@@ -7,6 +7,59 @@ from typing import List, Dict, Optional
 import pandas as pd
 
 
+def normalize_value(value: str) -> str:
+    """
+    Normalize a string value for consistent comparison.
+
+    Handles:
+    - Whitespace trimming: "xxx " → "xxx"
+    - Date normalization: "04MAR2026:00:00:00" → "2026-03-04"
+    - Numeric normalization: "0.440" → "0.44"
+
+    Args:
+        value: String value to normalize
+
+    Returns:
+        Normalized string
+    """
+    if value is None or value == '':
+        return ''
+
+    # Strip whitespace first
+    value = str(value).strip()
+
+    if not value:
+        return ''
+
+    # Try to parse as date
+    try:
+        from .date_utils import parse_date
+        normalized_date = parse_date(value)
+        return normalized_date
+    except:
+        pass
+
+    # Try to parse as number and normalize
+    try:
+        num = float(value)
+        # Format to remove trailing zeros
+        if '.' in str(value) or 'e' in str(value).lower():
+            # Convert to float and format
+            formatted = f'{num:.10f}'.rstrip('0').rstrip('.')
+            return formatted
+        else:
+            # Integer-like, but might have been "5.0"
+            if num == int(num):
+                return str(int(num))
+            else:
+                return f'{num:.10f}'.rstrip('0').rstrip('.')
+    except:
+        pass
+
+    # Return trimmed string
+    return value
+
+
 def detect_column_type(values: List[str]) -> str:
     """
     Detect if a column is numeric or categorical.
@@ -89,7 +142,12 @@ def compute_numeric_stats(values: List[str]) -> Dict:
 
 def compute_categorical_stats(values: List[str]) -> Dict:
     """
-    Compute statistics for a categorical column.
+    Compute statistics for a categorical column with normalization.
+
+    Normalizes values to handle:
+    - Whitespace differences: "xxx" vs "xxx "
+    - Date format differences: "04MAR2026:00:00:00" vs "2026-03-04"
+    - Numeric format differences: "0.440" vs "0.44"
 
     Args:
         values: List of string values
@@ -99,8 +157,10 @@ def compute_categorical_stats(values: List[str]) -> Dict:
     """
     n_total = len(values)
 
-    # Filter missing values
-    non_missing = [v for v in values if v and str(v).strip()]
+    # Filter missing values and normalize
+    non_missing_raw = [v for v in values if v and str(v).strip()]
+    non_missing = [normalize_value(v) for v in non_missing_raw if normalize_value(v)]
+
     n_missing = n_total - len(non_missing)
     n_unique = len(set(non_missing))
 
@@ -108,7 +168,7 @@ def compute_categorical_stats(values: List[str]) -> Dict:
         min_val = min(non_missing)
         max_val = max(non_missing)
 
-        # Compute top 10 frequency
+        # Compute top 10 frequency on normalized values
         counter = Counter(non_missing)
         top_10 = [
             {"value": value, "count": count}

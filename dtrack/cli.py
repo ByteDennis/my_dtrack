@@ -23,6 +23,7 @@ from .compare import (
     get_column_mapping,
     parse_col_map_string,
 )
+from .ppt import PPTBuilder, parse_markdown_to_ppt
 
 
 def cmd_init(args):
@@ -516,6 +517,52 @@ def cmd_show_stats(args):
                 print(f"{s['dt']:<12} {s['n_total']:>10} {s['n_missing']:>10} {s['n_unique']:>10} {min_val:<15} {max_val:<15}")
 
 
+def cmd_ppt_create(args):
+    """Create PowerPoint presentation from markdown"""
+    markdown_path = args.markdown_file
+    output_path = args.output
+    template_path = args.template
+    config_path = args.config
+
+    if not os.path.exists(markdown_path):
+        print(f"Error: Markdown file not found: {markdown_path}")
+        sys.exit(1)
+
+    if template_path and not os.path.exists(template_path):
+        print(f"Error: Template file not found: {template_path}")
+        sys.exit(1)
+
+    if config_path and not os.path.exists(config_path):
+        print(f"Error: Config file not found: {config_path}")
+        sys.exit(1)
+
+    try:
+        result = parse_markdown_to_ppt(
+            markdown_path, output_path, template_path, config_path,
+        )
+        print(f"Presentation created: {result}")
+    except Exception as e:
+        print(f"Error creating presentation: {e}")
+        sys.exit(1)
+
+
+def cmd_ppt_template(args):
+    """Create a PowerPoint template file"""
+    from .ppt import PPTBuilder
+
+    output_path = args.output
+    builder = PPTBuilder()
+
+    # Add sample slides to demonstrate layouts
+    builder.add_title_slide("Template Title", "Subtitle", "Date")
+    builder.add_section_slide("Section Title")
+    slide = builder.add_content_slide("Content Slide")
+    builder.add_bullets(slide, ["Bullet 1", "Bullet 2", "Bullet 3"])
+
+    builder.save(output_path)
+    print(f"✅ Template created: {output_path}")
+
+
 def main():
     """Main CLI entry point"""
     parser = argparse.ArgumentParser(
@@ -611,6 +658,17 @@ def main():
     parser_compare_col.add_argument('--from-date', help='Start date filter (YYYY-MM-DD)')
     parser_compare_col.add_argument('--to-date', help='End date filter (YYYY-MM-DD)')
 
+    # ppt-create command
+    parser_ppt_create = subparsers.add_parser('ppt-create', help='Create PowerPoint from markdown')
+    parser_ppt_create.add_argument('markdown_file', help='Markdown file to convert')
+    parser_ppt_create.add_argument('-o', '--output', required=True, help='Output PowerPoint file')
+    parser_ppt_create.add_argument('-t', '--template', help='Template PowerPoint file (optional)')
+    parser_ppt_create.add_argument('-c', '--config', help='Layout config JSON file (optional)')
+
+    # ppt-template command
+    parser_ppt_template = subparsers.add_parser('ppt-template', help='Create PowerPoint template')
+    parser_ppt_template.add_argument('-o', '--output', required=True, help='Output template file')
+
     args = parser.parse_args()
 
     if not args.command:
@@ -629,6 +687,8 @@ def main():
         'show-stats': cmd_show_stats,
         'compare-row': cmd_compare_row,
         'compare-col': cmd_compare_col,
+        'ppt-create': cmd_ppt_create,
+        'ppt-template': cmd_ppt_template,
     }
 
     handler = commands.get(args.command)
