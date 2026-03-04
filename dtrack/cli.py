@@ -12,8 +12,10 @@ from .db import (
     get_row_counts,
     get_col_stats,
     get_metadata,
+    list_table_pairs,
 )
 from .loader import load_row_counts, load_column_data
+from .load_map import load_map
 
 
 def cmd_init(args):
@@ -185,6 +187,73 @@ def cmd_show(args):
     print(f"\nShowing {len(rows)} rows")
 
 
+def cmd_load_map(args):
+    """Load table pairs from JSON configuration"""
+    if not os.path.exists(args.project_db):
+        print(f"Error: Database not found: {args.project_db}")
+        print(f"Run: dtrack init {args.project_db}")
+        sys.exit(1)
+
+    if not os.path.exists(args.config_file):
+        print(f"Error: Config file not found: {args.config_file}")
+        sys.exit(1)
+
+    print(f"Loading table pairs from: {args.config_file}")
+    print(f"Database: {args.project_db}")
+    print(f"Data type: {args.type}")
+    print()
+
+    load_map(
+        db_path=args.project_db,
+        config_path=args.config_file,
+        data_type=args.type,
+    )
+
+
+def cmd_list_pairs(args):
+    """List all registered table pairs"""
+    if not os.path.exists(args.project_db):
+        print(f"Error: Database not found: {args.project_db}")
+        sys.exit(1)
+
+    pairs = list_table_pairs(args.project_db)
+
+    if not pairs:
+        print("No table pairs found")
+        return
+
+    print(f"\nRegistered table pairs in {args.project_db}:")
+    print("-" * 100)
+    print(f"{'Pair Name':<25} {'Left Table':<25} {'Right Table':<25} {'Mappings':<20}")
+    print("-" * 100)
+
+    for pair in pairs:
+        name = pair["pair_name"]
+        left = pair["table_left"]
+        right = pair["table_right"]
+        mappings = pair["col_mappings"]
+
+        # Show count of mappings
+        if mappings:
+            map_str = f"{len(mappings)} columns"
+        else:
+            map_str = "(none)"
+
+        print(f"{name:<25} {left:<25} {right:<25} {map_str:<20}")
+
+    print(f"\nTotal: {len(pairs)} pair(s)")
+
+    # Show details if requested
+    if args.verbose:
+        print("\nColumn Mappings:")
+        print("-" * 100)
+        for pair in pairs:
+            if pair["col_mappings"]:
+                print(f"\n{pair['pair_name']}:")
+                for left_col, right_col in pair["col_mappings"].items():
+                    print(f"  {left_col} → {right_col}")
+
+
 def cmd_show_stats(args):
     """Show column statistics"""
     if not os.path.exists(args.project_db):
@@ -284,9 +353,21 @@ def main():
     parser_load_col.add_argument('--db', help='Database or service name')
     parser_load_col.add_argument('--source-table', help='Source table name (defaults to filename)')
 
+    # load-map command
+    parser_load_map = subparsers.add_parser('load-map', help='Load table pairs from JSON config')
+    parser_load_map.add_argument('project_db', help='Path to database file')
+    parser_load_map.add_argument('config_file', help='JSON configuration file')
+    parser_load_map.add_argument('--type', default='row', choices=['row', 'col'],
+                                  help='Data type to load: row (counts) or col (statistics) (default: row)')
+
     # list command
     parser_list = subparsers.add_parser('list', help='List all tables')
     parser_list.add_argument('project_db', help='Path to database file')
+
+    # list-pairs command
+    parser_list_pairs = subparsers.add_parser('list-pairs', help='List all registered table pairs')
+    parser_list_pairs.add_argument('project_db', help='Path to database file')
+    parser_list_pairs.add_argument('-v', '--verbose', action='store_true', help='Show column mappings')
 
     # show command
     parser_show = subparsers.add_parser('show', help='Show row count data')
@@ -314,7 +395,9 @@ def main():
         'init': cmd_init,
         'load-row': cmd_load_row,
         'load-col': cmd_load_col,
+        'load-map': cmd_load_map,
         'list': cmd_list,
+        'list-pairs': cmd_list_pairs,
         'show': cmd_show,
         'show-stats': cmd_show_stats,
     }

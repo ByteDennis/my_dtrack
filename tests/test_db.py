@@ -16,6 +16,9 @@ from dtrack.db import (
     update_metadata,
     get_metadata,
     list_tables,
+    register_table_pair,
+    get_table_pair,
+    list_table_pairs,
 )
 
 
@@ -230,3 +233,113 @@ class TestMetadataOperations:
         assert "table2" in table_names
         assert "_metadata" not in table_names
         assert "_col_stats" not in table_names
+
+
+class TestTablePairOperations:
+    """Test table pair registration and retrieval"""
+
+    def test_register_table_pair(self, test_db):
+        """Test registering a table pair"""
+        init_database(test_db)
+
+        col_mappings = {
+            "AMT": "amount",
+            "CUST_STATUS": "customer_status"
+        }
+
+        register_table_pair(
+            test_db,
+            pair_name="customer_daily",
+            table_left="customer_daily_oracle",
+            table_right="customer_daily_aws",
+            source_left="oracle",
+            source_right="aws",
+            col_mappings=col_mappings
+        )
+
+        # Retrieve and verify
+        pair = get_table_pair(test_db, "customer_daily")
+        assert pair is not None
+        assert pair["pair_name"] == "customer_daily"
+        assert pair["table_left"] == "customer_daily_oracle"
+        assert pair["table_right"] == "customer_daily_aws"
+        assert pair["source_left"] == "oracle"
+        assert pair["source_right"] == "aws"
+        assert pair["col_mappings"]["AMT"] == "amount"
+
+    def test_register_pair_without_mappings(self, test_db):
+        """Test registering a pair without column mappings"""
+        init_database(test_db)
+
+        register_table_pair(
+            test_db,
+            pair_name="test_pair",
+            table_left="table1",
+            table_right="table2"
+        )
+
+        pair = get_table_pair(test_db, "test_pair")
+        assert pair is not None
+        assert pair["col_mappings"] == {}
+
+    def test_get_nonexistent_pair(self, test_db):
+        """Test getting a pair that doesn't exist"""
+        init_database(test_db)
+        pair = get_table_pair(test_db, "nonexistent")
+        assert pair is None
+
+    def test_list_table_pairs(self, test_db):
+        """Test listing all table pairs"""
+        init_database(test_db)
+
+        register_table_pair(
+            test_db,
+            pair_name="pair1",
+            table_left="t1",
+            table_right="t2",
+            col_mappings={"A": "a"}
+        )
+
+        register_table_pair(
+            test_db,
+            pair_name="pair2",
+            table_left="t3",
+            table_right="t4"
+        )
+
+        pairs = list_table_pairs(test_db)
+        assert len(pairs) == 2
+
+        pair_names = [p["pair_name"] for p in pairs]
+        assert "pair1" in pair_names
+        assert "pair2" in pair_names
+
+    def test_update_existing_pair(self, test_db):
+        """Test that registering same pair name updates it"""
+        init_database(test_db)
+
+        # Register initial
+        register_table_pair(
+            test_db,
+            pair_name="test",
+            table_left="t1",
+            table_right="t2"
+        )
+
+        # Update with new mapping
+        register_table_pair(
+            test_db,
+            pair_name="test",
+            table_left="t1_new",
+            table_right="t2_new",
+            col_mappings={"X": "x"}
+        )
+
+        # Should only have one pair
+        pairs = list_table_pairs(test_db)
+        assert len(pairs) == 1
+
+        # Should have updated values
+        pair = get_table_pair(test_db, "test")
+        assert pair["table_left"] == "t1_new"
+        assert pair["col_mappings"]["X"] == "x"

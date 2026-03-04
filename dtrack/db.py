@@ -56,6 +56,19 @@ def init_database(db_path: str) -> None:
         )
     """)
 
+    # Create table pairs table for storing comparison mappings
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS _table_pairs (
+            pair_name TEXT PRIMARY KEY,
+            table_left TEXT NOT NULL,
+            table_right TEXT NOT NULL,
+            source_left TEXT,
+            source_right TEXT,
+            col_mappings TEXT,
+            created_at TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -347,6 +360,120 @@ def get_metadata(db_path: str, table_name: str) -> Optional[Dict]:
     if row:
         return dict(row)
     return None
+
+
+def register_table_pair(
+    db_path: str,
+    pair_name: str,
+    table_left: str,
+    table_right: str,
+    source_left: Optional[str] = None,
+    source_right: Optional[str] = None,
+    col_mappings: Optional[Dict[str, str]] = None,
+) -> None:
+    """
+    Register a table pair with column mappings.
+
+    Args:
+        db_path: Path to SQLite database file
+        pair_name: Name of the pair
+        table_left: Left table name (e.g., oracle table)
+        table_right: Right table name (e.g., aws table)
+        source_left: Source identifier for left table
+        source_right: Source identifier for right table
+        col_mappings: Dictionary mapping left column names to right column names
+    """
+    import json
+    from datetime import datetime
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    col_mappings_json = json.dumps(col_mappings) if col_mappings else None
+    created_at = datetime.now().isoformat()
+
+    cursor.execute("""
+        INSERT OR REPLACE INTO _table_pairs (
+            pair_name, table_left, table_right, source_left, source_right,
+            col_mappings, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        pair_name,
+        table_left,
+        table_right,
+        source_left,
+        source_right,
+        col_mappings_json,
+        created_at,
+    ))
+
+    conn.commit()
+    conn.close()
+
+
+def get_table_pair(db_path: str, pair_name: str) -> Optional[Dict]:
+    """
+    Get a table pair by name.
+
+    Args:
+        db_path: Path to SQLite database file
+        pair_name: Name of the pair
+
+    Returns:
+        Dictionary with pair information or None if not found
+    """
+    import json
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM _table_pairs WHERE pair_name = ?", (pair_name,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        result = dict(row)
+        # Parse col_mappings JSON
+        if result['col_mappings']:
+            result['col_mappings'] = json.loads(result['col_mappings'])
+        else:
+            result['col_mappings'] = {}
+        return result
+    return None
+
+
+def list_table_pairs(db_path: str) -> List[Dict]:
+    """
+    List all registered table pairs.
+
+    Args:
+        db_path: Path to SQLite database file
+
+    Returns:
+        List of dictionaries with pair information
+    """
+    import json
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM _table_pairs ORDER BY pair_name")
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = []
+    for row in rows:
+        pair = dict(row)
+        # Parse col_mappings JSON
+        if pair['col_mappings']:
+            pair['col_mappings'] = json.loads(pair['col_mappings'])
+        else:
+            pair['col_mappings'] = {}
+        result.append(pair)
+
+    return result
 
 
 def list_tables(db_path: str) -> List[Dict]:

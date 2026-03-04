@@ -1,0 +1,24 @@
+{
+  "pairs": [
+    {
+      "name": "customer_daily",
+      "tables": {
+        "pcds": {
+          "file": "sample_data/customer_daily_pcds.csv",
+          "source": "pcds",
+          "db": "prod_db",
+          "table_name": "customer_daily_pcds",
+          "vintage": "month"
+        },
+        "aws": {
+          "file": "sample_data/customer_daily_aws.csv",
+          "source": "aws",
+          "db": "analytics_db",
+          "table_name": "customer_daily_aws",
+          "vintage": "day"
+        }
+      },
+      "col_map": {}
+    }
+  ]
+}
