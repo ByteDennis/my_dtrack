@@ -49,4 +49,4 @@ ENV/
 Thumbs.db
 
 # Documentation
-README.md
+*.md

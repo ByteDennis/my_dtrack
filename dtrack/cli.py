@@ -13,9 +13,16 @@ from .db import (
     get_col_stats,
     get_metadata,
     list_table_pairs,
+    get_table_pair,
 )
 from .loader import load_row_counts, load_column_data
 from .load_map import load_map
+from .compare import (
+    compare_row_counts,
+    compare_column_stats,
+    get_column_mapping,
+    parse_col_map_string,
+)
 
 
 def cmd_init(args):
@@ -254,6 +261,206 @@ def cmd_list_pairs(args):
                     print(f"  {left_col} → {right_col}")
 
 
+def cmd_compare_row(args):
+    """Compare row counts between two tables"""
+    if not os.path.exists(args.project_db):
+        print(f"Error: Database not found: {args.project_db}")
+        sys.exit(1)
+
+    # Determine table names
+    if args.pair:
+        pair = get_table_pair(args.project_db, args.pair)
+        if not pair:
+            print(f"Error: Pair '{args.pair}' not found")
+            sys.exit(1)
+        table_left = pair["table_left"]
+        table_right = pair["table_right"]
+        source_left = pair.get("source_left", "left")
+        source_right = pair.get("source_right", "right")
+    else:
+        if not args.table_left or not args.table_right:
+            print("Error: Either --pair or both table names must be specified")
+            sys.exit(1)
+        table_left = args.table_left
+        table_right = args.table_right
+        source_left = "left"
+        source_right = "right"
+
+    print(f"\nComparing row counts: {table_left} vs {table_right}")
+    print("=" * 70)
+
+    # Perform comparison
+    result = compare_row_counts(
+        args.project_db,
+        table_left,
+        table_right,
+        from_date=args.from_date,
+        to_date=args.to_date,
+    )
+
+    summary = result["summary"]
+
+    # Print summary
+    print(f"\n{source_left}: {summary['date_range_left'][0]} to {summary['date_range_left'][1]} | {summary['count_left']} dates | total: {summary['total_left']:,}")
+    print(f"{source_right}: {summary['date_range_right'][0]} to {summary['date_range_right'][1]} | {summary['count_right']} dates | total: {summary['total_right']:,}")
+
+    # Only in left
+    print(f"\nOnly in {source_left} ({len(result['only_left'])} dates):")
+    if result["only_left"]:
+        for dt, count in result["only_left"][:5]:
+            print(f"  {dt}: {count:,}")
+        if len(result["only_left"]) > 5:
+            print(f"  ... ({len(result['only_left']) - 5} more)")
+    else:
+        print("  (none)")
+
+    # Only in right
+    print(f"\nOnly in {source_right} ({len(result['only_right'])} dates):")
+    if result["only_right"]:
+        for dt, count in result["only_right"][:5]:
+            print(f"  {dt}: {count:,}")
+        if len(result["only_right"]) > 5:
+            print(f"  ... ({len(result['only_right']) - 5} more)")
+    else:
+        print("  (none)")
+
+    # Matching
+    print(f"\nMatching ({len(result['matching'])} dates):")
+    if result["matching"]:
+        print(f"  (showing first 3)")
+        for dt, count in result["matching"][:3]:
+            print(f"  {dt}: {count:,}")
+        if len(result["matching"]) > 3:
+            print(f"  ... ({len(result['matching']) - 3} more)")
+    else:
+        print("  (none)")
+
+    # Mismatched
+    print(f"\nMismatched ({len(result['mismatched'])} dates):")
+    if result["mismatched"]:
+        for dt, count_left, count_right in result["mismatched"]:
+            diff = count_right - count_left
+            print(f"  {dt}: {source_left}={count_left:,}, {source_right}={count_right:,}, diff={diff:+,}")
+    else:
+        print("  (none)")
+
+    # Summary
+    print(f"\nSummary: {len(result['only_left'])} only-{source_left}, {len(result['only_right'])} only-{source_right}, {len(result['matching'])} match, {len(result['mismatched'])} mismatch")
+    print()
+
+
+def cmd_compare_col(args):
+    """Compare column statistics between two tables"""
+    if not os.path.exists(args.project_db):
+        print(f"Error: Database not found: {args.project_db}")
+        sys.exit(1)
+
+    # Determine table names and column mapping
+    if args.pair:
+        pair = get_table_pair(args.project_db, args.pair)
+        if not pair:
+            print(f"Error: Pair '{args.pair}' not found")
+            sys.exit(1)
+        table_left = pair["table_left"]
+        table_right = pair["table_right"]
+        source_left = pair.get("source_left", "left")
+        source_right = pair.get("source_right", "right")
+        col_mappings = pair.get("col_mappings", {})
+    else:
+        if not args.table_left or not args.table_right:
+            print("Error: Either --pair or both table names must be specified")
+            sys.exit(1)
+        table_left = args.table_left
+        table_right = args.table_right
+        source_left = "left"
+        source_right = "right"
+        col_mappings = {}
+
+    # Override with --col-map if provided
+    if args.col_map:
+        col_mappings = parse_col_map_string(args.col_map)
+
+    # Parse columns if provided
+    columns = None
+    if args.columns:
+        columns = [c.strip() for c in args.columns.split(',')]
+
+    print(f"\nComparing column stats: {table_left} vs {table_right}")
+    if args.from_date or args.to_date:
+        date_range = f"{args.from_date or 'beginning'} to {args.to_date or 'end'}"
+        print(f"Date range: {date_range}")
+    if col_mappings:
+        print(f"Column mapping: {len(col_mappings)} columns mapped")
+    print("=" * 70)
+
+    # Perform comparison
+    result = compare_column_stats(
+        args.project_db,
+        table_left,
+        table_right,
+        columns=columns,
+        col_mappings=col_mappings,
+        from_date=args.from_date,
+        to_date=args.to_date,
+    )
+
+    if not result:
+        print("\nNo matching columns found for comparison")
+        return
+
+    # Display results for each column
+    for col_name, comparisons in result.items():
+        if not comparisons:
+            continue
+
+        first = comparisons[0]
+        col_type = first["col_type"]
+        left_col = first["left_col"]
+        right_col = first["right_col"]
+
+        print(f"\nColumn: {left_col} ({col_type})")
+        if left_col != right_col:
+            print(f"  {source_left}: {left_col} → {source_right}: {right_col}")
+        print("-" * 70)
+
+        if col_type == "numeric":
+            # Show numeric comparison
+            print(f"{'Date':<12} {'n_total':<20} {'n_miss':<20} {'mean':<20} {'std':<20}")
+            print("-" * 70)
+            for comp in comparisons[:5]:  # Show first 5 dates
+                n_total_str = f"{comp['n_total_left']:,} / {comp['n_total_right']:,} ({comp['n_total_diff']:+,})"
+                n_miss_str = f"{comp['n_missing_left']:,} / {comp['n_missing_right']:,} ({comp['n_missing_diff']:+,})"
+                if comp['mean_left'] is not None and comp['mean_right'] is not None:
+                    mean_str = f"{comp['mean_left']:.1f} / {comp['mean_right']:.1f} ({comp['mean_diff']:+.1f})"
+                else:
+                    mean_str = "N/A"
+                if comp['std_left'] is not None and comp['std_right'] is not None:
+                    std_str = f"{comp['std_left']:.1f} / {comp['std_right']:.1f} ({comp['std_diff']:+.1f})"
+                else:
+                    std_str = "N/A"
+
+                print(f"{comp['dt']:<12} {n_total_str:<20} {n_miss_str:<20} {mean_str:<20} {std_str:<20}")
+
+            if len(comparisons) > 5:
+                print(f"  ... ({len(comparisons) - 5} more dates)")
+
+        else:
+            # Show categorical comparison
+            print(f"{'Date':<12} {'n_total':<20} {'n_miss':<20} {'n_unique':<20}")
+            print("-" * 70)
+            for comp in comparisons[:5]:
+                n_total_str = f"{comp['n_total_left']:,} / {comp['n_total_right']:,} ({comp['n_total_diff']:+,})"
+                n_miss_str = f"{comp['n_missing_left']:,} / {comp['n_missing_right']:,} ({comp['n_missing_diff']:+,})"
+                n_uniq_str = f"{comp['n_unique_left']:,} / {comp['n_unique_right']:,} ({comp['n_unique_diff']:+,})"
+
+                print(f"{comp['dt']:<12} {n_total_str:<20} {n_miss_str:<20} {n_uniq_str:<20}")
+
+            if len(comparisons) > 5:
+                print(f"  ... ({len(comparisons) - 5} more dates)")
+
+    print()
+
+
 def cmd_show_stats(args):
     """Show column statistics"""
     if not os.path.exists(args.project_db):
@@ -384,6 +591,26 @@ def main():
     parser_show_stats.add_argument('--to-date', help='End date filter (YYYY-MM-DD)')
     parser_show_stats.add_argument('--limit', type=int, help='Limit number of rows')
 
+    # compare-row command
+    parser_compare_row = subparsers.add_parser('compare-row', help='Compare row counts between two tables')
+    parser_compare_row.add_argument('project_db', help='Path to database file')
+    parser_compare_row.add_argument('--pair', help='Pair name (from load-map)')
+    parser_compare_row.add_argument('--table-left', dest='table_left', help='Left table name')
+    parser_compare_row.add_argument('--table-right', dest='table_right', help='Right table name')
+    parser_compare_row.add_argument('--from-date', help='Start date filter (YYYY-MM-DD)')
+    parser_compare_row.add_argument('--to-date', help='End date filter (YYYY-MM-DD)')
+
+    # compare-col command
+    parser_compare_col = subparsers.add_parser('compare-col', help='Compare column statistics between two tables')
+    parser_compare_col.add_argument('project_db', help='Path to database file')
+    parser_compare_col.add_argument('--pair', help='Pair name (from load-map)')
+    parser_compare_col.add_argument('--table-left', dest='table_left', help='Left table name')
+    parser_compare_col.add_argument('--table-right', dest='table_right', help='Right table name')
+    parser_compare_col.add_argument('--columns', help='Comma-separated list of columns to compare')
+    parser_compare_col.add_argument('--col-map', help='Column mapping: "left1=right1,left2=right2"')
+    parser_compare_col.add_argument('--from-date', help='Start date filter (YYYY-MM-DD)')
+    parser_compare_col.add_argument('--to-date', help='End date filter (YYYY-MM-DD)')
+
     args = parser.parse_args()
 
     if not args.command:
@@ -400,6 +627,8 @@ def main():
         'list-pairs': cmd_list_pairs,
         'show': cmd_show,
         'show-stats': cmd_show_stats,
+        'compare-row': cmd_compare_row,
+        'compare-col': cmd_compare_col,
     }
 
     handler = commands.get(args.command)
