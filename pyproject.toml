@@ -20,6 +20,9 @@ dependencies = [
 dtrack = "dtrack.cli:main"
 
 [project.optional-dependencies]
+aws = [
+    "pyathena>=2.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=3.0.0",

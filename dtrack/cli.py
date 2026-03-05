@@ -15,7 +15,7 @@ from .db import (
     list_table_pairs,
     get_table_pair,
 )
-from .loader import load_row_counts, load_column_data
+from .loader import load_row_counts, load_column_data, load_precomputed_col_stats
 from .load_map import load_map
 from .compare import (
     compare_row_counts,
@@ -517,6 +517,87 @@ def cmd_show_stats(args):
                 print(f"{s['dt']:<12} {s['n_total']:>10} {s['n_missing']:>10} {s['n_unique']:>10} {min_val:<15} {max_val:<15}")
 
 
+def cmd_gen_sas(args):
+    """Generate SAS extraction files from config"""
+    from .extract import gen_sas
+
+    if not os.path.exists(args.config):
+        print(f"Error: Config file not found: {args.config}")
+        sys.exit(1)
+
+    types = [args.type] if args.type != "both" else ["row", "col"]
+
+    print(f"Generating SAS files from: {args.config}")
+    print(f"Output directory: {args.outdir}")
+    print(f"Types: {', '.join(types)}")
+    print()
+
+    gen_sas(args.config, args.outdir, types=types)
+
+
+def cmd_gen_aws(args):
+    """Generate/extract data from AWS Athena"""
+    if not os.path.exists(args.config):
+        print(f"Error: Config file not found: {args.config}")
+        sys.exit(1)
+
+    if args.discover_only:
+        from .extract import discover_aws_columns
+        print(f"Discovering AWS columns from: {args.config}")
+        print(f"Output directory: {args.outdir}")
+        print()
+        discover_aws_columns(args.config, args.outdir)
+    else:
+        from .extract import extract_aws
+        types = [args.type] if args.type != "both" else ["row", "col"]
+        print(f"Extracting from AWS Athena using: {args.config}")
+        print(f"Output directory: {args.outdir}")
+        print(f"Types: {', '.join(types)}")
+        print(f"Workers: {args.workers}")
+        print()
+        extract_aws(args.config, args.outdir, types=types, max_workers=args.workers)
+
+
+def cmd_load_col_stats(args):
+    """Load pre-computed column statistics from CSV"""
+    if not os.path.exists(args.project_db):
+        print(f"Error: Database not found: {args.project_db}")
+        print(f"Run: dtrack init {args.project_db}")
+        sys.exit(1)
+
+    if not os.path.exists(args.csv_file):
+        print(f"Error: CSV file not found: {args.csv_file}")
+        sys.exit(1)
+
+    print(f"Loading pre-computed column statistics")
+    print(f"  Source: {args.csv_file}")
+    print(f"  Table: {args.table}")
+    print(f"  Mode: {args.mode}")
+
+    count = load_precomputed_col_stats(
+        db_path=args.project_db,
+        csv_path=args.csv_file,
+        table_name=args.table,
+        mode=args.mode,
+    )
+    print(f"✓ Loaded {count} stat rows")
+
+
+def cmd_match_columns(args):
+    """Match columns between PCDS and AWS column metadata CSVs"""
+    from .extract import match_columns
+
+    if not os.path.exists(args.pcds_csv):
+        print(f"Error: PCDS columns file not found: {args.pcds_csv}")
+        sys.exit(1)
+
+    if not os.path.exists(args.aws_csv):
+        print(f"Error: AWS columns file not found: {args.aws_csv}")
+        sys.exit(1)
+
+    match_columns(args.pcds_csv, args.aws_csv, outfile=args.outfile)
+
+
 def cmd_ppt_create(args):
     """Create PowerPoint presentation from markdown"""
     markdown_path = args.markdown_file
@@ -658,6 +739,38 @@ def main():
     parser_compare_col.add_argument('--from-date', help='Start date filter (YYYY-MM-DD)')
     parser_compare_col.add_argument('--to-date', help='End date filter (YYYY-MM-DD)')
 
+    # gen-sas command
+    parser_gen_sas = subparsers.add_parser('gen-sas', help='Generate SAS extraction files from config')
+    parser_gen_sas.add_argument('config', help='Extraction config JSON file')
+    parser_gen_sas.add_argument('--outdir', default='./sas/', help='Output directory (default: ./sas/)')
+    parser_gen_sas.add_argument('--type', default='both', choices=['row', 'col', 'both'],
+                                 help='Type to generate (default: both)')
+
+    # gen-aws command
+    parser_gen_aws = subparsers.add_parser('gen-aws', help='Extract data from AWS Athena')
+    parser_gen_aws.add_argument('config', help='Extraction config JSON file')
+    parser_gen_aws.add_argument('--outdir', default='./csv/', help='Output directory (default: ./csv/)')
+    parser_gen_aws.add_argument('--type', default='both', choices=['row', 'col', 'both'],
+                                 help='Type to extract (default: both)')
+    parser_gen_aws.add_argument('--workers', type=int, default=4, help='Max parallel workers (default: 4)')
+    parser_gen_aws.add_argument('--discover-only', action='store_true',
+                                 help='Only discover column metadata (no data extraction)')
+
+    # load-col-stats command
+    parser_load_col_stats = subparsers.add_parser('load-col-stats', help='Load pre-computed column statistics')
+    parser_load_col_stats.add_argument('project_db', help='Path to database file')
+    parser_load_col_stats.add_argument('csv_file', help='CSV file with pre-computed stats')
+    parser_load_col_stats.add_argument('--table', required=True, help='Table name to associate stats with')
+    parser_load_col_stats.add_argument('--mode', default='upsert', choices=['upsert', 'replace'],
+                                        help='Load mode (default: upsert)')
+
+    # match-columns command
+    parser_match_cols = subparsers.add_parser('match-columns',
+                                               help='Match columns between PCDS and AWS metadata CSVs')
+    parser_match_cols.add_argument('pcds_csv', help='PCDS/Oracle columns CSV (COLUMN_NAME, DATA_TYPE)')
+    parser_match_cols.add_argument('aws_csv', help='AWS columns CSV (COLUMN_NAME, DATA_TYPE)')
+    parser_match_cols.add_argument('--outfile', help='Output JSON file for column mapping')
+
     # ppt-create command
     parser_ppt_create = subparsers.add_parser('ppt-create', help='Create PowerPoint from markdown')
     parser_ppt_create.add_argument('markdown_file', help='Markdown file to convert')
@@ -687,6 +800,10 @@ def main():
         'show-stats': cmd_show_stats,
         'compare-row': cmd_compare_row,
         'compare-col': cmd_compare_col,
+        'gen-sas': cmd_gen_sas,
+        'gen-aws': cmd_gen_aws,
+        'load-col-stats': cmd_load_col_stats,
+        'match-columns': cmd_match_columns,
         'ppt-create': cmd_ppt_create,
         'ppt-template': cmd_ppt_template,
     }

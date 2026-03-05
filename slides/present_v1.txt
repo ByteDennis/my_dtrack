@@ -1,0 +1,47 @@
+SLIDE 1 — Opening (1 minute)
+"Good [morning/afternoon]. Thanks for making time. Today I want to walk you through something I've been working on — a redesign of our PVT workflow that addresses several gaps I've identified in our current process, and share the solution I've built along with where we're headed.
+I'll cover the current state, the pain points, what I've designed to fix them, where we are in the roadmap, and the business impact. This should take about 15 minutes."
+
+SLIDE 2 — Current Workflow (1.5 minutes)
+"Let me quickly level-set on how things work today. Our current end-to-end process goes: business requirement, loading strategy, column mappings, tech PVT, business PVT, defect resolution, and finally business sign-off.
+On the surface this looks like a clean handoff process. But there are several structural problems baked into this sequence — and that's what I want to focus on today."
+
+SLIDE 3 — Pain Points & Gaps (3 minutes)
+"There are four key gaps I've identified.
+First, business is only involved at the very beginning and the very end. They help define requirements, then disappear, and only come back at sign-off. This means they have no visibility into data quality during the critical middle stages.
+Second — and this was raised directly by the business team — there's a real concern that once they sign off, if a data issue surfaces later, there may be no resource available to fix it. They're essentially committing to something with no safety net.
+Third, some of our tables aren't structured for direct comparison. They require complex processing before any meaningful validation can happen. And some of them don't even reside in PCDS, which means our current tooling simply doesn't work for them.
+Fourth, there's no logical reason why business PVT has to wait until after both column mappings and tech PVT are fully complete. That sequencing creates an unnecessary bottleneck.
+And cutting across all of this — if an issue does occur, it can be very difficult to identify who the right point of contact is. Accountability is diffuse."
+
+SLIDE 4 — The Solution: Flexible Pipeline + Confluence Page (3 minutes)
+"So here's what I've built in response.
+The core idea is replacing the rigid end-to-end execution — which has no flexibility and only works within PCDS — with a modular, flexible pipeline.
+Here's how it works. For column mapping, rather than waiting for full confirmation from the tech side, I handle it myself. In practice, 99% of column names are either unchanged or involve only minor modifications. So the pipeline does the comparison first. If business can confirm all columns are accounted for, great — we move forward. If not, we escalate to tech to confirm the remainder. This means we take the initiative and don't stall waiting for a full handshake.
+Once columns are confirmed, we can start granular-level comparison immediately.
+The output is consistent and structured every time — no more one-off formats depending on who ran the last check.
+We're also saving historical validation summaries into a local database. Rather than starting fresh every run, we append new results. This is particularly valuable for granular-level comparisons that are time-consuming to regenerate. And the pipeline is flexible enough that if only certain parts of a table have been fixed, we can refresh just those sections rather than rerunning everything.
+We're also building and maintaining a dashboard — so business can engage much earlier in the process, getting a real sense of data quality as they start using the data, not just at the end. One thing I'm being careful about: I don't want publishing my validation results before tech PVT starts to compromise the objectivity of their review. So we're thinking carefully about the timing and visibility of what gets surfaced and when.
+And perhaps most importantly for that business concern I mentioned — this table is automatically refreshed on a regular schedule. So even after sign-off, if a data issue surfaces in the future, there's an ongoing check in place. Business doesn't have to just trust that everything will hold."
+
+SLIDE 5 — Roadmap (2.5 minutes)
+"Here's where we stand on delivery.
+Row count logic, SAS code, AWS code — all done. The HTML table template for row comparison is also complete.
+Currently in progress: column stat comparison — SAS code, AWS code, vintage comparison, and the HTML template are all ongoing. Column mapping with manual correction capability is also in progress.
+Next on the horizon: point-of-contact tracing and automatic alerting — so we can solve that accountability gap I mentioned. We're also scoping scheduled automation runs for processes that follow a repetitive pattern, assuming everything can be executed on the remote server.
+So the foundation is in place. We're in the middle of the most analytically complex layer right now, and then moving into automation and alerting."
+
+SLIDE 6 — Business Impact (2.5 minutes)
+"Let me connect this back to why it matters.
+One — business validation moves earlier. Instead of business only appearing at the end, they can now run in parallel with tech PVT. This compresses the overall timeline and catches issues sooner.
+Two — there's now ongoing, upfront data quality visibility. Business doesn't have to wait for a sign-off meeting to understand what the data looks like. The dashboard surfaces that proactively. And the time comparison between running things in SAS versus AWS is something we plan to show explicitly — to give people a concrete incentive to adopt the AWS solution.
+Three — faster feedback loops. We can now evaluate how our work is impacted more immediately, by examining and tracking the number of views or engagements with the validation output.
+Four — we can start tracking validation rules that PCDS doesn't currently capture. This gives us coverage we simply didn't have before.
+And five — the manual intervention points built into the pipeline give us flexibility between critical steps. We're not locked into a fully automated black box. If something needs a human decision, there's a place for that."
+
+SLIDE 7 — Closing (1.5 minutes)
+"To summarize: we had a workflow that kept business at arm's length during the most important stages, had no ongoing quality assurance after sign-off, and couldn't handle tables outside PCDS or with complex structures.
+What I've built gives us a flexible, modular pipeline that brings business earlier into the process, maintains a live quality check going forward, handles edge cases the old system couldn't, and creates clear accountability when something goes wrong.
+The foundational pieces are done. We're mid-build on the comparison layer, and automation and alerting are next.
+I'd love your thoughts — particularly on the dashboard timing question around objectivity of tech PVT, and whether you see any other stakeholders we should be looping in as this rolls out.
+Happy to take any questions."

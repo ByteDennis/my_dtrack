@@ -1,0 +1,114 @@
+=== dtrack End-to-End Workflow ===
+
+STEP 1: Create extraction config (extract_config.json)
+  - Define tables with source (pcds/aws), table names, date columns
+  - Optionally specify columns and their types
+
+STEP 2a (PCDS/Oracle): dtrack gen-sas extract_config.json --outdir ./sas/
+  - Generates .sas macro files for each PCDS table
+  - Run generated .sas files in SAS environment
+  - Produces row count and column stats CSVs + {name}_columns.csv
+
+STEP 2b (AWS/Athena): dtrack gen-aws extract_config.json --outdir ./csv/ --workers 4
+  - Connects to Athena directly via pyathena
+  - Extracts row counts and column statistics in parallel
+  - Writes CSVs + {name}_columns.csv to output directory
+
+STEP 2c (Column matching): dtrack match-columns ./sas/customer_daily_columns.csv ./csv/customer_daily_aws_columns.csv --outfile col_map.json
+  - Auto-matches columns by case-insensitive name
+  - Shows pcds_only / aws_only for manual review
+  - Edit col_map.json manual_mapping for unmatched columns
+  - Build col_map in pairs_config.json from matched + manual_mapping
+
+STEP 3: dtrack init project.db
+
+STEP 4: Load row counts
+  dtrack load-row project.db ./csv/customer_daily_row.csv --table customer_daily_pcds
+
+STEP 5: Load pre-computed column statistics
+  dtrack load-col-stats project.db ./csv/customer_daily_col.csv --table customer_daily_pcds
+
+STEP 6: Register table pairs
+  dtrack load-map project.db pairs_config.json --type row
+
+STEP 7: Compare
+  dtrack compare-row project.db --pair customer_daily
+  dtrack compare-col project.db --pair customer_daily
+  -> Two HTML comparison tables generated
+
+=== Config Format (extract_config.json) ===
+
+{
+  "tables": [
+    {
+      "name": "customer_daily",
+      "source": "pcds",
+      "table": "MYSCHEMA.CUSTOMER_DAILY",
+      "date_col": "RPG_DT",
+      "date_transform": "datetime_to_date",
+      "conn_macro": "pcds",
+      "where": "",
+      "columns": {
+        "AMOUNT": "NUMBER",
+        "CUST_STATUS": "VARCHAR2(20)",
+        "REGION_CD": "VARCHAR2(10)",
+        "ACCOUNT_ID": "NUMBER"
+      }
+    },
+    {
+      "name": "customer_daily_aws",
+      "source": "aws",
+      "database": "analytics_db",
+      "table": "customer_daily",
+      "date_col": "rpg_dt",
+      "where": ""
+    },
+    {
+      "name": "txn_monthly",
+      "source": "pcds",
+      "table": "MYSCHEMA.TXN_MONTHLY",
+      "date_col": "REPORT_DT",
+      "conn_macro": "pcds",
+      "where": "REPORT_DT >= DATE '2025-01-01'",
+      "columns": {
+        "TXN_AMT": "NUMBER",
+        "TXN_COUNT": "NUMBER",
+        "CHANNEL": "VARCHAR2(30)"
+      }
+    },
+    {
+      "name": "txn_monthly_aws",
+      "source": "aws",
+      "database": "analytics_db",
+      "table": "txn_monthly",
+      "date_col": "report_dt",
+      "where": "report_dt >= DATE '2025-01-01'"
+    }
+  ]
+}
+
+Notes:
+  - PCDS tables list columns explicitly (from ALL_TAB_COLUMNS or manual)
+  - AWS tables omit columns → gen-aws auto-discovers from information_schema
+  - gen-sas with no columns generates a discovery-only macro that exports {name}_columns.csv
+  - gen-aws --discover-only skips data extraction, only writes {name}_columns.csv
+  - After discovery, run: dtrack match-columns ./sas/customer_daily_columns.csv ./csv/customer_daily_aws_columns.csv --outfile col_map.json
+
+=== match-columns Output (col_map.json) ===
+
+{
+  "matched": {"ACCOUNT_ID": "account_id", "AMOUNT": "amount", "RPG_DT": "rpg_dt"},
+  "pcds_only": [{"name": "CUST_STATUS", "type": "VARCHAR2(20)"}, {"name": "REGION_CD", "type": "VARCHAR2(10)"}],
+  "aws_only": [{"name": "region", "type": "varchar"}, {"name": "status", "type": "varchar"}],
+  "manual_mapping": {}
+}
+
+Fill in manual_mapping for unmatched columns, then combine matched + manual_mapping → col_map in pairs_config.json:
+
+  "col_map": {"ACCOUNT_ID": "account_id", "AMOUNT": "amount", "CUST_STATUS": "status", "REGION_CD": "region"}
+
+=== Pre-computed Column Stats CSV Format ===
+
+column_name,dt,col_type,n_total,n_missing,n_unique,mean,std,min_val,max_val,top_10
+AMOUNT,2026-01-01,numeric,1000,5,450,123.45,67.89,0.01,999.99,
+STATUS,2026-01-01,categorical,1000,0,3,,,ACTIVE,PENDING,"[{""value"":""ACTIVE"",""count"":800}]"

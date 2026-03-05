@@ -315,3 +315,110 @@ def load_column_data(
         "vintage": vintage,
         "data_type": "col",
     })
+
+
+# Column name aliases for pre-computed stats CSV
+_COL_STATS_ALIASES = {
+    'mean': ['mean', 'col_avg', 'avg'],
+    'std': ['std', 'col_std', 'stddev'],
+    'min_val': ['min_val', 'col_min', 'min'],
+    'max_val': ['max_val', 'col_max', 'max'],
+    'top_10': ['top_10', 'col_freq', 'freq', 'top10'],
+}
+
+
+def _resolve_col(headers, field, aliases):
+    """Find the actual CSV header for a field using aliases."""
+    for alias in aliases:
+        for h in headers:
+            if h.lower().strip() == alias.lower():
+                return h
+    return None
+
+
+def load_precomputed_col_stats(
+    db_path: str,
+    csv_path: str,
+    table_name: str,
+    mode: str = "upsert",
+    source: Optional[str] = None,
+    db_name: Optional[str] = None,
+) -> int:
+    """
+    Load pre-computed column statistics from CSV into _col_stats table.
+
+    Expected CSV columns (with alias support):
+        column_name, dt, col_type, n_total, n_missing, n_unique,
+        mean/col_avg, std/col_std, min_val/col_min, max_val/col_max,
+        top_10/col_freq
+
+    Args:
+        db_path: Path to SQLite database
+        csv_path: Path to CSV file with pre-computed stats
+        table_name: Table name to associate stats with
+        mode: Load mode (upsert or replace)
+        source: Data source identifier
+        db_name: Database name
+
+    Returns:
+        Number of rows loaded
+    """
+    import sqlite3
+
+    with open(csv_path, 'r', newline='') as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames
+
+        # Resolve aliased column names
+        col_map = {}
+        for field, aliases in _COL_STATS_ALIASES.items():
+            resolved = _resolve_col(headers, field, aliases)
+            if resolved:
+                col_map[field] = resolved
+
+        if mode == "replace":
+            conn = sqlite3.connect(db_path)
+            conn.execute("DELETE FROM _col_stats WHERE source_table = ?", (table_name,))
+            conn.commit()
+            conn.close()
+
+        stats = []
+        for row in reader:
+            def _get(field, default=None):
+                mapped = col_map.get(field)
+                if mapped and row.get(mapped):
+                    return row[mapped]
+                if row.get(field):
+                    return row[field]
+                return default
+
+            stat = {
+                "source_table": table_name,
+                "column_name": row.get("column_name", ""),
+                "dt": row.get("dt", ""),
+                "col_type": row.get("col_type", "categorical"),
+                "n_total": int(_get("n_total", 0) or 0),
+                "n_missing": int(_get("n_missing", 0) or 0),
+                "n_unique": int(_get("n_unique", 0) or 0),
+                "mean": float(_get("mean")) if _get("mean") else None,
+                "std": float(_get("std")) if _get("std") else None,
+                "min_val": _get("min_val"),
+                "max_val": _get("max_val"),
+                "top_10": _get("top_10"),
+            }
+            stats.append(stat)
+
+    insert_col_stats(db_path, stats)
+
+    # Update metadata
+    update_metadata(db_path, {
+        "table_name": table_name,
+        "source": source,
+        "db": db_name,
+        "source_table": table_name,
+        "source_file": csv_path,
+        "load_mode": mode,
+        "data_type": "col",
+    })
+
+    return len(stats)
