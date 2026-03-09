@@ -1,0 +1,9 @@
+column_name,data_type
+month_dt,varchar
+account_id,bigint
+txn_type,varchar
+transaction_amount,double
+channel,varchar
+processed_timestamp,timestamp
+data_quality_score,double
+migration_batch,varchar

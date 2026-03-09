@@ -1,0 +1,351 @@
+column_name,dt,col_type,n_total,n_missing,n_unique,mean,std,min_val,max_val,top_10
+rpt_dt,2023-01-02,categorical,1497,0,1,,,,2023-01-02,{}
+customer_id,2023-01-02,numeric,1497,0,1397,25000.5,15000.2,1000,50000,
+amount,2023-01-02,numeric,1497,3,1447,2500.75,1800.5,10.50,9999.99,
+region,2023-01-02,categorical,1497,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-01-02,categorical,1497,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-01-09,categorical,1473,0,1,,,,2023-01-09,{}
+customer_id,2023-01-09,numeric,1473,0,1373,25000.5,15000.2,1000,50000,
+amount,2023-01-09,numeric,1473,3,1423,2500.75,1800.5,10.50,9999.99,
+region,2023-01-09,categorical,1473,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-01-09,categorical,1473,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-01-30,categorical,1412,0,1,,,,2023-01-30,{}
+customer_id,2023-01-30,numeric,1412,0,1312,25000.5,15000.2,1000,50000,
+amount,2023-01-30,numeric,1412,3,1362,2500.75,1800.5,10.50,9999.99,
+region,2023-01-30,categorical,1412,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-01-30,categorical,1412,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-02-06,categorical,1530,0,1,,,,2023-02-06,{}
+customer_id,2023-02-06,numeric,1530,0,1430,25000.5,15000.2,1000,50000,
+amount,2023-02-06,numeric,1530,3,1480,2500.75,1800.5,10.50,9999.99,
+region,2023-02-06,categorical,1530,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-02-06,categorical,1530,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-02-13,categorical,1460,0,1,,,,2023-02-13,{}
+customer_id,2023-02-13,numeric,1460,0,1360,25000.5,15000.2,1000,50000,
+amount,2023-02-13,numeric,1460,3,1410,2500.75,1800.5,10.50,9999.99,
+region,2023-02-13,categorical,1460,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-02-13,categorical,1460,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-02-20,categorical,1410,0,1,,,,2023-02-20,{}
+customer_id,2023-02-20,numeric,1410,0,1310,25000.5,15000.2,1000,50000,
+amount,2023-02-20,numeric,1410,3,1360,2500.75,1800.5,10.50,9999.99,
+region,2023-02-20,categorical,1410,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-02-20,categorical,1410,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-02-27,categorical,1533,0,1,,,,2023-02-27,{}
+customer_id,2023-02-27,numeric,1533,0,1433,25000.5,15000.2,1000,50000,
+amount,2023-02-27,numeric,1533,3,1483,2500.75,1800.5,10.50,9999.99,
+region,2023-02-27,categorical,1533,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-02-27,categorical,1533,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-03-06,categorical,1461,0,1,,,,2023-03-06,{}
+customer_id,2023-03-06,numeric,1461,0,1361,25000.5,15000.2,1000,50000,
+amount,2023-03-06,numeric,1461,3,1411,2500.75,1800.5,10.50,9999.99,
+region,2023-03-06,categorical,1461,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-03-06,categorical,1461,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-03-13,categorical,1517,0,1,,,,2023-03-13,{}
+customer_id,2023-03-13,numeric,1517,0,1417,25000.5,15000.2,1000,50000,
+amount,2023-03-13,numeric,1517,3,1467,2500.75,1800.5,10.50,9999.99,
+region,2023-03-13,categorical,1517,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-03-13,categorical,1517,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-03-20,categorical,1544,0,1,,,,2023-03-20,{}
+customer_id,2023-03-20,numeric,1544,0,1444,25000.5,15000.2,1000,50000,
+amount,2023-03-20,numeric,1544,3,1494,2500.75,1800.5,10.50,9999.99,
+region,2023-03-20,categorical,1544,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-03-20,categorical,1544,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-03-27,categorical,1433,0,1,,,,2023-03-27,{}
+customer_id,2023-03-27,numeric,1433,0,1333,25000.5,15000.2,1000,50000,
+amount,2023-03-27,numeric,1433,3,1383,2500.75,1800.5,10.50,9999.99,
+region,2023-03-27,categorical,1433,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-03-27,categorical,1433,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-04-03,categorical,1512,0,1,,,,2023-04-03,{}
+customer_id,2023-04-03,numeric,1512,0,1412,25000.5,15000.2,1000,50000,
+amount,2023-04-03,numeric,1512,3,1462,2500.75,1800.5,10.50,9999.99,
+region,2023-04-03,categorical,1512,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-04-03,categorical,1512,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-04-10,categorical,1402,0,1,,,,2023-04-10,{}
+customer_id,2023-04-10,numeric,1402,0,1302,25000.5,15000.2,1000,50000,
+amount,2023-04-10,numeric,1402,3,1352,2500.75,1800.5,10.50,9999.99,
+region,2023-04-10,categorical,1402,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-04-10,categorical,1402,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-04-17,categorical,1467,0,1,,,,2023-04-17,{}
+customer_id,2023-04-17,numeric,1467,0,1367,25000.5,15000.2,1000,50000,
+amount,2023-04-17,numeric,1467,3,1417,2500.75,1800.5,10.50,9999.99,
+region,2023-04-17,categorical,1467,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-04-17,categorical,1467,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-04-24,categorical,1472,0,1,,,,2023-04-24,{}
+customer_id,2023-04-24,numeric,1472,0,1372,25000.5,15000.2,1000,50000,
+amount,2023-04-24,numeric,1472,3,1422,2500.75,1800.5,10.50,9999.99,
+region,2023-04-24,categorical,1472,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-04-24,categorical,1472,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-05-01,categorical,1562,0,1,,,,2023-05-01,{}
+customer_id,2023-05-01,numeric,1562,0,1462,25000.5,15000.2,1000,50000,
+amount,2023-05-01,numeric,1562,3,1512,2500.75,1800.5,10.50,9999.99,
+region,2023-05-01,categorical,1562,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-05-01,categorical,1562,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-05-08,categorical,1562,0,1,,,,2023-05-08,{}
+customer_id,2023-05-08,numeric,1562,0,1462,25000.5,15000.2,1000,50000,
+amount,2023-05-08,numeric,1562,3,1512,2500.75,1800.5,10.50,9999.99,
+region,2023-05-08,categorical,1562,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-05-08,categorical,1562,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-05-15,categorical,1433,0,1,,,,2023-05-15,{}
+customer_id,2023-05-15,numeric,1433,0,1333,25000.5,15000.2,1000,50000,
+amount,2023-05-15,numeric,1433,3,1383,2500.75,1800.5,10.50,9999.99,
+region,2023-05-15,categorical,1433,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-05-15,categorical,1433,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-05-22,categorical,1580,0,1,,,,2023-05-22,{}
+customer_id,2023-05-22,numeric,1580,0,1480,25000.5,15000.2,1000,50000,
+amount,2023-05-22,numeric,1580,3,1530,2500.75,1800.5,10.50,9999.99,
+region,2023-05-22,categorical,1580,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-05-22,categorical,1580,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-05-29,categorical,1438,0,1,,,,2023-05-29,{}
+customer_id,2023-05-29,numeric,1438,0,1338,25000.5,15000.2,1000,50000,
+amount,2023-05-29,numeric,1438,3,1388,2500.75,1800.5,10.50,9999.99,
+region,2023-05-29,categorical,1438,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-05-29,categorical,1438,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-06-05,categorical,1510,0,1,,,,2023-06-05,{}
+customer_id,2023-06-05,numeric,1510,0,1410,25000.5,15000.2,1000,50000,
+amount,2023-06-05,numeric,1510,3,1460,2500.75,1800.5,10.50,9999.99,
+region,2023-06-05,categorical,1510,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-06-05,categorical,1510,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-06-12,categorical,1453,0,1,,,,2023-06-12,{}
+customer_id,2023-06-12,numeric,1453,0,1353,25000.5,15000.2,1000,50000,
+amount,2023-06-12,numeric,1453,3,1403,2500.75,1800.5,10.50,9999.99,
+region,2023-06-12,categorical,1453,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-06-12,categorical,1453,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-06-19,categorical,1543,0,1,,,,2023-06-19,{}
+customer_id,2023-06-19,numeric,1543,0,1443,25000.5,15000.2,1000,50000,
+amount,2023-06-19,numeric,1543,3,1493,2500.75,1800.5,10.50,9999.99,
+region,2023-06-19,categorical,1543,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-06-19,categorical,1543,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-06-26,categorical,1764,0,1,,,,2023-06-26,{}
+customer_id,2023-06-26,numeric,1764,0,1664,25000.5,15000.2,1000,50000,
+amount,2023-06-26,numeric,1764,3,1714,2500.75,1800.5,10.50,9999.99,
+region,2023-06-26,categorical,1764,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-06-26,categorical,1764,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-07-03,categorical,1505,0,1,,,,2023-07-03,{}
+customer_id,2023-07-03,numeric,1505,0,1405,25000.5,15000.2,1000,50000,
+amount,2023-07-03,numeric,1505,3,1455,2500.75,1800.5,10.50,9999.99,
+region,2023-07-03,categorical,1505,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-07-03,categorical,1505,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-07-10,categorical,1427,0,1,,,,2023-07-10,{}
+customer_id,2023-07-10,numeric,1427,0,1327,25000.5,15000.2,1000,50000,
+amount,2023-07-10,numeric,1427,3,1377,2500.75,1800.5,10.50,9999.99,
+region,2023-07-10,categorical,1427,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-07-10,categorical,1427,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-07-17,categorical,1489,0,1,,,,2023-07-17,{}
+customer_id,2023-07-17,numeric,1489,0,1389,25000.5,15000.2,1000,50000,
+amount,2023-07-17,numeric,1489,3,1439,2500.75,1800.5,10.50,9999.99,
+region,2023-07-17,categorical,1489,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-07-17,categorical,1489,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-07-24,categorical,1502,0,1,,,,2023-07-24,{}
+customer_id,2023-07-24,numeric,1502,0,1402,25000.5,15000.2,1000,50000,
+amount,2023-07-24,numeric,1502,3,1452,2500.75,1800.5,10.50,9999.99,
+region,2023-07-24,categorical,1502,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-07-24,categorical,1502,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-07-31,categorical,1564,0,1,,,,2023-07-31,{}
+customer_id,2023-07-31,numeric,1564,0,1464,25000.5,15000.2,1000,50000,
+amount,2023-07-31,numeric,1564,3,1514,2500.75,1800.5,10.50,9999.99,
+region,2023-07-31,categorical,1564,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-07-31,categorical,1564,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-08-07,categorical,1429,0,1,,,,2023-08-07,{}
+customer_id,2023-08-07,numeric,1429,0,1329,25000.5,15000.2,1000,50000,
+amount,2023-08-07,numeric,1429,3,1379,2500.75,1800.5,10.50,9999.99,
+region,2023-08-07,categorical,1429,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-08-07,categorical,1429,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-08-14,categorical,1552,0,1,,,,2023-08-14,{}
+customer_id,2023-08-14,numeric,1552,0,1452,25000.5,15000.2,1000,50000,
+amount,2023-08-14,numeric,1552,3,1502,2500.75,1800.5,10.50,9999.99,
+region,2023-08-14,categorical,1552,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-08-14,categorical,1552,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-08-21,categorical,1530,0,1,,,,2023-08-21,{}
+customer_id,2023-08-21,numeric,1530,0,1430,25000.5,15000.2,1000,50000,
+amount,2023-08-21,numeric,1530,3,1480,2500.75,1800.5,10.50,9999.99,
+region,2023-08-21,categorical,1530,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-08-21,categorical,1530,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-08-28,categorical,1581,0,1,,,,2023-08-28,{}
+customer_id,2023-08-28,numeric,1581,0,1481,25000.5,15000.2,1000,50000,
+amount,2023-08-28,numeric,1581,3,1531,2500.75,1800.5,10.50,9999.99,
+region,2023-08-28,categorical,1581,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-08-28,categorical,1581,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-09-11,categorical,1570,0,1,,,,2023-09-11,{}
+customer_id,2023-09-11,numeric,1570,0,1470,25000.5,15000.2,1000,50000,
+amount,2023-09-11,numeric,1570,3,1520,2500.75,1800.5,10.50,9999.99,
+region,2023-09-11,categorical,1570,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-09-11,categorical,1570,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-09-18,categorical,1476,0,1,,,,2023-09-18,{}
+customer_id,2023-09-18,numeric,1476,0,1376,25000.5,15000.2,1000,50000,
+amount,2023-09-18,numeric,1476,3,1426,2500.75,1800.5,10.50,9999.99,
+region,2023-09-18,categorical,1476,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-09-18,categorical,1476,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-09-25,categorical,1578,0,1,,,,2023-09-25,{}
+customer_id,2023-09-25,numeric,1578,0,1478,25000.5,15000.2,1000,50000,
+amount,2023-09-25,numeric,1578,3,1528,2500.75,1800.5,10.50,9999.99,
+region,2023-09-25,categorical,1578,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-09-25,categorical,1578,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-10-09,categorical,1503,0,1,,,,2023-10-09,{}
+customer_id,2023-10-09,numeric,1503,0,1403,25000.5,15000.2,1000,50000,
+amount,2023-10-09,numeric,1503,3,1453,2500.75,1800.5,10.50,9999.99,
+region,2023-10-09,categorical,1503,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-10-09,categorical,1503,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-10-16,categorical,1548,0,1,,,,2023-10-16,{}
+customer_id,2023-10-16,numeric,1548,0,1448,25000.5,15000.2,1000,50000,
+amount,2023-10-16,numeric,1548,3,1498,2500.75,1800.5,10.50,9999.99,
+region,2023-10-16,categorical,1548,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-10-16,categorical,1548,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-10-30,categorical,1421,0,1,,,,2023-10-30,{}
+customer_id,2023-10-30,numeric,1421,0,1321,25000.5,15000.2,1000,50000,
+amount,2023-10-30,numeric,1421,3,1371,2500.75,1800.5,10.50,9999.99,
+region,2023-10-30,categorical,1421,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-10-30,categorical,1421,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-11-06,categorical,1423,0,1,,,,2023-11-06,{}
+customer_id,2023-11-06,numeric,1423,0,1323,25000.5,15000.2,1000,50000,
+amount,2023-11-06,numeric,1423,3,1373,2500.75,1800.5,10.50,9999.99,
+region,2023-11-06,categorical,1423,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-11-06,categorical,1423,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-11-13,categorical,1437,0,1,,,,2023-11-13,{}
+customer_id,2023-11-13,numeric,1437,0,1337,25000.5,15000.2,1000,50000,
+amount,2023-11-13,numeric,1437,3,1387,2500.75,1800.5,10.50,9999.99,
+region,2023-11-13,categorical,1437,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-11-13,categorical,1437,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-11-27,categorical,1578,0,1,,,,2023-11-27,{}
+customer_id,2023-11-27,numeric,1578,0,1478,25000.5,15000.2,1000,50000,
+amount,2023-11-27,numeric,1578,3,1528,2500.75,1800.5,10.50,9999.99,
+region,2023-11-27,categorical,1578,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-11-27,categorical,1578,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-12-04,categorical,1576,0,1,,,,2023-12-04,{}
+customer_id,2023-12-04,numeric,1576,0,1476,25000.5,15000.2,1000,50000,
+amount,2023-12-04,numeric,1576,3,1526,2500.75,1800.5,10.50,9999.99,
+region,2023-12-04,categorical,1576,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-12-04,categorical,1576,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-12-11,categorical,1456,0,1,,,,2023-12-11,{}
+customer_id,2023-12-11,numeric,1456,0,1356,25000.5,15000.2,1000,50000,
+amount,2023-12-11,numeric,1456,3,1406,2500.75,1800.5,10.50,9999.99,
+region,2023-12-11,categorical,1456,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-12-11,categorical,1456,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-12-18,categorical,1463,0,1,,,,2023-12-18,{}
+customer_id,2023-12-18,numeric,1463,0,1363,25000.5,15000.2,1000,50000,
+amount,2023-12-18,numeric,1463,3,1413,2500.75,1800.5,10.50,9999.99,
+region,2023-12-18,categorical,1463,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-12-18,categorical,1463,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2023-12-25,categorical,1543,0,1,,,,2023-12-25,{}
+customer_id,2023-12-25,numeric,1543,0,1443,25000.5,15000.2,1000,50000,
+amount,2023-12-25,numeric,1543,3,1493,2500.75,1800.5,10.50,9999.99,
+region,2023-12-25,categorical,1543,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2023-12-25,categorical,1543,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-01-01,categorical,1529,0,1,,,,2024-01-01,{}
+customer_id,2024-01-01,numeric,1529,0,1429,25000.5,15000.2,1000,50000,
+amount,2024-01-01,numeric,1529,3,1479,2500.75,1800.5,10.50,9999.99,
+region,2024-01-01,categorical,1529,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-01-01,categorical,1529,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-01-08,categorical,1875,0,1,,,,2024-01-08,{}
+customer_id,2024-01-08,numeric,1875,0,1775,25000.5,15000.2,1000,50000,
+amount,2024-01-08,numeric,1875,3,1825,2500.75,1800.5,10.50,9999.99,
+region,2024-01-08,categorical,1875,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-01-08,categorical,1875,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-01-15,categorical,1599,0,1,,,,2024-01-15,{}
+customer_id,2024-01-15,numeric,1599,0,1499,25000.5,15000.2,1000,50000,
+amount,2024-01-15,numeric,1599,3,1549,2500.75,1800.5,10.50,9999.99,
+region,2024-01-15,categorical,1599,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-01-15,categorical,1599,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-01-22,categorical,1419,0,1,,,,2024-01-22,{}
+customer_id,2024-01-22,numeric,1419,0,1319,25000.5,15000.2,1000,50000,
+amount,2024-01-22,numeric,1419,3,1369,2500.75,1800.5,10.50,9999.99,
+region,2024-01-22,categorical,1419,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-01-22,categorical,1419,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-01-29,categorical,1538,0,1,,,,2024-01-29,{}
+customer_id,2024-01-29,numeric,1538,0,1438,25000.5,15000.2,1000,50000,
+amount,2024-01-29,numeric,1538,3,1488,2500.75,1800.5,10.50,9999.99,
+region,2024-01-29,categorical,1538,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-01-29,categorical,1538,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-02-05,categorical,1439,0,1,,,,2024-02-05,{}
+customer_id,2024-02-05,numeric,1439,0,1339,25000.5,15000.2,1000,50000,
+amount,2024-02-05,numeric,1439,3,1389,2500.75,1800.5,10.50,9999.99,
+region,2024-02-05,categorical,1439,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-02-05,categorical,1439,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-02-12,categorical,1538,0,1,,,,2024-02-12,{}
+customer_id,2024-02-12,numeric,1538,0,1438,25000.5,15000.2,1000,50000,
+amount,2024-02-12,numeric,1538,3,1488,2500.75,1800.5,10.50,9999.99,
+region,2024-02-12,categorical,1538,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-02-12,categorical,1538,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-02-26,categorical,1522,0,1,,,,2024-02-26,{}
+customer_id,2024-02-26,numeric,1522,0,1422,25000.5,15000.2,1000,50000,
+amount,2024-02-26,numeric,1522,3,1472,2500.75,1800.5,10.50,9999.99,
+region,2024-02-26,categorical,1522,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-02-26,categorical,1522,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-03-04,categorical,1537,0,1,,,,2024-03-04,{}
+customer_id,2024-03-04,numeric,1537,0,1437,25000.5,15000.2,1000,50000,
+amount,2024-03-04,numeric,1537,3,1487,2500.75,1800.5,10.50,9999.99,
+region,2024-03-04,categorical,1537,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-03-04,categorical,1537,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-03-11,categorical,1844,0,1,,,,2024-03-11,{}
+customer_id,2024-03-11,numeric,1844,0,1744,25000.5,15000.2,1000,50000,
+amount,2024-03-11,numeric,1844,3,1794,2500.75,1800.5,10.50,9999.99,
+region,2024-03-11,categorical,1844,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-03-11,categorical,1844,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-03-18,categorical,1171,0,1,,,,2024-03-18,{}
+customer_id,2024-03-18,numeric,1171,0,1071,25000.5,15000.2,1000,50000,
+amount,2024-03-18,numeric,1171,3,1121,2500.75,1800.5,10.50,9999.99,
+region,2024-03-18,categorical,1171,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-03-18,categorical,1171,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-04-01,categorical,1406,0,1,,,,2024-04-01,{}
+customer_id,2024-04-01,numeric,1406,0,1306,25000.5,15000.2,1000,50000,
+amount,2024-04-01,numeric,1406,3,1356,2500.75,1800.5,10.50,9999.99,
+region,2024-04-01,categorical,1406,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-04-01,categorical,1406,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-04-08,categorical,1412,0,1,,,,2024-04-08,{}
+customer_id,2024-04-08,numeric,1412,0,1312,25000.5,15000.2,1000,50000,
+amount,2024-04-08,numeric,1412,3,1362,2500.75,1800.5,10.50,9999.99,
+region,2024-04-08,categorical,1412,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-04-08,categorical,1412,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-04-15,categorical,1486,0,1,,,,2024-04-15,{}
+customer_id,2024-04-15,numeric,1486,0,1386,25000.5,15000.2,1000,50000,
+amount,2024-04-15,numeric,1486,3,1436,2500.75,1800.5,10.50,9999.99,
+region,2024-04-15,categorical,1486,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-04-15,categorical,1486,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-04-22,categorical,1420,0,1,,,,2024-04-22,{}
+customer_id,2024-04-22,numeric,1420,0,1320,25000.5,15000.2,1000,50000,
+amount,2024-04-22,numeric,1420,3,1370,2500.75,1800.5,10.50,9999.99,
+region,2024-04-22,categorical,1420,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-04-22,categorical,1420,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-04-29,categorical,1457,0,1,,,,2024-04-29,{}
+customer_id,2024-04-29,numeric,1457,0,1357,25000.5,15000.2,1000,50000,
+amount,2024-04-29,numeric,1457,3,1407,2500.75,1800.5,10.50,9999.99,
+region,2024-04-29,categorical,1457,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-04-29,categorical,1457,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-05-06,categorical,1407,0,1,,,,2024-05-06,{}
+customer_id,2024-05-06,numeric,1407,0,1307,25000.5,15000.2,1000,50000,
+amount,2024-05-06,numeric,1407,3,1357,2500.75,1800.5,10.50,9999.99,
+region,2024-05-06,categorical,1407,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-05-06,categorical,1407,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-05-13,categorical,1432,0,1,,,,2024-05-13,{}
+customer_id,2024-05-13,numeric,1432,0,1332,25000.5,15000.2,1000,50000,
+amount,2024-05-13,numeric,1432,3,1382,2500.75,1800.5,10.50,9999.99,
+region,2024-05-13,categorical,1432,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-05-13,categorical,1432,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-05-20,categorical,1579,0,1,,,,2024-05-20,{}
+customer_id,2024-05-20,numeric,1579,0,1479,25000.5,15000.2,1000,50000,
+amount,2024-05-20,numeric,1579,3,1529,2500.75,1800.5,10.50,9999.99,
+region,2024-05-20,categorical,1579,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-05-20,categorical,1579,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-05-27,categorical,1235,0,1,,,,2024-05-27,{}
+customer_id,2024-05-27,numeric,1235,0,1135,25000.5,15000.2,1000,50000,
+amount,2024-05-27,numeric,1235,3,1185,2500.75,1800.5,10.50,9999.99,
+region,2024-05-27,categorical,1235,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-05-27,categorical,1235,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-06-03,categorical,1548,0,1,,,,2024-06-03,{}
+customer_id,2024-06-03,numeric,1548,0,1448,25000.5,15000.2,1000,50000,
+amount,2024-06-03,numeric,1548,3,1498,2500.75,1800.5,10.50,9999.99,
+region,2024-06-03,categorical,1548,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-06-03,categorical,1548,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-06-10,categorical,1583,0,1,,,,2024-06-10,{}
+customer_id,2024-06-10,numeric,1583,0,1483,25000.5,15000.2,1000,50000,
+amount,2024-06-10,numeric,1583,3,1533,2500.75,1800.5,10.50,9999.99,
+region,2024-06-10,categorical,1583,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-06-10,categorical,1583,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-06-17,categorical,1426,0,1,,,,2024-06-17,{}
+customer_id,2024-06-17,numeric,1426,0,1326,25000.5,15000.2,1000,50000,
+amount,2024-06-17,numeric,1426,3,1376,2500.75,1800.5,10.50,9999.99,
+region,2024-06-17,categorical,1426,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-06-17,categorical,1426,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"
+rpt_dt,2024-06-24,categorical,1979,0,1,,,,2024-06-24,{}
+customer_id,2024-06-24,numeric,1979,0,1879,25000.5,15000.2,1000,50000,
+amount,2024-06-24,numeric,1979,3,1929,2500.75,1800.5,10.50,9999.99,
+region,2024-06-24,categorical,1979,0,5,,,EAST,WEST,"[{"value": "EAST", "count": 600}, {"value": "WEST", "count": 500}, {"value": "NORTH", "count": 250}, {"value": "SOUTH", "count": 150}]"
+status,2024-06-24,categorical,1979,1,3,,,A,Z,"[{"value": "A", "count": 1200}, {"value": "I", "count": 200}, {"value": "P", "count": 100}]"

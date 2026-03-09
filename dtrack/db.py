@@ -107,6 +107,18 @@ def init_database(db_path: str) -> None:
         )
     """)
 
+    # Create column comparison results table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS _col_comparison (
+            pair_name TEXT PRIMARY KEY,
+            columns_compared TEXT,
+            matched_columns TEXT,
+            diff_columns TEXT,
+            comparison_details TEXT,
+            created_at TEXT
+        )
+    """)
+
     # Create sampled dates table (for vintage='sample')
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS _sample_date (
@@ -796,6 +808,92 @@ def get_row_comparison(db_path: str, pair_name: str) -> Optional[Dict]:
         result = dict(row)
         result['matching_dates'] = json.loads(result['matching_dates']) if result['matching_dates'] else []
         result['excluded_dates'] = json.loads(result['excluded_dates']) if result['excluded_dates'] else []
+        return result
+    return None
+
+
+def save_col_comparison(
+    db_path: str,
+    pair_name: str,
+    columns_compared: List[str],
+    matched_columns: List[str],
+    diff_columns: List[str],
+    comparison_details: Optional[Dict] = None,
+) -> None:
+    """Save column comparison results to _col_comparison table.
+
+    Args:
+        db_path: Path to database
+        pair_name: Name of the table pair
+        columns_compared: List of all columns compared
+        matched_columns: List of columns with matching statistics
+        diff_columns: List of columns with differing statistics
+        comparison_details: Optional dict of full comparison results per column
+    """
+    import json
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # Ensure table exists with all columns
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS _col_comparison (
+            pair_name TEXT PRIMARY KEY,
+            columns_compared TEXT,
+            matched_columns TEXT,
+            diff_columns TEXT,
+            comparison_details TEXT,
+            created_at TEXT
+        )
+    """)
+
+    # Try to add comparison_details column if it doesn't exist (backward compatibility)
+    try:
+        cursor.execute("ALTER TABLE _col_comparison ADD COLUMN comparison_details TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    cursor.execute("""
+        INSERT OR REPLACE INTO _col_comparison (
+            pair_name, columns_compared, matched_columns, diff_columns, comparison_details, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        pair_name,
+        json.dumps(sorted(columns_compared)),
+        json.dumps(sorted(matched_columns)),
+        json.dumps(sorted(diff_columns)),
+        json.dumps(comparison_details) if comparison_details else None,
+        datetime.now().isoformat(),
+    ))
+
+    conn.commit()
+    conn.close()
+
+
+def get_col_comparison(db_path: str, pair_name: str) -> Optional[Dict]:
+    """Get column comparison results for a pair."""
+    import json
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            "SELECT * FROM _col_comparison WHERE pair_name = ?", (pair_name,)
+        )
+        row = cursor.fetchone()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        conn.close()
+
+    if row:
+        result = dict(row)
+        result['columns_compared'] = json.loads(result['columns_compared']) if result['columns_compared'] else []
+        result['matched_columns'] = json.loads(result['matched_columns']) if result['matched_columns'] else []
+        result['diff_columns'] = json.loads(result['diff_columns']) if result['diff_columns'] else []
+        result['comparison_details'] = json.loads(result['comparison_details']) if result.get('comparison_details') else None
         return result
     return None
 

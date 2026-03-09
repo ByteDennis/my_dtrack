@@ -1,0 +1,501 @@
+column_name,dt,col_type,n_total,n_missing,n_unique,mean,std,min_val,max_val,top_10
+month_dt,202002,categorical,45409,0,1,,,,202002,{}
+account_id,202002,numeric,45409,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202002,categorical,45409,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202002,numeric,45409,5,45309,5500.50,3200.25,0.01,999999.99,
+channel,202002,categorical,45409,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202003,categorical,42094,0,1,,,,202003,{}
+account_id,202003,numeric,42094,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202003,categorical,42094,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202003,numeric,42094,5,41994,5500.50,3200.25,0.01,999999.99,
+channel,202003,categorical,42094,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202004,categorical,49012,0,1,,,,202004,{}
+account_id,202004,numeric,49012,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202004,categorical,49012,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202004,numeric,49012,5,48912,5500.50,3200.25,0.01,999999.99,
+channel,202004,categorical,49012,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202006,categorical,47286,0,1,,,,202006,{}
+account_id,202006,numeric,47286,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202006,categorical,47286,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202006,numeric,47286,5,47186,5500.50,3200.25,0.01,999999.99,
+channel,202006,categorical,47286,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202007,categorical,46679,0,1,,,,202007,{}
+account_id,202007,numeric,46679,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202007,categorical,46679,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202007,numeric,46679,5,46579,5500.50,3200.25,0.01,999999.99,
+channel,202007,categorical,46679,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202008,categorical,41278,0,1,,,,202008,{}
+account_id,202008,numeric,41278,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202008,categorical,41278,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202008,numeric,41278,5,41178,5500.50,3200.25,0.01,999999.99,
+channel,202008,categorical,41278,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202009,categorical,46424,0,1,,,,202009,{}
+account_id,202009,numeric,46424,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202009,categorical,46424,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202009,numeric,46424,5,46324,5500.50,3200.25,0.01,999999.99,
+channel,202009,categorical,46424,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202010,categorical,54674,0,1,,,,202010,{}
+account_id,202010,numeric,54674,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202010,categorical,54674,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202010,numeric,54674,5,54574,5500.50,3200.25,0.01,999999.99,
+channel,202010,categorical,54674,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202011,categorical,42121,0,1,,,,202011,{}
+account_id,202011,numeric,42121,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202011,categorical,42121,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202011,numeric,42121,5,42021,5500.50,3200.25,0.01,999999.99,
+channel,202011,categorical,42121,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202101,categorical,45488,0,1,,,,202101,{}
+account_id,202101,numeric,45488,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202101,categorical,45488,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202101,numeric,45488,5,45388,5500.50,3200.25,0.01,999999.99,
+channel,202101,categorical,45488,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202102,categorical,46535,0,1,,,,202102,{}
+account_id,202102,numeric,46535,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202102,categorical,46535,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202102,numeric,46535,5,46435,5500.50,3200.25,0.01,999999.99,
+channel,202102,categorical,46535,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202104,categorical,48811,0,1,,,,202104,{}
+account_id,202104,numeric,48811,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202104,categorical,48811,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202104,numeric,48811,5,48711,5500.50,3200.25,0.01,999999.99,
+channel,202104,categorical,48811,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202105,categorical,53279,0,1,,,,202105,{}
+account_id,202105,numeric,53279,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202105,categorical,53279,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202105,numeric,53279,5,53179,5500.50,3200.25,0.01,999999.99,
+channel,202105,categorical,53279,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202107,categorical,53810,0,1,,,,202107,{}
+account_id,202107,numeric,53810,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202107,categorical,53810,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202107,numeric,53810,5,53710,5500.50,3200.25,0.01,999999.99,
+channel,202107,categorical,53810,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202108,categorical,63454,0,1,,,,202108,{}
+account_id,202108,numeric,63454,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202108,categorical,63454,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202108,numeric,63454,5,63354,5500.50,3200.25,0.01,999999.99,
+channel,202108,categorical,63454,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202112,categorical,38537,0,1,,,,202112,{}
+account_id,202112,numeric,38537,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202112,categorical,38537,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202112,numeric,38537,5,38437,5500.50,3200.25,0.01,999999.99,
+channel,202112,categorical,38537,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202201,categorical,52359,0,1,,,,202201,{}
+account_id,202201,numeric,52359,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202201,categorical,52359,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202201,numeric,52359,5,52259,5500.50,3200.25,0.01,999999.99,
+channel,202201,categorical,52359,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202202,categorical,54654,0,1,,,,202202,{}
+account_id,202202,numeric,54654,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202202,categorical,54654,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202202,numeric,54654,5,54554,5500.50,3200.25,0.01,999999.99,
+channel,202202,categorical,54654,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202203,categorical,49557,0,1,,,,202203,{}
+account_id,202203,numeric,49557,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202203,categorical,49557,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202203,numeric,49557,5,49457,5500.50,3200.25,0.01,999999.99,
+channel,202203,categorical,49557,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202206,categorical,51924,0,1,,,,202206,{}
+account_id,202206,numeric,51924,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202206,categorical,51924,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202206,numeric,51924,5,51824,5500.50,3200.25,0.01,999999.99,
+channel,202206,categorical,51924,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202207,categorical,50574,0,1,,,,202207,{}
+account_id,202207,numeric,50574,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202207,categorical,50574,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202207,numeric,50574,5,50474,5500.50,3200.25,0.01,999999.99,
+channel,202207,categorical,50574,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202208,categorical,49552,0,1,,,,202208,{}
+account_id,202208,numeric,49552,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202208,categorical,49552,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202208,numeric,49552,5,49452,5500.50,3200.25,0.01,999999.99,
+channel,202208,categorical,49552,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202210,categorical,48527,0,1,,,,202210,{}
+account_id,202210,numeric,48527,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202210,categorical,48527,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202210,numeric,48527,5,48427,5500.50,3200.25,0.01,999999.99,
+channel,202210,categorical,48527,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202211,categorical,50514,0,1,,,,202211,{}
+account_id,202211,numeric,50514,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202211,categorical,50514,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202211,numeric,50514,5,50414,5500.50,3200.25,0.01,999999.99,
+channel,202211,categorical,50514,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202212,categorical,46674,0,1,,,,202212,{}
+account_id,202212,numeric,46674,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202212,categorical,46674,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202212,numeric,46674,5,46574,5500.50,3200.25,0.01,999999.99,
+channel,202212,categorical,46674,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202301,categorical,53431,0,1,,,,202301,{}
+account_id,202301,numeric,53431,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202301,categorical,53431,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202301,numeric,53431,5,53331,5500.50,3200.25,0.01,999999.99,
+channel,202301,categorical,53431,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202302,categorical,51224,0,1,,,,202302,{}
+account_id,202302,numeric,51224,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202302,categorical,51224,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202302,numeric,51224,5,51124,5500.50,3200.25,0.01,999999.99,
+channel,202302,categorical,51224,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202304,categorical,50881,0,1,,,,202304,{}
+account_id,202304,numeric,50881,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202304,categorical,50881,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202304,numeric,50881,5,50781,5500.50,3200.25,0.01,999999.99,
+channel,202304,categorical,50881,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202306,categorical,54891,0,1,,,,202306,{}
+account_id,202306,numeric,54891,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202306,categorical,54891,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202306,numeric,54891,5,54791,5500.50,3200.25,0.01,999999.99,
+channel,202306,categorical,54891,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202308,categorical,45711,0,1,,,,202308,{}
+account_id,202308,numeric,45711,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202308,categorical,45711,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202308,numeric,45711,5,45611,5500.50,3200.25,0.01,999999.99,
+channel,202308,categorical,45711,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202309,categorical,52527,0,1,,,,202309,{}
+account_id,202309,numeric,52527,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202309,categorical,52527,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202309,numeric,52527,5,52427,5500.50,3200.25,0.01,999999.99,
+channel,202309,categorical,52527,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202310,categorical,53785,0,1,,,,202310,{}
+account_id,202310,numeric,53785,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202310,categorical,53785,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202310,numeric,53785,5,53685,5500.50,3200.25,0.01,999999.99,
+channel,202310,categorical,53785,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202311,categorical,47045,0,1,,,,202311,{}
+account_id,202311,numeric,47045,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202311,categorical,47045,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202311,numeric,47045,5,46945,5500.50,3200.25,0.01,999999.99,
+channel,202311,categorical,47045,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202312,categorical,51201,0,1,,,,202312,{}
+account_id,202312,numeric,51201,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202312,categorical,51201,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202312,numeric,51201,5,51101,5500.50,3200.25,0.01,999999.99,
+channel,202312,categorical,51201,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202401,categorical,46291,0,1,,,,202401,{}
+account_id,202401,numeric,46291,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202401,categorical,46291,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202401,numeric,46291,5,46191,5500.50,3200.25,0.01,999999.99,
+channel,202401,categorical,46291,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202402,categorical,54044,0,1,,,,202402,{}
+account_id,202402,numeric,54044,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202402,categorical,54044,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202402,numeric,54044,5,53944,5500.50,3200.25,0.01,999999.99,
+channel,202402,categorical,54044,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202403,categorical,49803,0,1,,,,202403,{}
+account_id,202403,numeric,49803,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202403,categorical,49803,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202403,numeric,49803,5,49703,5500.50,3200.25,0.01,999999.99,
+channel,202403,categorical,49803,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202405,categorical,54459,0,1,,,,202405,{}
+account_id,202405,numeric,54459,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202405,categorical,54459,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202405,numeric,54459,5,54359,5500.50,3200.25,0.01,999999.99,
+channel,202405,categorical,54459,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202406,categorical,48150,0,1,,,,202406,{}
+account_id,202406,numeric,48150,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202406,categorical,48150,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202406,numeric,48150,5,48050,5500.50,3200.25,0.01,999999.99,
+channel,202406,categorical,48150,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202408,categorical,45750,0,1,,,,202408,{}
+account_id,202408,numeric,45750,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202408,categorical,45750,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202408,numeric,45750,5,45650,5500.50,3200.25,0.01,999999.99,
+channel,202408,categorical,45750,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202409,categorical,48733,0,1,,,,202409,{}
+account_id,202409,numeric,48733,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202409,categorical,48733,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202409,numeric,48733,5,48633,5500.50,3200.25,0.01,999999.99,
+channel,202409,categorical,48733,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202410,categorical,49741,0,1,,,,202410,{}
+account_id,202410,numeric,49741,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202410,categorical,49741,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202410,numeric,49741,5,49641,5500.50,3200.25,0.01,999999.99,
+channel,202410,categorical,49741,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202412,categorical,48814,0,1,,,,202412,{}
+account_id,202412,numeric,48814,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202412,categorical,48814,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202412,numeric,48814,5,48714,5500.50,3200.25,0.01,999999.99,
+channel,202412,categorical,48814,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202501,categorical,46654,0,1,,,,202501,{}
+account_id,202501,numeric,46654,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202501,categorical,46654,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202501,numeric,46654,5,46554,5500.50,3200.25,0.01,999999.99,
+channel,202501,categorical,46654,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202503,categorical,49554,0,1,,,,202503,{}
+account_id,202503,numeric,49554,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202503,categorical,49554,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202503,numeric,49554,5,49454,5500.50,3200.25,0.01,999999.99,
+channel,202503,categorical,49554,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202504,categorical,38791,0,1,,,,202504,{}
+account_id,202504,numeric,38791,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202504,categorical,38791,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202504,numeric,38791,5,38691,5500.50,3200.25,0.01,999999.99,
+channel,202504,categorical,38791,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202505,categorical,57036,0,1,,,,202505,{}
+account_id,202505,numeric,57036,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202505,categorical,57036,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202505,numeric,57036,5,56936,5500.50,3200.25,0.01,999999.99,
+channel,202505,categorical,57036,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202506,categorical,53008,0,1,,,,202506,{}
+account_id,202506,numeric,53008,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202506,categorical,53008,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202506,numeric,53008,5,52908,5500.50,3200.25,0.01,999999.99,
+channel,202506,categorical,53008,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202507,categorical,51065,0,1,,,,202507,{}
+account_id,202507,numeric,51065,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202507,categorical,51065,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202507,numeric,51065,5,50965,5500.50,3200.25,0.01,999999.99,
+channel,202507,categorical,51065,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202509,categorical,48432,0,1,,,,202509,{}
+account_id,202509,numeric,48432,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202509,categorical,48432,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202509,numeric,48432,5,48332,5500.50,3200.25,0.01,999999.99,
+channel,202509,categorical,48432,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202511,categorical,34096,0,1,,,,202511,{}
+account_id,202511,numeric,34096,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202511,categorical,34096,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202511,numeric,34096,5,33996,5500.50,3200.25,0.01,999999.99,
+channel,202511,categorical,34096,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202512,categorical,54980,0,1,,,,202512,{}
+account_id,202512,numeric,54980,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202512,categorical,54980,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202512,numeric,54980,5,54880,5500.50,3200.25,0.01,999999.99,
+channel,202512,categorical,54980,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202601,categorical,47803,0,1,,,,202601,{}
+account_id,202601,numeric,47803,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202601,categorical,47803,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202601,numeric,47803,5,47703,5500.50,3200.25,0.01,999999.99,
+channel,202601,categorical,47803,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202602,categorical,53751,0,1,,,,202602,{}
+account_id,202602,numeric,53751,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202602,categorical,53751,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202602,numeric,53751,5,53651,5500.50,3200.25,0.01,999999.99,
+channel,202602,categorical,53751,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202603,categorical,49010,0,1,,,,202603,{}
+account_id,202603,numeric,49010,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202603,categorical,49010,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202603,numeric,49010,5,48910,5500.50,3200.25,0.01,999999.99,
+channel,202603,categorical,49010,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202606,categorical,51216,0,1,,,,202606,{}
+account_id,202606,numeric,51216,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202606,categorical,51216,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202606,numeric,51216,5,51116,5500.50,3200.25,0.01,999999.99,
+channel,202606,categorical,51216,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202612,categorical,48752,0,1,,,,202612,{}
+account_id,202612,numeric,48752,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202612,categorical,48752,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202612,numeric,48752,5,48652,5500.50,3200.25,0.01,999999.99,
+channel,202612,categorical,48752,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202701,categorical,45525,0,1,,,,202701,{}
+account_id,202701,numeric,45525,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202701,categorical,45525,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202701,numeric,45525,5,45425,5500.50,3200.25,0.01,999999.99,
+channel,202701,categorical,45525,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202702,categorical,50168,0,1,,,,202702,{}
+account_id,202702,numeric,50168,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202702,categorical,50168,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202702,numeric,50168,5,50068,5500.50,3200.25,0.01,999999.99,
+channel,202702,categorical,50168,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202703,categorical,51572,0,1,,,,202703,{}
+account_id,202703,numeric,51572,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202703,categorical,51572,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202703,numeric,51572,5,51472,5500.50,3200.25,0.01,999999.99,
+channel,202703,categorical,51572,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202704,categorical,49386,0,1,,,,202704,{}
+account_id,202704,numeric,49386,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202704,categorical,49386,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202704,numeric,49386,5,49286,5500.50,3200.25,0.01,999999.99,
+channel,202704,categorical,49386,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202705,categorical,46084,0,1,,,,202705,{}
+account_id,202705,numeric,46084,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202705,categorical,46084,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202705,numeric,46084,5,45984,5500.50,3200.25,0.01,999999.99,
+channel,202705,categorical,46084,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202708,categorical,50155,0,1,,,,202708,{}
+account_id,202708,numeric,50155,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202708,categorical,50155,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202708,numeric,50155,5,50055,5500.50,3200.25,0.01,999999.99,
+channel,202708,categorical,50155,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202710,categorical,53179,0,1,,,,202710,{}
+account_id,202710,numeric,53179,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202710,categorical,53179,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202710,numeric,53179,5,53079,5500.50,3200.25,0.01,999999.99,
+channel,202710,categorical,53179,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202711,categorical,45813,0,1,,,,202711,{}
+account_id,202711,numeric,45813,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202711,categorical,45813,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202711,numeric,45813,5,45713,5500.50,3200.25,0.01,999999.99,
+channel,202711,categorical,45813,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202802,categorical,49339,0,1,,,,202802,{}
+account_id,202802,numeric,49339,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202802,categorical,49339,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202802,numeric,49339,5,49239,5500.50,3200.25,0.01,999999.99,
+channel,202802,categorical,49339,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202803,categorical,47287,0,1,,,,202803,{}
+account_id,202803,numeric,47287,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202803,categorical,47287,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202803,numeric,47287,5,47187,5500.50,3200.25,0.01,999999.99,
+channel,202803,categorical,47287,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202804,categorical,49040,0,1,,,,202804,{}
+account_id,202804,numeric,49040,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202804,categorical,49040,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202804,numeric,49040,5,48940,5500.50,3200.25,0.01,999999.99,
+channel,202804,categorical,49040,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202806,categorical,53830,0,1,,,,202806,{}
+account_id,202806,numeric,53830,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202806,categorical,53830,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202806,numeric,53830,5,53730,5500.50,3200.25,0.01,999999.99,
+channel,202806,categorical,53830,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202808,categorical,54577,0,1,,,,202808,{}
+account_id,202808,numeric,54577,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202808,categorical,54577,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202808,numeric,54577,5,54477,5500.50,3200.25,0.01,999999.99,
+channel,202808,categorical,54577,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202809,categorical,52019,0,1,,,,202809,{}
+account_id,202809,numeric,52019,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202809,categorical,52019,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202809,numeric,52019,5,51919,5500.50,3200.25,0.01,999999.99,
+channel,202809,categorical,52019,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202810,categorical,54560,0,1,,,,202810,{}
+account_id,202810,numeric,54560,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202810,categorical,54560,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202810,numeric,54560,5,54460,5500.50,3200.25,0.01,999999.99,
+channel,202810,categorical,54560,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202812,categorical,50930,0,1,,,,202812,{}
+account_id,202812,numeric,50930,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202812,categorical,50930,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202812,numeric,50930,5,50830,5500.50,3200.25,0.01,999999.99,
+channel,202812,categorical,50930,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202902,categorical,47266,0,1,,,,202902,{}
+account_id,202902,numeric,47266,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202902,categorical,47266,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202902,numeric,47266,5,47166,5500.50,3200.25,0.01,999999.99,
+channel,202902,categorical,47266,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202904,categorical,53085,0,1,,,,202904,{}
+account_id,202904,numeric,53085,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202904,categorical,53085,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202904,numeric,53085,5,52985,5500.50,3200.25,0.01,999999.99,
+channel,202904,categorical,53085,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202906,categorical,45771,0,1,,,,202906,{}
+account_id,202906,numeric,45771,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202906,categorical,45771,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202906,numeric,45771,5,45671,5500.50,3200.25,0.01,999999.99,
+channel,202906,categorical,45771,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202907,categorical,46796,0,1,,,,202907,{}
+account_id,202907,numeric,46796,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202907,categorical,46796,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202907,numeric,46796,5,46696,5500.50,3200.25,0.01,999999.99,
+channel,202907,categorical,46796,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202908,categorical,47504,0,1,,,,202908,{}
+account_id,202908,numeric,47504,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202908,categorical,47504,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202908,numeric,47504,5,47404,5500.50,3200.25,0.01,999999.99,
+channel,202908,categorical,47504,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,202909,categorical,47621,0,1,,,,202909,{}
+account_id,202909,numeric,47621,0,8500,55000.2,25000.5,10000,99999,
+txn_type,202909,categorical,47621,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,202909,numeric,47621,5,47521,5500.50,3200.25,0.01,999999.99,
+channel,202909,categorical,47621,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203003,categorical,54763,0,1,,,,203003,{}
+account_id,203003,numeric,54763,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203003,categorical,54763,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203003,numeric,54763,5,54663,5500.50,3200.25,0.01,999999.99,
+channel,203003,categorical,54763,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203004,categorical,52668,0,1,,,,203004,{}
+account_id,203004,numeric,52668,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203004,categorical,52668,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203004,numeric,52668,5,52568,5500.50,3200.25,0.01,999999.99,
+channel,203004,categorical,52668,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203007,categorical,54064,0,1,,,,203007,{}
+account_id,203007,numeric,54064,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203007,categorical,54064,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203007,numeric,54064,5,53964,5500.50,3200.25,0.01,999999.99,
+channel,203007,categorical,54064,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203008,categorical,56244,0,1,,,,203008,{}
+account_id,203008,numeric,56244,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203008,categorical,56244,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203008,numeric,56244,5,56144,5500.50,3200.25,0.01,999999.99,
+channel,203008,categorical,56244,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203009,categorical,46876,0,1,,,,203009,{}
+account_id,203009,numeric,46876,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203009,categorical,46876,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203009,numeric,46876,5,46776,5500.50,3200.25,0.01,999999.99,
+channel,203009,categorical,46876,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203010,categorical,53797,0,1,,,,203010,{}
+account_id,203010,numeric,53797,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203010,categorical,53797,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203010,numeric,53797,5,53697,5500.50,3200.25,0.01,999999.99,
+channel,203010,categorical,53797,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203011,categorical,49371,0,1,,,,203011,{}
+account_id,203011,numeric,49371,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203011,categorical,49371,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203011,numeric,49371,5,49271,5500.50,3200.25,0.01,999999.99,
+channel,203011,categorical,49371,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203012,categorical,50573,0,1,,,,203012,{}
+account_id,203012,numeric,50573,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203012,categorical,50573,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203012,numeric,50573,5,50473,5500.50,3200.25,0.01,999999.99,
+channel,203012,categorical,50573,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203101,categorical,46827,0,1,,,,203101,{}
+account_id,203101,numeric,46827,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203101,categorical,46827,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203101,numeric,46827,5,46727,5500.50,3200.25,0.01,999999.99,
+channel,203101,categorical,46827,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203102,categorical,49808,0,1,,,,203102,{}
+account_id,203102,numeric,49808,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203102,categorical,49808,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203102,numeric,49808,5,49708,5500.50,3200.25,0.01,999999.99,
+channel,203102,categorical,49808,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203103,categorical,52123,0,1,,,,203103,{}
+account_id,203103,numeric,52123,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203103,categorical,52123,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203103,numeric,52123,5,52023,5500.50,3200.25,0.01,999999.99,
+channel,203103,categorical,52123,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203106,categorical,32417,0,1,,,,203106,{}
+account_id,203106,numeric,32417,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203106,categorical,32417,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203106,numeric,32417,5,32317,5500.50,3200.25,0.01,999999.99,
+channel,203106,categorical,32417,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203108,categorical,53201,0,1,,,,203108,{}
+account_id,203108,numeric,53201,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203108,categorical,53201,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203108,numeric,53201,5,53101,5500.50,3200.25,0.01,999999.99,
+channel,203108,categorical,53201,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203109,categorical,47927,0,1,,,,203109,{}
+account_id,203109,numeric,47927,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203109,categorical,47927,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203109,numeric,47927,5,47827,5500.50,3200.25,0.01,999999.99,
+channel,203109,categorical,47927,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203110,categorical,53317,0,1,,,,203110,{}
+account_id,203110,numeric,53317,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203110,categorical,53317,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203110,numeric,53317,5,53217,5500.50,3200.25,0.01,999999.99,
+channel,203110,categorical,53317,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203111,categorical,46743,0,1,,,,203111,{}
+account_id,203111,numeric,46743,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203111,categorical,46743,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203111,numeric,46743,5,46643,5500.50,3200.25,0.01,999999.99,
+channel,203111,categorical,46743,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203201,categorical,53317,0,1,,,,203201,{}
+account_id,203201,numeric,53317,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203201,categorical,53317,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203201,numeric,53317,5,53217,5500.50,3200.25,0.01,999999.99,
+channel,203201,categorical,53317,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203203,categorical,34080,0,1,,,,203203,{}
+account_id,203203,numeric,34080,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203203,categorical,34080,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203203,numeric,34080,5,33980,5500.50,3200.25,0.01,999999.99,
+channel,203203,categorical,34080,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203204,categorical,40719,0,1,,,,203204,{}
+account_id,203204,numeric,40719,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203204,categorical,40719,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203204,numeric,40719,5,40619,5500.50,3200.25,0.01,999999.99,
+channel,203204,categorical,40719,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203205,categorical,51126,0,1,,,,203205,{}
+account_id,203205,numeric,51126,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203205,categorical,51126,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203205,numeric,51126,5,51026,5500.50,3200.25,0.01,999999.99,
+channel,203205,categorical,51126,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"
+month_dt,203206,categorical,47646,0,1,,,,203206,{}
+account_id,203206,numeric,47646,0,8500,55000.2,25000.5,10000,99999,
+txn_type,203206,categorical,47646,0,15,,,CREDIT,WITHDRAWAL,"[{"value": "CREDIT", "count": 20000}, {"value": "DEBIT", "count": 18000}, {"value": "TRANSFER", "count": 10000}, {"value": "WITHDRAWAL", "count": 2000}]"
+transaction_amount,203206,numeric,47646,5,47546,5500.50,3200.25,0.01,999999.99,
+channel,203206,categorical,47646,2,6,,,ATM,WEB,"[{"value": "WEB", "count": 25000}, {"value": "MOBILE", "count": 15000}, {"value": "ATM", "count": 8000}, {"value": "BRANCH", "count": 2000}]"

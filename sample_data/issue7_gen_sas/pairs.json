@@ -1,0 +1,90 @@
+{
+  "metadata": {
+    "title": "Row Count Comparison",
+    "subtitle": "updates every Thursday",
+    "col_title": "Column Statistics Comparison",
+    "col_subtitle": "updates first Thursday of every month"
+  },
+  "pairs": {
+    "cust_daily": {
+      "left": {
+        "name": "cust_daily",
+        "table": "CUST_DAILY",
+        "source": "pcds",
+        "date_col": "RPT_DT",
+        "date_transform": "TRUNC({col})",
+        "conn_macro": "pcds",
+        "where": "STATUS = 'A'",
+        "vintage": "week"
+      },
+      "right": {
+        "name": "cust_daily",
+        "table": "cust_daily",
+        "source": "aws",
+        "database": "analytics_db",
+        "date_col": "rpt_dt",
+        "where": "",
+        "vintage": "week"
+      },
+      "col_map": {
+        "CUSTOMER_ID": "customer_id",
+        "REGION": "region",
+        "RPT_DT": "rpt_dt",
+        "STATUS": "status",
+        "AMT": "amount"
+      },
+      "where_map": {
+        "left": "(STATUS = 'A') AND RPT_DT >= DATE '2023-01-09' AND RPT_DT <= DATE '2024-12-30' AND RPT_DT NOT IN (DATE '2023-01-02', DATE '2023-01-16', DATE '2023-01-23', DATE '2023-01-30', DATE '2023-02-06', DATE '2023-02-13', DATE '2023-02-20', DATE '2023-02-27', DATE '2023-03-13', DATE '2023-03-20', DATE '2023-03-27', DATE '2023-04-03', DATE '2023-04-10', DATE '2023-04-17', DATE '2023-04-24', DATE '2023-05-01', DATE '2023-05-08', DATE '2023-05-15', DATE '2023-05-22', DATE '2023-05-29', DATE '2023-06-05', DATE '2023-06-12', DATE '2023-06-19', DATE '2023-06-26', DATE '2023-07-03', DATE '2023-07-10', DATE '2023-07-17', DATE '2023-07-24', DATE '2023-07-31', DATE '2023-08-07', DATE '2023-08-21', DATE '2023-08-28', DATE '2023-09-11', DATE '2023-09-25', DATE '2023-10-02', DATE '2023-10-09', DATE '2023-10-16', DATE '2023-10-23', DATE '2023-11-06', DATE '2023-11-13', DATE '2023-11-20', DATE '2023-11-27', DATE '2023-12-04', DATE '2023-12-11', DATE '2023-12-18', DATE '2024-01-01', DATE '2024-01-08', DATE '2024-01-15', DATE '2024-01-22', DATE '2024-01-29', DATE '2024-02-12', DATE '2024-02-19', DATE '2024-02-26', DATE '2024-03-04', DATE '2024-03-11', DATE '2024-03-18', DATE '2024-03-25', DATE '2024-04-01', DATE '2024-04-08', DATE '2024-04-15', DATE '2024-04-22', DATE '2024-05-06', DATE '2024-05-13', DATE '2024-05-20', DATE '2024-05-27', DATE '2024-06-03', DATE '2024-06-10', DATE '2024-06-17', DATE '2024-06-24', DATE '2024-07-01', DATE '2024-07-08', DATE '2024-07-15', DATE '2024-07-22', DATE '2024-07-29', DATE '2024-08-05', DATE '2024-08-12', DATE '2024-08-19', DATE '2024-08-26', DATE '2024-09-02', DATE '2024-09-09', DATE '2024-09-16', DATE '2024-09-23', DATE '2024-09-30', DATE '2024-10-07', DATE '2024-10-14', DATE '2024-10-21', DATE '2024-11-04', DATE '2024-11-18', DATE '2024-12-02', DATE '2024-12-16', DATE '2024-12-23')",
+        "right": "rpt_dt >= DATE('2023-01-09') AND rpt_dt <= DATE('2024-12-30') AND rpt_dt NOT IN (DATE('2023-01-02'), DATE('2023-01-16'), DATE('2023-01-23'), DATE('2023-01-30'), DATE('2023-02-06'), DATE('2023-02-13'), DATE('2023-02-20'), DATE('2023-02-27'), DATE('2023-03-13'), DATE('2023-03-20'), DATE('2023-03-27'), DATE('2023-04-03'), DATE('2023-04-10'), DATE('2023-04-17'), DATE('2023-04-24'), DATE('2023-05-01'), DATE('2023-05-08'), DATE('2023-05-15'), DATE('2023-05-22'), DATE('2023-05-29'), DATE('2023-06-05'), DATE('2023-06-12'), DATE('2023-06-19'), DATE('2023-06-26'), DATE('2023-07-03'), DATE('2023-07-10'), DATE('2023-07-17'), DATE('2023-07-24'), DATE('2023-07-31'), DATE('2023-08-07'), DATE('2023-08-21'), DATE('2023-08-28'), DATE('2023-09-11'), DATE('2023-09-25'), DATE('2023-10-02'), DATE('2023-10-09'), DATE('2023-10-16'), DATE('2023-10-23'), DATE('2023-11-06'), DATE('2023-11-13'), DATE('2023-11-20'), DATE('2023-11-27'), DATE('2023-12-04'), DATE('2023-12-11'), DATE('2023-12-18'), DATE('2024-01-01'), DATE('2024-01-08'), DATE('2024-01-15'), DATE('2024-01-22'), DATE('2024-01-29'), DATE('2024-02-12'), DATE('2024-02-19'), DATE('2024-02-26'), DATE('2024-03-04'), DATE('2024-03-11'), DATE('2024-03-18'), DATE('2024-03-25'), DATE('2024-04-01'), DATE('2024-04-08'), DATE('2024-04-15'), DATE('2024-04-22'), DATE('2024-05-06'), DATE('2024-05-13'), DATE('2024-05-20'), DATE('2024-05-27'), DATE('2024-06-03'), DATE('2024-06-10'), DATE('2024-06-17'), DATE('2024-06-24'), DATE('2024-07-01'), DATE('2024-07-08'), DATE('2024-07-15'), DATE('2024-07-22'), DATE('2024-07-29'), DATE('2024-08-05'), DATE('2024-08-12'), DATE('2024-08-19'), DATE('2024-08-26'), DATE('2024-09-02'), DATE('2024-09-09'), DATE('2024-09-16'), DATE('2024-09-23'), DATE('2024-09-30'), DATE('2024-10-07'), DATE('2024-10-14'), DATE('2024-10-21'), DATE('2024-11-04'), DATE('2024-11-18'), DATE('2024-12-02'), DATE('2024-12-16'), DATE('2024-12-23'))"
+      },
+      "metadata": {
+        "last_comparison": "2026-03-09T13:32:01.046818",
+        "query_time": "42 secs",
+        "time_map": {
+          "pcds": "42 sec",
+          "aws": "112 sec"
+        }
+      }
+    },
+    "txn_monthly": {
+      "left": {
+        "name": "txn_monthly",
+        "table": "TXN_MONTHLY",
+        "source": "oracle",
+        "date_col": "MONTH_DT",
+        "date_transform": "",
+        "conn_macro": "pb23",
+        "where": "",
+        "vintage": "sample"
+      },
+      "right": {
+        "name": "txn_monthly",
+        "table": "txn_monthly",
+        "source": "aws",
+        "database": "analytics_db",
+        "date_col": "month_dt",
+        "where": "",
+        "vintage": "sample"
+      },
+      "col_map": {
+        "CHANNEL": "channel",
+        "MONTH_DT": "month_dt",
+        "TXN_TYPE": "txn_type",
+        "TXN_AMT": "transaction_amount",
+        "ACCT_ID": "account_id"
+      },
+      "where_map": {
+        "left": "MONTH_DT >= 202002 AND MONTH_DT <= 203206 AND MONTH_DT NOT IN (202003, 202005, 202008, 202011, 202103, 202106, 202107, 202108, 202109, 202110, 202111, 202112, 202205, 202209, 202301, 202307, 202404, 202407, 202502, 202504, 202505, 202506, 202508, 202511, 202607, 202608, 202611, 202709, 202711, 202712, 202801, 202807, 202901, 202905, 203002, 203005, 203006, 203008, 203104, 203106, 203107, 203202, 203203, 203204)",
+        "right": "month_dt >= 202002 AND month_dt <= 203206 AND month_dt NOT IN (202003, 202005, 202008, 202011, 202103, 202106, 202107, 202108, 202109, 202110, 202111, 202112, 202205, 202209, 202301, 202307, 202404, 202407, 202502, 202504, 202505, 202506, 202508, 202511, 202607, 202608, 202611, 202709, 202711, 202712, 202801, 202807, 202901, 202905, 203002, 203005, 203006, 203008, 203104, 203106, 203107, 203202, 203203, 203204)"
+      },
+      "metadata": {
+        "last_comparison": "2026-03-09T13:32:01.051982",
+        "query_time": "1 hour 42 mins",
+        "time_map": {
+          "oracle": "1 hour 2 mins",
+          "aws": "4 secs"
+        }
+      }
+    }
+  }
+}

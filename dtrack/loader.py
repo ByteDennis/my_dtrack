@@ -343,6 +343,7 @@ def load_precomputed_col_stats(
     mode: str = "upsert",
     source: Optional[str] = None,
     db_name: Optional[str] = None,
+    vintage: str = "day",
 ) -> int:
     """
     Load pre-computed column statistics from CSV into _col_stats table.
@@ -418,6 +419,7 @@ def load_precomputed_col_stats(
         "source_table": table_name,
         "source_file": csv_path,
         "load_mode": mode,
+        "vintage": vintage,
         "data_type": "col",
     })
 

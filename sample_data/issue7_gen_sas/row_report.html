@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Row Count Comparison</title>
+    
+    <style>
+        body {
+            margin: 0;
+            padding: 12px;
+            font-family: Segoe UI, Arial, sans-serif;
+            font-size: 12.5px;
+        }
+
+        summary::-webkit-details-marker {
+            display: none;
+        }
+
+        details[open] summary::before {
+            content: '▼ ';
+        }
+
+        details summary::before {
+            content: '▶ ';
+        }
+
+        div.page-title {
+            font-family: "Segoe UI", Arial, sans-serif;
+            font-size: 28px;
+            font-weight: 600;
+            color: #1f2933;
+            margin-bottom: 6px;
+        }
+
+        div.page-title .update-note {
+            margin-top: 4px;
+            font-size: 13px;
+            color: #6b7280;
+            font-weight: 400;
+        }
+
+        .calendar-icon {
+            width: 14px;
+            height: 14px;
+            margin-right: 6px;
+            vertical-align: -2px;
+            stroke: #9CA3AF;
+            stroke-width: 2;
+            fill: none;
+        }
+    </style>
+    
+</head>
+<body>
+    <div class="page-title">
+        Row Count Comparison
+        <div class="update-note">
+            <svg class="calendar-icon" viewBox="0 0 24 24">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                <line x1="16" y1="2" x2="16" y2="6" />
+                <line x1="8" y1="2" x2="8" y2="6" />
+                <line x1="3" y1="10" x2="21" y2="10" />
+            </svg>
+            Latest update: Mar 09, 2026 | updates every Thursday
+        </div>
+    </div>
+
+
+    <table style="border-collapse:collapse; width:100%; font-family:Segoe UI, Arial, sans-serif; font-size:12.5px; table-layout:fixed;">
+        <colgroup>
+            <col style="width:120px;"> <!-- Environment -->
+            <col style="width:140px;"> <!-- Date Variable -->
+            <col style="width:110px;"> <!-- Min Date -->
+            <col style="width:110px;"> <!-- Max Date -->
+            <col style="width:160px;"> <!-- Row Count -->
+            <col style="width:120px;"> <!-- Query Runtime -->
+        </colgroup>
+
+        <thead>
+            <tr>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Environment</th>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Date Variable</th>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Min Date</th>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Max Date</th>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Row Count</th>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Query Runtime</th>
+            </tr>
+        </thead>
+
+        <tbody>
+
+            <!-- cust_daily -->
+            <tr>
+                <td colspan="6" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">
+                    cust_daily
+                </td>
+            </tr>
+            <tr>
+                <td style="border:1px solid #ccc; padding:8px;">pcds</td>
+                <td style="border:1px solid #ccc; padding:8px;">RPT_DT</td>
+                <td style="border:1px solid #ccc; padding:8px;">2023-01-02</td>
+                <td style="border:1px solid #ccc; padding:8px;">2024-12-30</td>
+                <td style="border:1px solid #ccc; padding:8px;">990,823</td>
+                <td style="border:1px solid #ccc; padding:8px;">42 sec</td>
+            </tr>
+            <tr>
+                <td style="border:1px solid #ccc; padding:8px;">aws</td>
+                <td style="border:1px solid #ccc; padding:8px;">rpt_dt</td>
+                <td style="border:1px solid #ccc; padding:8px;">2023-01-02</td>
+                <td style="border:1px solid #ccc; padding:8px;">2024-12-30</td>
+                <td style="border:1px solid #ccc; padding:8px;">976,687</td>
+                <td style="border:1px solid #ccc; padding:8px;">112 sec</td>
+            </tr>
+            <tr>
+                <td colspan="6" style="border:1px solid #ccc; padding:4px;">
+                    <details style="margin:0;">
+                        <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">
+                            pcds only: 0, aws only: 0, <span style="color:green;">days match: 14</span>, <span style="color:#c62828; font-weight:600;">days mismatch: 91</span>
+                        </summary>
+                        <div style="padding:8px; font-size:12px;">
+                            <table style="width:100%; border:none; border-spacing:0;">
+                                <tr style="vertical-align:top;">
+                                    <td style="width:32%; padding:0 12px 0 0; border:none;">
+                                        <p style="margin:4px 0; font-weight:600; text-align:center;">Mismatched Dates (91)</p>
+                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">
+                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">PCDS</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">AWS</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">2023-01-02</td><td style="padding:2px; font-size:10px;">9,179</td><td style="padding:2px; font-size:10px;">8,669</td><td style="padding:2px; font-size:10px;">-510</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">2023-01-16</td><td style="padding:2px; font-size:10px;">8,755</td><td style="padding:2px; font-size:10px;">10,338</td><td style="padding:2px; font-size:10px;">+1,583</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">2023-01-23</td><td style="padding:2px; font-size:10px;">10,574</td><td style="padding:2px; font-size:10px;">7,546</td><td style="padding:2px; font-size:10px;">-3,028</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">2023-01-30</td><td style="padding:2px; font-size:10px;">8,851</td><td style="padding:2px; font-size:10px;">8,960</td><td style="padding:2px; font-size:10px;">+109</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">2023-02-06</td><td style="padding:2px; font-size:10px;">8,908</td><td style="padding:2px; font-size:10px;">7,366</td><td style="padding:2px; font-size:10px;">-1,542</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">2023-02-13</td><td style="padding:2px; font-size:10px;">10,501</td><td style="padding:2px; font-size:10px;">10,165</td><td style="padding:2px; font-size:10px;">-336</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">2023-02-20</td><td style="padding:2px; font-size:10px;">7,505</td><td style="padding:2px; font-size:10px;">10,718</td><td style="padding:2px; font-size:10px;">+3,213</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">2023-02-27</td><td style="padding:2px; font-size:10px;">10,565</td><td style="padding:2px; font-size:10px;">8,982</td><td style="padding:2px; font-size:10px;">-1,583</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">2023-03-13</td><td style="padding:2px; font-size:10px;">10,485</td><td style="padding:2px; font-size:10px;">5,916</td><td style="padding:2px; font-size:10px;">-4,569</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">2023-03-20</td><td style="padding:2px; font-size:10px;">10,374</td><td style="padding:2px; font-size:10px;">7,054</td><td style="padding:2px; font-size:10px;">-3,320</td></tr>
+                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#999;">... and 81 more</td></tr>
+                                        </table>
+                                    </td>
+                                    <td style="width:32%; padding:0 12px; border-left:1px solid #ddd;">
+                                        <p style="margin:4px 0; color:#999;">No PCDS-Only dates</p>
+                                    </td>
+                                    <td style="width:32%; padding:0 0 0 12px; border-left:1px solid #ddd;">
+                                        <p style="margin:4px 0; color:#999;">No AWS-Only dates</p>
+                                    </td>
+                                </tr>
+                            </table>
+                        </div>
+                    </details>
+                </td>
+            </tr>
+
+
+            <!-- txn_monthly -->
+            <tr>
+                <td colspan="6" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">
+                    txn_monthly
+                </td>
+            </tr>
+            <tr>
+                <td style="border:1px solid #ccc; padding:8px;">oracle</td>
+                <td style="border:1px solid #ccc; padding:8px;">MONTH_DT</td>
+                <td style="border:1px solid #ccc; padding:8px;">202001</td>
+                <td style="border:1px solid #ccc; padding:8px;">203206</td>
+                <td style="border:1px solid #ccc; padding:8px;">6,880,546 (6.88 M)</td>
+                <td style="border:1px solid #ccc; padding:8px;">1 hour 2 mins</td>
+            </tr>
+            <tr>
+                <td style="border:1px solid #ccc; padding:8px;">aws</td>
+                <td style="border:1px solid #ccc; padding:8px;">month_dt</td>
+                <td style="border:1px solid #ccc; padding:8px;">202002</td>
+                <td style="border:1px solid #ccc; padding:8px;">203206</td>
+                <td style="border:1px solid #ccc; padding:8px;">6,679,219 (6.68 M)</td>
+                <td style="border:1px solid #ccc; padding:8px;">4 secs</td>
+            </tr>
+            <tr>
+                <td colspan="6" style="border:1px solid #ccc; padding:4px;">
+                    <details style="margin:0;">
+                        <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">
+                            oracle only: 15, aws only: 12, <span style="color:green;">days match: 105</span>, <span style="color:#c62828; font-weight:600;">days mismatch: 18</span>
+                        </summary>
+                        <div style="padding:8px; font-size:12px;">
+                            <table style="width:100%; border:none; border-spacing:0;">
+                                <tr style="vertical-align:top;">
+                                    <td style="width:32%; padding:0 12px 0 0; border:none;">
+                                        <p style="margin:4px 0; font-weight:600; text-align:center;">Mismatched Dates (18)</p>
+                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">
+                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">ORACLE</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">AWS</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202003</td><td style="padding:2px; font-size:10px;">49,506</td><td style="padding:2px; font-size:10px;">42,094</td><td style="padding:2px; font-size:10px;">-7,412</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202008</td><td style="padding:2px; font-size:10px;">53,935</td><td style="padding:2px; font-size:10px;">41,278</td><td style="padding:2px; font-size:10px;">-12,657</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202011</td><td style="padding:2px; font-size:10px;">51,912</td><td style="padding:2px; font-size:10px;">42,121</td><td style="padding:2px; font-size:10px;">-9,791</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202107</td><td style="padding:2px; font-size:10px;">45,434</td><td style="padding:2px; font-size:10px;">53,810</td><td style="padding:2px; font-size:10px;">+8,376</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202108</td><td style="padding:2px; font-size:10px;">54,195</td><td style="padding:2px; font-size:10px;">63,454</td><td style="padding:2px; font-size:10px;">+9,259</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202111</td><td style="padding:2px; font-size:10px;">51,873</td><td style="padding:2px; font-size:10px;">41,887</td><td style="padding:2px; font-size:10px;">-9,986</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202112</td><td style="padding:2px; font-size:10px;">48,611</td><td style="padding:2px; font-size:10px;">38,537</td><td style="padding:2px; font-size:10px;">-10,074</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202301</td><td style="padding:2px; font-size:10px;">46,519</td><td style="padding:2px; font-size:10px;">53,431</td><td style="padding:2px; font-size:10px;">+6,912</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202504</td><td style="padding:2px; font-size:10px;">52,428</td><td style="padding:2px; font-size:10px;">38,791</td><td style="padding:2px; font-size:10px;">-13,637</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202505</td><td style="padding:2px; font-size:10px;">50,977</td><td style="padding:2px; font-size:10px;">57,036</td><td style="padding:2px; font-size:10px;">+6,059</td></tr>
+                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#999;">... and 8 more</td></tr>
+                                        </table>
+                                    </td>
+                                    <td style="width:32%; padding:0 12px; border-left:1px solid #ddd;">
+                                        <p style="margin:4px 0; font-weight:600; text-align:center;">ORACLE-Only Dates (15)</p>
+                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">
+                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">ORACLE</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">AWS</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202005</td><td style="padding:2px; font-size:10px;">48,657</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-48,657</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202103</td><td style="padding:2px; font-size:10px;">48,582</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-48,582</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202109</td><td style="padding:2px; font-size:10px;">48,257</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-48,257</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202110</td><td style="padding:2px; font-size:10px;">53,928</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-53,928</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202205</td><td style="padding:2px; font-size:10px;">47,615</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-47,615</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202502</td><td style="padding:2px; font-size:10px;">51,227</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-51,227</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202607</td><td style="padding:2px; font-size:10px;">49,422</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-49,422</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202611</td><td style="padding:2px; font-size:10px;">45,916</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-45,916</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202709</td><td style="padding:2px; font-size:10px;">48,483</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-48,483</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">203005</td><td style="padding:2px; font-size:10px;">53,669</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-53,669</td></tr>
+                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#999;">... and 5 more inside overlap</td></tr>
+                                        </table>
+                                    </td>
+                                    <td style="width:32%; padding:0 0 0 12px; border-left:1px solid #ddd;">
+                                        <p style="margin:4px 0; font-weight:600; text-align:center;">AWS-Only Dates (12)</p>
+                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">
+                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">ORACLE</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">AWS</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202106</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">54,863</td><td style="padding:2px; font-size:10px;">+54,863</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202209</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">47,547</td><td style="padding:2px; font-size:10px;">+47,547</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202307</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">49,333</td><td style="padding:2px; font-size:10px;">+49,333</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202404</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">50,925</td><td style="padding:2px; font-size:10px;">+50,925</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202407</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">46,139</td><td style="padding:2px; font-size:10px;">+46,139</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202508</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">57,592</td><td style="padding:2px; font-size:10px;">+57,592</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202608</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">64,748</td><td style="padding:2px; font-size:10px;">+64,748</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202712</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">52,517</td><td style="padding:2px; font-size:10px;">+52,517</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202807</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">49,304</td><td style="padding:2px; font-size:10px;">+49,304</td></tr>
+                                            <tr><td style="padding:2px; font-size:10px;">202901</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">48,593</td><td style="padding:2px; font-size:10px;">+48,593</td></tr>
+                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#999;">... and 2 more inside overlap</td></tr>
+                                        </table>
+                                    </td>
+                                </tr>
+                            </table>
+                        </div>
+                    </details>
+                </td>
+            </tr>
+
+        </tbody>
+    </table>
+
+</body>
+</html>

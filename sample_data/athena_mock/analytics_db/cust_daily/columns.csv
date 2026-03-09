@@ -1,0 +1,9 @@
+column_name,data_type
+rpt_dt,date
+customer_id,bigint
+amount,double
+region,varchar
+status,varchar
+created_at,timestamp
+updated_at,timestamp
+data_source,varchar

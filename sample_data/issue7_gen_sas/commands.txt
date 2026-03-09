@@ -1,0 +1,57 @@
+# dtrack Unified Config Workflow
+# This demonstrates the new streamlined workflow with pairs.json
+
+# Step 0: Initialize database
+dtrack init project.db
+
+# Step 1: Discover columns (loads metadata for all tables from unified config)
+dtrack load-columns project.db --config pairs.json
+
+# Step 2: Generate + run row extraction (mock mode: copies from oracle_mock/ and athena_mock/)
+dtrack gen-sas pairs.json --outdir ./sas --type row
+dtrack gen-aws pairs.json --outdir ./csv/ --type row
+
+# Step 3: Load row CSVs (batch mode with config)
+dtrack load-row project.db ./sas/ --config pairs.json --mode replace
+dtrack load-row project.db ./csv/ --config pairs.json --mode replace
+
+# Step 4: Compare rows (auto-registers pairs + prompts to save where_map + generates HTML)
+# Note: Will prompt for each pair, then pause for you to edit config before syncing to DB
+dtrack compare-row project.db --config pairs.json --html row_report.html
+
+# Step 5: Match columns (auto-matches + prompts to save col_map + shows unmapped side-by-side)
+dtrack match-columns project.db --config pairs.json
+
+# Step 6: Generate col extraction (auto-filtered using where_map from config)
+# Note: Uses N_SAMPLE from .env to sample partitions when > 100 matching dates
+dtrack gen-sas pairs.json --outdir ./sas --type col --db project.db
+dtrack gen-aws pairs.json --outdir ./csv/ --type col --db project.db
+
+# Step 7: Load column stats (batch mode with config - NEW!)
+dtrack load-col project.db ./sas --config pairs.json --mode replace
+dtrack load-col project.db ./csv --config pairs.json --mode replace
+
+# Step 8: Compare columns (generates HTML report with statistical comparisons)
+dtrack compare-col project.db --config pairs.json --html col_report.html
+
+# =============================================================================
+# What's New in Unified Config Workflow?
+# =============================================================================
+#
+# 1. Single config file (pairs.json) instead of two separate files
+# 2. compare-row saves to config → pauses for manual editing → syncs to database
+# 3. Config includes query_time field you can manually fill in
+# 4. match-columns prompts to save col_map to config + database
+# 5. load-col-stats now supports folder + config (like load-row)
+# 6. All commands use --config consistently
+#
+# =============================================================================
+# Migrating from Old Workflow
+# =============================================================================
+#
+# If you have extract_config.json + pairs_config.json, migrate them:
+#
+#   python migrate_config.py extract_config.json pairs_config.json -o pairs.json
+#
+# Then use the commands above with --config pairs.json
+#

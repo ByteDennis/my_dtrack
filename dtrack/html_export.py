@@ -14,6 +14,7 @@ def generate_row_count_html(
     metadata_left: Optional[Dict] = None,
     metadata_right: Optional[Dict] = None,
     where_map: Optional[Dict[str, str]] = None,
+    time_map: Optional[Dict[str, str]] = None,
 ) -> str:
     """
     Generate HTML table rows for row count comparison.
@@ -65,13 +66,24 @@ def generate_row_count_html(
             return f'{count:,}'
 
     # Data rows
+    time_left = '—'
+    time_right = '—'
+    if time_map:
+        time_left = time_map.get(source_left, time_map.get('left', '—'))
+        time_right = time_map.get(source_right, time_map.get('right', '—'))
+        # Filter out placeholder values
+        if time_left == '—' or not time_left:
+            time_left = '—'
+        if time_right == '—' or not time_right:
+            time_right = '—'
+
     html += f'''            <tr>
                 <td style="border:1px solid #ccc; padding:8px;">{source_left}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{date_col_left}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_left'][0] or '—'}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_left'][1] or '—'}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{format_count(summary['total_left'])}</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
+                <td style="border:1px solid #ccc; padding:8px;">{time_left}</td>
             </tr>
             <tr>
                 <td style="border:1px solid #ccc; padding:8px;">{source_right}</td>
@@ -79,7 +91,7 @@ def generate_row_count_html(
                 <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_right'][0] or '—'}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_right'][1] or '—'}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{format_count(summary['total_right'])}</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
+                <td style="border:1px solid #ccc; padding:8px;">{time_right}</td>
             </tr>
 '''
 
@@ -202,6 +214,8 @@ def generate_column_stats_html(
     table_right: str,
     comparison: Dict[str, List[Dict]],
     col_mappings: Dict[str, str],
+    metadata_left: Optional[Dict] = None,
+    metadata_right: Optional[Dict] = None,
 ) -> str:
     """
     Generate HTML table rows for column statistics comparison.
@@ -264,9 +278,13 @@ def generate_column_stats_html(
     max_date = sorted_dates[0] if sorted_dates else '—'
     n_vintages = len(sorted_dates)
 
+    # Get date columns from metadata
+    date_col_left = metadata_left.get('date_var') or '—' if metadata_left else '—'
+    date_col_right = metadata_right.get('date_var') or '—' if metadata_right else '—'
+
     html += f'''            <tr>
                 <td style="border:1px solid #ccc; padding:8px;">{source_left}</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
+                <td style="border:1px solid #ccc; padding:8px;">{date_col_left}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{min_date}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{max_date}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{n_cols}</td>
@@ -275,7 +293,7 @@ def generate_column_stats_html(
             </tr>
             <tr>
                 <td style="border:1px solid #ccc; padding:8px;">{source_right}</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
+                <td style="border:1px solid #ccc; padding:8px;">{date_col_right}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{min_date}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{max_date}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{n_cols}</td>
@@ -289,7 +307,7 @@ def generate_column_stats_html(
     summary_text = f'{n_cols} columns: <span style="color:green;">{n_match} match</span>, <span style="{diff_style}">{n_diff} diff</span> ({cols_display})'
 
     html += f'''            <tr>
-                <td colspan="6" style="border:1px solid #ccc; padding:4px;">
+                <td colspan="7" style="border:1px solid #ccc; padding:4px;">
                     <details style="margin:0;">
                         <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">
                             {summary_text}

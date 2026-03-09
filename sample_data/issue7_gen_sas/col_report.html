@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Column Statistics Comparison</title>
+    
+    <style>
+        body {
+            margin: 0;
+            padding: 12px;
+            font-family: Segoe UI, Arial, sans-serif;
+            font-size: 12.5px;
+        }
+
+        summary::-webkit-details-marker {
+            display: none;
+        }
+
+        details[open] summary::before {
+            content: '▼ ';
+        }
+
+        details summary::before {
+            content: '▶ ';
+        }
+
+        div.page-title {
+            font-family: "Segoe UI", Arial, sans-serif;
+            font-size: 28px;
+            font-weight: 600;
+            color: #1f2933;
+            margin-bottom: 6px;
+        }
+
+        div.page-title .update-note {
+            margin-top: 4px;
+            font-size: 13px;
+            color: #6b7280;
+            font-weight: 400;
+        }
+
+        .calendar-icon {
+            width: 14px;
+            height: 14px;
+            margin-right: 6px;
+            vertical-align: -2px;
+            stroke: #9CA3AF;
+            stroke-width: 2;
+            fill: none;
+        }
+    </style>
+    
+</head>
+<body>
+    <div class="page-title">
+        Column Statistics Comparison
+        <div class="update-note">
+            <svg class="calendar-icon" viewBox="0 0 24 24">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                <line x1="16" y1="2" x2="16" y2="6" />
+                <line x1="8" y1="2" x2="8" y2="6" />
+                <line x1="3" y1="10" x2="21" y2="10" />
+            </svg>
+            Latest update: Mar 09, 2026 | updates first Thursday of every month
+        </div>
+    </div>
+
+
+    <table style="border-collapse:collapse; width:100%; font-family:Segoe UI, Arial, sans-serif; font-size:12.5px; table-layout:fixed;">
+        <colgroup>
+            <col style="width:120px;"> <!-- Environment -->
+            <col style="width:140px;"> <!-- Date Variable -->
+            <col style="width:110px;"> <!-- Min Date -->
+            <col style="width:110px;"> <!-- Max Date -->
+            <col style="width:100px;"> <!-- # Columns -->
+            <col style="width:100px;"> <!-- # Vintages -->
+            <col style="width:120px;"> <!-- Query Runtime -->
+        </colgroup>
+
+        <thead>
+            <tr>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Environment</th>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Date Variable</th>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Min Date</th>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Max Date</th>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;"># Columns</th>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;"># vintages</th>
+                <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Query Runtime</th>
+            </tr>
+        </thead>
+
+        <tbody>
+
+            <!-- cust_daily -->
+            <tr>
+                <td colspan="6" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">
+                    cust_daily
+                </td>
+            </tr>
+            <tr>
+                <td style="border:1px solid #ccc; padding:8px;">pcds</td>
+                <td style="border:1px solid #ccc; padding:8px;">—</td>
+                <td style="border:1px solid #ccc; padding:8px;">2023-01-09</td>
+                <td style="border:1px solid #ccc; padding:8px;">2024-04-29</td>
+                <td style="border:1px solid #ccc; padding:8px;">5</td>
+                <td style="border:1px solid #ccc; padding:8px;">8</td>
+                <td style="border:1px solid #ccc; padding:8px;">—</td>
+            </tr>
+            <tr>
+                <td style="border:1px solid #ccc; padding:8px;">aws</td>
+                <td style="border:1px solid #ccc; padding:8px;">—</td>
+                <td style="border:1px solid #ccc; padding:8px;">2023-01-09</td>
+                <td style="border:1px solid #ccc; padding:8px;">2024-04-29</td>
+                <td style="border:1px solid #ccc; padding:8px;">5</td>
+                <td style="border:1px solid #ccc; padding:8px;">8</td>
+                <td style="border:1px solid #ccc; padding:8px;">—</td>
+            </tr>
+            <tr>
+                <td colspan="7" style="border:1px solid #ccc; padding:4px;">
+                    <details style="margin:0;">
+                        <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">
+                            5 columns: <span style="color:green;">5 match</span>, <span style="color:green;">0 diff</span> (None)
+                        </summary>
+                        <div style="padding:8px; font-size:12px;">
+                            <p style="margin:8px 0; color:green;">✓ All columns match across all vintages!</p>
+                        </div>
+                    </details>
+                </td>
+            </tr>
+
+
+            <!-- txn_monthly -->
+            <tr>
+                <td colspan="6" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">
+                    txn_monthly
+                </td>
+            </tr>
+            <tr>
+                <td style="border:1px solid #ccc; padding:8px;">oracle</td>
+                <td style="border:1px solid #ccc; padding:8px;">—</td>
+                <td style="border:1px solid #ccc; padding:8px;">202002</td>
+                <td style="border:1px solid #ccc; padding:8px;">203206</td>
+                <td style="border:1px solid #ccc; padding:8px;">5</td>
+                <td style="border:1px solid #ccc; padding:8px;">84</td>
+                <td style="border:1px solid #ccc; padding:8px;">—</td>
+            </tr>
+            <tr>
+                <td style="border:1px solid #ccc; padding:8px;">aws</td>
+                <td style="border:1px solid #ccc; padding:8px;">—</td>
+                <td style="border:1px solid #ccc; padding:8px;">202002</td>
+                <td style="border:1px solid #ccc; padding:8px;">203206</td>
+                <td style="border:1px solid #ccc; padding:8px;">5</td>
+                <td style="border:1px solid #ccc; padding:8px;">84</td>
+                <td style="border:1px solid #ccc; padding:8px;">—</td>
+            </tr>
+            <tr>
+                <td colspan="7" style="border:1px solid #ccc; padding:4px;">
+                    <details style="margin:0;">
+                        <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">
+                            5 columns: <span style="color:green;">5 match</span>, <span style="color:green;">0 diff</span> (None)
+                        </summary>
+                        <div style="padding:8px; font-size:12px;">
+                            <p style="margin:8px 0; color:green;">✓ All columns match across all vintages!</p>
+                        </div>
+                    </details>
+                </td>
+            </tr>
+
+        </tbody>
+    </table>
+
+</body>
+</html>

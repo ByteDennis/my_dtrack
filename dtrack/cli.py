@@ -88,12 +88,14 @@ def cmd_load_row(args):
             # date_col from config is the source DB column name (e.g. RPT_DT),
             # not necessarily the CSV header. Pass it for metadata only.
             config_date_col = tbl.get('date_col')
+            # Use vintage from config, fall back to command line arg
+            table_vintage = tbl.get('vintage', args.vintage)
             load_row_counts(
                 db_path=args.project_db,
                 file_or_folder=csv_path,
                 table_name=qname,
                 mode=args.mode,
-                vintage=args.vintage,
+                vintage=table_vintage,
                 source=source,
                 db_name=args.db,
                 source_table=tbl.get('table', ''),
@@ -139,58 +141,6 @@ def cmd_load_row(args):
     print(f"✓ Loaded {len(rows)} date buckets")
     total = sum(count for _, count in rows)
     print(f"  Total row count: {total:,}")
-
-
-def cmd_load_col(args):
-    """Load column statistics from CSV"""
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        print(f"Run: dtrack init {args.project_db}")
-        sys.exit(1)
-
-    if not args.date_col:
-        print("Error: --date-col is required")
-        sys.exit(1)
-
-    # Determine source table name
-    if args.source_table:
-        source_table = args.source_table
-    else:
-        source_table = Path(args.file_path).stem
-
-    # Parse columns if provided
-    columns = None
-    if args.columns:
-        columns = [c.strip() for c in args.columns.split(',')]
-
-    print(f"Loading column statistics for: {source_table}")
-    print(f"  Source: {args.file_path}")
-    print(f"  Date column: {args.date_col}")
-    print(f"  Mode: {args.mode}")
-    print(f"  Vintage: {args.vintage}")
-    if columns:
-        print(f"  Columns: {', '.join(columns)}")
-
-    load_column_data(
-        db_path=args.project_db,
-        file_path=args.file_path,
-        source_table=source_table,
-        date_col=args.date_col,
-        columns=columns,
-        mode=args.mode,
-        vintage=args.vintage,
-        from_date=args.from_date,
-        to_date=args.to_date,
-        source=args.source,
-        db_name=args.db,
-    )
-
-    # Show summary
-    stats = get_col_stats(args.project_db, source_table)
-    if stats:
-        dates = set(s['dt'] for s in stats)
-        cols = set(s['column_name'] for s in stats)
-        print(f"✓ Loaded statistics for {len(cols)} columns across {len(dates)} dates")
 
 
 def cmd_list(args):
@@ -650,12 +600,18 @@ def cmd_compare_row(args):
                             {"where_left": where_left, "where_right": where_right}
                         )
 
-                        # Add query_time placeholder to metadata
+                        # Add time_map placeholder to metadata
                         if 'metadata' not in config['pairs'][pair_name]:
                             config['pairs'][pair_name]['metadata'] = {}
 
                         config['pairs'][pair_name]['metadata']['last_comparison'] = datetime.now().isoformat()
-                        config['pairs'][pair_name]['metadata']['query_time'] = "—"
+
+                        # Initialize time_map with placeholders for left and right sources
+                        if 'time_map' not in config['pairs'][pair_name]['metadata']:
+                            config['pairs'][pair_name]['metadata']['time_map'] = {
+                                source_left: "—",
+                                source_right: "—"
+                            }
 
                         print(f"  ✓ {pair_name}: {len(matching)} matching dates")
 
@@ -676,7 +632,8 @@ def cmd_compare_row(args):
                 print(f"  File: {config_path}")
                 print()
                 print("  You can now:")
-                print("  - Add query_time value (currently \"—\")")
+                print("  - Add time_map values (check ./sas/_timing.csv and ./csv/_timing.csv)")
+                print("    Format: \"time_map\": {\"pcds\": \"5.2s\", \"aws\": \"3.1s\"}")
                 print("  - Review where_map")
                 print("  - Add notes to metadata")
                 print()
@@ -697,9 +654,11 @@ def cmd_compare_row(args):
                 # Show what was synced
                 if is_unified:
                     for pair_name in config.get("pairs", {}):
-                        qt = config["pairs"][pair_name].get("metadata", {}).get("query_time")
-                        if qt and qt != "—":
-                            print(f"  - {pair_name}: query_time = {qt}")
+                        time_map = config["pairs"][pair_name].get("metadata", {}).get("time_map", {})
+                        if time_map:
+                            times = [f"{k}={v}" for k, v in time_map.items() if v and v != "—"]
+                            if times:
+                                print(f"  - {pair_name}: time_map = {{{', '.join(times)}}}")
 
                 print(f"\n📄 Your edits are saved in: {config_path}")
                 print("   (File was NOT overwritten after sync)")
@@ -751,10 +710,25 @@ def cmd_compare_row(args):
         for pair_name, src_l, src_r, tbl_l, tbl_r, comp_result, where_map in html_entries:
             meta_l = get_metadata(args.project_db, tbl_l)
             meta_r = get_metadata(args.project_db, tbl_r)
+
+            # Read time_map from database or config
+            time_map = {}
+            row_comp = get_row_comparison(args.project_db, pair_name)
+            if row_comp and row_comp.get('time_map'):
+                # Database stores time_map as JSON
+                import json
+                if isinstance(row_comp['time_map'], str):
+                    time_map = json.loads(row_comp['time_map'])
+                else:
+                    time_map = row_comp['time_map']
+            elif config_path and is_unified and pair_name in config.get('pairs', {}):
+                time_map = config['pairs'][pair_name].get('metadata', {}).get('time_map', {})
+
             section = generate_row_count_html(
                 pair_name, src_l, src_r, tbl_l, tbl_r,
                 comp_result, metadata_left=meta_l, metadata_right=meta_r,
                 where_map=where_map,
+                time_map=time_map,
             )
             row_sections.append(section)
 
@@ -786,6 +760,143 @@ def cmd_compare_col(args):
         print(f"Error: Database not found: {args.project_db}")
         sys.exit(1)
 
+    config_path = getattr(args, 'config', None)
+    html_path = getattr(args, 'html', None)
+
+    # Batch mode: compare all pairs from config
+    if config_path:
+        import json
+        if not os.path.exists(config_path):
+            print(f"Error: Config file not found: {config_path}")
+            sys.exit(1)
+
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+
+        # Detect config format
+        is_unified = "pairs" in config and isinstance(config["pairs"], dict)
+
+        if not is_unified:
+            print("Error: compare-col --config requires unified config format")
+            sys.exit(1)
+
+        from .config import get_all_tables_from_unified
+        from .extract import _qualified_name
+
+        # Collect results for HTML generation
+        html_entries = []
+
+        for pair_name, pair_config in config["pairs"].items():
+            left = pair_config["left"]
+            right = pair_config["right"]
+            table_left = _qualified_name(left)
+            table_right = _qualified_name(right)
+            source_left = left.get("source", "left")
+            source_right = right.get("source", "right")
+            col_mappings = pair_config.get("col_map", {})
+
+            # Auto-register pair
+            register_table_pair(
+                args.project_db, pair_name,
+                table_left, table_right,
+                source_left=source_left,
+                source_right=source_right,
+                col_mappings=col_mappings if col_mappings else None,
+            )
+
+            print(f"\n{'='*70}")
+            print(f"Comparing column stats: {pair_name}")
+            print(f"  {source_left}: {table_left}")
+            print(f"  {source_right}: {table_right}")
+            print(f"{'='*70}")
+
+            # Get matched dates from row comparison for filtering
+            matched_dates = None
+            if not args.no_date_filter:
+                row_result = compare_row_counts(
+                    args.project_db, table_left, table_right,
+                    from_date=args.from_date, to_date=args.to_date,
+                )
+                matched_dates = {dt for dt, _ in row_result['matching']}
+                if matched_dates:
+                    print(f"Filtering to {len(matched_dates)} matching dates from row comparison")
+
+            # Compare column statistics
+            result = compare_column_stats(
+                args.project_db, table_left, table_right,
+                columns=None,
+                col_mappings=col_mappings,
+                from_date=args.from_date, to_date=args.to_date,
+                matched_dates=matched_dates,
+            )
+
+            if result:
+                _print_col_comparison(result, source_left, source_right)
+
+                # Classify columns as matched or differing
+                from .compare import _has_col_differences
+                matched_cols = []
+                diff_cols = []
+
+                for col_name, comparisons in result.items():
+                    if any(_has_col_differences(comp) for comp in comparisons):
+                        diff_cols.append(col_name)
+                    else:
+                        matched_cols.append(col_name)
+
+                # Save comparison results to database
+                from .db import save_col_comparison
+                save_col_comparison(
+                    args.project_db, pair_name,
+                    columns_compared=list(result.keys()),
+                    matched_columns=matched_cols,
+                    diff_columns=diff_cols,
+                    comparison_details=result,
+                )
+
+                html_entries.append((pair_name, source_left, source_right, table_left, table_right, result, col_mappings))
+            else:
+                print("  No matching columns found")
+
+            print()
+
+        # Generate HTML report if requested
+        if html_path and html_entries:
+            from .html_export import generate_column_stats_html, create_column_stats_table, wrap_html_document
+
+            col_sections = []
+            for pair_name, src_l, src_r, tbl_l, tbl_r, comp_result, col_map in html_entries:
+                meta_l = get_metadata(args.project_db, tbl_l)
+                meta_r = get_metadata(args.project_db, tbl_r)
+                section = generate_column_stats_html(
+                    pair_name, src_l, src_r, tbl_l, tbl_r,
+                    comp_result, col_map,
+                    metadata_left=meta_l,
+                    metadata_right=meta_r,
+                )
+                col_sections.append(section)
+
+            vintage = getattr(args, 'vintage', 'day')
+            table_html = create_column_stats_table(col_sections, vintage=vintage)
+
+            # Read title/subtitle from config metadata
+            global_meta = config.get('metadata', {})
+            default_title = global_meta.get('col_title') or "Column Statistics Comparison"
+            default_subtitle = global_meta.get('col_subtitle') or "updates first Thursday of every month"
+
+            doc = wrap_html_document(
+                getattr(args, 'title', None) or default_title,
+                [table_html],
+                subtitle=getattr(args, 'subtitle', None) or default_subtitle,
+            )
+
+            with open(html_path, 'w') as f:
+                f.write(doc)
+            print(f"HTML report: {html_path}")
+
+        return
+
+    # Single pair or ad-hoc mode
     # Determine table names and column mapping
     if args.pair:
         pair = get_table_pair(args.project_db, args.pair)
@@ -910,34 +1021,109 @@ def _print_col_comparison(result, source_left, source_right):
         print("-" * 70)
 
         if col_type == "numeric":
-            print(f"{'Date':<12} {'n_total':<20} {'n_miss':<20} {'mean':<20} {'std':<20}")
+            # Determine which columns have any differences
+            has_n_total_diff = any(comp.get('n_total_diff', 0) != 0 for comp in comparisons)
+            has_n_miss_diff = any(comp.get('n_missing_diff', 0) != 0 for comp in comparisons)
+            has_mean_diff = any(comp.get('mean_diff') is not None and abs(comp.get('mean_diff', 0)) > 0.01 for comp in comparisons)
+            has_std_diff = any(comp.get('std_diff') is not None and abs(comp.get('std_diff', 0)) > 0.01 for comp in comparisons)
+
+            # Build header with only differing columns
+            headers = ["Date"]
+            if has_n_total_diff:
+                headers.append("n_total")
+            if has_n_miss_diff:
+                headers.append("n_miss")
+            if has_mean_diff:
+                headers.append("mean")
+            if has_std_diff:
+                headers.append("std")
+
+            if len(headers) == 1:
+                print("  ✓ All statistics match")
+                continue
+
+            # Print header
+            header_line = f"{'Date':<12} " + " ".join(f"{h:<20}" for h in headers[1:])
+            print(header_line)
             print("-" * 70)
+
             for comp in comparisons[:5]:
-                n_total_str = f"{comp['n_total_left']:,} / {comp['n_total_right']:,} ({comp['n_total_diff']:+,})"
-                n_miss_str = f"{comp['n_missing_left']:,} / {comp['n_missing_right']:,} ({comp['n_missing_diff']:+,})"
-                if comp['mean_left'] is not None and comp['mean_right'] is not None:
-                    mean_str = f"{comp['mean_left']:.1f} / {comp['mean_right']:.1f} ({comp['mean_diff']:+.1f})"
-                else:
-                    mean_str = "N/A"
-                if comp['std_left'] is not None and comp['std_right'] is not None:
-                    std_str = f"{comp['std_left']:.1f} / {comp['std_right']:.1f} ({comp['std_diff']:+.1f})"
-                else:
-                    std_str = "N/A"
-                print(f"{comp['dt']:<12} {n_total_str:<20} {n_miss_str:<20} {mean_str:<20} {std_str:<20}")
+                row_parts = [f"{comp['dt']:<12}"]
+
+                if has_n_total_diff:
+                    row_parts.append(f"{comp['n_total_left']:,} / {comp['n_total_right']:,} ({comp['n_total_diff']:+,})")
+                if has_n_miss_diff:
+                    row_parts.append(f"{comp['n_missing_left']:,} / {comp['n_missing_right']:,} ({comp['n_missing_diff']:+,})")
+                if has_mean_diff:
+                    if comp['mean_left'] is not None and comp['mean_right'] is not None:
+                        row_parts.append(f"{comp['mean_left']:.1f} / {comp['mean_right']:.1f} ({comp['mean_diff']:+.1f})")
+                    else:
+                        row_parts.append("N/A")
+                if has_std_diff:
+                    if comp['std_left'] is not None and comp['std_right'] is not None:
+                        row_parts.append(f"{comp['std_left']:.1f} / {comp['std_right']:.1f} ({comp['std_diff']:+.1f})")
+                    else:
+                        row_parts.append("N/A")
+
+                print(" ".join(f"{part:<20}" if i > 0 else part for i, part in enumerate(row_parts)))
 
             if len(comparisons) > 5:
                 print(f"  ... ({len(comparisons) - 5} more dates)")
         else:
-            print(f"{'Date':<12} {'n_total':<20} {'n_miss':<20} {'n_unique':<20}")
+            # Determine which columns have any differences
+            has_n_total_diff = any(comp.get('n_total_diff', 0) != 0 for comp in comparisons)
+            has_n_miss_diff = any(comp.get('n_missing_diff', 0) != 0 for comp in comparisons)
+            has_n_uniq_diff = any(comp.get('n_unique_diff', 0) != 0 for comp in comparisons)
+
+            # Build header with only differing columns
+            headers = ["Date"]
+            if has_n_total_diff:
+                headers.append("n_total")
+            if has_n_miss_diff:
+                headers.append("n_miss")
+            if has_n_uniq_diff:
+                headers.append("n_unique")
+
+            if len(headers) == 1:
+                print("  ✓ All statistics match")
+                continue
+
+            # Print header
+            header_line = f"{'Date':<12} " + " ".join(f"{h:<20}" for h in headers[1:])
+            print(header_line)
             print("-" * 70)
+
             for comp in comparisons[:5]:
-                n_total_str = f"{comp['n_total_left']:,} / {comp['n_total_right']:,} ({comp['n_total_diff']:+,})"
-                n_miss_str = f"{comp['n_missing_left']:,} / {comp['n_missing_right']:,} ({comp['n_missing_diff']:+,})"
-                n_uniq_str = f"{comp['n_unique_left']:,} / {comp['n_unique_right']:,} ({comp['n_unique_diff']:+,})"
-                print(f"{comp['dt']:<12} {n_total_str:<20} {n_miss_str:<20} {n_uniq_str:<20}")
+                row_parts = [f"{comp['dt']:<12}"]
+
+                if has_n_total_diff:
+                    row_parts.append(f"{comp['n_total_left']:,} / {comp['n_total_right']:,} ({comp['n_total_diff']:+,})")
+                if has_n_miss_diff:
+                    row_parts.append(f"{comp['n_missing_left']:,} / {comp['n_missing_right']:,} ({comp['n_missing_diff']:+,})")
+                if has_n_uniq_diff:
+                    row_parts.append(f"{comp['n_unique_left']:,} / {comp['n_unique_right']:,} ({comp['n_unique_diff']:+,})")
+
+                print(" ".join(f"{part:<20}" if i > 0 else part for i, part in enumerate(row_parts)))
 
             if len(comparisons) > 5:
                 print(f"  ... ({len(comparisons) - 5} more dates)")
+
+            # Show top_10 differences if they exist
+            has_top10_diff = any(comp.get('top_10_left') != comp.get('top_10_right') for comp in comparisons)
+            if has_top10_diff:
+                print()
+                print("  Top 10 value differences detected:")
+                import json
+                for comp in comparisons[:3]:  # Show first 3 dates with top_10
+                    top10_left = comp.get('top_10_left')
+                    top10_right = comp.get('top_10_right')
+                    if top10_left != top10_right and top10_left and top10_right:
+                        try:
+                            left_vals = json.loads(top10_left) if isinstance(top10_left, str) else top10_left
+                            right_vals = json.loads(top10_right) if isinstance(top10_right, str) else top10_right
+                            print(f"    {comp['dt']}: {len(left_vals)} vs {len(right_vals)} unique values (see HTML for details)")
+                        except:
+                            pass
 
 
 def cmd_show_stats(args):
@@ -1080,11 +1266,16 @@ def cmd_load_col_stats(args):
                 continue
 
             print(f"\n--- {qname} ---")
+            # Use vintage from config, fall back to 'day'
+            table_vintage = tbl.get('vintage', 'day')
             count = load_precomputed_col_stats(
                 db_path=args.project_db,
                 csv_path=csv_path,
                 table_name=qname,
                 mode=args.mode,
+                source=tbl.get('source'),
+                db_name=tbl.get('database') or tbl.get('conn_macro'),
+                vintage=table_vintage,
             )
             print(f"  ✓ Loaded {count} stat rows")
         return
@@ -1968,22 +2159,6 @@ def main():
     parser_load_row.add_argument('--date-var', help='Date column name (auto-detected if not provided)')
     parser_load_row.add_argument('--config', help='Extraction config JSON; loads {source}_{table_name}_row.csv from folder for each table')
 
-    # load-col command
-    parser_load_col = subparsers.add_parser('load-col', help='Load column statistics')
-    parser_load_col.add_argument('project_db', help='Path to database file')
-    parser_load_col.add_argument('file_path', help='CSV file with data')
-    parser_load_col.add_argument('--date-col', required=True, help='Name of the date column')
-    parser_load_col.add_argument('--columns', help='Comma-separated list of columns to analyze')
-    parser_load_col.add_argument('--mode', default='upsert', choices=['replace', 'upsert'],
-                                  help='Load mode (default: upsert)')
-    parser_load_col.add_argument('--vintage', default='day', choices=['day', 'week', 'month', 'quarter', 'year'],
-                                  help='Time granularity (default: day)')
-    parser_load_col.add_argument('--from-date', help='Start date filter (YYYY-MM-DD)')
-    parser_load_col.add_argument('--to-date', help='End date filter (YYYY-MM-DD)')
-    parser_load_col.add_argument('--source', help='Data source (e.g., aws, pcds, oracle)')
-    parser_load_col.add_argument('--db', help='Database or service name')
-    parser_load_col.add_argument('--source-table', help='Source table name (defaults to filename)')
-
     # load-map command
     parser_load_map = subparsers.add_parser('load-map', help='Load table pairs from JSON config')
     parser_load_map.add_argument('project_db', help='Path to database file')
@@ -2040,10 +2215,14 @@ def main():
     parser_compare_col.add_argument('--col-map', help='Column mapping: "left1=right1,left2=right2"')
     parser_compare_col.add_argument('--from-date', help='Start date filter (YYYY-MM-DD)')
     parser_compare_col.add_argument('--to-date', help='End date filter (YYYY-MM-DD)')
+    parser_compare_col.add_argument('--config', help='Pairs config JSON (auto-registers pairs and compares)')
     parser_compare_col.add_argument('--no-date-filter', action='store_true',
                                      help='Include all dates (skip auto-filtering to matched row counts)')
     parser_compare_col.add_argument('--vintage', choices=['month', 'quarter', 'year'],
                                      help='Group comparison by vintage window')
+    parser_compare_col.add_argument('--html', help='Output HTML report file')
+    parser_compare_col.add_argument('--title', help='HTML report title (default: "Column Statistics Comparison")')
+    parser_compare_col.add_argument('--subtitle', help='HTML report subtitle (default: "updates first Thursday of every month")')
 
     # gen-sas command
     parser_gen_sas = subparsers.add_parser('gen-sas', help='Generate SAS extraction files from config')
@@ -2068,16 +2247,15 @@ def main():
     parser_gen_aws.add_argument('--vintage', default='day', choices=['day', 'week', 'month', 'quarter', 'year', 'sample'],
                                  help='Date bucketing granularity via Athena date_trunc (default: day). "sample" picks N random matching dates.')
 
-    # load-col-stats command
-    parser_load_col_stats = subparsers.add_parser('load-col-stats', help='Load pre-computed column statistics',
-                                                   aliases=['load-col-batch'])
-    parser_load_col_stats.add_argument('project_db', help='Path to database file')
-    parser_load_col_stats.add_argument('file_or_folder', help='CSV file or folder with *_col.csv files')
-    parser_load_col_stats.add_argument('--table', help='Table name (required for single file mode)')
-    parser_load_col_stats.add_argument('--config', help='Config JSON file (enables batch mode from folder)')
-    parser_load_col_stats.add_argument('--mode', default='upsert', choices=['upsert', 'replace'],
+    # load-col command
+    parser_load_col = subparsers.add_parser('load-col', help='Load column statistics from CSV')
+    parser_load_col.add_argument('project_db', help='Path to database file')
+    parser_load_col.add_argument('file_or_folder', help='CSV file or folder with *_col.csv files')
+    parser_load_col.add_argument('--table', help='Table name (required for single file mode)')
+    parser_load_col.add_argument('--config', help='Config JSON file (enables batch mode from folder)')
+    parser_load_col.add_argument('--mode', default='upsert', choices=['upsert', 'replace'],
                                         help='Load mode (default: upsert)')
-    parser_load_col_stats.set_defaults(func=cmd_load_col_stats)
+    parser_load_col.set_defaults(func=cmd_load_col_stats)
 
     # load-columns command
     parser_load_cols = subparsers.add_parser('load-columns', help='Load column metadata from CSV, Oracle, or Athena into DB')
@@ -2190,6 +2368,7 @@ def main():
             os.environ[key] = val
     else:
         from dotenv import load_dotenv, find_dotenv
+        # Search upward from cwd to find .env
         found = find_dotenv(usecwd=True)
         env_dir = os.path.dirname(found) if found else os.getcwd()
         load_dotenv(found)
@@ -2204,7 +2383,7 @@ def main():
     commands = {
         'init': cmd_init,
         'load-row': cmd_load_row,
-        'load-col': cmd_load_col,
+        'load-col': cmd_load_col_stats,
         'load-map': cmd_load_map,
         'list': cmd_list,
         'list-pairs': cmd_list_pairs,
@@ -2214,7 +2393,6 @@ def main():
         'compare-col': cmd_compare_col,
         'gen-sas': cmd_gen_sas,
         'gen-aws': cmd_gen_aws,
-        'load-col-stats': cmd_load_col_stats,
         'load-columns': cmd_load_columns,
         'match-columns': cmd_match_columns,
         'query': cmd_query,

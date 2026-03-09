@@ -1,0 +1,66 @@
+{
+  "metadata": {
+    "title": "Row Count Comparison",
+    "subtitle": "updates every Thursday",
+    "col_title": "Column Statistics Comparison",
+    "col_subtitle": "updates first Thursday of every month"
+  },
+  "pairs": {
+    "cust_daily": {
+      "left": {
+        "name": "cust_daily",
+        "table": "CUST_DAILY",
+        "source": "pcds",
+        "date_col": "RPT_DT",
+        "date_transform": "TRUNC({col})",
+        "conn_macro": "pcds",
+        "where": "STATUS = 'A'",
+        "vintage": "week"
+      },
+      "right": {
+        "name": "cust_daily",
+        "table": "cust_daily",
+        "source": "aws",
+        "database": "analytics_db",
+        "date_col": "rpt_dt",
+        "where": "",
+        "vintage": "week"
+      },
+      "col_map": {
+        "CUSTOMER_ID": "customer_id",
+        "REGION": "region",
+        "RPT_DT": "rpt_dt",
+        "STATUS": "status",
+        "AMT": "amount"
+      }
+    },
+    "txn_monthly": {
+      "left": {
+        "name": "txn_monthly",
+        "table": "TXN_MONTHLY",
+        "source": "oracle",
+        "date_col": "MONTH_DT",
+        "date_transform": "",
+        "conn_macro": "pb23",
+        "where": "",
+        "vintage": "sample"
+      },
+      "right": {
+        "name": "txn_monthly",
+        "table": "txn_monthly",
+        "source": "aws",
+        "database": "analytics_db",
+        "date_col": "month_dt",
+        "where": "",
+        "vintage": "sample"
+      },
+      "col_map": {
+        "CHANNEL": "channel",
+        "MONTH_DT": "month_dt",
+        "TXN_TYPE": "txn_type",
+        "TXN_AMT": "transaction_amount",
+        "ACCT_ID": "account_id"
+      }
+    }
+  }
+}

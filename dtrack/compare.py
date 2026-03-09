@@ -297,3 +297,36 @@ def compare_column_stats(
             result[left_col] = comparisons
 
     return result
+
+
+def _has_col_differences(comp: Dict) -> bool:
+    """Check if a column comparison has any statistical differences.
+
+    Args:
+        comp: Single comparison record from compare_column_stats
+
+    Returns:
+        True if any metric shows a difference, False otherwise
+    """
+    # Check count differences
+    if comp.get('n_total_diff', 0) != 0:
+        return True
+    if comp.get('n_missing_diff', 0) != 0:
+        return True
+    if comp.get('n_unique_diff', 0) != 0:
+        return True
+
+    # Check numeric differences (use threshold for floating point)
+    mean_diff = comp.get('mean_diff')
+    if mean_diff is not None and abs(mean_diff) > 0.01:
+        return True
+
+    std_diff = comp.get('std_diff')
+    if std_diff is not None and abs(std_diff) > 0.01:
+        return True
+
+    # Check categorical top_10 differences
+    if comp.get('top_10_left') != comp.get('top_10_right'):
+        return True
+
+    return False
