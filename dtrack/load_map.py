@@ -34,33 +34,35 @@ def load_pair_row_counts(
     table_left_config = apply_table_defaults(tables[table_left_key])
     table_right_config = apply_table_defaults(tables[table_right_key])
 
-    # Load left table
-    print(f"Loading {table_left_key} table: {table_left_config['table_name']}")
-    load_row_counts(
-        db_path=db_path,
-        file_or_folder=table_left_config["file"],
-        table_name=table_left_config["table_name"],
-        mode=table_left_config["mode"],
-        vintage=table_left_config["vintage"],
-        source=table_left_config.get("source", table_left_key),
-        db_name=table_left_config.get("db"),
-        source_table=table_left_config.get("source_table"),
-        date_col=table_left_config.get("date_col"),
-    )
+    # Load left table (skip if no file — data loaded separately via load-row)
+    if table_left_config.get("file"):
+        print(f"Loading {table_left_key} table: {table_left_config['table_name']}")
+        load_row_counts(
+            db_path=db_path,
+            file_or_folder=table_left_config["file"],
+            table_name=table_left_config["table_name"],
+            mode=table_left_config["mode"],
+            vintage=table_left_config["vintage"],
+            source=table_left_config.get("source", table_left_key),
+            db_name=table_left_config.get("db"),
+            source_table=table_left_config.get("source_table"),
+            date_col=table_left_config.get("date_col"),
+        )
 
-    # Load right table
-    print(f"Loading {table_right_key} table: {table_right_config['table_name']}")
-    load_row_counts(
-        db_path=db_path,
-        file_or_folder=table_right_config["file"],
-        table_name=table_right_config["table_name"],
-        mode=table_right_config["mode"],
-        vintage=table_right_config["vintage"],
-        source=table_right_config.get("source", table_right_key),
-        db_name=table_right_config.get("db"),
-        source_table=table_right_config.get("source_table"),
-        date_col=table_right_config.get("date_col"),
-    )
+    # Load right table (skip if no file)
+    if table_right_config.get("file"):
+        print(f"Loading {table_right_key} table: {table_right_config['table_name']}")
+        load_row_counts(
+            db_path=db_path,
+            file_or_folder=table_right_config["file"],
+            table_name=table_right_config["table_name"],
+            mode=table_right_config["mode"],
+            vintage=table_right_config["vintage"],
+            source=table_right_config.get("source", table_right_key),
+            db_name=table_right_config.get("db"),
+            source_table=table_right_config.get("source_table"),
+            date_col=table_right_config.get("date_col"),
+        )
 
     # Register the pair with column mappings
     print(f"Registering pair: {pair_name}")
@@ -111,37 +113,39 @@ def load_pair_column_data(
             f"Pair '{pair_name}', table '{table_right_key}': 'date_col' is required for column statistics"
         )
 
-    # Load left table
-    print(f"Loading {table_left_key} column stats: {table_left_config['table_name']}")
-    load_column_data(
-        db_path=db_path,
-        file_path=table_left_config["file"],
-        source_table=table_left_config["table_name"],
-        date_col=table_left_config["date_col"],
-        columns=None,  # Analyze all columns
-        mode=table_left_config["mode"],
-        vintage=table_left_config["vintage"],
-        from_date=table_left_config.get("from_date"),
-        to_date=table_left_config.get("to_date"),
-        source=table_left_config.get("source", table_left_key),
-        db_name=table_left_config.get("db"),
-    )
+    # Load left table (skip if no file — data loaded separately via load-col-stats)
+    if table_left_config.get("file"):
+        print(f"Loading {table_left_key} column stats: {table_left_config['table_name']}")
+        load_column_data(
+            db_path=db_path,
+            file_path=table_left_config["file"],
+            source_table=table_left_config["table_name"],
+            date_col=table_left_config["date_col"],
+            columns=None,  # Analyze all columns
+            mode=table_left_config["mode"],
+            vintage=table_left_config["vintage"],
+            from_date=table_left_config.get("from_date"),
+            to_date=table_left_config.get("to_date"),
+            source=table_left_config.get("source", table_left_key),
+            db_name=table_left_config.get("db"),
+        )
 
-    # Load right table
-    print(f"Loading {table_right_key} column stats: {table_right_config['table_name']}")
-    load_column_data(
-        db_path=db_path,
-        file_path=table_right_config["file"],
-        source_table=table_right_config["table_name"],
-        date_col=table_right_config["date_col"],
-        columns=None,  # Analyze all columns
-        mode=table_right_config["mode"],
-        vintage=table_right_config["vintage"],
-        from_date=table_right_config.get("from_date"),
-        to_date=table_right_config.get("to_date"),
-        source=table_right_config.get("source", table_right_key),
-        db_name=table_right_config.get("db"),
-    )
+    # Load right table (skip if no file)
+    if table_right_config.get("file"):
+        print(f"Loading {table_right_key} column stats: {table_right_config['table_name']}")
+        load_column_data(
+            db_path=db_path,
+            file_path=table_right_config["file"],
+            source_table=table_right_config["table_name"],
+            date_col=table_right_config["date_col"],
+            columns=None,  # Analyze all columns
+            mode=table_right_config["mode"],
+            vintage=table_right_config["vintage"],
+            from_date=table_right_config.get("from_date"),
+            to_date=table_right_config.get("to_date"),
+            source=table_right_config.get("source", table_right_key),
+            db_name=table_right_config.get("db"),
+        )
 
     # Register the pair with column mappings
     print(f"Registering pair: {pair_name}")

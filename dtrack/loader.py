@@ -9,7 +9,6 @@ import pandas as pd
 
 from .date_utils import parse_date, bucket_date
 from .db import (
-    create_row_count_table,
     upsert_row_counts,
     insert_col_stats,
     update_metadata,
@@ -127,6 +126,8 @@ def load_row_counts(
     db_name: Optional[str] = None,
     source_table: Optional[str] = None,
     date_col: Optional[str] = None,
+    date_var_override: Optional[str] = None,
+    where_clause: Optional[str] = None,
 ) -> None:
     """
     Load row counts from CSV file(s) into the database.
@@ -140,7 +141,9 @@ def load_row_counts(
         source: Data source identifier (aws, pcds, oracle)
         db_name: Database or service name
         source_table: Original table name
-        date_col: Date column name (auto-detected if None)
+        date_col: Date column name for CSV parsing (auto-detected if None)
+        date_var_override: Source DB column name to store in metadata (e.g. RPT_DT)
+        where_clause: Original WHERE clause from extract config
     """
     path = Path(file_or_folder)
 
@@ -151,9 +154,6 @@ def load_row_counts(
         csv_files = list(path.glob("*.csv"))
     else:
         raise ValueError(f"Path does not exist: {file_or_folder}")
-
-    # Create table
-    create_row_count_table(db_path, table_name)
 
     # Load data from all CSV files
     all_data = defaultdict(int)
@@ -172,12 +172,11 @@ def load_row_counts(
 
     # Insert data based on mode
     if mode == "replace":
-        # Drop and recreate table
         import sqlite3
         conn = sqlite3.connect(db_path)
-        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+        conn.execute("DELETE FROM _row_counts WHERE source_table = ?", (table_name,))
+        conn.commit()
         conn.close()
-        create_row_count_table(db_path, table_name)
         upsert_row_counts(db_path, table_name, data_list)
     elif mode == "upsert":
         upsert_row_counts(db_path, table_name, data_list)
@@ -194,12 +193,13 @@ def load_row_counts(
         "source": source,
         "db": db_name,
         "source_table": source_table,
-        "date_var": date_col,
+        "date_var": date_var_override or date_col,
         "source_file": str(file_or_folder),
         "row_count_total": total_count,
         "load_mode": mode,
         "vintage": vintage,
         "data_type": "row",
+        "where_clause": where_clause,
     })
 
 

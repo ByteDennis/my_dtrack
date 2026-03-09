@@ -164,6 +164,7 @@ def compare_column_stats(
     col_mappings: Optional[Dict[str, str]] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    matched_dates: Optional[set] = None,
 ) -> Dict[str, List[Dict]]:
     """
     Compare column statistics between two tables.
@@ -176,6 +177,7 @@ def compare_column_stats(
         col_mappings: Optional column name mappings {left_col: right_col}
         from_date: Optional start date filter
         to_date: Optional end date filter
+        matched_dates: Optional set of date strings to include (e.g. from row count matching)
 
     Returns:
         Dictionary mapping column names to list of comparison records
@@ -229,6 +231,8 @@ def compare_column_stats(
         # Compare for each date
         comparisons = []
         all_dates = set(left_dates.keys()) | set(right_dates.keys())
+        if matched_dates is not None:
+            all_dates = all_dates & matched_dates
 
         for dt in sorted(all_dates):
             if dt not in left_dates or dt not in right_dates:

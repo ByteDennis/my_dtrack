@@ -112,3 +112,47 @@ Fill in manual_mapping for unmatched columns, then combine matched + manual_mapp
 column_name,dt,col_type,n_total,n_missing,n_unique,mean,std,min_val,max_val,top_10
 AMOUNT,2026-01-01,numeric,1000,5,450,123.45,67.89,0.01,999.99,
 STATUS,2026-01-01,categorical,1000,0,3,,,ACTIVE,PENDING,"[{""value"":""ACTIVE"",""count"":800}]"
+
+=== Derived Tables (Joins/Transforms) ===
+
+When the "table" is not a real table but a subquery (joins, transforms, CTEs),
+put the subquery directly in the table field and provide columns manually:
+
+  {
+    "name": "cust_scored",
+    "source": "pcds",
+    "table": "(SELECT a.RPT_DT, a.AMT, b.SCORE FROM CUST a JOIN SCORES b ON a.ID=b.ID) t",
+    "date_col": "RPT_DT",
+    "conn_macro": "pcds",
+    "where": "",
+    "columns": {
+      "RPT_DT": "DATE",
+      "AMT": "NUMBER",
+      "SCORE": "NUMBER"
+    }
+  }
+
+  {
+    "name": "cust_scored_aws",
+    "source": "aws",
+    "database": "analytics_db",
+    "table": "(SELECT a.rpt_dt, a.amt, b.score FROM cust a JOIN scores b ON a.id=b.id) t",
+    "date_col": "rpt_dt",
+    "where": "",
+    "columns": {
+      "rpt_dt": "date",
+      "amt": "double",
+      "score": "double"
+    }
+  }
+
+Generated SQL works with subqueries:
+  SELECT TRUNC(RPT_DT) AS dt, COUNT(*) AS n_total, ...
+  FROM (SELECT a.RPT_DT, a.AMT, b.SCORE FROM CUST a JOIN SCORES b ON a.ID=b.ID) t
+  WHERE 1=1
+  GROUP BY TRUNC(RPT_DT)
+
+What to skip for derived tables:
+  - load-columns --conn-macro (can't discover columns from a subquery)
+  - gen-aws --discover-only (no real table in information_schema)
+  - columns MUST be provided manually in the config JSON

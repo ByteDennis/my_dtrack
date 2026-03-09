@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 from dtrack.db import (
     init_database,
-    create_row_count_table,
     insert_row_counts,
     upsert_row_counts,
     get_row_counts,
@@ -19,6 +18,12 @@ from dtrack.db import (
     register_table_pair,
     get_table_pair,
     list_table_pairs,
+    insert_column_meta,
+    get_column_meta,
+    generic_upsert,
+    generic_update,
+    generic_delete,
+    parse_where_clause,
 )
 
 
@@ -75,16 +80,14 @@ class TestInitDatabase:
 class TestRowCountOperations:
     """Test row count table operations"""
 
-    def test_create_row_count_table(self, test_db):
-        """Test creating a row count table"""
+    def test_init_creates_row_counts_table(self, test_db):
+        """Test that _row_counts table is created on init"""
         init_database(test_db)
-        create_row_count_table(test_db, "test_table")
-
         conn = sqlite3.connect(test_db)
         cursor = conn.cursor()
         cursor.execute("""
             SELECT name FROM sqlite_master
-            WHERE type='table' AND name='test_table'
+            WHERE type='table' AND name='_row_counts'
         """)
         result = cursor.fetchone()
         conn.close()
@@ -93,7 +96,6 @@ class TestRowCountOperations:
     def test_insert_row_counts(self, test_db):
         """Test inserting row counts"""
         init_database(test_db)
-        create_row_count_table(test_db, "test_table")
 
         data = [
             ("2022-01-01", 100),
@@ -109,7 +111,6 @@ class TestRowCountOperations:
     def test_upsert_row_counts(self, test_db):
         """Test upserting row counts (update existing, insert new)"""
         init_database(test_db)
-        create_row_count_table(test_db, "test_table")
 
         # Initial insert
         data = [("2022-01-01", 100)]
@@ -212,8 +213,8 @@ class TestMetadataOperations:
     def test_list_tables(self, test_db):
         """Test listing all tables with metadata"""
         init_database(test_db)
-        create_row_count_table(test_db, "table1")
-        create_row_count_table(test_db, "table2")
+        upsert_row_counts(test_db, "table1", [("2025-01-01", 100)])
+        upsert_row_counts(test_db, "table2", [("2025-01-01", 200)])
 
         update_metadata(test_db, {
             "table_name": "table1",
@@ -227,12 +228,12 @@ class TestMetadataOperations:
         })
 
         tables = list_tables(test_db)
-        # Should not include _metadata and _col_stats
         table_names = [t["table_name"] for t in tables]
         assert "table1" in table_names
         assert "table2" in table_names
         assert "_metadata" not in table_names
         assert "_col_stats" not in table_names
+        assert "_row_counts" not in table_names
 
 
 class TestTablePairOperations:
@@ -343,3 +344,267 @@ class TestTablePairOperations:
         pair = get_table_pair(test_db, "test")
         assert pair["table_left"] == "t1_new"
         assert pair["col_mappings"]["X"] == "x"
+
+
+class TestColumnMetaOperations:
+    """Test column metadata operations"""
+
+    def test_insert_and_get_column_meta(self, test_db):
+        """Test inserting and retrieving column metadata"""
+        init_database(test_db)
+
+        columns = {"AMT": "NUMBER", "STATUS": "VARCHAR2", "EFF_DT": "DATE"}
+        count = insert_column_meta(test_db, "customer_daily", columns, source="pcds")
+
+        assert count == 3
+        meta = get_column_meta(test_db, "customer_daily")
+        assert len(meta) == 3
+        names = {m["column_name"] for m in meta}
+        assert names == {"AMT", "STATUS", "EFF_DT"}
+        assert meta[0]["source"] == "pcds"
+
+    def test_upsert_column_meta(self, test_db):
+        """Test that inserting same column updates it"""
+        init_database(test_db)
+
+        insert_column_meta(test_db, "tbl", {"COL1": "INT"}, source="pcds")
+        insert_column_meta(test_db, "tbl", {"COL1": "BIGINT"}, source="aws")
+
+        meta = get_column_meta(test_db, "tbl")
+        assert len(meta) == 1
+        assert meta[0]["data_type"] == "BIGINT"
+        assert meta[0]["source"] == "aws"
+
+    def test_get_column_meta_empty(self, test_db):
+        """Test getting columns for nonexistent table"""
+        init_database(test_db)
+        meta = get_column_meta(test_db, "nonexistent")
+        assert meta == []
+
+
+class TestGenericUpsertDelete:
+    """Test generic upsert and delete operations"""
+
+    def test_generic_upsert_insert(self, test_db):
+        """Test inserting a new row via generic_upsert"""
+        init_database(test_db)
+        count = generic_upsert(test_db, "_row_counts", {
+            "source_table": "tbl1", "dt": "2025-01-01", "row_count": "500"
+        })
+        assert count == 1
+        rows = get_row_counts(test_db, "tbl1")
+        assert len(rows) == 1
+        assert rows[0] == ("2025-01-01", 500)
+
+    def test_generic_upsert_update(self, test_db):
+        """Test updating an existing row via generic_upsert"""
+        init_database(test_db)
+        insert_row_counts(test_db, "tbl1", [("2025-01-01", 100)])
+        generic_upsert(test_db, "_row_counts", {
+            "source_table": "tbl1", "dt": "2025-01-01", "row_count": "999"
+        })
+        rows = get_row_counts(test_db, "tbl1")
+        assert len(rows) == 1
+        assert rows[0] == ("2025-01-01", 999)
+
+    def test_generic_delete(self, test_db):
+        """Test deleting rows via generic_delete"""
+        init_database(test_db)
+        insert_row_counts(test_db, "tbl1", [("2025-01-01", 100), ("2025-01-02", 200)])
+        count = generic_delete(test_db, "_row_counts", {"source_table": "tbl1", "dt": "2025-01-01"})
+        assert count == 1
+        rows = get_row_counts(test_db, "tbl1")
+        assert len(rows) == 1
+        assert rows[0] == ("2025-01-02", 200)
+
+    def test_generic_upsert_invalid_table(self, test_db):
+        """Test that upserting to nonexistent table raises error"""
+        init_database(test_db)
+        with pytest.raises(ValueError, match="does not exist"):
+            generic_upsert(test_db, "no_such_table", {"col": "val"})
+
+    def test_generic_delete_invalid_table(self, test_db):
+        """Test that deleting from nonexistent table raises error"""
+        init_database(test_db)
+        with pytest.raises(ValueError, match="does not exist"):
+            generic_delete(test_db, "no_such_table", {"col": "val"})
+
+    def test_generic_upsert_metadata(self, test_db):
+        """Test upserting into _metadata table"""
+        init_database(test_db)
+        generic_upsert(test_db, "_metadata", {
+            "table_name": "foo", "source": "oracle", "db": "prod"
+        })
+        meta = get_metadata(test_db, "foo")
+        assert meta is not None
+        assert meta["source"] == "oracle"
+        assert meta["db"] == "prod"
+
+    def test_generic_upsert_update_preserves_columns(self, test_db):
+        """Test that updating only touches provided non-PK columns"""
+        init_database(test_db)
+        # Insert full record
+        generic_upsert(test_db, "_metadata", {
+            "table_name": "foo", "source": "oracle", "db": "prod"
+        })
+        # Update only source — db should stay "prod"
+        generic_upsert(test_db, "_metadata", {
+            "table_name": "foo", "source": "aws"
+        })
+        meta = get_metadata(test_db, "foo")
+        assert meta["source"] == "aws"
+        assert meta["db"] == "prod"
+
+    def test_generic_upsert_bad_column(self, test_db):
+        """Test that unknown column names raise error"""
+        init_database(test_db)
+        with pytest.raises(ValueError, match="Unknown column"):
+            generic_upsert(test_db, "_metadata", {
+                "table_name": "foo", "nonexistent_col": "bar"
+            })
+
+    def test_generic_upsert_missing_pk(self, test_db):
+        """Test that missing PK columns raise error"""
+        init_database(test_db)
+        with pytest.raises(ValueError, match="Missing primary key"):
+            generic_upsert(test_db, "_metadata", {"source": "oracle"})
+
+    def test_generic_delete_bad_column(self, test_db):
+        """Test that unknown column in delete raises error"""
+        init_database(test_db)
+        with pytest.raises(ValueError, match="Unknown column"):
+            generic_delete(test_db, "_metadata", {"bad_col": "val"})
+
+    def test_generic_update_explicit(self, test_db):
+        """Test explicit update with WHERE + SET separation"""
+        init_database(test_db)
+        insert_row_counts(test_db, "tbl1", [("2025-01-01", 100), ("2025-01-02", 200)])
+        count = generic_update(
+            test_db, "_row_counts",
+            where={"source_table": "tbl1", "dt": "2025-01-01"},
+            updates={"row_count": "999"},
+        )
+        assert count == 1
+        rows = get_row_counts(test_db, "tbl1")
+        assert rows[0] == ("2025-01-01", 999)
+        assert rows[1] == ("2025-01-02", 200)
+
+    def test_generic_update_multiple_rows(self, test_db):
+        """Test update matching multiple rows"""
+        init_database(test_db)
+        insert_row_counts(test_db, "tbl1", [("2025-01-01", 100), ("2025-01-02", 200)])
+        count = generic_update(
+            test_db, "_row_counts",
+            where={"source_table": "tbl1"},
+            updates={"row_count": "0"},
+        )
+        assert count == 2
+        rows = get_row_counts(test_db, "tbl1")
+        assert all(c == 0 for _, c in rows)
+
+    def test_generic_update_bad_column(self, test_db):
+        """Test that unknown column in update raises error"""
+        init_database(test_db)
+        with pytest.raises(ValueError, match="Unknown column"):
+            generic_update(test_db, "_metadata", {"table_name": "foo"}, {"bad": "val"})
+
+    def test_delete_with_like_operator(self, test_db):
+        """Test delete with LIKE pattern"""
+        init_database(test_db)
+        insert_row_counts(test_db, "pcds_cust", [("2025-01-01", 100)])
+        insert_row_counts(test_db, "aws_cust", [("2025-01-01", 200)])
+        insert_row_counts(test_db, "other", [("2025-01-01", 300)])
+        count = generic_delete(test_db, "_row_counts", {"source_table": "~=%_cust"})
+        assert count == 2
+        rows = get_row_counts(test_db, "other")
+        assert len(rows) == 1
+
+    def test_delete_with_in_operator(self, test_db):
+        """Test delete with IN (comma-separated values)"""
+        init_database(test_db)
+        insert_row_counts(test_db, "tbl1", [("2025-01-01", 100)])
+        insert_row_counts(test_db, "tbl2", [("2025-01-01", 200)])
+        insert_row_counts(test_db, "tbl3", [("2025-01-01", 300)])
+        count = generic_delete(test_db, "_row_counts", {"source_table": "tbl1,tbl3"})
+        assert count == 2
+        rows = get_row_counts(test_db, "tbl2")
+        assert len(rows) == 1
+
+    def test_delete_with_not_equal(self, test_db):
+        """Test delete with != operator"""
+        init_database(test_db)
+        insert_row_counts(test_db, "keep", [("2025-01-01", 100)])
+        insert_row_counts(test_db, "drop1", [("2025-01-01", 200)])
+        insert_row_counts(test_db, "drop2", [("2025-01-01", 300)])
+        count = generic_delete(test_db, "_row_counts", {"source_table": "!=keep"})
+        assert count == 2
+        rows = get_row_counts(test_db, "keep")
+        assert len(rows) == 1
+
+    def test_update_with_like_operator(self, test_db):
+        """Test update with LIKE pattern in WHERE"""
+        init_database(test_db)
+        insert_row_counts(test_db, "pcds_a", [("2025-01-01", 100)])
+        insert_row_counts(test_db, "pcds_b", [("2025-01-01", 200)])
+        insert_row_counts(test_db, "aws_c", [("2025-01-01", 300)])
+        count = generic_update(
+            test_db, "_row_counts",
+            where={"source_table": "~=pcds_%"},
+            updates={"row_count": "0"},
+        )
+        assert count == 2
+        assert get_row_counts(test_db, "aws_c")[0] == ("2025-01-01", 300)
+
+
+class TestParseWhereClause:
+    """Test WHERE clause parsing with operators"""
+
+    def test_exact_match(self):
+        sql, params = parse_where_clause({"col": "val"})
+        assert sql == "col = ?"
+        assert params == ["val"]
+
+    def test_not_equal(self):
+        sql, params = parse_where_clause({"col": "!=val"})
+        assert sql == "col != ?"
+        assert params == ["val"]
+
+    def test_like(self):
+        sql, params = parse_where_clause({"col": "~=%pattern%"})
+        assert sql == "col LIKE ?"
+        assert params == ["%pattern%"]
+
+    def test_not_like(self):
+        sql, params = parse_where_clause({"col": "!~=test%"})
+        assert sql == "col NOT LIKE ?"
+        assert params == ["test%"]
+
+    def test_in_list(self):
+        sql, params = parse_where_clause({"col": "a,b,c"})
+        assert sql == "col IN (?, ?, ?)"
+        assert params == ["a", "b", "c"]
+
+    def test_combined(self):
+        sql, params = parse_where_clause({"a": "val", "b": "~=%x%"})
+        assert "a = ?" in sql
+        assert "b LIKE ?" in sql
+        assert params == ["val", "%x%"]
+
+    def test_auto_like_from_percent(self):
+        sql, params = parse_where_clause({"col": "%_cust_daily"})
+        assert sql == "col LIKE ?"
+        assert params == ["%_cust_daily"]
+
+
+    def test_init_creates_column_meta_table(self, test_db):
+        """Test that _column_meta table is created on init"""
+        init_database(test_db)
+        conn = sqlite3.connect(test_db)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='_column_meta'
+        """)
+        result = cursor.fetchone()
+        conn.close()
+        assert result is not None

@@ -5,7 +5,6 @@ import tempfile
 import os
 from dtrack.db import (
     init_database,
-    create_row_count_table,
     upsert_row_counts,
     register_table_pair,
     insert_col_stats,
@@ -34,8 +33,6 @@ class TestCompareRowCounts:
     def test_compare_identical_tables(self, test_db):
         """Test comparing two identical tables"""
         # Create two tables with same data
-        create_row_count_table(test_db, "table_a")
-        create_row_count_table(test_db, "table_b")
 
         data = [
             ("2025-01-01", 100),
@@ -55,8 +52,6 @@ class TestCompareRowCounts:
 
     def test_compare_with_only_left(self, test_db):
         """Test comparison with dates only in left table"""
-        create_row_count_table(test_db, "table_a")
-        create_row_count_table(test_db, "table_b")
 
         upsert_row_counts(test_db, "table_a", [
             ("2025-01-01", 100),
@@ -77,8 +72,6 @@ class TestCompareRowCounts:
 
     def test_compare_with_mismatched(self, test_db):
         """Test comparison with different counts"""
-        create_row_count_table(test_db, "table_a")
-        create_row_count_table(test_db, "table_b")
 
         upsert_row_counts(test_db, "table_a", [
             ("2025-01-01", 100),
@@ -292,3 +285,52 @@ class TestGetColumnMapping:
         )
 
         assert mapping == {}
+
+
+class TestCompareColumnStatsMatchedDates:
+    """Test matched_dates filtering in compare_column_stats"""
+
+    def _setup_stats(self, test_db):
+        """Insert stats for 3 dates across two tables."""
+        for dt in ["2025-01-01", "2025-01-02", "2025-01-03"]:
+            for tbl in ["table_a", "table_b"]:
+                insert_col_stats(test_db, [{
+                    "source_table": tbl,
+                    "column_name": "amount",
+                    "dt": dt,
+                    "col_type": "numeric",
+                    "n_total": 100,
+                    "n_missing": 5,
+                    "n_unique": 80,
+                    "mean": 1500.0,
+                    "std": 200.0,
+                    "min_val": "100",
+                    "max_val": "5000",
+                    "top_10": None,
+                }])
+
+    def test_no_filter_returns_all_dates(self, test_db):
+        """Without matched_dates, all common dates are returned"""
+        self._setup_stats(test_db)
+        result = compare_column_stats(test_db, "table_a", "table_b")
+        assert len(result["amount"]) == 3
+
+    def test_matched_dates_filters(self, test_db):
+        """matched_dates limits to specified dates only"""
+        self._setup_stats(test_db)
+        result = compare_column_stats(
+            test_db, "table_a", "table_b",
+            matched_dates={"2025-01-01", "2025-01-03"}
+        )
+        assert len(result["amount"]) == 2
+        dates = [c["dt"] for c in result["amount"]]
+        assert "2025-01-02" not in dates
+
+    def test_matched_dates_empty_set(self, test_db):
+        """Empty matched_dates set returns no results"""
+        self._setup_stats(test_db)
+        result = compare_column_stats(
+            test_db, "table_a", "table_b",
+            matched_dates=set()
+        )
+        assert len(result) == 0

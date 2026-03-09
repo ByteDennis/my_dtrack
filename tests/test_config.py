@@ -152,18 +152,16 @@ class TestValidatePairConfig:
         with pytest.raises(ValueError, match="at least two tables"):
             validate_pair_config(pair)
 
-    def test_validate_missing_file(self):
-        """Test validation fails for missing file in table config"""
+    def test_validate_file_optional(self):
+        """Test validation passes when file is omitted (data loaded separately)"""
         pair = {
             "name": "test",
             "tables": {
-                "oracle": {"table_name": "t1"},  # Missing file
-                "aws": {"file": "b.csv", "table_name": "t2"}
+                "oracle": {"table_name": "t1"},
+                "aws": {"table_name": "t2"}
             }
         }
-
-        with pytest.raises(ValueError, match="file"):
-            validate_pair_config(pair)
+        validate_pair_config(pair)  # Should not raise
 
     def test_validate_missing_table_name(self):
         """Test validation fails for missing table_name"""

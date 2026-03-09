@@ -42,14 +42,9 @@ def parse_date(value: str) -> str:
         except ValueError:
             continue
 
-    # Try YYYYMM format (6 digits)
+    # Try YYYYMM format (6 digits) - keep as-is, don't convert to date
     if re.match(r'^\d{6}$', value):
-        try:
-            # Parse as YYYYMM and convert to first of month
-            dt = datetime.strptime(value, "%Y%m")
-            return dt.strftime("%Y-%m-%d")
-        except ValueError:
-            pass
+        return value  # Return YYYYMM as-is (e.g., "202401")
 
     raise ValueError(f"Unable to parse date: {value}")
 
@@ -59,15 +54,21 @@ def bucket_date(dt_str: str, vintage: str) -> str:
     Bucket a date according to the specified vintage granularity.
 
     Args:
-        dt_str: Date string in YYYY-MM-DD format
+        dt_str: Date string in YYYY-MM-DD format or YYYYMM format
         vintage: One of 'day', 'week', 'month', 'quarter', 'year'
 
     Returns:
-        Bucketed date in YYYY-MM-DD format
+        Bucketed date in YYYY-MM-DD or YYYYMM format
 
     Raises:
         ValueError: If vintage is not valid
     """
+    # Check if YYYYMM format (6 digits)
+    if re.match(r'^\d{6}$', dt_str):
+        # YYYYMM format - already at month granularity, return as-is
+        # (bucketing not meaningful for YYYYMM since it's already monthly)
+        return dt_str
+
     dt = datetime.strptime(dt_str, "%Y-%m-%d")
 
     if vintage == "day":
