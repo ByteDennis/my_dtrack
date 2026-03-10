@@ -251,8 +251,16 @@ def get_all_tables_from_unified(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     seen = set()  # Track (source, name) to avoid duplicates
 
     for pair_name, pair_config in config["pairs"].items():
+        col_map = pair_config.get("col_map", {})
         for side in ["left", "right"]:
             table_cfg = pair_config[side].copy()
+
+            # Inject col_map column names for this side
+            if col_map:
+                if side == "left":
+                    table_cfg["_col_map_columns"] = set(col_map.keys())
+                else:
+                    table_cfg["_col_map_columns"] = set(col_map.values())
 
             # Create unique key
             source = table_cfg.get("source", "")
@@ -269,6 +277,10 @@ def get_all_tables_from_unified(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                 for t in tables:
                     if t.get("source") == source and t.get("name") == name:
                         t["_pairs"].append(pair_name)
+                        # Merge col_map columns
+                        existing = t.get("_col_map_columns", set())
+                        existing.update(table_cfg.get("_col_map_columns", set()))
+                        t["_col_map_columns"] = existing
                         break
 
     return tables

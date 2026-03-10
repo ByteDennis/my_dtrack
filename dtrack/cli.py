@@ -2,6 +2,7 @@
 """Command-line interface for dtrack"""
 
 import argparse
+import re
 import sys
 import os
 from pathlib import Path
@@ -379,25 +380,36 @@ def _print_row_comparison(db_path, table_left, table_right, source_left, source_
     return result
 
 
-def _build_where_from_dates(table_cfg, matching_dates, excluded_dates):
+def _build_where_from_dates(table_cfg, matching_dates, excluded_dates, db_path=None):
     """Build WHERE clause from matching and excluded dates."""
     date_col = table_cfg.get('date_col', 'dt')
-    source = table_cfg.get('source', '').lower()
 
-    # Get date column data type if available
-    from .db import get_column_meta
-    # This would require db_path, so for now use heuristics
+    # Look up date column data type from _column_meta
+    date_dtype = ''
+    if db_path:
+        from .db import get_column_meta
+        from .extract import _qualified_name
+        qn = _qualified_name(table_cfg)
+        col_meta = get_column_meta(db_path, qn)
+        for cm in col_meta:
+            if cm['column_name'].upper() == date_col.upper():
+                date_dtype = (cm.get('data_type') or '').upper()
+                break
 
-    # Format date literals based on source
     def fmt_date(d):
-        import re
         is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
         if is_yyyymm:
-            return str(d)  # No quotes for integer dates
-        elif source in ('oracle', 'pcds'):
-            return f"DATE '{d}'"
-        else:  # AWS/Athena
-            return f"DATE('{d}')"
+            if date_dtype.startswith(('NUMBER', 'INTEGER', 'INT', 'BIGINT')):
+                return str(d)
+            else:
+                return f"'{d}'"
+        else:
+            if date_dtype.startswith(('VARCHAR', 'CHAR', 'STRING', 'TEXT')):
+                return f"'{d}'"
+            elif date_dtype.startswith(('DATE', 'TIMESTAMP')):
+                return f"DATE '{d}'"
+            else:
+                return f"'{d}'"
 
     # Build WHERE clause
     parts = []
@@ -536,22 +548,21 @@ def cmd_compare_row(args):
 
                         # Format date literals based on source/type
                         def _fmt_date(d, _src=source_type, _dt=date_dtype):
-                            # Check if d is YYYYMM format (6 digits)
                             import re
                             is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
 
                             if is_yyyymm:
-                                # YYYYMM format - handle based on data type
-                                if _dt in ('NUMBER', 'INTEGER', 'INT', 'BIGINT'):
-                                    return str(d)  # No quotes for integer
-                                else:  # VARCHAR, STRING, etc.
-                                    return f"'{d}'"  # Quotes for string
+                                if _dt.startswith(('NUMBER', 'INTEGER', 'INT', 'BIGINT')):
+                                    return str(d)
+                                else:
+                                    return f"'{d}'"
                             else:
-                                # Regular date format (YYYY-MM-DD)
-                                if _src in ('oracle', 'pcds') or _dt == 'DATE':
+                                if _dt.startswith(('VARCHAR', 'CHAR', 'STRING', 'TEXT')):
+                                    return f"'{d}'"
+                                elif _dt.startswith(('DATE', 'TIMESTAMP')):
                                     return f"DATE '{d}'"
                                 else:
-                                    return f"DATE('{d}')"
+                                    return f"'{d}'"
 
                         parts = []
                         # Prepend original WHERE from extract config (stored in _metadata)
@@ -586,8 +597,8 @@ def cmd_compare_row(args):
                         # Generate WHERE statements from dates
                         left_cfg = config['pairs'][pair_name]['left']
                         right_cfg = config['pairs'][pair_name]['right']
-                        where_left = _build_where_from_dates(left_cfg, matching, excluded)
-                        where_right = _build_where_from_dates(right_cfg, matching, excluded)
+                        where_left = _build_where_from_dates(left_cfg, matching, excluded, db_path=args.project_db)
+                        where_right = _build_where_from_dates(right_cfg, matching, excluded, db_path=args.project_db)
 
                         set_pair_where_map(config, pair_name, where_left, where_right)
 
@@ -749,7 +760,7 @@ def cmd_compare_row(args):
             subtitle=getattr(args, 'subtitle', None) or default_subtitle,
         )
 
-        with open(html_path, 'w') as f:
+        with open(html_path, 'w', encoding='utf-8') as f:
             f.write(doc)
         print(f"HTML report: {html_path}")
 
@@ -1393,7 +1404,8 @@ def cmd_match_columns(args):
             right_cols = {m['column_name']: m['data_type'] or '' for m in right_meta}
 
             # Get existing col_map to exclude already-mapped columns
-            existing_col_map = pair_config.get('col_map', {}) if is_unified else {}
+            replace_mode = getattr(args, 'mode', 'merge') == 'replace'
+            existing_col_map = {} if replace_mode else (pair_config.get('col_map', {}) if is_unified else {})
 
             result = match_columns_from_dicts(left_cols, right_cols, left_table, right_table, outfile=None)
 
@@ -1484,7 +1496,8 @@ def cmd_match_columns(args):
                 print()
 
                 # Ask to save
-                save_filename = f"{pair_name}_unmapped.txt"
+                safe_name = re.sub(r'[^\w\-]', '_', pair_name)
+                save_filename = f"{safe_name}_unmapped.txt"
                 response = input(f"💾 Save unmapped columns to {save_filename}? (y/n): ").strip().lower()
                 if response == 'y':
                     with open(save_filename, 'w') as f:
@@ -2130,6 +2143,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('--env', dest='env_file', help='Path to .env file for environment variables')
+    parser.add_argument('--debug', choices=['ipdb', 'debugpy'], default=None,
+                        help='Enable debugging: ipdb for interactive breakpoints, debugpy for VS Code attach on port 5678')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 
@@ -2280,6 +2295,8 @@ def main():
     parser_match_cols.add_argument('--config', help='Pairs config JSON; match all pairs and update col_map in place')
     parser_match_cols.add_argument('--left', help='Left table name (from _column_meta source_table field)')
     parser_match_cols.add_argument('--right', help='Right table name (from _column_meta source_table field)')
+    parser_match_cols.add_argument('--mode', default='merge', choices=['merge', 'replace'],
+                                  help='merge: keep existing col_map, add new matches; replace: discard existing col_map (default: merge)')
 
     # query command
     parser_query = subparsers.add_parser(
@@ -2355,11 +2372,27 @@ def main():
 
     args = parser.parse_args()
 
+    # Set up debugger if requested
+    if args.debug == 'ipdb':
+        import ipdb
+        sys.breakpointhook = ipdb.set_trace
+        def _ipdb_excepthook(type, value, tb):
+            import traceback
+            traceback.print_exception(type, value, tb)
+            ipdb.post_mortem(tb)
+        sys.excepthook = _ipdb_excepthook
+    elif args.debug == 'debugpy':
+        import debugpy
+        debugpy.listen(('0.0.0.0', 5678))
+        print('Waiting for debugger attach on port 5678...')
+        debugpy.wait_for_client()
+        print('Debugger attached.')
+
     if not args.command:
         parser.print_help()
         sys.exit(1)
 
-    # Load .env file into os.environ
+    # Load config file into os.environ
     env_file = getattr(args, 'env_file', None)
     if env_file:
         from dotenv import dotenv_values
@@ -2368,12 +2401,11 @@ def main():
             os.environ[key] = val
     else:
         from dotenv import load_dotenv, find_dotenv
-        # Search upward from cwd to find .env
-        found = find_dotenv(usecwd=True)
+        found = find_dotenv(usecwd=True, filename='dtrack.conf')
         env_dir = os.path.dirname(found) if found else os.getcwd()
         load_dotenv(found)
 
-    # Resolve mock paths relative to .env location
+    # Resolve mock paths relative to config file location
     for mock_var in ('DTRACK_ORACLE_MOCK', 'DTRACK_ATHENA_MOCK'):
         mock_dir = os.environ.get(mock_var)
         if mock_dir and not os.path.isabs(mock_dir):
@@ -2403,13 +2435,16 @@ def main():
 
     handler = commands.get(args.command)
     if handler:
-        try:
+        if args.debug:
             handler(args)
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
-            sys.exit(1)
+        else:
+            try:
+                handler(args)
+            except Exception as e:
+                print(f"Error: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc()
+                sys.exit(1)
     else:
         print(f"Unknown command: {args.command}")
         sys.exit(1)

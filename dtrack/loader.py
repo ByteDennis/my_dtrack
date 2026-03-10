@@ -55,7 +55,6 @@ def detect_count_column(headers: List[str]) -> Optional[str]:
 
 def load_row_count_csv(
     csv_path: str,
-    vintage: str = "day",
     date_col: Optional[str] = None,
     count_col: Optional[str] = None,
 ) -> List[Tuple[str, int]]:
@@ -64,12 +63,11 @@ def load_row_count_csv(
 
     Args:
         csv_path: Path to CSV file
-        vintage: Time granularity (day, week, month, quarter, year)
         date_col: Name of date column (auto-detected if None)
         count_col: Name of count column (auto-detected if None)
 
     Returns:
-        List of (date, row_count) tuples with dates bucketed by vintage
+        List of (date, row_count) tuples
     """
     with open(csv_path, 'r', newline='') as f:
         reader = csv.DictReader(f)
@@ -99,9 +97,6 @@ def load_row_count_csv(
                 print(f"Warning: Skipping row with invalid date '{date_str}': {e}")
                 continue
 
-            # Bucket date by vintage
-            dt_bucketed = bucket_date(dt, vintage)
-
             # Parse count
             try:
                 count = int(count_str)
@@ -109,8 +104,7 @@ def load_row_count_csv(
                 print(f"Warning: Skipping row with invalid count '{count_str}'")
                 continue
 
-            # Aggregate counts for the same bucket
-            data[dt_bucketed] += count
+            data[dt] += count
 
     # Convert to sorted list
     return sorted(data.items())
@@ -160,7 +154,6 @@ def load_row_counts(
     for csv_file in csv_files:
         data = load_row_count_csv(
             csv_path=str(csv_file),
-            vintage=vintage,
             date_col=date_col,
         )
         # Aggregate data

@@ -5,6 +5,8 @@ import sqlite3
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional, Any
 
+import pattern
+
 
 def init_database(db_path: str) -> None:
     """
@@ -602,34 +604,26 @@ def get_column_meta(db_path: str, source_table: str) -> List[Dict]:
 MACRO2SVC = {
     "pcds": "pcds_svc",
     "pb23": "pcbs_mkt_comnn",
+    "pb30": "pcbs_mkt_comnn_30",
 }
 
-
-def solve_ldap(ldap_dsn: str) -> str:
-    """Resolve an LDAP DSN to an Oracle TNS connect string.
-
-    Uses the LDAP directory (via ldap3) to look up the service name
-    and return the full connect descriptor.
-    """
-    import ldap3
-
-    # Parse ldap_dsn: "ldap://host:port/cn=service,cn=OracleContext,dc=..."
-    from urllib.parse import urlparse
-    parsed = urlparse(ldap_dsn)
-    host = parsed.hostname
-    port = parsed.port or 389
-    dn = parsed.path.lstrip('/')
-
-    server = ldap3.Server(host, port=port, get_info=ldap3.NONE)
-    conn = ldap3.Connection(server, auto_bind=True)
-    conn.search(dn, '(objectClass=*)', attributes=['orclNetDescString'])
-
-    if not conn.entries:
-        raise RuntimeError(f"LDAP lookup failed for: {dn}")
-
-    tns = str(conn.entries[0]['orclNetDescString'])
-    conn.unbind()
+#>>> Solve LDAP DSN to get TNS connect string <<<#
+def solve_ldap(ldap_dsn: str):
+    import re
+    from ldap3 import Server, Connection, ALL
+    pattern = r"^ldap:\/\/(.+)\/(.+)\,(cn=OracleContext.*)$"
+    x = re.match(pattern, ldap_dsn)
+    if not x:
+        return None
+    else:
+        ldap_server, db, ora_context = x.groups()
+    server = Server(ldap_server, get_info=ALL)
+    conn = Connection(server)
+    conn.bind()
+    conn.search(ora_context, f"(cn={db})", attributes=['orclNetDescString'])
+    tns = conn.entries[0].orclNetDescString.value
     return tns
+
 
 
 def oracle_connect(conn_macro: str):

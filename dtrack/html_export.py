@@ -59,11 +59,9 @@ def generate_row_count_html(
         if count >= 1_000_000_000:
             billions = count / 1_000_000_000
             return f'{count:,} ({billions:.2f} B)'
-        elif count >= 1_000_000:
+        else:
             millions = count / 1_000_000
             return f'{count:,} ({millions:.2f} M)'
-        else:
-            return f'{count:,}'
 
     # Data rows
     time_left = '—'

@@ -230,7 +230,7 @@ def build_top10_sql_oracle(table, col, date_col, where=""):
     where_clause = f"AND {where}" if where else ""
     return f"""
 SELECT dt, val, cnt FROM (
-    SELECT {date_col} AS dt, {col} AS val, COUNT(*) AS cnt,
+    SELECT {date_col} AS dt, CAST({col} AS VARCHAR(200)) AS val, COUNT(*) AS cnt,
            ROW_NUMBER() OVER (PARTITION BY {date_col} ORDER BY COUNT(*) DESC) AS rn
     FROM {table}
     WHERE {col} IS NOT NULL {where_clause}
@@ -244,7 +244,7 @@ def build_top10_sql_athena(table, col, date_col, where=""):
     where_clause = f"AND {where}" if where else ""
     return f"""
 SELECT dt, val, cnt FROM (
-    SELECT {date_col} AS dt, {col} AS val, COUNT(*) AS cnt,
+    SELECT {date_col} AS dt, CAST({col} AS VARCHAR(200)) AS val, COUNT(*) AS cnt,
            ROW_NUMBER() OVER (PARTITION BY {date_col} ORDER BY COUNT(*) DESC) AS rn
     FROM {table}
     WHERE {col} IS NOT NULL {where_clause}
@@ -331,16 +331,14 @@ def _gen_sas_row(tbl_cfg, sas_lib='WORK', out_dir='.'):
     name = tbl_cfg['name']
     qname = _qualified_name(tbl_cfg)
     conn_macro = tbl_cfg.get('conn_macro', 'pcds')
+    user_override = tbl_cfg.get('user', '')
     where = tbl_cfg.get('where', '')
     transform = tbl_cfg.get('date_transform', '')
-    vintage = tbl_cfg.get('vintage', 'day')
-    vintage_transform = tbl_cfg.get('vintage_transform', None)
 
     date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
-    date_expr = _vintage_date_expr(date_expr, vintage, vintage_transform)
     where_clause = f"WHERE {where}" if where else ""
 
-    sql = _sas_quote(
+    sql = (
         f"SELECT {date_expr} AS date_value, COUNT(*) AS row_count "
         f"FROM {table} {where_clause} "
         f"GROUP BY {date_expr}"
@@ -349,12 +347,14 @@ def _gen_sas_row(tbl_cfg, sas_lib='WORK', out_dir='.'):
     # SAS library reference (no quotes), table name with prefix
     sas_table = f"sas_lib.&prefix._rc_{name}" if sas_lib else f"&prefix._rc_{name}"
 
+    user_args = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
+
     return f"""\
 %macro get_rowcounts_{name}();
-    %pull_data(%str({sql}), {sas_table}, server={conn_macro});
+    %pull_data(%nrstr({sql}), {sas_table}, server={conn_macro}{user_args});
 
     proc export data={sas_table}
-        outfile=&out_dir./{qname}_row.csv
+        outfile="&out_dir./{qname}_row.csv"
         dbms=csv replace;
     run;
 
@@ -379,6 +379,7 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
     name = tbl_cfg['name']
     qname = _qualified_name(tbl_cfg)
     conn_macro = tbl_cfg.get('conn_macro', 'pcds')
+    user_override = tbl_cfg.get('user', '')
     where = tbl_cfg.get('where', '')
     columns = tbl_cfg.get('columns', {})
     transform = tbl_cfg.get('date_transform', '')
@@ -403,6 +404,11 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
         lines.append(f"%mend get_colstats_{name};")
         return '\n'.join(lines)
 
+    # SAS alias: truncate column name so alias fits 32-byte limit
+    def _sas_alias(col, suffix):
+        max_len = 32 - len(suffix)
+        return f"{col[:max_len]}{suffix}"
+
     # Filter out date column
     col_list = [(col, dtype) for col, dtype in columns.items()
                 if col.upper() != date_col.upper()]
@@ -417,8 +423,8 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
     num_cols = [(col, dtype) for col, dtype in col_list if is_numeric_type(dtype, is_oracle=True)]
     cat_cols = [(col, dtype) for col, dtype in col_list if not is_numeric_type(dtype, is_oracle=True)]
 
-    q = "%str(%')"  # SAS-safe single quote
-    where_fragment = _sas_quote(f"AND ({where})") if where else ""
+    q = "'"  # Single quote (safe inside %nrstr)
+    where_fragment = f"AND ({where})" if where else ""
 
     # Decide: batched or single-scan?
     use_batching = n_cols > MAX_COLS_PER_BATCH
@@ -451,19 +457,19 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
 
             for col, dtype in batch_num_cols:
                 col_safe = col.replace("'", "''")
-                agg_parts.append(f"COUNT({col}) AS {col}_not_null")
-                agg_parts.append(f"COUNT(DISTINCT {col}) AS {col}_n_unique")
-                agg_parts.append(f"AVG({col}) AS {col}_mean")
-                agg_parts.append(f"STDDEV({col}) AS {col}_std")
-                agg_parts.append(f"MIN({col}) AS {col}_min")
-                agg_parts.append(f"MAX({col}) AS {col}_max")
+                agg_parts.append(f"COUNT({col}) AS {_sas_alias(col, '_not_null')}")
+                agg_parts.append(f"COUNT(DISTINCT {col}) AS {_sas_alias(col, '_n_unique')}")
+                agg_parts.append(f"AVG({col}) AS {_sas_alias(col, '_mean')}")
+                agg_parts.append(f"STDDEV({col}) AS {_sas_alias(col, '_std')}")
+                agg_parts.append(f"MIN({col}) AS {_sas_alias(col, '_min')}")
+                agg_parts.append(f"MAX({col}) AS {_sas_alias(col, '_max')}")
 
             for col, dtype in batch_cat_cols:
                 col_safe = col.replace("'", "''")
-                agg_parts.append(f"SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) AS {col}_n_missing")
-                agg_parts.append(f"COUNT(DISTINCT {col}) AS {col}_n_unique")
-                agg_parts.append(f"MIN({col}) AS {col}_min")
-                agg_parts.append(f"MAX({col}) AS {col}_max")
+                agg_parts.append(f"SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) AS {_sas_alias(col, '_n_missing')}")
+                agg_parts.append(f"COUNT(DISTINCT {col}) AS {_sas_alias(col, '_n_unique')}")
+                agg_parts.append(f"MIN({col}) AS {_sas_alias(col, '_min')}")
+                agg_parts.append(f"MAX({col}) AS {_sas_alias(col, '_max')}")
 
             agg_select = ",\n        ".join(agg_parts)
             wide_sql = f"""SELECT {parallel_hint}
@@ -473,9 +479,9 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
     GROUP BY {date_expr}"""
 
             # Store SQL in macro variable (no fragile %str nesting!)
-            sql_clean = _sas_quote(wide_sql)
-            lines.append(f"    %let _sql_b{batch_idx} = {sql_clean};")
-            lines.append(f"    %pull_data(&_sql_b{batch_idx}, _wide_{name}_b{batch_idx}, server={conn_macro});")
+            lines.append(f"    %let _sql_b{batch_idx} = %nrstr({wide_sql});")
+            _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
+            lines.append(f"    %pull_data(&_sql_b{batch_idx}, _wide_{name}_b{batch_idx}, server={conn_macro}{_ua});")
             lines.append("")
 
             # Reshape this batch
@@ -488,12 +494,12 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
                 col_safe = col.replace("'", "''")
                 lines.append(f"        column_name = '{col_safe}';")
                 lines.append(f"        col_type = 'numeric';")
-                lines.append(f"        n_missing = n_total - {col}_not_null;")
-                lines.append(f"        n_unique = {col}_n_unique;")
-                lines.append(f"        mean = {col}_mean;")
-                lines.append(f"        std = {col}_std;")
-                lines.append(f"        min_val = strip(put({col}_min, best32.));")
-                lines.append(f"        max_val = strip(put({col}_max, best32.));")
+                lines.append(f"        n_missing = n_total - {_sas_alias(col, '_not_null')};")
+                lines.append(f"        n_unique = {_sas_alias(col, '_n_unique')};")
+                lines.append(f"        mean = {_sas_alias(col, '_mean')};")
+                lines.append(f"        std = {_sas_alias(col, '_std')};")
+                lines.append(f"        min_val = strip(put({_sas_alias(col, '_min')}, best32.));")
+                lines.append(f"        max_val = strip(put({_sas_alias(col, '_max')}, best32.));")
                 lines.append(f"        top_10 = '';")
                 lines.append(f"        output;")
                 lines.append("")
@@ -502,12 +508,12 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
                 col_safe = col.replace("'", "''")
                 lines.append(f"        column_name = '{col_safe}';")
                 lines.append(f"        col_type = 'categorical';")
-                lines.append(f"        n_missing = {col}_n_missing;")
-                lines.append(f"        n_unique = {col}_n_unique;")
+                lines.append(f"        n_missing = {_sas_alias(col, '_n_missing')};")
+                lines.append(f"        n_unique = {_sas_alias(col, '_n_unique')};")
                 lines.append(f"        mean = .;")
                 lines.append(f"        std = .;")
-                lines.append(f"        min_val = {col}_min;")
-                lines.append(f"        max_val = {col}_max;")
+                lines.append(f"        min_val = {_sas_alias(col, '_min')};")
+                lines.append(f"        max_val = {_sas_alias(col, '_max')};")
                 lines.append(f"        top_10 = '';")
                 lines.append(f"        output;")
                 lines.append("")
@@ -546,19 +552,19 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
 
         for col, dtype in num_cols:
             col_safe = col.replace("'", "''")
-            agg_parts.append(f"COUNT({col}) AS {col}_not_null")
-            agg_parts.append(f"COUNT(DISTINCT {col}) AS {col}_n_unique")
-            agg_parts.append(f"AVG({col}) AS {col}_mean")
-            agg_parts.append(f"STDDEV({col}) AS {col}_std")
-            agg_parts.append(f"MIN({col}) AS {col}_min")
-            agg_parts.append(f"MAX({col}) AS {col}_max")
+            agg_parts.append(f"COUNT({col}) AS {_sas_alias(col, '_not_null')}")
+            agg_parts.append(f"COUNT(DISTINCT {col}) AS {_sas_alias(col, '_n_unique')}")
+            agg_parts.append(f"AVG({col}) AS {_sas_alias(col, '_mean')}")
+            agg_parts.append(f"STDDEV({col}) AS {_sas_alias(col, '_std')}")
+            agg_parts.append(f"MIN({col}) AS {_sas_alias(col, '_min')}")
+            agg_parts.append(f"MAX({col}) AS {_sas_alias(col, '_max')}")
 
         for col, dtype in cat_cols:
             col_safe = col.replace("'", "''")
-            agg_parts.append(f"SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) AS {col}_n_missing")
-            agg_parts.append(f"COUNT(DISTINCT {col}) AS {col}_n_unique")
-            agg_parts.append(f"MIN({col}) AS {col}_min")
-            agg_parts.append(f"MAX({col}) AS {col}_max")
+            agg_parts.append(f"SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) AS {_sas_alias(col, '_n_missing')}")
+            agg_parts.append(f"COUNT(DISTINCT {col}) AS {_sas_alias(col, '_n_unique')}")
+            agg_parts.append(f"MIN({col}) AS {_sas_alias(col, '_min')}")
+            agg_parts.append(f"MAX({col}) AS {_sas_alias(col, '_max')}")
 
         agg_select = ",\n        ".join(agg_parts)
         wide_sql = f"""SELECT {parallel_hint}
@@ -568,9 +574,9 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
     GROUP BY {date_expr}"""
 
         # Store SQL in macro variable (no fragile %str nesting!)
-        sql_clean = _sas_quote(wide_sql)
-        lines.append(f"    %let _sql_main = {sql_clean};")
-        lines.append(f"    %pull_data(&_sql_main, _wide_{name}, server={conn_macro});")
+        lines.append(f"    %let _sql_main = %nrstr({wide_sql});")
+        _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
+        lines.append(f"    %pull_data(&_sql_main, _wide_{name}, server={conn_macro}{_ua});")
         lines.append("")
 
         # Reshape from wide to long
@@ -584,12 +590,12 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
             col_safe = col.replace("'", "''")
             lines.append(f"        column_name = '{col_safe}';")
             lines.append(f"        col_type = 'numeric';")
-            lines.append(f"        n_missing = n_total - {col}_not_null;")
-            lines.append(f"        n_unique = {col}_n_unique;")
-            lines.append(f"        mean = {col}_mean;")
-            lines.append(f"        std = {col}_std;")
-            lines.append(f"        min_val = strip(put({col}_min, best32.));")
-            lines.append(f"        max_val = strip(put({col}_max, best32.));")
+            lines.append(f"        n_missing = n_total - {_sas_alias(col, '_not_null')};")
+            lines.append(f"        n_unique = {_sas_alias(col, '_n_unique')};")
+            lines.append(f"        mean = {_sas_alias(col, '_mean')};")
+            lines.append(f"        std = {_sas_alias(col, '_std')};")
+            lines.append(f"        min_val = strip(put({_sas_alias(col, '_min')}, best32.));")
+            lines.append(f"        max_val = strip(put({_sas_alias(col, '_max')}, best32.));")
             lines.append(f"        top_10 = '';")
             lines.append(f"        output;")
             lines.append("")
@@ -598,12 +604,12 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
             col_safe = col.replace("'", "''")
             lines.append(f"        column_name = '{col_safe}';")
             lines.append(f"        col_type = 'categorical';")
-            lines.append(f"        n_missing = {col}_n_missing;")
-            lines.append(f"        n_unique = {col}_n_unique;")
+            lines.append(f"        n_missing = {_sas_alias(col, '_n_missing')};")
+            lines.append(f"        n_unique = {_sas_alias(col, '_n_unique')};")
             lines.append(f"        mean = .;")
             lines.append(f"        std = .;")
-            lines.append(f"        min_val = {col}_min;")
-            lines.append(f"        max_val = {col}_max;")
+            lines.append(f"        min_val = {_sas_alias(col, '_min')};")
+            lines.append(f"        max_val = {_sas_alias(col, '_max')};")
             lines.append(f"        top_10 = '';")
             lines.append(f"        output;")
             lines.append("")
@@ -629,7 +635,7 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
                 for col, dtype in cat_batch:
                     col_safe = col.replace("'", "''")
                     topn_part = f"""SELECT {q}{col_safe}{q} AS column_name, dt, val, cnt FROM (
-        SELECT {date_expr} AS dt, {col} AS val, COUNT(*) AS cnt,
+        SELECT {date_expr} AS dt, CAST({col} AS VARCHAR2(200)) AS val, COUNT(*) AS cnt,
                ROW_NUMBER() OVER (PARTITION BY {date_expr} ORDER BY COUNT(*) DESC) AS rn
         FROM {table}
         WHERE {col} IS NOT NULL {where_fragment}
@@ -638,9 +644,9 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
                     union_parts.append(topn_part)
 
                 combined_topn_sql = "\n    UNION ALL\n    ".join(union_parts)
-                sql_clean = _sas_quote(combined_topn_sql)
-                lines.append(f"    %let _sql_top{cat_batch_idx} = {sql_clean};")
-                lines.append(f"    %pull_data(&_sql_top{cat_batch_idx}, _topn_all_{name}_c{cat_batch_idx}, server={conn_macro});")
+                lines.append(f"    %let _sql_top{cat_batch_idx} = %nrstr({combined_topn_sql});")
+                _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
+                lines.append(f"    %pull_data(&_sql_top{cat_batch_idx}, _topn_all_{name}_c{cat_batch_idx}, server={conn_macro}{_ua});")
 
             # Stack cat batches
             lines.append(f"    data _topn_all_{name};")
@@ -663,7 +669,7 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
             for col, dtype in cat_cols:
                 col_safe = col.replace("'", "''")
                 topn_part = f"""SELECT {q}{col_safe}{q} AS column_name, dt, val, cnt FROM (
-        SELECT {date_expr} AS dt, {col} AS val, COUNT(*) AS cnt,
+        SELECT {date_expr} AS dt, CAST({col} AS VARCHAR2(200)) AS val, COUNT(*) AS cnt,
                ROW_NUMBER() OVER (PARTITION BY {date_expr} ORDER BY COUNT(*) DESC) AS rn
         FROM {table}
         WHERE {col} IS NOT NULL {where_fragment}
@@ -672,9 +678,9 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
                 union_parts.append(topn_part)
 
             combined_topn_sql = "\n    UNION ALL\n    ".join(union_parts)
-            sql_clean = _sas_quote(combined_topn_sql)
-        lines.append(f"    %let _sql_topn = {sql_clean};")
-        lines.append(f"    %pull_data(&_sql_topn, _topn_all_{name}, server={conn_macro});")
+        lines.append(f"    %let _sql_topn = %nrstr({combined_topn_sql});")
+        _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
+        lines.append(f"    %pull_data(&_sql_topn, _topn_all_{name}, server={conn_macro}{_ua});")
         lines.append("")
 
         # Aggregate top-10 (same for both batched and non-batched)
@@ -705,7 +711,7 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
 
     # Export
     lines.append(f"    proc export data=_colstats_{name}")
-    lines.append(f'        outfile=&out_dir./{qname}_col.csv')
+    lines.append(f'        outfile="&out_dir./{qname}_col.csv"')
     lines.append(f"        dbms=csv replace;")
     lines.append(f"    run;")
     lines.append("")
@@ -769,56 +775,43 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         print("No PCDS/Oracle tables found in config")
         return
 
-    # Auto-detect .env file if not specified (search upward from cwd)
-    if not env_path:
-        from dotenv import find_dotenv
-        env_path = find_dotenv(usecwd=True)
-        if env_path:
-            print(f"  Auto-detected: {env_path}")
+    # Use os.environ (already loaded from dtrack.conf by CLI)
+    env_src = os.environ
 
-    # Load environment variables from .env file (all UPPERCASE keys)
-    env_vars = {
-        'PCDS_USR': '',
-        'EMAIL_TO': '',
-        'SAS_LIB': 'WORK',
-        'OUT_DIR': '.',
-        'SEED': '2025'
-    }
+    # Defaults, then override from env_src
+    env_vars = {'SAS_LIB': 'WORK', 'OUT_DIR': '.', 'SEED': '2025'}
+    for key in ['PCDS_USR', 'EMAIL_TO', 'SAS_LIB', 'OUT_DIR', 'SEED']:
+        if key in env_src:
+            env_vars[key] = env_src[key]
 
-    if env_path:
-        from dotenv import dotenv_values
-        dot_vals = dotenv_values(env_path)
+    # Connection macro passwords (e.g., PCDS_PWD, PB23_PWD, PB30_PWD)
+    conn_macros = set(t.get('conn_macro', 'pcds') for t in pcds_tables)
+    for conn_macro in conn_macros:
+        pwd_key = f"{conn_macro.upper()}_PWD"
+        if pwd_key in env_src:
+            env_vars[pwd_key] = env_src[pwd_key]
+        else:
+            raise KeyError(f"{pwd_key} not found in config or environment")
 
-        # Load basic keys directly (all uppercase)
-        for key in ['PCDS_USR', 'EMAIL_TO', 'SAS_LIB', 'OUT_DIR', 'SEED']:
-            if key in dot_vals:
-                env_vars[key] = dot_vals[key]
-
-        # Load passwords for all connection macros
-        # Find unique conn_macro values from tables
-        conn_macros = set(t.get('conn_macro', 'pcds') for t in pcds_tables)
-
-        for conn_macro in conn_macros:
-            # Read {CONN_MACRO}_PWD from .env (e.g., PCDS_PWD, PB23_PWD)
-            pwd_key = f"{conn_macro.upper()}_PWD"
-            if pwd_key in dot_vals:
-                env_vars[pwd_key] = dot_vals[pwd_key]
+    # User override credentials (e.g., TMP_USR, TMP_PWD)
+    for user_key in set(t.get('user', '') for t in pcds_tables if t.get('user')):
+        for suffix in ('_USR', '_PWD'):
+            k = f"{user_key.upper()}{suffix}"
+            if k in env_src:
+                env_vars[k] = env_src[k]
             else:
-                raise KeyError(f"{pwd_key} not found in .env file")
-    else:
-        print("  Warning: No .env file found, using defaults")
+                raise KeyError(f"{k} not found in config or environment")
 
     # Read template
     template_path = os.path.join(os.path.dirname(__file__), 'template.sas')
     with open(template_path, 'r') as f:
         template = f.read()
 
-    # Fill in columns from _column_meta if db_path provided
+    # Fill in columns from _column_meta, filtered by col_map if available
     if db_path and "col" in types:
         from .db import get_column_meta
         for tbl in pcds_tables:
             if not tbl.get('columns'):
-                # Try qualified name first, then name, then table name
                 qn = _qualified_name(tbl)
                 meta = get_column_meta(db_path, qn)
                 if not meta:
@@ -826,25 +819,40 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
                 if not meta:
                     meta = get_column_meta(db_path, tbl['table'])
                 if meta:
-                    tbl['columns'] = {m['column_name']: m['data_type'] for m in meta}
-                    print(f"  {tbl['name']}: loaded {len(tbl['columns'])} columns from _column_meta")
+                    all_cols = {m['column_name']: m['data_type'] for m in meta}
+                    allowed = tbl.get('_col_map_columns')
+                    if allowed:
+                        tbl['columns'] = {c: t for c, t in all_cols.items() if c in allowed}
+                        print(f"  {tbl['name']}: {len(tbl['columns'])}/{len(all_cols)} columns (filtered by col_map)")
+                    else:
+                        tbl['columns'] = all_cols
+                        print(f"  {tbl['name']}: loaded {len(all_cols)} columns from _column_meta")
 
     # Inject vintage into each table config (preserve table-specific vintage if set)
     for tbl in pcds_tables:
         if 'vintage' not in tbl:
             tbl['vintage'] = vintage
 
-    # Inject date filtering from _row_comparison for col extraction
-    if db_path and "col" in types:
+    # Inject date filtering from config where_map for col extraction
+    if "col" in types and "pairs" in config:
         for tbl in pcds_tables:
-            tbl_vintage = tbl.get('vintage', vintage)
-            col_where, eff_vintage = _build_col_where(tbl, db_path, tbl_vintage)
-            if col_where:
-                existing = tbl.get('where', '')
-                tbl['where'] = f"({existing}) AND {col_where}" if existing else col_where
-                tbl['vintage'] = eff_vintage
-                qn = _qualified_name(tbl)
-                print(f"  {qn}: filtering col extraction to matching dates")
+            tbl_name = tbl.get('name', '')
+            for pair_name in tbl.get('_pairs', []):
+                pair_cfg = config['pairs'].get(pair_name, {})
+                where_map = pair_cfg.get('where_map', {})
+                if not where_map:
+                    continue
+                # Determine if this table is left or right in the pair
+                if pair_cfg.get('left', {}).get('name') == tbl_name:
+                    side = 'left'
+                else:
+                    side = 'right'
+                where_clause = where_map.get(side, '')
+                if where_clause:
+                    tbl['where'] = where_clause
+                    qn = _qualified_name(tbl)
+                    print(f"  {qn}: using where_map[{side}] from config")
+                    break
 
     # Pass sas_lib and out_dir to table configs
     sas_lib = env_vars['SAS_LIB']
@@ -876,9 +884,9 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             qname = _qualified_name(tbl)
             # Email after each col table
             runner_parts.append(
-                f'%send_email(subject=dtrack col done: {name}, '
+                f'/* %send_email(subject=dtrack col done: {name}, '
                 f'body=Table {name} col extraction complete. '
-                f'Output: &out_dir./{qname}_col.csv);'
+                f'Output: &out_dir./{qname}_col.csv); */'
             )
             runner_parts.append("")
 
@@ -887,10 +895,10 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         runner_parts.append(f"%let _job_end = %sysfunc(datetime());")
         runner_parts.append(f"%let _job_elapsed = %sysevalf(&_job_end - &_job_start);")
         runner_parts.append(
-            f'%send_email(subject=dtrack row extraction complete, '
+            f'/* %send_email(subject=dtrack row extraction complete, '
             f'body=Row extraction finished. '
             f'Elapsed: %sysfunc(putn(%nrstr(&_job_elapsed), time8.)). '
-            f'Output: &out_dir.);'
+            f'Output: &out_dir.); */'
         )
         runner_parts.append("")
 
@@ -899,23 +907,42 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     runner_content = '\n'.join(runner_parts)
     seed = env_vars['SEED']
     hash_input = f"{seed}:{runner_content}"
-    prefix = hashlib.md5(hash_input.encode()).hexdigest()[:8]
+    prefix = 'x' + hashlib.md5(hash_input.encode()).hexdigest()[:7]
 
-    # Build template vars (convert from UPPERCASE env_vars to lowercase template placeholders)
+    # Generate connection macros for only the servers used
+    from .db import MACRO2SVC
+    conn_macro_lines = []
+    for macro in sorted(conn_macros):
+        tns_path = f"@{MACRO2SVC.get(macro, macro)}"
+        pwd_var = env_vars[f"{macro.upper()}_PWD"]
+        conn_macro_lines.append(
+            f'%macro {macro};\n'
+            f'  connect to oracle(user="&iamusr" orapw="{pwd_var}" path="{tns_path}"\n'
+            f'    buffsize=5000 preserve_comments);\n'
+            f'%mend {macro};'
+        )
+
+    # Build user credential %let statements for override accounts
+    user_overrides = set(t.get('user', '') for t in pcds_tables if t.get('user'))
+    cred_lines = []
+    for user_key in sorted(user_overrides):
+        usr_var = f"{user_key.upper()}_USR"
+        pwd_var = f"{user_key.upper()}_PWD"
+        cred_lines.append(f"%let {user_key}_usr = {env_vars[usr_var]};")
+        cred_lines.append(f"%let {user_key}_pwd = {env_vars[pwd_var]};")
+
+    # Build template vars
     template_vars = {
         'pcds_usr': env_vars['PCDS_USR'],
         'prefix': prefix,
         'email_to': env_vars['EMAIL_TO'],
         'out_dir': out_dir,
         'sas_lib': sas_lib,
+        'conn_macros': '\n'.join(conn_macro_lines),
         'table_macros': '\n'.join(macro_parts),
         'runner': runner_content,
+        'user_credentials': '\n'.join(cred_lines),
     }
-
-    # Add all connection macro passwords (PCDS_PWD → pcds_pwd, PB23_PWD → pb23_pwd)
-    for key, value in env_vars.items():
-        if key.endswith('_PWD'):
-            template_vars[key.lower()] = value
 
     sas_content = template.format(**template_vars)
 
@@ -1015,7 +1042,7 @@ def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None):
     unit = _VINTAGE_ATHENA.get(vintage)
     if unit is None:
         return date_expr
-    return f"date_trunc('{unit}', {date_expr})"
+    return f"date_trunc('{unit}', CAST({date_expr} AS date))"
 
 
 def _discover_columns_athena(cursor, database, table):
@@ -1035,17 +1062,15 @@ def _extract_row_athena(cursor, tbl_cfg, outdir):
     import time
     from datetime import datetime
 
-    database = tbl_cfg['database']
+    database = tbl_cfg['conn_macro']
     table = tbl_cfg['table']
     date_col = tbl_cfg['date_col']
     name = tbl_cfg['name']
     qname = _qualified_name(tbl_cfg)
     where = tbl_cfg.get('where', '')
-    vintage = tbl_cfg.get('vintage', 'day')
-    vintage_transform = tbl_cfg.get('vintage_transform', None)
 
     full_table = f"{database}.{table}"
-    date_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform)
+    date_expr = date_col
     where_clause = f"WHERE {where}" if where else ""
 
     sql = f"""
@@ -1190,7 +1215,7 @@ def _extract_aws_mock(config_path, outdir, types, db_path, mock_dir):
     for tbl_cfg in aws_tables:
         name = tbl_cfg['name']
         qname = _qualified_name(tbl_cfg)
-        database = tbl_cfg['database']
+        database = tbl_cfg['conn_macro']
         table = tbl_cfg['table']
         tbl_mock_dir = os.path.join(mock_dir, database, table)
 
@@ -1275,18 +1300,27 @@ def extract_aws(config_path, outdir, types=None, max_workers=4, db_path=None, vi
         if 'vintage' not in tbl:
             tbl['vintage'] = vintage
 
-    # Inject date filtering from _row_comparison for col extraction
-    if db_path and "col" in types:
+    # Inject date filtering from config where_map for col extraction
+    if "col" in types and "pairs" in config:
         for tbl in aws_tables:
-            col_where, eff_vintage = _build_col_where(tbl, db_path, vintage)
-            if col_where:
-                existing = tbl.get('where', '')
-                tbl['where'] = f"({existing}) AND {col_where}" if existing else col_where
-                tbl['vintage'] = eff_vintage
-                qn = _qualified_name(tbl)
-                print(f"  {qn}: filtering col extraction to matching dates")
+            tbl_name = tbl.get('name', '')
+            for pair_name in tbl.get('_pairs', []):
+                pair_cfg = config['pairs'].get(pair_name, {})
+                where_map = pair_cfg.get('where_map', {})
+                if not where_map:
+                    continue
+                if pair_cfg.get('left', {}).get('name') == tbl_name:
+                    side = 'left'
+                else:
+                    side = 'right'
+                where_clause = where_map.get(side, '')
+                if where_clause:
+                    tbl['where'] = where_clause
+                    qn = _qualified_name(tbl)
+                    print(f"  {qn}: using where_map[{side}] from config")
+                    break
 
-    # Fill in columns from _column_meta if db_path provided
+    # Fill in columns from _column_meta, filtered by col_map if available
     if db_path and "col" in types:
         from .db import get_column_meta
         for tbl in aws_tables:
@@ -1298,11 +1332,17 @@ def extract_aws(config_path, outdir, types=None, max_workers=4, db_path=None, vi
                 if not meta:
                     meta = get_column_meta(db_path, tbl['table'])
                 if meta:
-                    tbl['columns'] = {m['column_name']: m['data_type'] for m in meta}
-                    print(f"  {tbl['name']}: loaded {len(tbl['columns'])} columns from _column_meta")
+                    all_cols = {m['column_name']: m['data_type'] for m in meta}
+                    allowed = tbl.get('_col_map_columns')
+                    if allowed:
+                        tbl['columns'] = {c: t for c, t in all_cols.items() if c in allowed}
+                        print(f"  {tbl['name']}: {len(tbl['columns'])}/{len(all_cols)} columns (filtered by col_map)")
+                    else:
+                        tbl['columns'] = all_cols
+                        print(f"  {tbl['name']}: loaded {len(all_cols)} columns from _column_meta")
 
     aws_creds_renew()
-    conn = athena_connect(data_base=aws_tables[0].get('database'))
+    conn = athena_connect(data_base=aws_tables[0].get('conn_macro'))
     cursor = conn.cursor()
 
     # Track timing for all extractions
@@ -1310,7 +1350,7 @@ def extract_aws(config_path, outdir, types=None, max_workers=4, db_path=None, vi
 
     for tbl_cfg in aws_tables:
         name = tbl_cfg['name']
-        database = tbl_cfg['database']
+        database = tbl_cfg['conn_macro']
         table = tbl_cfg['table']
         date_col = tbl_cfg['date_col']
         full_table = f"{database}.{table}"
@@ -1444,7 +1484,7 @@ def discover_aws_columns(config_path, outdir, db_path=None):
         for tbl_cfg in aws_tables:
             name = tbl_cfg['name']
             qname = _qualified_name(tbl_cfg)
-            database = tbl_cfg['database']
+            database = tbl_cfg['conn_macro']
             table = tbl_cfg['table']
             tbl_mock_dir = os.path.join(mock_dir, database, table)
             cols_src = os.path.join(tbl_mock_dir, 'columns.csv')
@@ -1472,13 +1512,13 @@ def discover_aws_columns(config_path, outdir, db_path=None):
         return
 
     aws_creds_renew()
-    conn = athena_connect(data_base=aws_tables[0].get('database'))
+    conn = athena_connect(data_base=aws_tables[0].get('conn_macro'))
     cursor = conn.cursor()
 
     for tbl_cfg in aws_tables:
         name = tbl_cfg['name']
         qname = _qualified_name(tbl_cfg)
-        database = tbl_cfg['database']
+        database = tbl_cfg['conn_macro']
         table = tbl_cfg['table']
 
         print(f"\nDiscovering columns: {name} ({database}.{table})")
