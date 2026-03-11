@@ -41,10 +41,12 @@ from .ppt import PPTBuilder, parse_markdown_to_ppt
 def cmd_init(args):
     """Initialize a new dtrack database"""
     db_path = args.project_db
-    if os.path.exists(db_path) and not args.force:
-        print(f"Error: Database already exists: {db_path}")
-        print("Use --force to overwrite")
-        sys.exit(1)
+    if os.path.exists(db_path):
+        if not args.force:
+            print(f"Error: Database already exists: {db_path}")
+            print("Use --force to overwrite")
+            sys.exit(1)
+        os.remove(db_path)
 
     init_database(db_path)
     print(f"Initialized database: {db_path}")
@@ -1320,6 +1322,40 @@ def cmd_load_col_stats(args):
     print(f"✓ Loaded {count} stat rows")
 
 
+def _save_matched_to_config(config, is_unified, matched_columns, config_path):
+    """Save matched columns into config file."""
+    import json
+    for pair_name, matched in matched_columns.items():
+        if is_unified:
+            config['pairs'][pair_name]['col_map'] = matched
+        else:
+            for pair in config['pairs']:
+                if pair.get('name') == pair_name:
+                    pair['col_map'] = matched
+                    break
+
+    from .config import save_unified_config
+    if is_unified:
+        save_unified_config(config, config_path)
+    else:
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+
+    for pair_name, matched in matched_columns.items():
+        print(f"  {pair_name}: {len(matched)} column mappings saved")
+    print(f"Saved to: {config_path}")
+
+
+def _sync_config_to_db(project_db, config_path):
+    """Reload config from disk and sync to database."""
+    import json
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    from .db import sync_config_to_db
+    sync_config_to_db(project_db, config)
+    print(f"Synced to database: {project_db}")
+
+
 def cmd_match_columns(args):
     """Match columns between tables - single pair or all pairs from config"""
     import json
@@ -1426,191 +1462,179 @@ def cmd_match_columns(args):
             # Use all_matched for final save
             matched = all_matched
 
-            print()
-            print("=" * 100)
-            print(f"📝 Column Matching - {pair_name}")
-            print("=" * 100)
-            print(f"✓ Auto-matched: {len(matched)} columns (case-insensitive)")
+            auto_count = len(matched) - len(existing_col_map)
+            print(f"Auto-matched: {auto_count} columns (case-insensitive)")
+            if existing_col_map:
+                print(f"Existing mappings: {len(existing_col_map)}")
             print()
 
             if left_only or right_only:
-                # Build sorted lists for alignment (unmapped only)
-                left_unmapped = [(col['name'], col['type']) for col in left_only]
-                left_unmapped.sort(key=lambda x: x[0].lower())
+                # Build unmapped file content
+                left_unmapped = sorted([(c['name'], c['type']) for c in left_only], key=lambda x: x[0].lower())
+                right_unmapped = sorted([(c['name'], c['type']) for c in right_only], key=lambda x: x[0].lower())
 
-                right_unmapped = [(col['name'], col['type']) for col in right_only]
-                right_unmapped.sort(key=lambda x: x[0].lower())
-
-                # Build display output
-                output_lines = []
                 left_width = 40
-                right_width = 40
+                output_lines = []
+                output_lines.append(f"{'LEFT (' + left_src + ')':<{left_width}}  RIGHT ({right_src})")
+                output_lines.append("─" * 80)
 
-                # Header
-                header = f"{'LEFT (' + left_src + ')':<{left_width}}  {'RIGHT (' + right_src + ')':<{right_width}}  STATUS"
-                separator = "─" * 100
-                output_lines.append(header)
-                output_lines.append(separator)
-
-                # Merge and align both lists
                 i, j = 0, 0
                 while i < len(left_unmapped) or j < len(right_unmapped):
-                    left_name, left_type = left_unmapped[i] if i < len(left_unmapped) else ("", "")
-                    right_name, right_type = right_unmapped[j] if j < len(right_unmapped) else ("", "")
-
-                    # Determine alignment
-                    if not left_name:  # Right only remaining
-                        left_display = ""
-                        right_display = f"{right_name} ({right_type})"
-                        status = "✓ NEW"
+                    ln, lt = left_unmapped[i] if i < len(left_unmapped) else ("", "")
+                    rn, rt = right_unmapped[j] if j < len(right_unmapped) else ("", "")
+                    if not ln:
+                        output_lines.append(f"{'':<{left_width}}  {rn} ({rt})")
                         j += 1
-                    elif not right_name:  # Left only remaining
-                        left_display = f"{left_name} ({left_type})"
-                        right_display = ""
-                        status = "✗ DROP"
+                    elif not rn:
+                        output_lines.append(f"{ln} ({lt})")
+                        i += 1
+                    elif ln.lower() < rn.lower():
+                        output_lines.append(f"{ln} ({lt})")
                         i += 1
                     else:
-                        # Compare alphabetically (case-insensitive)
-                        cmp = (left_name.lower() > right_name.lower()) - (left_name.lower() < right_name.lower())
+                        output_lines.append(f"{'':<{left_width}}  {rn} ({rt})")
+                        j += 1
 
-                        if cmp < 0:  # Left comes first alphabetically
-                            left_display = f"{left_name} ({left_type})"
-                            right_display = ""
-                            status = "✗ DROP"
-                            i += 1
-                        else:  # Right comes first alphabetically
-                            left_display = ""
-                            right_display = f"{right_name} ({right_type})"
-                            status = "✓ NEW"
-                            j += 1
+                # Write unmapped file to map/ directory
+                os.makedirs("map", exist_ok=True)
+                safe_name = re.sub(r'[^\w\-]', '_', pair_name)
+                unmapped_path = os.path.join("map", f"{safe_name}_unmapped.txt")
+                with open(unmapped_path, 'w') as f:
+                    f.write('\n'.join(output_lines))
 
-                    line = f"{left_display:<{left_width}}  {right_display:<{right_width}}  {status}"
-                    output_lines.append(line)
-
-                # Display to console
                 for line in output_lines:
                     print(line)
+                print()
+                print(f"Unmapped: {len(left_only)} {left_src}-only | {len(right_only)} {right_src}-only")
+                print(f"Saved to: {unmapped_path}")
+                print()
 
-                print()
-                print(f"📊 Unmapped: {len(left_only)} left-only (✗ DROP), {len(right_only)} right-only (✓ NEW)")
-                print()
+                # --- Annotation loop ---
+                manual_count = 0
+                left_names = {c['name'] for c in left_only}
+                right_names = {c['name'] for c in right_only}
 
-                # Ask to save
-                safe_name = re.sub(r'[^\w\-]', '_', pair_name)
-                save_filename = f"{safe_name}_unmapped.txt"
-                response = input(f"💾 Save unmapped columns to {save_filename}? (y/n): ").strip().lower()
-                if response == 'y':
-                    with open(save_filename, 'w') as f:
-                        f.write('\n'.join(output_lines))
-                    print(f"✅ Saved to {save_filename}")
-                print()
+                while True:
+                    print("Type column mappings (LEFT_COL  RIGHT_COL), wildcards supported (PREFIX_*  prefix_*)")
+                    print("Two empty lines to commit batch. Enter nothing twice to skip.")
+                    empty_count = 0
+                    batch = []
+
+                    while True:
+                        try:
+                            line = input("> ").strip()
+                        except EOFError:
+                            empty_count = 2
+                            break
+                        if not line:
+                            empty_count += 1
+                            if empty_count >= 2:
+                                break
+                        else:
+                            empty_count = 0
+                            batch.append(line)
+
+                    if not batch:
+                        # No mappings entered, skip annotation
+                        break
+
+                    # Process batch - resolve wildcards and direct mappings
+                    new_maps = {}
+                    for entry in batch:
+                        parts = entry.split()
+                        if len(parts) != 2:
+                            print(f"  Skipping invalid: {entry}")
+                            continue
+                        lp, rp = parts
+
+                        if '*' in lp or '*' in rp:
+                            # Wildcard matching
+                            l_prefix, l_suffix = lp.split('*', 1) if '*' in lp else (lp, '')
+                            r_prefix, r_suffix = rp.split('*', 1) if '*' in rp else (rp, '')
+
+                            for ln in list(left_names):
+                                if ln.startswith(l_prefix) and ln.endswith(l_suffix):
+                                    variable = ln[len(l_prefix):len(ln) - len(l_suffix) if l_suffix else len(ln)]
+                                    candidate = r_prefix + variable + r_suffix
+                                    # Case-insensitive search in right_names
+                                    for rn in list(right_names):
+                                        if rn.lower() == candidate.lower():
+                                            new_maps[ln] = rn
+                                            break
+                        else:
+                            # Direct mapping - find exact or case-insensitive match
+                            actual_left = None
+                            for ln in left_names:
+                                if ln.lower() == lp.lower():
+                                    actual_left = ln
+                                    break
+                            actual_right = None
+                            for rn in right_names:
+                                if rn.lower() == rp.lower():
+                                    actual_right = rn
+                                    break
+                            if actual_left and actual_right:
+                                new_maps[actual_left] = actual_right
+                            else:
+                                missing = []
+                                if not actual_left:
+                                    missing.append(f"left: {lp}")
+                                if not actual_right:
+                                    missing.append(f"right: {rp}")
+                                print(f"  Not found: {', '.join(missing)}")
+
+                    if new_maps:
+                        matched.update(new_maps)
+                        left_names -= set(new_maps.keys())
+                        right_names -= set(new_maps.values())
+                        manual_count += len(new_maps)
+
+                        # Update unmapped file
+                        remaining_lines = [output_lines[0], output_lines[1]]
+                        for ol in output_lines[2:]:
+                            # Check if any matched column appears in this line
+                            skip = False
+                            for lk, rv in new_maps.items():
+                                if lk in ol or rv in ol:
+                                    skip = True
+                                    break
+                            if not skip:
+                                remaining_lines.append(ol)
+                        output_lines = remaining_lines
+                        with open(unmapped_path, 'w') as f:
+                            f.write('\n'.join(output_lines))
+
+                        print(f"  Mapped {len(new_maps)} columns")
+
+                    print()
+                    print(f"{pair_name}: {len(matched)} column mappings (manual: {manual_count} + identical: {auto_count})")
+                    print(f"  unmapped: {len(left_names)} {left_src}-only | {len(right_names)} {right_src}-only")
+                    print()
+
+                    if not left_names and not right_names:
+                        print("All columns mapped!")
+                        break
+
+                    resp = input("[c]ontinue annotating / [f]inish (next table) / [q]uit: ").strip().lower()
+                    if resp == 'q':
+                        matched_columns[pair_name] = matched
+                        # Save and sync before quitting
+                        _save_matched_to_config(config, is_unified, matched_columns, args.config)
+                        _sync_config_to_db(args.project_db, args.config)
+                        return
+                    elif resp != 'c':
+                        break  # 'f' or anything else -> next table
 
             else:
-                print("✅ All columns matched!")
+                print("All columns matched!")
                 print()
 
-            # Store matched columns for later save
             matched_columns[pair_name] = matched
-            print()
 
-        # Ask user before saving col_map to config
-        print()
-        print("=" * 100)
-        print(f"✅ Column matching complete for all {len(pairs_list)} pairs")
-        print("=" * 100)
-
+        # Save config and sync to DB
         if matched_columns:
-            total_mapped = sum(len(cols) for cols in matched_columns.values())
-            print(f"\n💾 Found {total_mapped} auto-matched columns across {len(matched_columns)} pair(s)")
-
-            # Reload config in case user edited during unmapped prompts
-            print(f"\n🔄 Reloading config from {args.config}")
-            with open(args.config, 'r') as f:
-                config = json.load(f)
-
-            # Merge auto-matched columns with existing col_map (preserve user edits)
-            for pair_name, matched in matched_columns.items():
-                if is_unified:
-                    # Only update if col_map is empty or doesn't exist
-                    existing_map = config['pairs'][pair_name].get('col_map', {})
-                    if not existing_map:
-                        config['pairs'][pair_name]['col_map'] = matched
-                        print(f"  ✓ {pair_name}: {len(matched)} column mappings (auto-matched)")
-                    else:
-                        print(f"  ℹ️  {pair_name}: {len(existing_map)} column mappings (keeping existing)")
-                else:
-                    for pair in config['pairs']:
-                        if pair.get('name') == pair_name:
-                            existing_map = pair.get('col_map', {})
-                            if not existing_map:
-                                pair['col_map'] = matched
-                            break
-
-            # Write config file
-            from .config import save_unified_config
-            try:
-                if is_unified:
-                    save_unified_config(config, args.config)
-                else:
-                    with open(args.config, 'w') as f:
-                        json.dump(config, f, indent=2)
-                print(f"\n✓ Saved to: {args.config}")
-
-                # Pause for manual review and editing
-                print("\n" + "="*80)
-                print("📝 Review and edit the config file now")
-                print("="*80)
-                print(f"  File: {args.config}")
-                print()
-                print("  You can now:")
-                print("  - Review auto-matched column mappings")
-                print("  - Add or remove column mappings manually")
-                print("  - Adjust mapping for renamed columns")
-                print()
-                resp = input("Press Enter when done editing (or 's' to skip reload): ").strip().lower()
-
-                # Reload config file with user's edits
-                print(f"\n🔄 Reloading config from {args.config}")
-                with open(args.config, 'r') as f:
-                    reloaded_config = json.load(f)
-
-                # Verify reload worked
-                for pair_name in matched_columns.keys():
-                    old_count = len(matched_columns[pair_name])
-                    new_count = len(reloaded_config.get('pairs', {}).get(pair_name, {}).get('col_map', {}))
-                    if new_count != old_count:
-                        print(f"   📝 {pair_name}: {old_count} → {new_count} (edited)")
-                    else:
-                        print(f"   ✓ {pair_name}: {new_count} (unchanged)")
-
-                config = reloaded_config
-
-                # Sync to database
-                print("\n💾 Syncing to database...")
-                from .db import sync_config_to_db
-                sync_config_to_db(args.project_db, config)
-                print(f"✓ Synced to database: {args.project_db}")
-
-                # Show what was synced
-                if is_unified:
-                    for pair_name in config.get("pairs", {}):
-                        col_map = config["pairs"][pair_name].get("col_map", {})
-                        if col_map:
-                            print(f"  - {pair_name}: {len(col_map)} column mappings")
-
-                print(f"\n📄 Your edits are saved in: {args.config}")
-                print("   (File was NOT overwritten after sync)")
-
-            except Exception as e:
-                print(f"⚠️  Could not save config: {e}")
-
-        print()
-        if left_only or right_only:
-            print("💡 Next steps:")
-            print(f"   1. Review unmapped columns in the saved .txt files")
-            print(f"   2. If needed, manually add renamed column mappings to col_map in {args.config}")
-            print(f"   3. Example: \"AMT\": \"amount\" maps left AMT column to right amount column")
-        print("=" * 100)
+            _save_matched_to_config(config, is_unified, matched_columns, args.config)
+            _sync_config_to_db(args.project_db, args.config)
 
     # Mode 2: Single pair from --left and --right
     elif args.left and args.right:

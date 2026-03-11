@@ -9,8 +9,8 @@ from dtrack.extract import (
     _oracle_date_transform,
     _vintage_date_expr,
     _vintage_date_expr_athena,
-    _gen_sas_row,
-    _gen_sas_col,
+    _gen_sas_row_datadriven,
+    _gen_sas_col_local,
     gen_sas,
     build_continuous_sql_oracle,
     build_categorical_sql_oracle,
@@ -108,16 +108,16 @@ class TestVintageDateExprAthena:
         assert _vintage_date_expr_athena('dt_col', 'day') == 'dt_col'
 
     def test_week(self):
-        assert _vintage_date_expr_athena('dt_col', 'week') == "date_trunc('week', dt_col)"
+        assert _vintage_date_expr_athena('dt_col', 'week') == "date_trunc('week', CAST(dt_col AS date))"
 
     def test_month(self):
-        assert _vintage_date_expr_athena('dt_col', 'month') == "date_trunc('month', dt_col)"
+        assert _vintage_date_expr_athena('dt_col', 'month') == "date_trunc('month', CAST(dt_col AS date))"
 
     def test_quarter(self):
-        assert _vintage_date_expr_athena('dt_col', 'quarter') == "date_trunc('quarter', dt_col)"
+        assert _vintage_date_expr_athena('dt_col', 'quarter') == "date_trunc('quarter', CAST(dt_col AS date))"
 
     def test_year(self):
-        assert _vintage_date_expr_athena('dt_col', 'year') == "date_trunc('year', dt_col)"
+        assert _vintage_date_expr_athena('dt_col', 'year') == "date_trunc('year', CAST(dt_col AS date))"
 
     def test_vintage_transform_overrides(self):
         result = _vintage_date_expr_athena('dt_col', 'week', vintage_transform="date_trunc('month', {col})")
@@ -128,14 +128,15 @@ class TestVintageDateExprAthena:
 
 
 # ---------------------------------------------------------------------------
-# TestGenSasRow
+# TestGenSasRowDatadriven
 # ---------------------------------------------------------------------------
-class TestGenSasRow:
+class TestGenSasRowDatadriven:
     @pytest.fixture()
     def basic_cfg(self):
         return {
             'name': 'cust_daily',
             'table': 'SCHEMA1.CUST_DAILY',
+            'source': 'pcds',
             'date_col': 'RPT_DT',
             'conn_macro': 'pcds',
             'where': '',
@@ -143,55 +144,50 @@ class TestGenSasRow:
         }
 
     def test_basic_structure(self, basic_cfg):
-        sas = _gen_sas_row(basic_cfg)
-        assert '%macro get_rowcounts_cust_daily' in sas
+        sas = _gen_sas_row_datadriven([basic_cfg])
+        assert 'table_date_map' in sas
+        assert '%macro export_row_one' in sas
+        assert 'call execute' in sas
         assert '%pull_data(' in sas
         assert 'proc export' in sas
-        assert 'proc delete' in sas
 
-    def test_where_clause(self, basic_cfg):
-        basic_cfg['where'] = "STATUS = 'A'"
-        sas = _gen_sas_row(basic_cfg)
-        assert "WHERE STATUS = %str(%')A%str(%')" in sas
-
-    def test_no_where_clause(self, basic_cfg):
-        sas = _gen_sas_row(basic_cfg)
-        assert 'WHERE' not in sas.split('%pull_data')[1].split(')')[0].replace('WHERE 1=1', '')
-        # Simply check no dangling WHERE before GROUP
-        sql_part = sas.split('%pull_data(')[1].split(',')[0]
-        assert 'WHERE' not in sql_part
+    def test_datalines_content(self, basic_cfg):
+        sas = _gen_sas_row_datadriven([basic_cfg])
+        assert 'SCHEMA1.CUST_DAILY|pcds_cust_daily|RPT_DT|pcds||' in sas
 
     def test_date_transform_trunc(self, basic_cfg):
         basic_cfg['date_transform'] = 'datetime_to_date'
-        sas = _gen_sas_row(basic_cfg)
+        sas = _gen_sas_row_datadriven([basic_cfg])
         assert 'TRUNC(RPT_DT)' in sas
 
-    def test_conn_macro_pb23(self, basic_cfg):
+    def test_conn_macro_in_datalines(self, basic_cfg):
         basic_cfg['conn_macro'] = 'pb23'
-        sas = _gen_sas_row(basic_cfg)
-        assert 'server=pb23' in sas
+        sas = _gen_sas_row_datadriven([basic_cfg])
+        assert '|pb23|' in sas
 
-    def test_default_conn_macro(self):
-        cfg = {'name': 't', 'table': 'T', 'date_col': 'D'}
-        sas = _gen_sas_row(cfg)
-        assert 'server=pcds' in sas
+    def test_multiple_tables(self, basic_cfg):
+        cfg2 = {
+            'name': 'txn_monthly',
+            'table': 'TXN_MONTHLY',
+            'source': 'oracle',
+            'date_col': 'MONTH_DT',
+            'conn_macro': 'pb23',
+        }
+        sas = _gen_sas_row_datadriven([basic_cfg, cfg2])
+        assert 'SCHEMA1.CUST_DAILY' in sas
+        assert 'TXN_MONTHLY' in sas
 
-    def test_vintage_week(self, basic_cfg):
-        basic_cfg['vintage'] = 'week'
-        sas = _gen_sas_row(basic_cfg)
-        assert "TRUNC(RPT_DT, %str(%')IW%str(%'))" in sas
-
-    def test_vintage_with_transform(self, basic_cfg):
-        basic_cfg['date_transform'] = 'datetime_to_date'
-        basic_cfg['vintage'] = 'month'
-        sas = _gen_sas_row(basic_cfg)
-        assert "TRUNC(TRUNC(RPT_DT), %str(%')MM%str(%'))" in sas
+    def test_where_in_datalines(self, basic_cfg):
+        basic_cfg['where'] = "STATUS = 'A'"
+        sas = _gen_sas_row_datadriven([basic_cfg])
+        # SAS-safe quoting (doubled single quotes)
+        assert "STATUS = ''A''" in sas
 
 
 # ---------------------------------------------------------------------------
-# TestGenSasCol
+# TestGenSasColLocal
 # ---------------------------------------------------------------------------
-class TestGenSasCol:
+class TestGenSasColLocal:
     @pytest.fixture()
     def mixed_cfg(self):
         return {
@@ -208,14 +204,15 @@ class TestGenSasCol:
             },
         }
 
-    def test_numeric_has_avg_stddev(self, mixed_cfg):
-        sas = _gen_sas_col(mixed_cfg)
-        assert 'AVG(' in sas
-        assert 'STDDEV(' in sas
+    def test_uses_proc_means_for_numeric(self, mixed_cfg):
+        sas = _gen_sas_col_local(mixed_cfg)
+        assert 'proc means' in sas
+        assert 'var AMT' in sas
 
-    def test_categorical_has_null(self, mixed_cfg):
-        sas = _gen_sas_col(mixed_cfg)
-        assert 'NULL AS mean' in sas
+    def test_uses_proc_freq_for_categorical(self, mixed_cfg):
+        sas = _gen_sas_col_local(mixed_cfg)
+        assert 'proc freq' in sas
+        assert 'CUST_STATUS' in sas
 
     def test_discovery_mode(self):
         cfg = {
@@ -225,9 +222,8 @@ class TestGenSasCol:
             'conn_macro': 'pcds',
             'columns': {},
         }
-        sas = _gen_sas_col(cfg)
+        sas = _gen_sas_col_local(cfg)
         assert 'WARNING' in sas
-        assert 'load-columns --conn-macro' in sas
 
     def test_zero_non_date_columns(self):
         cfg = {
@@ -236,50 +232,37 @@ class TestGenSasCol:
             'date_col': 'DT',
             'columns': {'DT': 'DATE'},
         }
-        sas = _gen_sas_col(cfg)
+        sas = _gen_sas_col_local(cfg)
         assert 'WARNING' in sas
         assert 'No non-date columns' in sas
 
-    def test_date_col_filtered_case_insensitive(self):
-        cfg = {
-            'name': 'test',
-            'table': 'T',
-            'date_col': 'rpt_dt',
-            'columns': {'RPT_DT': 'DATE', 'AMT': 'NUMBER'},
-        }
-        sas = _gen_sas_col(cfg)
-        assert '_ncols = 1' in sas
-
     def test_uses_pull_data(self, mixed_cfg):
-        sas = _gen_sas_col(mixed_cfg)
+        sas = _gen_sas_col_local(mixed_cfg)
         assert '%pull_data(' in sas
-        assert 'connect using' not in sas
 
-    def test_numeric_uses_count_minus(self, mixed_cfg):
-        sas = _gen_sas_col(mixed_cfg)
-        assert 'COUNT(*) - COUNT(&_c) AS n_missing' in sas
+    def test_cache_saves_stats(self, mixed_cfg):
+        sas = _gen_sas_col_local(mixed_cfg)
+        assert 'cache._cs_' in sas
 
-    def test_categorical_top_n_query(self, mixed_cfg):
-        sas = _gen_sas_col(mixed_cfg)
-        assert 'ROW_NUMBER() OVER' in sas
-        assert 'rn <= 10' in sas
-        assert '_topn_' in sas
+    def test_skip_if_cached(self, mixed_cfg):
+        sas = _gen_sas_col_local(mixed_cfg)
+        assert '%sysfunc(exist(' in sas
+        assert 'skipping' in sas.lower()
 
-    def test_categorical_top_n_merge(self, mixed_cfg):
-        sas = _gen_sas_col(mixed_cfg)
+    def test_top_10_from_freq(self, mixed_cfg):
+        sas = _gen_sas_col_local(mixed_cfg)
         assert 'top_10' in sas
-        assert 'merge' in sas.lower()
-
-    def test_vintage_in_col(self, mixed_cfg):
-        mixed_cfg['vintage'] = 'quarter'
-        sas = _gen_sas_col(mixed_cfg)
-        assert "TRUNC(TRUNC(RPT_DT), 'Q')" in sas
+        assert '_t10_' in sas
 
     def test_stacking_export_cleanup(self, mixed_cfg):
-        sas = _gen_sas_col(mixed_cfg)
+        sas = _gen_sas_col_local(mixed_cfg)
         assert 'data _colstats_cust_daily' in sas
         assert 'proc export' in sas
-        assert 'proc datasets' in sas
+        assert 'proc delete' in sas
+
+    def test_cleanup_raw_data(self, mixed_cfg):
+        sas = _gen_sas_col_local(mixed_cfg)
+        assert 'proc delete data=_raw_' in sas
 
 
 
@@ -303,17 +286,17 @@ class TestGenSasFull:
         outdir = tmp_path / 'out'
         gen_sas(config_path, str(outdir))
         sas = (outdir / 'extract.sas').read_text()
-        # 4 PCDS tables (cust_daily, txn_monthly, acct_summary, date_only_tbl)
-        assert 'get_rowcounts_cust_daily' in sas
-        assert 'get_rowcounts_txn_monthly' in sas
-        assert 'get_rowcounts_acct_summary' in sas
-        assert 'get_rowcounts_date_only_tbl' in sas
+        # Data-driven row uses table_date_map, not per-table macros
+        assert 'table_date_map' in sas
+        assert 'export_row_one' in sas
+        # Col macros still per-table
+        assert 'get_colstats_cust_daily' in sas
+        assert 'get_colstats_txn_monthly' in sas
 
     def test_aws_table_skipped(self, tmp_path, config_path):
         outdir = tmp_path / 'out'
         gen_sas(config_path, str(outdir))
         sas = (outdir / 'extract.sas').read_text()
-        assert 'get_rowcounts_aws_table' not in sas
         assert 'get_colstats_aws_table' not in sas
 
     def test_template_boilerplate(self, tmp_path, config_path):
@@ -337,7 +320,7 @@ class TestGenSasFull:
         outdir = tmp_path / 'out'
         gen_sas(config_path, str(outdir), types=['row'])
         sas = (outdir / 'extract_row.sas').read_text()
-        assert 'get_rowcounts_cust_daily' in sas
+        assert 'export_row_one' in sas
         assert 'get_colstats_cust_daily' not in sas
 
     def test_types_col_only(self, tmp_path, config_path):
@@ -439,9 +422,9 @@ class TestSqlBuilders:
         assert 'ORDER BY' not in sql.split('rn <= 10')[1]  # no ORDER BY after filter
 
     def test_athena_continuous_with_vintage(self):
-        date_expr = "date_trunc('week', dt_col)"
+        date_expr = "date_trunc('week', CAST(dt_col AS date))"
         sql = build_continuous_sql_athena('T', 'AMT', date_expr)
-        assert "date_trunc('week', dt_col) AS dt" in sql
+        assert f"{date_expr} AS dt" in sql
         assert f"GROUP BY {date_expr}" in sql
 
 

@@ -324,55 +324,94 @@ def _sas_quote(s):
     return s.replace("'", "''")
 
 
-def _gen_sas_row(tbl_cfg, sas_lib='WORK', out_dir='.'):
-    """Generate SAS macro for row count extraction using pull_data."""
-    table = tbl_cfg['table']
-    date_col = tbl_cfg['date_col']
-    name = tbl_cfg['name']
-    qname = _qualified_name(tbl_cfg)
-    conn_macro = tbl_cfg.get('conn_macro', 'pcds')
-    user_override = tbl_cfg.get('user', '')
-    where = tbl_cfg.get('where', '')
-    transform = tbl_cfg.get('date_transform', '')
+def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
+    """Generate data-driven SAS row extraction using table_date_map + call execute.
 
-    date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
-    where_clause = f"WHERE {where}" if where else ""
+    Instead of generating one macro per table, builds a single reusable
+    %export_row_one macro and drives it from a table_date_map dataset.
+    """
+    lines = []
 
-    sql = (
-        f"SELECT {date_expr} AS date_value, COUNT(*) AS row_count "
-        f"FROM {table} {where_clause} "
-        f"GROUP BY {date_expr}"
-    )
+    # Build datalines for table_date_map
+    datalines = []
+    for tbl_cfg in pcds_tables:
+        table = tbl_cfg['table']
+        date_col = tbl_cfg['date_col']
+        name = tbl_cfg['name']
+        qname = _qualified_name(tbl_cfg)
+        conn_macro = tbl_cfg.get('conn_macro', 'pcds')
+        user_override = tbl_cfg.get('user', '')
+        where = _sas_quote(tbl_cfg.get('where', ''))
+        transform = tbl_cfg.get('date_transform', '')
 
-    # SAS library reference (no quotes), table name with prefix
-    sas_table = f"sas_lib.&prefix._rc_{name}" if sas_lib else f"&prefix._rc_{name}"
+        date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
 
-    user_args = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
+        datalines.append(
+            f"{table}|{qname}|{date_expr}|{conn_macro}|{user_override}|{where}"
+        )
 
-    return f"""\
-%macro get_rowcounts_{name}();
-    %pull_data(%nrstr({sql}), {sas_table}, server={conn_macro}{user_args});
+    # Data step: table_date_map
+    lines.append("/* Data-driven row extraction: one macro, many tables */")
+    lines.append("data table_date_map;")
+    lines.append("    length table $128 qname $64 date_expr $200 conn_macro $32 user_override $32 where_clause $500;")
+    lines.append("    infile datalines dlm='|' truncover;")
+    lines.append("    input table $ qname $ date_expr $ conn_macro $ user_override $ where_clause $;")
+    lines.append("    datalines;")
+    for dl in datalines:
+        lines.append(dl)
+    lines.append(";")
+    lines.append("run;")
+    lines.append("")
 
-    proc export data={sas_table}
-        outfile="&out_dir./{qname}_row.csv"
-        dbms=csv replace;
-    run;
+    # Reusable macro
+    lines.append("%macro export_row_one(table=, qname=, date_expr=, conn_macro=, user_override=, where_clause=);")
+    lines.append("    %local _sql _sas_tbl _user_args;")
+    lines.append("")
+    lines.append("    %if %length(&where_clause) > 0 %then")
+    lines.append('        %let _sql = SELECT &date_expr AS date_value, COUNT(*) AS row_count FROM &table WHERE &where_clause GROUP BY &date_expr;')
+    lines.append("    %else")
+    lines.append('        %let _sql = SELECT &date_expr AS date_value, COUNT(*) AS row_count FROM &table GROUP BY &date_expr;')
+    lines.append("")
+    lines.append("    %let _sas_tbl = sas_lib.&prefix._rc_&qname;")
+    lines.append("")
+    lines.append("    %if %length(&user_override) > 0 %then")
+    lines.append("        %let _user_args = , user=&&&user_override._usr, pwd=&&&user_override._pwd;")
+    lines.append("    %else")
+    lines.append("        %let _user_args = ;")
+    lines.append("")
+    lines.append("    %start_timer();")
+    lines.append('    %pull_data(%superq(_sql), &_sas_tbl, server=&conn_macro &_user_args);')
+    lines.append("")
+    lines.append('    proc export data=&_sas_tbl outfile="&out_dir./&qname._row.csv" dbms=csv replace; run;')
+    lines.append("    proc delete data=&_sas_tbl; run;")
+    lines.append("    %log_time(table=&qname, step=row, outpath=&out_dir.);")
+    lines.append("%mend export_row_one;")
+    lines.append("")
 
-    proc delete data={sas_table}; run;
-%mend get_rowcounts_{name};
-"""
+    # Call execute loop
+    lines.append("data _null_;")
+    lines.append("    set table_date_map;")
+    lines.append("    length _cmd $2000;")
+    lines.append("    _cmd = cats('%export_row_one(table=', table,")
+    lines.append("               ', qname=', qname,")
+    lines.append("               ', date_expr=', date_expr,")
+    lines.append("               ', conn_macro=', conn_macro,")
+    lines.append("               ', user_override=', user_override,")
+    lines.append("               ', where_clause=', where_clause, ')');")
+    lines.append("    call execute(_cmd);")
+    lines.append("run;")
+    lines.append("")
+    lines.append("proc delete data=table_date_map; run;")
+
+    return '\n'.join(lines)
 
 
-def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
-    """Generate SAS macro for column statistics extraction using pull_data.
+def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
+    """Generate SAS macro for column statistics using local compute.
 
-    OPTIMIZED VERSION WITH BATCHING:
-    - For tables with ≤ MAX_COLS_PER_BATCH columns: Single table scan (fastest)
-    - For tables with > MAX_COLS_PER_BATCH columns: Batched scans (safe)
-
-    MAX_COLS_PER_BATCH is read from environment (default: 40).
-
-    Performance improvement: 10-40× faster than per-column approach.
+    Pulls raw data per vintage bucket, computes stats via PROC FREQ/MEANS,
+    saves computed stats to cache library. On re-run, skips vintages whose
+    cached stats already exist (unless SAS_COL_REDO=1).
     """
     table = tbl_cfg['table']
     date_col = tbl_cfg['date_col']
@@ -384,30 +423,14 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
     columns = tbl_cfg.get('columns', {})
     transform = tbl_cfg.get('date_transform', '')
     vintage = tbl_cfg.get('vintage', 'day')
-    vintage_transform = tbl_cfg.get('vintage_transform', None)
-
-    # Read configuration from environment
-    MAX_COLS_PER_BATCH = int(os.environ.get('MAX_COLS_PER_BATCH', '40'))
-
-    # Oracle PARALLEL hint (optional performance optimization)
-    parallel_degree = os.environ.get('ORACLE_PARALLEL', '')
-    parallel_hint = f"/*+ PARALLEL({parallel_degree}) */ " if parallel_degree else ""
-
-    date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
-    date_expr = _vintage_date_expr(date_expr, vintage, vintage_transform)
 
     lines = []
     lines.append(f"%macro get_colstats_{name}();")
 
     if not columns:
-        lines.append(f"    %put WARNING: No columns specified for {name}. Use 'dtrack load-columns --conn-macro' to discover columns.;")
+        lines.append(f"    %put WARNING: No columns specified for {name}.;")
         lines.append(f"%mend get_colstats_{name};")
         return '\n'.join(lines)
-
-    # SAS alias: truncate column name so alias fits 32-byte limit
-    def _sas_alias(col, suffix):
-        max_len = 32 - len(suffix)
-        return f"{col[:max_len]}{suffix}"
 
     # Filter out date column
     col_list = [(col, dtype) for col, dtype in columns.items()
@@ -419,318 +442,264 @@ def _gen_sas_col(tbl_cfg, sas_lib='WORK', out_dir='.'):
         lines.append(f"%mend get_colstats_{name};")
         return '\n'.join(lines)
 
-    # Separate numeric and categorical columns
     num_cols = [(col, dtype) for col, dtype in col_list if is_numeric_type(dtype, is_oracle=True)]
     cat_cols = [(col, dtype) for col, dtype in col_list if not is_numeric_type(dtype, is_oracle=True)]
 
-    q = "'"  # Single quote (safe inside %nrstr)
-    where_fragment = f"AND ({where})" if where else ""
+    # Get matching dates and bucket them by vintage
+    vintage_buckets = {}
+    if db_path:
+        where_fragment, effective_vintage = _build_col_where(tbl_cfg, db_path, vintage)
+        if where_fragment:
+            from .db import get_row_comparison, list_table_pairs
+            pairs = list_table_pairs(db_path)
+            pair_name = None
+            for pair in pairs:
+                if qname in (pair['table_left'], pair['table_right']):
+                    pair_name = pair['pair_name']
+                    break
+            if pair_name:
+                comp = get_row_comparison(db_path, pair_name)
+                if comp and comp.get('matching_dates'):
+                    from .date_utils import bucket_date
+                    matching_dates = comp['matching_dates']
+                    for dt in matching_dates:
+                        bucket = bucket_date(dt, effective_vintage)
+                        if bucket not in vintage_buckets:
+                            vintage_buckets[bucket] = []
+                        vintage_buckets[bucket].append(dt)
 
-    # Decide: batched or single-scan?
-    use_batching = n_cols > MAX_COLS_PER_BATCH
+    date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
+    where_fragment_str = f"AND ({where})" if where else ""
+    _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
 
-    if use_batching:
-        # BATCHED APPROACH for large tables
-        n_batches = (n_cols + MAX_COLS_PER_BATCH - 1) // MAX_COLS_PER_BATCH
+    # REDO flag from environment (default 0 = use cache)
+    redo = int(os.environ.get('SAS_COL_REDO', '0'))
 
-        lines.append(f"    %put NOTE: ===== BATCHED EXTRACTION ({n_batches} batches) ====;")
-        lines.append(f"    %put NOTE: Table: {name} ({table});")
-        lines.append(f"    %put NOTE: Columns: {len(num_cols)} numeric + {len(cat_cols)} categorical = {n_cols} total;")
-        lines.append(f"    %put NOTE: Batch size: {MAX_COLS_PER_BATCH} columns/batch to avoid SQL length limits;")
-        lines.append("")
+    lines.append(f"    %put NOTE: ===== LOCAL COMPUTE EXTRACTION ====;")
+    lines.append(f"    %put NOTE: Table: {name} ({table});")
+    lines.append(f"    %put NOTE: Columns: {len(num_cols)} numeric + {len(cat_cols)} categorical = {n_cols} total;")
+    lines.append(f"    %put NOTE: REDO={redo} (1=force re-pull, 0=use cached stats);")
 
-        # Split columns into batches
-        col_batches = [col_list[i:i+MAX_COLS_PER_BATCH] for i in range(0, n_cols, MAX_COLS_PER_BATCH)]
+    def _emit_vintage_compute(lines, v_idx, raw_ds, suffix):
+        """Emit PROC FREQ/MEANS compute block for one vintage. Stats go to cache._cs_{name}_v{idx}."""
+        cache_ds = f"cache._cs_{name}_v{v_idx}"
 
-        for batch_idx, batch_cols in enumerate(col_batches, 1):
-            batch_num_cols = [c for c in batch_cols if is_numeric_type(c[1], is_oracle=True)]
-            batch_cat_cols = [c for c in batch_cols if not is_numeric_type(c[1], is_oracle=True)]
-
-            first_col = batch_cols[0][0]
-            last_col = batch_cols[-1][0]
-
-            lines.append(f"    /* ===== Batch {batch_idx}/{n_batches}: {first_col} to {last_col} ({len(batch_cols)} columns) ===== */")
-            lines.append("")
-
-            # Build aggregation for this batch
-            agg_parts = [f"{date_expr} AS dt", "COUNT(*) AS n_total"]
-
-            for col, dtype in batch_num_cols:
-                col_safe = col.replace("'", "''")
-                agg_parts.append(f"COUNT({col}) AS {_sas_alias(col, '_not_null')}")
-                agg_parts.append(f"COUNT(DISTINCT {col}) AS {_sas_alias(col, '_n_unique')}")
-                agg_parts.append(f"AVG({col}) AS {_sas_alias(col, '_mean')}")
-                agg_parts.append(f"STDDEV({col}) AS {_sas_alias(col, '_std')}")
-                agg_parts.append(f"MIN({col}) AS {_sas_alias(col, '_min')}")
-                agg_parts.append(f"MAX({col}) AS {_sas_alias(col, '_max')}")
-
-            for col, dtype in batch_cat_cols:
-                col_safe = col.replace("'", "''")
-                agg_parts.append(f"SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) AS {_sas_alias(col, '_n_missing')}")
-                agg_parts.append(f"COUNT(DISTINCT {col}) AS {_sas_alias(col, '_n_unique')}")
-                agg_parts.append(f"MIN({col}) AS {_sas_alias(col, '_min')}")
-                agg_parts.append(f"MAX({col}) AS {_sas_alias(col, '_max')}")
-
-            agg_select = ",\n        ".join(agg_parts)
-            wide_sql = f"""SELECT {parallel_hint}
-        {agg_select}
-    FROM {table}
-    WHERE 1=1 {where_fragment}
-    GROUP BY {date_expr}"""
-
-            # Store SQL in macro variable (no fragile %str nesting!)
-            lines.append(f"    %let _sql_b{batch_idx} = %nrstr({wide_sql});")
-            _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
-            lines.append(f"    %pull_data(&_sql_b{batch_idx}, _wide_{name}_b{batch_idx}, server={conn_macro}{_ua});")
-            lines.append("")
-
-            # Reshape this batch
-            lines.append(f"    data _colstats_{name}_b{batch_idx};")
-            lines.append(f"        set _wide_{name}_b{batch_idx};")
-            lines.append(f"        length column_name $32 col_type $12 min_val $100 max_val $100;")
-            lines.append("")
-
-            for col, dtype in batch_num_cols:
-                col_safe = col.replace("'", "''")
-                lines.append(f"        column_name = '{col_safe}';")
-                lines.append(f"        col_type = 'numeric';")
-                lines.append(f"        n_missing = n_total - {_sas_alias(col, '_not_null')};")
-                lines.append(f"        n_unique = {_sas_alias(col, '_n_unique')};")
-                lines.append(f"        mean = {_sas_alias(col, '_mean')};")
-                lines.append(f"        std = {_sas_alias(col, '_std')};")
-                lines.append(f"        min_val = strip(put({_sas_alias(col, '_min')}, best32.));")
-                lines.append(f"        max_val = strip(put({_sas_alias(col, '_max')}, best32.));")
-                lines.append(f"        top_10 = '';")
-                lines.append(f"        output;")
-                lines.append("")
-
-            for col, dtype in batch_cat_cols:
-                col_safe = col.replace("'", "''")
-                lines.append(f"        column_name = '{col_safe}';")
-                lines.append(f"        col_type = 'categorical';")
-                lines.append(f"        n_missing = {_sas_alias(col, '_n_missing')};")
-                lines.append(f"        n_unique = {_sas_alias(col, '_n_unique')};")
-                lines.append(f"        mean = .;")
-                lines.append(f"        std = .;")
-                lines.append(f"        min_val = {_sas_alias(col, '_min')};")
-                lines.append(f"        max_val = {_sas_alias(col, '_max')};")
-                lines.append(f"        top_10 = '';")
-                lines.append(f"        output;")
-                lines.append("")
-
+        # Numeric columns: PROC MEANS
+        for col, dtype in num_cols:
+            col_safe = col.replace("'", "''")
+            lines.append(f"    proc means data={raw_ds} noprint;")
+            lines.append(f"        class dt;")
+            lines.append(f"        var {col};")
+            lines.append(f"        output out=_means_{col}{suffix}(where=(_type_=1))")
+            lines.append(f"            n={col}_n nmiss={col}_nmiss mean={col}_mean")
+            lines.append(f"            std={col}_std min={col}_min max={col}_max;")
+            lines.append(f"    run;")
+            lines.append(f"    proc sql noprint;")
+            lines.append(f"        create table _nuniq_{col}{suffix} as")
+            lines.append(f"        select dt, count(distinct {col}) as {col}_n_unique")
+            lines.append(f"        from {raw_ds} group by dt;")
+            lines.append(f"    quit;")
+            lines.append(f"    data _sn_{col}{suffix};")
+            lines.append(f"        merge _means_{col}{suffix} _nuniq_{col}{suffix};")
+            lines.append(f"        by dt;")
+            lines.append(f"        length column_name $32 col_type $12 min_val $100 max_val $100 top_10 $2000;")
+            lines.append(f"        column_name = '{col_safe}'; col_type = 'numeric';")
+            lines.append(f"        n_total = {col}_n + {col}_nmiss; n_missing = {col}_nmiss;")
+            lines.append(f"        n_unique = {col}_n_unique; mean = {col}_mean; std = {col}_std;")
+            lines.append(f"        min_val = strip(put({col}_min, best32.));")
+            lines.append(f"        max_val = strip(put({col}_max, best32.)); top_10 = '';")
             lines.append(f"        keep dt column_name col_type n_total n_missing n_unique mean std min_val max_val top_10;")
             lines.append(f"    run;")
             lines.append("")
 
-        # Stack all batches
-        lines.append(f"    /* Stack all {n_batches} batches */")
-        lines.append(f"    data _colstats_{name};")
-        lines.append(f"        set")
-        for i in range(1, n_batches + 1):
-            lines.append(f"            _colstats_{name}_b{i}")
-        lines.append(f"        ;")
-        lines.append(f"    run;")
-        lines.append("")
-
-        # Cleanup batch datasets
-        cleanup_batches = []
-        for i in range(1, n_batches + 1):
-            cleanup_batches.extend([f"_wide_{name}_b{i}", f"_colstats_{name}_b{i}"])
-
-    else:
-        # SINGLE-SCAN APPROACH for small tables (current optimized version)
-        lines.append(f"    %put NOTE: ===== OPTIMIZED EXTRACTION (single scan) ====;")
-        lines.append(f"    %put NOTE: Table: {name} ({table});")
-        lines.append(f"    %put NOTE: Columns: {len(num_cols)} numeric + {len(cat_cols)} categorical = {n_cols} total;")
-        lines.append(f"    %put NOTE: Method: Single table scan (not {n_cols} separate scans);")
-        lines.append("")
-
-        lines.append(f"    /* ===== Single table scan for all {n_cols} columns ===== */")
-        lines.append("")
-
-        agg_parts = [f"{date_expr} AS dt", "COUNT(*) AS n_total"]
-
-        for col, dtype in num_cols:
-            col_safe = col.replace("'", "''")
-            agg_parts.append(f"COUNT({col}) AS {_sas_alias(col, '_not_null')}")
-            agg_parts.append(f"COUNT(DISTINCT {col}) AS {_sas_alias(col, '_n_unique')}")
-            agg_parts.append(f"AVG({col}) AS {_sas_alias(col, '_mean')}")
-            agg_parts.append(f"STDDEV({col}) AS {_sas_alias(col, '_std')}")
-            agg_parts.append(f"MIN({col}) AS {_sas_alias(col, '_min')}")
-            agg_parts.append(f"MAX({col}) AS {_sas_alias(col, '_max')}")
-
+        # Categorical columns: PROC FREQ → stats + top-10
         for col, dtype in cat_cols:
             col_safe = col.replace("'", "''")
-            agg_parts.append(f"SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) AS {_sas_alias(col, '_n_missing')}")
-            agg_parts.append(f"COUNT(DISTINCT {col}) AS {_sas_alias(col, '_n_unique')}")
-            agg_parts.append(f"MIN({col}) AS {_sas_alias(col, '_min')}")
-            agg_parts.append(f"MAX({col}) AS {_sas_alias(col, '_max')}")
-
-        agg_select = ",\n        ".join(agg_parts)
-        wide_sql = f"""SELECT {parallel_hint}
-        {agg_select}
-    FROM {table}
-    WHERE 1=1 {where_fragment}
-    GROUP BY {date_expr}"""
-
-        # Store SQL in macro variable (no fragile %str nesting!)
-        lines.append(f"    %let _sql_main = %nrstr({wide_sql});")
-        _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
-        lines.append(f"    %pull_data(&_sql_main, _wide_{name}, server={conn_macro}{_ua});")
-        lines.append("")
-
-        # Reshape from wide to long
-        lines.append(f"    /* Reshape from wide to long format */")
-        lines.append(f"    data _colstats_{name};")
-        lines.append(f"        set _wide_{name};")
-        lines.append(f"        length column_name $32 col_type $12 min_val $100 max_val $100;")
-        lines.append("")
-
-        for col, dtype in num_cols:
-            col_safe = col.replace("'", "''")
-            lines.append(f"        column_name = '{col_safe}';")
-            lines.append(f"        col_type = 'numeric';")
-            lines.append(f"        n_missing = n_total - {_sas_alias(col, '_not_null')};")
-            lines.append(f"        n_unique = {_sas_alias(col, '_n_unique')};")
-            lines.append(f"        mean = {_sas_alias(col, '_mean')};")
-            lines.append(f"        std = {_sas_alias(col, '_std')};")
-            lines.append(f"        min_val = strip(put({_sas_alias(col, '_min')}, best32.));")
-            lines.append(f"        max_val = strip(put({_sas_alias(col, '_max')}, best32.));")
-            lines.append(f"        top_10 = '';")
-            lines.append(f"        output;")
-            lines.append("")
-
-        for col, dtype in cat_cols:
-            col_safe = col.replace("'", "''")
-            lines.append(f"        column_name = '{col_safe}';")
-            lines.append(f"        col_type = 'categorical';")
-            lines.append(f"        n_missing = {_sas_alias(col, '_n_missing')};")
-            lines.append(f"        n_unique = {_sas_alias(col, '_n_unique')};")
-            lines.append(f"        mean = .;")
-            lines.append(f"        std = .;")
-            lines.append(f"        min_val = {_sas_alias(col, '_min')};")
-            lines.append(f"        max_val = {_sas_alias(col, '_max')};")
-            lines.append(f"        top_10 = '';")
-            lines.append(f"        output;")
-            lines.append("")
-
-        lines.append(f"        keep dt column_name col_type n_total n_missing n_unique mean std min_val max_val top_10;")
-        lines.append(f"    run;")
-        lines.append("")
-
-        cleanup_batches = []
-
-    # Top-10 for categorical columns (batched if needed)
-    if cat_cols:
-        if len(cat_cols) > MAX_COLS_PER_BATCH:
-            # Batch categorical top-10 queries too
-            cat_batches = [cat_cols[i:i+MAX_COLS_PER_BATCH] for i in range(0, len(cat_cols), MAX_COLS_PER_BATCH)]
-            n_cat_batches = len(cat_batches)
-
-            lines.append(f"    /* ===== Top-10 extraction ({n_cat_batches} batches for {len(cat_cols)} categorical columns) ===== */")
-            lines.append("")
-
-            for cat_batch_idx, cat_batch in enumerate(cat_batches, 1):
-                union_parts = []
-                for col, dtype in cat_batch:
-                    col_safe = col.replace("'", "''")
-                    topn_part = f"""SELECT {q}{col_safe}{q} AS column_name, dt, val, cnt FROM (
-        SELECT {date_expr} AS dt, CAST({col} AS VARCHAR2(200)) AS val, COUNT(*) AS cnt,
-               ROW_NUMBER() OVER (PARTITION BY {date_expr} ORDER BY COUNT(*) DESC) AS rn
-        FROM {table}
-        WHERE {col} IS NOT NULL {where_fragment}
-        GROUP BY {date_expr}, {col}
-    ) WHERE rn <= 10"""
-                    union_parts.append(topn_part)
-
-                combined_topn_sql = "\n    UNION ALL\n    ".join(union_parts)
-                lines.append(f"    %let _sql_top{cat_batch_idx} = %nrstr({combined_topn_sql});")
-                _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
-                lines.append(f"    %pull_data(&_sql_top{cat_batch_idx}, _topn_all_{name}_c{cat_batch_idx}, server={conn_macro}{_ua});")
-
-            # Stack cat batches
-            lines.append(f"    data _topn_all_{name};")
-            lines.append(f"        set")
-            for i in range(1, n_cat_batches + 1):
-                lines.append(f"            _topn_all_{name}_c{i}")
-            lines.append(f"        ;")
+            lines.append(f"    proc freq data={raw_ds} noprint;")
+            lines.append(f"        tables dt * {col} / out=_freq_{col}{suffix} sparse;")
+            lines.append(f"    run;")
+            lines.append(f"    proc sql noprint;")
+            lines.append(f"        create table _sc_{col}{suffix} as")
+            lines.append(f"        select dt, '{col_safe}' as column_name length=32,")
+            lines.append(f"            'categorical' as col_type length=12,")
+            lines.append(f"            sum(count) as n_total,")
+            lines.append(f"            sum(case when {col} is missing then count else 0 end) as n_missing,")
+            lines.append(f"            count(distinct case when {col} is not missing then {col} end) as n_unique,")
+            lines.append(f"            . as mean, . as std,")
+            lines.append(f"            '' as min_val length=100, '' as max_val length=100,")
+            lines.append(f"            '' as top_10 length=2000")
+            lines.append(f"        from _freq_{col}{suffix} group by dt;")
+            lines.append(f"    quit;")
+            # Top-10
+            lines.append(f"    proc sort data=_freq_{col}{suffix}; by dt descending count; run;")
+            lines.append(f"    data _t10_{col}{suffix}(keep=dt top_10);")
+            lines.append(f"        length top_10 $2000 _entry $200;")
+            lines.append(f"        set _freq_{col}{suffix}; by dt;")
+            lines.append(f"        retain top_10 _rn;")
+            lines.append(f"        if first.dt then do; top_10 = ''; _rn = 0; end;")
+            lines.append(f"        if {col} is not missing and _rn < 10 then do;")
+            lines.append(f"            _rn + 1;")
+            lines.append(f"            _entry = catx('', strip(vvalue({col})), '(', strip(put(count, best.)), ')');")
+            lines.append(f"            if top_10 = '' then top_10 = _entry;")
+            lines.append(f"            else top_10 = catx('; ', top_10, _entry);")
+            lines.append(f"        end;")
+            lines.append(f"        if last.dt then output;")
+            lines.append(f"    run;")
+            # Merge top_10
+            lines.append(f"    proc sort data=_sc_{col}{suffix}; by dt; run;")
+            lines.append(f"    proc sort data=_t10_{col}{suffix}; by dt; run;")
+            lines.append(f"    data _sc_{col}{suffix};")
+            lines.append(f"        merge _sc_{col}{suffix}(in=a) _t10_{col}{suffix}(in=b rename=(top_10=_top10));")
+            lines.append(f"        by dt; if a; if b then top_10 = _top10; drop _top10;")
+            lines.append(f"    run;")
+            # Min/max
+            lines.append(f"    proc sql noprint;")
+            lines.append(f"        create table _mm_{col}{suffix} as")
+            lines.append(f"        select dt,")
+            lines.append(f"            min(case when {col} is not missing then {col} end) as min_val length=100,")
+            lines.append(f"            max(case when {col} is not missing then {col} end) as max_val length=100")
+            lines.append(f"        from {raw_ds} group by dt;")
+            lines.append(f"    quit;")
+            lines.append(f"    data _sc_{col}{suffix};")
+            lines.append(f"        merge _sc_{col}{suffix}(in=a drop=min_val max_val) _mm_{col}{suffix}(in=b);")
+            lines.append(f"        by dt; if a;")
             lines.append(f"    run;")
             lines.append("")
 
-            for i in range(1, n_cat_batches + 1):
-                cleanup_batches.append(f"_topn_all_{name}_c{i}")
-
-        else:
-            # Single top-10 query (current approach)
-            lines.append(f"    /* ===== Single top-10 query for all {len(cat_cols)} categorical columns ===== */")
+        # Stack all column stats for this vintage → save to cache
+        stat_datasets = [f"_sn_{col}{suffix}" for col, _ in num_cols] + \
+                         [f"_sc_{col}{suffix}" for col, _ in cat_cols]
+        if stat_datasets:
+            lines.append(f"    data {cache_ds};")
+            lines.append(f"        set {' '.join(stat_datasets)};")
+            lines.append(f"    run;")
             lines.append("")
 
-            union_parts = []
-            for col, dtype in cat_cols:
-                col_safe = col.replace("'", "''")
-                topn_part = f"""SELECT {q}{col_safe}{q} AS column_name, dt, val, cnt FROM (
-        SELECT {date_expr} AS dt, CAST({col} AS VARCHAR2(200)) AS val, COUNT(*) AS cnt,
-               ROW_NUMBER() OVER (PARTITION BY {date_expr} ORDER BY COUNT(*) DESC) AS rn
-        FROM {table}
-        WHERE {col} IS NOT NULL {where_fragment}
-        GROUP BY {date_expr}, {col}
-    ) WHERE rn <= 10"""
-                union_parts.append(topn_part)
-
-            combined_topn_sql = "\n    UNION ALL\n    ".join(union_parts)
-        lines.append(f"    %let _sql_topn = %nrstr({combined_topn_sql});")
-        _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
-        lines.append(f"    %pull_data(&_sql_topn, _topn_all_{name}, server={conn_macro}{_ua});")
+        # Cleanup raw data + all intermediates from WORK
+        lines.append(f"    proc delete data={raw_ds}; run;")
+        cleanup = [f"_means_{col}{suffix}" for col, _ in num_cols] + \
+                  [f"_nuniq_{col}{suffix}" for col, _ in num_cols] + \
+                  [f"_sn_{col}{suffix}" for col, _ in num_cols] + \
+                  [f"_freq_{col}{suffix}" for col, _ in cat_cols] + \
+                  [f"_sc_{col}{suffix}" for col, _ in cat_cols] + \
+                  [f"_t10_{col}{suffix}" for col, _ in cat_cols] + \
+                  [f"_mm_{col}{suffix}" for col, _ in cat_cols]
+        if cleanup:
+            lines.append(f"    proc datasets lib=work nolist; delete {' '.join(cleanup)}; quit;")
         lines.append("")
 
-        # Aggregate top-10 (same for both batched and non-batched)
-        lines.append(f"    proc sort data=_topn_all_{name}; by column_name dt descending cnt; run;")
-        lines.append("")
-        lines.append(f"    data _topn_agg_{name}(keep=column_name dt top_10);")
-        lines.append(f"        length top_10 $2000;")
-        lines.append(f"        set _topn_all_{name};")
-        lines.append(f"        by column_name dt;")
-        lines.append(f"        retain top_10;")
-        lines.append(f"        if first.dt then top_10 = catx('', strip(val), '(', strip(put(cnt, best.)), ')');")
-        lines.append(f"        else top_10 = catx('; ', top_10, catx('', strip(val), '(', strip(put(cnt, best.)), ')'));")
-        lines.append(f"        if last.dt then output;")
-        lines.append(f"    run;")
+    if vintage_buckets:
+        n_vintages = len(vintage_buckets)
+        lines.append(f"    %put NOTE: Vintages: {n_vintages} buckets (vintage={vintage});")
         lines.append("")
 
-        # Merge top_10
-        lines.append(f"    proc sort data=_colstats_{name}; by column_name dt; run;")
-        lines.append(f"    proc sort data=_topn_agg_{name}; by column_name dt; run;")
-        lines.append("")
+        # Look up date column type for IN clause formatting
+        from .db import get_column_meta
+        col_meta = get_column_meta(db_path, qname) if db_path else []
+        date_dtype = None
+        for cm in col_meta:
+            if cm['column_name'].upper() == date_col.upper():
+                date_dtype = (cm.get('data_type') or '').upper()
+                break
+
+        for v_idx, (bucket_key, dates) in enumerate(sorted(vintage_buckets.items()), 1):
+            cache_ds = f"cache._cs_{name}_v{v_idx}"
+            suffix = f"_v{v_idx}"
+
+            lines.append(f"    /* ===== Vintage {v_idx}/{n_vintages}: {bucket_key} ({len(dates)} dates) ===== */")
+
+            # Skip if cached stats exist and REDO=0
+            if not redo:
+                lines.append(f"    %if %sysfunc(exist({cache_ds})) %then %do;")
+                lines.append(f"        %put NOTE: Cached stats found: {cache_ds} — skipping;")
+                lines.append(f"    %end;")
+                lines.append(f"    %else %do;")
+
+            # Build IN clause for this vintage's dates
+            if date_dtype and date_dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
+                date_list = ", ".join(str(d) for d in dates)
+                date_where = f"{date_col} IN ({date_list})"
+            elif date_dtype and ('TIMESTAMP' in date_dtype or 'DATE' in date_dtype):
+                date_list = ", ".join(f"DATE '{d}'" for d in dates)
+                date_where = f"TRUNC({date_col}) IN ({date_list})"
+            elif date_dtype and date_dtype.startswith('CHAR'):
+                date_list = ", ".join(f"'{d}'" for d in dates)
+                date_where = f"TRIM({date_col}) IN ({date_list})"
+            else:
+                date_list = ", ".join(f"'{d}'" for d in dates)
+                date_where = f"{date_col} IN ({date_list})"
+
+            # Pull raw data into WORK (temporary)
+            col_select = ", ".join([date_expr + " AS dt"] + [col for col, _ in col_list])
+            pull_sql = f"SELECT {col_select} FROM {table} WHERE {date_where} {where_fragment_str}"
+            raw_ds = f"_raw_{name}{suffix}"
+
+            lines.append(f"    %let _sql{suffix} = %nrstr({pull_sql});")
+            lines.append(f"    %pull_data(&_sql{suffix}, {raw_ds}, server={conn_macro}{_ua});")
+            lines.append("")
+
+            # Compute stats → save to cache
+            _emit_vintage_compute(lines, v_idx, raw_ds, suffix)
+
+            if not redo:
+                lines.append(f"    %end;")
+            lines.append("")
+
+        # Stack all cached vintage stats
+        cache_sets = " ".join(f"cache._cs_{name}_v{i}" for i in range(1, n_vintages + 1))
+        lines.append(f"    /* Stack all {n_vintages} cached vintage stats */")
         lines.append(f"    data _colstats_{name};")
-        lines.append(f"        merge _colstats_{name}(in=a) _topn_agg_{name}(in=b);")
-        lines.append(f"        by column_name dt;")
-        lines.append(f"        if a;")
-        lines.append(f"        if not b then top_10 = '';")
+        lines.append(f"        set {cache_sets};")
         lines.append(f"    run;")
         lines.append("")
 
-    # Export
+    else:
+        # No vintage buckets — pull everything, compute, save to cache
+        cache_ds = f"cache._cs_{name}"
+        lines.append(f"    %put NOTE: No vintage buckets - pulling full table;")
+        lines.append("")
+
+        if not redo:
+            lines.append(f"    %if %sysfunc(exist({cache_ds})) %then %do;")
+            lines.append(f"        %put NOTE: Cached stats found: {cache_ds} — skipping pull;")
+            lines.append(f"        data _colstats_{name}; set {cache_ds}; run;")
+            lines.append(f"    %end;")
+            lines.append(f"    %else %do;")
+
+        col_select = ", ".join([date_expr + " AS dt"] + [col for col, _ in col_list])
+        if where:
+            pull_sql = f"SELECT {col_select} FROM {table} WHERE {where}"
+        else:
+            pull_sql = f"SELECT {col_select} FROM {table}"
+
+        raw_ds = f"_raw_{name}"
+        lines.append(f"    %let _sql_full = %nrstr({pull_sql});")
+        lines.append(f"    %pull_data(&_sql_full, {raw_ds}, server={conn_macro}{_ua});")
+        lines.append("")
+
+        # Compute stats → save to cache (v_idx=0, suffix='')
+        # We'll use a special index for non-vintage mode
+        _emit_vintage_compute(lines, 0, raw_ds, '')
+
+        # Rename cache._cs_{name}_v0 to cache._cs_{name}
+        lines.append(f"    data {cache_ds}; set cache._cs_{name}_v0; run;")
+        lines.append(f"    proc delete data=cache._cs_{name}_v0; run;")
+        lines.append(f"    data _colstats_{name}; set {cache_ds}; run;")
+        lines.append("")
+
+        if not redo:
+            lines.append(f"    %end;")
+        lines.append("")
+
+    # Export final
     lines.append(f"    proc export data=_colstats_{name}")
     lines.append(f'        outfile="&out_dir./{qname}_col.csv"')
     lines.append(f"        dbms=csv replace;")
     lines.append(f"    run;")
     lines.append("")
-
-    # Cleanup
-    lines.append(f"    proc datasets lib=work nolist;")
-    cleanup_datasets = [f"_colstats_{name}"]
-    if not use_batching:
-        cleanup_datasets.append(f"_wide_{name}")
-    if cat_cols:
-        cleanup_datasets.extend([f"_topn_all_{name}", f"_topn_agg_{name}"])
-    cleanup_datasets.extend(cleanup_batches)
-    lines.append(f"        delete {' '.join(cleanup_datasets)};")
-    lines.append(f"    quit;")
-    lines.append("")
-
+    lines.append(f"    proc delete data=_colstats_{name}; run;")
     lines.append(f"    %put NOTE: ===== EXTRACTION COMPLETE: {name} ====;")
     lines.append("")
-
     lines.append(f"%mend get_colstats_{name};")
     return '\n'.join(lines)
 
@@ -836,14 +805,14 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     # Inject date filtering from config where_map for col extraction
     if "col" in types and "pairs" in config:
         for tbl in pcds_tables:
-            tbl_name = tbl.get('name', '')
+            tbl_table = tbl.get('table', '')
             for pair_name in tbl.get('_pairs', []):
                 pair_cfg = config['pairs'].get(pair_name, {})
                 where_map = pair_cfg.get('where_map', {})
                 if not where_map:
                     continue
                 # Determine if this table is left or right in the pair
-                if pair_cfg.get('left', {}).get('name') == tbl_name:
+                if pair_cfg.get('left', {}).get('table') == tbl_table:
                     side = 'left'
                 else:
                     side = 'right'
@@ -860,29 +829,34 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 
     # Generate table macros
     macro_parts = []
-    for tbl in pcds_tables:
-        name = tbl['name']
-        macro_parts.append(f"/* --- {name}: {tbl['table']} --- */")
-        if "row" in types:
-            macro_parts.append(_gen_sas_row(tbl, sas_lib, out_dir))
-        if "col" in types:
-            macro_parts.append(_gen_sas_col(tbl, sas_lib, out_dir))
 
-    # Generate runner section (runner calls the macros)
+    if "row" in types:
+        # Data-driven row extraction (single block for all tables)
+        macro_parts.append("/* --- Row extraction (data-driven) --- */")
+        macro_parts.append(_gen_sas_row_datadriven(pcds_tables, sas_lib, out_dir))
+
+    if "col" in types:
+        for tbl in pcds_tables:
+            name = tbl['name']
+            macro_parts.append(f"/* --- {name}: {tbl['table']} (col) --- */")
+            macro_parts.append(_gen_sas_col_local(tbl, db_path, sas_lib, out_dir))
+
+    # Generate runner section
     runner_parts = []
-    for tbl in pcds_tables:
-        name = tbl['name']
-        if "row" in types:
-            runner_parts.append(f"%start_timer();")
-            runner_parts.append(f"%get_rowcounts_{name}();")
-            runner_parts.append(f"%log_time(table={name}, step=row, outpath=&out_dir.);")
-            runner_parts.append("")
-        if "col" in types:
+
+    # Row runner: data-driven macro handles its own timing via call execute
+    # Just add email notification at the end
+    if "row" in types:
+        runner_parts.append("/* Row extraction driven by table_date_map (macros above) */")
+        runner_parts.append("")
+
+    if "col" in types:
+        for tbl in pcds_tables:
+            name = tbl['name']
             runner_parts.append(f"%start_timer();")
             runner_parts.append(f"%get_colstats_{name}();")
             runner_parts.append(f"%log_time(table={name}, step=col, outpath=&out_dir.);")
             qname = _qualified_name(tbl)
-            # Email after each col table
             runner_parts.append(
                 f'/* %send_email(subject=dtrack col done: {name}, '
                 f'body=Table {name} col extraction complete. '
@@ -890,7 +864,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             )
             runner_parts.append("")
 
-    # Email after all row extractions
+    # Email after all extractions
     if "row" in types:
         runner_parts.append(f"%let _job_end = %sysfunc(datetime());")
         runner_parts.append(f"%let _job_elapsed = %sysevalf(&_job_end - &_job_start);")
@@ -931,6 +905,9 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         cred_lines.append(f"%let {user_key}_usr = {env_vars[usr_var]};")
         cred_lines.append(f"%let {user_key}_pwd = {env_vars[pwd_var]};")
 
+    # SAS cache directory for column extraction staging
+    sas_cache_dir = os.environ.get('SAS_CACHE_DIR', sas_lib)
+
     # Build template vars
     template_vars = {
         'pcds_usr': env_vars['PCDS_USR'],
@@ -938,6 +915,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         'email_to': env_vars['EMAIL_TO'],
         'out_dir': out_dir,
         'sas_lib': sas_lib,
+        'sas_cache_dir': sas_cache_dir,
         'conn_macros': '\n'.join(conn_macro_lines),
         'table_macros': '\n'.join(macro_parts),
         'runner': runner_content,
@@ -1098,8 +1076,12 @@ def _extract_row_athena(cursor, tbl_cfg, outdir):
     return csv_path, elapsed, start_timestamp, end_timestamp
 
 
-def _extract_col_single(cursor, tbl_cfg, col, dtype, full_table):
-    """Extract stats for a single column. Returns list of stat dicts."""
+def _extract_col_athena(cursor, tbl_cfg, col, dtype, full_table):
+    """Extract stats for a single column from Athena.
+
+    Numeric columns: direct aggregation (no top-10).
+    Categorical columns: single frequency query, then derive all stats in Python.
+    """
     date_col = tbl_cfg['date_col']
     where = tbl_cfg.get('where', '')
     vintage = tbl_cfg.get('vintage', 'day')
@@ -1107,33 +1089,77 @@ def _extract_col_single(cursor, tbl_cfg, col, dtype, full_table):
     numeric = is_numeric_type(dtype, is_oracle=False)
 
     date_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform)
+    where_clause = f"AND {where}" if where else ""
 
     if numeric:
+        # Direct aggregation for numeric columns (unchanged approach)
         sql = build_continuous_sql_athena(full_table, col, date_expr, where)
-    else:
-        sql = build_categorical_sql_athena(full_table, col, date_expr, where)
+        cursor.execute(sql)
+        results = []
+        col_descriptions = [desc[0] for desc in cursor.description]
+        for row in cursor.fetchall():
+            row_dict = dict(zip(col_descriptions, row))
+            parsed = parse_stats_row(row_dict)
+            results.append(parsed)
+        return results
 
-    cursor.execute(sql)
-    results = []
-    col_descriptions = [desc[0] for desc in cursor.description]
+    # Categorical: single frequency query
+    freq_sql = f"""
+SELECT {date_expr} AS dt, CAST({col} AS VARCHAR) AS col_value, COUNT(*) AS freq
+FROM {full_table}
+WHERE 1=1 {where_clause}
+GROUP BY {date_expr}, {col}"""
+
+    cursor.execute(freq_sql)
+
+    # Collect frequency data grouped by dt
+    from collections import defaultdict
+    freq_by_dt = defaultdict(list)
     for row in cursor.fetchall():
-        row_dict = dict(zip(col_descriptions, row))
-        parsed = parse_stats_row(row_dict)
-        results.append(parsed)
+        dt_key = str(row[0])
+        col_value = row[1]  # may be None
+        freq = int(row[2])
+        freq_by_dt[dt_key].append((col_value, freq))
 
-    # Fetch top 10 for categorical columns
-    if not numeric:
-        top10_sql = build_top10_sql_athena(full_table, col, date_expr, where)
-        cursor.execute(top10_sql)
-        top10_by_dt = {}
-        for r in cursor.fetchall():
-            dt_key = str(r[0])
-            if dt_key not in top10_by_dt:
-                top10_by_dt[dt_key] = []
-            top10_by_dt[dt_key].append({"value": str(r[1]), "count": int(r[2])})
+    # Derive stats from frequency table per dt
+    results = []
+    for dt_key, freq_rows in freq_by_dt.items():
+        n_total = sum(f for _, f in freq_rows)
+        n_missing = sum(f for v, f in freq_rows if v is None)
+        non_null = [(v, f) for v, f in freq_rows if v is not None]
+        n_unique = len(non_null)
 
-        for stat in results:
-            stat['top_10'] = json.dumps(top10_by_dt.get(stat['dt'], []))
+        # Top 10 by frequency (descending)
+        top_sorted = sorted(non_null, key=lambda x: -x[1])[:10]
+        top_10 = json.dumps([{"value": str(v), "count": c} for v, c in top_sorted])
+
+        # Stats of the frequency distribution (non-null values only)
+        if non_null:
+            freqs = [f for _, f in non_null]
+            import statistics
+            mean_freq = statistics.mean(freqs)
+            std_freq = statistics.pstdev(freqs) if len(freqs) > 1 else 0.0
+            min_val = str(min(v for v, _ in non_null))
+            max_val = str(max(v for v, _ in non_null))
+        else:
+            mean_freq = None
+            std_freq = None
+            min_val = None
+            max_val = None
+
+        results.append({
+            'dt': dt_key,
+            'column_name': col,
+            'col_type': 'categorical',
+            'n_total': n_total,
+            'n_missing': n_missing,
+            'n_unique': n_unique,
+            'mean': mean_freq,
+            'std': std_freq,
+            'min_val': min_val,
+            'max_val': max_val,
+            'top_10': top_10,
+        })
 
     return results
 
@@ -1303,13 +1329,13 @@ def extract_aws(config_path, outdir, types=None, max_workers=4, db_path=None, vi
     # Inject date filtering from config where_map for col extraction
     if "col" in types and "pairs" in config:
         for tbl in aws_tables:
-            tbl_name = tbl.get('name', '')
+            tbl_table = tbl.get('table', '')
             for pair_name in tbl.get('_pairs', []):
                 pair_cfg = config['pairs'].get(pair_name, {})
                 where_map = pair_cfg.get('where_map', {})
                 if not where_map:
                     continue
-                if pair_cfg.get('left', {}).get('name') == tbl_name:
+                if pair_cfg.get('left', {}).get('table') == tbl_table:
                     side = 'left'
                 else:
                     side = 'right'
@@ -1389,14 +1415,15 @@ def extract_aws(config_path, outdir, types=None, max_workers=4, db_path=None, vi
                 # Each thread needs its own cursor
                 thread_cursor = conn.cursor()
                 try:
-                    return _extract_col_single(thread_cursor, tbl_cfg, col, dtype, full_table)
+                    return _extract_col_athena(thread_cursor, tbl_cfg, col, dtype, full_table)
                 finally:
                     thread_cursor.close()
 
             col_start_time = time.time()
             col_start_ts = datetime.now().isoformat()
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            _max_workers = int(os.environ.get('MAX_WORKERS', max_workers))
+            with ThreadPoolExecutor(max_workers=_max_workers) as executor:
                 futures = {executor.submit(_extract_one, (c, d)): c for c, d in columns.items()}
                 for future in as_completed(futures):
                     col_name = futures[future]

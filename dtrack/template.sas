@@ -1,4 +1,4 @@
-options mprint symbolgen;
+options nomprint nomlogic nosymbolgen;
 
 /* Credentials (filled by Python from dtrack.conf) */
 %let iamusr = {pcds_usr};
@@ -6,6 +6,8 @@ options mprint symbolgen;
 %let email_to = {email_to};
 %let out_dir = {out_dir};
 libname sas_lib "{sas_lib}";
+/* Cache library for column extraction staging */
+libname cache "{sas_cache_dir}";
 {user_credentials}
 
 /* Connection macros (Python inserts here) */
