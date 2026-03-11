@@ -115,7 +115,7 @@ def load_row_counts(
     file_or_folder: str,
     table_name: str,
     mode: str = "upsert",
-    vintage: str = "day",
+    vintage: Optional[str] = None,
     source: Optional[str] = None,
     db_name: Optional[str] = None,
     source_table: Optional[str] = None,

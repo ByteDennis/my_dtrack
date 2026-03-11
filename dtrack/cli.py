@@ -91,14 +91,11 @@ def cmd_load_row(args):
             # date_col from config is the source DB column name (e.g. RPT_DT),
             # not necessarily the CSV header. Pass it for metadata only.
             config_date_col = tbl.get('date_col')
-            # Use vintage from config, fall back to command line arg
-            table_vintage = tbl.get('vintage', args.vintage)
             load_row_counts(
                 db_path=args.project_db,
                 file_or_folder=csv_path,
                 table_name=qname,
                 mode=args.mode,
-                vintage=table_vintage,
                 source=source,
                 db_name=args.db,
                 source_table=tbl.get('table', ''),
@@ -125,14 +122,12 @@ def cmd_load_row(args):
     print(f"Loading row counts into table: {table_name}")
     print(f"  Source: {args.file_or_folder}")
     print(f"  Mode: {args.mode}")
-    print(f"  Vintage: {args.vintage}")
 
     load_row_counts(
         db_path=args.project_db,
         file_or_folder=args.file_or_folder,
         table_name=table_name,
         mode=args.mode,
-        vintage=args.vintage,
         source=args.source,
         db_name=args.db,
         source_table=args.source_table,
@@ -1217,7 +1212,7 @@ def cmd_gen_sas(args):
     print()
 
     db_path = getattr(args, 'db_path', None)
-    vintage = getattr(args, 'vintage', 'day')
+    vintage = getattr(args, 'vintage', None)
     gen_sas(args.config, args.outdir, types=types, env_path=env_path, db_path=db_path, vintage=vintage)
 
 
@@ -1234,11 +1229,13 @@ def cmd_gen_aws(args):
     print(f"Extracting from AWS Athena using: {args.config}")
     print(f"Output directory: {args.outdir}")
     print(f"Types: {', '.join(types)}")
-    print(f"Workers: {args.workers}")
+    workers = args.workers
+    if workers:
+        print(f"Workers: {workers}")
     print()
-    vintage = getattr(args, 'vintage', 'day')
+    vintage = getattr(args, 'vintage', None)
     force = getattr(args, 'force', False)
-    extract_aws(args.config, args.outdir, types=types, max_workers=args.workers, db_path=db_path, vintage=vintage, force=force)
+    extract_aws(args.config, args.outdir, types=types, max_workers=workers, db_path=db_path, vintage=vintage, force=force)
 
 
 def cmd_load_col_stats(args):
@@ -2031,7 +2028,7 @@ def cmd_query(args):
     for c in cols:
         col_widths[c] = len(c)
         for row in rows:
-            col_widths[c] = min(max(col_widths[c], len(str(row[c] or ''))), 40)
+            col_widths[c] = min(max(col_widths[c], len(str(row[c]) if row[c] is not None else '')), 40)
 
     # Print
     header = "  ".join(f"{c:<{col_widths[c]}}" for c in cols)
@@ -2039,7 +2036,7 @@ def cmd_query(args):
     print(header)
     print(sep)
     for row in rows:
-        line = "  ".join(f"{str(row[c] or ''):<{col_widths[c]}}" for c in cols)
+        line = "  ".join(f"{str(row[c]) if row[c] is not None else '':<{col_widths[c]}}" for c in cols)
         print(line)
 
     print(f"\n({len(rows)} row{'s' if len(rows) != 1 else ''})")
@@ -2085,14 +2082,14 @@ def _preview_matching_rows(db_path, table, where, limit=10):
     col_widths = {c: max(len(c), 6) for c in cols}
     for row in rows[:limit]:
         for c in cols:
-            val_len = len(str(row[c] or ''))
+            val_len = len(str(row[c]) if row[c] is not None else '')
             col_widths[c] = min(max(col_widths[c], val_len), 30)
 
     header = "  ".join(f"{c:<{col_widths[c]}}" for c in cols)
     print(f"  {header}")
     print(f"  {'─' * len(header)}")
     for row in rows[:limit]:
-        line = "  ".join(f"{str(row[c] or ''):<{col_widths[c]}}" for c in cols)
+        line = "  ".join(f"{str(row[c]) if row[c] is not None else '':<{col_widths[c]}}" for c in cols)
         print(f"  {line}")
     if len(rows) > limit:
         print(f"  ... and {len(rows) - limit} more row(s)")
@@ -2274,8 +2271,6 @@ def main():
     parser_load_row.add_argument('--table', '--table-name', dest='table_name', help='Table name (defaults to filename)')
     parser_load_row.add_argument('--mode', default='upsert', choices=['replace', 'append', 'upsert'],
                                   help='Load mode (default: upsert)')
-    parser_load_row.add_argument('--vintage', default='day', choices=['day', 'week', 'month', 'quarter', 'year'],
-                                  help='Time granularity (default: day)')
     parser_load_row.add_argument('--source', help='Data source (e.g., aws, pcds, oracle)')
     parser_load_row.add_argument('--db', help='Database or service name')
     parser_load_row.add_argument('--source-table', help='Original table name')
@@ -2355,8 +2350,8 @@ def main():
                                  help='Type to generate (default: both)')
     parser_gen_sas.add_argument('--env', help='Path to .env file with credentials (pcds_usr, pcds_pw, email_to, lib_path)')
     parser_gen_sas.add_argument('--db', dest='db_path', help='Database path to read column metadata from _column_meta')
-    parser_gen_sas.add_argument('--vintage', default='day', choices=['day', 'week', 'month', 'quarter', 'year', 'sample'],
-                                 help='Date bucketing granularity via Oracle TRUNC (default: day). "sample" picks N random matching dates.')
+    parser_gen_sas.add_argument('--vintage', choices=['day', 'week', 'month', 'quarter', 'year', 'sample'],
+                                 help='Override vintage for all tables. If omitted, uses each table\'s config vintage (default: day).')
 
     # gen-aws command
     parser_gen_aws = subparsers.add_parser('gen-aws', help='Extract data from AWS Athena')
@@ -2364,11 +2359,11 @@ def main():
     parser_gen_aws.add_argument('--outdir', default='./csv/', help='Output directory (default: ./csv/)')
     parser_gen_aws.add_argument('--type', default='both', choices=['row', 'col', 'both'],
                                  help='Type to extract (default: both)')
-    parser_gen_aws.add_argument('--workers', type=int, default=4, help='Max parallel workers (default: 4)')
+    parser_gen_aws.add_argument('--workers', type=int, help='Max parallel workers (default: 4, or MAX_WORKERS env var)')
     parser_gen_aws.add_argument('--db', dest='db_path',
                                  help='Database path to read column metadata from _column_meta')
-    parser_gen_aws.add_argument('--vintage', default='day', choices=['day', 'week', 'month', 'quarter', 'year', 'sample'],
-                                 help='Date bucketing granularity via Athena date_trunc (default: day). "sample" picks N random matching dates.')
+    parser_gen_aws.add_argument('--vintage', choices=['day', 'week', 'month', 'quarter', 'year', 'sample'],
+                                 help='Override vintage for all tables. If omitted, uses each table\'s config vintage (default: day).')
     parser_gen_aws.add_argument('--force', action='store_true', help='Overwrite existing CSV files without prompting')
 
     # load-col command

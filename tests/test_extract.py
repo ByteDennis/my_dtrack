@@ -205,15 +205,15 @@ class TestGenSasColLocal:
             },
         }
 
-    def test_uses_proc_means_for_numeric(self, mixed_cfg):
+    def test_uses_proc_sql_for_numeric(self, mixed_cfg):
         sas = _gen_sas_col_local(mixed_cfg)
-        assert 'proc means' in sas
-        assert 'var &col' in sas
+        assert 'col_count' in sas
+        assert 'col_sum_sq' in sas
         assert 'AMT|numeric' in sas
 
-    def test_uses_proc_freq_for_categorical(self, mixed_cfg):
+    def test_uses_freq_table_for_categorical(self, mixed_cfg):
         sas = _gen_sas_col_local(mixed_cfg)
-        assert 'proc freq' in sas
+        assert '_freq_raw_' in sas
         assert 'CUST_STATUS' in sas
 
     def test_discovery_mode(self):
@@ -251,9 +251,9 @@ class TestGenSasColLocal:
         assert '%sysfunc(exist(' in sas
         assert 'skipping' in sas.lower()
 
-    def test_top_10_from_freq(self, mixed_cfg):
+    def test_col_freq_from_freq(self, mixed_cfg):
         sas = _gen_sas_col_local(mixed_cfg)
-        assert 'top_10' in sas
+        assert 'col_freq' in sas
         assert '_t10_' in sas
 
     def test_stacking_export_cleanup(self, mixed_cfg):
