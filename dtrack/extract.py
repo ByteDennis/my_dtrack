@@ -25,6 +25,37 @@ def _qualified_name(tbl_cfg):
     return f"{source}_{name}" if source else name
 
 
+def _sas_safe_name(name, max_len=18):
+    """Truncate name for SAS identifiers (datasets max 32, macros max 32).
+
+    The tightest constraint is macro names like get_colstats_{name} (14 prefix),
+    so default max_len=18 keeps everything safe.
+    """
+    return name[:max_len]
+
+
+def _resolve_table(tbl_cfg, full_table=None):
+    """Resolve table reference, wrapping with CTE if 'processed' is configured.
+
+    Args:
+        tbl_cfg: Table config dict, may contain 'processed' (str or list of str)
+        full_table: Fully qualified table name (e.g. "db.table"). If None, uses tbl_cfg['table'].
+
+    Returns:
+        (table_ref, cte_prefix): table_ref to use in FROM, cte_prefix to prepend to SQL.
+        When no 'processed', cte_prefix is empty string.
+    """
+    processed = tbl_cfg.get('processed')
+    table = full_table or tbl_cfg['table']
+    if not processed:
+        return table, ""
+    if isinstance(processed, list):
+        processed = "\n".join(processed)
+    alias = tbl_cfg['name']
+    cte = f"WITH {alias} AS (\n{processed}\n)\n"
+    return alias, cte
+
+
 def _build_col_where(tbl_cfg, db_path, vintage='day'):
     """Build a WHERE clause fragment filtering to matching dates from _row_comparison.
 
@@ -283,6 +314,44 @@ def _oracle_date_transform(date_col, transform):
     return date_col
 
 
+# ── Oracle → SAS date transform mapping ──
+# Oracle SQL expressions used in passthrough vs SAS native equivalents
+# for $-prefixed processed tables (SAS datasets, not Oracle).
+_ORACLE_TO_SAS_TRANSFORM = {
+    'datetime_to_date': 'datepart({col})',
+    'to_char':          "put({col}, yymmdd10.)",
+}
+
+# Oracle TRUNC vintage → SAS intnx equivalent
+_ORACLE_VINTAGE_TO_SAS = {
+    'day':     None,                                  # identity
+    'week':    "intnx('week', {col}, 0, 'b')",
+    'month':   "intnx('month', {col}, 0, 'b')",
+    'quarter': "intnx('qtr', {col}, 0, 'b')",
+    'year':    "intnx('year', {col}, 0, 'b')",
+}
+
+
+def _sas_date_transform(date_col, transform):
+    """Return SAS expression for date transformation (for $ processed tables)."""
+    if transform and "{col}" in transform:
+        return transform.replace("{col}", date_col)
+    sas_expr = _ORACLE_TO_SAS_TRANSFORM.get(transform)
+    if sas_expr:
+        return sas_expr.replace("{col}", date_col)
+    return date_col
+
+
+def _sas_vintage_date_expr(date_expr, vintage):
+    """Wrap date_expr with SAS vintage bucketing (for $ processed tables)."""
+    if not vintage or vintage == 'day':
+        return date_expr
+    sas_expr = _ORACLE_VINTAGE_TO_SAS.get(vintage)
+    if sas_expr:
+        return sas_expr.replace("{col}", date_expr)
+    return date_expr
+
+
 # Oracle TRUNC format codes for vintage bucketing
 _VINTAGE_TRUNC = {
     'day': None,       # no extra TRUNC needed (identity)
@@ -327,81 +396,182 @@ def _sas_quote(s):
 def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
     """Generate data-driven SAS row extraction using table_date_map + call execute.
 
-    Instead of generating one macro per table, builds a single reusable
-    %export_row_one macro and drives it from a table_date_map dataset.
+    Builds mapping datasets and reusable macros for two modes:
+    - Oracle tables: proc sql passthrough to Oracle
+    - SAS tables ($-prefixed processed): proc sql on local SAS dataset
+
+    Caches results: skips tables whose output dataset already exists.
+    Supports 'processed' config field as CTE (Oracle) or SAS dataset reference ($).
     """
     lines = []
 
-    # Build datalines for table_date_map
-    datalines = []
-    for tbl_cfg in pcds_tables:
+    # Split tables into Oracle vs SAS ($-prefixed processed)
+    oracle_datalines = []
+    sas_datalines = []
+
+    for idx, tbl_cfg in enumerate(pcds_tables, 1):
         table = tbl_cfg['table']
         date_col = tbl_cfg['date_col']
         name = tbl_cfg['name']
         qname = _qualified_name(tbl_cfg)
         conn_macro = tbl_cfg.get('conn_macro', 'pcds')
-        user_override = tbl_cfg.get('user', '')
         where = _sas_quote(tbl_cfg.get('where', ''))
         transform = tbl_cfg.get('date_transform', '')
+        processed = tbl_cfg.get('processed')
+        if isinstance(processed, list):
+            processed = " ".join(processed)
 
-        date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
+        safe_ds = _sas_safe_name(qname, 29)
 
-        datalines.append(
-            f"{table}|{qname}|{date_expr}|{conn_macro}|{user_override}|{where}"
-        )
+        if processed and processed.startswith('$'):
+            # SAS dataset mode: $ prefix means local SAS table
+            sas_table = processed[1:].strip()  # remove $ prefix
+            date_expr = _sas_date_transform(date_col, transform) if transform else date_col
+            sas_datalines.append(
+                f"{sas_table}|{safe_ds}|{qname}|{date_expr}|{where}"
+            )
+        else:
+            # Oracle mode
+            date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
+            if processed:
+                table = name  # CTE alias
+            oracle_datalines.append(
+                f"{table}|{safe_ds}|{qname}|{date_expr}|{conn_macro}|{idx}|{where}"
+            )
 
-    # Data step: table_date_map
-    lines.append("/* Data-driven row extraction: one macro, many tables */")
-    lines.append("data table_date_map;")
-    lines.append("    length table $128 qname $64 date_expr $200 conn_macro $32 user_override $32 where_clause $500;")
-    lines.append("    infile datalines dlm='|' truncover;")
-    lines.append("    input table $ qname $ date_expr $ conn_macro $ user_override $ where_clause $;")
-    lines.append("    datalines;")
-    for dl in datalines:
-        lines.append(dl)
-    lines.append(";")
-    lines.append("run;")
-    lines.append("")
+    # Emit CTE %let statements for Oracle processed tables
+    for idx, tbl_cfg in enumerate(pcds_tables, 1):
+        processed = tbl_cfg.get('processed')
+        if isinstance(processed, list):
+            processed = " ".join(processed)
+        if processed and not processed.startswith('$'):
+            name = tbl_cfg['name']
+            lines.append(f"%let _cte{idx} = WITH {name} AS ({processed});")
 
-    # Reusable macro
-    lines.append("%macro export_row_one(table=, qname=, date_expr=, conn_macro=, user_override=, where_clause=);")
-    lines.append("    %local _sql _sas_tbl _user_args;")
-    lines.append("")
-    lines.append("    %if %length(&where_clause) > 0 %then")
-    lines.append('        %let _sql = SELECT &date_expr AS date_value, COUNT(*) AS row_count FROM &table WHERE &where_clause GROUP BY &date_expr;')
-    lines.append("    %else")
-    lines.append('        %let _sql = SELECT &date_expr AS date_value, COUNT(*) AS row_count FROM &table GROUP BY &date_expr;')
-    lines.append("")
-    lines.append("    %let _sas_tbl = sas_lib.&prefix._rc_&qname;")
-    lines.append("")
-    lines.append("    %if %length(&user_override) > 0 %then")
-    lines.append("        %let _user_args = , user=&&&user_override._usr, pwd=&&&user_override._pwd;")
-    lines.append("    %else")
-    lines.append("        %let _user_args = ;")
-    lines.append("")
-    lines.append("    %start_timer();")
-    lines.append('    %pull_data(%superq(_sql), &_sas_tbl, server=&conn_macro &_user_args);')
-    lines.append("")
-    lines.append('    proc export data=&_sas_tbl outfile="&out_dir./&qname._row.csv" dbms=csv replace; run;')
-    lines.append("    proc delete data=&_sas_tbl; run;")
-    lines.append("    %log_time(table=&qname, step=row, outpath=&out_dir.);")
-    lines.append("%mend export_row_one;")
+    # REDO flag
+    redo = int(os.environ.get('SAS_ROW_REDO', '0'))
+    lines.append(f"%let _row_redo = {redo};")
     lines.append("")
 
-    # Call execute loop
-    lines.append("data _null_;")
-    lines.append("    set table_date_map;")
-    lines.append("    length _cmd $2000;")
-    lines.append("    _cmd = cats('%export_row_one(table=', table,")
-    lines.append("               ', qname=', qname,")
-    lines.append("               ', date_expr=', date_expr,")
-    lines.append("               ', conn_macro=', conn_macro,")
-    lines.append("               ', user_override=', user_override,")
-    lines.append("               ', where_clause=', where_clause, ')');")
-    lines.append("    call execute(_cmd);")
-    lines.append("run;")
-    lines.append("")
-    lines.append("proc delete data=table_date_map; run;")
+    # ── Oracle tables ──
+    if oracle_datalines:
+        lines.append("/* Oracle row extraction (passthrough) */")
+        lines.append("data _ora_map;")
+        lines.append("    length table $128 dsname $32 qname $64 date_expr $200 conn_macro $32 idx $4 where_clause $500;")
+        lines.append("    infile datalines dlm='|' truncover;")
+        lines.append("    input table $ dsname $ qname $ date_expr $ conn_macro $ idx $ where_clause $;")
+        lines.append("    datalines;")
+        for dl in oracle_datalines:
+            lines.append(dl)
+        lines.append(";")
+        lines.append("run;")
+        lines.append("")
+
+        lines.append("%macro _row_oracle(table=, dsname=, qname=, date_expr=, conn_macro=, where_clause=, idx=);")
+        lines.append("    %local _outpath _cte_val;")
+        lines.append('    %let _outpath = &out_dir./&qname._row.csv;')
+        lines.append("")
+        lines.append("    %if &_row_redo = 0 and %sysfunc(exist(cache.rc_&dsname)) %then %do;")
+        lines.append("        %put NOTE: Cached rc_&dsname found - skipping;")
+        lines.append('        proc export data=cache.rc_&dsname outfile="&_outpath" dbms=csv replace; run;')
+        lines.append("        %return;")
+        lines.append("    %end;")
+        lines.append("")
+        lines.append("    %if %symexist(_cte&idx) %then %let _cte_val = &&_cte&idx;")
+        lines.append("    %else %let _cte_val = ;")
+        lines.append("")
+        lines.append("    %start_timer();")
+        lines.append("    proc sql;")
+        lines.append("        %&conn_macro")
+        lines.append("        create table cache.rc_&dsname as")
+        lines.append("        select * from connection to oracle (")
+        lines.append("            &_cte_val")
+        lines.append("            select &date_expr as date_value, count(*) as row_count")
+        lines.append("            from &table")
+        lines.append("            %if %length(&where_clause) > 0 %then where &where_clause;")
+        lines.append("            group by &date_expr")
+        lines.append("        );")
+        lines.append("        disconnect from oracle;")
+        lines.append("    quit;")
+        lines.append("")
+        lines.append('    proc export data=cache.rc_&dsname outfile="&_outpath" dbms=csv replace; run;')
+        lines.append("    %log_time(table=&qname, step=row, outpath=&out_dir.);")
+        lines.append("%mend _row_oracle;")
+        lines.append("")
+
+        lines.append("data _null_;")
+        lines.append("    set _ora_map;")
+        lines.append("    length _cmd $2000;")
+        lines.append("    _cmd = cats(")
+        lines.append("        '%nrstr(%_row_oracle)(',")
+        lines.append("        'table=', strip(table),")
+        lines.append("        ', dsname=', strip(dsname),")
+        lines.append("        ', qname=', strip(qname),")
+        lines.append("        ', date_expr=', strip(date_expr),")
+        lines.append("        ', conn_macro=', strip(conn_macro),")
+        lines.append("        ', where_clause=', strip(where_clause),")
+        lines.append("        ', idx=', strip(idx),")
+        lines.append("        ')'")
+        lines.append("    );")
+        lines.append("    call execute(_cmd);")
+        lines.append("run;")
+        lines.append("proc delete data=_ora_map; run;")
+        lines.append("")
+
+    # ── SAS dataset tables ($-prefixed) ──
+    if sas_datalines:
+        lines.append("/* SAS dataset row extraction (local proc sql) */")
+        lines.append("data _sas_map;")
+        lines.append("    length table $128 dsname $32 qname $64 date_expr $200 where_clause $500;")
+        lines.append("    infile datalines dlm='|' truncover;")
+        lines.append("    input table $ dsname $ qname $ date_expr $ where_clause $;")
+        lines.append("    datalines;")
+        for dl in sas_datalines:
+            lines.append(dl)
+        lines.append(";")
+        lines.append("run;")
+        lines.append("")
+
+        lines.append("%macro _row_sas(table=, dsname=, qname=, date_expr=, where_clause=);")
+        lines.append("    %local _outpath;")
+        lines.append('    %let _outpath = &out_dir./&qname._row.csv;')
+        lines.append("")
+        lines.append("    %if &_row_redo = 0 and %sysfunc(exist(cache.rc_&dsname)) %then %do;")
+        lines.append("        %put NOTE: Cached rc_&dsname found - skipping;")
+        lines.append('        proc export data=cache.rc_&dsname outfile="&_outpath" dbms=csv replace; run;')
+        lines.append("        %return;")
+        lines.append("    %end;")
+        lines.append("")
+        lines.append("    %start_timer();")
+        lines.append("    proc sql;")
+        lines.append("        create table cache.rc_&dsname as")
+        lines.append("        select &date_expr as date_value, count(*) as row_count")
+        lines.append("        from &table")
+        lines.append("        %if %length(&where_clause) > 0 %then where &where_clause;")
+        lines.append("        group by &date_expr;")
+        lines.append("    quit;")
+        lines.append("")
+        lines.append('    proc export data=cache.rc_&dsname outfile="&_outpath" dbms=csv replace; run;')
+        lines.append("    %log_time(table=&qname, step=row, outpath=&out_dir.);")
+        lines.append("%mend _row_sas;")
+        lines.append("")
+
+        lines.append("data _null_;")
+        lines.append("    set _sas_map;")
+        lines.append("    length _cmd $2000;")
+        lines.append("    _cmd = cats(")
+        lines.append("        '%nrstr(%_row_sas)(',")
+        lines.append("        'table=', strip(table),")
+        lines.append("        ', dsname=', strip(dsname),")
+        lines.append("        ', qname=', strip(qname),")
+        lines.append("        ', date_expr=', strip(date_expr),")
+        lines.append("        ', where_clause=', strip(where_clause),")
+        lines.append("        ')'")
+        lines.append("    );")
+        lines.append("    call execute(_cmd);")
+        lines.append("run;")
+        lines.append("proc delete data=_sas_map; run;")
+        lines.append("")
 
     return '\n'.join(lines)
 
@@ -414,8 +584,20 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     cached stats already exist (unless SAS_COL_REDO=1).
     """
     table = tbl_cfg['table']
+    processed = tbl_cfg.get('processed')
+    if isinstance(processed, list):
+        processed = " ".join(processed)
+    cte_prefix = ""
+    is_sas_table = processed and processed.startswith('$')
+    if is_sas_table:
+        table = processed[1:].strip()  # SAS dataset path
+    elif processed:
+        alias = tbl_cfg['name']
+        cte_prefix = f"WITH {alias} AS ({processed}) "
+        table = alias
     date_col = tbl_cfg['date_col']
     name = tbl_cfg['name']
+    sn = _sas_safe_name(name)  # truncated name for SAS identifiers
     qname = _qualified_name(tbl_cfg)
     conn_macro = tbl_cfg.get('conn_macro', 'pcds')
     user_override = tbl_cfg.get('user', '')
@@ -425,11 +607,11 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     vintage = tbl_cfg.get('vintage', 'day')
 
     lines = []
-    lines.append(f"%macro get_colstats_{name}();")
+    lines.append(f"%macro get_colstats_{sn}();")
 
     if not columns:
         lines.append(f"    %put WARNING: No columns specified for {name}.;")
-        lines.append(f"%mend get_colstats_{name};")
+        lines.append(f"%mend get_colstats_{sn};")
         return '\n'.join(lines)
 
     # Filter out date column
@@ -439,7 +621,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
 
     if n_cols == 0:
         lines.append(f"    %put WARNING: No non-date columns to extract for {name};")
-        lines.append(f"%mend get_colstats_{name};")
+        lines.append(f"%mend get_colstats_{sn};")
         return '\n'.join(lines)
 
     num_cols = [(col, dtype) for col, dtype in col_list if is_numeric_type(dtype, is_oracle=True)]
@@ -468,7 +650,10 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
                             vintage_buckets[bucket] = []
                         vintage_buckets[bucket].append(dt)
 
-    date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
+    if is_sas_table:
+        date_expr = _sas_date_transform(date_col, transform) if transform else date_col
+    else:
+        date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
     where_fragment_str = f"AND ({where})" if where else ""
     _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
 
@@ -481,8 +666,8 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     lines.append(f"    %put NOTE: REDO={redo} (1=force re-pull, 0=use cached stats);")
 
     def _emit_vintage_compute(lines, v_idx, raw_ds, suffix):
-        """Emit PROC FREQ/MEANS compute block for one vintage. Stats go to cache._cs_{name}_v{idx}."""
-        cache_ds = f"cache._cs_{name}_v{v_idx}"
+        """Emit PROC FREQ/MEANS compute block for one vintage. Stats go to cache._cs_{sn}_v{idx}."""
+        cache_ds = f"cache._cs_{sn}_v{v_idx}"
 
         # Numeric columns: PROC MEANS
         for col, dtype in num_cols:
@@ -603,7 +788,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
                 break
 
         for v_idx, (bucket_key, dates) in enumerate(sorted(vintage_buckets.items()), 1):
-            cache_ds = f"cache._cs_{name}_v{v_idx}"
+            cache_ds = f"cache._cs_{sn}_v{v_idx}"
             suffix = f"_v{v_idx}"
 
             lines.append(f"    /* ===== Vintage {v_idx}/{n_vintages}: {bucket_key} ({len(dates)} dates) ===== */")
@@ -631,11 +816,20 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
 
             # Pull raw data into WORK (temporary)
             col_select = ", ".join([date_expr + " AS dt"] + [col for col, _ in col_list])
-            pull_sql = f"SELECT {col_select} FROM {table} WHERE {date_where} {where_fragment_str}"
-            raw_ds = f"_raw_{name}{suffix}"
+            raw_ds = f"_raw_{sn}{suffix}"
 
-            lines.append(f"    %let _sql{suffix} = %nrstr({pull_sql});")
-            lines.append(f"    %pull_data(&_sql{suffix}, {raw_ds}, server={conn_macro}{_ua});")
+            if is_sas_table:
+                # SAS dataset: direct proc sql (no Oracle passthrough)
+                sas_where = f"WHERE {date_where}"
+                if where_fragment_str:
+                    sas_where += f" {where_fragment_str}"
+                pull_sql = f"SELECT {col_select} FROM {table} {sas_where}"
+                lines.append(f"    proc sql; create table {raw_ds} as {pull_sql}; quit;")
+            else:
+                # Oracle: passthrough via %pull_data
+                pull_sql = f"{cte_prefix}SELECT {col_select} FROM {table} WHERE {date_where} {where_fragment_str}"
+                lines.append(f"    %let _sql{suffix} = %nrstr({pull_sql});")
+                lines.append(f"    %pull_data(&_sql{suffix}, {raw_ds}, server={conn_macro}{_ua});")
             lines.append("")
 
             # Compute stats → save to cache
@@ -646,35 +840,44 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
             lines.append("")
 
         # Stack all cached vintage stats
-        cache_sets = " ".join(f"cache._cs_{name}_v{i}" for i in range(1, n_vintages + 1))
+        cache_sets = " ".join(f"cache._cs_{sn}_v{i}" for i in range(1, n_vintages + 1))
         lines.append(f"    /* Stack all {n_vintages} cached vintage stats */")
-        lines.append(f"    data _colstats_{name};")
+        lines.append(f"    data _colstats_{sn};")
         lines.append(f"        set {cache_sets};")
         lines.append(f"    run;")
         lines.append("")
 
     else:
         # No vintage buckets — pull everything, compute, save to cache
-        cache_ds = f"cache._cs_{name}"
+        cache_ds = f"cache._cs_{sn}"
         lines.append(f"    %put NOTE: No vintage buckets - pulling full table;")
         lines.append("")
 
         if not redo:
             lines.append(f"    %if %sysfunc(exist({cache_ds})) %then %do;")
             lines.append(f"        %put NOTE: Cached stats found: {cache_ds} — skipping pull;")
-            lines.append(f"        data _colstats_{name}; set {cache_ds}; run;")
+            lines.append(f"        data _colstats_{sn}; set {cache_ds}; run;")
             lines.append(f"    %end;")
             lines.append(f"    %else %do;")
 
         col_select = ", ".join([date_expr + " AS dt"] + [col for col, _ in col_list])
-        if where:
-            pull_sql = f"SELECT {col_select} FROM {table} WHERE {where}"
-        else:
-            pull_sql = f"SELECT {col_select} FROM {table}"
+        raw_ds = f"_raw_{sn}"
 
-        raw_ds = f"_raw_{name}"
-        lines.append(f"    %let _sql_full = %nrstr({pull_sql});")
-        lines.append(f"    %pull_data(&_sql_full, {raw_ds}, server={conn_macro}{_ua});")
+        if is_sas_table:
+            # SAS dataset: direct proc sql
+            if where:
+                pull_sql = f"SELECT {col_select} FROM {table} WHERE {where}"
+            else:
+                pull_sql = f"SELECT {col_select} FROM {table}"
+            lines.append(f"    proc sql; create table {raw_ds} as {pull_sql}; quit;")
+        else:
+            # Oracle: passthrough via %pull_data
+            if where:
+                pull_sql = f"{cte_prefix}SELECT {col_select} FROM {table} WHERE {where}"
+            else:
+                pull_sql = f"{cte_prefix}SELECT {col_select} FROM {table}"
+            lines.append(f"    %let _sql_full = %nrstr({pull_sql});")
+            lines.append(f"    %pull_data(&_sql_full, {raw_ds}, server={conn_macro}{_ua});")
         lines.append("")
 
         # Compute stats → save to cache (v_idx=0, suffix='')
@@ -682,9 +885,9 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
         _emit_vintage_compute(lines, 0, raw_ds, '')
 
         # Rename cache._cs_{name}_v0 to cache._cs_{name}
-        lines.append(f"    data {cache_ds}; set cache._cs_{name}_v0; run;")
-        lines.append(f"    proc delete data=cache._cs_{name}_v0; run;")
-        lines.append(f"    data _colstats_{name}; set {cache_ds}; run;")
+        lines.append(f"    data {cache_ds}; set cache._cs_{sn}_v0; run;")
+        lines.append(f"    proc delete data=cache._cs_{sn}_v0; run;")
+        lines.append(f"    data _colstats_{sn}; set {cache_ds}; run;")
         lines.append("")
 
         if not redo:
@@ -692,15 +895,15 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
         lines.append("")
 
     # Export final
-    lines.append(f"    proc export data=_colstats_{name}")
+    lines.append(f"    proc export data=_colstats_{sn}")
     lines.append(f'        outfile="&out_dir./{qname}_col.csv"')
     lines.append(f"        dbms=csv replace;")
     lines.append(f"    run;")
     lines.append("")
-    lines.append(f"    proc delete data=_colstats_{name}; run;")
+    lines.append(f"    proc delete data=_colstats_{sn}; run;")
     lines.append(f"    %put NOTE: ===== EXTRACTION COMPLETE: {name} ====;")
     lines.append("")
-    lines.append(f"%mend get_colstats_{name};")
+    lines.append(f"%mend get_colstats_{sn};")
     return '\n'.join(lines)
 
 
@@ -853,8 +1056,9 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     if "col" in types:
         for tbl in pcds_tables:
             name = tbl['name']
+            sn = _sas_safe_name(name)
             runner_parts.append(f"%start_timer();")
-            runner_parts.append(f"%get_colstats_{name}();")
+            runner_parts.append(f"%get_colstats_{sn}();")
             runner_parts.append(f"%log_time(table={name}, step=col, outpath=&out_dir.);")
             qname = _qualified_name(tbl)
             runner_parts.append(
@@ -905,8 +1109,9 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         cred_lines.append(f"%let {user_key}_usr = {env_vars[usr_var]};")
         cred_lines.append(f"%let {user_key}_pwd = {env_vars[pwd_var]};")
 
-    # SAS cache directory for column extraction staging
-    sas_cache_dir = os.environ.get('SAS_CACHE_DIR', sas_lib)
+    # SAS cache directory: {base}/{prefix}/ — prefix isolates runs by config
+    sas_cache_base = os.environ.get('SAS_CACHE_DIR', sas_lib)
+    sas_cache_dir = sas_cache_base.rstrip('/') + '/' + prefix
 
     # Build template vars
     template_vars = {
@@ -946,14 +1151,26 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 # AWS Athena Direct Extraction
 # ---------------------------------------------------------------------------
 
-def aws_creds_renew():
+_aws_creds_expires = None
+
+
+def aws_creds_renew(ttl_minutes=50):
     """Renew AWS credentials via token-based auth (Windows only).
 
     On Windows, fetches a token from AWS_TOKEN_URL and uses it to obtain
     temporary credentials from AWS_ARN_URL. On Linux/containers, credentials
     come from IAM roles or environment variables, so this is a no-op.
+
+    Skips renewal if credentials were refreshed less than ttl_minutes ago.
     """
+    global _aws_creds_expires
+
     if os.name != 'nt':
+        return
+
+    import time
+    now = time.time()
+    if _aws_creds_expires and now < _aws_creds_expires:
         return
 
     import requests
@@ -975,6 +1192,7 @@ def aws_creds_renew():
         os.environ['AWS_ACCESS_KEY_ID'] = creds['AccessKeyId']
         os.environ['AWS_SECRET_ACCESS_KEY'] = creds['SecretAccessKey']
         os.environ['AWS_SESSION_TOKEN'] = creds['SessionToken']
+        _aws_creds_expires = now + ttl_minutes * 60
     except Exception as e:
         print(f"Warning: AWS credential renewal failed: {e}")
 
@@ -1047,11 +1265,12 @@ def _extract_row_athena(cursor, tbl_cfg, outdir):
     qname = _qualified_name(tbl_cfg)
     where = tbl_cfg.get('where', '')
 
-    full_table = f"{database}.{table}"
+    raw_full_table = f"{database}.{table}"
+    full_table, cte_prefix = _resolve_table(tbl_cfg, raw_full_table)
     date_expr = date_col
     where_clause = f"WHERE {where}" if where else ""
 
-    sql = f"""
+    sql = f"""{cte_prefix}
         SELECT {date_expr} AS date_value, COUNT(*) AS row_count
         FROM {full_table}
         {where_clause}
@@ -1076,7 +1295,7 @@ def _extract_row_athena(cursor, tbl_cfg, outdir):
     return csv_path, elapsed, start_timestamp, end_timestamp
 
 
-def _extract_col_athena(cursor, tbl_cfg, col, dtype, full_table):
+def _extract_col_athena(cursor, tbl_cfg, col, dtype, full_table, cte_prefix=""):
     """Extract stats for a single column from Athena.
 
     Numeric columns: direct aggregation (no top-10).
@@ -1093,7 +1312,7 @@ def _extract_col_athena(cursor, tbl_cfg, col, dtype, full_table):
 
     if numeric:
         # Direct aggregation for numeric columns (unchanged approach)
-        sql = build_continuous_sql_athena(full_table, col, date_expr, where)
+        sql = cte_prefix + build_continuous_sql_athena(full_table, col, date_expr, where)
         cursor.execute(sql)
         results = []
         col_descriptions = [desc[0] for desc in cursor.description]
@@ -1104,7 +1323,7 @@ def _extract_col_athena(cursor, tbl_cfg, col, dtype, full_table):
         return results
 
     # Categorical: single frequency query
-    freq_sql = f"""
+    freq_sql = f"""{cte_prefix}
 SELECT {date_expr} AS dt, CAST({col} AS VARCHAR) AS col_value, COUNT(*) AS freq
 FROM {full_table}
 WHERE 1=1 {where_clause}
@@ -1379,9 +1598,10 @@ def extract_aws(config_path, outdir, types=None, max_workers=4, db_path=None, vi
         database = tbl_cfg['conn_macro']
         table = tbl_cfg['table']
         date_col = tbl_cfg['date_col']
-        full_table = f"{database}.{table}"
+        raw_full_table = f"{database}.{table}"
+        full_table, cte_prefix = _resolve_table(tbl_cfg, raw_full_table)
 
-        print(f"\nExtracting: {name} ({full_table})")
+        print(f"\nExtracting: {name} ({raw_full_table})")
 
         if "row" in types:
             csv_path, elapsed, start_ts, end_ts = _extract_row_athena(cursor, tbl_cfg, outdir)
@@ -1415,7 +1635,7 @@ def extract_aws(config_path, outdir, types=None, max_workers=4, db_path=None, vi
                 # Each thread needs its own cursor
                 thread_cursor = conn.cursor()
                 try:
-                    return _extract_col_athena(thread_cursor, tbl_cfg, col, dtype, full_table)
+                    return _extract_col_athena(thread_cursor, tbl_cfg, col, dtype, full_table, cte_prefix)
                 finally:
                     thread_cursor.close()
 

@@ -6,7 +6,8 @@ options nomprint nomlogic nosymbolgen;
 %let email_to = {email_to};
 %let out_dir = {out_dir};
 libname sas_lib "{sas_lib}";
-/* Cache library for column extraction staging */
+/* Cache library for extraction staging (prefix-namespaced) */
+options dlcreatedir;
 libname cache "{sas_cache_dir}";
 {user_credentials}
 

@@ -145,15 +145,16 @@ class TestGenSasRowDatadriven:
 
     def test_basic_structure(self, basic_cfg):
         sas = _gen_sas_row_datadriven([basic_cfg])
-        assert 'table_date_map' in sas
-        assert '%macro export_row_one' in sas
+        assert '_ora_map' in sas
+        assert '%macro _row_oracle' in sas
         assert 'call execute' in sas
-        assert '%pull_data(' in sas
+        assert 'connection to oracle' in sas
         assert 'proc export' in sas
+        assert 'cache.' in sas
 
     def test_datalines_content(self, basic_cfg):
         sas = _gen_sas_row_datadriven([basic_cfg])
-        assert 'SCHEMA1.CUST_DAILY|pcds_cust_daily|RPT_DT|pcds||' in sas
+        assert 'SCHEMA1.CUST_DAILY|pcds_cust_daily|pcds_cust_daily|RPT_DT|pcds|' in sas
 
     def test_date_transform_trunc(self, basic_cfg):
         basic_cfg['date_transform'] = 'datetime_to_date'
