@@ -42,6 +42,11 @@ def parse_date(value: str) -> str:
         except ValueError:
             continue
 
+    # Try YYYYMMDD format (8 digits) - convert to YYYY-MM-DD
+    if re.match(r'^\d{8}$', value):
+        dt = datetime.strptime(value, "%Y%m%d")
+        return dt.strftime("%Y-%m-%d")
+
     # Try YYYYMM format (6 digits) - keep as-is, don't convert to date
     if re.match(r'^\d{6}$', value):
         return value  # Return YYYYMM as-is (e.g., "202401")

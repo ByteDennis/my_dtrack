@@ -66,14 +66,27 @@ def generate_row_count_html(
     # Data rows
     time_left = '—'
     time_right = '—'
+    def _fmt_time(val):
+        """Format time value: raw seconds (int/float) → human readable, strings pass through."""
+        if val is None or val == '—' or val == '':
+            return '—'
+        try:
+            secs = float(val)
+        except (TypeError, ValueError):
+            return str(val)  # already a string like "42 sec"
+        if secs < 60:
+            return f"{secs:.0f} sec"
+        elif secs < 3600:
+            m, s = divmod(int(secs), 60)
+            return f"{m} min {s} sec" if s else f"{m} min"
+        else:
+            h, rem = divmod(int(secs), 3600)
+            m = rem // 60
+            return f"{h} hour {m} min" if m else f"{h} hour"
+
     if time_map:
-        time_left = time_map.get(source_left, time_map.get('left', '—'))
-        time_right = time_map.get(source_right, time_map.get('right', '—'))
-        # Filter out placeholder values
-        if time_left == '—' or not time_left:
-            time_left = '—'
-        if time_right == '—' or not time_right:
-            time_right = '—'
+        time_left = _fmt_time(time_map.get(source_left, time_map.get('left', '—')))
+        time_right = _fmt_time(time_map.get(source_right, time_map.get('right', '—')))
 
     html += f'''            <tr>
                 <td style="border:1px solid #ccc; padding:8px;">{source_left}</td>
@@ -120,8 +133,11 @@ def generate_row_count_html(
         only_right_outside = all_only_right
 
     # Details row with summary stats as clickable header
-    mismatch_style = 'color:#c62828; font-weight:600;' if n_mismatch > 0 else 'color:green;'
-    summary_text = f'{source_left} only: {n_only_left}, {source_right} only: {n_only_right}, <span style="color:green;">days match: {n_match}</span>, <span style="{mismatch_style}">days mismatch: {n_mismatch}</span>'
+    # Red only when there are misloads (one-sided dates inside overlap range)
+    only_left_style = 'color:#c62828; font-weight:600;' if len(only_left_in_overlap) > 0 else ''
+    only_right_style = 'color:#c62828; font-weight:600;' if len(only_right_in_overlap) > 0 else ''
+    mismatch_style = 'color:#c62828; font-weight:600;' if n_mismatch > 0 else ''
+    summary_text = f'<span style="{only_left_style}">{source_left} only: {n_only_left}</span>, <span style="{only_right_style}">{source_right} only: {n_only_right}</span>, <span style="color:green;">days match: {n_match}</span>, <span style="{mismatch_style}">days mismatch: {n_mismatch}</span>'
 
     html += f'''            <tr>
                 <td colspan="6" style="border:1px solid #ccc; padding:4px;">
@@ -159,33 +175,39 @@ def generate_row_count_html(
             html += '                                        <p style="margin:4px 0; color:#999;">No mismatches</p>\n'
         html += '                                    </td>\n'
 
-        # Column 2: Only-left details (overlap dates shown, outside as "...")
+        # Column 2: Only-left details — overlap (red) then outside (gray)
         html += f'                                    <td style="width:32%; padding:0 12px; {bar_style}">\n'
         if n_only_left > 0:
             html += f'                                        <p style="margin:4px 0; font-weight:600; text-align:center;">{source_left}-Only Dates ({n_only_left})</p>\n'
             html += '                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">\n'
             html += f'                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_left}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_right}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>\n'
+            # In-overlap rows (red — these are misloads)
             for dt, count in only_left_in_overlap[:10]:
-                html += f'                                            <tr><td style="padding:2px; font-size:10px;">{dt}</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-{count:,}</td></tr>\n'
-            n_not_shown = len(only_left_in_overlap[10:]) + len(only_left_outside)
-            if n_not_shown > 0:
-                html += f'                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#999;">... and {n_not_shown} more inside overlap</td></tr>\n'
+                html += f'                                            <tr style="color:#c62828;"><td style="padding:2px; font-size:10px;">{dt}</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-{count:,}</td></tr>\n'
+            if len(only_left_in_overlap) > 10:
+                html += f'                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#c62828;">... and {len(only_left_in_overlap) - 10} more in overlap</td></tr>\n'
+            # Outside-overlap summary (gray)
+            if only_left_outside:
+                html += f'                                            <tr><td colspan="4" style="padding:4px 2px 2px; font-style:italic; font-size:10px; color:#999;">{len(only_left_outside)} more outside overlap</td></tr>\n'
             html += '                                        </table>\n'
         else:
             html += f'                                        <p style="margin:4px 0; color:#999;">No {source_left}-Only dates</p>\n'
         html += '                                    </td>\n'
 
-        # Column 3: Only-right details (overlap dates shown, outside as "...")
+        # Column 3: Only-right details — overlap (red) then outside (gray)
         html += f'                                    <td style="width:32%; padding:0 0 0 12px; {bar_style}">\n'
         if n_only_right > 0:
             html += f'                                        <p style="margin:4px 0; font-weight:600; text-align:center;">{source_right}-Only Dates ({n_only_right})</p>\n'
             html += '                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">\n'
             html += f'                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_left}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_right}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>\n'
+            # In-overlap rows (red — these are misloads)
             for dt, count in only_right_in_overlap[:10]:
-                html += f'                                            <tr><td style="padding:2px; font-size:10px;">{dt}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">+{count:,}</td></tr>\n'
-            n_not_shown = len(only_right_in_overlap[10:]) + len(only_right_outside)
-            if n_not_shown > 0:
-                html += f'                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#999;">... and {n_not_shown} more inside overlap</td></tr>\n'
+                html += f'                                            <tr style="color:#c62828;"><td style="padding:2px; font-size:10px;">{dt}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">+{count:,}</td></tr>\n'
+            if len(only_right_in_overlap) > 10:
+                html += f'                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#c62828;">... and {len(only_right_in_overlap) - 10} more in overlap</td></tr>\n'
+            # Outside-overlap summary (gray)
+            if only_right_outside:
+                html += f'                                            <tr><td colspan="4" style="padding:4px 2px 2px; font-style:italic; font-size:10px; color:#999;">{len(only_right_outside)} more outside overlap</td></tr>\n'
             html += '                                        </table>\n'
         else:
             html += f'                                        <p style="margin:4px 0; color:#999;">No {source_right}-Only dates</p>\n'

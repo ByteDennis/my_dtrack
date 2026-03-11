@@ -208,7 +208,8 @@ class TestGenSasColLocal:
     def test_uses_proc_means_for_numeric(self, mixed_cfg):
         sas = _gen_sas_col_local(mixed_cfg)
         assert 'proc means' in sas
-        assert 'var AMT' in sas
+        assert 'var &col' in sas
+        assert 'AMT|numeric' in sas
 
     def test_uses_proc_freq_for_categorical(self, mixed_cfg):
         sas = _gen_sas_col_local(mixed_cfg)
@@ -263,7 +264,7 @@ class TestGenSasColLocal:
 
     def test_cleanup_raw_data(self, mixed_cfg):
         sas = _gen_sas_col_local(mixed_cfg)
-        assert 'proc delete data=_raw_' in sas
+        assert 'proc delete data=&raw_ds' in sas
 
 
 

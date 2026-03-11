@@ -355,7 +355,9 @@ def _print_row_comparison(db_path, table_left, table_right, source_left, source_
         print(f"\nOnly in {source_right}: (none)")
 
     # Matching
-    print(f"\nMatching ({len(result['matching'])} dates):")
+    n_matching = len(result['matching'])
+    n_total = n_matching + len(result['mismatched']) + len(misload_left) + len(misload_right)
+    print(f"\nMatching ({n_matching} of {n_total} dates in overlap):")
     if result["matching"]:
         for dt, count in result["matching"][:3]:
             print(f"  {dt}: {count:,}")
@@ -1235,7 +1237,8 @@ def cmd_gen_aws(args):
     print(f"Workers: {args.workers}")
     print()
     vintage = getattr(args, 'vintage', 'day')
-    extract_aws(args.config, args.outdir, types=types, max_workers=args.workers, db_path=db_path, vintage=vintage)
+    force = getattr(args, 'force', False)
+    extract_aws(args.config, args.outdir, types=types, max_workers=args.workers, db_path=db_path, vintage=vintage, force=force)
 
 
 def cmd_load_col_stats(args):
@@ -1287,7 +1290,7 @@ def cmd_load_col_stats(args):
                 table_name=qname,
                 mode=args.mode,
                 source=tbl.get('source'),
-                db_name=tbl.get('database') or tbl.get('conn_macro'),
+                db_name=tbl.get('conn_macro'),
                 vintage=table_vintage,
             )
             print(f"  ✓ Loaded {count} stat rows")
@@ -1502,11 +1505,10 @@ def cmd_match_columns(args):
                 with open(unmapped_path, 'w') as f:
                     f.write('\n'.join(output_lines))
 
-                for line in output_lines:
-                    print(line)
-                print()
+                total_cols = min(len(left_cols), len(right_cols))
+                print(f"Mapped: {len(matched)}/{total_cols} columns (auto: {auto_count}, existing: {len(existing_col_map)})")
                 print(f"Unmapped: {len(left_only)} {left_src}-only | {len(right_only)} {right_src}-only")
-                print(f"Saved to: {unmapped_path}")
+                print(f"Details: {unmapped_path}")
                 print()
 
                 # --- Annotation loop ---
@@ -1607,7 +1609,9 @@ def cmd_match_columns(args):
                         print(f"  Mapped {len(new_maps)} columns")
 
                     print()
-                    print(f"{pair_name}: {len(matched)} column mappings (manual: {manual_count} + identical: {auto_count})")
+                    total_cols = min(len(left_cols), len(right_cols))
+                    pct = len(matched) / total_cols * 100 if total_cols else 100
+                    print(f"{pair_name}: {len(matched)}/{total_cols} mapped ({pct:.0f}%) — auto: {auto_count}, manual: {manual_count}, existing: {len(existing_col_map)}")
                     print(f"  unmapped: {len(left_names)} {left_src}-only | {len(right_names)} {right_src}-only")
                     print()
 
@@ -1727,6 +1731,40 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
     print(f"Loaded {count} columns into _column_meta for table: {store_name}")
 
 
+def _load_csv_meta_files(project_db, csv_files):
+    """Load column metadata from proc contents CSVs.
+
+    CSV columns: source, table, column_name, data_type
+    source_table is derived as {source}_{table} (matching _qualified_name convention).
+    """
+    import csv as csv_mod
+    for csv_path in csv_files:
+        if not os.path.exists(csv_path):
+            print(f"Error: CSV file not found: {csv_path}")
+            continue
+
+        # Group by (source, table) -> {col: dtype}
+        tables = {}
+        with open(csv_path, 'r', newline='') as f:
+            reader = csv_mod.DictReader(f)
+            for row in reader:
+                src = row.get('source') or row.get('SOURCE', '')
+                tbl = row.get('table') or row.get('TABLE', '')
+                col = row.get('column_name') or row.get('COLUMN_NAME', '')
+                dt = row.get('data_type') or row.get('DATA_TYPE', '')
+                if tbl and col:
+                    source_table = f"{src}_{tbl}" if src else tbl
+                    if source_table not in tables:
+                        tables[source_table] = {'source': src, 'columns': {}}
+                    tables[source_table]['columns'][col] = dt
+
+        for source_table, info in tables.items():
+            count = insert_column_meta(
+                project_db, source_table, info['columns'], source=info['source']
+            )
+            print(f"Loaded {count} columns for {source_table} from {csv_path}")
+
+
 def cmd_load_columns(args):
     """Load column metadata from CSV, Oracle, or Athena into _column_meta table"""
     import csv
@@ -1752,48 +1790,64 @@ def cmd_load_columns(args):
             tables = config.get('tables', [])
 
         from .extract import _qualified_name
+
+        # Build CSV lookup: {(source, table) -> {col: dtype}} from --csv files
+        csv_files = getattr(args, 'csv_files', [])
+        csv_lookup = {}  # (source, table) -> {col_name: data_type}
+        if csv_files:
+            import csv as csv_mod
+            for csv_path in csv_files:
+                if not os.path.exists(csv_path):
+                    print(f"Error: CSV file not found: {csv_path}")
+                    continue
+                with open(csv_path, 'r', newline='') as f:
+                    reader = csv_mod.DictReader(f)
+                    for row in reader:
+                        src = row.get('source') or row.get('SOURCE', '')
+                        tbl = row.get('table') or row.get('TABLE', '')
+                        col = row.get('column_name') or row.get('COLUMN_NAME', '')
+                        dt = row.get('data_type') or row.get('DATA_TYPE', '')
+                        if tbl and col:
+                            key = (src.lower(), tbl.lower())
+                            if key not in csv_lookup:
+                                csv_lookup[key] = {}
+                            csv_lookup[key][col] = dt
+
         for tbl in tables:
             source = tbl.get('source', '')
             qname = _qualified_name(tbl)
             raw_table = tbl['table']
-            # For AWS, conn_macro = database name; for Oracle, conn_macro from config
-            if source.lower() == 'aws':
-                conn_macro = tbl.get('database', '')
-            else:
-                conn_macro = tbl.get('conn_macro', '')
 
-            print(f"\n--- {qname} ({source}: {raw_table}) ---")
+            # Check if CSV provides columns for this table
+            # Try matching by (source, table) or (source, name)
+            name = tbl.get('name', '')
+            csv_key = (source.lower(), raw_table.lower())
+            csv_key_name = (source.lower(), name.lower())
+            matched_key = None
+            if csv_key in csv_lookup:
+                matched_key = csv_key
+            elif csv_key_name in csv_lookup:
+                matched_key = csv_key_name
+
+            if matched_key:
+                columns = csv_lookup[matched_key]
+                count = insert_column_meta(args.project_db, qname, columns, source=source)
+                print(f"{qname}: loaded {count} columns from CSV")
+                continue
+
+            # Otherwise discover from Oracle/Athena
+            conn_macro = tbl.get('conn_macro', '')
+
+            print(f"{qname}: discovering columns from {source} ({conn_macro}: {raw_table})")
             _load_columns_entry(args.project_db, qname, raw_table, source, conn_macro)
         return
 
     # Mode: --csv (repeatable) — load from proc contents metadata CSVs
+    # CSV format: source, table, column_name, data_type
+    # source_table is derived as {source}_{table}
     csv_files = getattr(args, 'csv_files', [])
     if csv_files:
-        import csv as csv_mod
-        for csv_path in csv_files:
-            if not os.path.exists(csv_path):
-                print(f"Error: CSV file not found: {csv_path}")
-                continue
-
-            # Group columns by source_table
-            tables = {}
-            with open(csv_path, 'r', newline='') as f:
-                reader = csv_mod.DictReader(f)
-                for row in reader:
-                    st = row.get('source_table') or row.get('SOURCE_TABLE', '')
-                    src = row.get('source') or row.get('SOURCE', '')
-                    col = row.get('column_name') or row.get('COLUMN_NAME', '')
-                    dt = row.get('data_type') or row.get('DATA_TYPE', '')
-                    if st and col:
-                        if st not in tables:
-                            tables[st] = {'source': src, 'columns': {}}
-                        tables[st]['columns'][col] = dt
-
-            for source_table, info in tables.items():
-                count = insert_column_meta(
-                    args.project_db, source_table, info['columns'], source=info['source']
-                )
-                print(f"Loaded {count} columns for {source_table} from {csv_path}")
+        _load_csv_meta_files(args.project_db, csv_files)
         return
 
     conn_macro = getattr(args, 'conn_macro', None)
@@ -2315,6 +2369,7 @@ def main():
                                  help='Database path to read column metadata from _column_meta')
     parser_gen_aws.add_argument('--vintage', default='day', choices=['day', 'week', 'month', 'quarter', 'year', 'sample'],
                                  help='Date bucketing granularity via Athena date_trunc (default: day). "sample" picks N random matching dates.')
+    parser_gen_aws.add_argument('--force', action='store_true', help='Overwrite existing CSV files without prompting')
 
     # load-col command
     parser_load_col = subparsers.add_parser('load-col', help='Load column statistics from CSV')

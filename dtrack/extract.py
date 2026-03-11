@@ -3,6 +3,7 @@
 import csv
 import json
 import os
+import threading
 
 
 # Oracle numeric types
@@ -352,6 +353,8 @@ def _sas_date_transform(date_col, transform):
 
 def _sas_vintage_date_expr(date_expr, vintage):
     """Wrap date_expr with SAS vintage bucketing (for $ processed tables)."""
+    if vintage == 'all':
+        return "'all'"
     if not vintage or vintage == 'day':
         return date_expr
     sas_expr = _ORACLE_VINTAGE_TO_SAS.get(vintage)
@@ -382,12 +385,48 @@ def _vintage_date_expr(date_expr, vintage, vintage_transform=None):
     """
     if vintage_transform:
         return vintage_transform.replace("{col}", date_expr)
+    if vintage == 'all':
+        return "'all'"
     if not vintage or vintage == 'day':
         return date_expr
     fmt = _VINTAGE_TRUNC.get(vintage)
     if fmt is None:
         return date_expr
     return f"TRUNC({date_expr}, '{fmt}')"
+
+
+def _oracle_where_to_sas(where, quote=True):
+    """Convert Oracle-style WHERE clause to SAS-compatible syntax.
+
+    Converts DATE 'YYYY-MM-DD' literals to SAS 'ddMONyyyy'd format.
+    If quote=True, also escapes remaining single quotes for SAS datalines
+    while preserving SAS date literals.
+    """
+    import re
+    from datetime import datetime as _dt
+
+    sas_dates = []
+
+    def _date_repl(m):
+        d = _dt.strptime(m.group(1), "%Y-%m-%d")
+        sas_lit = f"'{d.strftime('%d%b%Y').upper()}'d"
+        placeholder = f"\x00SASDT{len(sas_dates)}\x00"
+        sas_dates.append(sas_lit)
+        return placeholder
+
+    # DATE 'YYYY-MM-DD' or DATE('YYYY-MM-DD') -> placeholder
+    s = re.sub(r"DATE\s*\(\s*'(\d{4}-\d{2}-\d{2})'\s*\)", _date_repl, where, flags=re.IGNORECASE)
+    s = re.sub(r"DATE\s+'(\d{4}-\d{2}-\d{2})'", _date_repl, s, flags=re.IGNORECASE)
+
+    # Quote remaining single quotes for SAS datalines
+    if quote:
+        s = s.replace("'", "''")
+
+    # Restore SAS date literals (unquoted)
+    for i, lit in enumerate(sas_dates):
+        s = s.replace(f"\x00SASDT{i}\x00", lit)
+
+    return s
 
 
 def _sas_quote(s):
@@ -414,7 +453,7 @@ def _gen_sas_proc_contents(sas_tables, out_dir='.'):
         return ''
 
     lines = []
-    lines.append("/* ── Column metadata discovery for SAS datasets ── */")
+    lines.append("/* Column metadata discovery for SAS datasets */")
 
     for tbl_cfg in sas_tables:
         processed = tbl_cfg.get('processed', '')
@@ -429,11 +468,12 @@ def _gen_sas_proc_contents(sas_tables, out_dir='.'):
         lines.append(f"/* Metadata: {qname} from {sas_dataset} */")
         lines.append(f"proc contents data={sas_dataset} out=_meta_{sn} noprint; run;")
         lines.append(f"")
+        tbl_name = tbl_cfg['name']
         lines.append(f"proc sql;")
         lines.append(f"    create table _colmeta_{sn} as")
         lines.append(f"    select")
-        lines.append(f"        '{qname}' as source_table length=128,")
         lines.append(f"        '{source}' as source length=32,")
+        lines.append(f"        '{tbl_name}' as table length=128,")
         lines.append(f"        name as column_name length=64,")
         lines.append(f"        case")
         lines.append(f"            when type = 1 and (upcase(format) like '%DATE%'")
@@ -454,7 +494,9 @@ def _gen_sas_proc_contents(sas_tables, out_dir='.'):
         lines.append(f"quit;")
         lines.append(f"")
         lines.append(f'proc export data=_colmeta_{sn} outfile="&out_dir./{qname}_meta.csv"')
-        lines.append(f"    dbms=csv replace; run;")
+        lines.append(f"    dbms=csv replace;")
+        lines.append(f"    putnames=yes;")
+        lines.append(f"run;")
         lines.append(f"proc delete data=_meta_{sn} _colmeta_{sn}; run;")
 
     return '\n'.join(lines)
@@ -482,7 +524,7 @@ def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
         name = tbl_cfg['name']
         qname = _qualified_name(tbl_cfg)
         conn_macro = tbl_cfg.get('conn_macro', 'pcds')
-        where = _sas_quote(tbl_cfg.get('where', ''))
+        raw_where = tbl_cfg.get('where', '')
         transform = tbl_cfg.get('date_transform', '')
         processed = tbl_cfg.get('processed')
         if isinstance(processed, list):
@@ -492,13 +534,16 @@ def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
 
         if processed and processed.startswith('$'):
             # SAS dataset mode: $ prefix means local SAS table
+            # Convert Oracle date literals to SAS format, then quote
             sas_table = processed[1:].strip()  # remove $ prefix
+            where = _oracle_where_to_sas(raw_where, quote=False)
             date_expr = _sas_date_transform(date_col, transform) if transform else date_col
             sas_datalines.append(
                 f"{sas_table}|{safe_ds}|{qname}|{date_expr}|{where}"
             )
         else:
-            # Oracle mode
+            # Oracle mode — quote for SAS datalines but keep Oracle date syntax
+            where = _sas_quote(raw_where)
             date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
             if processed:
                 table = name  # CTE alias
@@ -547,6 +592,7 @@ def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
         lines.append("    %if %symexist(_cte&idx) %then %let _cte_val = &&_cte&idx;")
         lines.append("    %else %let _cte_val = ;")
         lines.append("")
+        lines.append("    %put NOTE: [&qname] SQL: &_cte_val select &date_expr as date_value, count(*) as row_count from &table where &where_clause group by &date_expr;")
         lines.append("    %start_timer();")
         lines.append("    proc sql;")
         lines.append("        %&conn_macro")
@@ -609,6 +655,7 @@ def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
         lines.append("        %return;")
         lines.append("    %end;")
         lines.append("")
+        lines.append("    %put NOTE: [&qname] SQL: select &date_expr as date_value, count(*) as row_count from &table where &where_clause group by &date_expr;")
         lines.append("    %start_timer();")
         lines.append("    proc sql;")
         lines.append("        create table cache.rc_&dsname as")
@@ -671,7 +718,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     where = tbl_cfg.get('where', '')
     columns = tbl_cfg.get('columns', {})
     transform = tbl_cfg.get('date_transform', '')
-    vintage = tbl_cfg.get('vintage', 'day')
+    vintage = tbl_cfg.get('vintage', 'all')
 
     lines = []
     lines.append(f"%macro get_colstats_{sn}();")
@@ -696,7 +743,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
 
     # Get matching dates and bucket them by vintage
     vintage_buckets = {}
-    if db_path:
+    if db_path and vintage != 'all':
         where_fragment, effective_vintage = _build_col_where(tbl_cfg, db_path, vintage)
         if where_fragment:
             from .db import get_row_comparison, list_table_pairs
@@ -721,7 +768,12 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
         date_expr = _sas_date_transform(date_col, transform) if transform else date_col
     else:
         date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
-    where_fragment_str = f"AND ({where})" if where else ""
+    if is_sas_table and where:
+        where_fragment_str = f"AND ({_oracle_where_to_sas(where, quote=False)})"
+    elif where:
+        where_fragment_str = f"AND ({where})"
+    else:
+        where_fragment_str = ""
     _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
 
     # REDO flag from environment (default 0 = use cache)
@@ -732,113 +784,142 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     lines.append(f"    %put NOTE: Columns: {len(num_cols)} numeric + {len(cat_cols)} categorical = {n_cols} total;")
     lines.append(f"    %put NOTE: REDO={redo} (1=force re-pull, 0=use cached stats);")
 
-    def _emit_vintage_compute(lines, v_idx, raw_ds, suffix):
-        """Emit PROC FREQ/MEANS compute block for one vintage. Stats go to cache._cs_{sn}_v{idx}."""
-        cache_ds = f"cache._cs_{sn}_v{v_idx}"
-
-        # Numeric columns: PROC MEANS
-        for col, dtype in num_cols:
-            col_safe = col.replace("'", "''")
-            lines.append(f"    proc means data={raw_ds} noprint;")
-            lines.append(f"        class dt;")
-            lines.append(f"        var {col};")
-            lines.append(f"        output out=_means_{col}{suffix}(where=(_type_=1))")
-            lines.append(f"            n={col}_n nmiss={col}_nmiss mean={col}_mean")
-            lines.append(f"            std={col}_std min={col}_min max={col}_max;")
-            lines.append(f"    run;")
-            lines.append(f"    proc sql noprint;")
-            lines.append(f"        create table _nuniq_{col}{suffix} as")
-            lines.append(f"        select dt, count(distinct {col}) as {col}_n_unique")
-            lines.append(f"        from {raw_ds} group by dt;")
-            lines.append(f"    quit;")
-            lines.append(f"    data _sn_{col}{suffix};")
-            lines.append(f"        merge _means_{col}{suffix} _nuniq_{col}{suffix};")
-            lines.append(f"        by dt;")
-            lines.append(f"        length column_name $32 col_type $12 min_val $100 max_val $100 top_10 $2000;")
-            lines.append(f"        column_name = '{col_safe}'; col_type = 'numeric';")
-            lines.append(f"        n_total = {col}_n + {col}_nmiss; n_missing = {col}_nmiss;")
-            lines.append(f"        n_unique = {col}_n_unique; mean = {col}_mean; std = {col}_std;")
-            lines.append(f"        min_val = strip(put({col}_min, best32.));")
-            lines.append(f"        max_val = strip(put({col}_max, best32.)); top_10 = '';")
-            lines.append(f"        keep dt column_name col_type n_total n_missing n_unique mean std min_val max_val top_10;")
-            lines.append(f"    run;")
-            lines.append("")
-
-        # Categorical columns: PROC FREQ → stats + top-10
-        for col, dtype in cat_cols:
-            col_safe = col.replace("'", "''")
-            lines.append(f"    proc freq data={raw_ds} noprint;")
-            lines.append(f"        tables dt * {col} / out=_freq_{col}{suffix} sparse;")
-            lines.append(f"    run;")
-            lines.append(f"    proc sql noprint;")
-            lines.append(f"        create table _sc_{col}{suffix} as")
-            lines.append(f"        select dt, '{col_safe}' as column_name length=32,")
-            lines.append(f"            'categorical' as col_type length=12,")
-            lines.append(f"            sum(count) as n_total,")
-            lines.append(f"            sum(case when {col} is missing then count else 0 end) as n_missing,")
-            lines.append(f"            count(distinct case when {col} is not missing then {col} end) as n_unique,")
-            lines.append(f"            . as mean, . as std,")
-            lines.append(f"            '' as min_val length=100, '' as max_val length=100,")
-            lines.append(f"            '' as top_10 length=2000")
-            lines.append(f"        from _freq_{col}{suffix} group by dt;")
-            lines.append(f"    quit;")
-            # Top-10
-            lines.append(f"    proc sort data=_freq_{col}{suffix}; by dt descending count; run;")
-            lines.append(f"    data _t10_{col}{suffix}(keep=dt top_10);")
-            lines.append(f"        length top_10 $2000 _entry $200;")
-            lines.append(f"        set _freq_{col}{suffix}; by dt;")
-            lines.append(f"        retain top_10 _rn;")
-            lines.append(f"        if first.dt then do; top_10 = ''; _rn = 0; end;")
-            lines.append(f"        if {col} is not missing and _rn < 10 then do;")
-            lines.append(f"            _rn + 1;")
-            lines.append(f"            _entry = catx('', strip(vvalue({col})), '(', strip(put(count, best.)), ')');")
-            lines.append(f"            if top_10 = '' then top_10 = _entry;")
-            lines.append(f"            else top_10 = catx('; ', top_10, _entry);")
-            lines.append(f"        end;")
-            lines.append(f"        if last.dt then output;")
-            lines.append(f"    run;")
-            # Merge top_10
-            lines.append(f"    proc sort data=_sc_{col}{suffix}; by dt; run;")
-            lines.append(f"    proc sort data=_t10_{col}{suffix}; by dt; run;")
-            lines.append(f"    data _sc_{col}{suffix};")
-            lines.append(f"        merge _sc_{col}{suffix}(in=a) _t10_{col}{suffix}(in=b rename=(top_10=_top10));")
-            lines.append(f"        by dt; if a; if b then top_10 = _top10; drop _top10;")
-            lines.append(f"    run;")
-            # Min/max
-            lines.append(f"    proc sql noprint;")
-            lines.append(f"        create table _mm_{col}{suffix} as")
-            lines.append(f"        select dt,")
-            lines.append(f"            min(case when {col} is not missing then {col} end) as min_val length=100,")
-            lines.append(f"            max(case when {col} is not missing then {col} end) as max_val length=100")
-            lines.append(f"        from {raw_ds} group by dt;")
-            lines.append(f"    quit;")
-            lines.append(f"    data _sc_{col}{suffix};")
-            lines.append(f"        merge _sc_{col}{suffix}(in=a drop=min_val max_val) _mm_{col}{suffix}(in=b);")
-            lines.append(f"        by dt; if a;")
-            lines.append(f"    run;")
-            lines.append("")
-
-        # Stack all column stats for this vintage → save to cache
-        stat_datasets = [f"_sn_{col}{suffix}" for col, _ in num_cols] + \
-                         [f"_sc_{col}{suffix}" for col, _ in cat_cols]
-        if stat_datasets:
-            lines.append(f"    data {cache_ds};")
-            lines.append(f"        set {' '.join(stat_datasets)};")
-            lines.append(f"    run;")
-            lines.append("")
-
-        # Cleanup raw data + all intermediates from WORK
-        lines.append(f"    proc delete data={raw_ds}; run;")
-        cleanup = [f"_means_{col}{suffix}" for col, _ in num_cols] + \
-                  [f"_nuniq_{col}{suffix}" for col, _ in num_cols] + \
-                  [f"_sn_{col}{suffix}" for col, _ in num_cols] + \
-                  [f"_freq_{col}{suffix}" for col, _ in cat_cols] + \
-                  [f"_sc_{col}{suffix}" for col, _ in cat_cols] + \
-                  [f"_t10_{col}{suffix}" for col, _ in cat_cols] + \
-                  [f"_mm_{col}{suffix}" for col, _ in cat_cols]
-        if cleanup:
-            lines.append(f"    proc datasets lib=work nolist; delete {' '.join(cleanup)}; quit;")
+    def _emit_macro_definitions(lines, is_sas, conn_macro, _ua, redo):
+        """Emit reusable macro definitions: %_col_numeric, %_col_categorical, %_process_vintage."""
+        # %_col_numeric macro
+        lines.append("    %macro _col_numeric(raw_ds=, col=, out_ds=);")
+        lines.append("        proc means data=&raw_ds noprint;")
+        lines.append("            class dt;")
+        lines.append("            var &col;")
+        lines.append("            output out=_means_(where=(_type_=1))")
+        lines.append("                n=_cn nmiss=_cnmiss mean=_cmean")
+        lines.append("                std=_cstd min=_cmin max=_cmax;")
+        lines.append("        run;")
+        lines.append("        proc sql noprint;")
+        lines.append("            create table _nuniq_ as")
+        lines.append("            select dt, count(distinct &col) as _cn_unique")
+        lines.append("            from &raw_ds group by dt;")
+        lines.append("        quit;")
+        lines.append("        data &out_ds;")
+        lines.append("            merge _means_ _nuniq_;")
+        lines.append("            by dt;")
+        lines.append("            length column_name $32 col_type $12 min_val $100 max_val $100 top_10 $2000;")
+        lines.append("            column_name = \"&col\"; col_type = 'numeric';")
+        lines.append("            n_total = _cn + _cnmiss; n_missing = _cnmiss;")
+        lines.append("            n_unique = _cn_unique; mean = _cmean; std = _cstd;")
+        lines.append("            min_val = strip(put(_cmin, best32.));")
+        lines.append("            max_val = strip(put(_cmax, best32.)); top_10 = '';")
+        lines.append("            keep dt column_name col_type n_total n_missing n_unique mean std min_val max_val top_10;")
+        lines.append("        run;")
+        lines.append("        proc datasets lib=work nolist; delete _means_ _nuniq_; quit;")
+        lines.append("    %mend _col_numeric;")
         lines.append("")
+        # %_col_categorical macro
+        lines.append("    %macro _col_categorical(raw_ds=, col=, out_ds=);")
+        lines.append("        proc freq data=&raw_ds noprint;")
+        lines.append("            tables dt * &col / out=_freq_ sparse;")
+        lines.append("        run;")
+        lines.append("        proc sql noprint;")
+        lines.append("            create table _sc_ as")
+        lines.append("            select dt, \"&col\" as column_name length=32,")
+        lines.append("                'categorical' as col_type length=12,")
+        lines.append("                sum(count) as n_total,")
+        lines.append("                sum(case when &col is missing then count else 0 end) as n_missing,")
+        lines.append("                count(distinct case when &col is not missing then &col end) as n_unique,")
+        lines.append("                . as mean, . as std,")
+        lines.append("                '' as min_val length=100, '' as max_val length=100,")
+        lines.append("                '' as top_10 length=2000")
+        lines.append("            from _freq_ group by dt;")
+        lines.append("        quit;")
+        lines.append("        proc sort data=_freq_; by dt descending count; run;")
+        lines.append("        data _t10_(keep=dt top_10);")
+        lines.append("            length top_10 $2000 _entry $200;")
+        lines.append("            set _freq_; by dt;")
+        lines.append("            retain top_10 _rn;")
+        lines.append("            if first.dt then do; top_10 = ''; _rn = 0; end;")
+        lines.append("            if &col is not missing and _rn < 10 then do;")
+        lines.append("                _rn + 1;")
+        lines.append("                _entry = catx('', strip(vvalue(&col)), '(', strip(put(count, best.)), ')');")
+        lines.append("                if top_10 = '' then top_10 = _entry;")
+        lines.append("                else top_10 = catx('; ', top_10, _entry);")
+        lines.append("            end;")
+        lines.append("            if last.dt then output;")
+        lines.append("        run;")
+        lines.append("        proc sort data=_sc_; by dt; run;")
+        lines.append("        proc sort data=_t10_; by dt; run;")
+        lines.append("        data _sc_;")
+        lines.append("            merge _sc_(in=a) _t10_(in=b rename=(top_10=_top10));")
+        lines.append("            by dt; if a; if b then top_10 = _top10; drop _top10;")
+        lines.append("        run;")
+        lines.append("        proc sql noprint;")
+        lines.append("            create table _mm_ as")
+        lines.append("            select dt,")
+        lines.append("                min(case when &col is not missing then &col end) as min_val length=100,")
+        lines.append("                max(case when &col is not missing then &col end) as max_val length=100")
+        lines.append("            from &raw_ds group by dt;")
+        lines.append("        quit;")
+        lines.append("        data &out_ds;")
+        lines.append("            merge _sc_(in=a drop=min_val max_val) _mm_(in=b);")
+        lines.append("            by dt; if a;")
+        lines.append("        run;")
+        lines.append("        proc datasets lib=work nolist; delete _freq_ _sc_ _t10_ _mm_; quit;")
+        lines.append("    %mend _col_categorical;")
+        lines.append("")
+        # %_process_vintage macro — orchestrates one vintage: cache check → pull → compute → stack
+        lines.append("    %macro _process_vintage(raw_ds=, cache_ds=, pull_mvar=);")
+        if not redo:
+            lines.append("        %if %sysfunc(exist(&cache_ds)) %then %do;")
+            lines.append("            %put NOTE: Cached stats found: &cache_ds - skipping;")
+            lines.append("        %end;")
+            lines.append("        %else %do;")
+        lines.append("        %put NOTE: Pulling data into &raw_ds;")
+        if is_sas:
+            lines.append("        proc sql; create table &raw_ds as %superq(&pull_mvar); quit;")
+        else:
+            lines.append(f"        %pull_data(%superq(&pull_mvar), &raw_ds, server={conn_macro}{_ua});")
+        # Column stats driver: iterate _col_map via call execute
+        lines.append("        data _null_;")
+        lines.append("            set _col_map;")
+        lines.append("            length _cmd $2000;")
+        lines.append("            if col_type = 'numeric' then")
+        lines.append("                _cmd = cats('%nrstr(%_col_numeric)(raw_ds=', \"&raw_ds\",")
+        lines.append("                            ', col=', strip(col_name),")
+        lines.append("                            ', out_ds=_cstat_', strip(put(_n_, 3.)), ')');")
+        lines.append("            else")
+        lines.append("                _cmd = cats('%nrstr(%_col_categorical)(raw_ds=', \"&raw_ds\",")
+        lines.append("                            ', col=', strip(col_name),")
+        lines.append("                            ', out_ds=_cstat_', strip(put(_n_, 3.)), ')');")
+        lines.append("            call execute(_cmd);")
+        lines.append("        run;")
+        lines.append("        data &cache_ds; set _cstat_:; run;")
+        lines.append("        proc delete data=&raw_ds; run;")
+        lines.append("        proc datasets lib=work nolist; delete _cstat_:; quit;")
+        if not redo:
+            lines.append("        %end;")
+        lines.append("    %mend _process_vintage;")
+        lines.append("")
+
+    def _emit_col_map(lines, col_list):
+        """Emit _col_map datalines dataset from Python col_list."""
+        lines.append("    data _col_map;")
+        lines.append("        length col_name $32 col_type $12;")
+        lines.append("        infile datalines dlm='|' truncover;")
+        lines.append("        input col_name $ col_type $;")
+        lines.append("        datalines;")
+        for col, dtype in col_list:
+            ctype = 'numeric' if is_numeric_type(dtype, is_oracle=True) else 'categorical'
+            lines.append(f"{col}|{ctype}")
+        lines.append(";")
+        lines.append("    run;")
+        lines.append("")
+
+    # Emit reusable macro definitions and column metadata
+    _emit_macro_definitions(lines, is_sas_table, conn_macro, _ua, redo)
+    _emit_col_map(lines, col_list)
+
+    # Build pull SQL macro variables and vintage map entries
+    col_select = ", ".join([date_expr + " AS dt"] + [col for col, _ in col_list])
+    vintage_entries = []  # list of (v_idx, raw_ds, cache_ds, pull_mvar)
 
     if vintage_buckets:
         n_vintages = len(vintage_buckets)
@@ -855,25 +936,25 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
                 break
 
         for v_idx, (bucket_key, dates) in enumerate(sorted(vintage_buckets.items()), 1):
-            cache_ds = f"cache._cs_{sn}_v{v_idx}"
-            suffix = f"_v{v_idx}"
-
-            lines.append(f"    /* ===== Vintage {v_idx}/{n_vintages}: {bucket_key} ({len(dates)} dates) ===== */")
-
-            # Skip if cached stats exist and REDO=0
-            if not redo:
-                lines.append(f"    %if %sysfunc(exist({cache_ds})) %then %do;")
-                lines.append(f"        %put NOTE: Cached stats found: {cache_ds} — skipping;")
-                lines.append(f"    %end;")
-                lines.append(f"    %else %do;")
-
             # Build IN clause for this vintage's dates
             if date_dtype and date_dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
                 date_list = ", ".join(str(d) for d in dates)
                 date_where = f"{date_col} IN ({date_list})"
             elif date_dtype and ('TIMESTAMP' in date_dtype or 'DATE' in date_dtype):
-                date_list = ", ".join(f"DATE '{d}'" for d in dates)
-                date_where = f"TRUNC({date_col}) IN ({date_list})"
+                if is_sas_table:
+                    from datetime import datetime as _dt
+                    sas_dates = []
+                    for d in dates:
+                        try:
+                            dt_obj = _dt.strptime(str(d), "%Y-%m-%d")
+                            sas_dates.append(f"'{dt_obj.strftime('%d%b%Y').upper()}'d")
+                        except ValueError:
+                            sas_dates.append(f"'{d}'")
+                    date_list = ", ".join(sas_dates)
+                    date_where = f"{date_col} IN ({date_list})"
+                else:
+                    date_list = ", ".join(f"DATE '{d}'" for d in dates)
+                    date_where = f"TRUNC({date_col}) IN ({date_list})"
             elif date_dtype and date_dtype.startswith('CHAR'):
                 date_list = ", ".join(f"'{d}'" for d in dates)
                 date_where = f"TRIM({date_col}) IN ({date_list})"
@@ -881,85 +962,84 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
                 date_list = ", ".join(f"'{d}'" for d in dates)
                 date_where = f"{date_col} IN ({date_list})"
 
-            # Pull raw data into WORK (temporary)
-            col_select = ", ".join([date_expr + " AS dt"] + [col for col, _ in col_list])
-            raw_ds = f"_raw_{sn}{suffix}"
+            # Build pull SQL and emit as macro variable
+            raw_ds = f"_raw_{sn}_v{v_idx}"
+            cache_ds = f"cache._cs_{sn}_v{v_idx}"
+            pull_mvar = f"_sql_v{v_idx}"
 
             if is_sas_table:
-                # SAS dataset: direct proc sql (no Oracle passthrough)
                 sas_where = f"WHERE {date_where}"
                 if where_fragment_str:
                     sas_where += f" {where_fragment_str}"
                 pull_sql = f"SELECT {col_select} FROM {table} {sas_where}"
-                lines.append(f"    proc sql; create table {raw_ds} as {pull_sql}; quit;")
             else:
-                # Oracle: passthrough via %pull_data
                 pull_sql = f"{cte_prefix}SELECT {col_select} FROM {table} WHERE {date_where} {where_fragment_str}"
-                lines.append(f"    %let _sql{suffix} = %nrstr({pull_sql});")
-                lines.append(f"    %pull_data(&_sql{suffix}, {raw_ds}, server={conn_macro}{_ua});")
-            lines.append("")
 
-            # Compute stats → save to cache
-            _emit_vintage_compute(lines, v_idx, raw_ds, suffix)
+            lines.append(f"    /* Vintage {v_idx}/{n_vintages}: {bucket_key} ({len(dates)} dates) */")
+            lines.append(f"    %let {pull_mvar} = %nrstr({pull_sql});")
+            lines.append(f"    %put NOTE: [{qname}] v{v_idx} pull SQL: &{pull_mvar};")
+            vintage_entries.append((v_idx, raw_ds, cache_ds, pull_mvar))
 
-            if not redo:
-                lines.append(f"    %end;")
-            lines.append("")
-
-        # Stack all cached vintage stats
-        cache_sets = " ".join(f"cache._cs_{sn}_v{i}" for i in range(1, n_vintages + 1))
-        lines.append(f"    /* Stack all {n_vintages} cached vintage stats */")
-        lines.append(f"    data _colstats_{sn};")
-        lines.append(f"        set {cache_sets};")
-        lines.append(f"    run;")
         lines.append("")
 
     else:
-        # No vintage buckets — pull everything, compute, save to cache
-        cache_ds = f"cache._cs_{sn}"
+        # No vintage buckets — single full-table pull
         lines.append(f"    %put NOTE: No vintage buckets - pulling full table;")
-        lines.append("")
-
-        if not redo:
-            lines.append(f"    %if %sysfunc(exist({cache_ds})) %then %do;")
-            lines.append(f"        %put NOTE: Cached stats found: {cache_ds} — skipping pull;")
-            lines.append(f"        data _colstats_{sn}; set {cache_ds}; run;")
-            lines.append(f"    %end;")
-            lines.append(f"    %else %do;")
-
-        col_select = ", ".join([date_expr + " AS dt"] + [col for col, _ in col_list])
         raw_ds = f"_raw_{sn}"
+        cache_ds = f"cache._cs_{sn}"
+        pull_mvar = "_sql_full"
 
         if is_sas_table:
-            # SAS dataset: direct proc sql
             if where:
                 pull_sql = f"SELECT {col_select} FROM {table} WHERE {where}"
             else:
                 pull_sql = f"SELECT {col_select} FROM {table}"
-            lines.append(f"    proc sql; create table {raw_ds} as {pull_sql}; quit;")
         else:
-            # Oracle: passthrough via %pull_data
             if where:
                 pull_sql = f"{cte_prefix}SELECT {col_select} FROM {table} WHERE {where}"
             else:
                 pull_sql = f"{cte_prefix}SELECT {col_select} FROM {table}"
-            lines.append(f"    %let _sql_full = %nrstr({pull_sql});")
-            lines.append(f"    %pull_data(&_sql_full, {raw_ds}, server={conn_macro}{_ua});")
+
+        lines.append(f"    %let {pull_mvar} = %nrstr({pull_sql});")
+        lines.append(f"    %put NOTE: [{qname}] full pull SQL: &{pull_mvar};")
+        vintage_entries.append((1, raw_ds, cache_ds, pull_mvar))
         lines.append("")
 
-        # Compute stats → save to cache (v_idx=0, suffix='')
-        # We'll use a special index for non-vintage mode
-        _emit_vintage_compute(lines, 0, raw_ds, '')
+    # Emit _vintage_map datalines and call execute driver
+    lines.append("    data _vintage_map;")
+    lines.append("        length raw_ds $40 cache_ds $60 pull_mvar $20;")
+    lines.append("        infile datalines dlm='|' truncover;")
+    lines.append("        input v_idx raw_ds $ cache_ds $ pull_mvar $;")
+    lines.append("        datalines;")
+    for v_idx, raw_ds, cache_ds, pull_mvar in vintage_entries:
+        lines.append(f"{v_idx}|{raw_ds}|{cache_ds}|{pull_mvar}")
+    lines.append(";")
+    lines.append("    run;")
+    lines.append("")
 
-        # Rename cache._cs_{name}_v0 to cache._cs_{name}
-        lines.append(f"    data {cache_ds}; set cache._cs_{sn}_v0; run;")
-        lines.append(f"    proc delete data=cache._cs_{sn}_v0; run;")
+    # Drive all vintages via call execute
+    lines.append("    data _null_;")
+    lines.append("        set _vintage_map;")
+    lines.append("        length _cmd $2000;")
+    lines.append("        _cmd = cats('%nrstr(%_process_vintage)(raw_ds=', strip(raw_ds),")
+    lines.append("                    ', cache_ds=', strip(cache_ds),")
+    lines.append("                    ', pull_mvar=', strip(pull_mvar), ')');")
+    lines.append("        call execute(_cmd);")
+    lines.append("    run;")
+    lines.append("")
+
+    # Stack all vintage caches into final dataset
+    if vintage_buckets:
+        cache_list = " ".join(e[2] for e in vintage_entries)
+        lines.append(f"    /* Stack all {len(vintage_entries)} cached vintage stats */")
+        lines.append(f"    data _colstats_{sn};")
+        lines.append(f"        set {cache_list};")
+        lines.append(f"    run;")
+    else:
+        cache_ds = vintage_entries[0][2]
         lines.append(f"    data _colstats_{sn}; set {cache_ds}; run;")
-        lines.append("")
-
-        if not redo:
-            lines.append(f"    %end;")
-        lines.append("")
+    lines.append("")
+    lines.append("    proc datasets lib=work nolist; delete _col_map _vintage_map; quit;")
 
     # Export final
     lines.append(f"    proc export data=_colstats_{sn}")
@@ -1229,15 +1309,17 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 # ---------------------------------------------------------------------------
 
 _aws_creds_expires = None
+_aws_creds_lock = threading.Lock()
 
 
-def aws_creds_renew(ttl_minutes=50):
+def aws_creds_renew(ttl_minutes=50, retries=3, retry_delay=10):
     """Renew AWS credentials via token-based auth (Windows only).
 
     On Windows, fetches a token from AWS_TOKEN_URL and uses it to obtain
     temporary credentials from AWS_ARN_URL. On Linux/containers, credentials
     come from IAM roles or environment variables, so this is a no-op.
 
+    Thread-safe: uses a lock so only one thread renews at a time.
     Skips renewal if credentials were refreshed less than ttl_minutes ago.
     """
     global _aws_creds_expires
@@ -1250,28 +1332,40 @@ def aws_creds_renew(ttl_minutes=50):
     if _aws_creds_expires and now < _aws_creds_expires:
         return
 
-    import requests
+    with _aws_creds_lock:
+        # Double-check after acquiring lock (another thread may have renewed)
+        now = time.time()
+        if _aws_creds_expires and now < _aws_creds_expires:
+            return
 
-    token_url = os.environ.get('AWS_TOKEN_URL')
-    arn_url = os.environ.get('AWS_ARN_URL')
-    if not token_url or not arn_url:
-        return
+        import requests
 
-    try:
-        token_resp = requests.get(token_url)
-        token_resp.raise_for_status()
-        token = token_resp.text.strip()
+        token_url = os.environ.get('AWS_TOKEN_URL')
+        arn_url = os.environ.get('AWS_ARN_URL')
+        if not token_url or not arn_url:
+            return
 
-        creds_resp = requests.get(arn_url, headers={'Authorization': f'Bearer {token}'})
-        creds_resp.raise_for_status()
-        creds = creds_resp.json()
+        for attempt in range(1, retries + 1):
+            try:
+                token_resp = requests.get(token_url)
+                token_resp.raise_for_status()
+                token = token_resp.text.strip()
 
-        os.environ['AWS_ACCESS_KEY_ID'] = creds['AccessKeyId']
-        os.environ['AWS_SECRET_ACCESS_KEY'] = creds['SecretAccessKey']
-        os.environ['AWS_SESSION_TOKEN'] = creds['SessionToken']
-        _aws_creds_expires = now + ttl_minutes * 60
-    except Exception as e:
-        print(f"Warning: AWS credential renewal failed: {e}")
+                creds_resp = requests.get(arn_url, headers={'Authorization': f'Bearer {token}'})
+                creds_resp.raise_for_status()
+                creds = creds_resp.json()
+
+                os.environ['AWS_ACCESS_KEY_ID'] = creds['AccessKeyId']
+                os.environ['AWS_SECRET_ACCESS_KEY'] = creds['SecretAccessKey']
+                os.environ['AWS_SESSION_TOKEN'] = creds['SessionToken']
+                _aws_creds_expires = now + ttl_minutes * 60
+                return
+            except Exception as e:
+                if attempt < retries:
+                    print(f"Warning: AWS credential renewal attempt {attempt}/{retries} failed: {e}")
+                    time.sleep(retry_delay)
+                else:
+                    print(f"Warning: AWS credential renewal failed after {retries} attempts: {e}")
 
 
 def athena_connect(data_base=None):
@@ -1310,6 +1404,8 @@ def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None):
     """
     if vintage_transform:
         return vintage_transform.replace("{col}", date_expr)
+    if vintage == 'all':
+        return "'all'"
     if not vintage or vintage == 'day':
         return date_expr
     unit = _VINTAGE_ATHENA.get(vintage)
@@ -1372,15 +1468,37 @@ def _extract_row_athena(cursor, tbl_cfg, outdir):
     return csv_path, elapsed, start_timestamp, end_timestamp
 
 
-def _extract_col_athena(cursor, tbl_cfg, col, dtype, full_table, cte_prefix=""):
+def _query_athena(sql, data_base=None):
+    """Execute SQL on Athena via pandas read_sql_query with fresh connection.
+
+    Renews credentials if needed, opens a new connection, runs the query,
+    and returns a DataFrame with lowercase column names.
+    """
+    import pandas.io.sql as psql
+    import warnings
+
+    aws_creds_renew()
+    conn = athena_connect(data_base=data_base)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            df = psql.read_sql_query(sql, conn)
+        df.columns = [c.lower() for c in df.columns]
+        return df
+    finally:
+        conn.close()
+
+
+def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database=None):
     """Extract stats for a single column from Athena.
 
     Numeric columns: direct aggregation (no top-10).
     Categorical columns: single frequency query, then derive all stats in Python.
+    Uses pandas read_sql_query for reliable query submission.
     """
     date_col = tbl_cfg['date_col']
     where = tbl_cfg.get('where', '')
-    vintage = tbl_cfg.get('vintage', 'day')
+    vintage = tbl_cfg.get('vintage', 'all')
     vintage_transform = tbl_cfg.get('vintage_transform', None)
     numeric = is_numeric_type(dtype, is_oracle=False)
 
@@ -1388,14 +1506,12 @@ def _extract_col_athena(cursor, tbl_cfg, col, dtype, full_table, cte_prefix=""):
     where_clause = f"AND {where}" if where else ""
 
     if numeric:
-        # Direct aggregation for numeric columns (unchanged approach)
         sql = cte_prefix + build_continuous_sql_athena(full_table, col, date_expr, where)
-        cursor.execute(sql)
+        print(f"    [{col}] SQL: {sql}")
+        df = _query_athena(sql, data_base=database)
         results = []
-        col_descriptions = [desc[0] for desc in cursor.description]
-        for row in cursor.fetchall():
-            row_dict = dict(zip(col_descriptions, row))
-            parsed = parse_stats_row(row_dict)
+        for _, row in df.iterrows():
+            parsed = parse_stats_row(row.to_dict())
             results.append(parsed)
         return results
 
@@ -1406,15 +1522,18 @@ FROM {full_table}
 WHERE 1=1 {where_clause}
 GROUP BY {date_expr}, {col}"""
 
-    cursor.execute(freq_sql)
+    print(f"    [{col}] SQL: {freq_sql}")
+    df = _query_athena(freq_sql, data_base=database)
 
     # Collect frequency data grouped by dt
     from collections import defaultdict
     freq_by_dt = defaultdict(list)
-    for row in cursor.fetchall():
-        dt_key = str(row[0])
-        col_value = row[1]  # may be None
-        freq = int(row[2])
+    for _, row in df.iterrows():
+        dt_key = str(row['dt'])
+        col_value = row['col_value']  # may be None/NaN
+        if col_value != col_value:  # NaN check
+            col_value = None
+        freq = int(row['freq'])
         freq_by_dt[dt_key].append((col_value, freq))
 
     # Derive stats from frequency table per dt
@@ -1569,7 +1688,7 @@ def _extract_aws_mock(config_path, outdir, types, db_path, mock_dir):
     print(f"\n[mock] Extraction complete. Output in: {outdir}")
 
 
-def extract_aws(config_path, outdir, types=None, max_workers=4, db_path=None, vintage='day'):
+def extract_aws(config_path, outdir, types=None, max_workers=4, db_path=None, vintage='day', force=False):
     """
     Extract data directly from AWS Athena.
 
@@ -1680,7 +1799,29 @@ def extract_aws(config_path, outdir, types=None, max_workers=4, db_path=None, vi
 
         print(f"\nExtracting: {name} ({raw_full_table})")
 
+        # Check for existing CSVs and skip/prompt/overwrite
+        if not force:
+            qname = _qualified_name(tbl_cfg)
+            existing = []
+            if "row" in types:
+                rp = os.path.join(outdir, f"{qname}_row.csv")
+                if os.path.exists(rp):
+                    existing.append(rp)
+            if "col" in types:
+                cp = os.path.join(outdir, f"{qname}_col.csv")
+                if os.path.exists(cp):
+                    existing.append(cp)
+            if existing:
+                fnames = ", ".join(os.path.basename(f) for f in existing)
+                resp = input(f"  {fnames} already exist. [o]verwrite / [s]kip / [a]lways overwrite? ").strip().lower()
+                if resp == 's':
+                    print(f"  Skipped {name}")
+                    continue
+                elif resp == 'a':
+                    force = True
+
         if "row" in types:
+            aws_creds_renew()
             csv_path, elapsed, start_ts, end_ts = _extract_row_athena(cursor, tbl_cfg, outdir)
             timing_records.append({
                 'table': name,
@@ -1700,35 +1841,52 @@ def extract_aws(config_path, outdir, types=None, max_workers=4, db_path=None, vi
                       f"Use 'dtrack load-columns --source aws' or provide columns in config.")
                 continue
 
-            # Extract column stats (parallel)
+            # Extract column stats
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             all_stats = []
-
-            def _extract_one(col_dtype):
-                col, dtype = col_dtype
-                if col.lower() == date_col.lower():
-                    return []
-                # Each thread needs its own cursor
-                thread_cursor = conn.cursor()
-                try:
-                    return _extract_col_athena(thread_cursor, tbl_cfg, col, dtype, full_table, cte_prefix)
-                finally:
-                    thread_cursor.close()
+            non_date_cols = [(c, d) for c, d in columns.items() if c.lower() != date_col.lower()]
 
             col_start_time = time.time()
             col_start_ts = datetime.now().isoformat()
 
             _max_workers = int(os.environ.get('MAX_WORKERS', max_workers))
-            with ThreadPoolExecutor(max_workers=_max_workers) as executor:
-                futures = {executor.submit(_extract_one, (c, d)): c for c, d in columns.items()}
-                for future in as_completed(futures):
-                    col_name = futures[future]
+
+            try:
+                from tqdm import tqdm
+            except ImportError:
+                tqdm = None
+
+            if _max_workers <= 1:
+                # Serial path: simpler, no thread overhead, clean output
+                col_iter = non_date_cols
+                if tqdm is not None:
+                    col_iter = tqdm(col_iter, desc=f"  {name} col stats", unit="col")
+                for col, dtype in col_iter:
                     try:
-                        stats = future.result()
+                        stats = _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix, database=database)
                         all_stats.extend(stats)
                     except Exception as e:
-                        print(f"  Warning: Failed to extract {col_name}: {e}")
+                        print(f"  Warning: Failed to extract {col}: {e}")
+            else:
+                # Parallel path
+                def _extract_one(col_dtype):
+                    col, dtype = col_dtype
+                    return _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix, database=database)
+
+                with ThreadPoolExecutor(max_workers=_max_workers) as executor:
+                    futures = {executor.submit(_extract_one, (c, d)): c for c, d in non_date_cols}
+                    completed_iter = as_completed(futures)
+                    if tqdm is not None:
+                        completed_iter = tqdm(completed_iter, total=len(futures),
+                                             desc=f"  {name} col stats", unit="col")
+                    for future in completed_iter:
+                        col_name = futures[future]
+                        try:
+                            stats = future.result()
+                            all_stats.extend(stats)
+                        except Exception as e:
+                            print(f"  Warning: Failed to extract {col_name}: {e}")
 
             col_elapsed = time.time() - col_start_time
             col_end_ts = datetime.now().isoformat()
@@ -1895,26 +2053,6 @@ def match_columns_from_dicts(left_cols, right_cols, left_label="left", right_lab
     for lower_name, right_name in sorted(right_lower.items()):
         if lower_name not in left_lower:
             right_only.append({"name": right_name, "type": right_cols[right_name]})
-
-    print(f"\nMatched ({len(matched)} columns):")
-    for left_name, right_name in sorted(matched.items()):
-        left_type = left_cols[left_name]
-        right_type = right_cols[right_name]
-        print(f"  {left_name} ({left_type}) <-> {right_name} ({right_type})")
-
-    print(f"\n{left_label} only ({len(left_only)}):")
-    if left_only:
-        for col in left_only:
-            print(f"  {col['name']}  {col['type']}")
-    else:
-        print("  (none)")
-
-    print(f"\n{right_label} only ({len(right_only)}):")
-    if right_only:
-        for col in right_only:
-            print(f"  {col['name']}  {col['type']}")
-    else:
-        print("  (none)")
 
     result = {
         "matched": matched,

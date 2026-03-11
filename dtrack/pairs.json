@@ -21,7 +21,7 @@
         "name": "cust_daily",
         "table": "cust_daily",
         "source": "aws",
-        "database": "analytics_db",
+        "conn_macro": "analytics_db",
         "date_col": "rpt_dt",
         "where": "",
         "vintage": "week"
@@ -49,7 +49,7 @@
         "name": "txn_monthly",
         "table": "txn_monthly",
         "source": "aws",
-        "database": "analytics_db",
+        "conn_macro": "analytics_db",
         "date_col": "month_dt",
         "where": "",
         "vintage": "sample"
