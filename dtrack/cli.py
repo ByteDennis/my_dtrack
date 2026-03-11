@@ -1766,6 +1766,36 @@ def cmd_load_columns(args):
             _load_columns_entry(args.project_db, qname, raw_table, source, conn_macro)
         return
 
+    # Mode: --csv (repeatable) — load from proc contents metadata CSVs
+    csv_files = getattr(args, 'csv_files', [])
+    if csv_files:
+        import csv as csv_mod
+        for csv_path in csv_files:
+            if not os.path.exists(csv_path):
+                print(f"Error: CSV file not found: {csv_path}")
+                continue
+
+            # Group columns by source_table
+            tables = {}
+            with open(csv_path, 'r', newline='') as f:
+                reader = csv_mod.DictReader(f)
+                for row in reader:
+                    st = row.get('source_table') or row.get('SOURCE_TABLE', '')
+                    src = row.get('source') or row.get('SOURCE', '')
+                    col = row.get('column_name') or row.get('COLUMN_NAME', '')
+                    dt = row.get('data_type') or row.get('DATA_TYPE', '')
+                    if st and col:
+                        if st not in tables:
+                            tables[st] = {'source': src, 'columns': {}}
+                        tables[st]['columns'][col] = dt
+
+            for source_table, info in tables.items():
+                count = insert_column_meta(
+                    args.project_db, source_table, info['columns'], source=info['source']
+                )
+                print(f"Loaded {count} columns for {source_table} from {csv_path}")
+        return
+
     conn_macro = getattr(args, 'conn_macro', None)
     csv_file = getattr(args, 'csv_file', None)
     source = getattr(args, 'source', None) or ''
@@ -2304,6 +2334,8 @@ def main():
     parser_load_cols.add_argument('--source', help='Source identifier (e.g., pcds, aws)')
     parser_load_cols.add_argument('--conn-macro', help='Connection identifier: Oracle macro (pcds, pb23) or Athena database name')
     parser_load_cols.add_argument('--config', help='Extraction config JSON; discovers columns for each table entry')
+    parser_load_cols.add_argument('--csv', dest='csv_files', action='append', default=[],
+                                 help='Metadata CSV with source_table,source,column_name,data_type columns (repeatable)')
 
     # match-columns command
     parser_match_cols = subparsers.add_parser(

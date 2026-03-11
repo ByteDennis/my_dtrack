@@ -25,6 +25,14 @@ def _qualified_name(tbl_cfg):
     return f"{source}_{name}" if source else name
 
 
+def _is_sas_table(tbl_cfg):
+    """Check if table config uses a SAS dataset ($ prefix in processed)."""
+    processed = tbl_cfg.get('processed')
+    if isinstance(processed, list):
+        processed = " ".join(processed)
+    return bool(processed and processed.startswith('$'))
+
+
 def _sas_safe_name(name, max_len=18):
     """Truncate name for SAS identifiers (datasets max 32, macros max 32).
 
@@ -391,6 +399,65 @@ def _sas_quote(s):
     Example: "WHERE STATUS = 'A'" becomes "WHERE STATUS = ''A''"
     """
     return s.replace("'", "''")
+
+
+def _gen_sas_proc_contents(sas_tables, out_dir='.'):
+    """Generate SAS code to export column metadata via proc contents for $ tables.
+
+    For each SAS dataset, runs proc contents to discover columns, then classifies
+    them as numeric/categorical/date and exports a CSV with columns:
+        source_table, source, column_name, data_type
+
+    The CSV can be loaded via: dtrack load-columns project.db --csv <file>
+    """
+    if not sas_tables:
+        return ''
+
+    lines = []
+    lines.append("/* ── Column metadata discovery for SAS datasets ── */")
+
+    for tbl_cfg in sas_tables:
+        processed = tbl_cfg.get('processed', '')
+        if isinstance(processed, list):
+            processed = " ".join(processed)
+        sas_dataset = processed[1:].strip()
+        qname = _qualified_name(tbl_cfg)
+        source = tbl_cfg.get('source', 'pcds')
+        sn = _sas_safe_name(tbl_cfg['name'])
+
+        lines.append(f"")
+        lines.append(f"/* Metadata: {qname} from {sas_dataset} */")
+        lines.append(f"proc contents data={sas_dataset} out=_meta_{sn} noprint; run;")
+        lines.append(f"")
+        lines.append(f"proc sql;")
+        lines.append(f"    create table _colmeta_{sn} as")
+        lines.append(f"    select")
+        lines.append(f"        '{qname}' as source_table length=128,")
+        lines.append(f"        '{source}' as source length=32,")
+        lines.append(f"        name as column_name length=64,")
+        lines.append(f"        case")
+        lines.append(f"            when type = 1 and (upcase(format) like '%DATE%'")
+        lines.append(f"                or upcase(format) like '%TIME%'")
+        lines.append(f"                or upcase(format) like '%DDMMYY%'")
+        lines.append(f"                or upcase(format) like '%MMDDYY%'")
+        lines.append(f"                or upcase(format) like '%YYMMDD%'")
+        lines.append(f"                or upcase(format) like '%DATETIME%'")
+        lines.append(f"                or upcase(informat) like '%DATE%'")
+        lines.append(f"                or upcase(informat) like '%TIME%')")
+        lines.append(f"                then 'DATE'")
+        lines.append(f"            when type = 1 then 'NUMBER'")
+        lines.append(f"            when type = 2 then cats('VARCHAR(', length, ')')")
+        lines.append(f"            else 'UNKNOWN'")
+        lines.append(f"        end as data_type length=32")
+        lines.append(f"    from _meta_{sn}")
+        lines.append(f"    order by name;")
+        lines.append(f"quit;")
+        lines.append(f"")
+        lines.append(f'proc export data=_colmeta_{sn} outfile="&out_dir./{qname}_meta.csv"')
+        lines.append(f"    dbms=csv replace; run;")
+        lines.append(f"proc delete data=_meta_{sn} _colmeta_{sn}; run;")
+
+    return '\n'.join(lines)
 
 
 def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
@@ -957,7 +1024,9 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             env_vars[key] = env_src[key]
 
     # Connection macro passwords (e.g., PCDS_PWD, PB23_PWD, PB30_PWD)
-    conn_macros = set(t.get('conn_macro', 'pcds') for t in pcds_tables)
+    # Skip $ (SAS dataset) tables — they don't need Oracle credentials
+    oracle_tables = [t for t in pcds_tables if not _is_sas_table(t)]
+    conn_macros = set(t.get('conn_macro', 'pcds') for t in oracle_tables)
     for conn_macro in conn_macros:
         pwd_key = f"{conn_macro.upper()}_PWD"
         if pwd_key in env_src:
@@ -1032,6 +1101,14 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 
     # Generate table macros
     macro_parts = []
+
+    # Emit proc contents for $ (SAS dataset) tables to export column metadata CSVs
+    sas_dataset_tables = [
+        t for t in pcds_tables
+        if _is_sas_table(t)
+    ]
+    if sas_dataset_tables:
+        macro_parts.append(_gen_sas_proc_contents(sas_dataset_tables, out_dir))
 
     if "row" in types:
         # Data-driven row extraction (single block for all tables)
