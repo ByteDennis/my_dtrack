@@ -212,7 +212,7 @@ class TestGenSasColLocal:
         sas = _gen_sas_col_local(mixed_cfg)
         assert 'col_count' in sas
         assert 'col_sum_sq' in sas
-        assert 'AMT|numeric' in sas
+        assert "col_name='AMT'; col_type='numeric'" in sas
 
     def test_uses_freq_table_for_categorical(self, mixed_cfg):
         sas = _gen_sas_col_local(mixed_cfg)

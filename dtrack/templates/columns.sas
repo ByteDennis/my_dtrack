@@ -11,10 +11,8 @@
      {PULL_STMT}           - pull data statement (SAS proc sql or %pull_data)
      {CACHE_CHECK_START}   - %if exist ... %else %do (or empty if REDO=1)
      {CACHE_CHECK_END}     - %end (or empty if REDO=1)
-     {COL_MAP_DATALINES}   - column name|type rows
-     {BASE_SQL}            - base SELECT without WHERE
-     {BASE_WHERE}          - original WHERE clause from config (or empty)
-     {VINTAGE_MAP_DATALINES} - v_idx|raw_ds|cache_ds|date_where rows
+     {COL_MAP_ROWS}        - column assignment statements
+     {VINTAGE_CALLS}       - data _null_ + %_process_vintage() per vintage
      {STACK_CACHES}        - data step to stack vintage caches
 */
 
@@ -120,15 +118,8 @@
     %mend _col_categorical;
 
     /* ---- Reusable macro: process one vintage ---- */
-    %macro _process_vintage(raw_ds=, cache_ds=, date_where=);
+    %macro _process_vintage(raw_ds=, cache_ds=);
 /*{CACHE_CHECK_START}*/
-        /* Compose full SQL: base + date filter + original WHERE */
-        %local _full_sql;
-        %if %length(&date_where) > 0 %then
-            %let _full_sql = %nrstr(/*{BASE_SQL}*/) WHERE &date_where /*{BASE_WHERE}*/;
-        %else
-            %let _full_sql = %nrstr(/*{BASE_SQL}*/) /*{BASE_WHERE}*/;
-
         %put NOTE: Pulling data into &raw_ds;
         %put NOTE: SQL: &_full_sql;
 /*{PULL_STMT}*/
@@ -154,36 +145,15 @@
     /* ---- Column metadata ---- */
     data _col_map;
         length col_name $32 col_type $12;
-        infile datalines dlm='|' truncover;
-        input col_name $ col_type $;
-        datalines;
-/*{COL_MAP_DATALINES}*/
-;
-    run;
-
-    /* ---- Vintage map (date_where per vintage) ---- */
-    data _vintage_map;
-        length raw_ds $40 cache_ds $60 date_where $2000;
-        infile datalines dlm='|' truncover;
-        input v_idx raw_ds $ cache_ds $ date_where $;
-        datalines;
-/*{VINTAGE_MAP_DATALINES}*/
-;
+/*{COL_MAP_ROWS}*/
     run;
 
     /* ---- Drive all vintages ---- */
-    data _null_;
-        set _vintage_map;
-        length _cmd $4000;
-        _cmd = cats('%nrstr(%_process_vintage)(raw_ds=', strip(raw_ds),
-                    ', cache_ds=', strip(cache_ds),
-                    ', date_where=', strip(date_where), ')');
-        call execute(_cmd);
-    run;
+/*{VINTAGE_CALLS}*/
 
     /* ---- Stack and export ---- */
 /*{STACK_CACHES}*/
-    proc datasets lib=work nolist; delete _col_map _vintage_map; quit;
+    proc datasets lib=work nolist; delete _col_map; quit;
 
     proc export data=_colstats_/*{SN}*/
         outfile="&out_dir.//*{QNAME}*/_col.csv"

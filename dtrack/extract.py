@@ -688,6 +688,11 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     date_dtype = date_filter['date_dtype']
     has_filter = date_filter['filter_type'] != 'none'
 
+    # For SAS DATETIME columns, wrap with datepart() if not already handled by date_transform
+    if is_sas and date_dtype and ('DATETIME' in date_dtype.upper() or 'TIMESTAMP' in date_dtype.upper()):
+        if 'datepart' not in date_expr.lower():
+            date_expr = f"datepart({date_expr})"
+
     # Apply vintage bucketing to date expression when vintage is week/month/quarter/year
     effective_vintage = date_filter['vintage']
     if effective_vintage not in ('all', 'day', None) and date_filter['filter_type'] != 'none':
@@ -700,9 +705,9 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     # Build template values
     _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
     if is_sas:
-        pull_stmt = "        proc sql; create table &raw_ds as %superq(_full_sql); quit;"
+        pull_stmt = "        proc sql; create table &raw_ds as &_full_sql; quit;"
     else:
-        pull_stmt = f"        %pull_data(%superq(_full_sql), &raw_ds, server={conn_macro}{_ua});"
+        pull_stmt = f"        %pull_data(&_full_sql, &raw_ds, server={conn_macro}{_ua});"
 
     if redo:
         cache_start, cache_end = "", ""
@@ -713,8 +718,9 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
                        "        %else %do;")
         cache_end = "        %end;"
 
-    col_map_datalines = '\n'.join(
-        f"{c}|{'numeric' if is_numeric_type(d, is_oracle=True) else 'categorical'}"
+    # Column map as assignment statements (no datalines — safe inside macros)
+    col_map_rows = '\n'.join(
+        f"        col_name='{c}'; col_type='{'numeric' if is_numeric_type(d, is_oracle=True) else 'categorical'}'; output;"
         for c, d in col_list
     )
 
@@ -725,30 +731,49 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     else:
         base_where = ""
 
-    # Build vintage map entries — one per bucket to limit peak memory
+    # Build vintage calls: data step sets _full_sql via call symputx, then macro runs
+    # call symputx stores text literally — no macro quoting, no paren issues
+    def _symputx_sql(full_sql):
+        """Generate a data step that sets _full_sql macro variable."""
+        # Use double quotes so single quotes inside (SAS date literals, intnx args) are safe
+        escaped = full_sql.replace('"', '""')
+        return f'    data _null_; call symputx("_full_sql", "{escaped}"); run;'
+
+    vintage_calls = []
     if date_filter['filter_type'] == 'between':
         from .date_utils import bucket_date
         buckets = {}
         for dt in date_filter['dates']:
             buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
         n = len(buckets)
-        vintage_map_lines = []
         for v_idx, (bucket_key, dates) in enumerate(sorted(buckets.items()), 1):
             bmin, bmax = min(dates), max(dates)
             dw = _build_date_between_clause(date_col, bmin, bmax, date_dtype, is_sas=is_sas)
-            vintage_map_lines.append(f"{v_idx}|_raw_{sn}|cache._cs_{sn}_v{v_idx}|{dw}")
+            full_sql = f"{base_sql} WHERE {dw} {base_where}"
+            vintage_calls.append(_symputx_sql(full_sql))
+            vintage_calls.append(
+                f"    %_process_vintage(raw_ds=_raw_{sn}, "
+                f"cache_ds=cache._cs_{sn}_v{v_idx});")
         cache_list = " ".join(f"cache._cs_{sn}_v{i}" for i in range(1, n + 1))
         stack_caches = (f"    data _colstats_{sn};\n"
                         f"        set {cache_list};\n"
                         f"    run;")
     elif date_filter['filter_type'] == 'in_list':
-        date_where = _build_date_in_clause(
+        dw = _build_date_in_clause(
             date_col, date_filter['dates'], date_dtype, is_sas=is_sas
         )
-        vintage_map_lines = [f"1|_raw_{sn}|cache._cs_{sn}|{date_where}"]
+        full_sql = f"{base_sql} WHERE {dw} {base_where}"
+        vintage_calls.append(_symputx_sql(full_sql))
+        vintage_calls.append(
+            f"    %_process_vintage(raw_ds=_raw_{sn}, "
+            f"cache_ds=cache._cs_{sn});")
         stack_caches = f"    data _colstats_{sn}; set cache._cs_{sn}; run;"
     else:
-        vintage_map_lines = [f"1|_raw_{sn}|cache._cs_{sn}|"]
+        full_sql = f"{base_sql} {base_where}"
+        vintage_calls.append(_symputx_sql(full_sql))
+        vintage_calls.append(
+            f"    %_process_vintage(raw_ds=_raw_{sn}, "
+            f"cache_ds=cache._cs_{sn});")
         stack_caches = f"    data _colstats_{sn}; set cache._cs_{sn}; run;"
 
     # Load template and fill placeholders
@@ -768,10 +793,8 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
         '/*{PULL_STMT}*/': pull_stmt,
         '/*{CACHE_CHECK_START}*/': cache_start,
         '/*{CACHE_CHECK_END}*/': cache_end,
-        '/*{COL_MAP_DATALINES}*/': col_map_datalines,
-        '/*{BASE_SQL}*/': base_sql,
-        '/*{BASE_WHERE}*/': base_where,
-        '/*{VINTAGE_MAP_DATALINES}*/': '\n'.join(vintage_map_lines),
+        '/*{COL_MAP_ROWS}*/': col_map_rows,
+        '/*{VINTAGE_CALLS}*/': '\n'.join(vintage_calls),
         '/*{STACK_CACHES}*/': stack_caches,
     }
     for placeholder, value in replacements.items():
@@ -854,9 +877,6 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             tbl['vintage'] = vintage
         elif 'vintage' not in tbl:
             tbl['vintage'] = 'all'
-    if "col" in types:
-        _inject_where_from_config(pcds_tables, config)
-
     # Pass sas_lib and out_dir to table configs
     sas_lib = env_vars['SAS_LIB']
     out_dir = env_vars['OUT_DIR']
@@ -1479,8 +1499,6 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
             tbl['vintage'] = vintage
         elif 'vintage' not in tbl:
             tbl['vintage'] = 'all'
-    if "col" in types:
-        _inject_where_from_config(aws_tables, config)
     if db_path and "col" in types:
         _fill_columns_from_meta(aws_tables, db_path)
 
