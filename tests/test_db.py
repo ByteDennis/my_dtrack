@@ -155,7 +155,7 @@ class TestColStatsOperations:
         results = get_col_stats(test_db, "test_table")
         assert len(results) == 1
         assert results[0]["column_name"] == "amount"
-        assert results[0]["mean"] == 1500.50
+        assert float(results[0]["mean"]) == 1500.50
 
     def test_insert_categorical_col_stats(self, test_db):
         """Test inserting categorical column statistics"""

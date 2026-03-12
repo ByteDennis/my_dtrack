@@ -1,7 +1,55 @@
 """Comparison functionality for row counts and column statistics"""
 
+import json
 from typing import Dict, List, Tuple, Optional
 from .db import get_row_counts, get_col_stats, get_table_pair, list_table_pairs
+
+
+def _safe_int(val):
+    """Parse a value to int, returning 0 for empty/None."""
+    if val is None or val == '':
+        return 0
+    return int(float(str(val)))
+
+
+def _safe_float(val):
+    """Parse a value to float, returning None for empty/None."""
+    if val is None or val == '':
+        return None
+    return float(str(val))
+
+
+def _parse_top10(s):
+    """Parse top_10 string (semicolon or JSON format) into {value: count} dict."""
+    if not s or s == '[]':
+        return {}
+    s = str(s).strip()
+    # JSON format: [{"value": "x", "count": 5}, ...]
+    if s.startswith('['):
+        try:
+            entries = json.loads(s)
+            return {str(e.get('value', '')): int(e.get('count', 0)) for e in entries}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    # Semicolon format: x(5); y(3)
+    result = {}
+    for entry in s.split('; '):
+        entry = entry.strip()
+        if '(' in entry and entry.endswith(')'):
+            val = entry[:entry.rfind('(')].strip()
+            try:
+                cnt = int(entry[entry.rfind('(') + 1:-1].strip())
+            except ValueError:
+                continue
+            result[val] = cnt
+    return result
+
+
+def _compare_top10(left_str, right_str):
+    """Compare two top_10 strings. Returns True if different."""
+    left = _parse_top10(left_str)
+    right = _parse_top10(right_str)
+    return left != right
 
 
 def parse_col_map_string(col_map_str: str) -> Dict[str, str]:
@@ -241,38 +289,50 @@ def compare_column_stats(
             left_stat = left_dates[dt]
             right_stat = right_dates[dt]
 
+            # Parse counts from strings
+            l_total = _safe_int(left_stat["n_total"])
+            r_total = _safe_int(right_stat["n_total"])
+            l_missing = _safe_int(left_stat["n_missing"])
+            r_missing = _safe_int(right_stat["n_missing"])
+            l_unique = _safe_int(left_stat["n_unique"])
+            r_unique = _safe_int(right_stat["n_unique"])
+
             comparison = {
                 "dt": dt,
                 "col_type": left_stat["col_type"],
                 "left_col": left_col,
                 "right_col": right_col,
                 # Counts
-                "n_total_left": left_stat["n_total"],
-                "n_total_right": right_stat["n_total"],
-                "n_total_diff": (right_stat["n_total"] or 0) - (left_stat["n_total"] or 0),
-                "n_missing_left": left_stat["n_missing"],
-                "n_missing_right": right_stat["n_missing"],
-                "n_missing_diff": (right_stat["n_missing"] or 0) - (left_stat["n_missing"] or 0),
-                "n_unique_left": left_stat["n_unique"],
-                "n_unique_right": right_stat["n_unique"],
-                "n_unique_diff": (right_stat["n_unique"] or 0) - (left_stat["n_unique"] or 0),
+                "n_total_left": l_total,
+                "n_total_right": r_total,
+                "n_total_diff": r_total - l_total,
+                "n_missing_left": l_missing,
+                "n_missing_right": r_missing,
+                "n_missing_diff": r_missing - l_missing,
+                "n_unique_left": l_unique,
+                "n_unique_right": r_unique,
+                "n_unique_diff": r_unique - l_unique,
             }
 
             # Numeric stats
             if left_stat["col_type"] == "numeric":
+                l_mean = _safe_float(left_stat["mean"])
+                r_mean = _safe_float(right_stat["mean"])
+                l_std = _safe_float(left_stat["std"])
+                r_std = _safe_float(right_stat["std"])
                 comparison.update({
-                    "mean_left": left_stat["mean"],
-                    "mean_right": right_stat["mean"],
+                    "mean_left": l_mean,
+                    "mean_right": r_mean,
                     "mean_diff": (
-                        (right_stat["mean"] or 0) - (left_stat["mean"] or 0)
-                        if left_stat["mean"] is not None and right_stat["mean"] is not None
+                        r_mean - l_mean
+                        if l_mean is not None and r_mean is not None
                         else None
                     ),
-                    "std_left": left_stat["std"],
-                    "std_right": right_stat["std"],
+                    "std_left": l_std,
+                    "std_right": r_std,
                     "std_diff": (
-                        (right_stat["std"] or 0) - (left_stat["std"] or 0)
-                        if left_stat["std"] is not None and right_stat["std"] is not None
+                        r_std - l_std
+                        if l_std is not None and r_std is not None
                         else None
                     ),
                     "min_left": left_stat["min_val"],
@@ -325,8 +385,8 @@ def _has_col_differences(comp: Dict) -> bool:
     if std_diff is not None and abs(std_diff) > 0.01:
         return True
 
-    # Check categorical top_10 differences
-    if comp.get('top_10_left') != comp.get('top_10_right'):
+    # Check categorical top_10 differences (handles JSON vs semicolon format)
+    if _compare_top10(comp.get('top_10_left'), comp.get('top_10_right')):
         return True
 
     return False

@@ -22,32 +22,33 @@
     %put NOTE: Columns: /*{N_NUMERIC}*/ numeric + /*{N_CATEGORICAL}*/ categorical = /*{N_COLS}*/ total;
     %put NOTE: REDO=/*{REDO}*/ (1=force re-pull, 0=use cached stats);
 
+    /* Suppress verbose logging during column processing */
+    options nomlogic nosymbolgen nomprint nonotes nosource;
+
     /* ---- Reusable macro: numeric column statistics ---- */
-    /* Output: dt, column_name, col_type, col_count, col_distinct, col_max, col_min,
-               col_avg, col_std, col_sum, col_sum_sq, col_freq, col_missing */
+    /* Output: dt, column_name, col_type, n_total, n_missing, n_unique,
+               mean, std, min_val, max_val, top_10 */
     %macro _col_numeric(raw_ds=, col=, out_ds=);
         proc sql noprint;
             create table &out_ds as
             select dt,
                 "&col" as column_name length=32,
                 'numeric' as col_type length=32,
-                count(&col) as col_count,
-                count(distinct &col) as col_distinct,
-                max(&col) as col_max,
-                min(&col) as col_min,
-                avg(&col) as col_avg,
-                std(&col) as col_std,
-                sum(&col) as col_sum,
-                sum(&col * &col) as col_sum_sq,
-                '' as col_freq length=2000,
-                count(*) - count(&col) as col_missing
+                count(*) as n_total,
+                count(*) - count(&col) as n_missing,
+                count(distinct &col) as n_unique,
+                avg(&col) as mean,
+                std(&col) as std,
+                strip(put(min(&col), best32.)) as min_val length=200,
+                strip(put(max(&col), best32.)) as max_val length=200,
+                '' as top_10 length=2000
             from &raw_ds
             group by dt;
         quit;
     %mend _col_numeric;
 
     /* ---- Reusable macro: categorical column statistics ---- */
-    /* Output: same schema as numeric, with col_freq = top-10 semicolon list */
+    /* Output: same schema as numeric, with top_10 = top-10 semicolon list */
     %macro _col_categorical(raw_ds=, col=, out_ds=);
         /* Frequency table */
         proc sql noprint;
@@ -61,17 +62,17 @@
         proc sort data=_freq_raw_ out=_freq_sorted_;
             by dt descending value_freq p_col;
         run;
-        data _t10_(keep=dt col_freq);
-            length col_freq $2000 _entry $200;
+        data _t10_(keep=dt top_10);
+            length top_10 $2000 _entry $200;
             set _freq_sorted_; by dt;
             where p_col is not missing;
-            retain col_freq _rn;
-            if first.dt then do; col_freq = ''; _rn = 0; end;
+            retain top_10 _rn;
+            if first.dt then do; top_10 = ''; _rn = 0; end;
             if _rn < 10 then do;
                 _rn + 1;
                 _entry = catx('', strip(vvalue(p_col)), '(', strip(put(value_freq, best.)), ')');
-                if col_freq = '' then col_freq = _entry;
-                else col_freq = catx('; ', col_freq, _entry);
+                if top_10 = '' then top_10 = _entry;
+                else top_10 = catx('; ', top_10, _entry);
             end;
             if last.dt then output;
         run;
@@ -82,14 +83,12 @@
             select dt,
                 "&col" as column_name length=32,
                 'categorical' as col_type length=32,
-                sum(value_freq) as col_count,
-                count(value_freq) as col_distinct,
-                max(value_freq) as col_max,
-                min(value_freq) as col_min,
-                avg(value_freq) as col_avg,
-                std(value_freq) as col_std,
-                sum(value_freq) as col_sum,
-                sum(value_freq * value_freq) as col_sum_sq
+                sum(value_freq) as n_total,
+                count(value_freq) as n_unique,
+                '' as mean length=1,
+                '' as std length=1,
+                '' as min_val length=200,
+                '' as max_val length=200
             from _freq_raw_
             group by dt;
         quit;
@@ -97,7 +96,7 @@
         /* Missing count per dt */
         proc sql noprint;
             create table _miss_ as
-            select dt, coalesce(value_freq, 0) as col_missing
+            select dt, coalesce(value_freq, 0) as n_missing
             from _freq_raw_
             where p_col is missing;
         quit;
@@ -110,8 +109,8 @@
             merge _agg_(in=a) _t10_(in=b) _miss_(in=c);
             by dt;
             if a;
-            if not b then col_freq = '';
-            if not c then col_missing = 0;
+            if not b then top_10 = '';
+            if not c then n_missing = 0;
         run;
 
         proc datasets lib=work nolist; delete _freq_raw_ _freq_sorted_ _t10_ _agg_ _miss_; quit;
@@ -155,12 +154,24 @@
 /*{STACK_CACHES}*/
     proc datasets lib=work nolist; delete _col_map; quit;
 
+    /* Format dt as YYYY-MM-DD for CSV export (SAS date numbers → readable dates) */
+    data _colstats_/*{SN}*/;
+        set _colstats_/*{SN}*/;
+        length dt_fmt $10;
+        dt_fmt = put(dt, yymmdd10.);
+        drop dt;
+        rename dt_fmt = dt;
+    run;
+
     proc export data=_colstats_/*{SN}*/
         outfile="&out_dir.//*{QNAME}*/_col.csv"
         dbms=csv replace;
     run;
 
     proc delete data=_colstats_/*{SN}*/; run;
+
+    /* Restore logging */
+    options notes source;
     %put NOTE: ===== EXTRACTION COMPLETE: /*{NAME}*/ ====;
 
 %mend get_colstats_/*{SN}*/;

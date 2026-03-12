@@ -41,18 +41,18 @@ def init_database(db_path: str) -> None:
         )
     """)
 
-    # Create column statistics table
+    # Create column statistics table (all TEXT for cross-source compatibility)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS _col_stats (
             source_table TEXT NOT NULL,
             column_name TEXT NOT NULL,
             dt TEXT NOT NULL,
             col_type TEXT NOT NULL,
-            n_total INTEGER,
-            n_missing INTEGER,
-            n_unique INTEGER,
-            mean REAL,
-            std REAL,
+            n_total TEXT,
+            n_missing TEXT,
+            n_unique TEXT,
+            mean TEXT,
+            std TEXT,
             min_val TEXT,
             max_val TEXT,
             top_10 TEXT,

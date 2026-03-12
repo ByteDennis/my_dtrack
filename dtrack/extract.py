@@ -377,18 +377,18 @@ def build_top10_sql_athena(table, col, date_col, where=""):
 
 
 def parse_stats_row(row):
-    """Normalize a query result row to standard dict format."""
+    """Normalize a query result row to standard dict format (all strings)."""
     return {
         'dt': str(row['dt']),
         'column_name': row['column_name'],
         'col_type': row['col_type'],
-        'n_total': int(row['n_total']) if row['n_total'] is not None else 0,
-        'n_missing': int(row['n_missing']) if row['n_missing'] is not None else 0,
-        'n_unique': int(row['n_unique']) if row['n_unique'] is not None else 0,
-        'mean': float(row['mean']) if row['mean'] is not None else None,
-        'std': float(row['std']) if row['std'] is not None else None,
-        'min_val': str(row['min_val']) if row['min_val'] is not None else None,
-        'max_val': str(row['max_val']) if row['max_val'] is not None else None,
+        'n_total': str(row['n_total']) if row['n_total'] is not None else '0',
+        'n_missing': str(row['n_missing']) if row['n_missing'] is not None else '0',
+        'n_unique': str(row['n_unique']) if row['n_unique'] is not None else '0',
+        'mean': str(row['mean']) if row['mean'] is not None else '',
+        'std': str(row['std']) if row['std'] is not None else '',
+        'min_val': str(row['min_val']) if row['min_val'] is not None else '',
+        'max_val': str(row['max_val']) if row['max_val'] is not None else '',
     }
 
 
@@ -1253,16 +1253,13 @@ def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database
 SELECT
     {dt_select},
     '{dtype}' AS col_type,
-    COUNT({col}) AS col_count,
-    COUNT(DISTINCT {col}) AS col_distinct,
-    MAX({col}) AS col_max,
-    MIN({col}) AS col_min,
-    CAST(AVG(CAST({col} AS DOUBLE)) AS VARCHAR) AS col_avg,
-    CAST(STDDEV_SAMP(CAST({col} AS DOUBLE)) AS VARCHAR) AS col_std,
-    CAST(SUM(CAST({col} AS DOUBLE)) AS VARCHAR) AS col_sum,
-    CAST(SUM(CAST({col} AS DOUBLE) * CAST({col} AS DOUBLE)) AS VARCHAR) AS col_sum_sq,
-    '' AS col_freq,
-    COUNT(*) - COUNT({col}) AS col_missing
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col}) AS n_missing,
+    COUNT(DISTINCT {col}) AS n_unique,
+    CAST(AVG(CAST({col} AS DOUBLE)) AS VARCHAR) AS mean,
+    CAST(STDDEV_SAMP(CAST({col} AS DOUBLE)) AS VARCHAR) AS std,
+    CAST(MIN({col}) AS VARCHAR) AS min_val,
+    CAST(MAX({col}) AS VARCHAR) AS max_val
 FROM {full_table} WHERE {wc}{group_by}"""
 
         _log_sql(col, sql)
@@ -1274,14 +1271,14 @@ FROM {full_table} WHERE {wc}{group_by}"""
                 'dt': str(rd.get('dt', 'all')),
                 'column_name': col,
                 'col_type': 'numeric',
-                'n_total': int(rd['col_count'] or 0) + int(rd['col_missing'] or 0),
-                'n_missing': int(rd['col_missing'] or 0),
-                'n_unique': int(rd['col_distinct'] or 0),
-                'mean': float(rd['col_avg']) if rd['col_avg'] else None,
-                'std': float(rd['col_std']) if rd['col_std'] else None,
-                'min_val': str(rd['col_min']) if rd['col_min'] is not None else None,
-                'max_val': str(rd['col_max']) if rd['col_max'] is not None else None,
-                'top_10': None,
+                'n_total': str(rd['n_total'] or 0),
+                'n_missing': str(rd['n_missing'] or 0),
+                'n_unique': str(rd['n_unique'] or 0),
+                'mean': str(rd['mean']) if rd['mean'] else '',
+                'std': str(rd['std']) if rd['std'] else '',
+                'min_val': str(rd['min_val']) if rd['min_val'] is not None else '',
+                'max_val': str(rd['max_val']) if rd['max_val'] is not None else '',
+                'top_10': '',
             })
         return results
 
@@ -1318,14 +1315,8 @@ WITH FreqTable_RAW AS (
 SELECT
     {agg_dt_select},
     '{dtype}' AS col_type,
-    SUM(value_freq) AS col_count,
-    COUNT(value_freq) AS col_distinct,
-    MAX(value_freq) AS col_max,
-    MIN(value_freq) AS col_min,
-    AVG(CAST(value_freq AS DOUBLE)) AS col_avg,
-    STDDEV_SAMP(CAST(value_freq AS DOUBLE)) AS col_std,
-    SUM(value_freq) AS col_sum,
-    SUM(value_freq * value_freq) AS col_sum_sq
+    SUM(value_freq) AS n_total,
+    COUNT(value_freq) AS n_unique
 FROM FreqTable{agg_group}"""
 
     _log_sql(col, sql)
@@ -1359,16 +1350,7 @@ SELECT COUNT(*) AS col_missing FROM {full_table} WHERE {wc} AND {col} IS NULL AN
 
         top10_df = _query_athena(top10_sql, data_base=database)
         col_freq = str(top10_df.iloc[0]['col_freq'] or '') if len(top10_df) > 0 else ''
-        if col_freq and col_freq != 'nan':
-            entries = []
-            for entry in col_freq.split('; '):
-                if '(' in entry and entry.endswith(')'):
-                    val = entry[:entry.rfind('(')]
-                    cnt = entry[entry.rfind('(') + 1:-1]
-                    entries.append({"value": val, "count": int(cnt)})
-            top_10 = json.dumps(entries)
-        else:
-            top_10 = json.dumps([])
+        top_10 = col_freq if col_freq and col_freq != 'nan' else ''
 
         missing_df = _query_athena(missing_sql, data_base=database)
         col_missing = int(missing_df.iloc[0]['col_missing'] or 0) if len(missing_df) > 0 else 0
@@ -1377,13 +1359,13 @@ SELECT COUNT(*) AS col_missing FROM {full_table} WHERE {wc} AND {col} IS NULL AN
             'dt': dt_val,
             'column_name': col,
             'col_type': 'categorical',
-            'n_total': int(rd['col_count'] or 0),
-            'n_missing': col_missing,
-            'n_unique': int(rd['col_distinct'] or 0),
-            'mean': None,
-            'std': None,
-            'min_val': None,
-            'max_val': None,
+            'n_total': str(rd['n_total'] or 0),
+            'n_missing': str(col_missing),
+            'n_unique': str(rd['n_unique'] or 0),
+            'mean': '',
+            'std': '',
+            'min_val': '',
+            'max_val': '',
             'top_10': top_10,
         })
 

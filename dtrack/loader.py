@@ -312,6 +312,9 @@ def load_column_data(
 
 # Column name aliases for pre-computed stats CSV
 _COL_STATS_ALIASES = {
+    'n_total': ['n_total', 'col_count', 'count'],
+    'n_missing': ['n_missing', 'col_missing', 'missing'],
+    'n_unique': ['n_unique', 'col_distinct', 'distinct'],
     'mean': ['mean', 'col_avg', 'avg'],
     'std': ['std', 'col_std', 'stddev'],
     'min_val': ['min_val', 'col_min', 'min'],
@@ -391,14 +394,14 @@ def load_precomputed_col_stats(
                 "column_name": row.get("column_name", ""),
                 "dt": row.get("dt", ""),
                 "col_type": row.get("col_type", "categorical"),
-                "n_total": int(_get("n_total", 0) or 0),
-                "n_missing": int(_get("n_missing", 0) or 0),
-                "n_unique": int(_get("n_unique", 0) or 0),
-                "mean": float(_get("mean")) if _get("mean") else None,
-                "std": float(_get("std")) if _get("std") else None,
-                "min_val": _get("min_val"),
-                "max_val": _get("max_val"),
-                "top_10": _get("top_10"),
+                "n_total": _get("n_total", ""),
+                "n_missing": _get("n_missing", ""),
+                "n_unique": _get("n_unique", ""),
+                "mean": _get("mean", ""),
+                "std": _get("std", ""),
+                "min_val": _get("min_val", ""),
+                "max_val": _get("max_val", ""),
+                "top_10": _get("top_10", ""),
             }
             stats.append(stat)
 
