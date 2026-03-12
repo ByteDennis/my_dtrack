@@ -37,7 +37,8 @@ def init_database(db_path: str) -> None:
             load_mode TEXT,
             vintage TEXT,
             data_type TEXT,
-            where_clause TEXT
+            where_clause TEXT,
+            date_format TEXT
         )
     """)
 
@@ -354,19 +355,21 @@ def update_metadata(db_path: str, metadata: Dict) -> None:
     metadata.setdefault("vintage", None)
     metadata.setdefault("data_type", None)
     metadata.setdefault("where_clause", None)
+    metadata.setdefault("date_format", None)
 
-    # Ensure where_clause column exists (for DBs created before this feature)
-    try:
-        cursor.execute("ALTER TABLE _metadata ADD COLUMN where_clause TEXT")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    # Ensure newer columns exist (for DBs created before these features)
+    for col in ('where_clause', 'date_format'):
+        try:
+            cursor.execute(f"ALTER TABLE _metadata ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     cursor.execute("""
         INSERT OR REPLACE INTO _metadata (
             table_name, source, db, source_table, date_var,
             source_file, loaded_at, last_updated, row_count_total,
-            load_mode, vintage, data_type, where_clause
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            load_mode, vintage, data_type, where_clause, date_format
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         metadata["table_name"],
         metadata["source"],
@@ -381,6 +384,7 @@ def update_metadata(db_path: str, metadata: Dict) -> None:
         metadata["vintage"],
         metadata["data_type"],
         metadata["where_clause"],
+        metadata["date_format"],
     ))
 
     conn.commit()
@@ -1310,6 +1314,8 @@ def sync_config_to_db(db_path: str, config: Dict[str, Any]) -> None:
     cursor = conn.cursor()
 
     for pair_name, pair_config in config.get("pairs", {}).items():
+        if pair_config.get("skip"):
+            continue
         # Update col_map in _table_pairs
         col_map = pair_config.get("col_map", {})
         if col_map:

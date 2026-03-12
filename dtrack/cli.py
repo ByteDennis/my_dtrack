@@ -464,6 +464,9 @@ def cmd_compare_row(args):
 
             pairs_to_process = []
             for pair_name, pair_config in config["pairs"].items():
+                if pair_config.get("skip"):
+                    print(f"  Skipping pair: {pair_name}")
+                    continue
                 left = pair_config["left"]
                 right = pair_config["right"]
                 table_left = _qualified_name(left)
@@ -809,6 +812,9 @@ def cmd_compare_col(args):
         html_entries = []
 
         for pair_name, pair_config in config["pairs"].items():
+            if pair_config.get("skip"):
+                print(f"  Skipping pair: {pair_name}")
+                continue
             left = pair_config["left"]
             right = pair_config["right"]
             table_left = _qualified_name(left)

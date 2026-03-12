@@ -1,0 +1,34 @@
+# H-1B Job Description
+
+**Job Title:** Data Analytics Development Associate
+**Department:** Data Strategy
+**Minimum Requirement:** *(To be provided by manager)*
+
+## Job Duties
+
+1. Develop and implement automated and semi-automated data strategy workflows to facilitate business analysts' transition from local on-premises systems to cloud-based solutions.
+
+2. Design data processing pipelines using Python, SQL, and SAS to extract, transform, and load (ETL) structured data from multiple enterprise systems.
+
+3. Apply analytical and data engineering techniques to evaluate patterns, trends, and potential business value in underutilized data assets across the organization.
+
+4. Build and maintain interactive visualization dashboards using HTML, CSS, and JavaScript to track ongoing migration progress, communicate key insights, and provide regular visibility into performance metrics.
+
+5. Collaborate with cross-functional teams including business stakeholders, product managers, and engineers to translate analytical findings into actionable strategies.
+
+6. Maintain documentation for data models, datasets, and analytical processes to ensure reproducibility and regulatory compliance across all developed tools and workflows.
+
+## Tools / Technologies
+
+Python, SQL, SAS, HTML/CSS/JavaScript, data visualization tools, AWS ecosystem (e.g., Athena, S3, Glue), and version control systems (e.g., Git).
+
+## Percentage Breakdown
+
+| Area | % |
+|------|---|
+| Data pipeline engineering and ETL development | 30% |
+| Cloud migration workflow development | 25% |
+| Dashboard and visualization development | 20% |
+| Data analysis and evaluation | 10% |
+| Cross-functional collaboration and stakeholder engagement | 10% |
+| Documentation and compliance | 5% |

@@ -251,6 +251,9 @@ def get_all_tables_from_unified(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     seen = set()  # Track (source, name) to avoid duplicates
 
     for pair_name, pair_config in config["pairs"].items():
+        # Skip pairs marked with skip: true
+        if pair_config.get("skip"):
+            continue
         col_map = pair_config.get("col_map", {})
         for side in ["left", "right"]:
             table_cfg = pair_config[side].copy()

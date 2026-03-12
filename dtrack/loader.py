@@ -7,7 +7,7 @@ from typing import List, Tuple, Optional
 from collections import defaultdict
 import pandas as pd
 
-from .date_utils import parse_date, bucket_date
+from .date_utils import parse_date, bucket_date, detect_format, DateConverter
 from .db import (
     upsert_row_counts,
     insert_col_stats,
@@ -57,7 +57,7 @@ def load_row_count_csv(
     csv_path: str,
     date_col: Optional[str] = None,
     count_col: Optional[str] = None,
-) -> List[Tuple[str, int]]:
+) -> Tuple[List[Tuple[str, int]], Optional[str]]:
     """
     Load row counts from a CSV file.
 
@@ -67,8 +67,10 @@ def load_row_count_csv(
         count_col: Name of count column (auto-detected if None)
 
     Returns:
-        List of (date, row_count) tuples
+        Tuple of (list of (date, row_count) tuples, detected_date_format)
     """
+    detected_format = None
+
     with open(csv_path, 'r', newline='') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
@@ -90,6 +92,13 @@ def load_row_count_csv(
             date_str = row[date_col].strip()
             count_str = row[count_col].strip()
 
+            # Detect format from first valid date value
+            if detected_format is None and date_str:
+                try:
+                    detected_format = detect_format(date_str)
+                except ValueError:
+                    pass
+
             # Parse date
             try:
                 dt = parse_date(date_str)
@@ -107,7 +116,7 @@ def load_row_count_csv(
             data[dt] += count
 
     # Convert to sorted list
-    return sorted(data.items())
+    return sorted(data.items()), detected_format
 
 
 def load_row_counts(
@@ -151,11 +160,14 @@ def load_row_counts(
 
     # Load data from all CSV files
     all_data = defaultdict(int)
+    detected_format = None
     for csv_file in csv_files:
-        data = load_row_count_csv(
+        data, fmt = load_row_count_csv(
             csv_path=str(csv_file),
             date_col=date_col,
         )
+        if fmt and not detected_format:
+            detected_format = fmt
         # Aggregate data
         for dt, count in data:
             all_data[dt] += count
@@ -193,6 +205,7 @@ def load_row_counts(
         "vintage": vintage,
         "data_type": "row",
         "where_clause": where_clause,
+        "date_format": detected_format,
     })
 
 

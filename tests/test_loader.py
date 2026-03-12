@@ -82,12 +82,13 @@ class TestLoadRowCountCSV:
 
     def test_load_row_count_csv_basic(self, row_count_csv):
         """Test loading a basic row count CSV"""
-        data = load_row_count_csv(row_count_csv)
+        data, fmt = load_row_count_csv(row_count_csv)
 
         assert len(data) == 3
         assert data[0] == ("201805", 3400)
         assert data[1] == ("201806", 3500)
         assert data[2] == ("201807", 3600)
+        assert fmt == "YYYYMM"
 
 
 class TestLoadRowCounts:

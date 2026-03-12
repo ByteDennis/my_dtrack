@@ -418,7 +418,7 @@ _ORACLE_TO_SAS_TRANSFORM = {
 # Oracle TRUNC vintage → SAS intnx equivalent
 _ORACLE_VINTAGE_TO_SAS = {
     'day':     None,                                  # identity
-    'week':    "intnx('week', {col}, 0, 'b')",
+    'week':    "intnx('week.2', {col}, 0, 'b')",
     'month':   "intnx('month', {col}, 0, 'b')",
     'quarter': "intnx('qtr', {col}, 0, 'b')",
     'year':    "intnx('year', {col}, 0, 'b')",
