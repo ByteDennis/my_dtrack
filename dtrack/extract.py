@@ -121,7 +121,9 @@ def _build_date_in_clause(date_col, dates, date_dtype, is_sas=False):
     if dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
         date_list = ", ".join(str(d) for d in dates)
         return f"{date_col} IN ({date_list})"
-    elif 'TIMESTAMP' in dtype or 'DATE' in dtype:
+    elif 'TIMESTAMP' in dtype or 'DATE' in dtype or 'TIME' in dtype:
+        is_datetime = ('TIMESTAMP' in dtype or 'DATETIME' in dtype
+                       or (dtype == 'TIME'))
         if is_sas:
             from datetime import datetime as _dt
             sas_dates = []
@@ -132,7 +134,9 @@ def _build_date_in_clause(date_col, dates, date_dtype, is_sas=False):
                 except ValueError:
                     sas_dates.append(f"'{d}'")
             date_list = ", ".join(sas_dates)
-            return f"{date_col} IN ({date_list})"
+            # DATETIME/TIMESTAMP: wrap with datepart() to compare date-to-date
+            col_expr = f"datepart({date_col})" if is_datetime else date_col
+            return f"{col_expr} IN ({date_list})"
         else:
             date_list = ", ".join(f"DATE '{d}'" for d in dates)
             return f"TRUNC({date_col}) IN ({date_list})"
@@ -184,62 +188,116 @@ def _sample_matching_dates(db_path, tbl_cfg, matching_dates):
     return new_samples
 
 
-def _build_col_where(tbl_cfg, db_path, vintage='day'):
-    """Build a WHERE clause fragment filtering to matching dates from _row_comparison.
+def _compute_date_filter(tbl_cfg, db_path, vintage):
+    """Compute date filter once in Python for both SAS and Athena paths.
 
-    Looks up which pair this table belongs to, loads saved comparison results,
-    and builds a date IN (...) filter. For vintage='sample', picks N random dates.
-
-    Returns (where_fragment, effective_vintage) or (None, vintage) if no results found.
+    Returns dict with:
+        vintage, filter_type ('none'|'between'|'in_list'),
+        min_date, max_date, dates (for in_list),
+        n_matching, n_buckets, date_dtype
     """
-    import random
-
-    if not db_path:
-        return None, vintage
-
-    from .db import list_table_pairs, get_row_comparison
-
     qname = _qualified_name(tbl_cfg)
     date_col = tbl_cfg.get('date_col', '')
 
-    # Find which pair this table belongs to
-    pairs = list_table_pairs(db_path)
-    pair_name = None
-    for pair in pairs:
-        if qname in (pair['table_left'], pair['table_right']):
-            pair_name = pair['pair_name']
-            break
+    result = {
+        'vintage': vintage,
+        'filter_type': 'none',
+        'min_date': None,
+        'max_date': None,
+        'dates': [],
+        'n_matching': 0,
+        'n_buckets': 0,
+        'date_dtype': None,
+    }
 
+    if vintage == 'all' or not db_path:
+        print(f"  [date filter] vintage: {vintage} | no date filter applied")
+        return result
+
+    from .db import list_table_pairs, get_row_comparison, get_column_meta
+
+    # Find pair
+    pairs = list_table_pairs(db_path)
+    pair_name = next(
+        (p['pair_name'] for p in pairs
+         if qname in (p['table_left'], p['table_right'])),
+        None
+    )
     if not pair_name:
-        return None, vintage
+        print(f"  [date filter] no pair found for {qname}, skipping filter")
+        return result
 
     comp = get_row_comparison(db_path, pair_name)
     if not comp or not comp.get('matching_dates'):
-        return None, vintage
+        print(f"  [date filter] no matching dates for {qname}, skipping filter")
+        return result
 
     matching_dates = comp['matching_dates']
 
-    if vintage == 'sample':
-        matching_dates = _sample_matching_dates(db_path, tbl_cfg, matching_dates)
-        effective_vintage = 'day'
-    else:
-        effective_vintage = vintage
-        from .date_utils import bucket_date
-        unique_buckets = len(set(bucket_date(dt, vintage) for dt in matching_dates))
-        print(f"  {qname}: using vintage='{vintage}' with {len(matching_dates)} matching dates → {unique_buckets} vintages")
-
-    # Build IN clause - look up date column type
-    from .db import get_column_meta
+    # Look up date column dtype
     col_meta = get_column_meta(db_path, qname)
     date_dtype = None
-    for cm in col_meta:
+    for cm in (col_meta or []):
         if cm['column_name'].upper() == date_col.upper():
             date_dtype = (cm.get('data_type') or '').upper()
             break
+    result['date_dtype'] = date_dtype
 
-    where_fragment = _build_date_in_clause(date_col, matching_dates, date_dtype)
+    if vintage == 'sample':
+        sampled = _sample_matching_dates(db_path, tbl_cfg, matching_dates)
+        result['vintage'] = 'day'
+        result['filter_type'] = 'in_list'
+        result['dates'] = sampled
+        result['n_matching'] = len(matching_dates)
+        result['n_buckets'] = len(sampled)
+        print(f"  [date filter] vintage: sample | {len(matching_dates)} dates → {len(sampled)} sampled")
+        return result
 
-    return where_fragment, effective_vintage
+    # between filter for day/week/month/quarter/year
+    from .date_utils import bucket_date
+    buckets = {}
+    for dt in matching_dates:
+        buckets.setdefault(bucket_date(dt, vintage), []).append(dt)
+
+    result['filter_type'] = 'between'
+    result['min_date'] = min(matching_dates)
+    result['max_date'] = max(matching_dates)
+    result['n_matching'] = len(matching_dates)
+    result['n_buckets'] = len(buckets)
+    result['dates'] = matching_dates
+
+    print(f"  [date filter] vintage: {vintage} | range: {result['min_date']} to {result['max_date']} | {len(matching_dates)} dates → {len(buckets)} buckets")
+    return result
+
+
+def _build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=False):
+    """Build a WHERE fragment using BETWEEN based on column type."""
+    dtype = (date_dtype or '').upper()
+    if dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
+        return f"{date_col} BETWEEN {min_date} AND {max_date}"
+    elif 'TIMESTAMP' in dtype or 'DATE' in dtype or 'TIME' in dtype:
+        is_datetime = ('TIMESTAMP' in dtype or 'DATETIME' in dtype
+                       or (dtype == 'TIME'))
+        if is_sas:
+            from datetime import datetime as _dt
+            try:
+                d_min = _dt.strptime(str(min_date), "%Y-%m-%d")
+                d_max = _dt.strptime(str(max_date), "%Y-%m-%d")
+                sas_min = f"'{d_min.strftime('%d%b%Y').upper()}'d"
+                sas_max = f"'{d_max.strftime('%d%b%Y').upper()}'d"
+                # DATETIME/TIMESTAMP: wrap with datepart() to compare date-to-date
+                col_expr = f"datepart({date_col})" if is_datetime else date_col
+                return f"{col_expr} BETWEEN {sas_min} AND {sas_max}"
+            except ValueError:
+                return f"{date_col} BETWEEN '{min_date}' AND '{max_date}'"
+        else:
+            return f"TRUNC({date_col}) BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
+    elif dtype.startswith('CHAR'):
+        return f"TRIM({date_col}) BETWEEN '{min_date}' AND '{max_date}'"
+    else:
+        return f"{date_col} BETWEEN '{min_date}' AND '{max_date}'"
+
+
 
 
 def is_numeric_type(data_type, is_oracle=True):
@@ -586,59 +644,6 @@ def _resolve_table_and_cte(tbl_cfg):
     return table, "", False
 
 
-def _get_vintage_buckets(tbl_cfg, db_path, qname, vintage):
-    """Look up matching dates from row comparison and bucket by vintage.
-
-    Returns dict of {bucket_key: [dates]} or empty dict.
-    """
-    if not db_path or vintage == 'all':
-        return {}
-
-    where_fragment, effective_vintage = _build_col_where(tbl_cfg, db_path, vintage)
-    if not where_fragment:
-        return {}
-
-    from .db import get_row_comparison, list_table_pairs
-    pairs = list_table_pairs(db_path)
-    pair_name = next(
-        (p['pair_name'] for p in pairs
-         if qname in (p['table_left'], p['table_right'])),
-        None
-    )
-    if not pair_name:
-        return {}
-
-    comp = get_row_comparison(db_path, pair_name)
-    if not comp or not comp.get('matching_dates'):
-        return {}
-
-    from .date_utils import bucket_date
-    buckets = {}
-    for dt in comp['matching_dates']:
-        buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
-    return buckets
-
-
-def _build_vintage_map(sn, vintage_buckets, date_col, date_dtype, is_sas_table, db_path, qname):
-    """Build vintage map datalines and stack_caches SAS code.
-
-    Returns (vintage_map_lines, stack_caches).
-    """
-    if not vintage_buckets:
-        return [f"1|_raw_{sn}|cache._cs_{sn}|"], f"    data _colstats_{sn}; set cache._cs_{sn}; run;"
-
-    n = len(vintage_buckets)
-    lines = []
-    for v_idx, (bucket_key, dates) in enumerate(sorted(vintage_buckets.items()), 1):
-        date_where = _build_date_in_clause(date_col, dates, date_dtype, is_sas=is_sas_table)
-        lines.append(f"{v_idx}|_raw_{sn}_v{v_idx}|cache._cs_{sn}_v{v_idx}|{date_where}")
-
-    cache_list = " ".join(f"cache._cs_{sn}_v{i}" for i in range(1, n + 1))
-    stack = (f"    /* Stack all {n} cached vintage stats */\n"
-             f"    data _colstats_{sn};\n"
-             f"        set {cache_list};\n"
-             f"    run;")
-    return lines, stack
 
 
 def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
@@ -678,17 +683,19 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     else:
         date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
 
-    # Vintage buckets from row comparison
-    vintage_buckets = _get_vintage_buckets(tbl_cfg, db_path, qname, vintage)
+    # Compute unified date filter
+    date_filter = _compute_date_filter(tbl_cfg, db_path, vintage)
+    date_dtype = date_filter['date_dtype']
+    has_filter = date_filter['filter_type'] != 'none'
 
-    # Date column dtype (needed for IN clause formatting)
-    date_dtype = None
-    if vintage_buckets and db_path:
-        from .db import get_column_meta
-        for cm in (get_column_meta(db_path, qname) or []):
-            if cm['column_name'].upper() == date_col.upper():
-                date_dtype = (cm.get('data_type') or '').upper()
-                break
+    # Apply vintage bucketing to date expression when vintage is week/month/quarter/year
+    effective_vintage = date_filter['vintage']
+    if effective_vintage not in ('all', 'day', None) and date_filter['filter_type'] != 'none':
+        vintage_transform = tbl_cfg.get('vintage_transform', None)
+        if is_sas:
+            date_expr = _sas_vintage_date_expr(date_expr, effective_vintage)
+        else:
+            date_expr = _vintage_date_expr(date_expr, effective_vintage, vintage_transform)
 
     # Build template values
     _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
@@ -714,13 +721,35 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     col_select = ", ".join([f"{date_expr} AS dt"] + [c for c, _ in col_list])
     base_sql = f"{cte_prefix}SELECT {col_select} FROM {table}"
     if where:
-        base_where = f"AND ({where})" if vintage_buckets else f"WHERE {where}"
+        base_where = f"AND ({where})" if has_filter else f"WHERE {where}"
     else:
         base_where = ""
 
-    vintage_map_lines, stack_caches = _build_vintage_map(
-        sn, vintage_buckets, date_col, date_dtype, is_sas, db_path, qname
-    )
+    # Build vintage map entries — one per bucket to limit peak memory
+    if date_filter['filter_type'] == 'between':
+        from .date_utils import bucket_date
+        buckets = {}
+        for dt in date_filter['dates']:
+            buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
+        n = len(buckets)
+        vintage_map_lines = []
+        for v_idx, (bucket_key, dates) in enumerate(sorted(buckets.items()), 1):
+            bmin, bmax = min(dates), max(dates)
+            dw = _build_date_between_clause(date_col, bmin, bmax, date_dtype, is_sas=is_sas)
+            vintage_map_lines.append(f"{v_idx}|_raw_{sn}|cache._cs_{sn}_v{v_idx}|{dw}")
+        cache_list = " ".join(f"cache._cs_{sn}_v{i}" for i in range(1, n + 1))
+        stack_caches = (f"    data _colstats_{sn};\n"
+                        f"        set {cache_list};\n"
+                        f"    run;")
+    elif date_filter['filter_type'] == 'in_list':
+        date_where = _build_date_in_clause(
+            date_col, date_filter['dates'], date_dtype, is_sas=is_sas
+        )
+        vintage_map_lines = [f"1|_raw_{sn}|cache._cs_{sn}|{date_where}"]
+        stack_caches = f"    data _colstats_{sn}; set cache._cs_{sn}; run;"
+    else:
+        vintage_map_lines = [f"1|_raw_{sn}|cache._cs_{sn}|"]
+        stack_caches = f"    data _colstats_{sn}; set cache._cs_{sn}; run;"
 
     # Load template and fill placeholders
     tmpl_path = os.path.join(os.path.dirname(__file__), 'templates', 'columns.sas')
@@ -1049,11 +1078,30 @@ _VINTAGE_ATHENA = {
 }
 
 
-def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None):
+def _athena_date_cast(date_expr, date_dtype):
+    """Wrap date_expr with appropriate cast for Athena based on column type.
+
+    - date/timestamp columns: use as-is (already date-compatible)
+    - varchar/string columns: parse with date_parse assuming YYYYMMDD or YYYY-MM-DD
+    - number columns: cast to varchar first, then date_parse
+    """
+    dtype = (date_dtype or '').lower()
+    if 'date' in dtype or 'timestamp' in dtype:
+        return date_expr
+    if dtype in ('int', 'integer', 'bigint', 'smallint', 'tinyint', 'number'):
+        return f"date_parse(CAST({date_expr} AS VARCHAR), '%Y%m%d')"
+    # varchar/string: try ISO first, fall back to YYYYMMDD
+    if 'char' in dtype or 'string' in dtype:
+        return f"date_parse({date_expr}, '%Y%m%d')"
+    return date_expr
+
+
+def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None, date_dtype=None):
     """Wrap date_expr with Athena date_trunc for vintage bucketing.
 
     If vintage_transform is provided (from config JSON), use it directly.
     Otherwise fall back to date_trunc('unit', date_expr).
+    Uses date_dtype to CAST string/number columns to date before date_trunc.
     """
     if vintage_transform:
         return vintage_transform.replace("{col}", date_expr)
@@ -1064,7 +1112,8 @@ def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None):
     unit = _VINTAGE_ATHENA.get(vintage)
     if unit is None:
         return date_expr
-    return f"date_trunc('{unit}', CAST({date_expr} AS date))"
+    cast_expr = _athena_date_cast(date_expr, date_dtype)
+    return f"date_trunc('{unit}', {cast_expr})"
 
 
 def _discover_columns_athena(cursor, database, table):
@@ -1154,12 +1203,12 @@ def _log_sql(col, sql):
                 f.write(f"-- [{col}]\n{sql.strip()}\n;\n\n")
 
 
-def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database=None, vintage=None):
+def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database=None, vintage=None, date_dtype=None):
     """Extract stats for a single column from Athena.
 
     Numeric columns: direct aggregation (no top-10).
     Categorical columns: single CTE query computing all stats server-side.
-    Uses pandas read_sql_query for reliable query submission.
+    When vintage != 'all', adds GROUP BY date_trunc to produce per-vintage rows.
     """
     date_col = tbl_cfg['date_col']
     where = tbl_cfg.get('where', '')
@@ -1170,9 +1219,19 @@ def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database
 
     wc = where.strip() if where else "(1=1)"
 
+    # Build date expression and GROUP BY for vintage bucketing
+    if vintage == 'all':
+        dt_select = f"'all' AS dt"
+        group_by = ""
+    else:
+        dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype)
+        dt_select = f"CAST({dt_expr} AS VARCHAR) AS dt"
+        group_by = f"\nGROUP BY {dt_expr}"
+
     if numeric:
         sql = f"""{cte_prefix}
 SELECT
+    {dt_select},
     '{dtype}' AS col_type,
     COUNT({col}) AS col_count,
     COUNT(DISTINCT {col}) AS col_distinct,
@@ -1184,40 +1243,60 @@ SELECT
     CAST(SUM(CAST({col} AS DOUBLE) * CAST({col} AS DOUBLE)) AS VARCHAR) AS col_sum_sq,
     '' AS col_freq,
     COUNT(*) - COUNT({col}) AS col_missing
-FROM {full_table} WHERE {wc}"""
+FROM {full_table} WHERE {wc}{group_by}"""
 
         _log_sql(col, sql)
         df = _query_athena(sql, data_base=database)
-        rd = df.iloc[0].to_dict()
-        return [{
-            'dt': 'all',
-            'column_name': col,
-            'col_type': 'numeric',
-            'n_total': int(rd['col_count'] or 0) + int(rd['col_missing'] or 0),
-            'n_missing': int(rd['col_missing'] or 0),
-            'n_unique': int(rd['col_distinct'] or 0),
-            'mean': float(rd['col_avg']) if rd['col_avg'] else None,
-            'std': float(rd['col_std']) if rd['col_std'] else None,
-            'min_val': str(rd['col_min']) if rd['col_min'] is not None else None,
-            'max_val': str(rd['col_max']) if rd['col_max'] is not None else None,
-            'top_10': None,
-        }]
+        results = []
+        for _, rd in df.iterrows():
+            rd = rd.to_dict()
+            results.append({
+                'dt': str(rd.get('dt', 'all')),
+                'column_name': col,
+                'col_type': 'numeric',
+                'n_total': int(rd['col_count'] or 0) + int(rd['col_missing'] or 0),
+                'n_missing': int(rd['col_missing'] or 0),
+                'n_unique': int(rd['col_distinct'] or 0),
+                'mean': float(rd['col_avg']) if rd['col_avg'] else None,
+                'std': float(rd['col_std']) if rd['col_std'] else None,
+                'min_val': str(rd['col_min']) if rd['col_min'] is not None else None,
+                'max_val': str(rd['col_max']) if rd['col_max'] is not None else None,
+                'top_10': None,
+            })
+        return results
 
     # Categorical: single CTE query
+    # For vintage != 'all', freq table includes dt grouping
+    if vintage == 'all':
+        freq_dt = ""
+        freq_group = ""
+        freq_partition = "ORDER BY value_freq DESC, p_col ASC"
+        agg_group = ""
+        agg_dt_select = "'all' AS dt"
+    else:
+        dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype)
+        freq_dt = f"CAST({dt_expr} AS VARCHAR) AS dt,"
+        freq_group = f", {dt_expr}"
+        freq_partition = "PARTITION BY dt ORDER BY value_freq DESC, p_col ASC"
+        agg_group = "\nGROUP BY dt"
+        agg_dt_select = "dt"
+
     sql = f"""{cte_prefix}
 WITH FreqTable_RAW AS (
     SELECT
+        {freq_dt}
         {col} AS p_col,
         COUNT(*) AS value_freq
     FROM {full_table} WHERE {wc}
-    GROUP BY {col}
+    GROUP BY {col}{freq_group}
 ), FreqTable AS (
     SELECT
-        p_col, value_freq,
-        ROW_NUMBER() OVER (ORDER BY value_freq DESC, p_col ASC) AS rn
+        {'dt,' if vintage != 'all' else ''} p_col, value_freq,
+        ROW_NUMBER() OVER ({freq_partition}) AS rn
     FROM FreqTable_RAW
 )
 SELECT
+    {agg_dt_select},
     '{dtype}' AS col_type,
     SUM(value_freq) AS col_count,
     COUNT(value_freq) AS col_distinct,
@@ -1226,41 +1305,69 @@ SELECT
     AVG(CAST(value_freq AS DOUBLE)) AS col_avg,
     STDDEV_SAMP(CAST(value_freq AS DOUBLE)) AS col_std,
     SUM(value_freq) AS col_sum,
-    SUM(value_freq * value_freq) AS col_sum_sq,
-    (SELECT ARRAY_JOIN(ARRAY_AGG(COALESCE(CAST(p_col AS VARCHAR), '') || '(' || CAST(value_freq AS VARCHAR) || ')' ORDER BY value_freq DESC), '; ') FROM FreqTable WHERE rn <= 10) AS col_freq,
-    (SELECT COALESCE(value_freq, 0) FROM FreqTable WHERE p_col IS NULL) AS col_missing
-FROM FreqTable"""
+    SUM(value_freq * value_freq) AS col_sum_sq
+FROM FreqTable{agg_group}"""
 
     _log_sql(col, sql)
     df = _query_athena(sql, data_base=database)
-    rd = df.iloc[0].to_dict()
 
-    # Parse col_freq into JSON top_10 format
-    col_freq = rd.get('col_freq') or ''
-    if col_freq and str(col_freq) != 'nan':
-        entries = []
-        for entry in str(col_freq).split('; '):
-            if '(' in entry and entry.endswith(')'):
-                val = entry[:entry.rfind('(')]
-                cnt = entry[entry.rfind('(') + 1:-1]
-                entries.append({"value": val, "count": int(cnt)})
-        top_10 = json.dumps(entries)
-    else:
-        top_10 = json.dumps([])
+    results = []
+    for _, rd in df.iterrows():
+        rd = rd.to_dict()
 
-    return [{
-        'dt': 'all',
-        'column_name': col,
-        'col_type': 'categorical',
-        'n_total': int(rd['col_count'] or 0),
-        'n_missing': int(rd['col_missing'] or 0),
-        'n_unique': int(rd['col_distinct'] or 0),
-        'mean': None,
-        'std': None,
-        'min_val': None,
-        'max_val': None,
-        'top_10': top_10,
-    }]
+        # Get top-10 for this dt via separate query (scalar subquery can't GROUP BY)
+        dt_val = str(rd.get('dt', 'all'))
+        if vintage == 'all':
+            top10_sql = f"""{cte_prefix}
+SELECT ARRAY_JOIN(ARRAY_AGG(entry ORDER BY cnt DESC), '; ') AS col_freq FROM (
+    SELECT COALESCE(CAST({col} AS VARCHAR), '') || '(' || CAST(COUNT(*) AS VARCHAR) || ')' AS entry, COUNT(*) AS cnt
+    FROM {full_table} WHERE {wc} AND {col} IS NOT NULL
+    GROUP BY {col} ORDER BY COUNT(*) DESC LIMIT 10
+) t"""
+            missing_sql = f"""{cte_prefix}
+SELECT COUNT(*) AS col_missing FROM {full_table} WHERE {wc} AND {col} IS NULL"""
+        else:
+            dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype)
+            top10_sql = f"""{cte_prefix}
+SELECT ARRAY_JOIN(ARRAY_AGG(entry ORDER BY cnt DESC), '; ') AS col_freq FROM (
+    SELECT COALESCE(CAST({col} AS VARCHAR), '') || '(' || CAST(COUNT(*) AS VARCHAR) || ')' AS entry, COUNT(*) AS cnt
+    FROM {full_table} WHERE {wc} AND {col} IS NOT NULL AND CAST({dt_expr} AS VARCHAR) = '{dt_val}'
+    GROUP BY {col} ORDER BY COUNT(*) DESC LIMIT 10
+) t"""
+            missing_sql = f"""{cte_prefix}
+SELECT COUNT(*) AS col_missing FROM {full_table} WHERE {wc} AND {col} IS NULL AND CAST({dt_expr} AS VARCHAR) = '{dt_val}'"""
+
+        top10_df = _query_athena(top10_sql, data_base=database)
+        col_freq = str(top10_df.iloc[0]['col_freq'] or '') if len(top10_df) > 0 else ''
+        if col_freq and col_freq != 'nan':
+            entries = []
+            for entry in col_freq.split('; '):
+                if '(' in entry and entry.endswith(')'):
+                    val = entry[:entry.rfind('(')]
+                    cnt = entry[entry.rfind('(') + 1:-1]
+                    entries.append({"value": val, "count": int(cnt)})
+            top_10 = json.dumps(entries)
+        else:
+            top_10 = json.dumps([])
+
+        missing_df = _query_athena(missing_sql, data_base=database)
+        col_missing = int(missing_df.iloc[0]['col_missing'] or 0) if len(missing_df) > 0 else 0
+
+        results.append({
+            'dt': dt_val,
+            'column_name': col,
+            'col_type': 'categorical',
+            'n_total': int(rd['col_count'] or 0),
+            'n_missing': col_missing,
+            'n_unique': int(rd['col_distinct'] or 0),
+            'mean': None,
+            'std': None,
+            'min_val': None,
+            'max_val': None,
+            'top_10': top_10,
+        })
+
+    return results
 
 
 def _extract_mock(config_path, outdir, types, db_path, mock_dir, source_filter):
@@ -1384,6 +1491,21 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
     # Track timing for all extractions
     timing_records = []
 
+    # Confirm vintage for column extraction
+    if "col" in types:
+        # Collect unique vintages across tables
+        table_vintages = set(t.get('vintage', 'all') for t in aws_tables)
+        vintage_display = ', '.join(sorted(table_vintages))
+        resp = input(f"  Column stats vintage: {vintage_display}. Proceed? [y]es / [c]hange: ").strip().lower()
+        if resp == 'c':
+            new_vintage = input(f"  Enter vintage (all/day/week/month/quarter/year/sample): ").strip().lower()
+            if new_vintage in ('all', 'day', 'week', 'month', 'quarter', 'year', 'sample'):
+                for t in aws_tables:
+                    t['vintage'] = new_vintage
+                print(f"  Vintage set to: {new_vintage}")
+            else:
+                print(f"  Invalid vintage '{new_vintage}', keeping original")
+
     for tbl_cfg in aws_tables:
         name = tbl_cfg['name']
         database = tbl_cfg['conn_macro']
@@ -1393,27 +1515,6 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
         full_table, cte_prefix = _resolve_table(tbl_cfg, raw_full_table)
 
         print(f"\nExtracting: {name} ({raw_full_table})")
-
-        # Check for existing CSVs and skip/prompt/overwrite
-        if not force:
-            qname = _qualified_name(tbl_cfg)
-            existing = []
-            if "row" in types:
-                rp = os.path.join(outdir, f"{qname}_row.csv")
-                if os.path.exists(rp):
-                    existing.append(rp)
-            if "col" in types:
-                cp = os.path.join(outdir, f"{qname}_col.csv")
-                if os.path.exists(cp):
-                    existing.append(cp)
-            if existing:
-                fnames = ", ".join(os.path.basename(f) for f in existing)
-                resp = input(f"  {fnames} already exist. [o]verwrite / [s]kip / [a]lways overwrite? ").strip().lower()
-                if resp == 's':
-                    print(f"  Skipped {name}")
-                    continue
-                elif resp == 'a':
-                    force = True
 
         if "row" in types:
             aws_creds_renew()
@@ -1442,31 +1543,29 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
             all_stats = []
             non_date_cols = [(c, d) for c, d in columns.items() if c.lower() != date_col.lower()]
 
-            # Handle vintage='sample': sample dates and inject WHERE filter
+            # Compute unified date filter
             table_vintage = tbl_cfg.get('vintage', vintage)
-            if table_vintage == 'sample' and db_path:
-                from .db import get_row_comparison, list_table_pairs
-                qname = _qualified_name(tbl_cfg)
-                pairs = list_table_pairs(db_path)
-                pair_name = None
-                for pair in pairs:
-                    if qname in (pair['table_left'], pair['table_right']):
-                        pair_name = pair['pair_name']
-                        break
-                if pair_name:
-                    comp = get_row_comparison(db_path, pair_name)
-                    if comp and comp.get('matching_dates'):
-                        sampled = _sample_matching_dates(db_path, tbl_cfg, comp['matching_dates'])
-                        date_in = ", ".join(f"DATE '{d}'" for d in sampled)
-                        sample_where = f"CAST({date_col} AS DATE) IN ({date_in})"
-                        existing_where = tbl_cfg.get('where', '')
-                        if existing_where:
-                            tbl_cfg['where'] = f"({existing_where}) AND {sample_where}"
-                        else:
-                            tbl_cfg['where'] = sample_where
-                        print(f"  {qname}: col extraction filtered to {len(sampled)} sampled dates")
+            date_filter = _compute_date_filter(tbl_cfg, db_path, table_vintage)
 
-            col_vintage = 'all'  # col stats always aggregate across dates
+            if date_filter['filter_type'] == 'in_list':
+                date_where = _build_date_in_clause(
+                    date_col, date_filter['dates'], date_filter['date_dtype'])
+                existing_where = tbl_cfg.get('where', '')
+                if existing_where:
+                    tbl_cfg['where'] = f"({existing_where}) AND {date_where}"
+                else:
+                    tbl_cfg['where'] = date_where
+            elif date_filter['filter_type'] == 'between':
+                date_where = _build_date_between_clause(
+                    date_col, date_filter['min_date'], date_filter['max_date'],
+                    date_filter['date_dtype'])
+                existing_where = tbl_cfg.get('where', '')
+                if existing_where:
+                    tbl_cfg['where'] = f"({existing_where}) AND {date_where}"
+                else:
+                    tbl_cfg['where'] = date_where
+
+            col_vintage = date_filter['vintage']
 
             # Set up SQL log file for this table
             global _sql_log_file
@@ -1493,7 +1592,7 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
                     col_iter = tqdm(col_iter, desc=f"  {name} col stats", unit="col")
                 for col, dtype in col_iter:
                     try:
-                        stats = _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix, database=database, vintage=col_vintage)
+                        stats = _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix, database=database, vintage=col_vintage, date_dtype=date_filter.get('date_dtype'))
                         all_stats.extend(stats)
                     except Exception as e:
                         print(f"  Warning: Failed to extract {col}: {e}")
@@ -1501,7 +1600,7 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
                 # Parallel path
                 def _extract_one(col_dtype):
                     col, dtype = col_dtype
-                    return _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix, database=database, vintage=col_vintage)
+                    return _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix, database=database, vintage=col_vintage, date_dtype=date_filter.get('date_dtype'))
 
                 with ThreadPoolExecutor(max_workers=_max_workers) as executor:
                     futures = {executor.submit(_extract_one, (c, d)): c for c, d in non_date_cols}

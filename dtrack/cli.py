@@ -734,11 +734,23 @@ def cmd_compare_row(args):
             elif config_path and is_unified and pair_name in config.get('pairs', {}):
                 time_map = config['pairs'][pair_name].get('metadata', {}).get('time_map', {})
 
+            # Read comment from pair config
+            comment_left, comment_right = '', ''
+            if config_path and is_unified and pair_name in config.get('pairs', {}):
+                comment = config['pairs'][pair_name].get('comment', '')
+                if isinstance(comment, dict):
+                    comment_left = comment.get('left', '')
+                    comment_right = comment.get('right', '')
+                else:
+                    comment_left = comment_right = comment
+
             section = generate_row_count_html(
                 pair_name, src_l, src_r, tbl_l, tbl_r,
                 comp_result, metadata_left=meta_l, metadata_right=meta_r,
                 where_map=where_map,
                 time_map=time_map,
+                comment_left=comment_left,
+                comment_right=comment_right,
             )
             row_sections.append(section)
 
@@ -878,11 +890,23 @@ def cmd_compare_col(args):
             for pair_name, src_l, src_r, tbl_l, tbl_r, comp_result, col_map in html_entries:
                 meta_l = get_metadata(args.project_db, tbl_l)
                 meta_r = get_metadata(args.project_db, tbl_r)
+
+                # Read comment from pair config
+                comment_left, comment_right = '', ''
+                comment = config['pairs'].get(pair_name, {}).get('comment', '')
+                if isinstance(comment, dict):
+                    comment_left = comment.get('left', '')
+                    comment_right = comment.get('right', '')
+                else:
+                    comment_left = comment_right = comment
+
                 section = generate_column_stats_html(
                     pair_name, src_l, src_r, tbl_l, tbl_r,
                     comp_result, col_map,
                     metadata_left=meta_l,
                     metadata_right=meta_r,
+                    comment_left=comment_left,
+                    comment_right=comment_right,
                 )
                 col_sections.append(section)
 

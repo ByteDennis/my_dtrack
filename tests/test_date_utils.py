@@ -22,9 +22,9 @@ class TestParseDate:
         assert parse_date("15JAN2024:14:30:00") == "2024-01-15"
 
     def test_parse_yyyymm(self):
-        """Test parsing YYYYMM to first of month"""
-        assert parse_date("201805") == "2018-05-01"
-        assert parse_date("202412") == "2024-12-01"
+        """Test YYYYMM passes through unchanged (not a date format we convert)"""
+        assert parse_date("201805") == "201805"
+        assert parse_date("202412") == "202412"
 
     def test_parse_us_date(self):
         """Test parsing US format MM/DD/YYYY"""

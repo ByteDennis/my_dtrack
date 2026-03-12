@@ -82,19 +82,12 @@ class TestLoadRowCountCSV:
 
     def test_load_row_count_csv_basic(self, row_count_csv):
         """Test loading a basic row count CSV"""
-        data = load_row_count_csv(row_count_csv, vintage="day")
+        data = load_row_count_csv(row_count_csv)
 
         assert len(data) == 3
-        assert data[0] == ("2018-05-01", 3400)
-        assert data[1] == ("2018-06-01", 3500)
-        assert data[2] == ("2018-07-01", 3600)
-
-    def test_load_row_count_csv_with_vintage_month(self, row_count_csv):
-        """Test loading with month vintage (should already be at month level)"""
-        data = load_row_count_csv(row_count_csv, vintage="month")
-
-        assert len(data) == 3
-        assert data[0] == ("2018-05-01", 3400)
+        assert data[0] == ("201805", 3400)
+        assert data[1] == ("201806", 3500)
+        assert data[2] == ("201807", 3600)
 
 
 class TestLoadRowCounts:

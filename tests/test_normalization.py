@@ -23,8 +23,8 @@ class TestNormalizeValue:
         # ISO format (already normalized)
         assert normalize_value("2026-03-04") == "2026-03-04"
 
-        # YYYYMM format
-        assert normalize_value("202603") == "2026-03-01"
+        # YYYYMM format (passes through unchanged)
+        assert normalize_value("202603") == "202603"
 
         # US format
         assert normalize_value("03/04/2026") == "2026-03-04"

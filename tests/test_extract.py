@@ -107,17 +107,20 @@ class TestVintageDateExprAthena:
     def test_day_is_identity(self):
         assert _vintage_date_expr_athena('dt_col', 'day') == 'dt_col'
 
-    def test_week(self):
-        assert _vintage_date_expr_athena('dt_col', 'week') == "date_trunc('week', CAST(dt_col AS date))"
+    def test_week_date_type(self):
+        assert _vintage_date_expr_athena('dt_col', 'week', date_dtype='date') == "date_trunc('week', dt_col)"
+
+    def test_week_string_type(self):
+        assert _vintage_date_expr_athena('dt_col', 'week', date_dtype='varchar') == "date_trunc('week', date_parse(dt_col, '%Y%m%d'))"
 
     def test_month(self):
-        assert _vintage_date_expr_athena('dt_col', 'month') == "date_trunc('month', CAST(dt_col AS date))"
+        assert _vintage_date_expr_athena('dt_col', 'month', date_dtype='date') == "date_trunc('month', dt_col)"
 
     def test_quarter(self):
-        assert _vintage_date_expr_athena('dt_col', 'quarter') == "date_trunc('quarter', CAST(dt_col AS date))"
+        assert _vintage_date_expr_athena('dt_col', 'quarter', date_dtype='date') == "date_trunc('quarter', dt_col)"
 
     def test_year(self):
-        assert _vintage_date_expr_athena('dt_col', 'year') == "date_trunc('year', CAST(dt_col AS date))"
+        assert _vintage_date_expr_athena('dt_col', 'year', date_dtype='date') == "date_trunc('year', dt_col)"
 
     def test_vintage_transform_overrides(self):
         result = _vintage_date_expr_athena('dt_col', 'week', vintage_transform="date_trunc('month', {col})")
@@ -424,7 +427,7 @@ class TestSqlBuilders:
         assert 'ORDER BY' not in sql.split('rn <= 10')[1]  # no ORDER BY after filter
 
     def test_athena_continuous_with_vintage(self):
-        date_expr = "date_trunc('week', CAST(dt_col AS date))"
+        date_expr = "date_trunc('week', dt_col)"
         sql = build_continuous_sql_athena('T', 'AMT', date_expr)
         assert f"{date_expr} AS dt" in sql
         assert f"GROUP BY {date_expr}" in sql

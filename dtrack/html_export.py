@@ -4,6 +4,15 @@ from typing import Dict, List, Optional
 from datetime import datetime
 
 
+def _comment_icon(comment):
+    """Return ⓘ tooltip HTML if comment is non-empty, else empty string."""
+    if not comment:
+        return ''
+    # Escape HTML entities in comment
+    safe = comment.replace('&', '&amp;').replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+    return f' <span title="{safe}" style="cursor:help; color:#5b7083;">ⓘ</span>'
+
+
 def generate_row_count_html(
     pair_name: str,
     source_left: str,
@@ -15,6 +24,8 @@ def generate_row_count_html(
     metadata_right: Optional[Dict] = None,
     where_map: Optional[Dict[str, str]] = None,
     time_map: Optional[Dict[str, str]] = None,
+    comment_left: str = '',
+    comment_right: str = '',
 ) -> str:
     """
     Generate HTML table rows for row count comparison.
@@ -28,6 +39,8 @@ def generate_row_count_html(
         comparison: Result from compare_row_counts()
         metadata_left: Optional metadata for left table
         metadata_right: Optional metadata for right table
+        comment_left: Optional comment for left source (shown as ⓘ tooltip)
+        comment_right: Optional comment for right source (shown as ⓘ tooltip)
 
     Returns:
         HTML string with table rows
@@ -89,7 +102,7 @@ def generate_row_count_html(
         time_right = _fmt_time(time_map.get(source_right, time_map.get('right', '—')))
 
     html += f'''            <tr>
-                <td style="border:1px solid #ccc; padding:8px;">{source_left}</td>
+                <td style="border:1px solid #ccc; padding:8px;">{source_left.upper()}{_comment_icon(comment_left)}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{date_col_left}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_left'][0] or '—'}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_left'][1] or '—'}</td>
@@ -97,7 +110,7 @@ def generate_row_count_html(
                 <td style="border:1px solid #ccc; padding:8px;">{time_left}</td>
             </tr>
             <tr>
-                <td style="border:1px solid #ccc; padding:8px;">{source_right}</td>
+                <td style="border:1px solid #ccc; padding:8px;">{source_right.upper()}{_comment_icon(comment_right)}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{date_col_right}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_right'][0] or '—'}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_right'][1] or '—'}</td>
@@ -236,6 +249,8 @@ def generate_column_stats_html(
     col_mappings: Dict[str, str],
     metadata_left: Optional[Dict] = None,
     metadata_right: Optional[Dict] = None,
+    comment_left: str = '',
+    comment_right: str = '',
 ) -> str:
     """
     Generate HTML table rows for column statistics comparison.
@@ -248,6 +263,8 @@ def generate_column_stats_html(
         table_right: Right table name
         comparison: Result from compare_column_stats()
         col_mappings: Column mappings used
+        comment_left: Optional comment for left source (shown as ⓘ tooltip)
+        comment_right: Optional comment for right source (shown as ⓘ tooltip)
 
     Returns:
         HTML string with table rows
@@ -303,7 +320,7 @@ def generate_column_stats_html(
     date_col_right = metadata_right.get('date_var') or '—' if metadata_right else '—'
 
     html += f'''            <tr>
-                <td style="border:1px solid #ccc; padding:8px;">{source_left}</td>
+                <td style="border:1px solid #ccc; padding:8px;">{source_left.upper()}{_comment_icon(comment_left)}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{date_col_left}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{min_date}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{max_date}</td>
@@ -312,7 +329,7 @@ def generate_column_stats_html(
                 <td style="border:1px solid #ccc; padding:8px;">—</td>
             </tr>
             <tr>
-                <td style="border:1px solid #ccc; padding:8px;">{source_right}</td>
+                <td style="border:1px solid #ccc; padding:8px;">{source_right.upper()}{_comment_icon(comment_right)}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{date_col_right}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{min_date}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{max_date}</td>
