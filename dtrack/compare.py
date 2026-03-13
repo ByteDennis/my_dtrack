@@ -3,6 +3,7 @@
 import json
 from typing import Dict, List, Tuple, Optional
 from .db import get_row_counts, get_col_stats, get_table_pair, list_table_pairs
+from .date_utils import parse_date
 
 
 def _safe_int(val):
@@ -240,12 +241,12 @@ def compare_column_stats(
         from_date=from_date, to_date=to_date
     )
 
-    # Organize stats by column and date
+    # Organize stats by column and date (normalize dt to YYYY-MM-DD)
     def organize_stats(stats):
         organized = {}
         for stat in stats:
             col = stat['column_name']
-            dt = stat['dt']
+            dt = parse_date(stat['dt']) if stat['dt'] else stat['dt']
             if col not in organized:
                 organized[col] = {}
             organized[col][dt] = stat
@@ -299,6 +300,7 @@ def compare_column_stats(
 
             comparison = {
                 "dt": dt,
+                "vintage_label": left_stat.get("vintage_label") or dt,
                 "col_type": left_stat["col_type"],
                 "left_col": left_col,
                 "right_col": right_col,

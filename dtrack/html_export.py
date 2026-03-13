@@ -249,6 +249,7 @@ def generate_column_stats_html(
     col_mappings: Dict[str, str],
     metadata_left: Optional[Dict] = None,
     metadata_right: Optional[Dict] = None,
+    time_map: Optional[Dict[str, str]] = None,
     comment_left: str = '',
     comment_right: str = '',
 ) -> str:
@@ -319,6 +320,12 @@ def generate_column_stats_html(
     date_col_left = metadata_left.get('date_var') or '—' if metadata_left else '—'
     date_col_right = metadata_right.get('date_var') or '—' if metadata_right else '—'
 
+    time_left = '—'
+    time_right = '—'
+    if time_map:
+        time_left = _fmt_time(time_map.get(source_left, time_map.get('left', '—')))
+        time_right = _fmt_time(time_map.get(source_right, time_map.get('right', '—')))
+
     html += f'''            <tr>
                 <td style="border:1px solid #ccc; padding:8px;">{source_left.upper()}{_comment_icon(comment_left)}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{date_col_left}</td>
@@ -326,7 +333,7 @@ def generate_column_stats_html(
                 <td style="border:1px solid #ccc; padding:8px;">{max_date}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{n_cols}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{n_vintages}</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
+                <td style="border:1px solid #ccc; padding:8px;">{time_left}</td>
             </tr>
             <tr>
                 <td style="border:1px solid #ccc; padding:8px;">{source_right.upper()}{_comment_icon(comment_right)}</td>
@@ -335,7 +342,7 @@ def generate_column_stats_html(
                 <td style="border:1px solid #ccc; padding:8px;">{max_date}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{n_cols}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{n_vintages}</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
+                <td style="border:1px solid #ccc; padding:8px;">{time_right}</td>
             </tr>
 '''
 
@@ -369,18 +376,19 @@ def generate_column_stats_html(
                 if col not in col_diffs:
                     col_diffs[col] = []
 
-                # Collect differing stats
+                # Collect differing stats (use vintage_label for display)
+                vlabel = comp.get('vintage_label', dt)
                 if comp.get('n_total_diff', 0) != 0:
-                    col_diffs[col].append((dt, 'n_total', comp['n_total_left'], comp['n_total_right'], comp['n_total_diff']))
+                    col_diffs[col].append((vlabel, 'n_total', comp['n_total_left'], comp['n_total_right'], comp['n_total_diff']))
                 if comp.get('n_missing_diff', 0) != 0:
-                    col_diffs[col].append((dt, 'n_missing', comp['n_missing_left'], comp['n_missing_right'], comp['n_missing_diff']))
+                    col_diffs[col].append((vlabel, 'n_missing', comp['n_missing_left'], comp['n_missing_right'], comp['n_missing_diff']))
                 if comp.get('n_unique_diff', 0) != 0:
-                    col_diffs[col].append((dt, 'n_unique', comp['n_unique_left'], comp['n_unique_right'], comp['n_unique_diff']))
+                    col_diffs[col].append((vlabel, 'n_unique', comp['n_unique_left'], comp['n_unique_right'], comp['n_unique_diff']))
                 if comp['col_type'] == 'numeric':
                     if comp.get('mean_diff') is not None and abs(comp.get('mean_diff', 0)) > 0.01:
-                        col_diffs[col].append((dt, 'mean', comp.get('mean_left'), comp.get('mean_right'), comp.get('mean_diff')))
+                        col_diffs[col].append((vlabel, 'mean', comp.get('mean_left'), comp.get('mean_right'), comp.get('mean_diff')))
                     if comp.get('std_diff') is not None and abs(comp.get('std_diff', 0)) > 0.01:
-                        col_diffs[col].append((dt, 'std', comp.get('std_left'), comp.get('std_right'), comp.get('std_diff')))
+                        col_diffs[col].append((vlabel, 'std', comp.get('std_left'), comp.get('std_right'), comp.get('std_diff')))
 
         # Prepare column details for 3-column layout
         col_details_list = []

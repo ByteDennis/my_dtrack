@@ -41,6 +41,18 @@ from .ppt import PPTBuilder, parse_markdown_to_ppt
 def cmd_init(args):
     """Initialize a new dtrack database"""
     db_path = args.project_db
+
+    if args.refresh:
+        if not os.path.exists(db_path):
+            print(f"Error: Database not found: {db_path}")
+            sys.exit(1)
+        from .db import refresh_database
+        actions = refresh_database(db_path)
+        print(f"Refreshed database: {db_path}")
+        for table, action in sorted(actions.items()):
+            print(f"  {table}: {action}")
+        return
+
     if os.path.exists(db_path):
         if not args.force:
             print(f"Error: Database already exists: {db_path}")
@@ -619,11 +631,11 @@ def cmd_compare_row(args):
 
                         config['pairs'][pair_name]['metadata']['last_comparison'] = datetime.now().isoformat()
 
-                        # Initialize time_map with placeholders for left and right sources
-                        if 'time_map' not in config['pairs'][pair_name]['metadata']:
-                            config['pairs'][pair_name]['metadata']['time_map'] = {
-                                source_left: "—",
-                                source_right: "—"
+                        # Initialize time_map at pair level with row/col sub-keys
+                        if 'time_map' not in config['pairs'][pair_name]:
+                            config['pairs'][pair_name]['time_map'] = {
+                                "row": {"left": "—", "right": "—"},
+                                "col": {"left": "—", "right": "—"}
                             }
 
                         print(f"  ✓ {pair_name}: {len(matching)} matching dates")
@@ -646,7 +658,7 @@ def cmd_compare_row(args):
                 print()
                 print("  You can now:")
                 print("  - Add time_map values (check ./sas/_timing.csv and ./csv/_timing.csv)")
-                print("    Format: \"time_map\": {\"pcds\": \"5.2s\", \"aws\": \"3.1s\"}")
+                print("    Format: \"time_map\": {\"row\": {\"left\": \"5.2s\", \"right\": \"3.1s\"}, \"col\": {...}}")
                 print("  - Review where_map")
                 print("  - Add notes to metadata")
                 print()
@@ -667,11 +679,17 @@ def cmd_compare_row(args):
                 # Show what was synced
                 if is_unified:
                     for pair_name in config.get("pairs", {}):
-                        time_map = config["pairs"][pair_name].get("metadata", {}).get("time_map", {})
-                        if time_map:
-                            times = [f"{k}={v}" for k, v in time_map.items() if v and v != "—"]
-                            if times:
-                                print(f"  - {pair_name}: time_map = {{{', '.join(times)}}}")
+                        tm = config["pairs"][pair_name].get("time_map", {})
+                        if tm:
+                            parts = []
+                            for kind in ('row', 'col'):
+                                sub = tm.get(kind, {})
+                                if isinstance(sub, dict):
+                                    vals = [f"{k}={v}" for k, v in sub.items() if v and v != "—"]
+                                    if vals:
+                                        parts.append(f"{kind}: {{{', '.join(vals)}}}")
+                            if parts:
+                                print(f"  - {pair_name}: time_map = {{{', '.join(parts)}}}")
 
                 print(f"\n📄 Your edits are saved in: {config_path}")
                 print("   (File was NOT overwritten after sync)")
@@ -724,18 +742,16 @@ def cmd_compare_row(args):
             meta_l = get_metadata(args.project_db, tbl_l)
             meta_r = get_metadata(args.project_db, tbl_r)
 
-            # Read time_map from database or config
+            # Read time_map from config (pair-level, row sub-key)
             time_map = {}
-            row_comp = get_row_comparison(args.project_db, pair_name)
-            if row_comp and row_comp.get('time_map'):
-                # Database stores time_map as JSON
-                import json
-                if isinstance(row_comp['time_map'], str):
-                    time_map = json.loads(row_comp['time_map'])
+            if config_path and is_unified and pair_name in config.get('pairs', {}):
+                pair_time_map = config['pairs'][pair_name].get('time_map', {})
+                # New format: time_map.row.{left,right}
+                if 'row' in pair_time_map and isinstance(pair_time_map['row'], dict):
+                    time_map = pair_time_map['row']
                 else:
-                    time_map = row_comp['time_map']
-            elif config_path and is_unified and pair_name in config.get('pairs', {}):
-                time_map = config['pairs'][pair_name].get('metadata', {}).get('time_map', {})
+                    # Legacy: flat time_map in metadata
+                    time_map = config['pairs'][pair_name].get('metadata', {}).get('time_map', {})
 
             # Read comment from pair config
             comment_left, comment_right = '', ''
@@ -906,11 +922,18 @@ def cmd_compare_col(args):
                 else:
                     comment_left = comment_right = comment
 
+                # Read time_map from config (pair-level, col sub-key)
+                col_time_map = {}
+                pair_time_map = config['pairs'].get(pair_name, {}).get('time_map', {})
+                if 'col' in pair_time_map and isinstance(pair_time_map['col'], dict):
+                    col_time_map = pair_time_map['col']
+
                 section = generate_column_stats_html(
                     pair_name, src_l, src_r, tbl_l, tbl_r,
                     comp_result, col_map,
                     metadata_left=meta_l,
                     metadata_right=meta_r,
+                    time_map=col_time_map,
                     comment_left=comment_left,
                     comment_right=comment_right,
                 )
@@ -1068,7 +1091,7 @@ def _print_col_comparison(result, source_left, source_right):
             has_std_diff = any(comp.get('std_diff') is not None and abs(comp.get('std_diff', 0)) > 0.01 for comp in comparisons)
 
             # Build header with only differing columns
-            headers = ["Date"]
+            headers = ["Vintage"]
             if has_n_total_diff:
                 headers.append("n_total")
             if has_n_miss_diff:
@@ -1083,12 +1106,13 @@ def _print_col_comparison(result, source_left, source_right):
                 continue
 
             # Print header
-            header_line = f"{'Date':<12} " + " ".join(f"{h:<20}" for h in headers[1:])
+            header_line = f"{'Vintage':<20} " + " ".join(f"{h:<20}" for h in headers[1:])
             print(header_line)
             print("-" * 70)
 
             for comp in comparisons[:5]:
-                row_parts = [f"{comp['dt']:<12}"]
+                vlabel = comp.get('vintage_label', comp['dt'])
+                row_parts = [f"{vlabel:<20}"]
 
                 if has_n_total_diff:
                     row_parts.append(f"{comp['n_total_left']:,} / {comp['n_total_right']:,} ({comp['n_total_diff']:+,})")
@@ -1116,7 +1140,7 @@ def _print_col_comparison(result, source_left, source_right):
             has_n_uniq_diff = any(comp.get('n_unique_diff', 0) != 0 for comp in comparisons)
 
             # Build header with only differing columns
-            headers = ["Date"]
+            headers = ["Vintage"]
             if has_n_total_diff:
                 headers.append("n_total")
             if has_n_miss_diff:
@@ -1129,12 +1153,13 @@ def _print_col_comparison(result, source_left, source_right):
                 continue
 
             # Print header
-            header_line = f"{'Date':<12} " + " ".join(f"{h:<20}" for h in headers[1:])
+            header_line = f"{'Vintage':<20} " + " ".join(f"{h:<20}" for h in headers[1:])
             print(header_line)
             print("-" * 70)
 
             for comp in comparisons[:5]:
-                row_parts = [f"{comp['dt']:<12}"]
+                vlabel = comp.get('vintage_label', comp['dt'])
+                row_parts = [f"{vlabel:<20}"]
 
                 if has_n_total_diff:
                     row_parts.append(f"{comp['n_total_left']:,} / {comp['n_total_right']:,} ({comp['n_total_diff']:+,})")
@@ -1309,8 +1334,11 @@ def cmd_load_col_stats(args):
                 continue
 
             print(f"\n--- {qname} ---")
-            # Use vintage from config, fall back to 'day'
-            table_vintage = tbl.get('vintage', 'day')
+            # Use vintage from config, fall back to _metadata, then 'day'
+            table_vintage = tbl.get('vintage')
+            if not table_vintage:
+                meta = get_metadata(args.project_db, qname)
+                table_vintage = (meta.get('vintage') or 'day') if meta else 'day'
             count = load_precomputed_col_stats(
                 db_path=args.project_db,
                 csv_path=csv_path,
@@ -1338,16 +1366,22 @@ def cmd_load_col_stats(args):
         print("Error: --table is required when loading a single file")
         sys.exit(1)
 
+    # Look up vintage from _metadata if available
+    meta = get_metadata(args.project_db, table)
+    table_vintage = (meta.get('vintage') or 'day') if meta else 'day'
+
     print(f"Loading pre-computed column statistics")
     print(f"  Source: {csv_file}")
     print(f"  Table: {table}")
     print(f"  Mode: {args.mode}")
+    print(f"  Vintage: {table_vintage}")
 
     count = load_precomputed_col_stats(
         db_path=args.project_db,
         csv_path=csv_file,
         table_name=table,
         mode=args.mode,
+        vintage=table_vintage,
     )
     print(f"✓ Loaded {count} stat rows")
 
@@ -2287,6 +2321,7 @@ def main():
     parser_init = subparsers.add_parser('init', help='Initialize a new database')
     parser_init.add_argument('project_db', help='Path to database file')
     parser_init.add_argument('--force', action='store_true', help='Overwrite existing database')
+    parser_init.add_argument('--refresh', action='store_true', help='Add missing columns/tables; recreate on type conflict')
 
     # load-row command
     parser_load_row = subparsers.add_parser(
@@ -2380,8 +2415,8 @@ def main():
                                  help='Type to generate (default: both)')
     parser_gen_sas.add_argument('--env', help='Path to .env file with credentials (pcds_usr, pcds_pw, email_to, lib_path)')
     parser_gen_sas.add_argument('--db', dest='db_path', help='Database path to read column metadata from _column_meta')
-    parser_gen_sas.add_argument('--vintage', choices=['day', 'week', 'month', 'quarter', 'year', 'sample'],
-                                 help='Override vintage for all tables. If omitted, uses each table\'s config vintage (default: day).')
+    parser_gen_sas.add_argument('--vintage',
+                                 help='Override vintage: day, week, month, quarter, year, sample, or sample@N (default: day).')
 
     # gen-aws command
     parser_gen_aws = subparsers.add_parser('gen-aws', help='Extract data from AWS Athena')
@@ -2392,8 +2427,8 @@ def main():
     parser_gen_aws.add_argument('--workers', type=int, help='Max parallel workers (default: 4, or MAX_WORKERS env var)')
     parser_gen_aws.add_argument('--db', dest='db_path',
                                  help='Database path to read column metadata from _column_meta')
-    parser_gen_aws.add_argument('--vintage', choices=['day', 'week', 'month', 'quarter', 'year', 'sample'],
-                                 help='Override vintage for all tables. If omitted, uses each table\'s config vintage (default: day).')
+    parser_gen_aws.add_argument('--vintage',
+                                 help='Override vintage: day, week, month, quarter, year, sample, or sample@N (default: day).')
     parser_gen_aws.add_argument('--force', action='store_true', help='Overwrite existing CSV files without prompting')
 
     # load-col command

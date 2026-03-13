@@ -148,17 +148,30 @@ def _build_date_in_clause(date_col, dates, date_dtype, is_sas=False):
         return f"{date_col} IN ({date_list})"
 
 
-def _sample_matching_dates(db_path, tbl_cfg, matching_dates):
+def _parse_sample_vintage(vintage_str):
+    """Parse 'sample@N' into (is_sample, n_sample).
+
+    Returns (True, N) if vintage_str matches 'sample@N', else (False, 0).
+    Bare 'sample' without @N is not accepted.
+    """
+    if not vintage_str or not vintage_str.startswith('sample@'):
+        return False, 0
+    try:
+        return True, int(vintage_str.split('@', 1)[1])
+    except ValueError:
+        return False, 0
+
+
+def _sample_matching_dates(db_path, tbl_cfg, matching_dates, n_sample=100):
     """Sample N dates from matching_dates with reproducible seed. Returns sampled list or original."""
     import random
     from .db import get_sampled_dates, save_sampled_dates
 
-    n_sample = int(os.environ.get('N_SAMPLE', '100'))
     seed = int(os.environ.get('SEED', '2025'))
     qname = _qualified_name(tbl_cfg)
 
     if len(matching_dates) <= n_sample:
-        print(f"  {qname}: {len(matching_dates)} dates <= N_SAMPLE={n_sample}, using all")
+        print(f"  {qname}: {len(matching_dates)} dates <= sample@{n_sample}, using all")
         return matching_dates
 
     # Find pair_name for this table
@@ -181,7 +194,7 @@ def _sample_matching_dates(db_path, tbl_cfg, matching_dates):
         return existing_samples
 
     if existing_samples:
-        print(f"  {qname}: scope changed, saving new sample (seed={seed}, N_SAMPLE={n_sample})")
+        print(f"  {qname}: scope changed, saving new sample (seed={seed}, sample@{n_sample})")
     else:
         print(f"  {qname}: sampling {n_sample} from {len(matching_dates)} matching dates (seed={seed})")
     save_sampled_dates(db_path, pair_name, qname, new_samples)
@@ -243,14 +256,20 @@ def _compute_date_filter(tbl_cfg, db_path, vintage):
             break
     result['date_dtype'] = date_dtype
 
-    if vintage == 'sample':
-        sampled = _sample_matching_dates(db_path, tbl_cfg, matching_dates)
+    # Look up date_format from _metadata
+    from .db import get_metadata
+    meta = get_metadata(db_path, qname)
+    result['date_format'] = meta.get('date_format') if meta else None
+
+    is_sample, n_sample = _parse_sample_vintage(vintage)
+    if is_sample:
+        sampled = _sample_matching_dates(db_path, tbl_cfg, matching_dates, n_sample=n_sample)
         result['vintage'] = 'day'
         result['filter_type'] = 'in_list'
         result['dates'] = sampled
         result['n_matching'] = len(matching_dates)
         result['n_buckets'] = len(sampled)
-        print(f"  [date filter] vintage: sample | {len(matching_dates)} dates → {len(sampled)} sampled")
+        print(f"  [date filter] vintage: sample@{n_sample} | {len(matching_dates)} dates → {len(sampled)} sampled")
         return result
 
     # between filter for day/week/month/quarter/year
@@ -260,8 +279,45 @@ def _compute_date_filter(tbl_cfg, db_path, vintage):
         buckets.setdefault(bucket_date(dt, vintage), []).append(dt)
 
     result['filter_type'] = 'between'
-    result['min_date'] = min(matching_dates)
-    result['max_date'] = max(matching_dates)
+    raw_min = min(matching_dates)
+    raw_max = max(matching_dates)
+
+    # Extend range to cover full vintage boundaries (e.g., full week Mon-Sun)
+    if vintage == 'week':
+        from datetime import datetime as _dt, timedelta
+        d_min = _dt.strptime(raw_min, "%Y-%m-%d")
+        d_max = _dt.strptime(raw_max, "%Y-%m-%d")
+        # Extend min back to Monday
+        d_min -= timedelta(days=d_min.weekday())  # weekday() 0=Mon
+        # Extend max forward to Sunday
+        d_max += timedelta(days=(6 - d_max.weekday()))
+        result['min_date'] = d_min.strftime("%Y-%m-%d")
+        result['max_date'] = d_max.strftime("%Y-%m-%d")
+    elif vintage == 'month':
+        from datetime import datetime as _dt
+        import calendar
+        d_min = _dt.strptime(raw_min, "%Y-%m-%d")
+        d_max = _dt.strptime(raw_max, "%Y-%m-%d")
+        result['min_date'] = d_min.replace(day=1).strftime("%Y-%m-%d")
+        last_day = calendar.monthrange(d_max.year, d_max.month)[1]
+        result['max_date'] = d_max.replace(day=last_day).strftime("%Y-%m-%d")
+    elif vintage == 'quarter':
+        from datetime import datetime as _dt
+        d_min = _dt.strptime(raw_min, "%Y-%m-%d")
+        d_max = _dt.strptime(raw_max, "%Y-%m-%d")
+        q_start_month = ((d_min.month - 1) // 3) * 3 + 1
+        result['min_date'] = d_min.replace(month=q_start_month, day=1).strftime("%Y-%m-%d")
+        q_end_month = ((d_max.month - 1) // 3) * 3 + 3
+        import calendar
+        last_day = calendar.monthrange(d_max.year, q_end_month)[1]
+        result['max_date'] = d_max.replace(month=q_end_month, day=last_day).strftime("%Y-%m-%d")
+    elif vintage == 'year':
+        result['min_date'] = raw_min[:4] + "-01-01"
+        result['max_date'] = raw_max[:4] + "-12-31"
+    else:
+        result['min_date'] = raw_min
+        result['max_date'] = raw_max
+
     result['n_matching'] = len(matching_dates)
     result['n_buckets'] = len(buckets)
     result['dates'] = matching_dates
@@ -1098,25 +1154,51 @@ _VINTAGE_ATHENA = {
 }
 
 
-def _athena_date_cast(date_expr, date_dtype):
+# Map date_format labels (from _metadata / detect_format) to Athena date_parse patterns
+_ATHENA_DATE_PARSE = {
+    "YYYYMMDD":                     "%Y%m%d",
+    "YYYYMM":                       "%Y%m",
+    "YYYY-MM-DD":                   "%Y-%m-%d",
+    "YYYY-MM-DD HH:MM:SS":         "%Y-%m-%d %H:%i:%s",
+    "YYYY-MM-DD HH:MM:SS.ffffff":  "%Y-%m-%d %H:%i:%s.%f",
+    "YYYY-MM-DDTHH:MM:SS":         "%Y-%m-%dT%H:%i:%s",
+    "YYYY-MM-DDTHH:MM:SS.ffffff":  "%Y-%m-%dT%H:%i:%s.%f",
+    "DDMONYYYY":                    "%d%b%Y",
+    "DDMONYYYY:HH:MM:SS":          "%d%b%Y:%H:%i:%s",
+    "DDMONYYYY:HH:MM:SS.ffffff":   "%d%b%Y:%H:%i:%s.%f",
+    "DDMONYY":                      "%d%b%y",
+    "DD-MON-YYYY":                  "%d-%b-%Y",
+    "DD-MON-YYYY HH24:MI:SS":      "%d-%b-%Y %H:%i:%s",
+    "DD-MON-YY":                    "%d-%b-%y",
+    "YYYY/MM/DD":                   "%Y/%m/%d",
+    "YYYY/MM/DD HH:MM:SS":         "%Y/%m/%d %H:%i:%s",
+    "MM/DD/YYYY":                   "%m/%d/%Y",
+}
+
+
+def _athena_date_cast(date_expr, date_dtype, date_format=None):
     """Wrap date_expr with appropriate cast for Athena based on column type.
 
     - date/timestamp columns: use as-is (already date-compatible)
-    - varchar/string columns: parse with date_parse assuming YYYYMMDD or YYYY-MM-DD
+    - varchar/string columns: parse with date_parse using date_format label
     - number columns: cast to varchar first, then date_parse
+    - date_format: format label from _metadata (e.g. 'YYYYMMDD', 'DD-MON-YYYY')
     """
     dtype = (date_dtype or '').lower()
     if 'date' in dtype or 'timestamp' in dtype:
         return date_expr
+
+    # Resolve Athena date_parse pattern from format label (default to %Y%m%d)
+    athena_fmt = _ATHENA_DATE_PARSE.get(date_format, '%Y%m%d') if date_format else '%Y%m%d'
+
     if dtype in ('int', 'integer', 'bigint', 'smallint', 'tinyint', 'number'):
-        return f"date_parse(CAST({date_expr} AS VARCHAR), '%Y%m%d')"
-    # varchar/string: try ISO first, fall back to YYYYMMDD
+        return f"date_parse(CAST({date_expr} AS VARCHAR), '{athena_fmt}')"
     if 'char' in dtype or 'string' in dtype:
-        return f"date_parse({date_expr}, '%Y%m%d')"
+        return f"date_parse({date_expr}, '{athena_fmt}')"
     return date_expr
 
 
-def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None, date_dtype=None):
+def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None, date_dtype=None, date_format=None):
     """Wrap date_expr with Athena date_trunc for vintage bucketing.
 
     If vintage_transform is provided (from config JSON), use it directly.
@@ -1132,7 +1214,7 @@ def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None, date_d
     unit = _VINTAGE_ATHENA.get(vintage)
     if unit is None:
         return date_expr
-    cast_expr = _athena_date_cast(date_expr, date_dtype)
+    cast_expr = _athena_date_cast(date_expr, date_dtype, date_format)
     return f"date_trunc('{unit}', {cast_expr})"
 
 
@@ -1223,7 +1305,7 @@ def _log_sql(col, sql):
                 f.write(f"-- [{col}]\n{sql.strip()}\n;\n\n")
 
 
-def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database=None, vintage=None, date_dtype=None):
+def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database=None, vintage=None, date_dtype=None, date_format=None):
     """Extract stats for a single column from Athena.
 
     Numeric columns: direct aggregation (no top-10).
@@ -1244,7 +1326,7 @@ def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database
         dt_select = f"'all' AS dt"
         group_by = ""
     else:
-        dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype)
+        dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype, date_format=date_format)
         dt_select = f"CAST({dt_expr} AS VARCHAR) AS dt"
         group_by = f"\nGROUP BY {dt_expr}"
 
@@ -1291,7 +1373,7 @@ FROM {full_table} WHERE {wc}{group_by}"""
         agg_group = ""
         agg_dt_select = "'all' AS dt"
     else:
-        dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype)
+        dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype, date_format=date_format)
         freq_dt = f"CAST({dt_expr} AS VARCHAR) AS dt,"
         freq_group = f", {dt_expr}"
         freq_partition = "PARTITION BY dt ORDER BY value_freq DESC, p_col ASC"
@@ -1338,7 +1420,7 @@ SELECT ARRAY_JOIN(ARRAY_AGG(entry ORDER BY cnt DESC), '; ') AS col_freq FROM (
             missing_sql = f"""{cte_prefix}
 SELECT COUNT(*) AS col_missing FROM {full_table} WHERE {wc} AND {col} IS NULL"""
         else:
-            dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype)
+            dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype, date_format=date_format)
             top10_sql = f"""{cte_prefix}
 SELECT ARRAY_JOIN(ARRAY_AGG(entry ORDER BY cnt DESC), '; ') AS col_freq FROM (
     SELECT COALESCE(CAST({col} AS VARCHAR), '') || '(' || CAST(COUNT(*) AS VARCHAR) || ')' AS entry, COUNT(*) AS cnt
@@ -1498,8 +1580,8 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
         vintage_display = ', '.join(sorted(table_vintages))
         resp = input(f"  Column stats vintage: {vintage_display}. Proceed? [y]es / [c]hange: ").strip().lower()
         if resp == 'c':
-            new_vintage = input(f"  Enter vintage (all/day/week/month/quarter/year/sample): ").strip().lower()
-            if new_vintage in ('all', 'day', 'week', 'month', 'quarter', 'year', 'sample'):
+            new_vintage = input(f"  Enter vintage (all/day/week/month/quarter/year/sample@N): ").strip().lower()
+            if new_vintage in ('all', 'day', 'week', 'month', 'quarter', 'year') or new_vintage.startswith('sample@'):
                 for t in aws_tables:
                     t['vintage'] = new_vintage
                 print(f"  Vintage set to: {new_vintage}")
@@ -1592,7 +1674,7 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
                     col_iter = tqdm(col_iter, desc=f"  {name} col stats", unit="col")
                 for col, dtype in col_iter:
                     try:
-                        stats = _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix, database=database, vintage=col_vintage, date_dtype=date_filter.get('date_dtype'))
+                        stats = _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix, database=database, vintage=col_vintage, date_dtype=date_filter.get('date_dtype'), date_format=date_filter.get('date_format'))
                         all_stats.extend(stats)
                     except Exception as e:
                         print(f"  Warning: Failed to extract {col}: {e}")
@@ -1600,7 +1682,7 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
                 # Parallel path
                 def _extract_one(col_dtype):
                     col, dtype = col_dtype
-                    return _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix, database=database, vintage=col_vintage, date_dtype=date_filter.get('date_dtype'))
+                    return _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix, database=database, vintage=col_vintage, date_dtype=date_filter.get('date_dtype'), date_format=date_filter.get('date_format'))
 
                 with ThreadPoolExecutor(max_workers=_max_workers) as executor:
                     futures = {executor.submit(_extract_one, (c, d)): c for c, d in non_date_cols}
@@ -1635,7 +1717,18 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
                     for stat in sorted(all_stats, key=lambda x: (x['column_name'], x['dt'])):
                         writer.writerow({k: stat.get(k, '') for k in fieldnames})
 
-                print(f"  Column stats: {csv_path} ({len(all_stats)} rows, {col_elapsed:.1f}s)")
+                # Compute total sampled records (n_total summed across vintages for one column)
+                first_col = all_stats[0]['column_name'] if all_stats else None
+                total_records = 0
+                if first_col:
+                    for s in all_stats:
+                        if s['column_name'] == first_col:
+                            try:
+                                total_records += int(float(s.get('n_total', 0) or 0))
+                            except (ValueError, TypeError):
+                                pass
+                records_info = f", ~{total_records:,} records" if total_records else ""
+                print(f"  Column stats: {csv_path} ({len(all_stats)} rows, {col_elapsed:.1f}s{records_info})")
 
                 timing_records.append({
                     'table': name,

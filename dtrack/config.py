@@ -394,6 +394,10 @@ def convert_old_to_unified(
             "right": right_cfg,
             "col_map": old_pair.get("col_map", {}),
             "where_map": {},
+            "time_map": {
+                "row": {"left": "—", "right": "—"},
+                "col": {"left": "—", "right": "—"}
+            },
             "metadata": {
                 "last_comparison": None,
                 "query_time": None

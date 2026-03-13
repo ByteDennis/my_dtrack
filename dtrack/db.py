@@ -5,7 +5,98 @@ import sqlite3
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional, Any
 
-import pattern
+from .date_utils import parse_date
+
+
+# Canonical schema: {table_name: [(col_name, col_type, constraint), ...]}
+# constraint is '' for normal columns, 'PRIMARY KEY' etc. for special ones.
+# This is the single source of truth for all table schemas.
+_SCHEMA = {
+    "_metadata": [
+        ("table_name", "TEXT", "PRIMARY KEY"),
+        ("source", "TEXT", ""),
+        ("db", "TEXT", ""),
+        ("source_table", "TEXT", ""),
+        ("date_var", "TEXT", ""),
+        ("source_file", "TEXT", ""),
+        ("loaded_at", "TEXT", ""),
+        ("last_updated", "TEXT", ""),
+        ("row_count_total", "INTEGER", ""),
+        ("load_mode", "TEXT", ""),
+        ("vintage", "TEXT", ""),
+        ("data_type", "TEXT", ""),
+        ("where_clause", "TEXT", ""),
+        ("date_format", "TEXT", ""),
+    ],
+    "_col_stats": [
+        ("source_table", "TEXT", "NOT NULL"),
+        ("column_name", "TEXT", "NOT NULL"),
+        ("dt", "TEXT", "NOT NULL"),
+        ("col_type", "TEXT", "NOT NULL"),
+        ("n_total", "TEXT", ""),
+        ("n_missing", "TEXT", ""),
+        ("n_unique", "TEXT", ""),
+        ("mean", "TEXT", ""),
+        ("std", "TEXT", ""),
+        ("min_val", "TEXT", ""),
+        ("max_val", "TEXT", ""),
+        ("top_10", "TEXT", ""),
+        ("vintage_label", "TEXT", ""),
+    ],
+    "_column_meta": [
+        ("source_table", "TEXT", "NOT NULL"),
+        ("column_name", "TEXT", "NOT NULL"),
+        ("data_type", "TEXT", ""),
+        ("source", "TEXT", ""),
+    ],
+    "_table_pairs": [
+        ("pair_name", "TEXT", "PRIMARY KEY"),
+        ("table_left", "TEXT", "NOT NULL"),
+        ("table_right", "TEXT", "NOT NULL"),
+        ("source_left", "TEXT", ""),
+        ("source_right", "TEXT", ""),
+        ("col_mappings", "TEXT", ""),
+        ("created_at", "TEXT", ""),
+    ],
+    "_row_counts": [
+        ("source_table", "TEXT", "NOT NULL"),
+        ("dt", "TEXT", "NOT NULL"),
+        ("row_count", "INTEGER", "NOT NULL"),
+    ],
+    "_row_comparison": [
+        ("pair_name", "TEXT", "PRIMARY KEY"),
+        ("overlap_start", "TEXT", ""),
+        ("overlap_end", "TEXT", ""),
+        ("matching_dates", "TEXT", ""),
+        ("excluded_dates", "TEXT", ""),
+        ("created_at", "TEXT", ""),
+        ("query_time", "TEXT", ""),
+        ("where_left", "TEXT", ""),
+        ("where_right", "TEXT", ""),
+    ],
+    "_col_comparison": [
+        ("pair_name", "TEXT", "PRIMARY KEY"),
+        ("columns_compared", "TEXT", ""),
+        ("matched_columns", "TEXT", ""),
+        ("diff_columns", "TEXT", ""),
+        ("comparison_details", "TEXT", ""),
+        ("created_at", "TEXT", ""),
+    ],
+    "_sample_date": [
+        ("pair_name", "TEXT", "NOT NULL"),
+        ("table_name", "TEXT", "NOT NULL"),
+        ("samples", "TEXT", ""),
+        ("sampled_at", "TEXT", "DEFAULT CURRENT_TIMESTAMP"),
+    ],
+}
+
+# Composite primary keys (tables not using single-column PRIMARY KEY constraint)
+_COMPOSITE_PKS = {
+    "_col_stats": ["source_table", "column_name", "dt"],
+    "_column_meta": ["source_table", "column_name"],
+    "_row_counts": ["source_table", "dt"],
+    "_sample_date": ["pair_name", "table_name"],
+}
 
 
 def init_database(db_path: str) -> None:
@@ -57,6 +148,7 @@ def init_database(db_path: str) -> None:
             min_val TEXT,
             max_val TEXT,
             top_10 TEXT,
+            vintage_label TEXT,
             PRIMARY KEY (source_table, column_name, dt)
         )
     """)
@@ -135,6 +227,109 @@ def init_database(db_path: str) -> None:
 
     conn.commit()
     conn.close()
+
+
+def _build_create_sql(table_name: str) -> str:
+    """Build CREATE TABLE SQL from _SCHEMA definition."""
+    cols = _SCHEMA[table_name]
+    parts = []
+    for name, dtype, constraint in cols:
+        part = f"{name} {dtype}"
+        if constraint and constraint not in ("DEFAULT CURRENT_TIMESTAMP",):
+            part += f" {constraint}"
+        elif constraint == "DEFAULT CURRENT_TIMESTAMP":
+            part += " DEFAULT CURRENT_TIMESTAMP"
+        parts.append(part)
+    if table_name in _COMPOSITE_PKS:
+        pk_cols = ", ".join(_COMPOSITE_PKS[table_name])
+        parts.append(f"PRIMARY KEY ({pk_cols})")
+    return f"CREATE TABLE IF NOT EXISTS {table_name} (\n    " + ",\n    ".join(parts) + "\n)"
+
+
+def refresh_database(db_path: str) -> Dict[str, str]:
+    """Refresh database schema: add missing columns, recreate conflicting tables.
+
+    For each table in _SCHEMA:
+    - If table doesn't exist: create it
+    - If table exists with matching columns: skip
+    - If table exists but missing columns: ALTER TABLE ADD COLUMN
+    - If table has type conflicts or extra constraints differ: DROP and recreate
+
+    Args:
+        db_path: Path to SQLite database file
+
+    Returns:
+        Dict mapping table names to action taken: 'created', 'ok', 'updated', 'recreated'
+    """
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    actions = {}
+
+    for table_name, schema_cols in _SCHEMA.items():
+        # Check if table exists
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,)
+        )
+        if not cursor.fetchone():
+            cursor.execute(_build_create_sql(table_name))
+            actions[table_name] = 'created'
+            continue
+
+        # Get existing columns: {name: type}
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        existing = {row[1]: row[2] for row in cursor.fetchall()}
+
+        expected = {name: dtype for name, dtype, _ in schema_cols}
+        expected_names = [name for name, _, _ in schema_cols]
+
+        # Check for type conflicts
+        conflict = False
+        for col_name, col_type in expected.items():
+            if col_name in existing and existing[col_name].upper() != col_type.upper():
+                conflict = True
+                break
+
+        if conflict:
+            # Back up data, drop, recreate
+            # Find overlapping columns to preserve data
+            overlap_cols = [c for c in expected_names if c in existing]
+            has_data = False
+            if overlap_cols:
+                cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                has_data = cursor.fetchone()[0] > 0
+
+            if has_data and overlap_cols:
+                tmp = f"{table_name}__bak"
+                cursor.execute(f"ALTER TABLE {table_name} RENAME TO {tmp}")
+                cursor.execute(_build_create_sql(table_name))
+                cols_str = ", ".join(overlap_cols)
+                cursor.execute(f"INSERT INTO {table_name} ({cols_str}) SELECT {cols_str} FROM {tmp}")
+                cursor.execute(f"DROP TABLE {tmp}")
+            else:
+                cursor.execute(f"DROP TABLE {table_name}")
+                cursor.execute(_build_create_sql(table_name))
+            actions[table_name] = 'recreated'
+            continue
+
+        # Check for missing columns
+        missing = [name for name in expected_names if name not in existing]
+        if missing:
+            for col_name in missing:
+                col_type = expected[col_name]
+                # Find constraint
+                constraint = next(c for n, t, c in schema_cols if n == col_name)
+                col_def = col_type
+                if constraint == "DEFAULT CURRENT_TIMESTAMP":
+                    col_def += " DEFAULT CURRENT_TIMESTAMP"
+                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_def}")
+            actions[table_name] = f'updated (+{", ".join(missing)})'
+        else:
+            actions[table_name] = 'ok'
+
+    conn.commit()
+    conn.close()
+    return actions
 
 
 def insert_row_counts(db_path: str, source_table: str, data: List[Tuple[str, int]]) -> None:
@@ -221,7 +416,7 @@ def get_row_counts(
     rows = cursor.fetchall()
     conn.close()
 
-    return rows
+    return [(parse_date(dt), count) for dt, count in rows]
 
 
 def insert_col_stats(db_path: str, stats: List[Dict]) -> None:
@@ -237,13 +432,19 @@ def insert_col_stats(db_path: str, stats: List[Dict]) -> None:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
+    # Ensure vintage_label column exists (for DBs created before this feature)
+    try:
+        cursor.execute("ALTER TABLE _col_stats ADD COLUMN vintage_label TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     for stat in stats:
         cursor.execute("""
             INSERT OR REPLACE INTO _col_stats (
                 source_table, column_name, dt, col_type,
                 n_total, n_missing, n_unique, mean, std,
-                min_val, max_val, top_10
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                min_val, max_val, top_10, vintage_label
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             stat["source_table"],
             stat["column_name"],
@@ -257,6 +458,7 @@ def insert_col_stats(db_path: str, stats: List[Dict]) -> None:
             stat["min_val"],
             stat["max_val"],
             stat["top_10"],
+            stat.get("vintage_label"),
         ))
 
     conn.commit()

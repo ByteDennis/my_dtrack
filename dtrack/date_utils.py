@@ -84,6 +84,13 @@ def parse_date(value: str) -> str:
     """
     value = value.strip().rstrip("Z")
 
+    # Normalize colon-separated milliseconds to dot: "HH:MM:SS:fff" → "HH:MM:SS.fff"
+    # ISO: "2025-11-03 00:00:00:000"  SAS: "10MAR2025:00:00:00:000"
+    _colon_ms = re.match(
+        r'^(.+\d{2}:\d{2}:\d{2}):(\d{3,6})$', value)
+    if _colon_ms:
+        value = f"{_colon_ms.group(1)}.{_colon_ms.group(2)}"
+
     for fmt, upper, _label in _DATE_FORMATS:
         try:
             val = value.upper() if upper else value
@@ -280,9 +287,9 @@ def format_vintage_label(dt_str: str, vintage: str) -> str:
     dt = datetime.strptime(dt_str, "%Y-%m-%d")
 
     if vintage == "day":
-        return dt.strftime("%b %-d, %Y")
+        return f"{dt.strftime('%b')} {dt.day}, {dt.year}"
     elif vintage == "week":
-        return f"Week of {dt.strftime('%b %-d')}"
+        return f"Week of {dt.strftime('%b')} {dt.day}"
     elif vintage == "month":
         return dt.strftime("%b %Y")
     elif vintage == "quarter":

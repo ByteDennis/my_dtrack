@@ -7,7 +7,7 @@ from typing import List, Tuple, Optional
 from collections import defaultdict
 import pandas as pd
 
-from .date_utils import parse_date, bucket_date, detect_format, DateConverter
+from .date_utils import parse_date, bucket_date, detect_format, format_vintage_label, DateConverter
 from .db import (
     upsert_row_counts,
     insert_col_stats,
@@ -99,12 +99,8 @@ def load_row_count_csv(
                 except ValueError:
                     pass
 
-            # Parse date
-            try:
-                dt = parse_date(date_str)
-            except ValueError as e:
-                print(f"Warning: Skipping row with invalid date '{date_str}': {e}")
-                continue
+            # Keep original date string (no normalization)
+            dt = date_str
 
             # Parse count
             try:
@@ -298,6 +294,13 @@ def load_column_data(
         columns=columns,
     )
 
+    # Add vintage_label to each stat
+    for stat in stats:
+        try:
+            stat["vintage_label"] = format_vintage_label(stat["dt"], vintage)
+        except (ValueError, KeyError):
+            stat["vintage_label"] = ""
+
     # Insert stats
     if mode == "replace":
         # Delete existing stats for this source_table
@@ -392,6 +395,15 @@ def load_precomputed_col_stats(
             conn.commit()
             conn.close()
 
+        # Resolve effective vintage for labeling:
+        # sample@N -> day, all -> skip labels, others -> as-is
+        if vintage.startswith('sample@'):
+            effective_vintage = 'day'
+        elif vintage == 'all':
+            effective_vintage = None
+        else:
+            effective_vintage = vintage
+
         stats = []
         for row in reader:
             def _get(field, default=None):
@@ -402,10 +414,25 @@ def load_precomputed_col_stats(
                     return row[field]
                 return default
 
+            # Normalize dt to YYYY-MM-DD and compute vintage label
+            raw_dt = row.get("dt", "")
+            try:
+                canonical_dt = parse_date(raw_dt) if raw_dt else raw_dt
+            except ValueError as e:
+                canonical_dt = raw_dt
+                if not stats:  # print once
+                    print(f"  [vintage_label] WARNING: parse_date({raw_dt!r}) failed: {e}")
+            label = ""
+            if canonical_dt and effective_vintage:
+                try:
+                    label = format_vintage_label(canonical_dt, effective_vintage)
+                except (ValueError, KeyError):
+                    label = ""
+
             stat = {
                 "source_table": table_name,
                 "column_name": row.get("column_name", ""),
-                "dt": row.get("dt", ""),
+                "dt": raw_dt,
                 "col_type": row.get("col_type", "categorical"),
                 "n_total": _get("n_total", ""),
                 "n_missing": _get("n_missing", ""),
@@ -415,6 +442,7 @@ def load_precomputed_col_stats(
                 "min_val": _get("min_val", ""),
                 "max_val": _get("max_val", ""),
                 "top_10": _get("top_10", ""),
+                "vintage_label": label,
             }
             stats.append(stat)
 
