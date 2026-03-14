@@ -398,10 +398,11 @@ def convert_old_to_unified(
                 "row": {"left": "—", "right": "—"},
                 "col": {"left": "—", "right": "—"}
             },
-            "metadata": {
-                "last_comparison": None,
-                "query_time": None
-            }
+            "comment_map": {
+                "row": {"left": "", "right": ""},
+                "col": {"left": "", "right": ""}
+            },
+            "diff_map": {}
         }
 
     # Add global metadata
@@ -457,12 +458,6 @@ def set_pair_where_map(
         "left": where_left,
         "right": where_right
     }
-
-    # Update timestamp
-    if "metadata" not in config["pairs"][pair_name]:
-        config["pairs"][pair_name]["metadata"] = {}
-
-    config["pairs"][pair_name]["metadata"]["last_comparison"] = datetime.now().isoformat()
 
 
 def get_pair_col_map(config: Dict[str, Any], pair_name: str) -> Dict[str, str]:

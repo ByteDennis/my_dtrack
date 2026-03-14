@@ -26,6 +26,8 @@ def generate_row_count_html(
     time_map: Optional[Dict[str, str]] = None,
     comment_left: str = '',
     comment_right: str = '',
+    left_cfg: Optional[Dict] = None,
+    right_cfg: Optional[Dict] = None,
 ) -> str:
     """
     Generate HTML table rows for row count comparison.
@@ -53,19 +55,34 @@ def generate_row_count_html(
     n_only_left = len(comparison['only_left'])
     n_only_right = len(comparison['only_right'])
 
+    # Build banner text
+    banner_text = pair_name
+    if left_cfg and right_cfg:
+        tbl_l = left_cfg.get('table', table_left).upper()
+        tbl_r = right_cfg.get('table', table_right).upper()
+        conn_l = left_cfg.get('conn_macro', '').upper()
+        conn_r = right_cfg.get('conn_macro', '').upper()
+        banner_text = f'{pair_name} | <b>{tbl_l}</b>{f" ({conn_l})" if conn_l else ""} | <b>{tbl_r}</b>{f" ({conn_r})" if conn_r else ""}'
+
     # Generate HTML rows
     html = f'''
             <!-- {pair_name} -->
             <tr>
                 <td colspan="6" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">
-                    {pair_name}
+                    {banner_text}
                 </td>
             </tr>
 '''
 
-    # Get date columns and format row counts
-    date_col_left = metadata_left.get('date_var') or '—' if metadata_left else '—'
-    date_col_right = metadata_right.get('date_var') or '—' if metadata_right else '—'
+    # Get date columns and format row counts (with vintage suffix)
+    date_col_left = (metadata_left.get('date_var') or '—') if metadata_left else '—'
+    date_col_right = (metadata_right.get('date_var') or '—') if metadata_right else '—'
+    vintage_left = metadata_left.get('vintage', '') if metadata_left else ''
+    vintage_right = metadata_right.get('vintage', '') if metadata_right else ''
+    if vintage_left and date_col_left != '—':
+        date_col_left = f"{date_col_left} ({vintage_left.upper()})"
+    if vintage_right and date_col_right != '—':
+        date_col_right = f"{date_col_right} ({vintage_right.upper()})"
 
     # Format row counts with billions
     def format_count(count):
@@ -101,34 +118,52 @@ def generate_row_count_html(
         time_left = _fmt_time(time_map.get(source_left, time_map.get('left', '—')))
         time_right = _fmt_time(time_map.get(source_right, time_map.get('right', '—')))
 
+    # Calculate overlap for highlighting
+    left_min, left_max = summary['date_range_left']
+    right_min, right_max = summary['date_range_right']
+    has_overlap = left_min and right_min and left_max and right_max
+    overlap_start = overlap_end = None
+    if has_overlap:
+        overlap_start = max(left_min, right_min)
+        overlap_end = min(left_max, right_max)
+        if overlap_start > overlap_end:
+            has_overlap = False
+
+    # Style helpers for min/max overlap highlighting
+    def _min_style(val):
+        base = 'border:1px solid #ccc; padding:8px;'
+        if has_overlap and val and val == overlap_start:
+            return f'{base} color:#1565c0; font-weight:600;'
+        return base
+
+    def _max_style(val, other_val):
+        base = 'border:1px solid #ccc; padding:8px;'
+        parts = []
+        if has_overlap and val and val == overlap_end:
+            parts.append('color:#1565c0; font-weight:600;')
+        if val and other_val and val != other_val:
+            parts.append('text-decoration:underline;')
+        if parts:
+            return f'{base} {" ".join(parts)}'
+        return base
+
     html += f'''            <tr>
                 <td style="border:1px solid #ccc; padding:8px;">{source_left.upper()}{_comment_icon(comment_left)}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{date_col_left}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_left'][0] or '—'}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_left'][1] or '—'}</td>
+                <td style="{_min_style(left_min)}">{left_min or '—'}</td>
+                <td style="{_max_style(left_max, right_max)}">{left_max or '—'}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{format_count(summary['total_left'])}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{time_left}</td>
             </tr>
             <tr>
                 <td style="border:1px solid #ccc; padding:8px;">{source_right.upper()}{_comment_icon(comment_right)}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{date_col_right}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_right'][0] or '—'}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{summary['date_range_right'][1] or '—'}</td>
+                <td style="{_min_style(right_min)}">{right_min or '—'}</td>
+                <td style="{_max_style(right_max, left_max)}">{right_max or '—'}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{format_count(summary['total_right'])}</td>
                 <td style="border:1px solid #ccc; padding:8px;">{time_right}</td>
             </tr>
 '''
-
-
-    # Calculate overlap for splitting only-left/only-right
-    left_min, left_max = summary['date_range_left']
-    right_min, right_max = summary['date_range_right']
-    has_overlap = left_min and right_min and left_max and right_max
-    if has_overlap:
-        overlap_start = max(left_min, right_min)
-        overlap_end = min(left_max, right_max)
-        if overlap_start > overlap_end:
-            has_overlap = False
 
     all_only_left = comparison['only_left']
     all_only_right = comparison['only_right']
@@ -194,14 +229,17 @@ def generate_row_count_html(
             html += f'                                        <p style="margin:4px 0; font-weight:600; text-align:center;">{source_left}-Only Dates ({n_only_left})</p>\n'
             html += '                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">\n'
             html += f'                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_left}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_right}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>\n'
-            # In-overlap rows (red — these are misloads)
+            # In-overlap rows (date in red, rest black)
             for dt, count in only_left_in_overlap[:10]:
-                html += f'                                            <tr style="color:#c62828;"><td style="padding:2px; font-size:10px;">{dt}</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-{count:,}</td></tr>\n'
+                html += f'                                            <tr><td style="padding:2px; font-size:10px; color:#c62828;">{dt}</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-{count:,}</td></tr>\n'
             if len(only_left_in_overlap) > 10:
                 html += f'                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#c62828;">... and {len(only_left_in_overlap) - 10} more in overlap</td></tr>\n'
-            # Outside-overlap summary (gray)
+            # Outside-overlap: 1 gray row + summary
             if only_left_outside:
-                html += f'                                            <tr><td colspan="4" style="padding:4px 2px 2px; font-style:italic; font-size:10px; color:#999;">{len(only_left_outside)} more outside overlap</td></tr>\n'
+                dt0, c0 = only_left_outside[0]
+                html += f'                                            <tr style="color:#999;"><td style="padding:2px; font-size:10px;">{dt0}</td><td style="padding:2px; font-size:10px;">{c0:,}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-{c0:,}</td></tr>\n'
+                if len(only_left_outside) > 1:
+                    html += f'                                            <tr><td colspan="4" style="padding:4px 2px 2px; font-style:italic; font-size:10px; color:#999;">... {len(only_left_outside) - 1} more outside overlap</td></tr>\n'
             html += '                                        </table>\n'
         else:
             html += f'                                        <p style="margin:4px 0; color:#999;">No {source_left}-Only dates</p>\n'
@@ -213,14 +251,17 @@ def generate_row_count_html(
             html += f'                                        <p style="margin:4px 0; font-weight:600; text-align:center;">{source_right}-Only Dates ({n_only_right})</p>\n'
             html += '                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">\n'
             html += f'                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_left}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_right}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>\n'
-            # In-overlap rows (red — these are misloads)
+            # In-overlap rows (date in red, rest black)
             for dt, count in only_right_in_overlap[:10]:
-                html += f'                                            <tr style="color:#c62828;"><td style="padding:2px; font-size:10px;">{dt}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">+{count:,}</td></tr>\n'
+                html += f'                                            <tr><td style="padding:2px; font-size:10px; color:#c62828;">{dt}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">+{count:,}</td></tr>\n'
             if len(only_right_in_overlap) > 10:
                 html += f'                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#c62828;">... and {len(only_right_in_overlap) - 10} more in overlap</td></tr>\n'
-            # Outside-overlap summary (gray)
+            # Outside-overlap: 1 gray row + summary
             if only_right_outside:
-                html += f'                                            <tr><td colspan="4" style="padding:4px 2px 2px; font-style:italic; font-size:10px; color:#999;">{len(only_right_outside)} more outside overlap</td></tr>\n'
+                dt0, c0 = only_right_outside[0]
+                html += f'                                            <tr style="color:#999;"><td style="padding:2px; font-size:10px;">{dt0}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">{c0:,}</td><td style="padding:2px; font-size:10px;">+{c0:,}</td></tr>\n'
+                if len(only_right_outside) > 1:
+                    html += f'                                            <tr><td colspan="4" style="padding:4px 2px 2px; font-style:italic; font-size:10px; color:#999;">... {len(only_right_outside) - 1} more outside overlap</td></tr>\n'
             html += '                                        </table>\n'
         else:
             html += f'                                        <p style="margin:4px 0; color:#999;">No {source_right}-Only dates</p>\n'
@@ -252,6 +293,8 @@ def generate_column_stats_html(
     time_map: Optional[Dict[str, str]] = None,
     comment_left: str = '',
     comment_right: str = '',
+    left_cfg: Optional[Dict] = None,
+    right_cfg: Optional[Dict] = None,
 ) -> str:
     """
     Generate HTML table rows for column statistics comparison.
@@ -282,7 +325,7 @@ def generate_column_stats_html(
                 vintages_data[dt] = {}
             vintages_data[dt][col] = comp
 
-    sorted_dates = sorted(all_dates, reverse=True)
+    sorted_dates = sorted(all_dates, key=lambda d: d[:10] if len(d) > 10 else d, reverse=True)
 
     # Count columns with differences
     cols_with_diffs = set()
@@ -301,12 +344,21 @@ def generate_column_stats_html(
     else:
         cols_display = ', '.join(sorted(cols_with_diffs)) if cols_with_diffs else 'None'
 
+    # Build banner text
+    banner_text = pair_name
+    if left_cfg and right_cfg:
+        tbl_l = left_cfg.get('table', table_left).upper()
+        tbl_r = right_cfg.get('table', table_right).upper()
+        conn_l = left_cfg.get('conn_macro', '').upper()
+        conn_r = right_cfg.get('conn_macro', '').upper()
+        banner_text = f'{pair_name} | <b>{tbl_l}</b>{f" ({conn_l})" if conn_l else ""} | <b>{tbl_r}</b>{f" ({conn_r})" if conn_r else ""}'
+
     # Generate HTML rows
     html = f'''
             <!-- {pair_name} -->
             <tr>
-                <td colspan="6" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">
-                    {pair_name}
+                <td colspan="7" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">
+                    {banner_text}
                 </td>
             </tr>
 '''
@@ -316,9 +368,15 @@ def generate_column_stats_html(
     max_date = sorted_dates[0] if sorted_dates else '—'
     n_vintages = len(sorted_dates)
 
-    # Get date columns from metadata
-    date_col_left = metadata_left.get('date_var') or '—' if metadata_left else '—'
-    date_col_right = metadata_right.get('date_var') or '—' if metadata_right else '—'
+    # Get date columns from metadata (with vintage suffix)
+    date_col_left = (metadata_left.get('date_var') or '—') if metadata_left else '—'
+    date_col_right = (metadata_right.get('date_var') or '—') if metadata_right else '—'
+    vintage_left = metadata_left.get('vintage', '') if metadata_left else ''
+    vintage_right = metadata_right.get('vintage', '') if metadata_right else ''
+    if vintage_left and date_col_left != '—':
+        date_col_left = f"{date_col_left} ({vintage_left.upper()})"
+    if vintage_right and date_col_right != '—':
+        date_col_right = f"{date_col_right} ({vintage_right.upper()})"
 
     time_left = '—'
     time_right = '—'
@@ -326,23 +384,27 @@ def generate_column_stats_html(
         time_left = _fmt_time(time_map.get(source_left, time_map.get('left', '—')))
         time_right = _fmt_time(time_map.get(source_right, time_map.get('right', '—')))
 
+    # Blue overlap boundary styling for min/max dates
+    overlap_style = 'border:1px solid #ccc; padding:8px; color:#1565c0; font-weight:600;'
+    cell = 'border:1px solid #ccc; padding:8px;'
+
     html += f'''            <tr>
-                <td style="border:1px solid #ccc; padding:8px;">{source_left.upper()}{_comment_icon(comment_left)}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{date_col_left}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{min_date}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{max_date}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{n_cols}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{n_vintages}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{time_left}</td>
+                <td style="{cell}">{source_left.upper()}{_comment_icon(comment_left)}</td>
+                <td style="{cell}">{date_col_left}</td>
+                <td style="{overlap_style}">{min_date}</td>
+                <td style="{overlap_style}">{max_date}</td>
+                <td style="{cell}">{n_cols}</td>
+                <td style="{cell}">{n_vintages}</td>
+                <td style="{cell}">{time_left}</td>
             </tr>
             <tr>
-                <td style="border:1px solid #ccc; padding:8px;">{source_right.upper()}{_comment_icon(comment_right)}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{date_col_right}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{min_date}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{max_date}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{n_cols}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{n_vintages}</td>
-                <td style="border:1px solid #ccc; padding:8px;">{time_right}</td>
+                <td style="{cell}">{source_right.upper()}{_comment_icon(comment_right)}</td>
+                <td style="{cell}">{date_col_right}</td>
+                <td style="{overlap_style}">{min_date}</td>
+                <td style="{overlap_style}">{max_date}</td>
+                <td style="{cell}">{n_cols}</td>
+                <td style="{cell}">{n_vintages}</td>
+                <td style="{cell}">{time_right}</td>
             </tr>
 '''
 
@@ -482,11 +544,6 @@ def _has_differences(comp: Dict) -> bool:
         if comp.get('mean_diff') is not None and abs(comp.get('mean_diff', 0)) > 0.01:
             return True
         if comp.get('std_diff') is not None and abs(comp.get('std_diff', 0)) > 0.01:
-            return True
-
-    # Check categorical differences
-    if comp['col_type'] == 'categorical':
-        if comp.get('top_10_left') != comp.get('top_10_right'):
             return True
 
     return False

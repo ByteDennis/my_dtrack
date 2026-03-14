@@ -129,7 +129,8 @@ def init_database(db_path: str) -> None:
             vintage TEXT,
             data_type TEXT,
             where_clause TEXT,
-            date_format TEXT
+            date_format TEXT,
+            pair_side TEXT
         )
     """)
 
@@ -558,9 +559,10 @@ def update_metadata(db_path: str, metadata: Dict) -> None:
     metadata.setdefault("data_type", None)
     metadata.setdefault("where_clause", None)
     metadata.setdefault("date_format", None)
+    metadata.setdefault("pair_side", None)
 
     # Ensure newer columns exist (for DBs created before these features)
-    for col in ('where_clause', 'date_format'):
+    for col in ('where_clause', 'date_format', 'pair_side'):
         try:
             cursor.execute(f"ALTER TABLE _metadata ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -570,8 +572,8 @@ def update_metadata(db_path: str, metadata: Dict) -> None:
         INSERT OR REPLACE INTO _metadata (
             table_name, source, db, source_table, date_var,
             source_file, loaded_at, last_updated, row_count_total,
-            load_mode, vintage, data_type, where_clause, date_format
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            load_mode, vintage, data_type, where_clause, date_format, pair_side
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         metadata["table_name"],
         metadata["source"],
@@ -587,8 +589,24 @@ def update_metadata(db_path: str, metadata: Dict) -> None:
         metadata["data_type"],
         metadata["where_clause"],
         metadata["date_format"],
+        metadata["pair_side"],
     ))
 
+    conn.commit()
+    conn.close()
+
+
+def patch_metadata(db_path: str, table_name: str, **fields) -> None:
+    """Update specific fields in _metadata without overwriting others."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM _metadata WHERE table_name = ?", (table_name,))
+    if not cursor.fetchone():
+        conn.close()
+        return
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    vals = list(fields.values()) + [table_name]
+    cursor.execute(f"UPDATE _metadata SET {sets} WHERE table_name = ?", vals)
     conn.commit()
     conn.close()
 
@@ -661,6 +679,17 @@ def register_table_pair(
         col_mappings_json,
         created_at,
     ))
+
+    # Update pair_side in _metadata for both tables
+    for tbl_name, side in [(table_left, 'left'), (table_right, 'right')]:
+        try:
+            cursor.execute("ALTER TABLE _metadata ADD COLUMN pair_side TEXT")
+        except sqlite3.OperationalError:
+            pass
+        cursor.execute(
+            "UPDATE _metadata SET pair_side = ? WHERE table_name = ?",
+            (side, tbl_name)
+        )
 
     conn.commit()
     conn.close()

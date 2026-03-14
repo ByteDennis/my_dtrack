@@ -283,13 +283,25 @@ def cmd_list_pairs(args):
                     print(f"  {left_col} → {right_col}")
 
 
-def _print_row_comparison(db_path, table_left, table_right, source_left, source_right, from_date=None, to_date=None, pair_name=None):
+def _print_row_comparison(db_path, table_left, table_right, source_left, source_right, from_date=None, to_date=None, pair_name=None, date_col_left=None, date_col_right=None):
     """Run and print row count comparison for a single pair."""
     source_left = source_left or "left"
     source_right = source_right or "right"
 
     print(f"\nComparing row counts: {table_left} vs {table_right}")
     print("=" * 70)
+
+    # Show date column (from config param, fallback to metadata)
+    if not date_col_left or not date_col_right:
+        meta_l = get_metadata(db_path, table_left)
+        meta_r = get_metadata(db_path, table_right)
+        date_col_left = date_col_left or ((meta_l.get('date_var') or '') if meta_l else '')
+        date_col_right = date_col_right or ((meta_r.get('date_var') or '') if meta_r else '')
+    if date_col_left or date_col_right:
+        if date_col_left == date_col_right:
+            print(f"Date column: {date_col_left}")
+        else:
+            print(f"Date column: {date_col_left} / {date_col_right}")
 
     result = compare_row_counts(
         db_path, table_left, table_right,
@@ -392,11 +404,24 @@ def _print_row_comparison(db_path, table_left, table_right, source_left, source_
 
 
 def _build_where_from_dates(table_cfg, matching_dates, excluded_dates, db_path=None):
-    """Build WHERE clause from matching and excluded dates."""
+    """Build WHERE clause from matching and excluded dates.
+
+    Date literals are formatted per platform and column type:
+
+      Platform                     datetime column                            date-only column
+      SAS (processed=$...)         datepart(eff_dt) >= '06NOV2025'd           original format preserved (e.g. '20251106')
+      Oracle (source=pcds/oracle)  TRUNC(eff_dt) >= DATE '2025-11-06'         DATE '2025-11-06'
+      Athena (source=aws)          CAST(eff_dt AS DATE) >= DATE '2025-11-06'  DATE '2025-11-06'
+    """
     date_col = table_cfg.get('date_col', 'dt')
 
-    # Look up date column data type from _column_meta
+    # Check if this is a SAS table (processed starts with $)
+    from .extract import _is_sas_table
+    is_sas = _is_sas_table(table_cfg)
+
+    # Look up date column data type and format from database
     date_dtype = ''
+    date_format = ''
     if db_path:
         from .db import get_column_meta
         from .extract import _qualified_name
@@ -406,21 +431,71 @@ def _build_where_from_dates(table_cfg, matching_dates, excluded_dates, db_path=N
             if cm['column_name'].upper() == date_col.upper():
                 date_dtype = (cm.get('data_type') or '').upper()
                 break
+        # Get date_format from _metadata
+        meta = get_metadata(db_path, qn)
+        if meta:
+            date_format = meta.get('date_format') or ''
 
-    def fmt_date(d):
-        is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
-        if is_yyyymm:
-            if date_dtype.startswith(('NUMBER', 'INTEGER', 'INT', 'BIGINT')):
-                return str(d)
-            else:
-                return f"'{d}'"
-        else:
-            if date_dtype.startswith(('VARCHAR', 'CHAR', 'STRING', 'TEXT')):
-                return f"'{d}'"
-            elif date_dtype.startswith(('DATE', 'TIMESTAMP')):
+    # Detect if date column is a datetime (has time component)
+    is_datetime = ('TIMESTAMP' in date_dtype or 'DATETIME' in date_dtype)
+    source = (table_cfg.get('source') or '').lower()
+
+    # Determine column expression and date literal format based on platform + datetime
+    if is_datetime:
+        if is_sas:
+            # SAS: datepart(col) >= '06NOV2025'd
+            col_expr = f"datepart({date_col})"
+
+            def fmt_date(d):
+                from datetime import datetime as _dt
+                is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
+                if is_yyyymm:
+                    return f"'{d}'"
+                dt_obj = _dt.strptime(str(d), "%Y-%m-%d")
+                return f"'{dt_obj.strftime('%d%b%Y').upper()}'d"
+        elif source == 'aws':
+            # Athena: CAST(col AS DATE) >= DATE '2025-11-06'
+            col_expr = f"CAST({date_col} AS DATE)"
+
+            def fmt_date(d):
+                is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
+                if is_yyyymm:
+                    return f"'{d}'"
                 return f"DATE '{d}'"
+        else:
+            # Oracle: TRUNC(col) >= DATE '2025-11-06'
+            col_expr = f"TRUNC({date_col})"
+
+            def fmt_date(d):
+                is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
+                if is_yyyymm:
+                    return f"'{d}'"
+                return f"DATE '{d}'"
+    else:
+        col_expr = date_col
+
+        # Set up date converter to restore original format
+        from .date_utils import DateConverter
+        dc = DateConverter()
+        if date_format:
+            dc.format_label = date_format
+
+        def fmt_date(d):
+            is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
+            if is_yyyymm:
+                if date_dtype.startswith(('NUMBER', 'INTEGER', 'INT', 'BIGINT')):
+                    return str(d)
+                else:
+                    return f"'{d}'"
             else:
-                return f"'{d}'"
+                # Convert canonical YYYY-MM-DD back to original format
+                original = dc.to_original(str(d)) if date_format else str(d)
+                if date_dtype.startswith(('VARCHAR', 'CHAR', 'STRING', 'TEXT')):
+                    return f"'{original}'"
+                elif date_dtype.startswith(('DATE', 'TIMESTAMP')):
+                    return f"DATE '{original}'"
+                else:
+                    return f"'{original}'"
 
     # Build WHERE clause
     parts = []
@@ -434,13 +509,13 @@ def _build_where_from_dates(table_cfg, matching_dates, excluded_dates, db_path=N
     if matching_dates:
         min_date = min(matching_dates)
         max_date = max(matching_dates)
-        parts.append(f"{date_col} >= {fmt_date(min_date)}")
-        parts.append(f"{date_col} <= {fmt_date(max_date)}")
+        parts.append(f"{col_expr} >= {fmt_date(min_date)}")
+        parts.append(f"{col_expr} <= {fmt_date(max_date)}")
 
         # Add NOT IN for excluded dates
         if excluded_dates:
             excluded_list = ", ".join(fmt_date(d) for d in excluded_dates)
-            parts.append(f"{date_col} NOT IN ({excluded_list})")
+            parts.append(f"{col_expr} NOT IN ({excluded_list})")
 
     return " AND ".join(parts) if parts else ""
 
@@ -454,6 +529,12 @@ def cmd_compare_row(args):
     config_path = getattr(args, 'config', None)
     yes = getattr(args, 'yes', False)
     html_path = getattr(args, 'html', None)
+
+    # Default HTML to ./output/ when using --config
+    if config_path and not html_path:
+        output_dir = os.path.join(os.getcwd(), 'output')
+        os.makedirs(output_dir, exist_ok=True)
+        html_path = os.path.join(output_dir, 'compare_row.html')
 
     # Collect (pair_name, source_left, source_right, table_left, table_right, result) for HTML
     html_entries = []
@@ -486,11 +567,14 @@ def cmd_compare_row(args):
                 source_left = left.get("source", "left")
                 source_right = right.get("source", "right")
                 col_map = pair_config.get("col_map", {})
-                pairs_to_process.append((pair_name, table_left, table_right, source_left, source_right, col_map))
+                dc_left = left.get('date_col', '')
+                dc_right = right.get('date_col', '')
+                pairs_to_process.append((pair_name, table_left, table_right, source_left, source_right, col_map, dc_left, dc_right))
 
             # When using --config, compare all pairs automatically (no per-pair prompts)
             # Use -y flag only for backward compatibility
-            for pair_name, table_left, table_right, source_left, source_right, col_map in pairs_to_process:
+            from .db import patch_metadata
+            for pair_name, table_left, table_right, source_left, source_right, col_map, dc_left, dc_right in pairs_to_process:
 
                 # Auto-register pair
                 register_table_pair(
@@ -501,11 +585,18 @@ def cmd_compare_row(args):
                     col_mappings=col_map if col_map else None,
                 )
 
+                # Sync date_col from config to metadata
+                if dc_left:
+                    patch_metadata(args.project_db, table_left, date_var=dc_left)
+                if dc_right:
+                    patch_metadata(args.project_db, table_right, date_var=dc_right)
+
                 result = _print_row_comparison(
                     args.project_db, table_left, table_right,
                     source_left, source_right,
                     from_date=args.from_date, to_date=args.to_date,
                     pair_name=pair_name,
+                    date_col_left=dc_left, date_col_right=dc_right,
                 )
 
                 html_entries.append((pair_name, source_left, source_right, table_left, table_right, result, {}))
@@ -560,8 +651,15 @@ def cmd_compare_row(args):
                                 date_dtype = (cm.get('data_type') or '').upper()
                                 break
 
+                        # Get date_format from _metadata for original format restoration
+                        date_format = (meta.get('date_format') or '') if meta else ''
+                        from .date_utils import DateConverter
+                        _dc = DateConverter()
+                        if date_format:
+                            _dc.format_label = date_format
+
                         # Format date literals based on source/type
-                        def _fmt_date(d, _src=source_type, _dt=date_dtype):
+                        def _fmt_date(d, _src=source_type, _dt=date_dtype, _dc=_dc, _df=date_format):
                             import re
                             is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
 
@@ -571,12 +669,13 @@ def cmd_compare_row(args):
                                 else:
                                     return f"'{d}'"
                             else:
+                                original = _dc.to_original(str(d)) if _df else str(d)
                                 if _dt.startswith(('VARCHAR', 'CHAR', 'STRING', 'TEXT')):
-                                    return f"'{d}'"
+                                    return f"'{original}'"
                                 elif _dt.startswith(('DATE', 'TIMESTAMP')):
-                                    return f"DATE '{d}'"
+                                    return f"DATE '{original}'"
                                 else:
-                                    return f"'{d}'"
+                                    return f"'{original}'"
 
                         parts = []
                         # Prepend original WHERE from extract config (stored in _metadata)
@@ -625,18 +724,21 @@ def cmd_compare_row(args):
                             {"where_left": where_left, "where_right": where_right}
                         )
 
-                        # Add time_map placeholder to metadata
-                        if 'metadata' not in config['pairs'][pair_name]:
-                            config['pairs'][pair_name]['metadata'] = {}
-
-                        config['pairs'][pair_name]['metadata']['last_comparison'] = datetime.now().isoformat()
-
                         # Initialize time_map at pair level with row/col sub-keys
                         if 'time_map' not in config['pairs'][pair_name]:
                             config['pairs'][pair_name]['time_map'] = {
                                 "row": {"left": "—", "right": "—"},
                                 "col": {"left": "—", "right": "—"}
                             }
+
+                        # Initialize comment_map and diff_map if missing
+                        if 'comment_map' not in config['pairs'][pair_name]:
+                            config['pairs'][pair_name]['comment_map'] = {
+                                "row": {"left": "", "right": ""},
+                                "col": {"left": "", "right": ""}
+                            }
+                        if 'diff_map' not in config['pairs'][pair_name]:
+                            config['pairs'][pair_name]['diff_map'] = {}
 
                         print(f"  ✓ {pair_name}: {len(matching)} matching dates")
 
@@ -659,8 +761,9 @@ def cmd_compare_row(args):
                 print("  You can now:")
                 print("  - Add time_map values (check ./sas/_timing.csv and ./csv/_timing.csv)")
                 print("    Format: \"time_map\": {\"row\": {\"left\": \"5.2s\", \"right\": \"3.1s\"}, \"col\": {...}}")
+                print("  - Add comment_map notes (shown as ⓘ tooltips in HTML)")
+                print("    Format: \"comment_map\": {\"row\": {\"left\": \"note\", \"right\": \"\"}, \"col\": {...}}")
                 print("  - Review where_map")
-                print("  - Add notes to metadata")
                 print()
                 input("Press Enter when done editing...")
 
@@ -733,6 +836,30 @@ def cmd_compare_row(args):
             html_entries.append((pair["pair_name"], pair.get("source_left", "left"), pair.get("source_right", "right"),
                                 pair["table_left"], pair["table_right"], result, {}))
 
+    # Write detailed log to ./output/compare_row.txt
+    if config_path and html_entries:
+        import io
+        output_dir = os.path.join(os.getcwd(), 'output')
+        os.makedirs(output_dir, exist_ok=True)
+        log_path = os.path.join(output_dir, 'compare_row.txt')
+        with open(log_path, 'w', encoding='utf-8') as log_f:
+            for pair_name, src_l, src_r, tbl_l, tbl_r, comp_result, where_map in html_entries:
+                s = comp_result['summary']
+                dr_l, dr_r = s['date_range_left'], s['date_range_right']
+                log_f.write(f"\n{'='*70}\n")
+                log_f.write(f"Pair: {pair_name}\n")
+                log_f.write(f"{src_l}: {dr_l[0]} to {dr_l[1]} | {s['count_left']} dates | total: {s['total_left']:,}\n")
+                log_f.write(f"{src_r}: {dr_r[0]} to {dr_r[1]} | {s['count_right']} dates | total: {s['total_right']:,}\n")
+                log_f.write(f"Matching: {len(comp_result['matching'])}, Mismatched: {len(comp_result['mismatched'])}, "
+                           f"Only {src_l}: {len(comp_result['only_left'])}, Only {src_r}: {len(comp_result['only_right'])}\n")
+                for dt, cl, cr in comp_result['mismatched']:
+                    log_f.write(f"  MISMATCH {dt}: {src_l}={cl:,}, {src_r}={cr:,}, diff={cr-cl:+,}\n")
+                for dt, c in comp_result['only_left']:
+                    log_f.write(f"  ONLY-{src_l} {dt}: {c:,}\n")
+                for dt, c in comp_result['only_right']:
+                    log_f.write(f"  ONLY-{src_r} {dt}: {c:,}\n")
+        print(f"Log: {log_path}")
+
     # Generate HTML report if requested
     if html_path and html_entries:
         from .html_export import generate_row_count_html, create_row_count_table, wrap_html_document
@@ -753,15 +880,26 @@ def cmd_compare_row(args):
                     # Legacy: flat time_map in metadata
                     time_map = config['pairs'][pair_name].get('metadata', {}).get('time_map', {})
 
-            # Read comment from pair config
+            # Read comment from pair config (comment_map.row or legacy comment)
             comment_left, comment_right = '', ''
             if config_path and is_unified and pair_name in config.get('pairs', {}):
-                comment = config['pairs'][pair_name].get('comment', '')
-                if isinstance(comment, dict):
-                    comment_left = comment.get('left', '')
-                    comment_right = comment.get('right', '')
+                pair_cfg = config['pairs'][pair_name]
+                comment_map = pair_cfg.get('comment_map', {})
+                if comment_map and 'row' in comment_map:
+                    comment_left = comment_map['row'].get('left', '')
+                    comment_right = comment_map['row'].get('right', '')
                 else:
-                    comment_left = comment_right = comment
+                    # Legacy fallback
+                    comment = pair_cfg.get('comment', '')
+                    if isinstance(comment, dict):
+                        comment_left = comment.get('left', '')
+                        comment_right = comment.get('right', '')
+                    else:
+                        comment_left = comment_right = comment
+
+            # Get left/right config entries for banner
+            lcfg = config['pairs'][pair_name]['left'] if config_path and is_unified and pair_name in config.get('pairs', {}) else None
+            rcfg = config['pairs'][pair_name]['right'] if config_path and is_unified and pair_name in config.get('pairs', {}) else None
 
             section = generate_row_count_html(
                 pair_name, src_l, src_r, tbl_l, tbl_r,
@@ -770,6 +908,8 @@ def cmd_compare_row(args):
                 time_map=time_map,
                 comment_left=comment_left,
                 comment_right=comment_right,
+                left_cfg=lcfg,
+                right_cfg=rcfg,
             )
             row_sections.append(section)
 
@@ -803,6 +943,12 @@ def cmd_compare_col(args):
 
     config_path = getattr(args, 'config', None)
     html_path = getattr(args, 'html', None)
+
+    # Default HTML to ./output/ when using --config
+    if config_path and not html_path:
+        output_dir = os.path.join(os.getcwd(), 'output')
+        os.makedirs(output_dir, exist_ok=True)
+        html_path = os.path.join(output_dir, 'compare_col.html')
 
     # Batch mode: compare all pairs from config
     if config_path:
@@ -848,10 +994,24 @@ def cmd_compare_col(args):
                 col_mappings=col_mappings if col_mappings else None,
             )
 
+            # Sync date_col from config to metadata
+            dc_left = left.get('date_col', '')
+            dc_right = right.get('date_col', '')
+            from .db import patch_metadata
+            if dc_left:
+                patch_metadata(args.project_db, table_left, date_var=dc_left)
+            if dc_right:
+                patch_metadata(args.project_db, table_right, date_var=dc_right)
+
             print(f"\n{'='*70}")
             print(f"Comparing column stats: {pair_name}")
             print(f"  {source_left}: {table_left}")
             print(f"  {source_right}: {table_right}")
+            if dc_left or dc_right:
+                if dc_left == dc_right:
+                    print(f"  Date column: {dc_left}")
+                else:
+                    print(f"  Date column: {dc_left} / {dc_right}")
             print(f"{'='*70}")
 
             # Get matched dates from row comparison for filtering
@@ -875,8 +1035,6 @@ def cmd_compare_col(args):
             )
 
             if result:
-                _print_col_comparison(result, source_left, source_right)
-
                 # Classify columns as matched or differing
                 from .compare import _has_col_differences
                 matched_cols = []
@@ -888,6 +1046,10 @@ def cmd_compare_col(args):
                     else:
                         matched_cols.append(col_name)
 
+                # Console: summary only
+                print(f"  {len(matched_cols)} match, {len(diff_cols)} diff"
+                      + (f" ({', '.join(sorted(diff_cols)[:4])}{'...' if len(diff_cols) > 4 else ''})" if diff_cols else ""))
+
                 # Save comparison results to database
                 from .db import save_col_comparison
                 save_col_comparison(
@@ -898,11 +1060,48 @@ def cmd_compare_col(args):
                     comparison_details=result,
                 )
 
+                # Build diff_map: {vintage_label: {col: {stat: {left: x, right: y}}}}
+                diff_map = {}
+                for col_name, comparisons in result.items():
+                    for comp in comparisons:
+                        if not _has_col_differences(comp):
+                            continue
+                        vlabel = comp.get('vintage_label', comp['dt'])
+                        if vlabel not in diff_map:
+                            diff_map[vlabel] = {}
+                        col_diffs = {}
+                        for stat in ('n_total', 'n_missing', 'n_unique'):
+                            d = comp.get(f'{stat}_diff', 0)
+                            if d != 0:
+                                col_diffs[stat] = {'left': comp[f'{stat}_left'], 'right': comp[f'{stat}_right']}
+                        if comp['col_type'] == 'numeric':
+                            for stat in ('mean', 'std'):
+                                d = comp.get(f'{stat}_diff')
+                                if d is not None and abs(d) > 0.01:
+                                    col_diffs[stat] = {'left': comp.get(f'{stat}_left'), 'right': comp.get(f'{stat}_right')}
+                        if col_diffs:
+                            diff_map[vlabel][col_name] = col_diffs
+                # Save diff_map to config
+                config['pairs'][pair_name]['diff_map'] = diff_map
+
                 html_entries.append((pair_name, source_left, source_right, table_left, table_right, result, col_mappings))
             else:
                 print("  No matching columns found")
 
             print()
+
+        # Write detailed log to ./output/compare_col.txt
+        if html_entries:
+            output_dir = os.path.join(os.getcwd(), 'output')
+            os.makedirs(output_dir, exist_ok=True)
+            log_path = os.path.join(output_dir, 'compare_col.txt')
+            with open(log_path, 'w', encoding='utf-8') as log_f:
+                for pair_name, src_l, src_r, tbl_l, tbl_r, comp_result, col_map in html_entries:
+                    log_f.write(f"\n{'='*70}\n")
+                    log_f.write(f"Pair: {pair_name}  ({tbl_l} vs {tbl_r})\n")
+                    log_f.write(f"{'='*70}\n")
+                    _write_detailed_col_log(log_f, comp_result, src_l, src_r)
+            print(f"Log: {log_path}")
 
         # Generate HTML report if requested
         if html_path and html_entries:
@@ -913,20 +1112,31 @@ def cmd_compare_col(args):
                 meta_l = get_metadata(args.project_db, tbl_l)
                 meta_r = get_metadata(args.project_db, tbl_r)
 
-                # Read comment from pair config
+                # Read comment from pair config (comment_map.col or legacy comment)
                 comment_left, comment_right = '', ''
-                comment = config['pairs'].get(pair_name, {}).get('comment', '')
-                if isinstance(comment, dict):
-                    comment_left = comment.get('left', '')
-                    comment_right = comment.get('right', '')
+                pair_cfg_comments = config['pairs'].get(pair_name, {})
+                comment_map = pair_cfg_comments.get('comment_map', {})
+                if comment_map and 'col' in comment_map:
+                    comment_left = comment_map['col'].get('left', '')
+                    comment_right = comment_map['col'].get('right', '')
                 else:
-                    comment_left = comment_right = comment
+                    # Legacy fallback
+                    comment = pair_cfg_comments.get('comment', '')
+                    if isinstance(comment, dict):
+                        comment_left = comment.get('left', '')
+                        comment_right = comment.get('right', '')
+                    else:
+                        comment_left = comment_right = comment
 
                 # Read time_map from config (pair-level, col sub-key)
                 col_time_map = {}
                 pair_time_map = config['pairs'].get(pair_name, {}).get('time_map', {})
                 if 'col' in pair_time_map and isinstance(pair_time_map['col'], dict):
                     col_time_map = pair_time_map['col']
+
+                # Get left/right config entries for banner
+                lcfg = config['pairs'].get(pair_name, {}).get('left')
+                rcfg = config['pairs'].get(pair_name, {}).get('right')
 
                 section = generate_column_stats_html(
                     pair_name, src_l, src_r, tbl_l, tbl_r,
@@ -936,6 +1146,8 @@ def cmd_compare_col(args):
                     time_map=col_time_map,
                     comment_left=comment_left,
                     comment_right=comment_right,
+                    left_cfg=lcfg,
+                    right_cfg=rcfg,
                 )
                 col_sections.append(section)
 
@@ -953,9 +1165,36 @@ def cmd_compare_col(args):
                 subtitle=getattr(args, 'subtitle', None) or default_subtitle,
             )
 
-            with open(html_path, 'w') as f:
+            with open(html_path, 'w', encoding='utf-8') as f:
                 f.write(doc)
             print(f"HTML report: {html_path}")
+
+        # Save config with diff_map updates
+        try:
+            from .config import save_unified_config
+            save_unified_config(config, config_path)
+            print(f"Config saved: {config_path}")
+
+            # Pause for manual review and editing
+            print("\n" + "="*80)
+            print("Review and edit the config file now")
+            print("="*80)
+            print(f"  File: {config_path}")
+            print()
+            print("  You can now:")
+            print("  - Review diff_map results")
+            print("  - Add comment_map notes (shown as tooltips in HTML)")
+            print("    Format: \"comment_map\": {\"col\": {\"left\": \"note\", \"right\": \"\"}}")
+            print()
+            input("Press Enter when done editing...")
+
+            # Reload config file with user's edits
+            print("\nReloading config from", config_path)
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+        except Exception as e:
+            print(f"Warning: Could not save config: {e}")
 
         return
 
@@ -991,6 +1230,18 @@ def cmd_compare_col(args):
         columns = [c.strip() for c in args.columns.split(',')]
 
     print(f"\nComparing column stats: {table_left} vs {table_right}")
+
+    # Show date column from metadata
+    meta_l = get_metadata(args.project_db, table_left)
+    meta_r = get_metadata(args.project_db, table_right)
+    dc_left = (meta_l.get('date_var') or '') if meta_l else ''
+    dc_right = (meta_r.get('date_var') or '') if meta_r else ''
+    if dc_left or dc_right:
+        if dc_left == dc_right:
+            print(f"Date column: {dc_left}")
+        else:
+            print(f"Date column: {dc_left} / {dc_right}")
+
     if args.from_date or args.to_date:
         date_range = f"{args.from_date or 'beginning'} to {args.to_date or 'end'}"
         print(f"Date range: {date_range}")
@@ -1189,6 +1440,66 @@ def _print_col_comparison(result, source_left, source_right):
                             print(f"    {comp['dt']}: {len(left_vals)} vs {len(right_vals)} unique values (see HTML for details)")
                         except:
                             pass
+
+
+def _write_detailed_col_log(f, result, source_left, source_right):
+    """Write detailed column comparison log with top-10 freq and stat diffs."""
+    import json as _json
+
+    for col_name, comparisons in sorted(result.items()):
+        if not comparisons:
+            continue
+
+        first = comparisons[0]
+        col_type = first["col_type"]
+        left_col = first["left_col"]
+        right_col = first["right_col"]
+
+        col_display = f"{left_col} -> {right_col}" if left_col != right_col else left_col
+        f.write(f"\n{'─'*70}\n")
+        f.write(f"Column: {col_display} ({col_type})\n")
+        f.write(f"{'─'*70}\n")
+
+        for comp in comparisons:
+            vlabel = comp.get('vintage_label', comp['dt'])
+            dt = comp['dt']
+
+            # Collect stat diffs (only non-zero)
+            stat_diffs = []
+            for stat in ('n_total', 'n_missing', 'n_unique'):
+                d = comp.get(f'{stat}_diff', 0)
+                if d != 0:
+                    stat_diffs.append(f"  {stat}: {comp[f'{stat}_left']:,} / {comp[f'{stat}_right']:,} ({d:+,})")
+            if col_type == 'numeric':
+                for stat in ('mean', 'std'):
+                    d = comp.get(f'{stat}_diff')
+                    if d is not None and abs(d) > 0.01:
+                        stat_diffs.append(f"  {stat}: {comp.get(f'{stat}_left'):.4f} / {comp.get(f'{stat}_right'):.4f} ({d:+.4f})")
+
+            has_stat_diff = len(stat_diffs) > 0
+
+            f.write(f"\n  Vintage: {vlabel}  (dt={dt})\n")
+            if stat_diffs:
+                f.write("  Stat differences:\n")
+                for line in stat_diffs:
+                    f.write(f"  {line}\n")
+            else:
+                f.write("  Stats: all match\n")
+
+            # Top-10 freq for both sides
+            for side, label in [('left', source_left), ('right', source_right)]:
+                top10 = comp.get(f'top_10_{side}', '')
+                if not top10:
+                    continue
+                try:
+                    vals = _json.loads(top10) if isinstance(top10, str) and top10.startswith('[') else top10
+                except:
+                    vals = top10
+                if isinstance(vals, list):
+                    items = [f"{v.get('value','?')}({v.get('count','?')})" for v in vals[:10]]
+                    f.write(f"  Top-10 [{label}]: {'; '.join(items)}\n")
+                elif isinstance(vals, str) and vals:
+                    f.write(f"  Top-10 [{label}]: {vals}\n")
 
 
 def cmd_show_stats(args):
@@ -1563,7 +1874,7 @@ def cmd_match_columns(args):
                 os.makedirs("map", exist_ok=True)
                 safe_name = re.sub(r'[^\w\-]', '_', pair_name)
                 unmapped_path = os.path.join("map", f"{safe_name}_unmapped.txt")
-                with open(unmapped_path, 'w') as f:
+                with open(unmapped_path, 'w', encoding='utf-8') as f:
                     f.write('\n'.join(output_lines))
 
                 total_cols = min(len(left_cols), len(right_cols))
@@ -1664,7 +1975,7 @@ def cmd_match_columns(args):
                             if not skip:
                                 remaining_lines.append(ol)
                         output_lines = remaining_lines
-                        with open(unmapped_path, 'w') as f:
+                        with open(unmapped_path, 'w', encoding='utf-8') as f:
                             f.write('\n'.join(output_lines))
 
                         print(f"  Mapped {len(new_maps)} columns")
@@ -2312,8 +2623,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument('--env', dest='env_file', help='Path to .env file for environment variables')
-    parser.add_argument('--debug', choices=['ipdb', 'debugpy'], default=None,
-                        help='Enable debugging: ipdb for interactive breakpoints, debugpy for VS Code attach on port 5678')
+    parser.add_argument('--debug', choices=['ipdb', 'attach'], default=None,
+                        help='Enable debugging: ipdb for interactive breakpoints, attach for VS Code debugpy attach on port 5678')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 
@@ -2552,7 +2863,7 @@ def main():
             traceback.print_exception(type, value, tb)
             ipdb.post_mortem(tb)
         sys.excepthook = _ipdb_excepthook
-    elif args.debug == 'debugpy':
+    elif args.debug == 'attach':
         import debugpy
         debugpy.listen(('0.0.0.0', 5678))
         print('Waiting for debugger attach on port 5678...')

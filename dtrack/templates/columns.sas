@@ -85,10 +85,10 @@
                 'categorical' as col_type length=32,
                 sum(value_freq) as n_total,
                 count(value_freq) as n_unique,
-                '' as mean length=1,
-                '' as std length=1,
-                '' as min_val length=200,
-                '' as max_val length=200
+                avg(value_freq) as mean,
+                std(value_freq) as std,
+                strip(put(min(value_freq), best32.)) as min_val length=200,
+                strip(put(max(value_freq), best32.)) as max_val length=200
             from _freq_raw_
             group by dt;
         quit;

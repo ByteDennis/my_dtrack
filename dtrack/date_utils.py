@@ -289,7 +289,8 @@ def format_vintage_label(dt_str: str, vintage: str) -> str:
     if vintage == "day":
         return f"{dt.strftime('%b')} {dt.day}, {dt.year}"
     elif vintage == "week":
-        return f"Week of {dt.strftime('%b')} {dt.day}"
+        iso_year, iso_week, _ = dt.isocalendar()
+        return f"{iso_year}-W{iso_week:02d}"
     elif vintage == "month":
         return dt.strftime("%b %Y")
     elif vintage == "quarter":

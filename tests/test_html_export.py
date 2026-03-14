@@ -34,8 +34,8 @@ class TestColumnStatsHTML:
                 'n_missing_right': 0,
                 'n_missing_diff': 0,
                 'n_unique_left': 3,
-                'n_unique_right': 3,
-                'n_unique_diff': 0,
+                'n_unique_right': 4,
+                'n_unique_diff': 1,
                 'min_left': 'ACTIVE',
                 'min_right': 'ACTIVE',
                 'max_left': 'INACTIVE',
@@ -95,7 +95,8 @@ class TestUtilityFunctions:
             'top_10_right': '{"A": 15}',
         }
 
-        assert _has_differences(comp_with_diff) is True
+        # top_10 differences alone no longer count as stat differences
+        assert _has_differences(comp_with_diff) is False
 
     def test_get_worst_stat(self):
         """Test identifying worst stat"""

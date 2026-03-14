@@ -387,8 +387,4 @@ def _has_col_differences(comp: Dict) -> bool:
     if std_diff is not None and abs(std_diff) > 0.01:
         return True
 
-    # Check categorical top_10 differences (handles JSON vs semicolon format)
-    if _compare_top10(comp.get('top_10_left'), comp.get('top_10_right')):
-        return True
-
     return False

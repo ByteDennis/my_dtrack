@@ -139,7 +139,7 @@ class TestFormatVintageLabel:
         assert "Mar" in label and "15" in label
 
     def test_week(self):
-        assert format_vintage_label("2025-03-03", "week") == "Week of Mar 3"
+        assert format_vintage_label("2025-03-03", "week") == "2025-W10"
 
     def test_month(self):
         assert format_vintage_label("2025-03-01", "month") == "Mar 2025"
