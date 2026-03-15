@@ -121,37 +121,70 @@ def _inject_where_from_config(tables, config):
                 break
 
 
-def _build_date_in_clause(date_col, dates, date_dtype, is_sas=False):
-    """Build a WHERE fragment for date IN (...) based on column type."""
+def _reformat_date(d, date_format):
+    """Reformat a YYYY-MM-DD date string to the target date_format."""
+    from datetime import datetime as _dt
+    if not date_format or date_format == 'YYYY-MM-DD':
+        return str(d)
+    try:
+        dt_obj = _dt.strptime(str(d), "%Y-%m-%d")
+    except ValueError:
+        return str(d)
+    fmt_map = {
+        'YYYYMMDD': '%Y%m%d',
+        'DDMONYYYY': '%d%b%Y',
+        'DD-MON-YYYY': '%d-%b-%Y',
+        'MM/DD/YYYY': '%m/%d/%Y',
+        'YYYYMM': '%Y%m',
+    }
+    py_fmt = fmt_map.get(date_format)
+    if py_fmt:
+        return dt_obj.strftime(py_fmt).upper() if 'MON' in date_format else dt_obj.strftime(py_fmt)
+    return str(d)
+
+
+def _build_date_in_clause(date_col, dates, date_dtype, is_sas=False, date_format=None):
+    """Build a WHERE fragment for date IN (...) based on column type.
+
+    For large date lists (>999), splits into multiple IN groups joined with OR
+    to respect Oracle's 1000-item IN limit.
+    """
     dtype = (date_dtype or '').upper()
+    is_string = dtype.startswith(('CHAR', 'VARCHAR', 'STRING', 'TEXT'))
+
     if dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
-        date_list = ", ".join(str(d) for d in dates)
-        return f"{date_col} IN ({date_list})"
+        formatted = [str(d) for d in dates]
+        col_expr = date_col
+    elif is_string:
+        formatted = [f"'{_reformat_date(d, date_format)}'" for d in dates]
+        col_expr = date_col
     elif 'TIMESTAMP' in dtype or 'DATE' in dtype or 'TIME' in dtype:
         is_datetime = ('TIMESTAMP' in dtype or 'DATETIME' in dtype
                        or (dtype == 'TIME'))
         if is_sas:
             from datetime import datetime as _dt
-            sas_dates = []
+            formatted = []
             for d in dates:
                 try:
                     dt_obj = _dt.strptime(str(d), "%Y-%m-%d")
-                    sas_dates.append(f"'{dt_obj.strftime('%d%b%Y').upper()}'d")
+                    formatted.append(f"'{dt_obj.strftime('%d%b%Y').upper()}'d")
                 except ValueError:
-                    sas_dates.append(f"'{d}'")
-            date_list = ", ".join(sas_dates)
-            # DATETIME/TIMESTAMP: wrap with datepart() to compare date-to-date
+                    formatted.append(f"'{d}'")
             col_expr = f"datepart({date_col})" if is_datetime else date_col
-            return f"{col_expr} IN ({date_list})"
         else:
-            date_list = ", ".join(f"DATE '{d}'" for d in dates)
-            return f"TRUNC({date_col}) IN ({date_list})"
-    elif dtype.startswith('CHAR'):
-        date_list = ", ".join(f"'{d}'" for d in dates)
-        return f"TRIM({date_col}) IN ({date_list})"
+            # Oracle/Athena: TRUNC for datetime, DATE literal
+            formatted = [f"DATE '{d}'" for d in dates]
+            col_expr = f"TRUNC({date_col})" if is_datetime else date_col
     else:
-        date_list = ", ".join(f"'{d}'" for d in dates)
-        return f"{date_col} IN ({date_list})"
+        formatted = [f"'{_reformat_date(d, date_format)}'" for d in dates]
+        col_expr = date_col
+
+    # Split into chunks of 999 for Oracle IN limit
+    chunks = [formatted[i:i+999] for i in range(0, len(formatted), 999)]
+    parts = [f"{col_expr} IN ({', '.join(chunk)})" for chunk in chunks]
+    if len(parts) == 1:
+        return parts[0]
+    return "(" + " OR ".join(parts) + ")"
 
 
 def _parse_sample_vintage(vintage_str):
@@ -311,7 +344,7 @@ def _compute_date_filter(tbl_cfg, db_path, vintage):
     from .date_utils import bucket_date
     buckets = {}
     for dt in matching_dates:
-        buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
+        buckets.setdefault(bucket_date(dt, vintage), []).append(dt)
 
     result['filter_type'] = 'between'
     result['min_date'] = min(matching_dates)
@@ -324,11 +357,17 @@ def _compute_date_filter(tbl_cfg, db_path, vintage):
     return result
 
 
-def _build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=False):
+def _build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=False, date_format=None):
     """Build a WHERE fragment using BETWEEN based on column type."""
     dtype = (date_dtype or '').upper()
+    is_string = dtype.startswith(('CHAR', 'VARCHAR', 'STRING', 'TEXT'))
+
     if dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
         return f"{date_col} BETWEEN {min_date} AND {max_date}"
+    elif is_string:
+        fmt_min = _reformat_date(min_date, date_format)
+        fmt_max = _reformat_date(max_date, date_format)
+        return f"{date_col} BETWEEN '{fmt_min}' AND '{fmt_max}'"
     elif 'TIMESTAMP' in dtype or 'DATE' in dtype or 'TIME' in dtype:
         is_datetime = ('TIMESTAMP' in dtype or 'DATETIME' in dtype
                        or (dtype == 'TIME'))
@@ -339,17 +378,17 @@ def _build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=
                 d_max = _dt.strptime(str(max_date), "%Y-%m-%d")
                 sas_min = f"'{d_min.strftime('%d%b%Y').upper()}'d"
                 sas_max = f"'{d_max.strftime('%d%b%Y').upper()}'d"
-                # DATETIME/TIMESTAMP: wrap with datepart() to compare date-to-date
                 col_expr = f"datepart({date_col})" if is_datetime else date_col
                 return f"{col_expr} BETWEEN {sas_min} AND {sas_max}"
             except ValueError:
                 return f"{date_col} BETWEEN '{min_date}' AND '{max_date}'"
         else:
-            return f"TRUNC({date_col}) BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
-    elif dtype.startswith('CHAR'):
-        return f"TRIM({date_col}) BETWEEN '{min_date}' AND '{max_date}'"
+            col_expr = f"TRUNC({date_col})" if is_datetime else date_col
+            return f"{col_expr} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
     else:
-        return f"{date_col} BETWEEN '{min_date}' AND '{max_date}'"
+        fmt_min = _reformat_date(min_date, date_format)
+        fmt_max = _reformat_date(max_date, date_format)
+        return f"{date_col} BETWEEN '{fmt_min}' AND '{fmt_max}'"
 
 
 
@@ -757,7 +796,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     if is_sas:
         pull_stmt = "        proc sql; create table &raw_ds as &_full_sql; quit;"
     else:
-        pull_stmt = f"        %pull_data(&_full_sql, &raw_ds, server={conn_macro}{_ua});"
+        pull_stmt = f"        %pull_data(%superq(_full_sql), &raw_ds, server={conn_macro}{_ua});"
 
     if redo:
         cache_start, cache_end = "", ""
@@ -787,10 +826,25 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     # Build vintage calls: data step sets _full_sql via call symputx, then macro runs
     # call symputx stores text literally — no macro quoting, no paren issues
     def _symputx_sql(full_sql):
-        """Generate a data step that sets _full_sql macro variable."""
-        # Use double quotes so single quotes inside (SAS date literals, intnx args) are safe
+        """Generate a data step that sets _full_sql macro variable.
+
+        For long SQL, splits into multiple string assignments concatenated
+        with cats() to avoid SAS quoted string length limits (~262 chars
+        in some contexts).
+        """
         escaped = full_sql.replace('"', '""')
-        return f'    data _null_; call symputx("_full_sql", "{escaped}"); run;'
+        max_chunk = 250  # safe under SAS quoted string limit
+        if len(escaped) <= max_chunk:
+            return f'    data _null_; call symputx("_full_sql", "{escaped}"); run;'
+        chunks = [escaped[i:i+max_chunk] for i in range(0, len(escaped), max_chunk)]
+        lines = ['    data _null_;']
+        lines.append(f'        length _sql ${len(escaped) + 100};')
+        lines.append(f'        _sql = "{chunks[0]}";')
+        for chunk in chunks[1:]:
+            lines.append(f'        _sql = cats(_sql, "{chunk}");')
+        lines.append('        call symputx("_full_sql", _sql);')
+        lines.append('    run;')
+        return '\n'.join(lines)
 
     vintage_calls = []
     if date_filter['filter_type'] == 'between':
@@ -802,7 +856,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
         n = len(buckets)
         for v_idx, (bucket_key, dates) in enumerate(sorted(buckets.items()), 1):
             bmin, bmax = min(dates), max(dates)
-            dw = _build_date_between_clause(date_col, bmin, bmax, date_dtype, is_sas=is_sas)
+            dw = _build_date_between_clause(date_col, bmin, bmax, date_dtype, is_sas=is_sas, date_format=date_filter.get('date_format'))
             bucket_sql = _make_sql(f"'{bucket_key}'")
             full_sql = f"{bucket_sql} WHERE {dw} {base_where}"
             vintage_calls.append(_symputx_sql(full_sql))
@@ -816,7 +870,8 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     elif date_filter['filter_type'] == 'in_list':
         # Sample dates: treated as one bucket
         dw = _build_date_in_clause(
-            date_col, date_filter['dates'], date_dtype, is_sas=is_sas
+            date_col, date_filter['dates'], date_dtype, is_sas=is_sas,
+            date_format=date_filter.get('date_format'),
         )
         base_sql = _make_sql("'sample'")
         full_sql = f"{base_sql} WHERE {dw} {base_where}"
@@ -1665,13 +1720,14 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
                     buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
                 dw = _build_date_between_clause(
                     date_col, date_filter['min_date'], date_filter['max_date'],
-                    extract_date_dtype)
+                    extract_date_dtype, date_format=date_filter.get('date_format'))
                 extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
                 print(f"  {len(buckets)} vintage buckets ({effective_vintage}) — GROUP BY")
             elif date_filter['filter_type'] == 'in_list':
                 # Sample: IN list, literal dt_label
                 dw = _build_date_in_clause(
-                    date_col, date_filter['dates'], extract_date_dtype)
+                    date_col, date_filter['dates'], extract_date_dtype,
+                    date_format=date_filter.get('date_format'))
                 extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
                 effective_vintage = 'all'  # no GROUP BY for sample
                 extract_date_dtype = None

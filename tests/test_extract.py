@@ -11,7 +11,6 @@ from dtrack.extract import (
     _vintage_date_expr_athena,
     _gen_sas_row_datadriven,
     _gen_sas_col_local,
-    gen_sas,
     build_continuous_sql_oracle,
     build_categorical_sql_oracle,
     build_continuous_sql_athena,
@@ -274,115 +273,6 @@ class TestGenSasColLocal:
 
 
 
-# ---------------------------------------------------------------------------
-# TestGenSasFull — integration tests
-# ---------------------------------------------------------------------------
-class TestGenSasFull:
-    @pytest.fixture()
-    def config_path(self):
-        return os.path.join(os.path.dirname(__file__), '..', 'sample_data', 'extract_config_full.json')
-
-    def test_single_table_output(self, tmp_path):
-        cfg = {'tables': [{'name': 't1', 'table': 'T1', 'source': 'pcds', 'date_col': 'D', 'columns': {'D': 'DATE', 'X': 'NUMBER'}}]}
-        cfg_path = tmp_path / 'cfg.json'
-        cfg_path.write_text(json.dumps(cfg))
-        outdir = tmp_path / 'out'
-        gen_sas(str(cfg_path), str(outdir))
-        assert (outdir / 'extract.sas').exists()
-
-    def test_multiple_pcds_tables(self, tmp_path, config_path):
-        outdir = tmp_path / 'out'
-        gen_sas(config_path, str(outdir))
-        sas = (outdir / 'extract.sas').read_text()
-        # Data-driven row uses table_date_map, not per-table macros
-        assert 'table_date_map' in sas
-        assert 'export_row_one' in sas
-        # Col macros still per-table
-        assert 'get_colstats_cust_daily' in sas
-        assert 'get_colstats_txn_monthly' in sas
-
-    def test_aws_table_skipped(self, tmp_path, config_path):
-        outdir = tmp_path / 'out'
-        gen_sas(config_path, str(outdir))
-        sas = (outdir / 'extract.sas').read_text()
-        assert 'get_colstats_aws_table' not in sas
-
-    def test_template_boilerplate(self, tmp_path, config_path):
-        outdir = tmp_path / 'out'
-        gen_sas(config_path, str(outdir))
-        sas = (outdir / 'extract.sas').read_text()
-        assert '%MACRO pull_data' in sas
-        assert '%macro start_timer' in sas
-        assert '%macro log_time' in sas
-        assert '%macro pcds' in sas
-        assert '%macro pb23' in sas
-
-    def test_runner_has_timer_pairs(self, tmp_path, config_path):
-        outdir = tmp_path / 'out'
-        gen_sas(config_path, str(outdir))
-        sas = (outdir / 'extract.sas').read_text()
-        assert '%start_timer()' in sas
-        assert '%log_time(' in sas
-
-    def test_types_row_only(self, tmp_path, config_path):
-        outdir = tmp_path / 'out'
-        gen_sas(config_path, str(outdir), types=['row'])
-        sas = (outdir / 'extract_row.sas').read_text()
-        assert 'export_row_one' in sas
-        assert 'get_colstats_cust_daily' not in sas
-
-    def test_types_col_only(self, tmp_path, config_path):
-        outdir = tmp_path / 'out'
-        gen_sas(config_path, str(outdir), types=['col'])
-        sas = (outdir / 'extract_col.sas').read_text()
-        assert 'get_colstats_cust_daily' in sas
-        assert 'get_rowcounts_cust_daily' not in sas
-
-    def test_env_credentials_filled(self, tmp_path, config_path):
-        env_file = tmp_path / '.env'
-        env_file.write_text('pcds_usr=myuser\npcds_pw=mypass\nemail_to=me@co.com\nlib_path=/data')
-        outdir = tmp_path / 'out'
-        gen_sas(config_path, str(outdir), env_path=str(env_file))
-        sas = (outdir / 'extract.sas').read_text()
-        assert 'myuser' in sas
-        assert 'mypass' in sas
-        assert 'me@co.com' in sas
-        assert '/data' in sas
-
-
-# ---------------------------------------------------------------------------
-# TestGenSasEnv
-# ---------------------------------------------------------------------------
-class TestGenSasEnv:
-    @pytest.fixture()
-    def simple_config(self, tmp_path):
-        cfg = {'tables': [{'name': 't', 'table': 'T', 'source': 'pcds', 'date_col': 'D', 'columns': {'D': 'DATE', 'X': 'NUMBER'}}]}
-        p = tmp_path / 'cfg.json'
-        p.write_text(json.dumps(cfg))
-        return str(p)
-
-    def test_all_env_vars(self, tmp_path, simple_config):
-        env = tmp_path / '.env'
-        env.write_text('pcds_usr=u1\npcds_pw=p1\nemail_to=e@x\nlib_path=/lib')
-        outdir = tmp_path / 'out'
-        gen_sas(simple_config, str(outdir), env_path=str(env))
-        sas = (outdir / 'extract.sas').read_text()
-        assert 'u1' in sas and 'p1' in sas and 'e@x' in sas and '/lib' in sas
-
-    def test_no_env(self, tmp_path, simple_config):
-        outdir = tmp_path / 'out'
-        gen_sas(simple_config, str(outdir))
-        sas = (outdir / 'extract.sas').read_text()
-        # Should have empty credentials
-        assert "%let iamusr = ;" in sas or "%let iamusr =;" in sas or "iamusr" in sas
-
-    def test_partial_env(self, tmp_path, simple_config):
-        env = tmp_path / '.env'
-        env.write_text('pcds_usr=onlyuser')
-        outdir = tmp_path / 'out'
-        gen_sas(simple_config, str(outdir), env_path=str(env))
-        sas = (outdir / 'extract.sas').read_text()
-        assert 'onlyuser' in sas
 
 
 # ---------------------------------------------------------------------------
@@ -477,23 +367,21 @@ class TestBuildDateBetweenClause:
         # SAS datetime: datepart wrap, SAS date literal
         ("TIMESTAMP", True, "datepart(RPT_DT) BETWEEN", "'01JAN2025'd"),
         ("DATETIME", True, "datepart(RPT_DT) BETWEEN", "'01JAN2025'd"),
-        # Oracle date: TRUNC wrap, DATE literal
-        ("DATE", False, "TRUNC(RPT_DT) BETWEEN", "DATE '2025-01-01'"),
+        # Oracle/Athena date (not datetime): no TRUNC wrap, DATE literal
+        ("DATE", False, "RPT_DT BETWEEN", "DATE '2025-01-01'"),
         # Oracle timestamp: TRUNC wrap, DATE literal
         ("TIMESTAMP", False, "TRUNC(RPT_DT) BETWEEN", "DATE '2025-01-01'"),
-        # Athena date (also is_sas=False): same as Oracle
-        ("DATE", False, "TRUNC(RPT_DT) BETWEEN", "DATE '2025-01-01'"),
         # Numeric column (e.g., YYYYMM as integer)
         ("NUMBER", False, "RPT_DT BETWEEN", "202501"),
         ("INTEGER", True, "RPT_DT BETWEEN", "202501"),
         # String column (CHAR)
-        ("CHAR(10)", False, "TRIM(RPT_DT) BETWEEN", "'2025-01-01'"),
-        ("CHAR(10)", True, "TRIM(RPT_DT) BETWEEN", "'2025-01-01'"),
+        ("CHAR(10)", False, "RPT_DT BETWEEN", "'2025-01-01'"),
+        ("CHAR(10)", True, "RPT_DT BETWEEN", "'2025-01-01'"),
         # VARCHAR (string dates like YYYYMMDD)
         ("VARCHAR2(8)", False, "RPT_DT BETWEEN", "'2025-01-01'"),
     ], ids=[
         "sas-date", "sas-timestamp", "sas-datetime",
-        "oracle-date", "oracle-timestamp", "athena-date",
+        "oracle-date", "oracle-timestamp",
         "numeric-oracle", "numeric-sas",
         "char-oracle", "char-sas", "varchar-oracle",
     ])
@@ -545,9 +433,9 @@ class TestBuildDateBetweenClause:
         assert "202601" in result
 
     def test_athena_date_dtype(self):
-        """Athena DATE dtype uses TRUNC and DATE literals."""
+        """Athena DATE dtype uses DATE literals (no TRUNC for non-datetime)."""
         result = _build_date_between_clause("DT", "2025-06-01", "2025-06-30", "DATE", is_sas=False)
-        assert "TRUNC(DT) BETWEEN" in result
+        assert "DT BETWEEN" in result
         assert "DATE '2025-06-01'" in result
         assert "DATE '2025-06-30'" in result
 
@@ -570,14 +458,14 @@ class TestBuildDateInClause:
         ("DATE", True, "RPT_DT IN", "'15MAR2025'd"),
         # SAS datetime: datepart wrap
         ("TIMESTAMP", True, "datepart(RPT_DT) IN", "'15MAR2025'd"),
-        # Oracle date: TRUNC wrap
-        ("DATE", False, "TRUNC(RPT_DT) IN", "DATE '2025-03-15'"),
+        # Oracle/Athena date (not datetime): no TRUNC
+        ("DATE", False, "RPT_DT IN", "DATE '2025-03-15'"),
         # Oracle timestamp: TRUNC wrap
         ("TIMESTAMP", False, "TRUNC(RPT_DT) IN", "DATE '2025-03-15'"),
         # Numeric
         ("NUMBER", False, "RPT_DT IN", "202503"),
         # String
-        ("CHAR(10)", False, "TRIM(RPT_DT) IN", "'2025-03-15'"),
+        ("CHAR(10)", False, "RPT_DT IN", "'2025-03-15'"),
         ("VARCHAR2(8)", False, "RPT_DT IN", "'2025-03-15'"),
     ], ids=[
         "sas-date", "sas-timestamp",
