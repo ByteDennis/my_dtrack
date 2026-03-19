@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Command-line interface for dtrack"""
+"""Command-line interface for dtrack (config-driven only)."""
 
 import argparse
+import json
+import os
 import re
 import sys
-import os
-from pathlib import Path
 
 from .db import (
     init_database,
@@ -20,28 +20,68 @@ from .db import (
     get_column_meta,
     save_row_comparison,
     get_row_comparison,
-    save_sampled_dates,
-    get_sampled_dates,
+    patch_metadata,
+    save_col_comparison,
+    sync_config_to_db,
     generic_upsert,
     generic_update,
     generic_delete,
     parse_where_clause,
 )
 from .loader import load_row_counts, load_column_data, load_precomputed_col_stats
-from .load_map import load_map
 from .compare import (
     compare_row_counts,
     compare_column_stats,
     get_column_mapping,
     parse_col_map_string,
+    match_columns_from_dicts,
+    _has_col_differences,
 )
-from .ppt import PPTBuilder, parse_markdown_to_ppt
+from .config import (
+    load_unified_config,
+    save_unified_config,
+    get_all_tables_from_unified,
+    set_pair_where_map,
+    set_pair_col_map,
+    ensure_pair_defaults,
+    mark_pair_skipped,
+    add_ignored_rows,
+    add_ignored_columns,
+    get_ignored_rows,
+    get_ignored_columns,
+    get_col_type_overrides,
+)
+from .platforms.base import qualified_name, is_sas_table
+from .interact import prompt_skip_pair, prompt_ignore_items, prompt_mapping, confirm, save_and_pause
 
+
+# ============================================================================
+# Helper: load config + tables
+# ============================================================================
+
+def _load_config(config_path):
+    """Load and return (config, config_path)."""
+    if not os.path.exists(config_path):
+        print(f"Error: Config file not found: {config_path}")
+        sys.exit(1)
+    return load_unified_config(config_path)
+
+
+def _require_db(db_path):
+    """Exit if db doesn't exist."""
+    if not os.path.exists(db_path):
+        print(f"Error: Database not found: {db_path}")
+        print(f"Run: dtrack init {db_path}")
+        sys.exit(1)
+
+
+# ============================================================================
+# Commands
+# ============================================================================
 
 def cmd_init(args):
-    """Initialize a new dtrack database"""
+    """Initialize a new dtrack database."""
     db_path = args.project_db
-
     if args.refresh:
         if not os.path.exists(db_path):
             print(f"Error: Database not found: {db_path}")
@@ -59,1991 +99,117 @@ def cmd_init(args):
             print("Use --force to overwrite")
             sys.exit(1)
         os.remove(db_path)
-
     init_database(db_path)
     print(f"Initialized database: {db_path}")
 
 
 def cmd_load_row(args):
-    """Load row count data from CSV"""
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        print(f"Run: dtrack init {args.project_db}")
-        sys.exit(1)
+    """Load row count data from CSV."""
+    _require_db(args.project_db)
+    config = _load_config(args.config)
+    tables = get_all_tables_from_unified(config)
 
-    config_path = getattr(args, 'config', None)
-    if config_path:
-        import json
-        if not os.path.exists(config_path):
-            print(f"Error: Config file not found: {config_path}")
-            sys.exit(1)
-        if not os.path.isdir(args.file_or_folder):
-            print(f"Error: {args.file_or_folder} must be a folder when using --config")
-            sys.exit(1)
-        with open(config_path, 'r') as f:
-            config = json.load(f)
+    for tbl in tables:
+        qname = qualified_name(tbl)
+        csv_path = os.path.join(args.folder, f"{qname}_row.csv")
+        if not os.path.exists(csv_path):
+            print(f"WARNING: {csv_path} not found, skipping {qname}")
+            continue
+        print(f"\n--- {qname} ---")
+        load_row_counts(
+            db_path=args.project_db,
+            file_or_folder=csv_path,
+            table_name=qname,
+            mode=args.mode,
+            source=tbl.get('source'),
+            db_name=args.db,
+            source_table=tbl.get('table', ''),
+            date_col=args.date_var,
+            date_var_override=tbl.get('date_col'),
+            where_clause=tbl.get('where', ''),
+        )
+        rows = get_row_counts(args.project_db, qname)
+        total = sum(count for _, count in rows)
+        print(f"  Loaded {len(rows)} date buckets, total: {total:,}")
 
-        # Detect config format and extract tables
-        if "pairs" in config and isinstance(config["pairs"], dict):
-            from .config import get_all_tables_from_unified
-            tables = get_all_tables_from_unified(config)
-        else:
-            tables = config.get('tables', [])
 
-        from .extract import _qualified_name
-        for tbl in tables:
-            qname = _qualified_name(tbl)
-            source = tbl.get('source', '')
-            csv_path = os.path.join(args.file_or_folder, f"{qname}_row.csv")
+def cmd_load_col(args):
+    """Load column statistics from CSV."""
+    _require_db(args.project_db)
+    config = _load_config(args.config)
+    tables = get_all_tables_from_unified(config)
+
+    for tbl in tables:
+        qname = qualified_name(tbl)
+        csv_path = os.path.join(args.folder, f"{qname}_col.csv")
+        if not os.path.exists(csv_path):
+            print(f"WARNING: {csv_path} not found, skipping {qname}")
+            continue
+        print(f"\n--- {qname} ---")
+        table_vintage = tbl.get('vintage')
+        if not table_vintage:
+            meta = get_metadata(args.project_db, qname)
+            table_vintage = (meta.get('vintage') or 'day') if meta else 'day'
+        count = load_precomputed_col_stats(
+            db_path=args.project_db,
+            csv_path=csv_path,
+            table_name=qname,
+            mode=args.mode,
+            source=tbl.get('source'),
+            db_name=tbl.get('conn_macro'),
+            vintage=table_vintage,
+        )
+        print(f"  Loaded {count} stat rows")
+
+
+def cmd_load_columns(args):
+    """Load column metadata from CSV or live discovery."""
+    _require_db(args.project_db)
+    config = _load_config(args.config)
+    tables = get_all_tables_from_unified(config)
+
+    import csv as csv_mod
+    csv_files = getattr(args, 'csv_files', [])
+    csv_lookup = {}
+    if csv_files:
+        for csv_path in csv_files:
             if not os.path.exists(csv_path):
-                print(f"WARNING: {csv_path} not found, skipping {qname}")
+                print(f"Error: CSV file not found: {csv_path}")
                 continue
-
-            print(f"\n--- {qname} ---")
-            # date_col from config is the source DB column name (e.g. RPT_DT),
-            # not necessarily the CSV header. Pass it for metadata only.
-            config_date_col = tbl.get('date_col')
-            load_row_counts(
-                db_path=args.project_db,
-                file_or_folder=csv_path,
-                table_name=qname,
-                mode=args.mode,
-                source=source,
-                db_name=args.db,
-                source_table=tbl.get('table', ''),
-                date_col=args.date_var,
-                date_var_override=config_date_col,
-                where_clause=tbl.get('where', ''),
-            )
-            rows = get_row_counts(args.project_db, qname)
-            total = sum(count for _, count in rows)
-            print(f"  Loaded {len(rows)} date buckets, total: {total:,}")
-        return
-
-    # Determine table name
-    if args.table_name:
-        table_name = args.table_name
-    else:
-        # Use filename without extension
-        if os.path.isfile(args.file_or_folder):
-            table_name = Path(args.file_or_folder).stem
-        else:
-            print("Error: --table is required when loading from a folder")
-            sys.exit(1)
-
-    print(f"Loading row counts into table: {table_name}")
-    print(f"  Source: {args.file_or_folder}")
-    print(f"  Mode: {args.mode}")
-
-    load_row_counts(
-        db_path=args.project_db,
-        file_or_folder=args.file_or_folder,
-        table_name=table_name,
-        mode=args.mode,
-        source=args.source,
-        db_name=args.db,
-        source_table=args.source_table,
-        date_col=args.date_var,
-    )
-
-    # Show summary
-    rows = get_row_counts(args.project_db, table_name)
-    print(f"✓ Loaded {len(rows)} date buckets")
-    total = sum(count for _, count in rows)
-    print(f"  Total row count: {total:,}")
-
-
-def cmd_list(args):
-    """List all tables in the database"""
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        sys.exit(1)
-
-    tables = list_tables(args.project_db)
-
-    if not tables:
-        print("No tables found")
-        return
-
-    print(f"\nTables in {args.project_db}:")
-    print("-" * 100)
-    print(f"{'Table':<30} {'Type':<8} {'Source':<10} {'DB':<15} {'Date Var':<12} {'Vintage':<8}")
-    print("-" * 100)
-
-    for table in tables:
-        name = table.get('table_name', '') or ''
-        data_type = table.get('data_type', '') or ''
-        source = table.get('source', '') or ''
-        db = table.get('db', '') or ''
-        date_var = table.get('date_var', '') or ''
-        vintage = table.get('vintage', '') or ''
-
-        print(f"{name:<30} {data_type:<8} {source:<10} {db:<15} {date_var:<12} {vintage:<8}")
-
-    print(f"\nTotal: {len(tables)} tables")
-
-
-def cmd_show(args):
-    """Show row count data from a table"""
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        sys.exit(1)
-
-    rows = get_row_counts(args.project_db, args.table, limit=args.limit)
-
-    if not rows:
-        print(f"No data found in table: {args.table}")
-        return
-
-    # Show metadata
-    metadata = get_metadata(args.project_db, args.table)
-    if metadata:
-        print(f"\nTable: {args.table}")
-        print(f"Source: {metadata.get('source', 'N/A')}")
-        print(f"Database: {metadata.get('db', 'N/A')}")
-        print(f"Vintage: {metadata.get('vintage', 'N/A')}")
-        print()
-
-    # Show data
-    print(f"{'Date':<12} {'Row Count':>12}")
-    print("-" * 26)
-    for dt, count in rows:
-        print(f"{dt:<12} {count:>12,}")
-
-    print("-" * 26)
-    total = sum(count for _, count in rows)
-    print(f"{'Total:':<12} {total:>12,}")
-    print(f"\nShowing {len(rows)} rows")
-
-
-def cmd_load_map(args):
-    """Load table pairs from JSON configuration"""
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        print(f"Run: dtrack init {args.project_db}")
-        sys.exit(1)
-
-    if not os.path.exists(args.config_file):
-        print(f"Error: Config file not found: {args.config_file}")
-        sys.exit(1)
-
-    print(f"Loading table pairs from: {args.config_file}")
-    print(f"Database: {args.project_db}")
-    print(f"Data type: {args.type}")
-    print()
-
-    load_map(
-        db_path=args.project_db,
-        config_path=args.config_file,
-        data_type=args.type,
-    )
-
-
-def cmd_list_pairs(args):
-    """List all registered table pairs"""
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        sys.exit(1)
-
-    pairs = list_table_pairs(args.project_db)
-
-    if not pairs:
-        print("No table pairs found")
-        return
-
-    print(f"\nRegistered table pairs in {args.project_db}:")
-    print("-" * 100)
-    print(f"{'Pair Name':<25} {'Left Table':<25} {'Right Table':<25} {'Mappings':<20}")
-    print("-" * 100)
-
-    for pair in pairs:
-        name = pair["pair_name"]
-        left = pair["table_left"]
-        right = pair["table_right"]
-        mappings = pair["col_mappings"]
-
-        # Show count of mappings
-        if mappings:
-            map_str = f"{len(mappings)} columns"
-        else:
-            map_str = "(none)"
-
-        print(f"{name:<25} {left:<25} {right:<25} {map_str:<20}")
-
-    print(f"\nTotal: {len(pairs)} pair(s)")
-
-    # Show details if requested
-    if args.verbose:
-        print("\nColumn Mappings:")
-        print("-" * 100)
-        for pair in pairs:
-            if pair["col_mappings"]:
-                print(f"\n{pair['pair_name']}:")
-                for left_col, right_col in pair["col_mappings"].items():
-                    print(f"  {left_col} → {right_col}")
-
-
-def _print_row_comparison(db_path, table_left, table_right, source_left, source_right, from_date=None, to_date=None, pair_name=None, date_col_left=None, date_col_right=None):
-    """Run and print row count comparison for a single pair."""
-    source_left = source_left or "left"
-    source_right = source_right or "right"
-
-    print(f"\nComparing row counts: {table_left} vs {table_right}")
-    print("=" * 70)
-
-    # Show date column (from config param, fallback to metadata)
-    if not date_col_left or not date_col_right:
-        meta_l = get_metadata(db_path, table_left)
-        meta_r = get_metadata(db_path, table_right)
-        date_col_left = date_col_left or ((meta_l.get('date_var') or '') if meta_l else '')
-        date_col_right = date_col_right or ((meta_r.get('date_var') or '') if meta_r else '')
-    if date_col_left or date_col_right:
-        if date_col_left == date_col_right:
-            print(f"Date column: {date_col_left}")
-        else:
-            print(f"Date column: {date_col_left} / {date_col_right}")
-
-    result = compare_row_counts(
-        db_path, table_left, table_right,
-        from_date=from_date, to_date=to_date,
-    )
-
-    summary = result["summary"]
-    dr_left = summary['date_range_left']
-    dr_right = summary['date_range_right']
-
-    print(f"\n{source_left}: {dr_left[0]} to {dr_left[1]} | {summary['count_left']} dates | total: {summary['total_left']:,}")
-    print(f"{source_right}: {dr_right[0]} to {dr_right[1]} | {summary['count_right']} dates | total: {summary['total_right']:,}")
-
-    # Overlap range
-    has_overlap = dr_left[0] and dr_right[0]
-    overlap_start = overlap_end = None
-    if has_overlap:
-        overlap_start = max(dr_left[0], dr_right[0])
-        overlap_end = min(dr_left[1], dr_right[1])
-        if overlap_start <= overlap_end:
-            print(f"\nOverlap range: {overlap_start} to {overlap_end}")
-        else:
-            print(f"\nOverlap range: (no overlap)")
-            has_overlap = False
-
-    # Split only_left/only_right into outside-overlap and misload (inside overlap)
-    def _in_overlap(dt):
-        return has_overlap and overlap_start <= dt <= overlap_end
-
-    misload_left = [(dt, c) for dt, c in result['only_left'] if _in_overlap(dt)]
-    misload_right = [(dt, c) for dt, c in result['only_right'] if _in_overlap(dt)]
-    outside_left = [(dt, c) for dt, c in result['only_left'] if not _in_overlap(dt)]
-    outside_right = [(dt, c) for dt, c in result['only_right'] if not _in_overlap(dt)]
-
-    # Mismatched (within overlap)
-    if result["mismatched"]:
-        print(f"\nMismatched ({len(result['mismatched'])} dates):")
-        for dt, count_left, count_right in result["mismatched"]:
-            diff = count_right - count_left
-            print(f"  {dt}: {source_left}={count_left:,}, {source_right}={count_right:,}, diff={diff:+,}")
-    else:
-        print(f"\nMismatched: (none)")
-
-    # Misload (one-sided dates within overlap range)
-    if misload_left or misload_right:
-        print(f"\nMisload ({len(misload_left) + len(misload_right)} dates):")
-        for dt, count in misload_left:
-            print(f"  {dt}: {source_left}={count:,}, {source_right}=0, diff={count:+,}")
-        for dt, count in misload_right:
-            print(f"  {dt}: {source_left}=0, {source_right}={count:,}, diff={-count:+,}")
-
-    # Only in left (outside overlap)
-    if outside_left:
-        print(f"\nOnly in {source_left} ({len(outside_left)} dates):")
-        for dt, count in outside_left[:5]:
-            print(f"  {dt}: {count:,}")
-        if len(outside_left) > 5:
-            print(f"  ... ({len(outside_left) - 5} more)")
-    else:
-        print(f"\nOnly in {source_left}: (none)")
-
-    # Only in right (outside overlap)
-    if outside_right:
-        print(f"\nOnly in {source_right} ({len(outside_right)} dates):")
-        for dt, count in outside_right[:5]:
-            print(f"  {dt}: {count:,}")
-        if len(outside_right) > 5:
-            print(f"  ... ({len(outside_right) - 5} more)")
-    else:
-        print(f"\nOnly in {source_right}: (none)")
-
-    # Matching
-    n_matching = len(result['matching'])
-    n_total = n_matching + len(result['mismatched']) + len(misload_left) + len(misload_right)
-    print(f"\nMatching ({n_matching} of {n_total} dates in overlap):")
-    if result["matching"]:
-        for dt, count in result["matching"][:3]:
-            print(f"  {dt}: {count:,}")
-        if len(result["matching"]) > 3:
-            print(f"  ... ({len(result['matching']) - 3} more)")
-    else:
-        print("  (none)")
-
-    # Save results to _row_comparison if pair_name provided
-    if pair_name:
-        matching_dates = [dt for dt, _ in result['matching']]
-        excluded_dates = [dt for dt, _, _ in result['mismatched']]
-        excluded_dates += [dt for dt, _ in misload_left]
-        excluded_dates += [dt for dt, _ in misload_right]
-        save_row_comparison(
-            db_path, pair_name,
-            overlap_start, overlap_end,
-            matching_dates, excluded_dates,
-        )
-        print(f"  Saved comparison results for pair '{pair_name}'")
-
-    print()
-
-    return result
-
-
-def _build_where_from_dates(table_cfg, matching_dates, excluded_dates, db_path=None):
-    """Build WHERE clause from matching and excluded dates.
-
-    Date literals are formatted per platform and column type:
-
-      Platform                     datetime column                            date-only column
-      SAS (processed=$...)         datepart(eff_dt) >= '06NOV2025'd           original format preserved (e.g. '20251106')
-      Oracle (source=pcds/oracle)  TRUNC(eff_dt) >= DATE '2025-11-06'         DATE '2025-11-06'
-      Athena (source=aws)          CAST(eff_dt AS DATE) >= DATE '2025-11-06'  DATE '2025-11-06'
-    """
-    date_col = table_cfg.get('date_col', 'dt')
-
-    # Check if this is a SAS table (processed starts with $)
-    from .extract import _is_sas_table
-    is_sas = _is_sas_table(table_cfg)
-
-    # Look up date column data type and format from database
-    date_dtype = ''
-    date_format = ''
-    if db_path:
-        from .db import get_column_meta
-        from .extract import _qualified_name
-        qn = _qualified_name(table_cfg)
-        col_meta = get_column_meta(db_path, qn)
-        for cm in col_meta:
-            if cm['column_name'].upper() == date_col.upper():
-                date_dtype = (cm.get('data_type') or '').upper()
-                break
-        # Get date_format from _metadata
-        meta = get_metadata(db_path, qn)
-        if meta:
-            date_format = meta.get('date_format') or ''
-
-    # Detect if date column is a datetime (has time component)
-    is_datetime = ('TIMESTAMP' in date_dtype or 'DATETIME' in date_dtype)
-    source = (table_cfg.get('source') or '').lower()
-
-    # Determine column expression and date literal format based on platform + datetime
-    if is_datetime:
-        if is_sas:
-            # SAS: datepart(col) >= '06NOV2025'd
-            col_expr = f"datepart({date_col})"
-
-            def fmt_date(d):
-                from datetime import datetime as _dt
-                is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
-                if is_yyyymm:
-                    return f"'{d}'"
-                dt_obj = _dt.strptime(str(d), "%Y-%m-%d")
-                return f"'{dt_obj.strftime('%d%b%Y').upper()}'d"
-        elif source == 'aws':
-            # Athena: CAST(col AS DATE) >= DATE '2025-11-06'
-            col_expr = f"CAST({date_col} AS DATE)"
-
-            def fmt_date(d):
-                is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
-                if is_yyyymm:
-                    return f"'{d}'"
-                return f"DATE '{d}'"
-        else:
-            # Oracle: TRUNC(col) >= DATE '2025-11-06'
-            col_expr = f"TRUNC({date_col})"
-
-            def fmt_date(d):
-                is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
-                if is_yyyymm:
-                    return f"'{d}'"
-                return f"DATE '{d}'"
-    else:
-        col_expr = date_col
-
-        # Set up date converter to restore original format
-        from .date_utils import DateConverter
-        dc = DateConverter()
-        if date_format:
-            dc.format_label = date_format
-
-        def fmt_date(d):
-            is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
-            if is_yyyymm:
-                if date_dtype.startswith(('NUMBER', 'INTEGER', 'INT', 'BIGINT')):
-                    return str(d)
-                else:
-                    return f"'{d}'"
-            else:
-                # Convert canonical YYYY-MM-DD back to original format
-                original = dc.to_original(str(d)) if date_format else str(d)
-                if date_dtype.startswith(('VARCHAR', 'CHAR', 'STRING', 'TEXT')):
-                    return f"'{original}'"
-                elif date_dtype.startswith(('DATE', 'TIMESTAMP')):
-                    return f"DATE '{original}'"
-                else:
-                    return f"'{original}'"
-
-    # Build WHERE clause
-    parts = []
-
-    # Add original WHERE from config
-    orig_where = table_cfg.get('where', '').strip()
-    if orig_where:
-        parts.append(f"({orig_where})")
-
-    # Add date range if we have matching dates
-    if matching_dates:
-        min_date = min(matching_dates)
-        max_date = max(matching_dates)
-        parts.append(f"{col_expr} >= {fmt_date(min_date)}")
-        parts.append(f"{col_expr} <= {fmt_date(max_date)}")
-
-        # Add NOT IN for excluded dates
-        if excluded_dates:
-            excluded_list = ", ".join(fmt_date(d) for d in excluded_dates)
-            parts.append(f"{col_expr} NOT IN ({excluded_list})")
-
-    return " AND ".join(parts) if parts else ""
-
-
-def cmd_compare_row(args):
-    """Compare row counts between two tables"""
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        sys.exit(1)
-
-    config_path = getattr(args, 'config', None)
-    yes = getattr(args, 'yes', False)
-    html_path = getattr(args, 'html', None)
-
-    # Default HTML to ./output/ when using --config
-    if config_path and not html_path:
-        output_dir = os.path.join(os.getcwd(), 'output')
-        os.makedirs(output_dir, exist_ok=True)
-        html_path = os.path.join(output_dir, 'compare_row.html')
-
-    # Collect (pair_name, source_left, source_right, table_left, table_right, result) for HTML
-    html_entries = []
-
-    if config_path:
-        import json
-        if not os.path.exists(config_path):
-            print(f"Error: Config file not found: {config_path}")
-            sys.exit(1)
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-
-        # Detect config format
-        is_unified = "pairs" in config and isinstance(config["pairs"], dict)
-
-        if is_unified:
-            # Unified format
-            from .config import set_pair_where_map
-            from .extract import _qualified_name
-
-            pairs_to_process = []
-            for pair_name, pair_config in config["pairs"].items():
-                if pair_config.get("skip"):
-                    print(f"  Skipping pair: {pair_name}")
-                    continue
-                left = pair_config["left"]
-                right = pair_config["right"]
-                table_left = _qualified_name(left)
-                table_right = _qualified_name(right)
-                source_left = left.get("source", "left")
-                source_right = right.get("source", "right")
-                col_map = pair_config.get("col_map", {})
-                dc_left = left.get('date_col', '')
-                dc_right = right.get('date_col', '')
-                pairs_to_process.append((pair_name, table_left, table_right, source_left, source_right, col_map, dc_left, dc_right))
-
-            # When using --config, compare all pairs automatically (no per-pair prompts)
-            # Use -y flag only for backward compatibility
-            from .db import patch_metadata
-            for pair_name, table_left, table_right, source_left, source_right, col_map, dc_left, dc_right in pairs_to_process:
-
-                # Auto-register pair
-                register_table_pair(
-                    args.project_db, pair_name,
-                    table_left, table_right,
-                    source_left=source_left,
-                    source_right=source_right,
-                    col_mappings=col_map if col_map else None,
-                )
-
-                # Sync date_col from config to metadata
-                if dc_left:
-                    patch_metadata(args.project_db, table_left, date_var=dc_left)
-                if dc_right:
-                    patch_metadata(args.project_db, table_right, date_var=dc_right)
-
-                result = _print_row_comparison(
-                    args.project_db, table_left, table_right,
-                    source_left, source_right,
-                    from_date=args.from_date, to_date=args.to_date,
-                    pair_name=pair_name,
-                    date_col_left=dc_left, date_col_right=dc_right,
-                )
-
-                html_entries.append((pair_name, source_left, source_right, table_left, table_right, result, {}))
-
-        else:
-            # Old format (list of pairs) - compare all automatically when using --config
-            for pair_cfg in config.get('pairs', []):
-                pair_name = pair_cfg['name']
-                tables = pair_cfg.get('tables', {})
-                sources = list(tables.keys())
-                if len(sources) < 2:
-                    print(f"Warning: Pair '{pair_name}' needs 2 tables, skipping")
-                    continue
-                source_left, source_right = sources[0], sources[1]
-                table_left = tables[source_left]['table_name']
-                table_right = tables[source_right]['table_name']
-
-                # Auto-register pair
-                col_map = pair_cfg.get('col_map', {})
-                register_table_pair(
-                    args.project_db, pair_name,
-                    table_left, table_right,
-                    source_left=source_left,
-                    source_right=source_right,
-                    col_mappings=col_map if col_map else None,
-                )
-
-                result = _print_row_comparison(
-                    args.project_db, table_left, table_right,
-                    source_left, source_right,
-                    from_date=args.from_date, to_date=args.to_date,
-                    pair_name=pair_name,
-                )
-
-                # Auto-generate where_map from comparison results (old format - SQL style)
-                where_map = {}
-                comp = get_row_comparison(args.project_db, pair_name)
-                if comp and comp.get('overlap_start') and comp.get('overlap_end'):
-                    excluded = comp.get('excluded_dates', [])
-                    for src, tbl in [(source_left, table_left), (source_right, table_right)]:
-                        meta = get_metadata(args.project_db, tbl)
-                        date_var = (meta.get('date_var') or '') if meta else ''
-                        source_type = (meta.get('source') or '').lower() if meta else ''
-                        if not date_var:
-                            continue
-
-                        # Get date column data type from _column_meta
-                        col_meta = get_column_meta(args.project_db, tbl)
-                        date_dtype = ''
-                        for cm in col_meta:
-                            if cm['column_name'].lower() == date_var.lower():
-                                date_dtype = (cm.get('data_type') or '').upper()
-                                break
-
-                        # Get date_format from _metadata for original format restoration
-                        date_format = (meta.get('date_format') or '') if meta else ''
-                        from .date_utils import DateConverter
-                        _dc = DateConverter()
-                        if date_format:
-                            _dc.format_label = date_format
-
-                        # Format date literals based on source/type
-                        def _fmt_date(d, _src=source_type, _dt=date_dtype, _dc=_dc, _df=date_format):
-                            import re
-                            is_yyyymm = bool(re.match(r'^\d{6}$', str(d)))
-
-                            if is_yyyymm:
-                                if _dt.startswith(('NUMBER', 'INTEGER', 'INT', 'BIGINT')):
-                                    return str(d)
-                                else:
-                                    return f"'{d}'"
-                            else:
-                                original = _dc.to_original(str(d)) if _df else str(d)
-                                if _dt.startswith(('VARCHAR', 'CHAR', 'STRING', 'TEXT')):
-                                    return f"'{original}'"
-                                elif _dt.startswith(('DATE', 'TIMESTAMP')):
-                                    return f"DATE '{original}'"
-                                else:
-                                    return f"'{original}'"
-
-                        parts = []
-                        # Prepend original WHERE from extract config (stored in _metadata)
-                        original_where = (meta.get('where_clause') or '').strip()
-                        if original_where:
-                            parts.append(original_where)
-                        parts.append(f"{date_var} >= {_fmt_date(comp['overlap_start'])}")
-                        parts.append(f"{date_var} <= {_fmt_date(comp['overlap_end'])}")
-                        if excluded:
-                            excluded_list = ", ".join(_fmt_date(d) for d in excluded)
-                            parts.append(f"{date_var} NOT IN ({excluded_list})")
-                        where_map[src] = ' AND '.join(parts)
-
-                    pair_cfg['where_map'] = where_map
-
-                html_entries.append((pair_name, source_left, source_right, table_left, table_right, result, where_map))
-
-        # Automatically save to config when using --config
-        if config_path and is_unified:
-            print("\n💾 Saving to config file...")
-
-            # Update where_map for unified format
-            if is_unified:
-                from .config import set_pair_where_map
-                from datetime import datetime
-                for pair_name, source_left, source_right, table_left, table_right, result, where_map in html_entries:
-                    comp = get_row_comparison(args.project_db, pair_name)
-                    if comp:
-                        matching = comp.get('matching_dates', [])
-                        excluded = comp.get('excluded_dates', [])
-
-                        # Generate WHERE statements from dates
-                        left_cfg = config['pairs'][pair_name]['left']
-                        right_cfg = config['pairs'][pair_name]['right']
-                        where_left = _build_where_from_dates(left_cfg, matching, excluded, db_path=args.project_db)
-                        where_right = _build_where_from_dates(right_cfg, matching, excluded, db_path=args.project_db)
-
-                        set_pair_where_map(config, pair_name, where_left, where_right)
-
-                        # Save WHERE clauses to database immediately
-                        from .db import generic_update
-                        generic_update(
-                            args.project_db,
-                            "_row_comparison",
-                            {"pair_name": pair_name},
-                            {"where_left": where_left, "where_right": where_right}
-                        )
-
-                        # Initialize time_map at pair level with row/col sub-keys
-                        if 'time_map' not in config['pairs'][pair_name]:
-                            config['pairs'][pair_name]['time_map'] = {
-                                "row": {"left": "—", "right": "—"},
-                                "col": {"left": "—", "right": "—"}
-                            }
-
-                        # Initialize comment_map and diff_map if missing
-                        if 'comment_map' not in config['pairs'][pair_name]:
-                            config['pairs'][pair_name]['comment_map'] = {
-                                "row": {"left": "", "right": ""},
-                                "col": {"left": "", "right": ""}
-                            }
-                        if 'diff_map' not in config['pairs'][pair_name]:
-                            config['pairs'][pair_name]['diff_map'] = {}
-
-                        print(f"  ✓ {pair_name}: {len(matching)} matching dates")
-
-            # Write updated config back
-            from .config import save_unified_config
-            try:
-                if is_unified:
-                    save_unified_config(config, config_path)
-                else:
-                    with open(config_path, 'w') as f:
-                        json.dump(config, f, indent=2)
-                print(f"\n✓ Saved to: {config_path}")
-
-                # Pause for manual review and editing
-                print("\n" + "="*80)
-                print("📝 Review and edit the config file now")
-                print("="*80)
-                print(f"  File: {config_path}")
-                print()
-                print("  You can now:")
-                print("  - Add time_map values (check ./sas/_timing.csv and ./csv/_timing.csv)")
-                print("    Format: \"time_map\": {\"row\": {\"left\": \"5.2s\", \"right\": \"3.1s\"}, \"col\": {...}}")
-                print("  - Add comment_map notes (shown as ⓘ tooltips in HTML)")
-                print("    Format: \"comment_map\": {\"row\": {\"left\": \"note\", \"right\": \"\"}, \"col\": {...}}")
-                print("  - Review where_map")
-                print()
-                input("Press Enter when done editing...")
-
-                # Reload config file with user's edits
-                print("\n🔄 Reloading config from", config_path)
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-
-                # Sync to database (where_map WHERE statements are for display only)
-                # The actual date arrays are already in the database from compare-row
-                print("\n💾 Syncing to database...")
-                from .db import sync_config_to_db
-                sync_config_to_db(args.project_db, config)
-                print(f"✓ Synced to database: {args.project_db}")
-
-                # Show what was synced
-                if is_unified:
-                    for pair_name in config.get("pairs", {}):
-                        tm = config["pairs"][pair_name].get("time_map", {})
-                        if tm:
-                            parts = []
-                            for kind in ('row', 'col'):
-                                sub = tm.get(kind, {})
-                                if isinstance(sub, dict):
-                                    vals = [f"{k}={v}" for k, v in sub.items() if v and v != "—"]
-                                    if vals:
-                                        parts.append(f"{kind}: {{{', '.join(vals)}}}")
-                            if parts:
-                                print(f"  - {pair_name}: time_map = {{{', '.join(parts)}}}")
-
-                print(f"\n📄 Your edits are saved in: {config_path}")
-                print("   (File was NOT overwritten after sync)")
-
-            except Exception as e:
-                print(f"Warning: Could not save config: {e}")
-
-    elif args.pair:
-        pair = get_table_pair(args.project_db, args.pair)
-        if not pair:
-            print(f"Error: Pair '{args.pair}' not found")
-            sys.exit(1)
-        result = _print_row_comparison(
-            args.project_db, pair["table_left"], pair["table_right"],
-            pair.get("source_left", "left"), pair.get("source_right", "right"),
-            from_date=args.from_date, to_date=args.to_date,
-            pair_name=args.pair,
-        )
-        html_entries.append((args.pair, pair.get("source_left", "left"), pair.get("source_right", "right"),
-                            pair["table_left"], pair["table_right"], result, {}))
-    elif args.table_left and args.table_right:
-        result = _print_row_comparison(
-            args.project_db, args.table_left, args.table_right,
-            "left", "right",
-            from_date=args.from_date, to_date=args.to_date,
-        )
-        html_entries.append(("adhoc", "left", "right", args.table_left, args.table_right, result, {}))
-    else:
-        # Compare all pairs
-        pairs = list_table_pairs(args.project_db)
-        if not pairs:
-            print("No table pairs registered. Use 'dtrack load-map' or 'dtrack compare-row --config' to register pairs.")
-            sys.exit(1)
-        for pair in pairs:
-            result = _print_row_comparison(
-                args.project_db, pair["table_left"], pair["table_right"],
-                pair.get("source_left", "left"), pair.get("source_right", "right"),
-                from_date=args.from_date, to_date=args.to_date,
-                pair_name=pair["pair_name"],
-            )
-            html_entries.append((pair["pair_name"], pair.get("source_left", "left"), pair.get("source_right", "right"),
-                                pair["table_left"], pair["table_right"], result, {}))
-
-    # Write detailed log to ./output/compare_row.txt
-    if config_path and html_entries:
-        import io
-        output_dir = os.path.join(os.getcwd(), 'output')
-        os.makedirs(output_dir, exist_ok=True)
-        log_path = os.path.join(output_dir, 'compare_row.txt')
-        with open(log_path, 'w', encoding='utf-8') as log_f:
-            for pair_name, src_l, src_r, tbl_l, tbl_r, comp_result, where_map in html_entries:
-                s = comp_result['summary']
-                dr_l, dr_r = s['date_range_left'], s['date_range_right']
-                log_f.write(f"\n{'='*70}\n")
-                log_f.write(f"Pair: {pair_name}\n")
-                log_f.write(f"{src_l}: {dr_l[0]} to {dr_l[1]} | {s['count_left']} dates | total: {s['total_left']:,}\n")
-                log_f.write(f"{src_r}: {dr_r[0]} to {dr_r[1]} | {s['count_right']} dates | total: {s['total_right']:,}\n")
-                log_f.write(f"Matching: {len(comp_result['matching'])}, Mismatched: {len(comp_result['mismatched'])}, "
-                           f"Only {src_l}: {len(comp_result['only_left'])}, Only {src_r}: {len(comp_result['only_right'])}\n")
-                for dt, cl, cr in comp_result['mismatched']:
-                    log_f.write(f"  MISMATCH {dt}: {src_l}={cl:,}, {src_r}={cr:,}, diff={cr-cl:+,}\n")
-                for dt, c in comp_result['only_left']:
-                    log_f.write(f"  ONLY-{src_l} {dt}: {c:,}\n")
-                for dt, c in comp_result['only_right']:
-                    log_f.write(f"  ONLY-{src_r} {dt}: {c:,}\n")
-        print(f"Log: {log_path}")
-
-    # Generate HTML report if requested
-    if html_path and html_entries:
-        from .html_export import generate_row_count_html, create_row_count_table, wrap_html_document
-
-        row_sections = []
-        for pair_name, src_l, src_r, tbl_l, tbl_r, comp_result, where_map in html_entries:
-            meta_l = get_metadata(args.project_db, tbl_l)
-            meta_r = get_metadata(args.project_db, tbl_r)
-
-            # Read time_map from config (pair-level, row sub-key)
-            time_map = {}
-            if config_path and is_unified and pair_name in config.get('pairs', {}):
-                pair_time_map = config['pairs'][pair_name].get('time_map', {})
-                # New format: time_map.row.{left,right}
-                if 'row' in pair_time_map and isinstance(pair_time_map['row'], dict):
-                    time_map = pair_time_map['row']
-                else:
-                    # Legacy: flat time_map in metadata
-                    time_map = config['pairs'][pair_name].get('metadata', {}).get('time_map', {})
-
-            # Read comment from pair config (comment_map.row or legacy comment)
-            comment_left, comment_right = '', ''
-            if config_path and is_unified and pair_name in config.get('pairs', {}):
-                pair_cfg = config['pairs'][pair_name]
-                comment_map = pair_cfg.get('comment_map', {})
-                if comment_map and 'row' in comment_map:
-                    comment_left = comment_map['row'].get('left', '')
-                    comment_right = comment_map['row'].get('right', '')
-                else:
-                    # Legacy fallback
-                    comment = pair_cfg.get('comment', '')
-                    if isinstance(comment, dict):
-                        comment_left = comment.get('left', '')
-                        comment_right = comment.get('right', '')
-                    else:
-                        comment_left = comment_right = comment
-
-            # Get left/right config entries for banner
-            lcfg = config['pairs'][pair_name]['left'] if config_path and is_unified and pair_name in config.get('pairs', {}) else None
-            rcfg = config['pairs'][pair_name]['right'] if config_path and is_unified and pair_name in config.get('pairs', {}) else None
-
-            section = generate_row_count_html(
-                pair_name, src_l, src_r, tbl_l, tbl_r,
-                comp_result, metadata_left=meta_l, metadata_right=meta_r,
-                where_map=where_map,
-                time_map=time_map,
-                comment_left=comment_left,
-                comment_right=comment_right,
-                left_cfg=lcfg,
-                right_cfg=rcfg,
-            )
-            row_sections.append(section)
-
-        table_html = create_row_count_table(row_sections)
-
-        # Read title/subtitle from config metadata if available
-        if config_path and is_unified:
-            global_meta = config.get('metadata', {})
-            default_title = global_meta.get('title') or "Row Count Comparison"
-            default_subtitle = global_meta.get('subtitle') or "updates every Thursday"
-        else:
-            default_title = "Row Count Comparison"
-            default_subtitle = "updates every Thursday"
-
-        doc = wrap_html_document(
-            getattr(args, 'title', None) or default_title,
-            [table_html],
-            subtitle=getattr(args, 'subtitle', None) or default_subtitle,
-        )
-
-        with open(html_path, 'w', encoding='utf-8') as f:
-            f.write(doc)
-        print(f"HTML report: {html_path}")
-
-
-def cmd_compare_col(args):
-    """Compare column statistics between two tables"""
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        sys.exit(1)
-
-    config_path = getattr(args, 'config', None)
-    html_path = getattr(args, 'html', None)
-
-    # Default HTML to ./output/ when using --config
-    if config_path and not html_path:
-        output_dir = os.path.join(os.getcwd(), 'output')
-        os.makedirs(output_dir, exist_ok=True)
-        html_path = os.path.join(output_dir, 'compare_col.html')
-
-    # Batch mode: compare all pairs from config
-    if config_path:
-        import json
-        if not os.path.exists(config_path):
-            print(f"Error: Config file not found: {config_path}")
-            sys.exit(1)
-
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-
-        # Detect config format
-        is_unified = "pairs" in config and isinstance(config["pairs"], dict)
-
-        if not is_unified:
-            print("Error: compare-col --config requires unified config format")
-            sys.exit(1)
-
-        from .config import get_all_tables_from_unified
-        from .extract import _qualified_name
-
-        # Collect results for HTML generation
-        html_entries = []
-
-        for pair_name, pair_config in config["pairs"].items():
-            if pair_config.get("skip"):
-                print(f"  Skipping pair: {pair_name}")
-                continue
-            left = pair_config["left"]
-            right = pair_config["right"]
-            table_left = _qualified_name(left)
-            table_right = _qualified_name(right)
-            source_left = left.get("source", "left")
-            source_right = right.get("source", "right")
-            col_mappings = pair_config.get("col_map", {})
-
-            # Auto-register pair
-            register_table_pair(
-                args.project_db, pair_name,
-                table_left, table_right,
-                source_left=source_left,
-                source_right=source_right,
-                col_mappings=col_mappings if col_mappings else None,
-            )
-
-            # Sync date_col from config to metadata
-            dc_left = left.get('date_col', '')
-            dc_right = right.get('date_col', '')
-            from .db import patch_metadata
-            if dc_left:
-                patch_metadata(args.project_db, table_left, date_var=dc_left)
-            if dc_right:
-                patch_metadata(args.project_db, table_right, date_var=dc_right)
-
-            print(f"\n{'='*70}")
-            print(f"Comparing column stats: {pair_name}")
-            print(f"  {source_left}: {table_left}")
-            print(f"  {source_right}: {table_right}")
-            if dc_left or dc_right:
-                if dc_left == dc_right:
-                    print(f"  Date column: {dc_left}")
-                else:
-                    print(f"  Date column: {dc_left} / {dc_right}")
-            print(f"{'='*70}")
-
-            # Get matched dates from row comparison for filtering
-            matched_dates = None
-            if not args.no_date_filter:
-                row_result = compare_row_counts(
-                    args.project_db, table_left, table_right,
-                    from_date=args.from_date, to_date=args.to_date,
-                )
-                matched_dates = {dt for dt, _ in row_result['matching']}
-                if matched_dates:
-                    print(f"Filtering to {len(matched_dates)} matching dates from row comparison")
-
-            # Compare column statistics
-            result = compare_column_stats(
-                args.project_db, table_left, table_right,
-                columns=None,
-                col_mappings=col_mappings,
-                from_date=args.from_date, to_date=args.to_date,
-                matched_dates=matched_dates,
-            )
-
-            if result:
-                # Classify columns as matched or differing
-                from .compare import _has_col_differences
-                matched_cols = []
-                diff_cols = []
-
-                for col_name, comparisons in result.items():
-                    if any(_has_col_differences(comp) for comp in comparisons):
-                        diff_cols.append(col_name)
-                    else:
-                        matched_cols.append(col_name)
-
-                # Console: summary only
-                print(f"  {len(matched_cols)} match, {len(diff_cols)} diff"
-                      + (f" ({', '.join(sorted(diff_cols)[:4])}{'...' if len(diff_cols) > 4 else ''})" if diff_cols else ""))
-
-                # Save comparison results to database
-                from .db import save_col_comparison
-                save_col_comparison(
-                    args.project_db, pair_name,
-                    columns_compared=list(result.keys()),
-                    matched_columns=matched_cols,
-                    diff_columns=diff_cols,
-                    comparison_details=result,
-                )
-
-                # Build diff_map: {vintage_label: {col: {stat: {left: x, right: y}}}}
-                diff_map = {}
-                for col_name, comparisons in result.items():
-                    for comp in comparisons:
-                        if not _has_col_differences(comp):
-                            continue
-                        vlabel = comp.get('vintage_label', comp['dt'])
-                        if vlabel not in diff_map:
-                            diff_map[vlabel] = {}
-                        col_diffs = {}
-                        for stat in ('n_total', 'n_missing', 'n_unique'):
-                            d = comp.get(f'{stat}_diff', 0)
-                            if d != 0:
-                                col_diffs[stat] = {'left': comp[f'{stat}_left'], 'right': comp[f'{stat}_right']}
-                        if comp['col_type'] == 'numeric':
-                            for stat in ('mean', 'std'):
-                                d = comp.get(f'{stat}_diff')
-                                if d is not None and abs(d) > 0.01:
-                                    col_diffs[stat] = {'left': comp.get(f'{stat}_left'), 'right': comp.get(f'{stat}_right')}
-                        if col_diffs:
-                            diff_map[vlabel][col_name] = col_diffs
-                # Save diff_map to config
-                config['pairs'][pair_name]['diff_map'] = diff_map
-
-                html_entries.append((pair_name, source_left, source_right, table_left, table_right, result, col_mappings))
-            else:
-                print("  No matching columns found")
-
-            print()
-
-        # Write detailed log to ./output/compare_col.txt
-        if html_entries:
-            output_dir = os.path.join(os.getcwd(), 'output')
-            os.makedirs(output_dir, exist_ok=True)
-            log_path = os.path.join(output_dir, 'compare_col.txt')
-            with open(log_path, 'w', encoding='utf-8') as log_f:
-                for pair_name, src_l, src_r, tbl_l, tbl_r, comp_result, col_map in html_entries:
-                    log_f.write(f"\n{'='*70}\n")
-                    log_f.write(f"Pair: {pair_name}  ({tbl_l} vs {tbl_r})\n")
-                    log_f.write(f"{'='*70}\n")
-                    _write_detailed_col_log(log_f, comp_result, src_l, src_r)
-            print(f"Log: {log_path}")
-
-        # Generate HTML report if requested
-        if html_path and html_entries:
-            from .html_export import generate_column_stats_html, create_column_stats_table, wrap_html_document
-
-            col_sections = []
-            for pair_name, src_l, src_r, tbl_l, tbl_r, comp_result, col_map in html_entries:
-                meta_l = get_metadata(args.project_db, tbl_l)
-                meta_r = get_metadata(args.project_db, tbl_r)
-
-                # Read comment from pair config (comment_map.col or legacy comment)
-                comment_left, comment_right = '', ''
-                pair_cfg_comments = config['pairs'].get(pair_name, {})
-                comment_map = pair_cfg_comments.get('comment_map', {})
-                if comment_map and 'col' in comment_map:
-                    comment_left = comment_map['col'].get('left', '')
-                    comment_right = comment_map['col'].get('right', '')
-                else:
-                    # Legacy fallback
-                    comment = pair_cfg_comments.get('comment', '')
-                    if isinstance(comment, dict):
-                        comment_left = comment.get('left', '')
-                        comment_right = comment.get('right', '')
-                    else:
-                        comment_left = comment_right = comment
-
-                # Read time_map from config (pair-level, col sub-key)
-                col_time_map = {}
-                pair_time_map = config['pairs'].get(pair_name, {}).get('time_map', {})
-                if 'col' in pair_time_map and isinstance(pair_time_map['col'], dict):
-                    col_time_map = pair_time_map['col']
-
-                # Get left/right config entries for banner
-                lcfg = config['pairs'].get(pair_name, {}).get('left')
-                rcfg = config['pairs'].get(pair_name, {}).get('right')
-
-                section = generate_column_stats_html(
-                    pair_name, src_l, src_r, tbl_l, tbl_r,
-                    comp_result, col_map,
-                    metadata_left=meta_l,
-                    metadata_right=meta_r,
-                    time_map=col_time_map,
-                    comment_left=comment_left,
-                    comment_right=comment_right,
-                    left_cfg=lcfg,
-                    right_cfg=rcfg,
-                )
-                col_sections.append(section)
-
-            vintage = getattr(args, 'vintage', 'day')
-            table_html = create_column_stats_table(col_sections, vintage=vintage)
-
-            # Read title/subtitle from config metadata
-            global_meta = config.get('metadata', {})
-            default_title = global_meta.get('col_title') or "Column Statistics Comparison"
-            default_subtitle = global_meta.get('col_subtitle') or "updates first Thursday of every month"
-
-            doc = wrap_html_document(
-                getattr(args, 'title', None) or default_title,
-                [table_html],
-                subtitle=getattr(args, 'subtitle', None) or default_subtitle,
-            )
-
-            with open(html_path, 'w', encoding='utf-8') as f:
-                f.write(doc)
-            print(f"HTML report: {html_path}")
-
-        # Save config with diff_map updates
-        try:
-            from .config import save_unified_config
-            save_unified_config(config, config_path)
-            print(f"Config saved: {config_path}")
-
-            # Pause for manual review and editing
-            print("\n" + "="*80)
-            print("Review and edit the config file now")
-            print("="*80)
-            print(f"  File: {config_path}")
-            print()
-            print("  You can now:")
-            print("  - Review diff_map results")
-            print("  - Add comment_map notes (shown as tooltips in HTML)")
-            print("    Format: \"comment_map\": {\"col\": {\"left\": \"note\", \"right\": \"\"}}")
-            print()
-            input("Press Enter when done editing...")
-
-            # Reload config file with user's edits
-            print("\nReloading config from", config_path)
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-
-        except Exception as e:
-            print(f"Warning: Could not save config: {e}")
-
-        return
-
-    # Single pair or ad-hoc mode
-    # Determine table names and column mapping
-    if args.pair:
-        pair = get_table_pair(args.project_db, args.pair)
-        if not pair:
-            print(f"Error: Pair '{args.pair}' not found")
-            sys.exit(1)
-        table_left = pair["table_left"]
-        table_right = pair["table_right"]
-        source_left = pair.get("source_left", "left")
-        source_right = pair.get("source_right", "right")
-        col_mappings = pair.get("col_mappings", {})
-    else:
-        if not args.table_left or not args.table_right:
-            print("Error: Either --pair or both table names must be specified")
-            sys.exit(1)
-        table_left = args.table_left
-        table_right = args.table_right
-        source_left = "left"
-        source_right = "right"
-        col_mappings = {}
-
-    # Override with --col-map if provided
-    if args.col_map:
-        col_mappings = parse_col_map_string(args.col_map)
-
-    # Parse columns if provided
-    columns = None
-    if args.columns:
-        columns = [c.strip() for c in args.columns.split(',')]
-
-    print(f"\nComparing column stats: {table_left} vs {table_right}")
-
-    # Show date column from metadata
-    meta_l = get_metadata(args.project_db, table_left)
-    meta_r = get_metadata(args.project_db, table_right)
-    dc_left = (meta_l.get('date_var') or '') if meta_l else ''
-    dc_right = (meta_r.get('date_var') or '') if meta_r else ''
-    if dc_left or dc_right:
-        if dc_left == dc_right:
-            print(f"Date column: {dc_left}")
-        else:
-            print(f"Date column: {dc_left} / {dc_right}")
-
-    if args.from_date or args.to_date:
-        date_range = f"{args.from_date or 'beginning'} to {args.to_date or 'end'}"
-        print(f"Date range: {date_range}")
-    if col_mappings:
-        print(f"Column mapping: {len(col_mappings)} columns mapped")
-
-    # Auto-filter to matched dates when --pair is used (unless --no-date-filter)
-    matched_dates = None
-    if args.pair and not args.no_date_filter:
-        row_result = compare_row_counts(
-            args.project_db, table_left, table_right,
-            from_date=args.from_date, to_date=args.to_date,
-        )
-        all_common = len(row_result['matching']) + len(row_result['mismatched'])
-        matched_dates = {dt for dt, _ in row_result['matching']}
-        excluded = len(row_result['mismatched']) + len(row_result['only_left']) + len(row_result['only_right'])
-        total = all_common + len(row_result['only_left']) + len(row_result['only_right'])
-        print(f"Filtering to {len(matched_dates)}/{total} dates (excluding {excluded} mismatched)")
-
-    print("=" * 70)
-
-    # Vintage windowing
-    vintage = getattr(args, 'vintage', None)
-    if vintage:
-        from .date_utils import bucket_date
-        dates_to_use = matched_dates if matched_dates is not None else None
-
-        # If no matched_dates computed yet, get all common dates
-        if dates_to_use is None:
-            from .db import get_col_stats as _gcs
-            stats_l = _gcs(args.project_db, table_left, from_date=args.from_date, to_date=args.to_date)
-            stats_r = _gcs(args.project_db, table_right, from_date=args.from_date, to_date=args.to_date)
-            dates_to_use = {s['dt'] for s in stats_l} & {s['dt'] for s in stats_r}
-
-        # Group into vintage buckets
-        buckets = {}
-        for dt in sorted(dates_to_use):
-            bucket = bucket_date(dt, vintage)
-            buckets.setdefault(bucket, set()).add(dt)
-
-        for bucket_key in sorted(buckets):
-            bucket_dates = buckets[bucket_key]
-            print(f"\n=== {bucket_key} ({len(bucket_dates)} matched dates) ===")
-
-            result = compare_column_stats(
-                args.project_db, table_left, table_right,
-                columns=columns, col_mappings=col_mappings,
-                from_date=args.from_date, to_date=args.to_date,
-                matched_dates=bucket_dates,
-            )
-
-            if not result:
-                print("  No matching columns found")
-                continue
-
-            _print_col_comparison(result, source_left, source_right)
-
-        print()
-        return
-
-    # Non-vintage comparison
-    result = compare_column_stats(
-        args.project_db, table_left, table_right,
-        columns=columns, col_mappings=col_mappings,
-        from_date=args.from_date, to_date=args.to_date,
-        matched_dates=matched_dates,
-    )
-
-    if not result:
-        print("\nNo matching columns found for comparison")
-        return
-
-    _print_col_comparison(result, source_left, source_right)
-    print()
-
-
-def _print_col_comparison(result, source_left, source_right):
-    """Print column comparison results."""
-    for col_name, comparisons in result.items():
-        if not comparisons:
+            with open(csv_path, 'r', newline='') as f:
+                reader = csv_mod.DictReader(f)
+                for row in reader:
+                    src = row.get('source') or row.get('SOURCE', '')
+                    tbl = row.get('table') or row.get('TABLE', '')
+                    col = row.get('column_name') or row.get('COLUMN_NAME', '')
+                    dt = row.get('data_type') or row.get('DATA_TYPE', '')
+                    if tbl and col:
+                        key = (src.lower(), tbl.lower())
+                        csv_lookup.setdefault(key, {})[col] = dt
+
+    for tbl in tables:
+        source = tbl.get('source', '')
+        qname = qualified_name(tbl)
+        raw_table = tbl['table']
+        name = tbl.get('name', '')
+
+        csv_key = (source.lower(), raw_table.lower())
+        csv_key_name = (source.lower(), name.lower())
+        matched_key = csv_key if csv_key in csv_lookup else (csv_key_name if csv_key_name in csv_lookup else None)
+
+        if matched_key:
+            columns = csv_lookup[matched_key]
+            count = insert_column_meta(args.project_db, qname, columns, source=source)
+            print(f"{qname}: loaded {count} columns from CSV")
             continue
 
-        first = comparisons[0]
-        col_type = first["col_type"]
-        left_col = first["left_col"]
-        right_col = first["right_col"]
-
-        print(f"\nColumn: {left_col} ({col_type})")
-        if left_col != right_col:
-            print(f"  {source_left}: {left_col} → {source_right}: {right_col}")
-        print("-" * 70)
-
-        if col_type == "numeric":
-            # Determine which columns have any differences
-            has_n_total_diff = any(comp.get('n_total_diff', 0) != 0 for comp in comparisons)
-            has_n_miss_diff = any(comp.get('n_missing_diff', 0) != 0 for comp in comparisons)
-            has_mean_diff = any(comp.get('mean_diff') is not None and abs(comp.get('mean_diff', 0)) > 0.01 for comp in comparisons)
-            has_std_diff = any(comp.get('std_diff') is not None and abs(comp.get('std_diff', 0)) > 0.01 for comp in comparisons)
-
-            # Build header with only differing columns
-            headers = ["Vintage"]
-            if has_n_total_diff:
-                headers.append("n_total")
-            if has_n_miss_diff:
-                headers.append("n_miss")
-            if has_mean_diff:
-                headers.append("mean")
-            if has_std_diff:
-                headers.append("std")
-
-            if len(headers) == 1:
-                print("  ✓ All statistics match")
-                continue
-
-            # Print header
-            header_line = f"{'Vintage':<20} " + " ".join(f"{h:<20}" for h in headers[1:])
-            print(header_line)
-            print("-" * 70)
-
-            for comp in comparisons[:5]:
-                vlabel = comp.get('vintage_label', comp['dt'])
-                row_parts = [f"{vlabel:<20}"]
-
-                if has_n_total_diff:
-                    row_parts.append(f"{comp['n_total_left']:,} / {comp['n_total_right']:,} ({comp['n_total_diff']:+,})")
-                if has_n_miss_diff:
-                    row_parts.append(f"{comp['n_missing_left']:,} / {comp['n_missing_right']:,} ({comp['n_missing_diff']:+,})")
-                if has_mean_diff:
-                    if comp['mean_left'] is not None and comp['mean_right'] is not None:
-                        row_parts.append(f"{comp['mean_left']:.1f} / {comp['mean_right']:.1f} ({comp['mean_diff']:+.1f})")
-                    else:
-                        row_parts.append("N/A")
-                if has_std_diff:
-                    if comp['std_left'] is not None and comp['std_right'] is not None:
-                        row_parts.append(f"{comp['std_left']:.1f} / {comp['std_right']:.1f} ({comp['std_diff']:+.1f})")
-                    else:
-                        row_parts.append("N/A")
-
-                print(" ".join(f"{part:<20}" if i > 0 else part for i, part in enumerate(row_parts)))
-
-            if len(comparisons) > 5:
-                print(f"  ... ({len(comparisons) - 5} more dates)")
-        else:
-            # Determine which columns have any differences
-            has_n_total_diff = any(comp.get('n_total_diff', 0) != 0 for comp in comparisons)
-            has_n_miss_diff = any(comp.get('n_missing_diff', 0) != 0 for comp in comparisons)
-            has_n_uniq_diff = any(comp.get('n_unique_diff', 0) != 0 for comp in comparisons)
-
-            # Build header with only differing columns
-            headers = ["Vintage"]
-            if has_n_total_diff:
-                headers.append("n_total")
-            if has_n_miss_diff:
-                headers.append("n_miss")
-            if has_n_uniq_diff:
-                headers.append("n_unique")
-
-            if len(headers) == 1:
-                print("  ✓ All statistics match")
-                continue
-
-            # Print header
-            header_line = f"{'Vintage':<20} " + " ".join(f"{h:<20}" for h in headers[1:])
-            print(header_line)
-            print("-" * 70)
-
-            for comp in comparisons[:5]:
-                vlabel = comp.get('vintage_label', comp['dt'])
-                row_parts = [f"{vlabel:<20}"]
-
-                if has_n_total_diff:
-                    row_parts.append(f"{comp['n_total_left']:,} / {comp['n_total_right']:,} ({comp['n_total_diff']:+,})")
-                if has_n_miss_diff:
-                    row_parts.append(f"{comp['n_missing_left']:,} / {comp['n_missing_right']:,} ({comp['n_missing_diff']:+,})")
-                if has_n_uniq_diff:
-                    row_parts.append(f"{comp['n_unique_left']:,} / {comp['n_unique_right']:,} ({comp['n_unique_diff']:+,})")
-
-                print(" ".join(f"{part:<20}" if i > 0 else part for i, part in enumerate(row_parts)))
-
-            if len(comparisons) > 5:
-                print(f"  ... ({len(comparisons) - 5} more dates)")
-
-            # Show top_10 differences if they exist
-            has_top10_diff = any(comp.get('top_10_left') != comp.get('top_10_right') for comp in comparisons)
-            if has_top10_diff:
-                print()
-                print("  Top 10 value differences detected:")
-                import json
-                for comp in comparisons[:3]:  # Show first 3 dates with top_10
-                    top10_left = comp.get('top_10_left')
-                    top10_right = comp.get('top_10_right')
-                    if top10_left != top10_right and top10_left and top10_right:
-                        try:
-                            left_vals = json.loads(top10_left) if isinstance(top10_left, str) else top10_left
-                            right_vals = json.loads(top10_right) if isinstance(top10_right, str) else top10_right
-                            print(f"    {comp['dt']}: {len(left_vals)} vs {len(right_vals)} unique values (see HTML for details)")
-                        except:
-                            pass
-
-
-def _write_detailed_col_log(f, result, source_left, source_right):
-    """Write detailed column comparison log with top-10 freq and stat diffs."""
-    import json as _json
-
-    for col_name, comparisons in sorted(result.items()):
-        if not comparisons:
-            continue
-
-        first = comparisons[0]
-        col_type = first["col_type"]
-        left_col = first["left_col"]
-        right_col = first["right_col"]
-
-        col_display = f"{left_col} -> {right_col}" if left_col != right_col else left_col
-        f.write(f"\n{'─'*70}\n")
-        f.write(f"Column: {col_display} ({col_type})\n")
-        f.write(f"{'─'*70}\n")
-
-        for comp in comparisons:
-            vlabel = comp.get('vintage_label', comp['dt'])
-            dt = comp['dt']
-
-            # Collect stat diffs (only non-zero)
-            stat_diffs = []
-            for stat in ('n_total', 'n_missing', 'n_unique'):
-                d = comp.get(f'{stat}_diff', 0)
-                if d != 0:
-                    stat_diffs.append(f"  {stat}: {comp[f'{stat}_left']:,} / {comp[f'{stat}_right']:,} ({d:+,})")
-            if col_type == 'numeric':
-                for stat in ('mean', 'std'):
-                    d = comp.get(f'{stat}_diff')
-                    if d is not None and abs(d) > 0.01:
-                        stat_diffs.append(f"  {stat}: {comp.get(f'{stat}_left'):.4f} / {comp.get(f'{stat}_right'):.4f} ({d:+.4f})")
-
-            has_stat_diff = len(stat_diffs) > 0
-
-            f.write(f"\n  Vintage: {vlabel}  (dt={dt})\n")
-            if stat_diffs:
-                f.write("  Stat differences:\n")
-                for line in stat_diffs:
-                    f.write(f"  {line}\n")
-            else:
-                f.write("  Stats: all match\n")
-
-            # Top-10 freq for both sides
-            for side, label in [('left', source_left), ('right', source_right)]:
-                top10 = comp.get(f'top_10_{side}', '')
-                if not top10:
-                    continue
-                try:
-                    vals = _json.loads(top10) if isinstance(top10, str) and top10.startswith('[') else top10
-                except:
-                    vals = top10
-                if isinstance(vals, list):
-                    items = [f"{v.get('value','?')}({v.get('count','?')})" for v in vals[:10]]
-                    f.write(f"  Top-10 [{label}]: {'; '.join(items)}\n")
-                elif isinstance(vals, str) and vals:
-                    f.write(f"  Top-10 [{label}]: {vals}\n")
-
-
-def cmd_show_stats(args):
-    """Show column statistics"""
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        sys.exit(1)
-
-    stats = get_col_stats(
-        args.project_db,
-        args.table,
-        column_name=args.column,
-        from_date=args.from_date,
-        to_date=args.to_date,
-        limit=args.limit,
-    )
-
-    if not stats:
-        print(f"No statistics found for table: {args.table}")
-        return
-
-    # Show metadata
-    metadata = get_metadata(args.project_db, args.table)
-    if metadata:
-        print(f"\nTable: {args.table}")
-        print(f"Source: {metadata.get('source', 'N/A')}")
-        print(f"Database: {metadata.get('db', 'N/A')}")
-        print()
-
-    # Group by column
-    from itertools import groupby
-
-    stats.sort(key=lambda x: (x['column_name'], x['dt']))
-
-    for column_name, group in groupby(stats, key=lambda x: x['column_name']):
-        group_list = list(group)
-        col_type = group_list[0]['col_type']
-
-        print(f"\nColumn: {column_name} ({col_type})")
-        print("-" * 80)
-
-        if col_type == 'numeric':
-            print(f"{'Date':<12} {'n_total':>10} {'n_missing':>10} {'n_unique':>10} {'mean':>12} {'std':>12}")
-            print("-" * 80)
-            for s in group_list:
-                mean_str = f"{s['mean']:.2f}" if s['mean'] is not None else "N/A"
-                std_str = f"{s['std']:.2f}" if s['std'] is not None else "N/A"
-                print(f"{s['dt']:<12} {s['n_total']:>10} {s['n_missing']:>10} {s['n_unique']:>10} {mean_str:>12} {std_str:>12}")
-        else:
-            print(f"{'Date':<12} {'n_total':>10} {'n_missing':>10} {'n_unique':>10} {'min':<15} {'max':<15}")
-            print("-" * 80)
-            for s in group_list:
-                min_val = s['min_val'] if s['min_val'] else "N/A"
-                max_val = s['max_val'] if s['max_val'] else "N/A"
-                print(f"{s['dt']:<12} {s['n_total']:>10} {s['n_missing']:>10} {s['n_unique']:>10} {min_val:<15} {max_val:<15}")
-
-
-def cmd_gen_sas(args):
-    """Generate SAS extraction files from config"""
-    from .extract import gen_sas
-
-    if not os.path.exists(args.config):
-        print(f"Error: Config file not found: {args.config}")
-        sys.exit(1)
-
-    env_path = getattr(args, 'env', None)
-    if env_path and not os.path.exists(env_path):
-        print(f"Error: .env file not found: {env_path}")
-        sys.exit(1)
-
-    types = [args.type] if args.type != "both" else ["row", "col"]
-
-    print(f"Generating SAS files from: {args.config}")
-    print(f"Output directory: {args.outdir}")
-    print(f"Types: {', '.join(types)}")
-    print()
-
-    db_path = getattr(args, 'db_path', None)
-    vintage = getattr(args, 'vintage', None)
-    gen_sas(args.config, args.outdir, types=types, env_path=env_path, db_path=db_path, vintage=vintage)
-
-
-def cmd_gen_aws(args):
-    """Generate/extract data from AWS Athena"""
-    if not os.path.exists(args.config):
-        print(f"Error: Config file not found: {args.config}")
-        sys.exit(1)
-
-    db_path = getattr(args, 'db_path', None)
-
-    from .extract import extract_aws
-    types = [args.type] if args.type != "both" else ["row", "col"]
-    print(f"Extracting from AWS Athena using: {args.config}")
-    print(f"Output directory: {args.outdir}")
-    print(f"Types: {', '.join(types)}")
-    workers = args.workers
-    if workers:
-        print(f"Workers: {workers}")
-    print()
-    vintage = getattr(args, 'vintage', None)
-    force = getattr(args, 'force', False)
-    extract_aws(args.config, args.outdir, types=types, max_workers=workers, db_path=db_path, vintage=vintage, force=force)
-
-
-def cmd_load_col_stats(args):
-    """Load pre-computed column statistics from CSV or folder"""
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        print(f"Run: dtrack init {args.project_db}")
-        sys.exit(1)
-
-    # Check if config is provided for batch processing
-    config_path = getattr(args, 'config', None)
-    if config_path:
-        import json
-        if not os.path.exists(config_path):
-            print(f"Error: Config file not found: {config_path}")
-            sys.exit(1)
-
-        folder_path = getattr(args, 'csv_file', None) or getattr(args, 'file_or_folder', None)
-        if not folder_path or not os.path.isdir(folder_path):
-            print(f"Error: When using --config, provide a folder path (not a single file)")
-            sys.exit(1)
-
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-
-        # Check if it's unified format or old format
-        if "pairs" in config and isinstance(config["pairs"], dict):
-            # Unified format - extract all tables
-            from .config import get_all_tables_from_unified
-            tables = get_all_tables_from_unified(config)
-        else:
-            # Old format
-            tables = config.get('tables', [])
-
-        from .extract import _qualified_name
-        for tbl in tables:
-            qname = _qualified_name(tbl)
-            csv_path = os.path.join(folder_path, f"{qname}_col.csv")
-            if not os.path.exists(csv_path):
-                print(f"WARNING: {csv_path} not found, skipping {qname}")
-                continue
-
-            print(f"\n--- {qname} ---")
-            # Use vintage from config, fall back to _metadata, then 'day'
-            table_vintage = tbl.get('vintage')
-            if not table_vintage:
-                meta = get_metadata(args.project_db, qname)
-                table_vintage = (meta.get('vintage') or 'day') if meta else 'day'
-            count = load_precomputed_col_stats(
-                db_path=args.project_db,
-                csv_path=csv_path,
-                table_name=qname,
-                mode=args.mode,
-                source=tbl.get('source'),
-                db_name=tbl.get('conn_macro'),
-                vintage=table_vintage,
-            )
-            print(f"  ✓ Loaded {count} stat rows")
-        return
-
-    # Single file mode
-    csv_file = getattr(args, 'csv_file', None) or getattr(args, 'file_or_folder', None)
-    if not csv_file:
-        print("Error: CSV file or folder required")
-        sys.exit(1)
-
-    if not os.path.exists(csv_file):
-        print(f"Error: CSV file not found: {csv_file}")
-        sys.exit(1)
-
-    table = getattr(args, 'table', None)
-    if not table:
-        print("Error: --table is required when loading a single file")
-        sys.exit(1)
-
-    # Look up vintage from _metadata if available
-    meta = get_metadata(args.project_db, table)
-    table_vintage = (meta.get('vintage') or 'day') if meta else 'day'
-
-    print(f"Loading pre-computed column statistics")
-    print(f"  Source: {csv_file}")
-    print(f"  Table: {table}")
-    print(f"  Mode: {args.mode}")
-    print(f"  Vintage: {table_vintage}")
-
-    count = load_precomputed_col_stats(
-        db_path=args.project_db,
-        csv_path=csv_file,
-        table_name=table,
-        mode=args.mode,
-        vintage=table_vintage,
-    )
-    print(f"✓ Loaded {count} stat rows")
-
-
-def _save_matched_to_config(config, is_unified, matched_columns, config_path):
-    """Save matched columns into config file."""
-    import json
-    for pair_name, matched in matched_columns.items():
-        if is_unified:
-            config['pairs'][pair_name]['col_map'] = matched
-        else:
-            for pair in config['pairs']:
-                if pair.get('name') == pair_name:
-                    pair['col_map'] = matched
-                    break
-
-    from .config import save_unified_config
-    if is_unified:
-        save_unified_config(config, config_path)
-    else:
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=2)
-
-    for pair_name, matched in matched_columns.items():
-        print(f"  {pair_name}: {len(matched)} column mappings saved")
-    print(f"Saved to: {config_path}")
-
-
-def _sync_config_to_db(project_db, config_path):
-    """Reload config from disk and sync to database."""
-    import json
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    from .db import sync_config_to_db
-    sync_config_to_db(project_db, config)
-    print(f"Synced to database: {project_db}")
-
-
-def cmd_match_columns(args):
-    """Match columns between tables - single pair or all pairs from config"""
-    import json
-    from .extract import match_columns_from_dicts
-
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        sys.exit(1)
-
-    # Mode 1: All pairs from config
-    if args.config:
-        if not os.path.exists(args.config):
-            print(f"Error: Config file not found: {args.config}")
-            sys.exit(1)
-
-        with open(args.config, 'r') as f:
-            config = json.load(f)
-
-        # Detect config format
-        is_unified = "pairs" in config and isinstance(config["pairs"], dict)
-
-        if not config.get('pairs'):
-            print("No pairs found in config")
-            sys.exit(1)
-
-        pairs_list = list(config['pairs'].items()) if is_unified else [(p.get('name'), p) for p in config['pairs']]
-        print(f"Matching columns for {len(pairs_list)} pair(s)...")
-        print()
-
-        matched_columns = {}  # Store matched columns for each pair
-
-        for pair_name, pair_config in pairs_list:
-            if is_unified:
-                # Unified format
-                from .extract import _qualified_name
-                left = pair_config['left']
-                right = pair_config['right']
-                left_table = _qualified_name(left)
-                right_table = _qualified_name(right)
-                left_src = left.get('source', 'left')
-                right_src = right.get('source', 'right')
-            else:
-                # Old format
-                pair = pair_config
-                pair_name = pair.get('name', '?')
-                tables = pair.get('tables', {})
-
-                # Get table names from all sources in the pair
-                table_names = []
-                for src, tbl_info in tables.items():
-                    table_name = tbl_info.get('table_name')
-                    if table_name:
-                        table_names.append((src, table_name))
-
-                if len(table_names) < 2:
-                    print(f"⚠️  Pair '{pair_name}': Need at least 2 tables, skipping")
-                    print()
-                    continue
-
-                # Match first two tables (typically left vs right)
-                left_src, left_table = table_names[0]
-                right_src, right_table = table_names[1]
-
-            print(f"=== Pair: {pair_name} ===")
-            print(f"  Left:  {left_table} ({left_src})")
-            print(f"  Right: {right_table} ({right_src})")
-            print()
-
-            left_meta = get_column_meta(args.project_db, left_table)
-            right_meta = get_column_meta(args.project_db, right_table)
-
-            if not left_meta:
-                print(f"⚠️  No column metadata found for: {left_table}")
-                print()
-                continue
-            if not right_meta:
-                print(f"⚠️  No column metadata found for: {right_table}")
-                print()
-                continue
-
-            left_cols = {m['column_name']: m['data_type'] or '' for m in left_meta}
-            right_cols = {m['column_name']: m['data_type'] or '' for m in right_meta}
-
-            # Get existing col_map to exclude already-mapped columns
-            replace_mode = getattr(args, 'mode', 'merge') == 'replace'
-            existing_col_map = {} if replace_mode else (pair_config.get('col_map', {}) if is_unified else {})
-
-            result = match_columns_from_dicts(left_cols, right_cols, left_table, right_table, outfile=None)
-
-            # Filter out columns that are already in existing col_map
-            left_only = result.get(f'{left_table}_only', [])
-            right_only = result.get(f'{right_table}_only', [])
-            matched = result.get('matched', {})
-
-            # Merge auto-matched with existing col_map
-            all_matched = {**matched, **existing_col_map}
-
-            # Remove columns from unmapped lists if they're in existing col_map
-            existing_left_cols = set(existing_col_map.keys())
-            existing_right_cols = set(existing_col_map.values())
-            left_only = [col for col in left_only if col['name'] not in existing_left_cols]
-            right_only = [col for col in right_only if col['name'] not in existing_right_cols]
-
-            # Use all_matched for final save
-            matched = all_matched
-
-            auto_count = len(matched) - len(existing_col_map)
-            print(f"Auto-matched: {auto_count} columns (case-insensitive)")
-            if existing_col_map:
-                print(f"Existing mappings: {len(existing_col_map)}")
-            print()
-
-            if left_only or right_only:
-                # Build unmapped file content
-                left_unmapped = sorted([(c['name'], c['type']) for c in left_only], key=lambda x: x[0].lower())
-                right_unmapped = sorted([(c['name'], c['type']) for c in right_only], key=lambda x: x[0].lower())
-
-                left_width = 40
-                output_lines = []
-                output_lines.append(f"{'LEFT (' + left_src + ')':<{left_width}}  RIGHT ({right_src})")
-                output_lines.append("─" * 80)
-
-                i, j = 0, 0
-                while i < len(left_unmapped) or j < len(right_unmapped):
-                    ln, lt = left_unmapped[i] if i < len(left_unmapped) else ("", "")
-                    rn, rt = right_unmapped[j] if j < len(right_unmapped) else ("", "")
-                    if not ln:
-                        output_lines.append(f"{'':<{left_width}}  {rn} ({rt})")
-                        j += 1
-                    elif not rn:
-                        output_lines.append(f"{ln} ({lt})")
-                        i += 1
-                    elif ln.lower() < rn.lower():
-                        output_lines.append(f"{ln} ({lt})")
-                        i += 1
-                    else:
-                        output_lines.append(f"{'':<{left_width}}  {rn} ({rt})")
-                        j += 1
-
-                # Write unmapped file to map/ directory
-                os.makedirs("map", exist_ok=True)
-                safe_name = re.sub(r'[^\w\-]', '_', pair_name)
-                unmapped_path = os.path.join("map", f"{safe_name}_unmapped.txt")
-                with open(unmapped_path, 'w', encoding='utf-8') as f:
-                    f.write('\n'.join(output_lines))
-
-                total_cols = min(len(left_cols), len(right_cols))
-                print(f"Mapped: {len(matched)}/{total_cols} columns (auto: {auto_count}, existing: {len(existing_col_map)})")
-                print(f"Unmapped: {len(left_only)} {left_src}-only | {len(right_only)} {right_src}-only")
-                print(f"Details: {unmapped_path}")
-                print()
-
-                # --- Annotation loop ---
-                manual_count = 0
-                left_names = {c['name'] for c in left_only}
-                right_names = {c['name'] for c in right_only}
-
-                while True:
-                    print("Type column mappings (LEFT_COL  RIGHT_COL), wildcards supported (PREFIX_*  prefix_*)")
-                    print("Two empty lines to commit batch. Enter nothing twice to skip.")
-                    empty_count = 0
-                    batch = []
-
-                    while True:
-                        try:
-                            line = input("> ").strip()
-                        except EOFError:
-                            empty_count = 2
-                            break
-                        if not line:
-                            empty_count += 1
-                            if empty_count >= 2:
-                                break
-                        else:
-                            empty_count = 0
-                            batch.append(line)
-
-                    if not batch:
-                        # No mappings entered, skip annotation
-                        break
-
-                    # Process batch - resolve wildcards and direct mappings
-                    new_maps = {}
-                    for entry in batch:
-                        parts = entry.split()
-                        if len(parts) != 2:
-                            print(f"  Skipping invalid: {entry}")
-                            continue
-                        lp, rp = parts
-
-                        if '*' in lp or '*' in rp:
-                            # Wildcard matching
-                            l_prefix, l_suffix = lp.split('*', 1) if '*' in lp else (lp, '')
-                            r_prefix, r_suffix = rp.split('*', 1) if '*' in rp else (rp, '')
-
-                            for ln in list(left_names):
-                                if ln.startswith(l_prefix) and ln.endswith(l_suffix):
-                                    variable = ln[len(l_prefix):len(ln) - len(l_suffix) if l_suffix else len(ln)]
-                                    candidate = r_prefix + variable + r_suffix
-                                    # Case-insensitive search in right_names
-                                    for rn in list(right_names):
-                                        if rn.lower() == candidate.lower():
-                                            new_maps[ln] = rn
-                                            break
-                        else:
-                            # Direct mapping - find exact or case-insensitive match
-                            actual_left = None
-                            for ln in left_names:
-                                if ln.lower() == lp.lower():
-                                    actual_left = ln
-                                    break
-                            actual_right = None
-                            for rn in right_names:
-                                if rn.lower() == rp.lower():
-                                    actual_right = rn
-                                    break
-                            if actual_left and actual_right:
-                                new_maps[actual_left] = actual_right
-                            else:
-                                missing = []
-                                if not actual_left:
-                                    missing.append(f"left: {lp}")
-                                if not actual_right:
-                                    missing.append(f"right: {rp}")
-                                print(f"  Not found: {', '.join(missing)}")
-
-                    if new_maps:
-                        matched.update(new_maps)
-                        left_names -= set(new_maps.keys())
-                        right_names -= set(new_maps.values())
-                        manual_count += len(new_maps)
-
-                        # Update unmapped file
-                        remaining_lines = [output_lines[0], output_lines[1]]
-                        for ol in output_lines[2:]:
-                            # Check if any matched column appears in this line
-                            skip = False
-                            for lk, rv in new_maps.items():
-                                if lk in ol or rv in ol:
-                                    skip = True
-                                    break
-                            if not skip:
-                                remaining_lines.append(ol)
-                        output_lines = remaining_lines
-                        with open(unmapped_path, 'w', encoding='utf-8') as f:
-                            f.write('\n'.join(output_lines))
-
-                        print(f"  Mapped {len(new_maps)} columns")
-
-                    print()
-                    total_cols = min(len(left_cols), len(right_cols))
-                    pct = len(matched) / total_cols * 100 if total_cols else 100
-                    print(f"{pair_name}: {len(matched)}/{total_cols} mapped ({pct:.0f}%) — auto: {auto_count}, manual: {manual_count}, existing: {len(existing_col_map)}")
-                    print(f"  unmapped: {len(left_names)} {left_src}-only | {len(right_names)} {right_src}-only")
-                    print()
-
-                    if not left_names and not right_names:
-                        print("All columns mapped!")
-                        break
-
-                    resp = input("[c]ontinue annotating / [f]inish (next table) / [q]uit: ").strip().lower()
-                    if resp == 'q':
-                        matched_columns[pair_name] = matched
-                        # Save and sync before quitting
-                        _save_matched_to_config(config, is_unified, matched_columns, args.config)
-                        _sync_config_to_db(args.project_db, args.config)
-                        return
-                    elif resp != 'c':
-                        break  # 'f' or anything else -> next table
-
-            else:
-                print("All columns matched!")
-                print()
-
-            matched_columns[pair_name] = matched
-
-        # Save config and sync to DB
-        if matched_columns:
-            _save_matched_to_config(config, is_unified, matched_columns, args.config)
-            _sync_config_to_db(args.project_db, args.config)
-
-    # Mode 2: Single pair from --left and --right
-    elif args.left and args.right:
-        left_meta = get_column_meta(args.project_db, args.left)
-        right_meta = get_column_meta(args.project_db, args.right)
-
-        if not left_meta:
-            print(f"Error: No column metadata found for table: {args.left}")
-            sys.exit(1)
-        if not right_meta:
-            print(f"Error: No column metadata found for table: {args.right}")
-            sys.exit(1)
-
-        left_cols = {m['column_name']: m['data_type'] or '' for m in left_meta}
-        right_cols = {m['column_name']: m['data_type'] or '' for m in right_meta}
-
-        match_columns_from_dicts(left_cols, right_cols, args.left, args.right, outfile=None)
-
-    else:
-        print("Error: Must provide either --config or both --left and --right")
-        sys.exit(1)
+        conn_macro = tbl.get('conn_macro', '')
+        print(f"{qname}: discovering columns from {source} ({conn_macro}: {raw_table})")
+        _load_columns_entry(args.project_db, qname, raw_table, source, conn_macro)
 
 
 def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
-    """Discover and load columns for one table entry.
-
-    Args:
-        project_db: Path to database file
-        store_name: Name to store under in _column_meta (qualified name)
-        raw_table: Actual table name for discovery queries / mock paths
-        source: Source identifier (pcds, oracle, aws)
-        conn_macro: Oracle macro name or Athena database name
-    """
+    """Discover and load columns for one table entry."""
     import csv as csv_mod
 
     if conn_macro and source.lower() == 'aws':
@@ -2063,7 +229,7 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
                         columns[name] = dtype
             print(f"[mock] Loaded {len(columns)} columns from {mock_csv}")
         else:
-            from .extract import _discover_columns_athena, athena_connect, aws_creds_renew
+            from .platforms.athena import _discover_columns_athena, athena_connect, aws_creds_renew
             print(f"Connecting to Athena ({conn_macro})...")
             aws_creds_renew()
             conn = athena_connect(data_base=conn_macro)
@@ -2074,12 +240,8 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
             conn.close()
 
         if not columns:
-            print(f"WARNING: No columns found for {conn_macro}.{raw_table}, skipping {store_name}")
+            print(f"WARNING: No columns found for {conn_macro}.{raw_table}")
             return
-
-        if not mock_dir:
-            print(f"Discovered {len(columns)} columns")
-
     elif conn_macro:
         from .db import oracle_connect, discover_columns
         print(f"Connecting to Oracle via '{conn_macro}'...")
@@ -2088,13 +250,10 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
         columns = discover_columns(conn, raw_table)
         if conn is not None:
             conn.close()
-
         if not columns:
-            print(f"WARNING: No columns found for {raw_table}, skipping {store_name}")
+            print(f"WARNING: No columns found for {raw_table}")
             return
-
         print(f"Discovered {len(columns)} columns")
-
     else:
         print(f"WARNING: No conn_macro for {store_name}, skipping")
         return
@@ -2103,270 +262,576 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
     print(f"Loaded {count} columns into _column_meta for table: {store_name}")
 
 
-def _load_csv_meta_files(project_db, csv_files):
-    """Load column metadata from proc contents CSVs.
+def _print_row_comparison(db_path, table_left, table_right, source_left, source_right,
+                          from_date=None, to_date=None, pair_name=None,
+                          date_col_left=None, date_col_right=None):
+    """Run and print row count comparison for a single pair."""
+    source_left = source_left or "left"
+    source_right = source_right or "right"
 
-    CSV columns: source, table, column_name, data_type
-    source_table is derived as {source}_{table} (matching _qualified_name convention).
-    """
-    import csv as csv_mod
-    for csv_path in csv_files:
-        if not os.path.exists(csv_path):
-            print(f"Error: CSV file not found: {csv_path}")
-            continue
+    print(f"\nComparing row counts: {table_left} vs {table_right}")
+    print("=" * 70)
 
-        # Group by (source, table) -> {col: dtype}
-        tables = {}
-        with open(csv_path, 'r', newline='') as f:
-            reader = csv_mod.DictReader(f)
-            for row in reader:
-                src = row.get('source') or row.get('SOURCE', '')
-                tbl = row.get('table') or row.get('TABLE', '')
-                col = row.get('column_name') or row.get('COLUMN_NAME', '')
-                dt = row.get('data_type') or row.get('DATA_TYPE', '')
-                if tbl and col:
-                    source_table = f"{src}_{tbl}" if src else tbl
-                    if source_table not in tables:
-                        tables[source_table] = {'source': src, 'columns': {}}
-                    tables[source_table]['columns'][col] = dt
+    if not date_col_left or not date_col_right:
+        meta_l = get_metadata(db_path, table_left)
+        meta_r = get_metadata(db_path, table_right)
+        date_col_left = date_col_left or ((meta_l.get('date_var') or '') if meta_l else '')
+        date_col_right = date_col_right or ((meta_r.get('date_var') or '') if meta_r else '')
+    if date_col_left or date_col_right:
+        dc_str = date_col_left if date_col_left == date_col_right else f"{date_col_left} / {date_col_right}"
+        print(f"Date column: {dc_str}")
 
-        for source_table, info in tables.items():
-            count = insert_column_meta(
-                project_db, source_table, info['columns'], source=info['source']
-            )
-            print(f"Loaded {count} columns for {source_table} from {csv_path}")
+    result = compare_row_counts(db_path, table_left, table_right, from_date=from_date, to_date=to_date)
+    summary = result["summary"]
+    dr_left = summary['date_range_left']
+    dr_right = summary['date_range_right']
 
+    print(f"\n{source_left}: {dr_left[0]} to {dr_left[1]} | {summary['count_left']} dates | total: {summary['total_left']:,}")
+    print(f"{source_right}: {dr_right[0]} to {dr_right[1]} | {summary['count_right']} dates | total: {summary['total_right']:,}")
 
-def cmd_load_columns(args):
-    """Load column metadata from CSV, Oracle, or Athena into _column_meta table"""
-    import csv
-
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        sys.exit(1)
-
-    config_path = getattr(args, 'config', None)
-    if config_path:
-        import json
-        if not os.path.exists(config_path):
-            print(f"Error: Config file not found: {config_path}")
-            sys.exit(1)
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-
-        # Detect config format and extract tables
-        if "pairs" in config and isinstance(config["pairs"], dict):
-            from .config import get_all_tables_from_unified
-            tables = get_all_tables_from_unified(config)
+    # Overlap
+    has_overlap = dr_left[0] and dr_right[0]
+    overlap_start = overlap_end = None
+    if has_overlap:
+        overlap_start = max(dr_left[0], dr_right[0])
+        overlap_end = min(dr_left[1], dr_right[1])
+        if overlap_start <= overlap_end:
+            print(f"\nOverlap range: {overlap_start} to {overlap_end}")
         else:
-            tables = config.get('tables', [])
+            has_overlap = False
 
-        from .extract import _qualified_name
+    def _in_overlap(dt):
+        return has_overlap and overlap_start <= dt <= overlap_end
 
-        # Build CSV lookup: {(source, table) -> {col: dtype}} from --csv files
-        csv_files = getattr(args, 'csv_files', [])
-        csv_lookup = {}  # (source, table) -> {col_name: data_type}
-        if csv_files:
-            import csv as csv_mod
-            for csv_path in csv_files:
-                if not os.path.exists(csv_path):
-                    print(f"Error: CSV file not found: {csv_path}")
-                    continue
-                with open(csv_path, 'r', newline='') as f:
-                    reader = csv_mod.DictReader(f)
-                    for row in reader:
-                        src = row.get('source') or row.get('SOURCE', '')
-                        tbl = row.get('table') or row.get('TABLE', '')
-                        col = row.get('column_name') or row.get('COLUMN_NAME', '')
-                        dt = row.get('data_type') or row.get('DATA_TYPE', '')
-                        if tbl and col:
-                            key = (src.lower(), tbl.lower())
-                            if key not in csv_lookup:
-                                csv_lookup[key] = {}
-                            csv_lookup[key][col] = dt
+    misload_left = [(dt, c) for dt, c in result['only_left'] if _in_overlap(dt)]
+    misload_right = [(dt, c) for dt, c in result['only_right'] if _in_overlap(dt)]
 
-        for tbl in tables:
-            source = tbl.get('source', '')
-            qname = _qualified_name(tbl)
-            raw_table = tbl['table']
-
-            # Check if CSV provides columns for this table
-            # Try matching by (source, table) or (source, name)
-            name = tbl.get('name', '')
-            csv_key = (source.lower(), raw_table.lower())
-            csv_key_name = (source.lower(), name.lower())
-            matched_key = None
-            if csv_key in csv_lookup:
-                matched_key = csv_key
-            elif csv_key_name in csv_lookup:
-                matched_key = csv_key_name
-
-            if matched_key:
-                columns = csv_lookup[matched_key]
-                count = insert_column_meta(args.project_db, qname, columns, source=source)
-                print(f"{qname}: loaded {count} columns from CSV")
-                continue
-
-            # Otherwise discover from Oracle/Athena
-            conn_macro = tbl.get('conn_macro', '')
-
-            print(f"{qname}: discovering columns from {source} ({conn_macro}: {raw_table})")
-            _load_columns_entry(args.project_db, qname, raw_table, source, conn_macro)
-        return
-
-    # Mode: --csv (repeatable) — load from proc contents metadata CSVs
-    # CSV format: source, table, column_name, data_type
-    # source_table is derived as {source}_{table}
-    csv_files = getattr(args, 'csv_files', [])
-    if csv_files:
-        _load_csv_meta_files(args.project_db, csv_files)
-        return
-
-    conn_macro = getattr(args, 'conn_macro', None)
-    csv_file = getattr(args, 'csv_file', None)
-    source = getattr(args, 'source', None) or ''
-
-    if not args.table:
-        print("Error: --table is required unless --config is provided")
-        sys.exit(1)
-
-    if csv_file:
-        # CSV path
-        if not os.path.exists(csv_file):
-            print(f"Error: CSV file not found: {csv_file}")
-            sys.exit(1)
-
-        columns = {}
-        with open(csv_file, 'r', newline='') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                name = row.get('COLUMN_NAME') or row.get('column_name', '')
-                dtype = row.get('DATA_TYPE') or row.get('data_type', '')
-                if name:
-                    columns[name] = dtype
-
-        if not columns:
-            print("No columns found in CSV")
-            sys.exit(1)
-
-    elif conn_macro and source.lower() == 'aws':
-        # Athena discovery (conn_macro = database name)
-        mock_dir = os.environ.get('DTRACK_ATHENA_MOCK')
-        if mock_dir:
-            # Mock mode: read from CSV
-            mock_csv = os.path.join(mock_dir, conn_macro, args.table, 'columns.csv')
-            if not os.path.exists(mock_csv):
-                print(f"[mock] File not found: {mock_csv}")
-                sys.exit(1)
-            columns = {}
-            with open(mock_csv, 'r', newline='') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    name = row.get('column_name') or row.get('COLUMN_NAME', '')
-                    dtype = row.get('data_type') or row.get('DATA_TYPE', '')
-                    if name:
-                        columns[name] = dtype
-            print(f"[mock] Loaded {len(columns)} columns from {mock_csv}")
-        else:
-            from .extract import _discover_columns_athena, athena_connect, aws_creds_renew
-            print(f"Connecting to Athena ({conn_macro})...")
-            aws_creds_renew()
-            conn = athena_connect(data_base=conn_macro)
-            cursor = conn.cursor()
-            print(f"Discovering columns for: {conn_macro}.{args.table}")
-            columns = _discover_columns_athena(cursor, conn_macro, args.table)
-            cursor.close()
-            conn.close()
-
-        if not columns:
-            print(f"No columns found for table: {conn_macro}.{args.table}")
-            sys.exit(1)
-
-        if not mock_dir:
-            print(f"Discovered {len(columns)} columns")
-
-    elif conn_macro:
-        # Live Oracle discovery
-        from .db import oracle_connect, discover_columns
-        print(f"Connecting to Oracle via '{conn_macro}'...")
-        conn = oracle_connect(conn_macro)
-        print(f"Discovering columns for: {args.table}")
-        columns = discover_columns(conn, args.table)
-        if conn is not None:
-            conn.close()
-
-        if not columns:
-            print(f"No columns found for table: {args.table}")
-            sys.exit(1)
-
-        print(f"Discovered {len(columns)} columns")
-
+    if result["mismatched"]:
+        print(f"\nMismatched ({len(result['mismatched'])} dates):")
+        for dt, cl, cr in result["mismatched"]:
+            print(f"  {dt}: {source_left}={cl:,}, {source_right}={cr:,}, diff={cr-cl:+,}")
     else:
-        print("Error: Provide a csv_file or --conn-macro (with --source pcds|aws)")
-        sys.exit(1)
+        print(f"\nMismatched: (none)")
 
-    count = insert_column_meta(args.project_db, args.table, columns, source=source)
-    print(f"Loaded {count} columns into _column_meta for table: {args.table}")
+    if misload_left or misload_right:
+        print(f"\nMisload ({len(misload_left) + len(misload_right)} dates):")
+        for dt, count in misload_left:
+            print(f"  {dt}: {source_left}={count:,}, {source_right}=0")
+        for dt, count in misload_right:
+            print(f"  {dt}: {source_left}=0, {source_right}={count:,}")
+
+    n_matching = len(result['matching'])
+    print(f"\nMatching: {n_matching} dates")
+
+    if pair_name:
+        matching_dates = [dt for dt, _ in result['matching']]
+        excluded_dates = [dt for dt, _, _ in result['mismatched']]
+        excluded_dates += [dt for dt, _ in misload_left]
+        excluded_dates += [dt for dt, _ in misload_right]
+        save_row_comparison(db_path, pair_name, overlap_start, overlap_end, matching_dates, excluded_dates)
+
+    return result
 
 
-def cmd_ppt_create(args):
-    """Create PowerPoint presentation from markdown"""
-    markdown_path = args.markdown_file
-    output_path = args.output
-    template_path = args.template
-    config_path = args.config
+def _build_where_from_dates(table_cfg, matching_dates, excluded_dates, db_path=None):
+    """Build WHERE clause from matching and excluded dates."""
+    date_col = table_cfg.get('date_col', 'dt')
+    is_sas = is_sas_table(table_cfg)
 
-    if not os.path.exists(markdown_path):
-        print(f"Error: Markdown file not found: {markdown_path}")
-        sys.exit(1)
+    date_dtype = ''
+    date_format = ''
+    if db_path:
+        qn = qualified_name(table_cfg)
+        col_meta = get_column_meta(db_path, qn)
+        for cm in col_meta:
+            if cm['column_name'].upper() == date_col.upper():
+                date_dtype = (cm.get('data_type') or '').upper()
+                break
+        meta = get_metadata(db_path, qn)
+        if meta:
+            date_format = meta.get('date_format') or ''
 
-    if template_path and not os.path.exists(template_path):
-        print(f"Error: Template file not found: {template_path}")
-        sys.exit(1)
+    is_datetime = ('TIMESTAMP' in date_dtype or 'DATETIME' in date_dtype)
+    source = (table_cfg.get('source') or '').lower()
 
-    if config_path and not os.path.exists(config_path):
-        print(f"Error: Config file not found: {config_path}")
-        sys.exit(1)
+    if is_datetime:
+        if is_sas:
+            col_expr = f"datepart({date_col})"
+            def fmt_date(d):
+                from datetime import datetime as _dt
+                if re.match(r'^\d{6}$', str(d)):
+                    return f"'{d}'"
+                dt_obj = _dt.strptime(str(d), "%Y-%m-%d")
+                return f"'{dt_obj.strftime('%d%b%Y').upper()}'d"
+        elif source == 'aws':
+            col_expr = f"CAST({date_col} AS DATE)"
+            def fmt_date(d):
+                return f"'{d}'" if re.match(r'^\d{6}$', str(d)) else f"DATE '{d}'"
+        else:
+            col_expr = f"TRUNC({date_col})"
+            def fmt_date(d):
+                return f"'{d}'" if re.match(r'^\d{6}$', str(d)) else f"DATE '{d}'"
+    else:
+        col_expr = date_col
+        from .date_utils import DateConverter
+        dc = DateConverter()
+        if date_format:
+            dc.format_label = date_format
+
+        def fmt_date(d):
+            if re.match(r'^\d{6}$', str(d)):
+                if date_dtype.startswith(('NUMBER', 'INTEGER', 'INT', 'BIGINT')):
+                    return str(d)
+                return f"'{d}'"
+            original = dc.to_original(str(d)) if date_format else str(d)
+            if date_dtype.startswith(('VARCHAR', 'CHAR', 'STRING', 'TEXT')):
+                return f"'{original}'"
+            elif date_dtype.startswith(('DATE', 'TIMESTAMP')):
+                return f"DATE '{original}'"
+            return f"'{original}'"
+
+    parts = []
+    orig_where = table_cfg.get('where', '').strip()
+    if orig_where:
+        parts.append(f"({orig_where})")
+    if matching_dates:
+        min_d, max_d = min(matching_dates), max(matching_dates)
+        parts.append(f"{col_expr} >= {fmt_date(min_d)}")
+        parts.append(f"{col_expr} <= {fmt_date(max_d)}")
+        if excluded_dates:
+            parts.append(f"{col_expr} NOT IN ({', '.join(fmt_date(d) for d in excluded_dates)})")
+    return " AND ".join(parts) if parts else ""
+
+
+def cmd_compare_row(args):
+    """Compare row counts between paired tables."""
+    _require_db(args.project_db)
+    config = _load_config(args.config)
+    yes = getattr(args, 'yes', False)
+    html_path = getattr(args, 'html', None)
+
+    if not html_path:
+        output_dir = os.path.join(os.getcwd(), 'output')
+        os.makedirs(output_dir, exist_ok=True)
+        html_path = os.path.join(output_dir, 'compare_row.html')
+
+    html_entries = []
+
+    for pair_name, pair_config in config["pairs"].items():
+        if pair_config.get("skip"):
+            print(f"  Skipping pair: {pair_name}")
+            continue
+        left = pair_config["left"]
+        right = pair_config["right"]
+        table_left = qualified_name(left)
+        table_right = qualified_name(right)
+        source_left = left.get("source", "left")
+        source_right = right.get("source", "right")
+        col_map = pair_config.get("col_map", {})
+        dc_left = left.get('date_col', '')
+        dc_right = right.get('date_col', '')
+
+        register_table_pair(
+            args.project_db, pair_name, table_left, table_right,
+            source_left=source_left, source_right=source_right,
+            col_mappings=col_map if col_map else None,
+        )
+        if dc_left:
+            patch_metadata(args.project_db, table_left, date_var=dc_left)
+        if dc_right:
+            patch_metadata(args.project_db, table_right, date_var=dc_right)
+
+        result = _print_row_comparison(
+            args.project_db, table_left, table_right,
+            source_left, source_right,
+            from_date=args.from_date, to_date=args.to_date,
+            pair_name=pair_name,
+            date_col_left=dc_left, date_col_right=dc_right,
+        )
+
+        # HITL: skip/ignore prompt
+        if not yes:
+            n_mismatch = len(result['mismatched']) + len(result['only_left']) + len(result['only_right'])
+            if n_mismatch > 0:
+                action = prompt_skip_pair(pair_name, f"{n_mismatch} mismatched/missing dates")
+                if action == 's':
+                    mark_pair_skipped(config, pair_name)
+                    save_unified_config(config, args.config)
+                    print(f"  Pair '{pair_name}' marked as skipped")
+                    continue
+                elif action == 'i':
+                    mismatch_dates = [dt for dt, _, _ in result['mismatched']]
+                    ignored = prompt_ignore_items(mismatch_dates, "mismatched dates")
+                    if ignored:
+                        add_ignored_rows(config, pair_name, ignored)
+                        save_unified_config(config, args.config)
+                        print(f"  Added {len(ignored)} dates to ignore_rows")
+
+        html_entries.append((pair_name, source_left, source_right, table_left, table_right, result, {}))
+
+    # Save where_map to config
+    for pair_name, sl, sr, tl, tr, result, _ in html_entries:
+        comp = get_row_comparison(args.project_db, pair_name)
+        if comp:
+            matching = comp.get('matching_dates', [])
+            excluded = comp.get('excluded_dates', [])
+            left_cfg = config['pairs'][pair_name]['left']
+            right_cfg = config['pairs'][pair_name]['right']
+            where_left = _build_where_from_dates(left_cfg, matching, excluded, db_path=args.project_db)
+            where_right = _build_where_from_dates(right_cfg, matching, excluded, db_path=args.project_db)
+            set_pair_where_map(config, pair_name, where_left, where_right)
+            ensure_pair_defaults(config, pair_name)
+
+    if not yes:
+        config = save_and_pause(config, args.config, [
+            "Review where_map",
+            "Add time_map values (check ./sas/_timing.csv and ./csv/_timing.csv)",
+            "Add comment_map notes (shown as tooltips in HTML)",
+        ])
+    else:
+        save_unified_config(config, args.config)
+
+    sync_config_to_db(args.project_db, config)
+    print(f"Synced to database: {args.project_db}")
+
+    # HTML report
+    if html_path and html_entries:
+        from .html_export import generate_row_count_html, create_row_count_table, wrap_html_document
+        row_sections = []
+        for pair_name, sl, sr, tl, tr, comp_result, wm in html_entries:
+            meta_l = get_metadata(args.project_db, tl)
+            meta_r = get_metadata(args.project_db, tr)
+            pair_cfg = config['pairs'].get(pair_name, {})
+            time_map = pair_cfg.get('time_map', {}).get('row', {})
+            cm = pair_cfg.get('comment_map', {}).get('row', {})
+            section = generate_row_count_html(
+                pair_name, sl, sr, tl, tr, comp_result,
+                metadata_left=meta_l, metadata_right=meta_r,
+                where_map=wm, time_map=time_map,
+                comment_left=cm.get('left', ''), comment_right=cm.get('right', ''),
+                left_cfg=pair_cfg.get('left'), right_cfg=pair_cfg.get('right'),
+            )
+            row_sections.append(section)
+        gm = config.get('metadata', {})
+        table_html = create_row_count_table(row_sections)
+        doc = wrap_html_document(
+            getattr(args, 'title', None) or gm.get('title', 'Row Count Comparison'),
+            [table_html],
+            subtitle=getattr(args, 'subtitle', None) or gm.get('subtitle', ''),
+        )
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(doc)
+        print(f"HTML report: {html_path}")
+
+
+def cmd_compare_col(args):
+    """Compare column statistics between paired tables."""
+    _require_db(args.project_db)
+    config = _load_config(args.config)
+    html_path = getattr(args, 'html', None)
+    yes = getattr(args, 'yes', False)
+
+    if not html_path:
+        output_dir = os.path.join(os.getcwd(), 'output')
+        os.makedirs(output_dir, exist_ok=True)
+        html_path = os.path.join(output_dir, 'compare_col.html')
+
+    html_entries = []
+
+    for pair_name, pair_config in config["pairs"].items():
+        if pair_config.get("skip"):
+            print(f"  Skipping pair: {pair_name}")
+            continue
+        left = pair_config["left"]
+        right = pair_config["right"]
+        table_left = qualified_name(left)
+        table_right = qualified_name(right)
+        source_left = left.get("source", "left")
+        source_right = right.get("source", "right")
+        col_mappings = pair_config.get("col_map", {})
+        col_type_overrides = get_col_type_overrides(config, pair_name)
+        ignore_columns = get_ignored_columns(config, pair_name)
+
+        register_table_pair(
+            args.project_db, pair_name, table_left, table_right,
+            source_left=source_left, source_right=source_right,
+            col_mappings=col_mappings if col_mappings else None,
+        )
+
+        dc_left = left.get('date_col', '')
+        dc_right = right.get('date_col', '')
+        if dc_left:
+            patch_metadata(args.project_db, table_left, date_var=dc_left)
+        if dc_right:
+            patch_metadata(args.project_db, table_right, date_var=dc_right)
+
+        print(f"\n{'='*70}")
+        print(f"Comparing column stats: {pair_name}")
+        print(f"  {source_left}: {table_left}")
+        print(f"  {source_right}: {table_right}")
+        print(f"{'='*70}")
+
+        matched_dates = None
+        if not args.no_date_filter:
+            row_result = compare_row_counts(
+                args.project_db, table_left, table_right,
+                from_date=args.from_date, to_date=args.to_date,
+            )
+            matched_dates = {dt for dt, _ in row_result['matching']}
+            if matched_dates:
+                print(f"Filtering to {len(matched_dates)} matching dates")
+
+        result = compare_column_stats(
+            args.project_db, table_left, table_right,
+            col_mappings=col_mappings,
+            from_date=args.from_date, to_date=args.to_date,
+            matched_dates=matched_dates,
+            col_type_overrides=col_type_overrides,
+        )
+
+        if result:
+            matched_cols = []
+            diff_cols = []
+            for col_name, comparisons in result.items():
+                if col_name in ignore_columns:
+                    continue
+                if any(_has_col_differences(c) for c in comparisons):
+                    diff_cols.append(col_name)
+                else:
+                    matched_cols.append(col_name)
+
+            print(f"  {len(matched_cols)} match, {len(diff_cols)} diff"
+                  + (f" ({', '.join(sorted(diff_cols)[:4])})" if diff_cols else ""))
+
+            save_col_comparison(
+                args.project_db, pair_name,
+                columns_compared=list(result.keys()),
+                matched_columns=matched_cols,
+                diff_columns=diff_cols,
+                comparison_details=result,
+            )
+
+            # Build diff_map
+            diff_map = {}
+            for col_name, comparisons in result.items():
+                for comp in comparisons:
+                    if not _has_col_differences(comp):
+                        continue
+                    vlabel = comp.get('vintage_label', comp['dt'])
+                    if vlabel not in diff_map:
+                        diff_map[vlabel] = {}
+                    col_diffs = {}
+                    for stat in ('n_total', 'n_missing', 'n_unique'):
+                        d = comp.get(f'{stat}_diff', 0)
+                        if d != 0:
+                            col_diffs[stat] = {'left': comp[f'{stat}_left'], 'right': comp[f'{stat}_right']}
+                    if comp['col_type'] == 'numeric':
+                        for stat in ('mean', 'std'):
+                            d = comp.get(f'{stat}_diff')
+                            if d is not None and abs(d) > 0.01:
+                                col_diffs[stat] = {'left': comp.get(f'{stat}_left'), 'right': comp.get(f'{stat}_right')}
+                    if col_diffs:
+                        diff_map[vlabel][col_name] = col_diffs
+            config['pairs'][pair_name]['diff_map'] = diff_map
+
+            html_entries.append((pair_name, source_left, source_right, table_left, table_right, result, col_mappings))
+        else:
+            print("  No matching columns found")
+
+    # HTML
+    if html_path and html_entries:
+        from .html_export import generate_column_stats_html, create_column_stats_table, wrap_html_document
+        col_sections = []
+        for pair_name, sl, sr, tl, tr, comp_result, cm in html_entries:
+            meta_l = get_metadata(args.project_db, tl)
+            meta_r = get_metadata(args.project_db, tr)
+            pair_cfg = config['pairs'].get(pair_name, {})
+            comment_map = pair_cfg.get('comment_map', {}).get('col', {})
+            col_time_map = pair_cfg.get('time_map', {}).get('col', {})
+            section = generate_column_stats_html(
+                pair_name, sl, sr, tl, tr, comp_result, cm,
+                metadata_left=meta_l, metadata_right=meta_r,
+                time_map=col_time_map,
+                comment_left=comment_map.get('left', ''),
+                comment_right=comment_map.get('right', ''),
+                left_cfg=pair_cfg.get('left'), right_cfg=pair_cfg.get('right'),
+            )
+            col_sections.append(section)
+
+        vintage = getattr(args, 'vintage', 'day')
+        table_html = create_column_stats_table(col_sections, vintage=vintage)
+        gm = config.get('metadata', {})
+        doc = wrap_html_document(
+            getattr(args, 'title', None) or gm.get('col_title', 'Column Statistics Comparison'),
+            [table_html],
+            subtitle=getattr(args, 'subtitle', None) or gm.get('col_subtitle', ''),
+        )
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(doc)
+        print(f"HTML report: {html_path}")
 
     try:
-        result = parse_markdown_to_ppt(
-            markdown_path, output_path, template_path, config_path,
-        )
-        print(f"Presentation created: {result}")
+        save_unified_config(config, args.config)
+        print(f"Config saved: {args.config}")
     except Exception as e:
-        print(f"Error creating presentation: {e}")
+        print(f"Warning: Could not save config: {e}")
+
+
+def cmd_gen_sas(args):
+    """Generate SAS extraction files from config."""
+    from .platforms.oracle import gen_sas
+    if not os.path.exists(args.config):
+        print(f"Error: Config file not found: {args.config}")
         sys.exit(1)
+    types = [args.type] if args.type != "both" else ["row", "col"]
+    db_path = getattr(args, 'db_path', None)
+    vintage = getattr(args, 'vintage', None)
+    gen_sas(args.config, args.outdir, types=types, db_path=db_path, vintage=vintage)
 
 
-def cmd_ppt_template(args):
-    """Create a PowerPoint template file"""
-    from .ppt import PPTBuilder
+def cmd_gen_aws(args):
+    """Extract data from AWS Athena."""
+    from .platforms.athena import extract_aws
+    if not os.path.exists(args.config):
+        print(f"Error: Config file not found: {args.config}")
+        sys.exit(1)
+    types = [args.type] if args.type != "both" else ["row", "col"]
+    db_path = getattr(args, 'db_path', None)
+    vintage = getattr(args, 'vintage', None)
+    force = getattr(args, 'force', False)
+    extract_aws(args.config, args.outdir, types=types, max_workers=args.workers,
+                db_path=db_path, vintage=vintage, force=force)
 
-    output_path = args.output
-    builder = PPTBuilder()
 
-    # Add sample slides to demonstrate layouts
-    builder.add_title_slide("Template Title", "Subtitle", "Date")
-    builder.add_section_slide("Section Title")
-    slide = builder.add_content_slide("Content Slide")
-    builder.add_bullets(slide, ["Bullet 1", "Bullet 2", "Bullet 3"])
+def cmd_match_columns(args):
+    """Match columns between paired tables."""
+    _require_db(args.project_db)
+    config = _load_config(args.config)
 
-    builder.save(output_path)
-    print(f"✅ Template created: {output_path}")
+    matched_columns = {}
+    for pair_name, pair_config in config["pairs"].items():
+        left = pair_config['left']
+        right = pair_config['right']
+        left_table = qualified_name(left)
+        right_table = qualified_name(right)
+        left_src = left.get('source', 'left')
+        right_src = right.get('source', 'right')
+
+        print(f"=== Pair: {pair_name} ===")
+        print(f"  Left:  {left_table} ({left_src})")
+        print(f"  Right: {right_table} ({right_src})")
+        print()
+
+        left_meta = get_column_meta(args.project_db, left_table)
+        right_meta = get_column_meta(args.project_db, right_table)
+        if not left_meta:
+            print(f"  No column metadata for: {left_table}")
+            continue
+        if not right_meta:
+            print(f"  No column metadata for: {right_table}")
+            continue
+
+        left_cols = {m['column_name']: m['data_type'] or '' for m in left_meta}
+        right_cols = {m['column_name']: m['data_type'] or '' for m in right_meta}
+
+        replace_mode = getattr(args, 'mode', 'merge') == 'replace'
+        existing_col_map = {} if replace_mode else pair_config.get('col_map', {})
+
+        result = match_columns_from_dicts(left_cols, right_cols, left_table, right_table)
+        matched = {**result.get('matched', {}), **existing_col_map}
+
+        left_only = result.get(f'{left_table}_only', [])
+        right_only = result.get(f'{right_table}_only', [])
+
+        # Filter already-mapped
+        existing_left = set(existing_col_map.keys())
+        existing_right = set(existing_col_map.values())
+        left_only = [c for c in left_only if c['name'] not in existing_left]
+        right_only = [c for c in right_only if c['name'] not in existing_right]
+
+        auto_count = len(matched) - len(existing_col_map)
+        print(f"Auto-matched: {auto_count} columns")
+        if existing_col_map:
+            print(f"Existing mappings: {len(existing_col_map)}")
+
+        if left_only or right_only:
+            left_items = [(c['name'], c['type']) for c in left_only]
+            right_items = [(c['name'], c['type']) for c in right_only]
+            matched = prompt_mapping(left_items, right_items, existing_map=matched)
+
+        matched_columns[pair_name] = matched
+
+    if matched_columns:
+        for pair_name, m in matched_columns.items():
+            set_pair_col_map(config, pair_name, m)
+            print(f"  {pair_name}: {len(m)} column mappings saved")
+        save_unified_config(config, args.config)
+        print(f"Saved to: {args.config}")
+        sync_config_to_db(args.project_db, config)
+        print(f"Synced to database: {args.project_db}")
+
+
+def cmd_list(args):
+    """List all tables in the database."""
+    _require_db(args.project_db)
+    tables = list_tables(args.project_db)
+    if not tables:
+        print("No tables found")
+        return
+    print(f"\n{'Table':<30} {'Type':<8} {'Source':<10} {'Vintage':<8}")
+    print("-" * 60)
+    for t in tables:
+        print(f"{t.get('table_name',''):<30} {t.get('data_type',''):<8} {t.get('source',''):<10} {t.get('vintage',''):<8}")
+    print(f"\nTotal: {len(tables)} tables")
+
+
+def cmd_list_pairs(args):
+    """List all registered table pairs."""
+    _require_db(args.project_db)
+    pairs = list_table_pairs(args.project_db)
+    if not pairs:
+        print("No table pairs found")
+        return
+    print(f"\n{'Pair Name':<25} {'Left Table':<25} {'Right Table':<25} {'Mappings':<10}")
+    print("-" * 90)
+    for p in pairs:
+        m = p["col_mappings"]
+        map_str = f"{len(m)} cols" if m else "(none)"
+        print(f"{p['pair_name']:<25} {p['table_left']:<25} {p['table_right']:<25} {map_str:<10}")
+    print(f"\nTotal: {len(pairs)} pair(s)")
+
+
+def cmd_run(args):
+    """Run the full pipeline: init → extract → load → compare → HTML."""
+    from .pipeline import run_pipeline
+    run_pipeline(
+        project_db=args.project_db,
+        config_path=args.config,
+        outdir=getattr(args, 'outdir', None),
+        sas_outdir=getattr(args, 'sas_outdir', None),
+        csv_outdir=getattr(args, 'csv_outdir', None),
+        types=[args.type] if args.type != "both" else ["row", "col"],
+        vintage=getattr(args, 'vintage', None),
+        yes=getattr(args, 'yes', False),
+        html_row=getattr(args, 'html_row', None),
+        html_col=getattr(args, 'html_col', None),
+        title=getattr(args, 'title', None),
+        subtitle=getattr(args, 'subtitle', None),
+        workers=getattr(args, 'workers', None),
+        force=getattr(args, 'force', False),
+        skip_extract=getattr(args, 'skip_extract', False),
+        skip_load=getattr(args, 'skip_load', False),
+        skip_compare=getattr(args, 'skip_compare', False),
+    )
 
 
 def cmd_query(args):
-    """Run a SQL query against the database"""
+    """Run a SQL query against the database."""
     import sqlite3
-
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        sys.exit(1)
-
+    _require_db(args.project_db)
     sql = args.sql.strip()
     allow_write = getattr(args, 'write', False)
 
-    # Safety: only allow read-only statements unless --write is specified
     if not allow_write:
         first_word = sql.split()[0].upper() if sql else ''
         if first_word not in ('SELECT', 'PRAGMA', 'EXPLAIN', 'WITH'):
@@ -2377,484 +842,165 @@ def cmd_query(args):
     conn = sqlite3.connect(args.project_db)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-
     try:
         cursor.execute(sql)
         rows = cursor.fetchall()
-        conn.commit()  # Commit changes for write operations
+        conn.commit()
     except sqlite3.Error as e:
         print(f"SQL error: {e}")
         conn.close()
         sys.exit(1)
 
     if not rows:
-        # For write operations, show affected row count
         if allow_write and cursor.rowcount >= 0:
-            print(f"Query executed successfully ({cursor.rowcount} row(s) affected)")
+            print(f"Query executed ({cursor.rowcount} row(s) affected)")
         else:
             print("(no rows)")
         conn.close()
         return
 
     cols = rows[0].keys()
-
-    # Compute column widths
-    col_widths = {}
-    for c in cols:
-        col_widths[c] = len(c)
-        for row in rows:
+    col_widths = {c: len(c) for c in cols}
+    for row in rows:
+        for c in cols:
             col_widths[c] = min(max(col_widths[c], len(str(row[c]) if row[c] is not None else '')), 40)
 
-    # Print
-    header = "  ".join(f"{c:<{col_widths[c]}}" for c in cols)
-    sep = "  ".join("─" * col_widths[c] for c in cols)
-    print(header)
-    print(sep)
+    print("  ".join(f"{c:<{col_widths[c]}}" for c in cols))
+    print("  ".join("-" * col_widths[c] for c in cols))
     for row in rows:
-        line = "  ".join(f"{str(row[c]) if row[c] is not None else '':<{col_widths[c]}}" for c in cols)
-        print(line)
-
+        print("  ".join(f"{str(row[c]) if row[c] is not None else '':<{col_widths[c]}}" for c in cols))
     print(f"\n({len(rows)} row{'s' if len(rows) != 1 else ''})")
     conn.close()
 
 
-def _parse_assignments(pairs):
-    """Parse key=value pairs into a dict."""
-    data = {}
-    for assignment in pairs:
-        if '=' not in assignment:
-            print(f"Error: Invalid assignment (expected key=value): {assignment}")
-            sys.exit(1)
-        key, value = assignment.split('=', 1)
-        data[key] = value
-    return data
-
-
-def _preview_matching_rows(db_path, table, where, limit=10):
-    """Query and display rows matching WHERE conditions. Returns row count."""
-    import sqlite3
-
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-
-    where_sql, where_params = parse_where_clause(where)
-    cursor.execute(
-        f"SELECT * FROM {table} WHERE {where_sql}",
-        where_params,
-    )
-    rows = cursor.fetchall()
-    conn.close()
-
-    if not rows:
-        print(f"  (no matching rows)")
-        return 0
-
-    # Get column names from first row
-    cols = rows[0].keys()
-
-    # Print header + rows (truncate values for readability)
-    col_widths = {c: max(len(c), 6) for c in cols}
-    for row in rows[:limit]:
-        for c in cols:
-            val_len = len(str(row[c]) if row[c] is not None else '')
-            col_widths[c] = min(max(col_widths[c], val_len), 30)
-
-    header = "  ".join(f"{c:<{col_widths[c]}}" for c in cols)
-    print(f"  {header}")
-    print(f"  {'─' * len(header)}")
-    for row in rows[:limit]:
-        line = "  ".join(f"{str(row[c]) if row[c] is not None else '':<{col_widths[c]}}" for c in cols)
-        print(f"  {line}")
-    if len(rows) > limit:
-        print(f"  ... and {len(rows) - limit} more row(s)")
-
-    return len(rows)
-
-
-def _format_where(where):
-    """Format WHERE dict as human-readable string, expanding operators."""
-    parts = []
-    for col, val in where.items():
-        if val.startswith('!~='):
-            parts.append(f"{col} NOT LIKE '{val[3:]}'")
-        elif val.startswith('~='):
-            parts.append(f"{col} LIKE '{val[2:]}'")
-        elif val.startswith('!='):
-            parts.append(f"{col} != '{val[2:]}'")
-        elif ',' in val and not val.startswith("'"):
-            items = [v.strip() for v in val.split(',')]
-            parts.append(f"{col} IN ({', '.join(repr(v) for v in items)})")
-        elif '%' in val:
-            parts.append(f"{col} LIKE '{val}'")
-        else:
-            parts.append(f"{col} = '{val}'")
-    return " AND ".join(parts)
-
-
-def _confirm(prompt="Proceed? [y/N] "):
-    """Ask user for confirmation. Returns True if confirmed."""
-    resp = input(prompt).strip().lower()
-    return resp in ('y', 'yes')
-
-
-def cmd_upsert(args):
-    """Insert, update, or delete records in any table"""
-    if not os.path.exists(args.project_db):
-        print(f"Error: Database not found: {args.project_db}")
-        sys.exit(1)
-
-    identifiers = _parse_assignments(args.assignments)
-    if not identifiers:
-        print("Error: No key=value pairs provided")
-        sys.exit(1)
-
-    updates = _parse_assignments(args.update) if args.update else None
-    skip_confirm = args.yes
-
-    # Mode: --delete
-    if args.delete:
-        where_display = _format_where(identifiers)
-
-        if args.dry_run:
-            where_sql, where_params = parse_where_clause(identifiers)
-            print(f"[dry-run] DELETE FROM {args.table} WHERE {where_sql}")
-            print(f"[dry-run] params: {where_params}")
-            return
-
-        print(f"WHERE: {where_display}")
-        print(f"\nRows to DELETE from {args.table}:")
-        count = _preview_matching_rows(args.project_db, args.table, identifiers)
-        if count == 0:
-            print("Nothing to delete.")
-            return
-        if not skip_confirm and not _confirm(f"Delete {count} row(s)? [y/N] "):
-            print("Aborted.")
-            return
-
-        count = generic_delete(args.project_db, args.table, identifiers)
-        print(f"Deleted {count} row(s) from {args.table}")
-
-    # Mode: --update (explicit WHERE + SET)
-    elif updates:
-        where_display = _format_where(identifiers)
-
-        if args.dry_run:
-            set_clause = ", ".join(f"{k}=?" for k in updates)
-            where_sql, where_params = parse_where_clause(identifiers)
-            print(f"[dry-run] UPDATE {args.table} SET {set_clause} WHERE {where_sql}")
-            print(f"[dry-run] params: {list(updates.values()) + where_params}")
-            return
-
-        print(f"WHERE: {where_display}")
-        print(f"\nRows to UPDATE in {args.table}:")
-        count = _preview_matching_rows(args.project_db, args.table, identifiers)
-        if count == 0:
-            print("No matching rows to update.")
-            return
-        print(f"\nWill set: {', '.join(f'{k}={v}' for k, v in updates.items())}")
-        if not skip_confirm and not _confirm(f"Update {count} row(s)? [y/N] "):
-            print("Aborted.")
-            return
-
-        count = generic_update(args.project_db, args.table, identifiers, updates)
-        print(f"Updated {count} row(s) in {args.table}")
-
-    # Mode: upsert (smart insert-or-update by PK)
-    else:
-        if args.dry_run:
-            from .db import _get_table_schema
-            import sqlite3
-            conn = sqlite3.connect(args.project_db)
-            cursor = conn.cursor()
-            all_cols, pk_cols = _get_table_schema(cursor, args.table)
-            non_pk = [k for k in identifiers if k not in pk_cols]
-            if pk_cols:
-                where = " AND ".join(f"{c}=?" for c in pk_cols)
-                print(f"[dry-run] PK: {pk_cols}")
-                if non_pk:
-                    print(f"[dry-run] If exists → UPDATE {args.table} SET {', '.join(f'{k}=?' for k in non_pk)} WHERE {where}")
-                cols = ", ".join(identifiers.keys())
-                print(f"[dry-run] If new    → INSERT INTO {args.table} ({cols}) VALUES ({', '.join('?' for _ in identifiers)})")
-            else:
-                cols = ", ".join(identifiers.keys())
-                print(f"[dry-run] INSERT INTO {args.table} ({cols}) VALUES ({', '.join('?' for _ in identifiers)})")
-            print(f"[dry-run] params: {list(identifiers.values())}")
-            conn.close()
-            return
-
-        # Check if record exists by PK to show preview
-        from .db import _get_table_schema
-        import sqlite3
-        conn = sqlite3.connect(args.project_db)
-        cursor = conn.cursor()
-        _, pk_cols = _get_table_schema(cursor, args.table)
-        conn.close()
-
-        if pk_cols:
-            pk_where = {k: identifiers[k] for k in pk_cols if k in identifiers}
-            if pk_where:
-                print(f"Existing row in {args.table}:")
-                existing = _preview_matching_rows(args.project_db, args.table, pk_where)
-                if existing:
-                    non_pk = {k: v for k, v in identifiers.items() if k not in pk_cols}
-                    if non_pk:
-                        print(f"\nWill set: {', '.join(f'{k}={v}' for k, v in non_pk.items())}")
-                    else:
-                        print("\nRow already exists, nothing to update.")
-                        return
-                    if not skip_confirm and not _confirm(f"Update this row? [y/N] "):
-                        print("Aborted.")
-                        return
-                else:
-                    print(f"\nWill insert: {', '.join(f'{k}={v}' for k, v in identifiers.items())}")
-                    if not skip_confirm and not _confirm(f"Insert new row? [y/N] "):
-                        print("Aborted.")
-                        return
-
-        count = generic_upsert(args.project_db, args.table, identifiers)
-        print(f"Upserted {count} row(s) in {args.table}")
-
+# ============================================================================
+# Main
+# ============================================================================
 
 def main():
-    """Main CLI entry point"""
+    """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         description="dtrack - Data tracking CLI for row counts and column statistics",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument('--env', dest='env_file', help='Path to .env file for environment variables')
-    parser.add_argument('--debug', choices=['ipdb', 'attach'], default=None,
-                        help='Enable debugging: ipdb for interactive breakpoints, attach for VS Code debugpy attach on port 5678')
+    parser.add_argument('--env', dest='env_file', help='Path to .env file')
+    parser.add_argument('--debug', choices=['ipdb', 'attach'], default=None)
 
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    sub = parser.add_subparsers(dest='command', help='Available commands')
 
-    # init command
-    parser_init = subparsers.add_parser('init', help='Initialize a new database')
-    parser_init.add_argument('project_db', help='Path to database file')
-    parser_init.add_argument('--force', action='store_true', help='Overwrite existing database')
-    parser_init.add_argument('--refresh', action='store_true', help='Add missing columns/tables; recreate on type conflict')
+    # init
+    p = sub.add_parser('init', help='Initialize database')
+    p.add_argument('project_db')
+    p.add_argument('--force', action='store_true')
+    p.add_argument('--refresh', action='store_true')
 
-    # load-row command
-    parser_load_row = subparsers.add_parser(
-        'load-row',
-        help='Load row count data',
-        description='Load row count data from CSV files. Expected format: date_value,row_count\n'
-                    'File naming: {source}_{table_name}_row.csv (e.g., pcds_cust_daily_row.csv, aws_txn_monthly_row.csv)',
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser_load_row.add_argument('project_db', help='Path to database file')
-    parser_load_row.add_argument('file_or_folder', help='CSV file or folder with {source}_{table_name}_row.csv files')
-    parser_load_row.add_argument('--table', '--table-name', dest='table_name', help='Table name (defaults to filename)')
-    parser_load_row.add_argument('--mode', default='upsert', choices=['replace', 'append', 'upsert'],
-                                  help='Load mode (default: upsert)')
-    parser_load_row.add_argument('--source', help='Data source (e.g., aws, pcds, oracle)')
-    parser_load_row.add_argument('--db', help='Database or service name')
-    parser_load_row.add_argument('--source-table', help='Original table name')
-    parser_load_row.add_argument('--date-var', help='Date column name (auto-detected if not provided)')
-    parser_load_row.add_argument('--config', help='Extraction config JSON; loads {source}_{table_name}_row.csv from folder for each table')
+    # load-row
+    p = sub.add_parser('load-row', help='Load row counts from CSV folder')
+    p.add_argument('project_db')
+    p.add_argument('folder', help='Folder with {qname}_row.csv files')
+    p.add_argument('--config', required=True, help='Unified config JSON')
+    p.add_argument('--mode', default='upsert', choices=['replace', 'append', 'upsert'])
+    p.add_argument('--db', help='Database name')
+    p.add_argument('--date-var', help='Date column name')
 
-    # load-map command
-    parser_load_map = subparsers.add_parser('load-map', help='Load table pairs from JSON config')
-    parser_load_map.add_argument('project_db', help='Path to database file')
-    parser_load_map.add_argument('config_file', help='JSON configuration file')
-    parser_load_map.add_argument('--type', default='row', choices=['row', 'col'],
-                                  help='Data type to load: row (counts) or col (statistics) (default: row)')
+    # load-col
+    p = sub.add_parser('load-col', help='Load column stats from CSV folder')
+    p.add_argument('project_db')
+    p.add_argument('folder', help='Folder with {qname}_col.csv files')
+    p.add_argument('--config', required=True, help='Unified config JSON')
+    p.add_argument('--mode', default='upsert', choices=['upsert', 'replace'])
 
-    # list command
-    parser_list = subparsers.add_parser('list', help='List all tables')
-    parser_list.add_argument('project_db', help='Path to database file')
+    # load-columns
+    p = sub.add_parser('load-columns', help='Load column metadata')
+    p.add_argument('project_db')
+    p.add_argument('--config', required=True, help='Unified config JSON')
+    p.add_argument('--csv', dest='csv_files', action='append', default=[],
+                   help='Metadata CSV (repeatable)')
 
-    # list-pairs command
-    parser_list_pairs = subparsers.add_parser('list-pairs', help='List all registered table pairs')
-    parser_list_pairs.add_argument('project_db', help='Path to database file')
-    parser_list_pairs.add_argument('-v', '--verbose', action='store_true', help='Show column mappings')
+    # compare-row
+    p = sub.add_parser('compare-row', help='Compare row counts')
+    p.add_argument('project_db')
+    p.add_argument('--config', required=True)
+    p.add_argument('--from-date')
+    p.add_argument('--to-date')
+    p.add_argument('-y', '--yes', action='store_true', help='Skip prompts')
+    p.add_argument('--html', help='Output HTML report')
+    p.add_argument('--title')
+    p.add_argument('--subtitle')
 
-    # show command
-    parser_show = subparsers.add_parser('show', help='Show row count data')
-    parser_show.add_argument('project_db', help='Path to database file')
-    parser_show.add_argument('table', help='Table name')
-    parser_show.add_argument('--limit', type=int, help='Limit number of rows')
+    # compare-col
+    p = sub.add_parser('compare-col', help='Compare column statistics')
+    p.add_argument('project_db')
+    p.add_argument('--config', required=True)
+    p.add_argument('--from-date')
+    p.add_argument('--to-date')
+    p.add_argument('--no-date-filter', action='store_true')
+    p.add_argument('--vintage', choices=['month', 'quarter', 'year'])
+    p.add_argument('-y', '--yes', action='store_true', help='Skip prompts')
+    p.add_argument('--html')
+    p.add_argument('--title')
+    p.add_argument('--subtitle')
 
-    # show-stats command
-    parser_show_stats = subparsers.add_parser('show-stats', help='Show column statistics')
-    parser_show_stats.add_argument('project_db', help='Path to database file')
-    parser_show_stats.add_argument('table', help='Table name')
-    parser_show_stats.add_argument('--column', help='Filter by column name')
-    parser_show_stats.add_argument('--from-date', help='Start date filter (YYYY-MM-DD)')
-    parser_show_stats.add_argument('--to-date', help='End date filter (YYYY-MM-DD)')
-    parser_show_stats.add_argument('--limit', type=int, help='Limit number of rows')
+    # gen-sas
+    p = sub.add_parser('gen-sas', help='Generate SAS extraction files')
+    p.add_argument('config')
+    p.add_argument('--outdir', default='./sas/')
+    p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
+    p.add_argument('--db', dest='db_path')
+    p.add_argument('--vintage')
 
-    # compare-row command
-    parser_compare_row = subparsers.add_parser('compare-row', help='Compare row counts between two tables')
-    parser_compare_row.add_argument('project_db', help='Path to database file')
-    parser_compare_row.add_argument('--pair', help='Pair name (from load-map)')
-    parser_compare_row.add_argument('--table-left', dest='table_left', help='Left table name')
-    parser_compare_row.add_argument('--table-right', dest='table_right', help='Right table name')
-    parser_compare_row.add_argument('--from-date', help='Start date filter (YYYY-MM-DD)')
-    parser_compare_row.add_argument('--to-date', help='End date filter (YYYY-MM-DD)')
-    parser_compare_row.add_argument('--config', help='Pairs config JSON (auto-registers pairs and compares)')
-    parser_compare_row.add_argument('-y', '--yes', action='store_true',
-                                     help='Compare all pairs without prompting (for each pair comparison)')
-    parser_compare_row.add_argument('--html', help='Output HTML report file')
-    parser_compare_row.add_argument('--title', help='HTML report title (default: "Row Count Comparison")')
-    parser_compare_row.add_argument('--subtitle', help='HTML report subtitle (default: "updates every Thursday")')
+    # gen-aws
+    p = sub.add_parser('gen-aws', help='Extract data from AWS Athena')
+    p.add_argument('config')
+    p.add_argument('--outdir', default='./csv/')
+    p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
+    p.add_argument('--workers', type=int)
+    p.add_argument('--db', dest='db_path')
+    p.add_argument('--vintage')
+    p.add_argument('--force', action='store_true')
 
-    # compare-col command
-    parser_compare_col = subparsers.add_parser('compare-col', help='Compare column statistics between two tables')
-    parser_compare_col.add_argument('project_db', help='Path to database file')
-    parser_compare_col.add_argument('--pair', help='Pair name (from load-map)')
-    parser_compare_col.add_argument('--table-left', dest='table_left', help='Left table name')
-    parser_compare_col.add_argument('--table-right', dest='table_right', help='Right table name')
-    parser_compare_col.add_argument('--columns', help='Comma-separated list of columns to compare')
-    parser_compare_col.add_argument('--col-map', help='Column mapping: "left1=right1,left2=right2"')
-    parser_compare_col.add_argument('--from-date', help='Start date filter (YYYY-MM-DD)')
-    parser_compare_col.add_argument('--to-date', help='End date filter (YYYY-MM-DD)')
-    parser_compare_col.add_argument('--config', help='Pairs config JSON (auto-registers pairs and compares)')
-    parser_compare_col.add_argument('--no-date-filter', action='store_true',
-                                     help='Include all dates (skip auto-filtering to matched row counts)')
-    parser_compare_col.add_argument('--vintage', choices=['month', 'quarter', 'year'],
-                                     help='Group comparison by vintage window')
-    parser_compare_col.add_argument('--html', help='Output HTML report file')
-    parser_compare_col.add_argument('--title', help='HTML report title (default: "Column Statistics Comparison")')
-    parser_compare_col.add_argument('--subtitle', help='HTML report subtitle (default: "updates first Thursday of every month")')
+    # match-columns
+    p = sub.add_parser('match-columns', help='Match columns between paired tables')
+    p.add_argument('project_db')
+    p.add_argument('--config', required=True)
+    p.add_argument('--mode', default='merge', choices=['merge', 'replace'])
 
-    # gen-sas command
-    parser_gen_sas = subparsers.add_parser('gen-sas', help='Generate SAS extraction files from config')
-    parser_gen_sas.add_argument('config', help='Extraction config JSON file')
-    parser_gen_sas.add_argument('--outdir', default='./sas/', help='Output directory (default: ./sas/)')
-    parser_gen_sas.add_argument('--type', default='both', choices=['row', 'col', 'both'],
-                                 help='Type to generate (default: both)')
-    parser_gen_sas.add_argument('--env', help='Path to .env file with credentials (pcds_usr, pcds_pw, email_to, lib_path)')
-    parser_gen_sas.add_argument('--db', dest='db_path', help='Database path to read column metadata from _column_meta')
-    parser_gen_sas.add_argument('--vintage',
-                                 help='Override vintage: day, week, month, quarter, year, sample, or sample@N (default: day).')
+    # list
+    p = sub.add_parser('list', help='List all tables')
+    p.add_argument('project_db')
 
-    # gen-aws command
-    parser_gen_aws = subparsers.add_parser('gen-aws', help='Extract data from AWS Athena')
-    parser_gen_aws.add_argument('config', help='Extraction config JSON file')
-    parser_gen_aws.add_argument('--outdir', default='./csv/', help='Output directory (default: ./csv/)')
-    parser_gen_aws.add_argument('--type', default='both', choices=['row', 'col', 'both'],
-                                 help='Type to extract (default: both)')
-    parser_gen_aws.add_argument('--workers', type=int, help='Max parallel workers (default: 4, or MAX_WORKERS env var)')
-    parser_gen_aws.add_argument('--db', dest='db_path',
-                                 help='Database path to read column metadata from _column_meta')
-    parser_gen_aws.add_argument('--vintage',
-                                 help='Override vintage: day, week, month, quarter, year, sample, or sample@N (default: day).')
-    parser_gen_aws.add_argument('--force', action='store_true', help='Overwrite existing CSV files without prompting')
+    # list-pairs
+    p = sub.add_parser('list-pairs', help='List table pairs')
+    p.add_argument('project_db')
 
-    # load-col command
-    parser_load_col = subparsers.add_parser('load-col', help='Load column statistics from CSV')
-    parser_load_col.add_argument('project_db', help='Path to database file')
-    parser_load_col.add_argument('file_or_folder', help='CSV file or folder with *_col.csv files')
-    parser_load_col.add_argument('--table', help='Table name (required for single file mode)')
-    parser_load_col.add_argument('--config', help='Config JSON file (enables batch mode from folder)')
-    parser_load_col.add_argument('--mode', default='upsert', choices=['upsert', 'replace'],
-                                        help='Load mode (default: upsert)')
-    parser_load_col.set_defaults(func=cmd_load_col_stats)
+    # run (full pipeline)
+    p = sub.add_parser('run', help='Run full pipeline (init → extract → load → compare → HTML)')
+    p.add_argument('project_db')
+    p.add_argument('--config', required=True)
+    p.add_argument('--outdir', help='Base output directory')
+    p.add_argument('--sas-outdir', help='SAS output directory')
+    p.add_argument('--csv-outdir', help='CSV output directory')
+    p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
+    p.add_argument('--vintage')
+    p.add_argument('-y', '--yes', action='store_true', help='Skip prompts')
+    p.add_argument('--html-row', help='Row comparison HTML path')
+    p.add_argument('--html-col', help='Column comparison HTML path')
+    p.add_argument('--title')
+    p.add_argument('--subtitle')
+    p.add_argument('--workers', type=int)
+    p.add_argument('--force', action='store_true')
+    p.add_argument('--skip-extract', action='store_true')
+    p.add_argument('--skip-load', action='store_true')
+    p.add_argument('--skip-compare', action='store_true')
 
-    # load-columns command
-    parser_load_cols = subparsers.add_parser('load-columns', help='Load column metadata from CSV, Oracle, or Athena into DB')
-    parser_load_cols.add_argument('project_db', help='Path to database file')
-    parser_load_cols.add_argument('csv_file', nargs='?', default=None, help='CSV file (optional if --conn-macro or --source aws used)')
-    parser_load_cols.add_argument('--table', help='Table name to associate columns with (required unless --config)')
-    parser_load_cols.add_argument('--source', help='Source identifier (e.g., pcds, aws)')
-    parser_load_cols.add_argument('--conn-macro', help='Connection identifier: Oracle macro (pcds, pb23) or Athena database name')
-    parser_load_cols.add_argument('--config', help='Extraction config JSON; discovers columns for each table entry')
-    parser_load_cols.add_argument('--csv', dest='csv_files', action='append', default=[],
-                                 help='Metadata CSV with source_table,source,column_name,data_type columns (repeatable)')
-
-    # match-columns command
-    parser_match_cols = subparsers.add_parser(
-        'match-columns',
-        help='Match columns between paired tables',
-        description='Match columns between tables. Two modes:\n'
-                    '  1. Single pair: --left and --right (display only)\n'
-                    '  2. All pairs: --config (updates col_map in config file)\n\n'
-                    'Shows: auto-matched (case-insensitive), source-only, and prompts for manual mappings.',
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser_match_cols.add_argument('project_db', help='Path to project database')
-    parser_match_cols.add_argument('--config', help='Pairs config JSON; match all pairs and update col_map in place')
-    parser_match_cols.add_argument('--left', help='Left table name (from _column_meta source_table field)')
-    parser_match_cols.add_argument('--right', help='Right table name (from _column_meta source_table field)')
-    parser_match_cols.add_argument('--mode', default='merge', choices=['merge', 'replace'],
-                                  help='merge: keep existing col_map, add new matches; replace: discard existing col_map (default: merge)')
-
-    # query command
-    parser_query = subparsers.add_parser(
-        'query',
-        help='Run a SQL query against the database',
-        description='Run a SQL query and display results as a table.\n\n'
-                    'By default, only SELECT, PRAGMA, EXPLAIN, and WITH statements are allowed (read-only).\n'
-                    'Use --write to enable write operations (INSERT, UPDATE, DELETE, DROP, etc.).\n\n'
-                    'Tables:\n'
-                    '  _metadata       Table metadata (source, db, vintage, etc.)\n'
-                    '  _row_counts     Row counts by source_table + dt\n'
-                    '  _col_stats      Column statistics by source_table + column_name + dt\n'
-                    '  _column_meta    Column metadata (name, data_type, source)\n'
-                    '  _table_pairs    Paired tables with column mappings\n'
-                    '  _row_comparison Row comparison results\n'
-                    '  _sample_date    Sampled dates for vintage=sample\n\n'
-                    'Examples (read-only):\n'
-                    '  dtrack query p.db "SELECT * FROM _metadata"\n'
-                    '  dtrack query p.db "SELECT * FROM _row_counts WHERE source_table LIKE \'%%cust%%\'"\n'
-                    '  dtrack query p.db "PRAGMA table_info(_metadata)"\n'
-                    '  dtrack query p.db "SELECT name FROM sqlite_master WHERE type=\'table\'"\n\n'
-                    'Examples (with --write):\n'
-                    '  dtrack query p.db "DROP TABLE _sample_date" --write\n'
-                    '  dtrack query p.db "DELETE FROM _metadata WHERE vintage=\'test\'" --write\n'
-                    '  dtrack query p.db "UPDATE _metadata SET vintage=\'week\' WHERE table_name=\'foo\'" --write',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser_query.add_argument('project_db', help='Path to database file')
-    parser_query.add_argument('sql', help='SQL query to execute')
-    parser_query.add_argument('--write', action='store_true', help='Allow write operations (INSERT, UPDATE, DELETE, DROP, etc.)')
-
-    # upsert command
-    parser_upsert = subparsers.add_parser(
-        'upsert',
-        help='Insert, update, or delete records in any table',
-        description='Insert, update, or delete records in any SQLite table.\n\n'
-                    'Modes:\n'
-                    '  upsert:  dtrack upsert DB TABLE col=val ...           (insert or update by PK)\n'
-                    '  update:  dtrack upsert DB TABLE col=val --update k=v  (WHERE + SET)\n'
-                    '  delete:  dtrack upsert DB TABLE col=val --delete      (WHERE conditions)\n\n'
-                    'Value operators (for --update/--delete WHERE conditions):\n'
-                    '  col=val            exact match\n'
-                    '  col=!=val          not equal\n'
-                    '  col=~=pattern      LIKE (use %% for wildcard)\n'
-                    '  col=!~=pattern     NOT LIKE\n'
-                    '  col=val1,val2      IN (comma-separated)\n'
-                    '  col=%%pattern%%    LIKE (auto-detected from %% in value)\n\n'
-                    'Examples:\n'
-                    '  dtrack upsert p.db _metadata table_name=foo source=oracle\n'
-                    '  dtrack upsert p.db _metadata table_name=%%_daily --update vintage=week\n'
-                    '  dtrack upsert p.db _row_counts --delete source_table=~=pcds_%%\n'
-                    '  dtrack upsert p.db _row_counts --delete source_table=tbl1,tbl2',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser_upsert.add_argument('project_db', help='Path to database file')
-    parser_upsert.add_argument('table', help='Table name (e.g., _metadata, _row_counts)')
-    parser_upsert.add_argument('assignments', nargs='+', help='Column=value pairs (identifiers for --update/--delete, or full row for upsert)')
-    parser_upsert.add_argument('--update', nargs='+', metavar='COL=VAL', help='Columns to set (pairs before --update become WHERE conditions)')
-    parser_upsert.add_argument('--delete', action='store_true', help='Delete matching rows (pairs become WHERE conditions)')
-    parser_upsert.add_argument('--dry-run', action='store_true', help='Show SQL without executing')
-    parser_upsert.add_argument('-y', '--yes', action='store_true', help='Skip confirmation prompt')
-
-    # ppt-create command
-    parser_ppt_create = subparsers.add_parser('ppt-create', help='Create PowerPoint from markdown')
-    parser_ppt_create.add_argument('markdown_file', help='Markdown file to convert')
-    parser_ppt_create.add_argument('-o', '--output', required=True, help='Output PowerPoint file')
-    parser_ppt_create.add_argument('-t', '--template', help='Template PowerPoint file (optional)')
-    parser_ppt_create.add_argument('-c', '--config', help='Layout config JSON file (optional)')
-
-    # ppt-template command
-    parser_ppt_template = subparsers.add_parser('ppt-template', help='Create PowerPoint template')
-    parser_ppt_template.add_argument('-o', '--output', required=True, help='Output template file')
+    # query
+    p = sub.add_parser('query', help='Run SQL query')
+    p.add_argument('project_db')
+    p.add_argument('sql')
+    p.add_argument('--write', action='store_true')
 
     args = parser.parse_args()
 
-    # Set up debugger if requested
     if args.debug == 'ipdb':
         import ipdb
         sys.breakpointhook = ipdb.set_trace
@@ -2868,13 +1014,12 @@ def main():
         debugpy.listen(('0.0.0.0', 5678))
         print('Waiting for debugger attach on port 5678...')
         debugpy.wait_for_client()
-        print('Debugger attached.')
 
     if not args.command:
         parser.print_help()
         sys.exit(1)
 
-    # Load config file into os.environ
+    # Load env
     env_file = getattr(args, 'env_file', None)
     if env_file:
         from dotenv import dotenv_values
@@ -2887,32 +1032,25 @@ def main():
         env_dir = os.path.dirname(found) if found else os.getcwd()
         load_dotenv(found)
 
-    # Resolve mock paths relative to config file location
     for mock_var in ('DTRACK_ORACLE_MOCK', 'DTRACK_ATHENA_MOCK'):
         mock_dir = os.environ.get(mock_var)
         if mock_dir and not os.path.isabs(mock_dir):
             os.environ[mock_var] = os.path.join(env_dir, mock_dir)
 
-    # Dispatch to command handler
     commands = {
         'init': cmd_init,
         'load-row': cmd_load_row,
-        'load-col': cmd_load_col_stats,
-        'load-map': cmd_load_map,
-        'list': cmd_list,
-        'list-pairs': cmd_list_pairs,
-        'show': cmd_show,
-        'show-stats': cmd_show_stats,
+        'load-col': cmd_load_col,
+        'load-columns': cmd_load_columns,
         'compare-row': cmd_compare_row,
         'compare-col': cmd_compare_col,
         'gen-sas': cmd_gen_sas,
         'gen-aws': cmd_gen_aws,
-        'load-columns': cmd_load_columns,
         'match-columns': cmd_match_columns,
+        'run': cmd_run,
+        'list': cmd_list,
+        'list-pairs': cmd_list_pairs,
         'query': cmd_query,
-        'upsert': cmd_upsert,
-        'ppt-create': cmd_ppt_create,
-        'ppt-template': cmd_ppt_template,
     }
 
     handler = commands.get(args.command)

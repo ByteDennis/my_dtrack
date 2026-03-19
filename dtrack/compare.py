@@ -1,7 +1,6 @@
-"""Comparison functionality for row counts and column statistics"""
+"""Comparison functionality for row counts and column statistics."""
 
 import json
-from typing import Dict, List, Tuple, Optional
 from .db import get_row_counts, get_col_stats, get_table_pair, list_table_pairs
 from .date_utils import parse_date
 
@@ -25,14 +24,12 @@ def _parse_top10(s):
     if not s or s == '[]':
         return {}
     s = str(s).strip()
-    # JSON format: [{"value": "x", "count": 5}, ...]
     if s.startswith('['):
         try:
             entries = json.loads(s)
             return {str(e.get('value', '')): int(e.get('count', 0)) for e in entries}
         except (json.JSONDecodeError, TypeError):
             return {}
-    # Semicolon format: x(5); y(3)
     result = {}
     for entry in s.split('; '):
         entry = entry.strip()
@@ -53,19 +50,10 @@ def _compare_top10(left_str, right_str):
     return left != right
 
 
-def parse_col_map_string(col_map_str: str) -> Dict[str, str]:
-    """
-    Parse column mapping string into dictionary.
-
-    Args:
-        col_map_str: String like "AMT=amount,STATUS=status"
-
-    Returns:
-        Dictionary mapping left columns to right columns
-    """
+def parse_col_map_string(col_map_str):
+    """Parse column mapping string like "AMT=amount,STATUS=status" into dict."""
     if not col_map_str:
         return {}
-
     mappings = {}
     for pair in col_map_str.split(','):
         pair = pair.strip()
@@ -73,97 +61,45 @@ def parse_col_map_string(col_map_str: str) -> Dict[str, str]:
             continue
         left, right = pair.split('=', 1)
         mappings[left.strip()] = right.strip()
-
     return mappings
 
 
-def get_column_mapping(
-    db_path: str,
-    table_left: str,
-    table_right: str,
-    pair_name: Optional[str] = None,
-    col_map_override: Optional[Dict[str, str]] = None,
-) -> Dict[str, str]:
+def get_column_mapping(db_path, table_left, table_right, pair_name=None, col_map_override=None):
+    """Get column mapping between two tables.
+
+    Priority: col_map_override > pair_name lookup > auto-detect > empty dict.
     """
-    Get column mapping between two tables.
-
-    Priority:
-    1. col_map_override (from --col-map parameter)
-    2. pair_name lookup in _table_pairs
-    3. Auto-detect from _table_pairs by table names
-    4. Empty dict (exact column name matching)
-
-    Args:
-        db_path: Path to SQLite database
-        table_left: Left table name
-        table_right: Right table name
-        pair_name: Optional pair name to lookup
-        col_map_override: Optional mapping dictionary to use instead
-
-    Returns:
-        Dictionary mapping left column names to right column names
-    """
-    # Priority 1: Override
     if col_map_override is not None:
         return col_map_override
 
-    # Priority 2: Explicit pair name
     if pair_name:
         pair = get_table_pair(db_path, pair_name)
         if pair and pair.get('col_mappings'):
             return pair['col_mappings']
 
-    # Priority 3: Auto-detect by table names
     pairs = list_table_pairs(db_path)
     for pair in pairs:
-        if (pair['table_left'] == table_left and pair['table_right'] == table_right):
+        if pair['table_left'] == table_left and pair['table_right'] == table_right:
             return pair.get('col_mappings', {})
-        if (pair['table_left'] == table_right and pair['table_right'] == table_left):
-            # Reverse mapping if tables are swapped
+        if pair['table_left'] == table_right and pair['table_right'] == table_left:
             mappings = pair.get('col_mappings', {})
             return {v: k for k, v in mappings.items()}
 
-    # Priority 4: Empty dict (exact matching)
     return {}
 
 
-def compare_row_counts(
-    db_path: str,
-    table_left: str,
-    table_right: str,
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
-) -> Dict[str, List]:
-    """
-    Compare row counts between two tables.
+def compare_row_counts(db_path, table_left, table_right, from_date=None, to_date=None):
+    """Compare row counts between two tables.
 
-    Args:
-        db_path: Path to SQLite database
-        table_left: Left table name
-        table_right: Right table name
-        from_date: Optional start date filter
-        to_date: Optional end date filter
-
-    Returns:
-        Dictionary with:
-        - only_left: [(date, count), ...]
-        - only_right: [(date, count), ...]
-        - matching: [(date, count), ...]
-        - mismatched: [(date, count_left, count_right), ...]
-        - summary: {date_range_left, date_range_right, total_left, total_right}
+    Returns dict with only_left, only_right, matching, mismatched, summary.
     """
-    # Get row counts for both tables
     rows_left = get_row_counts(db_path, table_left, from_date, to_date)
     rows_right = get_row_counts(db_path, table_right, from_date, to_date)
 
-    # Convert to dictionaries for easier lookup
     dict_left = {dt: count for dt, count in rows_left}
     dict_right = {dt: count for dt, count in rows_right}
-
-    # Get all unique dates
     all_dates = set(dict_left.keys()) | set(dict_right.keys())
 
-    # Categorize dates
     only_left = []
     only_right = []
     matching = []
@@ -180,7 +116,6 @@ def compare_row_counts(
         else:
             only_right.append((dt, dict_right[dt]))
 
-    # Calculate summary statistics
     summary = {
         "date_range_left": (
             min(dict_left.keys()) if dict_left else None,
@@ -205,43 +140,39 @@ def compare_row_counts(
     }
 
 
+# ============================================================================
+# Column type resolution
+# ============================================================================
+
+def resolve_col_type(left_type, right_type, overrides=None, col_name=None):
+    """Resolve disagreeing column types. Categorical is the safe default.
+
+    >>> resolve_col_type("categorical", "numeric")
+    'categorical'
+    >>> resolve_col_type("numeric", "numeric")
+    'numeric'
+    """
+    if overrides and col_name and col_name in overrides:
+        return overrides[col_name]
+    if left_type == right_type:
+        return left_type
+    return "categorical"
+
+
 def compare_column_stats(
-    db_path: str,
-    table_left: str,
-    table_right: str,
-    columns: Optional[List[str]] = None,
-    col_mappings: Optional[Dict[str, str]] = None,
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
-    matched_dates: Optional[set] = None,
-) -> Dict[str, List[Dict]]:
+    db_path, table_left, table_right,
+    columns=None, col_mappings=None,
+    from_date=None, to_date=None,
+    matched_dates=None,
+    col_type_overrides=None,
+):
+    """Compare column statistics between two tables.
+
+    Now resolves col_type disagreements using resolve_col_type().
     """
-    Compare column statistics between two tables.
+    stats_left = get_col_stats(db_path, table_left, from_date=from_date, to_date=to_date)
+    stats_right = get_col_stats(db_path, table_right, from_date=from_date, to_date=to_date)
 
-    Args:
-        db_path: Path to SQLite database
-        table_left: Left table name
-        table_right: Right table name
-        columns: Optional list of columns to compare
-        col_mappings: Optional column name mappings {left_col: right_col}
-        from_date: Optional start date filter
-        to_date: Optional end date filter
-        matched_dates: Optional set of date strings to include (e.g. from row count matching)
-
-    Returns:
-        Dictionary mapping column names to list of comparison records
-    """
-    # Get stats for both tables
-    stats_left = get_col_stats(
-        db_path, table_left,
-        from_date=from_date, to_date=to_date
-    )
-    stats_right = get_col_stats(
-        db_path, table_right,
-        from_date=from_date, to_date=to_date
-    )
-
-    # Organize stats by column and date (normalize dt to YYYY-MM-DD)
     def organize_stats(stats):
         organized = {}
         for stat in stats:
@@ -255,29 +186,22 @@ def compare_column_stats(
     left_by_col = organize_stats(stats_left)
     right_by_col = organize_stats(stats_right)
 
-    # If no columns specified, use all columns from left table
     if columns is None:
         columns = list(left_by_col.keys())
-
-    # If no mappings, use exact matching
     if col_mappings is None:
         col_mappings = {}
 
     result = {}
 
     for left_col in columns:
-        # Get corresponding right column name
         right_col = col_mappings.get(left_col, left_col)
 
-        if left_col not in left_by_col:
-            continue
-        if right_col not in right_by_col:
+        if left_col not in left_by_col or right_col not in right_by_col:
             continue
 
         left_dates = left_by_col[left_col]
         right_dates = right_by_col[right_col]
 
-        # Compare for each date
         comparisons = []
         all_dates = set(left_dates.keys()) | set(right_dates.keys())
         if matched_dates is not None:
@@ -285,12 +209,16 @@ def compare_column_stats(
 
         for dt in sorted(all_dates):
             if dt not in left_dates or dt not in right_dates:
-                continue  # Skip dates not in both
+                continue
 
             left_stat = left_dates[dt]
             right_stat = right_dates[dt]
 
-            # Parse counts from strings
+            # Resolve column type
+            left_type = left_stat["col_type"]
+            right_type = right_stat["col_type"]
+            resolved_type = resolve_col_type(left_type, right_type, col_type_overrides, left_col)
+
             l_total = _safe_int(left_stat["n_total"])
             r_total = _safe_int(right_stat["n_total"])
             l_missing = _safe_int(left_stat["n_missing"])
@@ -301,10 +229,11 @@ def compare_column_stats(
             comparison = {
                 "dt": dt,
                 "vintage_label": left_stat.get("vintage_label") or dt,
-                "col_type": left_stat["col_type"],
+                "col_type": resolved_type,
+                "col_type_left": left_type,
+                "col_type_right": right_type,
                 "left_col": left_col,
                 "right_col": right_col,
-                # Counts
                 "n_total_left": l_total,
                 "n_total_right": r_total,
                 "n_total_diff": r_total - l_total,
@@ -316,8 +245,7 @@ def compare_column_stats(
                 "n_unique_diff": r_unique - l_unique,
             }
 
-            # Numeric stats
-            if left_stat["col_type"] == "numeric":
+            if resolved_type == "numeric":
                 l_mean = _safe_float(left_stat["mean"])
                 r_mean = _safe_float(right_stat["mean"])
                 l_std = _safe_float(left_stat["std"])
@@ -325,25 +253,16 @@ def compare_column_stats(
                 comparison.update({
                     "mean_left": l_mean,
                     "mean_right": r_mean,
-                    "mean_diff": (
-                        r_mean - l_mean
-                        if l_mean is not None and r_mean is not None
-                        else None
-                    ),
+                    "mean_diff": (r_mean - l_mean if l_mean is not None and r_mean is not None else None),
                     "std_left": l_std,
                     "std_right": r_std,
-                    "std_diff": (
-                        r_std - l_std
-                        if l_std is not None and r_std is not None
-                        else None
-                    ),
+                    "std_diff": (r_std - l_std if l_std is not None and r_std is not None else None),
                     "min_left": left_stat["min_val"],
                     "min_right": right_stat["min_val"],
                     "max_left": left_stat["max_val"],
                     "max_right": right_stat["max_val"],
                 })
             else:
-                # Categorical stats
                 comparison.update({
                     "min_left": left_stat["min_val"],
                     "min_right": right_stat["min_val"],
@@ -361,16 +280,8 @@ def compare_column_stats(
     return result
 
 
-def _has_col_differences(comp: Dict) -> bool:
-    """Check if a column comparison has any statistical differences.
-
-    Args:
-        comp: Single comparison record from compare_column_stats
-
-    Returns:
-        True if any metric shows a difference, False otherwise
-    """
-    # Check count differences
+def _has_col_differences(comp):
+    """Check if a column comparison has any statistical differences."""
     if comp.get('n_total_diff', 0) != 0:
         return True
     if comp.get('n_missing_diff', 0) != 0:
@@ -378,7 +289,6 @@ def _has_col_differences(comp: Dict) -> bool:
     if comp.get('n_unique_diff', 0) != 0:
         return True
 
-    # Check numeric differences (use threshold for floating point)
     mean_diff = comp.get('mean_diff')
     if mean_diff is not None and abs(mean_diff) > 0.01:
         return True
@@ -388,3 +298,38 @@ def _has_col_differences(comp: Dict) -> bool:
         return True
 
     return False
+
+
+def match_columns_from_dicts(left_cols, right_cols, left_label="left", right_label="right", outfile=None):
+    """Compare two column dictionaries and match by case-insensitive name."""
+    left_lower = {k.lower(): k for k in left_cols}
+    right_lower = {k.lower(): k for k in right_cols}
+
+    matched = {}
+    left_only = []
+    right_only = []
+
+    for lower_name, left_name in sorted(left_lower.items()):
+        if lower_name in right_lower:
+            right_name = right_lower[lower_name]
+            matched[left_name] = right_name
+        else:
+            left_only.append({"name": left_name, "type": left_cols[left_name]})
+
+    for lower_name, right_name in sorted(right_lower.items()):
+        if lower_name not in left_lower:
+            right_only.append({"name": right_name, "type": right_cols[right_name]})
+
+    result = {
+        "matched": matched,
+        f"{left_label}_only": left_only,
+        f"{right_label}_only": right_only,
+        "manual_mapping": {},
+    }
+
+    if outfile:
+        with open(outfile, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2)
+        print(f"\nWritten to: {outfile}")
+
+    return result
