@@ -1,0 +1,709 @@
+================================================================================
+  dtrack — Semi-Automated Data Validation Across Oracle, SAS, and Athena
+================================================================================
+
+
+OVERVIEW
+--------
+
+dtrack is a config-driven CLI that compares row counts and column statistics
+between database tables across different platforms (Oracle via SAS passthrough,
+local SAS datasets, and AWS Athena). It produces HTML reports highlighting
+discrepancies, and uses a human-in-the-loop workflow where the analyst reviews,
+corrects, and annotates results at key checkpoints before proceeding.
+
+Everything is driven by a single JSON config file (pairs.json) that defines
+which tables to compare, how columns map between sides, and accumulates
+decisions as the workflow progresses. A local SQLite database stores extracted
+data and comparison results.
+
+
+THE WORKFLOW AT A GLANCE
+------------------------
+
+    pairs.json ──► extract ──► load ──► compare ──► HTML report
+                      │           │         │
+                      │           │         ▼
+                      │           │     [ANALYST REVIEWS]
+                      │           │     edits config, annotates
+                      │           │         │
+                      │           ▼         ▼
+                      └──── project.db ◄── synced
+
+The nine steps below are run in sequence. Steps 4, 5, and the pause between
+compare-row and gen-col are the manual checkpoints where the analyst intervenes.
+
+
+================================================================================
+STEP 0: Initialize the Database
+================================================================================
+
+    dtrack init project.db
+
+Creates a fresh SQLite database with the system tables that dtrack uses
+internally to store row counts, column statistics, metadata, pair definitions,
+and comparison results.
+
+    Options:
+      --force       Overwrite an existing database
+      --refresh     Update schema on existing database (add new columns,
+                    recreate conflicting tables)
+
+    Output:
+      project.db    SQLite database file
+
+
+================================================================================
+STEP 1: Discover Columns
+================================================================================
+
+    dtrack load-columns project.db --config pairs.json --csv sas/colmap.csv
+
+Loads column metadata (name + data type) for every table referenced in the
+config. This metadata is used later to generate platform-specific SQL (e.g.,
+knowing that RPT_DT is a TIMESTAMP triggers TRUNC() wrapping in Oracle).
+
+    Input:
+      --config      Unified config JSON (required)
+      --csv         One or more CSV files with pre-collected metadata
+                    (repeatable: --csv file1.csv --csv file2.csv)
+
+    CSV format:
+      source,table,column_name,data_type
+      pcds,CUST_DAILY,RPT_DT,TIMESTAMP
+      pcds,CUST_DAILY,CUSTOMER_ID,NUMBER
+      pcds,CUST_DAILY,AMT,NUMBER(15,2)
+      pcds,CUST_DAILY,REGION,VARCHAR2(50)
+      pcds,CUST_DAILY,STATUS,CHAR(1)
+
+    If no CSV is provided for a table, dtrack discovers columns live:
+      - Oracle/PCDS tables: queries ALL_TAB_COLUMNS via SAS passthrough
+      - AWS tables: queries information_schema.columns via pyathena
+
+    Database effect:
+      Populates _column_meta table with (source_table, column_name, data_type)
+
+
+================================================================================
+STEP 2: Generate and Run Extraction
+================================================================================
+
+Two commands, one per platform. Run both to extract from all tables.
+
+  Oracle / SAS (generates a .sas file to run in your SAS environment):
+
+    dtrack gen-sas pairs.json --outdir ./sas --type row
+
+  AWS Athena (queries Athena directly and writes CSVs):
+
+    dtrack gen-aws pairs.json --outdir ./csv/ --type row
+
+    Options:
+      --type        row, col, or both (default: both)
+      --db          Path to project.db — needed for col extraction to read
+                    where_map and column metadata
+      --vintage     Override vintage bucketing (day/week/month/quarter/year)
+      --workers     Max parallel Athena queries (gen-aws only, default: 4)
+      --force       Skip confirmation prompts (gen-aws only)
+
+  SAS output (./sas/):
+    extract_row.sas             Self-contained SAS program
+                                Contains connection macros, data-driven
+                                extraction, timing, and cache logic.
+                                Run this in your SAS environment.
+
+    After SAS runs, it produces:
+    pcds.cust_daily_row.csv     Row counts per date for Oracle table
+    oracle.txn_monthly_row.csv  Row counts per date for Oracle table
+
+  Athena output (./csv/):
+    aws.cust_daily_row.csv      Row counts per date for Athena table
+    aws.txn_monthly_row.csv     Row counts per date for Athena table
+    _timing.csv                 Query runtimes (table, step, elapsed_sec)
+
+  Row count CSV format (both platforms produce the same schema):
+    date_value,row_count
+    2023-01-02,1497
+    2023-01-09,1523
+    2023-01-16,1489
+
+  Mock mode:
+    Set DTRACK_ORACLE_MOCK=./oracle_mock in your .env file and dtrack
+    copies CSVs from the mock directory instead of generating SAS code.
+    Similarly, DTRACK_ATHENA_MOCK=./athena_mock skips live Athena queries.
+
+
+================================================================================
+STEP 3: Load Row Counts
+================================================================================
+
+    dtrack load-row project.db ./sas/ --config pairs.json --mode replace
+    dtrack load-row project.db ./csv/ --config pairs.json --mode replace
+
+Reads every {qname}_row.csv file from the given folder and loads it into the
+database. The config determines which tables to look for.
+
+    Options:
+      --mode        replace  — drop existing data, insert fresh
+                    upsert   — update existing dates, insert new ones (default)
+                    append   — insert all rows (may duplicate)
+      --db          Database name override
+      --date-var    Date column name override
+
+    File naming convention:
+      The loader looks for:  <folder>/<qualified_name>_row.csv
+      where qualified_name = "<source>.<table_name>" from the config
+      Examples: pcds.cust_daily_row.csv, aws.cust_daily_row.csv
+
+    Auto-detection:
+      The loader auto-detects date and count columns by matching common
+      aliases: dt, rpt_dt, eff_dt, date, run_date, snap_dt for dates;
+      row_count, count, cnt, rows for counts. Date format is detected
+      from the first data row (YYYYMMDD, YYYY-MM-DD, DDMONYYYY, etc.).
+
+    Database effect:
+      Populates _row_counts (source_table, dt, row_count)
+      Updates _metadata with totals, source info, date format
+
+    Output:
+      --- pcds.cust_daily ---
+        Loaded 104 date buckets, total: 156,208
+      --- aws.cust_daily ---
+        Loaded 104 date buckets, total: 155,882
+
+
+================================================================================
+STEP 4: Compare Row Counts                              [MANUAL CHECKPOINT]
+================================================================================
+
+    dtrack compare-row project.db --config pairs.json --html row_report.html
+
+This is the first major human-in-the-loop step. For each pair, dtrack compares
+row counts by date, then pauses for analyst review.
+
+    Options:
+      --from-date   Filter start date (YYYY-MM-DD)
+      --to-date     Filter end date (YYYY-MM-DD)
+      -y, --yes     Skip all prompts (use existing config state)
+      --html        Output HTML report path (default: ./output/compare_row.html)
+      --title       HTML report title
+      --subtitle    HTML report subtitle
+
+  What happens:
+
+    1. For each pair, computes the overlap range (dates both sides have data)
+       and categorizes every date as: matching, mismatched, left-only, or
+       right-only.
+
+    2. Prints a summary:
+
+         Comparing row counts: pcds.cust_daily vs aws.cust_daily
+         ======================================================================
+         Date column: RPT_DT / rpt_dt
+
+         pcds: 2023-01-02 to 2024-12-30 | 104 dates | total: 156,208
+         aws:  2023-01-02 to 2024-12-30 | 100 dates | total: 155,882
+
+         Overlap range: 2023-01-02 to 2024-12-30
+
+         Mismatched (5 dates):
+           2023-03-06: pcds=1,497, aws=1,502, diff=+5
+           2023-08-14: pcds=1,523, aws=1,521, diff=-2
+           ...
+
+         Misload (4 dates):
+           2023-01-04: pcds=1,499, aws=0
+           ...
+
+         Matching: 91 dates
+
+    3. INTERACTIVE PROMPT — asks the analyst what to do:
+
+         cust_daily: 9 mismatched/missing dates
+         Action? [s]kip pair / [i]gnore dates / [c]ontinue (default: c):
+
+       - [s]kip:     Marks skip: true in config. Pair is excluded from all
+                      subsequent steps.
+       - [i]gnore:   Shows each mismatched date numbered. Analyst picks which
+                      to add to ignore_rows in config:
+
+                        Mismatched dates (5):
+                          1. 2023-03-06
+                          2. 2023-08-14
+                          3. 2023-09-04
+                          4. 2024-04-29
+                          5. 2024-10-28
+                        Enter numbers to ignore (comma-separated), 'all', or empty:
+                        > 1,3
+
+       - [c]ontinue: Proceed as-is with all dates.
+
+    4. Builds WHERE clauses (where_map) from the matching and excluded dates.
+       These clauses are platform-aware:
+
+         Oracle:   RPT_DT >= DATE '2023-01-09' AND RPT_DT <= DATE '2024-12-30'
+                   AND RPT_DT NOT IN (DATE '2023-01-02', DATE '2023-03-06', ...)
+         Athena:   rpt_dt >= DATE('2023-01-09') AND rpt_dt <= DATE('2024-12-30')
+                   AND rpt_dt NOT IN (DATE('2023-01-02'), ...)
+         SAS:      datepart(RPT_DT) >= '09JAN2023'd AND ...
+         Numeric:  MONTH_DT >= 202002 AND MONTH_DT <= 203206
+                   AND MONTH_DT NOT IN (202003, 202005, ...)
+
+    5. PAUSE FOR MANUAL EDITING — saves config and waits:
+
+         ================================================================
+         Review and edit the config file now
+         ================================================================
+           File: /path/to/pairs.json
+
+           - Review where_map
+           - Add time_map values (check ./sas/_timing.csv and ./csv/_timing.csv)
+           - Add comment_map notes (shown as tooltips in HTML)
+
+         Press Enter when done editing...
+
+       This is where the analyst can:
+         - Adjust the auto-generated where_map if needed
+         - Fill in time_map with query runtimes from _timing.csv:
+             "time_map": {"row": {"left": "42 sec", "right": "112 sec"}}
+         - Add comment_map notes that appear as tooltips in the HTML:
+             "comment_map": {"row": {"left": "filtered STATUS='A'", "right": ""}}
+
+    6. After Enter, reloads the config and syncs everything to the database.
+
+    7. Generates the HTML row count report.
+
+  Config fields written by this step:
+    where_map       Auto-generated WHERE clauses for column extraction
+    time_map        Defaults added (analyst fills in manually)
+    comment_map     Defaults added (analyst fills in manually)
+    diff_map        Defaults added (empty)
+    skip            Set to true if analyst chose [s]kip
+    ignore_rows     Dates the analyst chose to ignore
+
+  HTML report structure:
+    - Banner per pair showing table names and connection info
+    - Side-by-side row: date range, total count, query runtime
+    - Expandable detail section (collapsed by default):
+        Mismatched dates with left/right counts and diff
+        Left-only dates (red if inside overlap = misload, gray if outside)
+        Right-only dates (same color coding)
+
+
+================================================================================
+STEP 5: Match Columns                                   [MANUAL CHECKPOINT]
+================================================================================
+
+    dtrack match-columns project.db --config pairs.json
+
+Maps column names between the left and right tables. Columns often have
+different names across platforms (e.g., AMT vs amount, CUSTOMER_ID vs
+customer_id). This step auto-matches what it can, then asks the analyst to
+resolve the rest interactively.
+
+    Options:
+      --mode        merge   — keep existing col_map, add new matches (default)
+                    replace — discard existing col_map, start fresh
+
+  What happens:
+
+    1. For each pair, fetches column metadata from _column_meta.
+
+    2. Auto-matches columns by case-insensitive name comparison.
+
+         === Pair: cust_daily ===
+           Left:  pcds.cust_daily (pcds)
+           Right: aws.cust_daily (aws)
+
+         Auto-matched: 3 columns
+
+    3. If unmatched columns remain, shows them side-by-side and prompts:
+
+         LEFT (pcds.cust_daily)          RIGHT (aws.cust_daily)
+         ─────────────────────           ──────────────────────
+         AMT          NUMBER(15,2)       amount       double
+         CUST_STATUS  VARCHAR2(20)       cust_stat    string
+
+         Type mappings (LEFT  RIGHT), wildcards supported (PREFIX_*  prefix_*)
+         Two empty lines to finish.
+         > AMT  amount
+         > CUST_STATUS  cust_stat
+         >
+         >
+           Mapped 2 columns
+
+       Wildcards expand against the actual column lists:
+         > RPT_*  rpt_*       matches RPT_DT→rpt_dt, RPT_AMT→rpt_amt, etc.
+
+    4. Saves the final col_map to config and syncs to the database.
+
+  Config fields written:
+    col_map         Dictionary mapping left column names to right column names
+                    Example: {"AMT": "amount", "CUSTOMER_ID": "customer_id"}
+
+
+================================================================================
+STEP 6: Generate Column Extraction
+================================================================================
+
+    dtrack gen-sas pairs.json --outdir ./sas --type col --db project.db
+    dtrack gen-aws pairs.json --outdir ./csv/ --type col --db project.db
+
+Same commands as Step 2, but now with --type col and --db pointing to the
+database. The --db flag is critical here: it lets dtrack read the where_map
+(from Step 4) and column metadata (from Step 1) to generate filtered queries.
+
+  Key behaviors:
+    - Only extracts columns listed in col_map (from Step 5)
+    - Applies the WHERE clause from where_map to restrict to matching dates
+    - Respects vintage settings for date bucketing:
+        day      — one row per date
+        week     — one row per ISO week
+        month    — one row per month
+        quarter  — one row per quarter
+        year     — one row per year
+        sample   — random sample of N dates (N from N_SAMPLE env var)
+        sample@N — sample exactly N dates
+        all      — aggregate all dates into a single row
+
+  Column stats CSV format (both platforms produce the same schema):
+    column_name,dt,col_type,n_total,n_missing,n_unique,mean,std,min_val,max_val,top_10
+    CUSTOMER_ID,2023-01-02,numeric,1497,0,1397,25000.5,15000.2,1000,50000,
+    REGION,2023-01-02,categorical,1497,0,5,,,EAST,WEST,"[{""value"":""EAST"",""count"":600}]"
+    STATUS,2023-01-02,categorical,1497,1,3,,,A,Z,"[{""value"":""A"",""count"":1200}]"
+
+  Columns explained:
+    column_name   Column being profiled
+    dt            Date bucket (format depends on vintage)
+    col_type      numeric or categorical
+    n_total       Total non-null row count
+    n_missing     Count of NULL values
+    n_unique      Count of distinct values
+    mean, std     Mean and standard deviation (numeric only)
+    min_val       Minimum value
+    max_val       Maximum value
+    top_10        Most frequent values with counts (categorical only)
+                  Format: semicolon-delimited "VAL(count); ..." or JSON array
+
+
+================================================================================
+STEP 7: Load Column Statistics
+================================================================================
+
+    dtrack load-col project.db ./sas --config pairs.json --mode replace
+    dtrack load-col project.db ./csv --config pairs.json --mode replace
+
+Same pattern as Step 3. Reads {qname}_col.csv files and loads them into the
+database.
+
+    Options:
+      --mode        upsert (default) or replace
+
+    File naming convention:
+      <folder>/<qualified_name>_col.csv
+      Examples: pcds.cust_daily_col.csv, aws.cust_daily_col.csv
+
+    Auto-detection:
+      Column aliases are resolved automatically. The loader accepts both
+      canonical names (n_total, n_missing) and common aliases (col_count,
+      col_missing, col_avg, col_std, col_distinct, col_freq, etc.).
+
+    Database effect:
+      Populates _col_stats table
+      Updates _metadata with vintage and source info
+
+
+================================================================================
+STEP 8: Compare Column Statistics
+================================================================================
+
+    dtrack compare-col project.db --config pairs.json --html col_report.html
+
+Compares column-level statistics between paired tables and generates an HTML
+report showing which columns match and which differ.
+
+    Options:
+      --from-date       Filter start date
+      --to-date         Filter end date
+      --no-date-filter  Compare all vintages (skip date-matching filter)
+      --vintage         Vintage for HTML grouping (month/quarter/year)
+      -y, --yes         Skip prompts
+      --html            Output path (default: ./output/compare_col.html)
+      --title           HTML report title
+      --subtitle        HTML report subtitle
+
+  What happens:
+
+    1. For each pair, first runs row comparison to get matching dates, then
+       filters column stats to only those dates (unless --no-date-filter).
+
+    2. For each column in col_map, compares left vs right statistics.
+
+    3. Resolves column type disagreements:
+       - If left=numeric and right=numeric → numeric comparison
+       - If left=categorical and right=categorical → categorical comparison
+       - If they disagree → defaults to categorical (safe, works for any type)
+       - Override with col_type_overrides in config:
+           "col_type_overrides": {"ACCOUNT_ID": "categorical"}
+
+    4. Detects differences:
+       - n_total, n_missing, n_unique: any non-zero diff flagged
+       - mean, std: absolute diff > 0.01 flagged
+
+    5. Prints summary:
+
+         ======================================================================
+         Comparing column stats: cust_daily
+           pcds: pcds.cust_daily
+           aws:  aws.cust_daily
+         ======================================================================
+         Filtering to 91 matching dates
+           3 match, 2 diff (AMT, STATUS)
+
+    6. Builds diff_map in config (keyed by vintage label → column → stat diffs)
+       for downstream reporting.
+
+    7. Generates HTML report.
+
+  Config fields written:
+    diff_map        Detailed differences per vintage per column
+
+  HTML report structure:
+    - Banner per pair with table names and connection info
+    - Side-by-side row: date range, column count, vintage count, runtime
+    - Expandable detail section:
+        Summary: "5 columns: 3 match, 2 diff (AMT, STATUS)"
+        Per differing column:
+          Column name, type, and per-vintage breakdown:
+          ├─ 2023-W02: n_total +50 (1000→1050)
+          ├─ 2023-W03: mean +0.5 (10.2→10.7)
+          └─ ... (max 3 vintages shown, remainder summarized)
+
+
+================================================================================
+THE CONFIG FILE: pairs.json
+================================================================================
+
+The config file is the single source of truth. It starts minimal (just the pair
+definitions) and accumulates data as the workflow progresses.
+
+  {
+    "metadata": {
+      "title": "Row Count Comparison",
+      "subtitle": "updates every Thursday",
+      "col_title": "Column Statistics Comparison",
+      "col_subtitle": "updates first Thursday of every month"
+    },
+    "pairs": {
+      "cust_daily": {
+        "left": {                            // Oracle/SAS side
+          "name": "cust_daily",              //   qualified name prefix
+          "table": "CUST_DAILY",             //   raw table in source DB
+          "source": "pcds",                  //   platform: pcds, oracle, aws
+          "date_col": "RPT_DT",              //   date column in source table
+          "date_transform": "TRUNC({col})",  //   SQL wrapper for date column
+          "conn_macro": "pcds",              //   SAS connection macro name
+          "where": "STATUS = 'A'",           //   base filter (always applied)
+          "vintage": "week"                  //   date bucketing granularity
+        },
+        "right": {                           // Athena side
+          "name": "cust_daily",
+          "table": "cust_daily",
+          "source": "aws",
+          "conn_macro": "analytics_db",      //   Athena database name
+          "date_col": "rpt_dt",
+          "where": "",
+          "vintage": "week"
+        },
+
+        // --- Populated by the workflow ---
+
+        "col_map": {                         // Step 5: column name mappings
+          "CUSTOMER_ID": "customer_id",
+          "AMT": "amount",
+          "REGION": "region"
+        },
+        "where_map": {                       // Step 4: auto-generated WHERE
+          "left": "RPT_DT >= DATE '...' AND RPT_DT <= DATE '...' AND ...",
+          "right": "rpt_dt >= DATE('...') AND rpt_dt <= DATE('...') AND ..."
+        },
+        "time_map": {                        // Step 4 pause: analyst fills in
+          "row": {"left": "42 sec", "right": "112 sec"},
+          "col": {"left": "5 min", "right": "30 sec"}
+        },
+        "comment_map": {                     // Step 4 pause: analyst fills in
+          "row": {"left": "filtered STATUS='A'", "right": ""},
+          "col": {"left": "", "right": ""}
+        },
+        "diff_map": { ... },                 // Step 8: auto-generated diffs
+
+        // --- HITL flags ---
+
+        "skip": false,                       // true = excluded from workflow
+        "ignore_rows": ["2023-03-06"],       // dates shown but not flagged
+        "ignore_columns": ["LOAD_DT"],       // columns shown but not flagged
+        "col_type_overrides": {              // force column type resolution
+          "ACCOUNT_ID": "categorical"
+        }
+      }
+    }
+  }
+
+  Table config fields:
+    name            Qualified name for dtrack (used as file name prefix)
+    table           Raw table name in the source database
+    source          Platform identifier: pcds, oracle, aws
+    date_col        Date column name in source table
+    date_transform  SQL wrapping for the date column (e.g., TRUNC({col}))
+    conn_macro      Connection name (SAS macro name or Athena database)
+    where           Base WHERE clause (always included in extraction)
+    vintage         Date bucketing: day, week, month, quarter, year,
+                    sample, sample@N, all
+    processed       SAS dataset path ($ prefix) or SQL CTE definition
+    user            Credential override (e.g., "tmp" uses TMP_USR/TMP_PWD)
+    date_format     Date format label (YYYYMMDD, DD-MON-YYYY, etc.)
+
+  Vintage options explained:
+    day             One bucket per calendar date
+    week            One bucket per ISO week (e.g., 2023-W02)
+    month           One bucket per month (e.g., 2023-01)
+    quarter         One bucket per quarter (e.g., 2023-Q1)
+    year            One bucket per year (e.g., 2023)
+    sample          Random sample of dates (size from N_SAMPLE env var)
+    sample@50       Random sample of exactly 50 dates
+    all             Single bucket aggregating all dates
+
+
+================================================================================
+FLEXIBILITY
+================================================================================
+
+  Multi-platform by design
+    A single pair can compare any two platforms. Oracle-to-Athena is the
+    common case, but SAS-to-Oracle, SAS-to-Athena, and even Oracle-to-Oracle
+    across different servers all work. The platform is auto-detected from the
+    "source" field, and WHERE clauses are generated in the correct SQL dialect.
+
+  Incremental workflow
+    Each step is independent. You can re-run any step without redoing the
+    others. For example: re-extract only column stats (Step 6-7) after adding
+    new column mappings, without touching row counts.
+
+  Mock mode for development
+    Set DTRACK_ORACLE_MOCK and DTRACK_ATHENA_MOCK environment variables to
+    directories containing pre-generated CSVs. dtrack copies them instead of
+    running live queries, enabling fast iteration without database access.
+
+  Sampling for large tables
+    When vintage is set to "sample" or "sample@N", dtrack randomly selects N
+    matching dates for column extraction instead of processing all of them.
+    This keeps query costs manageable for tables with years of daily data.
+
+  Config as checkpoint
+    The JSON config file is both input and output. After each major step,
+    decisions are written back to the config. The next run picks up where you
+    left off. You can version-control the config to track how the comparison
+    evolved over time.
+
+  --yes flag for automation
+    Pass -y or --yes to skip all interactive prompts. dtrack uses existing
+    config state (skip flags, ignore lists, existing col_map) and proceeds
+    without pausing. Useful for scheduled re-runs.
+
+  Direct SQL access
+    The query command gives direct SQL access to the SQLite database:
+      dtrack query project.db "SELECT * FROM _metadata"
+      dtrack query project.db "DELETE FROM _col_stats WHERE source_table='...'" --write
+
+
+================================================================================
+SEMI-AUTOMATED DESIGN
+================================================================================
+
+The workflow alternates between automated steps (extract, load, generate SQL)
+and manual checkpoints where the analyst makes judgment calls:
+
+  AUTOMATED                              MANUAL
+  ─────────                              ──────
+  init, load-columns                     (none)
+  gen-sas, gen-aws                       (none — but SAS must be run externally)
+  load-row, load-col                     (none)
+  compare-row                            Skip pair? Ignore dates? Edit where_map?
+  match-columns                          Map unmatched columns? Use wildcards?
+  compare-col                            (none — but review report)
+
+The key insight is that automated row comparison often produces imperfect
+results: some dates mismatch because of known data loads, holidays, or timing
+differences. The analyst decides which discrepancies matter and which to ignore.
+These decisions persist in the config and carry forward to column extraction,
+ensuring that only truly comparable date ranges are profiled.
+
+Similarly, column matching requires human judgment when naming conventions
+differ. The interactive mapper handles the common cases (case differences,
+prefix patterns) but the analyst confirms the final mapping.
+
+
+================================================================================
+ENVIRONMENT VARIABLES
+================================================================================
+
+Set in dtrack.conf (auto-discovered) or pass --env path/to/file:
+
+  Database credentials:
+    PCDS_USR, PCDS_PWD          Oracle PCDS credentials
+    PB23_USR, PB23_PWD          Oracle PB23 credentials
+    <NAME>_USR, <NAME>_PWD      Any additional credential pair
+
+  AWS configuration:
+    AWS_DEFAULT_REGION           AWS region (e.g., us-east-1)
+    AWS_S3_WORK_GROUP            Athena workgroup
+    AWS_S3_STAGING_DIR           S3 staging directory for Athena results
+    AWS_TOKEN_URL                Token renewal endpoint (Windows only)
+    AWS_ARN_URL                  ARN endpoint (Windows only)
+
+  SAS configuration:
+    SAS_LIB                      SAS library for temp datasets (default: WORK)
+    OUT_DIR                      SAS output directory (default: .)
+    EMAIL_TO                     Email for SAS job notifications
+    SEED                         Random seed for cache hash prefix
+
+  dtrack configuration:
+    DTRACK_ORACLE_MOCK           Path to Oracle mock data directory
+    DTRACK_ATHENA_MOCK           Path to Athena mock data directory
+    DTRACK_NO_PREVIEW            Skip SQL preview prompts in gen-aws
+    N_SAMPLE                     Default sample size for vintage=sample
+    MAX_WORKERS                  Default Athena parallel workers
+
+
+================================================================================
+GLOBAL CLI OPTIONS
+================================================================================
+
+    dtrack --env <path>          Load environment from specific .env file
+    dtrack --debug ipdb          Drop into ipdb on unhandled exceptions
+    dtrack --debug attach        Wait for debugpy attach on port 5678
+
+
+================================================================================
+FILE TREE (after a complete workflow run)
+================================================================================
+
+    project/
+    ├── pairs.json                    Config file (input + accumulated state)
+    ├── project.db                    SQLite database
+    ├── dtrack.conf                   Environment variables
+    ├── sas/
+    │   ├── extract_row.sas           Generated SAS program (Step 2)
+    │   ├── extract_col.sas           Generated SAS program (Step 6)
+    │   ├── pcds.cust_daily_row.csv   Row counts from SAS run
+    │   ├── pcds.cust_daily_col.csv   Column stats from SAS run
+    │   ├── pcds_colmap.csv           Column metadata from proc contents
+    │   └── _timing.csv               SAS query runtimes
+    ├── csv/
+    │   ├── aws.cust_daily_row.csv    Row counts from Athena
+    │   ├── aws.cust_daily_col.csv    Column stats from Athena
+    │   ├── aws.cust_daily_col.sql    SQL query log
+    │   └── _timing.csv               Athena query runtimes
+    └── output/
+        ├── row_report.html           Row count comparison report
+        └── col_report.html           Column statistics comparison report
