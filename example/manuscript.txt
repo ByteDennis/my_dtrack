@@ -707,3 +707,59 @@ FILE TREE (after a complete workflow run)
     └── output/
         ├── row_report.html           Row count comparison report
         └── col_report.html           Column statistics comparison report
+
+
+================================================================================
+INCREMENTAL UPDATES
+================================================================================
+
+dtrack tracks the date range of loaded data in _metadata (min_date_loaded,
+max_date_loaded). This enables incremental extraction — only pulling dates
+that haven't been loaded yet.
+
+    After loading:
+
+        dtrack query project.db \
+            "SELECT table_name, min_date_loaded, max_date_loaded FROM _metadata"
+
+        table_name          min_date_loaded  max_date_loaded
+        ─────────────────   ───────────────  ───────────────
+        pcds.cust_daily     2023-01-02       2025-03-13
+        aws.cust_daily      2023-01-02       2025-03-13
+
+    To extract only new dates:
+
+        dtrack gen-aws pairs.json --type row --from-date 2025-03-14
+        dtrack gen-sas pairs.json --type row --from-date 2025-03-14
+
+    The --from-date and --to-date flags inject additional WHERE clause bounds
+    on each table's date column before extraction. After loading the new data,
+    min/max_date_loaded is expanded automatically.
+
+    These flags are also available on the 'run' pipeline command:
+
+        dtrack run project.db --config pairs.json --from-date 2025-03-14
+
+
+================================================================================
+WEB UI
+================================================================================
+
+dtrack includes a minimal web UI for running the workflow from a browser.
+
+    dtrack serve project.db --config pairs.json --port 8080
+
+    Open http://localhost:8080
+
+The web UI shows:
+  - STATUS: pairs with loaded date ranges (from _metadata)
+  - ACTIONS: step buttons for extract, load, compare
+  - OUTPUT: scrolling log showing command output
+  - QUERY: run SQL against the database
+  - REPORTS: links to generated HTML reports
+
+The from-date field is auto-filled with max_date_loaded + 1 day, making
+incremental runs a single click.
+
+Tech stack: FastAPI + uvicorn + vanilla JS. No build step.
+Install with: pip install 'dtrack[web]'

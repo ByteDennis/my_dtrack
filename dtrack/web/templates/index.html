@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dtrack</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>dtrack</h1>
+        <div class="header-actions">
+            <button id="btn-refresh" onclick="loadStatus()">Refresh</button>
+            <button id="btn-init" onclick="runInit()">Init DB</button>
+        </div>
+    </header>
+
+    <main>
+        <section id="config-section">
+            <h2>CONFIG</h2>
+            <div class="config-row">
+                <label class="file-upload">
+                    Upload JSON
+                    <input type="file" id="config-file" accept=".json" onchange="uploadConfig(this)">
+                </label>
+                <button onclick="toggleAddPair()">+ Add Pair</button>
+            </div>
+            <div id="add-pair-form" style="display:none">
+                <div class="pair-form">
+                    <div class="form-row">
+                        <label>Pair name</label>
+                        <input type="text" id="pair-name" placeholder="cust_daily">
+                    </div>
+                    <div class="form-sides">
+                        <div class="form-side">
+                            <strong>Left</strong>
+                            <label>Source</label><input type="text" id="left-source" placeholder="pcds">
+                            <label>Table</label><input type="text" id="left-table" placeholder="CUST_DAILY">
+                            <label>Conn macro</label><input type="text" id="left-conn" placeholder="pcds">
+                            <label>Date col</label><input type="text" id="left-datecol" placeholder="RPT_DT">
+                        </div>
+                        <div class="form-side">
+                            <strong>Right</strong>
+                            <label>Source</label><input type="text" id="right-source" placeholder="aws">
+                            <label>Table</label><input type="text" id="right-table" placeholder="cust_daily">
+                            <label>Conn macro</label><input type="text" id="right-conn" placeholder="mydb">
+                            <label>Date col</label><input type="text" id="right-datecol" placeholder="rpt_dt">
+                        </div>
+                    </div>
+                    <div class="form-actions">
+                        <button onclick="addPair()">Save Pair</button>
+                        <button onclick="toggleAddPair()" class="btn-cancel">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="status-section">
+            <h2>STATUS</h2>
+            <table id="status-table">
+                <thead>
+                    <tr>
+                        <th>Pair</th>
+                        <th>Left</th>
+                        <th>Left Loaded</th>
+                        <th>Right</th>
+                        <th>Right Loaded</th>
+                        <th>Mappings</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="status-body"></tbody>
+            </table>
+            <p id="status-empty" class="muted" style="display:none">No pairs registered yet.</p>
+        </section>
+
+        <section id="actions-section">
+            <h2>ACTIONS</h2>
+            <div class="action-row">
+                <label>From date:</label>
+                <input type="text" id="from-date" placeholder="YYYY-MM-DD">
+                <label>To date:</label>
+                <input type="text" id="to-date" placeholder="YYYY-MM-DD">
+            </div>
+            <div class="action-grid">
+                <div class="action-step">
+                    <span class="step-label">Extract Row</span>
+                    <button onclick="runExtract('sas','row')">gen-sas</button>
+                    <button onclick="runExtract('aws','row')">gen-aws</button>
+                </div>
+                <div class="action-step">
+                    <span class="step-label">Load Row</span>
+                    <button onclick="runLoad('row')">Load</button>
+                </div>
+                <div class="action-step">
+                    <span class="step-label">Compare Row</span>
+                    <button onclick="runCompare('row')">Compare</button>
+                </div>
+                <div class="action-step">
+                    <span class="step-label">Extract Col</span>
+                    <button onclick="runExtract('sas','col')">gen-sas</button>
+                    <button onclick="runExtract('aws','col')">gen-aws</button>
+                </div>
+                <div class="action-step">
+                    <span class="step-label">Load Col</span>
+                    <button onclick="runLoad('col')">Load</button>
+                </div>
+                <div class="action-step">
+                    <span class="step-label">Compare Col</span>
+                    <button onclick="runCompare('col')">Compare</button>
+                </div>
+            </div>
+        </section>
+
+        <section id="output-section">
+            <h2>OUTPUT</h2>
+            <pre id="output"></pre>
+        </section>
+
+        <section id="annotate-section">
+            <h2>ANNOTATE</h2>
+            <div class="annotate-row">
+                <label>Pair:</label>
+                <select id="annotate-pair" onchange="loadAnnotations()">
+                    <option value="">-- select --</option>
+                </select>
+            </div>
+            <div id="annotate-form" style="display:none">
+                <div class="annotate-grid">
+                    <div class="annotate-group">
+                        <h3>WHERE clause</h3>
+                        <label>Left</label>
+                        <textarea id="ann-where-left" rows="2" placeholder="WHERE ..."></textarea>
+                        <label>Right</label>
+                        <textarea id="ann-where-right" rows="2" placeholder="WHERE ..."></textarea>
+                    </div>
+                    <div class="annotate-group">
+                        <h3>Time spent (row)</h3>
+                        <label>Left</label>
+                        <input type="text" id="ann-time-row-left" placeholder="42 sec">
+                        <label>Right</label>
+                        <input type="text" id="ann-time-row-right" placeholder="112 sec">
+                        <h3>Time spent (col)</h3>
+                        <label>Left</label>
+                        <input type="text" id="ann-time-col-left" placeholder="5 min">
+                        <label>Right</label>
+                        <input type="text" id="ann-time-col-right" placeholder="3 min">
+                    </div>
+                    <div class="annotate-group">
+                        <h3>Comment / tooltip (row)</h3>
+                        <label>Left</label>
+                        <input type="text" id="ann-comment-row-left" placeholder="filtered STATUS='A'">
+                        <label>Right</label>
+                        <input type="text" id="ann-comment-row-right" placeholder="">
+                        <h3>Comment / tooltip (col)</h3>
+                        <label>Left</label>
+                        <input type="text" id="ann-comment-col-left" placeholder="">
+                        <label>Right</label>
+                        <input type="text" id="ann-comment-col-right" placeholder="">
+                    </div>
+                </div>
+                <button onclick="saveAnnotations()">Save Annotations</button>
+            </div>
+        </section>
+
+        <section id="query-section">
+            <h2>QUERY</h2>
+            <div class="query-row">
+                <input type="text" id="sql-input" placeholder="SELECT * FROM _metadata LIMIT 10"
+                       onkeydown="if(event.key==='Enter') runQuery()">
+                <button onclick="runQuery()">Run</button>
+            </div>
+            <div id="query-result"></div>
+        </section>
+
+        <section id="reports-section">
+            <h2>REPORTS</h2>
+            <a href="/api/report/row" target="_blank">View Row Report</a>
+            <a href="/api/report/col" target="_blank">View Col Report</a>
+        </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

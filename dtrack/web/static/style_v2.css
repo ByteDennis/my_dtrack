@@ -1,0 +1,1093 @@
+/* dtrack v2 - JupyterLab Light Theme */
+
+/* ========================================================================
+   CSS VARIABLES
+   ======================================================================== */
+
+:root {
+    /* Colors - JupyterLab Light Theme */
+    --jp-layout-color0: #ffffff;
+    --jp-layout-color1: #fafafa;
+    --jp-layout-color2: #f5f5f5;
+    --jp-layout-color3: #e0e0e0;
+    --jp-layout-color4: #bdbdbd;
+
+    --jp-border-color0: #e0e0e0;
+    --jp-border-color1: #d0d0d0;
+    --jp-border-color2: #bdbdbd;
+
+    --jp-ui-font-color0: #212121;
+    --jp-ui-font-color1: #424242;
+    --jp-ui-font-color2: #616161;
+    --jp-ui-font-color3: #9e9e9e;
+
+    --jp-brand-color0: #2196F3;
+    --jp-brand-color1: #1976D2;
+    --jp-brand-color2: #0D47A1;
+
+    --jp-accent-color0: #2196F3;
+    --jp-success-color0: #4caf50;
+    --jp-warn-color0: #ff9800;
+    --jp-error-color0: #f44336;
+
+    /* Spacing */
+    --jp-space-xs: 4px;
+    --jp-space-sm: 8px;
+    --jp-space-md: 12px;
+    --jp-space-lg: 16px;
+    --jp-space-xl: 20px;
+    --jp-space-xxl: 24px;
+
+    /* Border Radius */
+    --jp-border-radius: 4px;
+    --jp-border-radius-sm: 2px;
+    --jp-border-radius-lg: 8px;
+
+    /* Shadows */
+    --jp-shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+    --jp-shadow-md: 0 2px 4px rgba(0,0,0,0.08);
+    --jp-shadow-lg: 0 4px 8px rgba(0,0,0,0.12);
+
+    /* Typography */
+    --jp-ui-font-size0: 11px;
+    --jp-ui-font-size1: 12px;
+    --jp-ui-font-size2: 13px;
+    --jp-ui-font-size3: 14px;
+    --jp-ui-font-size4: 16px;
+
+    --jp-code-font-family: 'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace;
+    --jp-ui-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+
+    /* Transitions */
+    --jp-transition-time: 0.15s;
+}
+
+/* ========================================================================
+   RESET & BASE
+   ======================================================================== */
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: var(--jp-ui-font-family);
+    font-size: var(--jp-ui-font-size2);
+    background: var(--jp-layout-color1);
+    color: var(--jp-ui-font-color0);
+    line-height: 1.6;
+}
+
+/* ========================================================================
+   HEADER
+   ======================================================================== */
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--jp-space-md) var(--jp-space-xxl);
+    background: var(--jp-layout-color0);
+    border-bottom: 1px solid var(--jp-border-color0);
+    box-shadow: var(--jp-shadow-sm);
+}
+
+.header-left h1 {
+    font-size: var(--jp-ui-font-size4);
+    font-weight: 600;
+    color: var(--jp-brand-color1);
+    letter-spacing: -0.5px;
+}
+
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: var(--jp-space-md);
+}
+
+.db-status {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--jp-success-color0);
+    cursor: help;
+    box-shadow: 0 0 0 2px var(--jp-layout-color0);
+}
+
+/* ========================================================================
+   IO BAR
+   ======================================================================== */
+
+.io-bar {
+    padding: var(--jp-space-sm) var(--jp-space-xxl);
+    background: var(--jp-layout-color2);
+    border-bottom: 1px solid var(--jp-border-color0);
+    font-size: var(--jp-ui-font-size1);
+    color: var(--jp-ui-font-color2);
+}
+
+.io-label {
+    font-weight: 600;
+    color: var(--jp-ui-font-color1);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.io-separator {
+    margin: 0 var(--jp-space-md);
+    color: var(--jp-border-color2);
+}
+
+/* ========================================================================
+   MAIN LAYOUT
+   ======================================================================== */
+
+main {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: var(--jp-space-xxl);
+}
+
+/* ========================================================================
+   CARD COMPONENT
+   ======================================================================== */
+
+.card {
+    background: var(--jp-layout-color0);
+    border: 1px solid var(--jp-border-color0);
+    border-radius: var(--jp-border-radius);
+    padding: var(--jp-space-xl);
+    margin-bottom: var(--jp-space-xxl);
+    box-shadow: var(--jp-shadow-sm);
+}
+
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--jp-space-lg);
+    padding-bottom: var(--jp-space-md);
+    border-bottom: 2px solid var(--jp-border-color0);
+}
+
+.section-header h2 {
+    font-size: var(--jp-ui-font-size1);
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--jp-ui-font-color1);
+}
+
+.section-header .actions {
+    display: flex;
+    align-items: center;
+    gap: var(--jp-space-sm);
+}
+
+/* ========================================================================
+   BUTTONS
+   ======================================================================== */
+
+button,
+select {
+    background: var(--jp-layout-color0);
+    color: var(--jp-ui-font-color0);
+    border: 1px solid var(--jp-border-color1);
+    padding: 6px 14px;
+    font-size: var(--jp-ui-font-size2);
+    font-family: var(--jp-ui-font-family);
+    border-radius: var(--jp-border-radius);
+    cursor: pointer;
+    transition: all var(--jp-transition-time);
+    font-weight: 500;
+}
+
+button:hover {
+    background: var(--jp-layout-color2);
+    border-color: var(--jp-border-color2);
+}
+
+button:active {
+    transform: translateY(1px);
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn-primary {
+    background: var(--jp-brand-color0);
+    border-color: var(--jp-brand-color0);
+    color: white;
+    font-weight: 600;
+}
+
+.btn-primary:hover {
+    background: var(--jp-brand-color1);
+    border-color: var(--jp-brand-color1);
+}
+
+.btn-secondary {
+    background: var(--jp-layout-color0);
+    border-color: var(--jp-border-color1);
+    color: var(--jp-ui-font-color1);
+}
+
+.btn-secondary:hover {
+    background: var(--jp-layout-color2);
+}
+
+.btn-text {
+    background: transparent;
+    border: none;
+    color: var(--jp-brand-color0);
+    padding: var(--jp-space-xs) var(--jp-space-sm);
+    font-weight: 500;
+}
+
+.btn-text:hover {
+    background: var(--jp-layout-color2);
+}
+
+.btn-danger {
+    background: transparent;
+    border-color: var(--jp-border-color1);
+    color: var(--jp-error-color0);
+}
+
+.btn-danger:hover {
+    background: var(--jp-error-color0);
+    color: white;
+    border-color: var(--jp-error-color0);
+}
+
+/* ========================================================================
+   FORM INPUTS
+   ======================================================================== */
+
+input[type="text"],
+input[type="date"],
+input[type="number"],
+textarea {
+    background: var(--jp-layout-color0);
+    border: 1px solid var(--jp-border-color1);
+    color: var(--jp-ui-font-color0);
+    padding: 6px 10px;
+    font-size: var(--jp-ui-font-size2);
+    font-family: var(--jp-ui-font-family);
+    border-radius: var(--jp-border-radius);
+    transition: border-color var(--jp-transition-time);
+}
+
+input[type="text"]:focus,
+input[type="date"]:focus,
+input[type="number"]:focus,
+textarea:focus {
+    outline: none;
+    border-color: var(--jp-brand-color0);
+    box-shadow: 0 0 0 1px var(--jp-brand-color0);
+}
+
+textarea {
+    resize: vertical;
+    font-family: var(--jp-code-font-family);
+    font-size: var(--jp-ui-font-size1);
+    line-height: 1.5;
+}
+
+input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+
+/* ========================================================================
+   PAIRS LIST
+   ======================================================================== */
+
+.pairs-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--jp-space-md);
+}
+
+.pair-item {
+    background: var(--jp-layout-color1);
+    border: 1px solid var(--jp-border-color0);
+    border-radius: var(--jp-border-radius);
+    overflow: hidden;
+    transition: all var(--jp-transition-time);
+}
+
+.pair-item:hover {
+    box-shadow: var(--jp-shadow-md);
+}
+
+.pair-item.selected {
+    border-color: var(--jp-brand-color0);
+    border-width: 2px;
+}
+
+.pair-header {
+    display: flex;
+    align-items: center;
+    padding: var(--jp-space-md) var(--jp-space-lg);
+    cursor: pointer;
+    user-select: none;
+    background: var(--jp-layout-color0);
+}
+
+.pair-header:hover {
+    background: var(--jp-layout-color2);
+}
+
+.pair-checkbox {
+    margin-right: var(--jp-space-md);
+}
+
+.pair-expand {
+    margin-right: var(--jp-space-sm);
+    font-size: var(--jp-ui-font-size3);
+    color: var(--jp-ui-font-color2);
+    transition: transform var(--jp-transition-time);
+}
+
+.pair-item.expanded .pair-expand {
+    transform: rotate(90deg);
+}
+
+.pair-name {
+    flex: 1;
+    font-weight: 600;
+    font-size: var(--jp-ui-font-size3);
+    color: var(--jp-ui-font-color0);
+}
+
+.pair-actions {
+    display: flex;
+    gap: var(--jp-space-sm);
+}
+
+.pair-actions button {
+    padding: 4px 10px;
+    font-size: var(--jp-ui-font-size1);
+}
+
+.pair-body {
+    padding: 0 var(--jp-space-lg) var(--jp-space-md) 44px;
+    display: none;
+    color: var(--jp-ui-font-color1);
+    font-size: var(--jp-ui-font-size2);
+    background: var(--jp-layout-color1);
+}
+
+.pair-body.expanded {
+    display: block;
+}
+
+.pair-info {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--jp-space-xl);
+    margin-bottom: var(--jp-space-md);
+    font-size: var(--jp-ui-font-size1);
+}
+
+.pair-side-info {
+    background: var(--jp-layout-color2);
+    padding: var(--jp-space-md);
+    border-radius: var(--jp-border-radius);
+    border: 1px solid var(--jp-border-color0);
+}
+
+.pair-side-title {
+    font-weight: 700;
+    color: var(--jp-brand-color1);
+    text-transform: uppercase;
+    font-size: var(--jp-ui-font-size0);
+    letter-spacing: 0.5px;
+    margin-bottom: var(--jp-space-sm);
+    padding-bottom: var(--jp-space-xs);
+    border-bottom: 2px solid var(--jp-border-color1);
+}
+
+.pair-info-row {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: var(--jp-space-sm);
+    margin-bottom: var(--jp-space-xs);
+    font-size: var(--jp-ui-font-size1);
+}
+
+.pair-info-label {
+    color: var(--jp-ui-font-color2);
+    font-weight: 600;
+}
+
+.pair-info-value {
+    color: var(--jp-ui-font-color0);
+    font-family: var(--jp-code-font-family);
+    font-size: var(--jp-ui-font-size0);
+}
+
+/* ========================================================================
+   SETTINGS & FORMS
+   ======================================================================== */
+
+.settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: var(--jp-space-xl);
+}
+
+.setting-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--jp-space-sm);
+}
+
+.setting-group label {
+    font-size: var(--jp-ui-font-size1);
+    font-weight: 600;
+    color: var(--jp-ui-font-color1);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.radio-group {
+    display: flex;
+    gap: var(--jp-space-lg);
+}
+
+.radio-group label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--jp-ui-font-size2);
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--jp-ui-font-color0);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.date-range {
+    display: flex;
+    align-items: center;
+    gap: var(--jp-space-sm);
+}
+
+.quick-dates {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: var(--jp-space-xs);
+}
+
+.quick-dates button {
+    padding: 4px 10px;
+    font-size: var(--jp-ui-font-size1);
+}
+
+.help-text {
+    font-size: var(--jp-ui-font-size0);
+    color: var(--jp-ui-font-color3);
+    font-style: italic;
+    margin-top: var(--jp-space-xs);
+}
+
+/* ========================================================================
+   SELECTED PAIRS SUMMARY
+   ======================================================================== */
+
+#selected-pairs-list {
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.selected-pair-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--jp-space-sm) var(--jp-space-md);
+    border-bottom: 1px solid var(--jp-border-color0);
+    font-size: var(--jp-ui-font-size2);
+}
+
+.selected-pair-row:last-child {
+    border-bottom: none;
+}
+
+.selected-pair-name {
+    font-weight: 600;
+    color: var(--jp-ui-font-color0);
+}
+
+.selected-pair-info {
+    color: var(--jp-ui-font-color2);
+    font-size: var(--jp-ui-font-size1);
+}
+
+.selected-pair-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.status-badge {
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: var(--jp-ui-font-size0);
+    font-weight: 600;
+}
+
+.status-badge.ready {
+    background: rgba(76, 175, 80, 0.15);
+    color: var(--jp-success-color0);
+}
+
+.status-badge.warning {
+    background: rgba(255, 152, 0, 0.15);
+    color: var(--jp-warn-color0);
+}
+
+/* ========================================================================
+   ACTION BUTTONS
+   ======================================================================== */
+
+.action-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--jp-space-md);
+    margin-top: var(--jp-space-lg);
+    padding-top: var(--jp-space-lg);
+    border-top: 1px solid var(--jp-border-color0);
+}
+
+/* ========================================================================
+   LOG OUTPUT
+   ======================================================================== */
+
+.log-output {
+    background: var(--jp-layout-color1);
+    border: 1px solid var(--jp-border-color0);
+    border-radius: var(--jp-border-radius);
+    padding: var(--jp-space-md);
+    max-height: 300px;
+    overflow-y: auto;
+    font-family: var(--jp-code-font-family);
+    font-size: var(--jp-ui-font-size1);
+    line-height: 1.5;
+}
+
+.log-empty {
+    color: var(--jp-ui-font-color3);
+    font-style: italic;
+}
+
+.log-entry {
+    display: flex;
+    gap: var(--jp-space-sm);
+    margin-bottom: var(--jp-space-xs);
+}
+
+.log-time {
+    color: var(--jp-ui-font-color3);
+}
+
+.log-message {
+    color: var(--jp-ui-font-color0);
+}
+
+.log-success {
+    color: var(--jp-success-color0);
+}
+
+.log-error {
+    color: var(--jp-error-color0);
+}
+
+.log-file {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--jp-space-sm) var(--jp-space-md);
+    background: var(--jp-layout-color2);
+    border: 1px solid var(--jp-border-color0);
+    border-radius: var(--jp-border-radius);
+    margin-bottom: 6px;
+}
+
+.log-file-name {
+    font-weight: 600;
+}
+
+.log-file-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.log-file-actions button {
+    padding: 2px 8px;
+    font-size: var(--jp-ui-font-size0);
+}
+
+.log-command {
+    background: var(--jp-layout-color0);
+    border: 1px solid var(--jp-border-color0);
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin: 4px 0;
+    font-family: var(--jp-code-font-family);
+    font-size: 12px;
+    color: var(--jp-ui-font-color1);
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* ========================================================================
+   EMPTY STATE
+   ======================================================================== */
+
+.empty-state {
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--jp-ui-font-color3);
+    font-size: var(--jp-ui-font-size3);
+}
+
+/* ========================================================================
+   MODAL
+   ======================================================================== */
+
+.modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.modal.active {
+    display: flex;
+}
+
+.modal-content {
+    background: var(--jp-layout-color0);
+    border: 1px solid var(--jp-border-color0);
+    border-radius: var(--jp-border-radius-lg);
+    max-width: 600px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: var(--jp-shadow-lg);
+}
+
+.modal-large {
+    max-width: 1000px;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--jp-space-lg) var(--jp-space-xl);
+    border-bottom: 1px solid var(--jp-border-color0);
+    background: var(--jp-layout-color1);
+}
+
+.modal-header h3 {
+    font-size: var(--jp-ui-font-size4);
+    font-weight: 600;
+    color: var(--jp-ui-font-color0);
+}
+
+.modal-close {
+    background: transparent;
+    border: none;
+    color: var(--jp-ui-font-color2);
+    font-size: 24px;
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    cursor: pointer;
+    border-radius: var(--jp-border-radius);
+}
+
+.modal-close:hover {
+    background: var(--jp-layout-color2);
+    color: var(--jp-ui-font-color0);
+}
+
+.modal-body {
+    padding: var(--jp-space-xl);
+    font-size: var(--jp-ui-font-size1);
+}
+
+.modal-body input,
+.modal-body select,
+.modal-body textarea {
+    font-size: var(--jp-ui-font-size1);
+}
+
+.modal-body label {
+    font-size: var(--jp-ui-font-size0);
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--jp-space-md);
+    padding: var(--jp-space-lg) var(--jp-space-xl);
+    border-top: 1px solid var(--jp-border-color0);
+    background: var(--jp-layout-color1);
+}
+
+/* ========================================================================
+   PAIR FORM (MODAL)
+   ======================================================================== */
+
+.pair-sides {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--jp-space-xxl);
+    margin: var(--jp-space-xl) 0;
+}
+
+.pair-side {
+    background: var(--jp-layout-color1);
+    border: 1px solid var(--jp-border-color0);
+    border-radius: var(--jp-border-radius);
+    padding: var(--jp-space-lg);
+}
+
+.pair-side h4 {
+    font-size: var(--jp-ui-font-size1);
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--jp-brand-color1);
+    margin-bottom: var(--jp-space-md);
+    padding-bottom: var(--jp-space-sm);
+    border-bottom: 2px solid var(--jp-border-color0);
+}
+
+.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--jp-space-lg);
+    margin-bottom: var(--jp-space-lg);
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: var(--jp-space-lg);
+}
+
+.form-group label {
+    font-size: var(--jp-ui-font-size0);
+    font-weight: 600;
+    color: var(--jp-ui-font-color1);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+    width: 100%;
+}
+
+.preset-buttons {
+    display: flex;
+    gap: var(--jp-space-xs);
+    margin-top: var(--jp-space-xs);
+}
+
+.preset-buttons button {
+    padding: 4px 8px;
+    font-size: var(--jp-ui-font-size0);
+}
+
+.form-section {
+    margin: var(--jp-space-xl) 0;
+    padding: var(--jp-space-lg);
+    background: var(--jp-layout-color1);
+    border: 1px solid var(--jp-border-color0);
+    border-radius: var(--jp-border-radius);
+}
+
+.form-section h4 {
+    font-size: var(--jp-ui-font-size1);
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--jp-brand-color1);
+    margin-bottom: var(--jp-space-md);
+}
+
+.date-range-compact {
+    display: flex;
+    align-items: center;
+    gap: var(--jp-space-lg);
+    padding: var(--jp-space-sm) 0;
+}
+
+.checkbox-inline {
+    display: flex;
+    align-items: center;
+    gap: var(--jp-space-xs);
+    font-size: var(--jp-ui-font-size2);
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.date-input-inline {
+    display: flex;
+    align-items: center;
+    gap: var(--jp-space-sm);
+    font-size: var(--jp-ui-font-size2);
+    font-weight: 500;
+}
+
+.date-input-inline input[type="date"] {
+    width: 150px;
+}
+
+.effective-range-info {
+    padding: var(--jp-space-sm) var(--jp-space-md);
+    background: #E3F2FD;
+    border-left: 3px solid var(--jp-brand-color0);
+    border-radius: var(--jp-border-radius);
+    font-size: var(--jp-ui-font-size1);
+    color: var(--jp-ui-font-color1);
+    margin-top: var(--jp-space-sm);
+}
+
+.help-box {
+    margin-top: var(--jp-space-lg);
+    padding: var(--jp-space-md);
+    background: #E3F2FD;
+    border-left: 3px solid var(--jp-brand-color0);
+    border-radius: var(--jp-border-radius);
+    font-size: var(--jp-ui-font-size1);
+    line-height: 1.6;
+    color: var(--jp-ui-font-color1);
+}
+
+.help-box code {
+    background: var(--jp-layout-color0);
+    padding: 2px 6px;
+    border-radius: var(--jp-border-radius-sm);
+    font-family: var(--jp-code-font-family);
+    font-size: var(--jp-ui-font-size0);
+    color: var(--jp-brand-color1);
+}
+
+/* ========================================================================
+   DATA TABLE
+   ======================================================================== */
+
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--jp-ui-font-size2);
+}
+
+.data-table thead {
+    background: var(--jp-layout-color2);
+}
+
+.data-table th {
+    padding: 10px 12px;
+    text-align: left;
+    font-size: var(--jp-ui-font-size1);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--jp-ui-font-color1);
+    border-bottom: 2px solid var(--jp-border-color1);
+}
+
+.data-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--jp-border-color0);
+    color: var(--jp-ui-font-color0);
+}
+
+.data-table tbody tr:hover {
+    background: var(--jp-layout-color2);
+}
+
+.data-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.empty-message {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--jp-ui-font-color3);
+    font-style: italic;
+}
+
+/* ========================================================================
+   DROP ZONE
+   ======================================================================== */
+
+.drop-zone {
+    border: 2px dashed var(--jp-border-color1);
+    border-radius: var(--jp-border-radius-lg);
+    padding: 40px 20px;
+    text-align: center;
+    transition: all var(--jp-transition-time);
+    cursor: pointer;
+    margin-bottom: var(--jp-space-xl);
+    background: var(--jp-layout-color1);
+}
+
+.drop-zone:hover {
+    border-color: var(--jp-brand-color0);
+    background: #E3F2FD;
+}
+
+.drop-zone.drag-over {
+    border-color: var(--jp-brand-color0);
+    background: #BBDEFB;
+    border-style: solid;
+}
+
+.drop-icon {
+    font-size: 48px;
+    margin-bottom: var(--jp-space-md);
+}
+
+.drop-text {
+    font-size: var(--jp-ui-font-size3);
+    color: var(--jp-ui-font-color2);
+    margin-bottom: var(--jp-space-lg);
+}
+
+/* ========================================================================
+   FILE ACTIONS
+   ======================================================================== */
+
+.file-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--jp-space-md);
+    margin-top: var(--jp-space-lg);
+    padding-top: var(--jp-space-lg);
+    border-top: 1px solid var(--jp-border-color0);
+}
+
+/* ========================================================================
+   VALIDATION BOX
+   ======================================================================== */
+
+.validation-box {
+    background: var(--jp-layout-color1);
+    border: 1px solid var(--jp-border-color0);
+    border-radius: var(--jp-border-radius);
+    padding: var(--jp-space-md) var(--jp-space-lg);
+    margin-bottom: var(--jp-space-lg);
+}
+
+.validation-item {
+    display: flex;
+    align-items: center;
+    gap: var(--jp-space-sm);
+    margin-bottom: var(--jp-space-sm);
+    font-size: var(--jp-ui-font-size2);
+}
+
+.validation-item:last-child {
+    margin-bottom: 0;
+}
+
+.validation-icon {
+    font-size: 16px;
+    font-weight: bold;
+}
+
+.validation-success {
+    color: var(--jp-success-color0);
+}
+
+.validation-warning {
+    color: var(--jp-warn-color0);
+}
+
+.validation-error {
+    color: var(--jp-error-color0);
+}
+
+/* ========================================================================
+   SUBSECTION TITLE
+   ======================================================================== */
+
+.subsection-title {
+    font-size: var(--jp-ui-font-size2);
+    font-weight: 600;
+    color: var(--jp-ui-font-color0);
+    margin: var(--jp-space-lg) 0 var(--jp-space-md) 0;
+}
+
+/* ========================================================================
+   SCAN PATH & MISC
+   ======================================================================== */
+
+.scan-path {
+    display: flex;
+    align-items: center;
+    gap: var(--jp-space-sm);
+    font-size: var(--jp-ui-font-size1);
+    color: var(--jp-ui-font-color2);
+}
+
+.auto-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--jp-ui-font-size1);
+    color: var(--jp-ui-font-color2);
+    cursor: pointer;
+}
+
+.last-load {
+    font-size: var(--jp-ui-font-size1);
+    color: var(--jp-ui-font-color2);
+}
+
+/* ========================================================================
+   SCROLLBAR (Webkit)
+   ======================================================================== */
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--jp-layout-color1);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--jp-border-color2);
+    border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--jp-ui-font-color3);
+}

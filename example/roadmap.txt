@@ -1,0 +1,403 @@
+================================================================================
+  dtrack Web UI — Roadmap
+================================================================================
+
+
+WHAT THE USER SEES
+------------------
+
+A single-page app at localhost:8080. Left sidebar shows the pair list.
+Main area walks through the workflow as a stepped pipeline. Each step has
+a panel that shows status, output, and controls.
+
+
+================================================================================
+  PAGE LAYOUT
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  dtrack                                        pairs.json ▾  ⚙    │
+  ├────────────┬────────────────────────────────────────────────────────┤
+  │            │                                                       │
+  │  PAIRS     │  PIPELINE                                             │
+  │            │                                                       │
+  │  ● cust    │  ┌─ 0. Database ──────────────────── ✓ ready ──────┐  │
+  │    _daily  │  │  project.db  (12 tables, 4 pairs)               │  │
+  │            │  └──────────────────────────────────────────────────┘  │
+  │  ● txn     │  ┌─ 1. Columns ──────────────────── ✓ loaded ─────┐  │
+  │    _monthly│  │  20 columns across 4 tables                     │  │
+  │            │  └──────────────────────────────────────────────────┘  │
+  │  ○ acct    │  ┌─ 2. Extract Row ──────────────── ◐ running ────┐  │
+  │    _balance│  │  SAS: generated  │  Athena: 3/4 tables done     │  │
+  │            │  │  ░░░░░░░░░░░░░░░░░░░░░░████░░░  75%            │  │
+  │  ○ email   │  └──────────────────────────────────────────────────┘  │
+  │    _events │  ┌─ 3. Load Row ─────────────────── ○ pending ────┐  │
+  │            │  │                                                 │  │
+  │  ──────    │  └──────────────────────────────────────────────────┘  │
+  │  [+ Add]   │  ┌─ 4. Compare Row ─────────────── ○ pending ────┐  │
+  │            │  │                                                 │  │
+  │            │  └──────────────────────────────────────────────────┘  │
+  │            │   ...                                                 │
+  │            │                                                       │
+  └────────────┴───────────────────────────────────────────────────────┘
+
+
+================================================================================
+  STEP-BY-STEP: WHAT EACH PANEL DOES
+================================================================================
+
+
+STEP 0 — Database
+─────────────────
+
+  State:  ✓ ready  /  ○ not initialized
+
+  What it shows:
+    Database path, table count, pair count, last modified time.
+
+  Controls:
+    [ Initialize ]     Creates project.db (or reinitializes with --force)
+    [ Refresh ]        Runs schema migration on existing db
+
+  On click:
+    POST /api/init
+    Returns: { status, tables, pairs }
+
+
+STEP 1 — Columns
+─────────────────
+
+  State:  ✓ loaded  /  ○ pending
+
+  What it shows:
+    Table listing each source table and its column count.
+    Expandable per-table view showing column names and data types.
+
+  Controls:
+    [ Upload CSV ]     File picker for colmap CSV(s)
+    [ Discover ]       Runs live discovery (Oracle/Athena)
+
+  On click:
+    POST /api/columns/load    { csv: <uploaded file> }
+    POST /api/columns/discover
+    Returns: { tables: [{ name, columns: [{ name, type }] }] }
+
+  Live output:
+    WebSocket streams discovery progress line by line.
+
+
+STEP 2 — Extract Row Counts
+────────────────────────────
+
+  State:  ✓ done  /  ◐ running  /  ○ pending
+
+  What it shows:
+    Two sub-panels side by side:
+
+    ┌─ SAS (Oracle/PCDS) ────────┐  ┌─ Athena (AWS) ─────────────┐
+    │  Status: generated         │  │  Status: running 3/4       │
+    │  File: ./sas/extract.sas   │  │  aws.cust_daily ✓  3.2s   │
+    │                            │  │  aws.txn_monthly ✓  2.1s  │
+    │  [ Generate SAS ]          │  │  aws.acct_balance ◐  ...   │
+    │  [ Download .sas ]         │  │  aws.email_events ○        │
+    │                            │  │                            │
+    │                            │  │  [ Run Extraction ]        │
+    └────────────────────────────┘  └────────────────────────────┘
+
+  Controls:
+    [ Generate SAS ]    POST /api/extract/sas   { type: "row" }
+                        Returns SAS file path. Offers download link.
+                        (User runs it externally in SAS EG)
+
+    [ Run Extraction ]  POST /api/extract/aws   { type: "row" }
+                        Runs live. WebSocket streams per-table progress.
+
+  After SAS runs externally, user clicks [ I've run the SAS ] to mark done.
+
+
+STEP 3 — Load Row Counts
+─────────────────────────
+
+  State:  ✓ loaded  /  ○ pending
+
+  What it shows:
+    Table per source folder:
+
+    Table                Dates    Total Rows    Source
+    ─────────────────    ─────    ──────────    ──────
+    pcds.cust_daily      104      156,208       ./sas/
+    aws.cust_daily       100      155,882       ./csv/
+    pcds.txn_monthly      52      2,340,112     ./sas/
+    aws.txn_monthly       52      2,340,112     ./csv/
+
+  Controls:
+    [ Load SAS CSVs ]   POST /api/load/row   { folder: "./sas/" }
+    [ Load AWS CSVs ]   POST /api/load/row   { folder: "./csv/" }
+    [ Load All ]        Runs both sequentially.
+
+  Yellow warning if a table has 0 CSVs found.
+
+
+STEP 4 — Compare Row Counts                              ** INTERACTIVE **
+────────────────────────────
+
+  State:  ✓ done  /  ◐ reviewing  /  ○ pending
+
+  This is the key HITL step. It replaces the terminal prompts with a form.
+
+  What it shows:
+    Iterates through each pair. For the current pair:
+
+    ┌─ cust_daily ─────────────────────────────────────────────────────┐
+    │                                                                  │
+    │  pcds: 2023-01-02 → 2024-12-30 │ 104 dates │ total: 156,208    │
+    │  aws:  2023-01-02 → 2024-12-30 │ 100 dates │ total: 155,882    │
+    │  Overlap: 2023-01-02 → 2024-12-30                               │
+    │                                                                  │
+    │  Mismatched (3):              Misload (4):                       │
+    │  ☐ 2023-03-06  +5            ☐ 2023-01-04  pcds only            │
+    │  ☐ 2023-08-14  -2            ☐ 2023-04-15  aws only             │
+    │  ☐ 2024-10-28  +1            ☐ 2024-06-01  pcds only            │
+    │                               ☐ 2024-09-15  aws only            │
+    │                                                                  │
+    │  Matching: 93 dates                                              │
+    │                                                                  │
+    │  ┌──────────────────────────────────────────────────────────┐    │
+    │  │  Action:  ○ Continue   ○ Skip pair   ○ Ignore checked   │    │
+    │  └──────────────────────────────────────────────────────────┘    │
+    │                                                                  │
+    │  [ Next Pair → ]                                                 │
+    └──────────────────────────────────────────────────────────────────┘
+
+  The checkboxes replace the terminal "enter numbers to ignore" prompt.
+  The radio buttons replace the [s]kip / [i]gnore / [c]ontinue prompt.
+
+  After all pairs:
+
+    ┌─ Review Config ──────────────────────────────────────────────────┐
+    │                                                                  │
+    │  Auto-generated where_map for 4 pairs.                          │
+    │                                                                  │
+    │  Optional fields to fill in:                                     │
+    │                                                                  │
+    │  cust_daily                                                      │
+    │    Row query time (left):  [ 42 sec        ]                    │
+    │    Row query time (right): [ 112 sec       ]                    │
+    │    Comment (left):         [ filtered STATUS='A' ]              │
+    │    Comment (right):        [                     ]              │
+    │                                                                  │
+    │  txn_monthly                                                     │
+    │    Row query time (left):  [ 1 hour 2 mins ]                    │
+    │    Row query time (right): [ 4 secs        ]                    │
+    │    Comment (left):         [                ]                    │
+    │    Comment (right):        [                ]                    │
+    │                                                                  │
+    │  [ Save & Generate Report ]                                      │
+    └──────────────────────────────────────────────────────────────────┘
+
+  This replaces the "pause for manual editing" terminal step. Instead of
+  opening pairs.json in a text editor, the user fills in a form.
+
+  Controls:
+    POST /api/compare/row         Runs comparison, returns results
+    PUT  /api/config              Saves ignore_rows, skip, time_map, comments
+    GET  /api/report/row          Returns rendered HTML report
+
+  The row report is embedded in an iframe or opens in a new tab.
+
+
+STEP 5 — Match Columns                                   ** INTERACTIVE **
+───────────────────────
+
+  State:  ✓ done  /  ◐ mapping  /  ○ pending
+
+  What it shows:
+    Per pair, a three-column layout:
+
+    ┌─ cust_daily ─────────────────────────────────────────────────────┐
+    │                                                                  │
+    │  Auto-matched: 8 columns                                        │
+    │                                                                  │
+    │  LEFT (pcds)              MAPPING           RIGHT (aws)          │
+    │  ────────────             ───────           ──────────           │
+    │  CUSTOMER_ID NUMBER    ←→ auto           customer_id bigint     │
+    │  REGION      VARCHAR   ←→ auto           region      string     │
+    │  RPT_DT      TIMESTAMP ←→ auto           rpt_dt      date       │
+    │  STATUS      CHAR(1)   ←→ auto           status      string     │
+    │  AMT         NUMBER    ←→ [________]     amount      double     │
+    │  CUST_STATUS VARCHAR   ←→ [________]     cust_stat   string     │
+    │                                           load_dt     timestamp  │
+    │                                                                  │
+    │  Drag right column names into the input boxes, or type them.    │
+    │                                                                  │
+    │  [ Save Mappings ]                                               │
+    └──────────────────────────────────────────────────────────────────┘
+
+  Unmapped left columns have an empty input box. Unmapped right columns
+  are listed on the right side and can be dragged or typed into the box.
+
+  Controls:
+    GET  /api/columns/{pair}      Returns auto-match results + unmatched
+    POST /api/columns/match       Saves final col_map to config + db
+
+
+STEP 6 — Extract Column Stats
+──────────────────────────────
+
+  State:  ✓ done  /  ◐ running  /  ○ pending
+
+  Same layout as Step 2, but for column extraction. Shows that where_map
+  is being applied (filtered to N matching dates).
+
+  Info banner:
+    "Extracting column stats for 93 matching dates (sampled to 50)"
+
+  Controls:
+    [ Generate SAS ]    POST /api/extract/sas   { type: "col" }
+    [ Run Extraction ]  POST /api/extract/aws   { type: "col" }
+
+
+STEP 7 — Load Column Stats
+───────────────────────────
+
+  State:  ✓ loaded  /  ○ pending
+
+  Same layout as Step 3 but shows stat row counts instead of date counts.
+
+    Table                Stats Rows    Columns    Source
+    ─────────────────    ──────────    ───────    ──────
+    pcds.cust_daily      930           10         ./sas/
+    aws.cust_daily       930           10         ./csv/
+
+  Controls:
+    [ Load All ]        POST /api/load/col
+
+
+STEP 8 — Compare Column Stats
+──────────────────────────────
+
+  State:  ✓ done  /  ○ pending
+
+  What it shows:
+    Summary per pair:
+
+    ┌─ cust_daily ─────────────────────────────────────────────────────┐
+    │                                                                  │
+    │  Filtering to 93 matching dates                                  │
+    │  10 columns: 8 match, 2 diff                                    │
+    │                                                                  │
+    │  ✓ CUSTOMER_ID   ✓ REGION   ✓ RPT_DT   ✓ STATUS                │
+    │  ✓ LOAD_DT       ✓ BATCH    ✓ FLAG      ✓ CODE                  │
+    │  ✗ AMT           ✗ CUST_STATUS                                  │
+    │                                                                  │
+    │  AMT — 3 vintages differ:                                        │
+    │    2023-W10: n_total +50 (1000→1050)                            │
+    │    2023-W15: mean +0.32 (142.5→142.82)                          │
+    │    2024-W02: n_missing +1 (0→1)                                 │
+    │                                                                  │
+    │  [ View Full Report ]                                            │
+    └──────────────────────────────────────────────────────────────────┘
+
+  Controls:
+    POST /api/compare/col         Runs comparison
+    GET  /api/report/col          Returns rendered HTML report
+
+  The column report opens in a new tab or iframe.
+
+
+================================================================================
+  API ROUTES
+================================================================================
+
+  Database & Config
+    POST   /api/init                    Initialize database
+    GET    /api/config                  Return current config JSON
+    PUT    /api/config                  Update config (partial merge)
+    POST   /api/query                   Run SQL against project.db
+
+  Columns
+    POST   /api/columns/load            Upload and load column CSV
+    POST   /api/columns/discover        Discover columns live
+    GET    /api/columns/{pair}           Get auto-match results for pair
+    POST   /api/columns/match           Save column mappings
+
+  Extract
+    POST   /api/extract/sas             Generate SAS file
+    POST   /api/extract/aws             Run Athena extraction (async)
+
+  Load
+    POST   /api/load/row                Load row CSVs from folder
+    POST   /api/load/col                Load col CSVs from folder
+
+  Compare
+    POST   /api/compare/row             Run row comparison (returns results)
+    POST   /api/compare/col             Run col comparison (returns results)
+
+  Reports
+    GET    /api/report/row              Serve row comparison HTML
+    GET    /api/report/col              Serve col comparison HTML
+
+  Pairs
+    GET    /api/pairs                   List all pairs with status
+    GET    /api/pairs/{name}            Get pair details + comparison state
+
+  WebSocket
+    WS     /ws/progress                 Live log streaming during long ops
+
+
+================================================================================
+  IMPLEMENTATION STATUS
+================================================================================
+
+  Phase 1 — MVP dashboard + actions                          [DONE]
+    dtrack/web/app.py          All routes in one file (~200 lines)
+    dtrack/web/static/app.js   Vanilla JS (~300 lines)
+    dtrack/web/static/style.css Minimal dark theme
+    dtrack/web/templates/index.html Single-page shell
+    Entry point: dtrack serve project.db --config pairs.json --port 8080
+
+    Implemented:
+      GET  /api/status        Pairs + metadata + date ranges
+      POST /api/init          Initialize or refresh DB
+      POST /api/extract       Run gen-sas or gen-aws
+      POST /api/load          Run load-row or load-col
+      POST /api/compare/row   Run row comparison
+      POST /api/compare/col   Run column comparison
+      POST /api/query         Run SQL query
+      GET  /api/report/{type} Serve HTML reports
+
+    Incremental tracking:
+      _metadata now has min_date_loaded, max_date_loaded columns
+      from-date auto-filled from max_date_loaded + 1 day
+      --from-date / --to-date on gen-sas, gen-aws, run commands
+
+  Phase 2 — HITL forms (future)
+    Interactive row comparison (checkboxes, radios)
+    Column matching UI (drag-and-drop)
+    Config review form (time_map, comment_map)
+    WebSocket for live progress streaming
+
+  Phase 3 — Polish (future)
+    Error handling, loading states
+    Mobile-friendly layout
+    Keyboard shortcuts
+
+
+================================================================================
+  TECH STACK
+================================================================================
+
+  Backend:
+    fastapi           ASGI framework, async-ready
+    uvicorn           ASGI server
+    jinja2            HTML templating (index.html shell only)
+
+  Frontend:
+    Vanilla JS        No build step, no npm, no node_modules
+    Fetch API         For all /api/ calls
+    WebSocket API     For live progress streaming
+    CSS Grid          Layout
+
+  No React, no Vue, no webpack. The frontend is ~500 lines of JS that
+  fetches JSON and renders HTML strings. The existing html_export.py
+  already produces self-contained HTML — we just embed it.

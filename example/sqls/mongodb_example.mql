@@ -1,0 +1,87 @@
+// # MongoDB MQL Test File
+// Test: completions after "db." — should show find, aggregate, insertOne, etc.
+// Test: completions after "$" — should show $match, $group, $set, $eq, etc.
+// Test: hover over $lookup, $unwind, find, aggregate
+// Test: parameter hints — type db.orders.find( and see (filter, [projection])
+
+// ---- Basic queries ----
+
+// Find with filter and projection
+db.orders.find(
+  { status: "shipped", total: { $gte: 100 } },
+  { customer_id: 1, total: 1, items: 1 }
+);
+
+// Find one document
+db.orders.findOne({ _id: ObjectId("507f1f77bcf86cd799439011") });
+
+// Count documents
+db.orders.countDocuments({ status: { $in: ["shipped", "delivered"] } });
+
+// Distinct values
+db.orders.distinct("status", { total: { $gt: 0 } });
+
+// ---- Aggregation pipeline ----
+
+db.orders.aggregate([
+  { $match: {
+      order_date: { $gte: ISODate("2024-01-01") }
+  }},
+  { $unwind: "$items" },
+  { $group: {
+      _id: "$customer_id",
+      total_spent: { $sum: "$total" },
+      order_count: { $sum: 1 },
+      first_order: { $first: "$order_date" },
+      last_order: { $last: "$order_date" },
+      all_items: { $push: "$items.product_name" }
+  }},
+  { $addFields: {
+      avg_order_value: { $cond: [
+        { $gt: ["$order_count", 0] },
+        { $concat: [{ $substr: ["$total_spent", 0, 10] }, " avg"] },
+        "N/A"
+      ]}
+  }},
+  { $lookup: {
+      from: "customers",
+      localField: "_id",
+      foreignField: "_id",
+      as: "customer"
+  }},
+  { $replaceRoot: {
+      newRoot: { $mergeObjects: [{ $arrayElemAt: ["$customer", 0] }, "$$ROOT"] }
+  }},
+  { $project: { customer: 0 } },
+  { $sort: { total_spent: -1 } },
+  { $limit: 20 }
+]);
+
+// ---- Updates ----
+
+db.orders.updateMany(
+  { status: "pending", order_date: { $lt: ISODate("2024-06-01") } },
+  { $set: { status: "cancelled" }, $currentDate: { updated_at: true } }
+);
+
+db.orders.findOneAndUpdate(
+  { _id: ObjectId("507f1f77bcf86cd799439011") },
+  { $inc: { total: 10.50 }, $push: { tags: "adjusted" } },
+  { returnDocument: "after" }
+);
+
+// ---- Index management ----
+
+db.orders.createIndex(
+  { customer_id: 1, order_date: -1 },
+  { name: "idx_customer_date" }
+);
+
+db.orders.getIndexes();
+
+// Try typing these and watch completions:
+// $graph  → should suggest $graphLookup
+// $bucket → should suggest $bucket, $bucketAuto
+// $dateT  → should suggest $dateToString, $dateFromString
+// db.orders.bulk → should suggest bulkWrite
+// db.orders.watch → should suggest watch (change stream)

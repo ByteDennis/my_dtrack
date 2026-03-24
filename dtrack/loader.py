@@ -12,6 +12,8 @@ from .db import (
     upsert_row_counts,
     insert_col_stats,
     update_metadata,
+    get_metadata,
+    patch_metadata,
 )
 from .stats import compute_column_stats
 
@@ -187,6 +189,19 @@ def load_row_counts(
     else:
         raise ValueError(f"Invalid mode: {mode}")
 
+    # Compute date range from loaded data
+    min_dt = min(dt for dt, _ in data_list) if data_list else None
+    max_dt = max(dt for dt, _ in data_list) if data_list else None
+
+    # For upsert mode, expand existing range
+    if mode == "upsert" and (min_dt or max_dt):
+        existing = get_metadata(db_path, table_name)
+        if existing:
+            if existing.get("min_date_loaded") and min_dt:
+                min_dt = min(min_dt, existing["min_date_loaded"])
+            if existing.get("max_date_loaded") and max_dt:
+                max_dt = max(max_dt, existing["max_date_loaded"])
+
     # Update metadata
     total_count = sum(count for _, count in data_list)
     update_metadata(db_path, {
@@ -202,6 +217,8 @@ def load_row_counts(
         "data_type": "row",
         "where_clause": where_clause,
         "date_format": detected_format,
+        "min_date_loaded": min_dt,
+        "max_date_loaded": max_dt,
     })
 
 
@@ -448,6 +465,20 @@ def load_precomputed_col_stats(
 
     insert_col_stats(db_path, stats)
 
+    # Compute date range from loaded stats
+    dt_values = [s["dt"] for s in stats if s.get("dt")]
+    min_dt = min(dt_values) if dt_values else None
+    max_dt = max(dt_values) if dt_values else None
+
+    # For upsert mode, expand existing range
+    if mode == "upsert" and (min_dt or max_dt):
+        existing = get_metadata(db_path, table_name)
+        if existing:
+            if existing.get("min_date_loaded") and min_dt:
+                min_dt = min(min_dt, existing["min_date_loaded"])
+            if existing.get("max_date_loaded") and max_dt:
+                max_dt = max(max_dt, existing["max_date_loaded"])
+
     # Update metadata
     update_metadata(db_path, {
         "table_name": table_name,
@@ -458,6 +489,8 @@ def load_precomputed_col_stats(
         "load_mode": mode,
         "vintage": vintage,
         "data_type": "col",
+        "min_date_loaded": min_dt,
+        "max_date_loaded": max_dt,
     })
 
     return len(stats)

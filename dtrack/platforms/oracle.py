@@ -457,7 +457,8 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     return tmpl
 
 
-def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintage=None):
+def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintage=None,
+            from_date=None, to_date=None):
     """
     Generate a single combined SAS file for Oracle data extraction.
 
@@ -472,6 +473,8 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         env_path: Path to .env file with pcds_usr, pcds_pw, email_to, lib_path
         db_path: Path to database for column metadata and where_map filtering
         vintage: Date bucketing granularity (day, week, month, quarter, year)
+        from_date: Start date for incremental extraction (YYYY-MM-DD)
+        to_date: End date for incremental extraction (YYYY-MM-DD)
     """
     if types is None:
         types = ["row", "col"]
@@ -483,6 +486,21 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 
     all_tables = load_tables_from_config(config)
     inject_where_from_config(all_tables, config)
+
+    # Inject --from-date / --to-date bounds into WHERE clauses
+    if from_date or to_date:
+        for tbl in all_tables:
+            date_col = tbl.get('date_col', '')
+            if not date_col:
+                continue
+            bounds = []
+            if from_date:
+                bounds.append(f"{date_col} >= '{from_date}'")
+            if to_date:
+                bounds.append(f"{date_col} <= '{to_date}'")
+            extra = " AND ".join(bounds)
+            existing = tbl.get('where', '').strip()
+            tbl['where'] = f"({existing}) AND {extra}" if existing else extra
 
     pcds_tables = [t for t in all_tables if t.get('source', '').lower() in ('pcds', 'oracle')]
 

@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dtrack - Load Row Data</title>
+    <link rel="stylesheet" href="/static/style_v2.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>dtrack</h1>
+        </div>
+        <div class="header-right">
+            <select id="step-selector" onchange="navigateToStep(this.value)">
+                <option value="pairs">Row Gen</option>
+                <option value="load_row" selected>Load Row</option>
+                <option value="row_compare">Row Compare</option>
+                <option value="col_mapping">Col Mapping</option>
+                <option value="col_gen">Col Gen</option>
+                <option value="load_col">Load Col</option>
+                <option value="col_compare">Col Compare</option>
+            </select>
+            <button onclick="openSettings()">Settings</button>
+            <button onclick="showHelp()">Help</button>
+            <div class="db-status" id="db-status" title="Database connected">●</div>
+        </div>
+    </header>
+
+    <div class="io-bar">
+        <span class="io-label">INPUT:</span> CSV files from <span id="input-dir">output/</span>
+        <span class="io-separator">│</span>
+        <span class="io-label">OUTPUT:</span> Database row counts → _row_counts
+    </div>
+
+    <main>
+        <!-- CSV DETECTION -->
+        <section class="card">
+            <div class="section-header">
+                <h2>CSV DETECTION</h2>
+                <div class="actions">
+                    <span class="scan-path">
+                        Scan: <input type="text" id="scan-dir" value="./output/" style="width:200px">
+                    </span>
+                    <button onclick="browsePath()">Browse</button>
+                    <button class="btn-primary" onclick="scanDirectory()">Refresh</button>
+                    <label class="auto-checkbox">
+                        <input type="checkbox" id="auto-scan" checked> Auto
+                    </label>
+                </div>
+            </div>
+
+            <div class="drop-zone" id="drop-zone">
+                <div class="drop-zone-content">
+                    <div class="drop-icon">📁</div>
+                    <div class="drop-text">Drop CSV files here or click Browse</div>
+                    <input type="file" id="file-input" multiple accept=".csv" style="display:none" onchange="handleFiles(this.files)">
+                    <button class="btn-secondary" onclick="document.getElementById('file-input').click()">Browse Files</button>
+                </div>
+            </div>
+
+            <div id="detected-files-section" style="display:none">
+                <h3 class="subsection-title">Detected Files</h3>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th><input type="checkbox" id="select-all-files" onchange="selectAllFiles(this.checked)"></th>
+                            <th>Pair</th>
+                            <th>Side</th>
+                            <th>File</th>
+                            <th>Rows</th>
+                            <th>Dates</th>
+                            <th>Modified</th>
+                        </tr>
+                    </thead>
+                    <tbody id="detected-files">
+                        <!-- Files will be listed here -->
+                    </tbody>
+                </table>
+                <div class="file-actions">
+                    <button class="btn-text" onclick="selectAllFiles(true)">Select All</button>
+                    <button class="btn-text" onclick="selectAllFiles(false)">None</button>
+                    <button class="btn-secondary" onclick="clearDatabase()">Clear DB</button>
+                    <button class="btn-primary" onclick="loadSelected()">Load Selected</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- LOAD PREVIEW -->
+        <section class="card" id="load-preview-section" style="display:none">
+            <div class="section-header">
+                <h2>LOAD PREVIEW</h2>
+                <div class="actions">
+                    <button onclick="validateFiles()">Validate</button>
+                </div>
+            </div>
+            <div id="validation-results" class="validation-box">
+                <!-- Validation results will appear here -->
+            </div>
+            <div class="form-group">
+                <label>Load mode</label>
+                <div class="radio-group">
+                    <label>
+                        <input type="radio" name="load-mode" value="upsert" checked>
+                        Upsert (replace overlapping dates)
+                    </label>
+                    <label>
+                        <input type="radio" name="load-mode" value="append">
+                        Append only
+                    </label>
+                </div>
+            </div>
+        </section>
+
+        <!-- DATABASE STATUS -->
+        <section class="card">
+            <div class="section-header">
+                <h2>DATABASE STATUS</h2>
+                <div class="actions">
+                    <span class="last-load">Last load: <span id="last-load-time">—</span></span>
+                    <button onclick="refreshStatus()">Refresh</button>
+                    <button onclick="queryDatabase()">Query</button>
+                    <button onclick="exportDatabase()">Export</button>
+                </div>
+            </div>
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Pair</th>
+                        <th>Side</th>
+                        <th>Loaded</th>
+                        <th>Date Range</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="db-status-table">
+                    <tr>
+                        <td colspan="5" class="empty-message">Loading...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- LOAD LOG -->
+        <section class="card">
+            <div class="section-header">
+                <h2>LOAD LOG</h2>
+                <button class="btn-text" onclick="clearLog()">Clear</button>
+            </div>
+            <div id="load-log" class="log-output">
+                <div class="log-empty">No load operations yet.</div>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/load_row.js"></script>
+</body>
+</html>

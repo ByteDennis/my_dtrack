@@ -27,6 +27,8 @@ _SCHEMA = {
         ("data_type", "TEXT", ""),
         ("where_clause", "TEXT", ""),
         ("date_format", "TEXT", ""),
+        ("min_date_loaded", "TEXT", ""),
+        ("max_date_loaded", "TEXT", ""),
     ],
     "_col_stats": [
         ("source_table", "TEXT", "NOT NULL"),
@@ -130,7 +132,9 @@ def init_database(db_path: str) -> None:
             data_type TEXT,
             where_clause TEXT,
             date_format TEXT,
-            pair_side TEXT
+            pair_side TEXT,
+            min_date_loaded TEXT,
+            max_date_loaded TEXT
         )
     """)
 
@@ -560,9 +564,11 @@ def update_metadata(db_path: str, metadata: Dict) -> None:
     metadata.setdefault("where_clause", None)
     metadata.setdefault("date_format", None)
     metadata.setdefault("pair_side", None)
+    metadata.setdefault("min_date_loaded", None)
+    metadata.setdefault("max_date_loaded", None)
 
     # Ensure newer columns exist (for DBs created before these features)
-    for col in ('where_clause', 'date_format', 'pair_side'):
+    for col in ('where_clause', 'date_format', 'pair_side', 'min_date_loaded', 'max_date_loaded'):
         try:
             cursor.execute(f"ALTER TABLE _metadata ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -572,8 +578,9 @@ def update_metadata(db_path: str, metadata: Dict) -> None:
         INSERT OR REPLACE INTO _metadata (
             table_name, source, db, source_table, date_var,
             source_file, loaded_at, last_updated, row_count_total,
-            load_mode, vintage, data_type, where_clause, date_format, pair_side
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            load_mode, vintage, data_type, where_clause, date_format, pair_side,
+            min_date_loaded, max_date_loaded
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         metadata["table_name"],
         metadata["source"],
@@ -590,6 +597,8 @@ def update_metadata(db_path: str, metadata: Dict) -> None:
         metadata["where_clause"],
         metadata["date_format"],
         metadata["pair_side"],
+        metadata["min_date_loaded"],
+        metadata["max_date_loaded"],
     ))
 
     conn.commit()

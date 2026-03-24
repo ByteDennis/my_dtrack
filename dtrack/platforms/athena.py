@@ -454,7 +454,8 @@ def _extract_aws_mock(config_path, outdir, types, db_path, mock_dir):
 # Main extraction entry point
 # ---------------------------------------------------------------------------
 
-def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None, vintage=None, force=False):
+def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None, vintage=None, force=False,
+                from_date=None, to_date=None):
     """
     Extract data directly from AWS Athena.
 
@@ -466,6 +467,8 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
         db_path: Optional database path to save discovered columns to _column_meta
         vintage: Date bucketing granularity (day, week, month, quarter, year)
         force: Skip confirmation prompts
+        from_date: Start date for incremental extraction (YYYY-MM-DD)
+        to_date: End date for incremental extraction (YYYY-MM-DD)
     """
     if types is None:
         types = ["row", "col"]
@@ -502,6 +505,21 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
         elif 'vintage' not in tbl:
             tbl['vintage'] = 'all'
     inject_where_from_config(aws_tables, config)
+
+    # Inject --from-date / --to-date bounds into WHERE clauses
+    if from_date or to_date:
+        for tbl in aws_tables:
+            date_col = tbl.get('date_col', '')
+            if not date_col:
+                continue
+            bounds = []
+            if from_date:
+                bounds.append(f"{date_col} >= '{from_date}'")
+            if to_date:
+                bounds.append(f"{date_col} <= '{to_date}'")
+            extra = " AND ".join(bounds)
+            existing = tbl.get('where', '').strip()
+            tbl['where'] = f"({existing}) AND {extra}" if existing else extra
     if db_path and "col" in types:
         fill_columns_from_meta(aws_tables, db_path)
 

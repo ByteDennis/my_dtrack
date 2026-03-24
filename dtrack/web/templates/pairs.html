@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dtrack - Row Generation</title>
+    <link rel="stylesheet" href="/static/style_v2.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>dtrack</h1>
+        </div>
+        <div class="header-right">
+            <select id="step-selector" onchange="navigateToStep(this.value)">
+                <option value="pairs">Row Gen</option>
+                <option value="load_row">Load Row</option>
+                <option value="row_compare">Row Compare</option>
+                <option value="col_mapping">Col Mapping</option>
+                <option value="col_gen">Col Gen</option>
+                <option value="load_col">Load Col</option>
+                <option value="col_compare">Col Compare</option>
+            </select>
+            <button onclick="openSettingsModal()">Settings</button>
+            <button onclick="showHelp()">Help</button>
+            <div class="db-status" id="db-status" title="Database connected">●</div>
+        </div>
+    </header>
+
+    <div class="io-bar">
+        <span class="io-label">INPUT:</span> Database (project.db)
+        <span class="io-separator">│</span>
+        <span class="io-label">OUTPUT:</span> SAS/SQL files → <span id="output-dir">output/</span>
+    </div>
+
+    <main>
+        <!-- PAIRS SECTION -->
+        <section class="card">
+            <div class="section-header">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                    <input type="checkbox" id="select-all-pairs" onchange="selectAllPairs(this.checked)">
+                    <h2 style="margin:0;">PAIRS</h2>
+                </label>
+                <button class="btn-primary" onclick="showAddPairModal()">+ Add Pair</button>
+            </div>
+            <div id="pairs-list" class="pairs-list">
+                <!-- Pairs will be loaded here -->
+            </div>
+            <div id="pairs-empty" class="empty-state" style="display:none">
+                No pairs configured yet. Click "+ Add Pair" to get started.
+            </div>
+        </section>
+
+        <!-- ACTIONS -->
+        <section class="card">
+            <div class="action-buttons" style="border-top:none; padding-top:0; margin-top:0">
+                <button class="btn-secondary" onclick="previewQueries()">Preview Queries</button>
+                <button class="btn-primary" onclick="generateAll()">Generate Selected</button>
+            </div>
+        </section>
+
+        <!-- RUNNING LOGS -->
+        <section class="card">
+            <div class="section-header">
+                <h2>RUNNING LOGS</h2>
+                <button class="btn-text" onclick="clearLog()">Clear</button>
+            </div>
+            <div id="generation-log" class="log-output">
+                <div class="log-empty">No files generated yet.</div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Pair Edit Modal -->
+    <div id="pair-modal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3 id="modal-title">Add New Pair</h3>
+                <button class="modal-close" onclick="closePairModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Pair Name *</label>
+                        <input type="text" id="pair-name" placeholder="customer_daily">
+                    </div>
+                    <div class="form-group">
+                        <label>Description</label>
+                        <input type="text" id="pair-desc" placeholder="Daily customer snapshot comparison">
+                    </div>
+                </div>
+
+                <div class="pair-sides">
+                    <!-- LEFT SIDE -->
+                    <div class="pair-side">
+                        <h4>LEFT SIDE</h4>
+                        <div class="form-group">
+                            <label>Source *</label>
+                            <select id="left-source" onchange="updateConnOptions('left')">
+                                <!-- Populated by JS -->
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Connection Macro *</label>
+                            <select id="left-conn">
+                                <!-- Populated by JS based on source -->
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Table *</label>
+                            <input type="text" id="left-table" placeholder="CUST_DAILY_VW">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Date Column *</label>
+                                <input type="text" id="left-date-col" placeholder="RPT_DT">
+                            </div>
+                            <div class="form-group">
+                                <label>Date Type *</label>
+                                <select id="left-date-type">
+                                    <!-- Populated by JS -->
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>WHERE Clause</label>
+                            <textarea id="left-where" rows="2" placeholder="STATUS='A' AND REGION='US'"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Vintage (bucketing function)</label>
+                            <input type="text" id="left-vintage" placeholder="TRUNC(RPT_DT,'IW')">
+                            <div class="preset-buttons">
+                                <button onclick="setVintage('left', 'day')">Day</button>
+                                <button onclick="setVintage('left', 'week')">Week</button>
+                                <button onclick="setVintage('left', 'month')">Month</button>
+                                <button onclick="setVintage('left', 'quarter')">Quarter</button>
+                                <button onclick="setVintage('left', 'year')">Year</button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>CTE/Processed (optional)</label>
+                            <textarea id="left-cte" rows="3" placeholder="WITH base AS (SELECT * FROM raw WHERE ...)"></textarea>
+                        </div>
+                    </div>
+
+                    <!-- RIGHT SIDE -->
+                    <div class="pair-side">
+                        <h4>RIGHT SIDE</h4>
+                        <div class="form-group">
+                            <label>Source *</label>
+                            <select id="right-source" onchange="updateConnOptions('right')">
+                                <!-- Populated by JS -->
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Connection Macro *</label>
+                            <select id="right-conn">
+                                <!-- Populated by JS based on source -->
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Table *</label>
+                            <input type="text" id="right-table" placeholder="customer_daily">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Date Column *</label>
+                                <input type="text" id="right-date-col" placeholder="rpt_date">
+                            </div>
+                            <div class="form-group">
+                                <label>Date Type *</label>
+                                <select id="right-date-type">
+                                    <!-- Populated by JS -->
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>WHERE Clause</label>
+                            <textarea id="right-where" rows="2" placeholder="status='ACTIVE' AND region='US'"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Vintage (bucketing function)</label>
+                            <input type="text" id="right-vintage" placeholder="DATE_TRUNC('week', rpt_date)">
+                            <div class="preset-buttons">
+                                <button onclick="setVintage('right', 'day')">Day</button>
+                                <button onclick="setVintage('right', 'week')">Week</button>
+                                <button onclick="setVintage('right', 'month')">Month</button>
+                                <button onclick="setVintage('right', 'quarter')">Quarter</button>
+                                <button onclick="setVintage('right', 'year')">Year</button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>CTE/Processed (optional)</label>
+                            <textarea id="right-cte" rows="3" placeholder=""></textarea>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Date Range Override -->
+                <div class="form-section">
+                    <h4>DATE RANGE & MODE</h4>
+                    <div class="date-range-compact">
+                        <label class="checkbox-inline">
+                            <input type="checkbox" id="pair-incremental" checked onchange="updateEffectiveRange()">
+                            Incremental
+                        </label>
+                        <label class="date-input-inline">
+                            From:
+                            <input type="date" id="pair-from-date" onchange="updateEffectiveRange()">
+                        </label>
+                        <label class="date-input-inline">
+                            To:
+                            <input type="date" id="pair-to-date" onchange="updateEffectiveRange()">
+                        </label>
+                        <button class="btn-text" onclick="clearPairDates()">Clear</button>
+                    </div>
+                    <div class="effective-range-info" id="effective-range-info">
+                        ℹ️ Current: Using global default
+                    </div>
+                </div>
+
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="closePairModal()">Cancel</button>
+                <button class="btn-secondary" onclick="testPair()">Test Query</button>
+                <div style="flex:1"></div>
+                <button class="btn-text" onclick="showVintageTips()" title="Show vintage function examples">Help</button>
+                <button class="btn-primary" onclick="savePair()">Save Pair</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Preview Modal -->
+    <div id="preview-modal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3>Query Preview</h3>
+                <button class="modal-close" onclick="closePreviewModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="preview-content"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="closePreviewModal()">Close</button>
+                <button class="btn-primary" onclick="generateFromPreview()">Generate Files</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Global Settings</h3>
+                <button class="modal-close" onclick="closeSettingsModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Default Mode</label>
+                    <div class="radio-group">
+                        <label><input type="radio" name="global-mode" value="incremental" checked> Incremental</label>
+                        <label><input type="radio" name="global-mode" value="full"> Full Refresh</label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Default Date Range</label>
+                    <div class="date-range">
+                        <input type="date" id="global-from-date" value="">
+                        <span>to</span>
+                        <input type="date" id="global-to-date" value="">
+                    </div>
+                    <div class="quick-dates">
+                        <button onclick="setQuickDate(7)">Last 7d</button>
+                        <button onclick="setQuickDate(30)">Last 30d</button>
+                        <button onclick="setQuickDate('week')">This week</button>
+                        <button onclick="setQuickDate('month')">This month</button>
+                        <button onclick="clearGlobalDates()">Clear</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="closeSettingsModal()">Cancel</button>
+                <button class="btn-primary" onclick="applyGlobalSettings()">Apply to All Pairs</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/pairs.js"></script>
+</body>
+</html>

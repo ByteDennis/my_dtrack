@@ -686,7 +686,10 @@ def cmd_gen_sas(args):
     types = [args.type] if args.type != "both" else ["row", "col"]
     db_path = getattr(args, 'db_path', None)
     vintage = getattr(args, 'vintage', None)
-    gen_sas(args.config, args.outdir, types=types, db_path=db_path, vintage=vintage)
+    from_date = getattr(args, 'from_date', None)
+    to_date = getattr(args, 'to_date', None)
+    gen_sas(args.config, args.outdir, types=types, db_path=db_path, vintage=vintage,
+            from_date=from_date, to_date=to_date)
 
 
 def cmd_gen_aws(args):
@@ -699,8 +702,11 @@ def cmd_gen_aws(args):
     db_path = getattr(args, 'db_path', None)
     vintage = getattr(args, 'vintage', None)
     force = getattr(args, 'force', False)
+    from_date = getattr(args, 'from_date', None)
+    to_date = getattr(args, 'to_date', None)
     extract_aws(args.config, args.outdir, types=types, max_workers=args.workers,
-                db_path=db_path, vintage=vintage, force=force)
+                db_path=db_path, vintage=vintage, force=force,
+                from_date=from_date, to_date=to_date)
 
 
 def cmd_match_columns(args):
@@ -822,7 +828,33 @@ def cmd_run(args):
         skip_extract=getattr(args, 'skip_extract', False),
         skip_load=getattr(args, 'skip_load', False),
         skip_compare=getattr(args, 'skip_compare', False),
+        from_date=getattr(args, 'from_date', None),
+        to_date=getattr(args, 'to_date', None),
     )
+
+
+def cmd_serve(args):
+    """Start the dtrack web UI."""
+    _require_db(args.project_db)
+
+    # Create a temporary config if none provided
+    config_path = args.config
+    if not config_path:
+        import tempfile
+        import json
+        # Create a temporary config with empty pairs
+        temp_config = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+        json.dump({"pairs": {}, "metadata": {}}, temp_config)
+        temp_config.close()
+        config_path = temp_config.name
+        print(f"No config provided, using temporary config: {config_path}")
+    elif not os.path.exists(config_path):
+        print(f"Error: Config file not found: {config_path}")
+        sys.exit(1)
+
+    from .web.app import serve
+    serve(db_path=args.project_db, config_path=config_path,
+          port=args.port, host=args.host)
 
 
 def cmd_query(args):
@@ -948,6 +980,8 @@ def main():
     p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
     p.add_argument('--db', dest='db_path')
     p.add_argument('--vintage')
+    p.add_argument('--from-date', help='Start date for incremental extraction')
+    p.add_argument('--to-date', help='End date for incremental extraction')
 
     # gen-aws
     p = sub.add_parser('gen-aws', help='Extract data from AWS Athena')
@@ -958,6 +992,8 @@ def main():
     p.add_argument('--db', dest='db_path')
     p.add_argument('--vintage')
     p.add_argument('--force', action='store_true')
+    p.add_argument('--from-date', help='Start date for incremental extraction')
+    p.add_argument('--to-date', help='End date for incremental extraction')
 
     # match-columns
     p = sub.add_parser('match-columns', help='Match columns between paired tables')
@@ -992,6 +1028,15 @@ def main():
     p.add_argument('--skip-extract', action='store_true')
     p.add_argument('--skip-load', action='store_true')
     p.add_argument('--skip-compare', action='store_true')
+    p.add_argument('--from-date', help='Start date for incremental extraction')
+    p.add_argument('--to-date', help='End date for incremental extraction')
+
+    # serve
+    p = sub.add_parser('serve', help='Start web UI')
+    p.add_argument('project_db')
+    p.add_argument('--config', default=None, help='Unified config JSON (optional)')
+    p.add_argument('--port', type=int, default=8080)
+    p.add_argument('--host', default='0.0.0.0')
 
     # query
     p = sub.add_parser('query', help='Run SQL query')
@@ -1050,6 +1095,7 @@ def main():
         'run': cmd_run,
         'list': cmd_list,
         'list-pairs': cmd_list_pairs,
+        'serve': cmd_serve,
         'query': cmd_query,
     }
 

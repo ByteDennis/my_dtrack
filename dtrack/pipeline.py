@@ -22,6 +22,8 @@ def run_pipeline(
     skip_extract=False,
     skip_load=False,
     skip_compare=False,
+    from_date=None,
+    to_date=None,
 ):
     """Run the full dtrack pipeline.
 
@@ -80,13 +82,15 @@ def run_pipeline(
         if sas_tables:
             print(f"\n--- Generating SAS extraction ({len(sas_tables)} tables) ---")
             from .platforms.oracle import gen_sas
-            gen_sas(config_path, sas_outdir, types=types, db_path=project_db, vintage=vintage)
+            gen_sas(config_path, sas_outdir, types=types, db_path=project_db, vintage=vintage,
+                    from_date=from_date, to_date=to_date)
 
         if aws_tables:
             print(f"\n--- Extracting from Athena ({len(aws_tables)} tables) ---")
             from .platforms.athena import extract_aws
             extract_aws(config_path, csv_outdir, types=types, max_workers=workers,
-                        db_path=project_db, vintage=vintage, force=force)
+                        db_path=project_db, vintage=vintage, force=force,
+                        from_date=from_date, to_date=to_date)
     else:
         print("Skipping extraction (--skip-extract)")
 
