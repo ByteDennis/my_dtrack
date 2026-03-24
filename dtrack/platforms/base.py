@@ -40,8 +40,15 @@ def sas_safe_name(name, max_len=18):
 def resolve_table(tbl_cfg, full_table=None):
     """Resolve table reference, wrapping with CTE if 'processed' is configured.
 
+    For SAS tables (source=sas), processed is setup statements, not a CTE.
     Returns (table_ref, cte_prefix).
     """
+    if is_sas_table(tbl_cfg):
+        # SAS: table = conn_macro.table, no CTE
+        conn = tbl_cfg.get('conn_macro', '')
+        table = tbl_cfg.get('table', '')
+        return f"{conn}.{table}" if conn else table, ""
+
     processed = tbl_cfg.get('processed')
     table = full_table or tbl_cfg['table']
     if not processed:
@@ -54,11 +61,8 @@ def resolve_table(tbl_cfg, full_table=None):
 
 
 def is_sas_table(tbl_cfg):
-    """Check if table config uses a SAS dataset ($ prefix in processed)."""
-    processed = tbl_cfg.get('processed')
-    if isinstance(processed, list):
-        processed = " ".join(processed)
-    return bool(processed and processed.startswith('$'))
+    """Check if table config is a local SAS dataset (source=sas)."""
+    return tbl_cfg.get('source', '').lower() == 'sas'
 
 
 def reformat_date(d, date_format):

@@ -1,0 +1,145 @@
+{
+  "metadata": {
+    "title": "dtrack Test Suite",
+    "subtitle": "5 realistic pair scenarios \u2014 history load"
+  },
+  "pairs": {
+    "oracle_ts_vs_aws_str": {
+      "description": "Oracle TIMESTAMP (00:00:00) vs AWS VARCHAR YYYY-MM-DD. 3 days with count mismatches.",
+      "left": {
+        "name": "ts_cust_daily",
+        "table": "CUST_DAILY_VW",
+        "source": "pcds",
+        "conn_macro": "pcds",
+        "date_col": "RPT_TS",
+        "date_type": "timestamp"
+      },
+      "right": {
+        "name": "str_cust_daily",
+        "table": "cust_daily",
+        "source": "aws",
+        "conn_macro": "analytics_db",
+        "date_col": "rpt_dt",
+        "date_type": "string_dash"
+      },
+      "mode": "incremental",
+      "fromDate": "2024-10-01",
+      "toDate": "2024-12-31",
+      "comment_map": {
+        "row": {
+          "left": "",
+          "right": ""
+        }
+      },
+      "time_map": {
+        "row": {
+          "left": "",
+          "right": ""
+        }
+      }
+    },
+    "oracle_date_vs_aws_cte": {
+      "description": "Oracle DATE vs AWS TIMESTAMP with ROW_NUMBER dedup CTE. Right missing Dec 25, dedup reduces counts.",
+      "left": {
+        "name": "acct_master",
+        "table": "ACCT_MASTER",
+        "source": "pcds",
+        "conn_macro": "pcds",
+        "date_col": "ACCT_DT",
+        "date_type": "date"
+      },
+      "right": {
+        "name": "cust_log",
+        "table": "cust_log",
+        "source": "aws",
+        "conn_macro": "analytics_db",
+        "date_col": "log_ts",
+        "date_type": "timestamp",
+        "processed": "SELECT * FROM (SELECT *, ROW_NUMBER() OVER(PARTITION BY cust_id ORDER BY log_ts DESC) AS rn FROM analytics_db.cust_log) WHERE rn = 1"
+      },
+      "mode": "incremental",
+      "fromDate": "",
+      "toDate": "2024-12-31",
+      "comment_map": {
+        "row": {
+          "left": "",
+          "right": ""
+        }
+      },
+      "time_map": {
+        "row": {
+          "left": "",
+          "right": ""
+        }
+      }
+    },
+    "sas_dt_vs_aws_compact": {
+      "description": "SAS DATETIME dataset vs AWS VARCHAR YYYYMMDD. Right has 2 extra early days.",
+      "left": {
+        "name": "acct_snap",
+        "table": "ACCT_SNAP",
+        "source": "sas",
+        "conn_macro": "saslib",
+        "date_col": "SNAP_DTTM",
+        "date_type": "datetime",
+        "processed": "libname saslib '/sas/data';"
+      },
+      "right": {
+        "name": "acct_snap_aws",
+        "table": "acct_snap",
+        "source": "aws",
+        "conn_macro": "analytics_db",
+        "date_col": "snap_dt",
+        "date_type": "string_compact"
+      },
+      "mode": "incremental",
+      "fromDate": "",
+      "toDate": "2024-12-31"
+    },
+    "oracle_date_vs_aws_int": {
+      "description": "Oracle DATE vs AWS INTEGER YYYYMMDD with MAX subquery CTE. ~5% of days have count diffs.",
+      "left": {
+        "name": "pos_daily",
+        "table": "POS_DAILY",
+        "source": "oracle",
+        "conn_macro": "pb30",
+        "date_col": "POS_DT",
+        "date_type": "date"
+      },
+      "right": {
+        "name": "pos_snapshot",
+        "table": "pos_snapshot",
+        "source": "aws",
+        "conn_macro": "warehouse_db",
+        "date_col": "int_date",
+        "date_type": "num",
+        "processed": "SELECT * FROM warehouse_db.pos_snapshot WHERE int_date = (SELECT MAX(int_date) FROM warehouse_db.pos_snapshot)"
+      },
+      "mode": "incremental",
+      "fromDate": "2024-10-01",
+      "toDate": "2024-12-31"
+    },
+    "oracle_month_vs_aws_month": {
+      "description": "Oracle INTEGER YYYYMM vs AWS INTEGER YYYYMM. Right missing Oct, Nov has count mismatch.",
+      "left": {
+        "name": "month_summary",
+        "table": "MONTH_SUMMARY",
+        "source": "oracle",
+        "conn_macro": "pb30",
+        "date_col": "MONTH_FLAG",
+        "date_type": "num"
+      },
+      "right": {
+        "name": "month_summary",
+        "table": "month_summary",
+        "source": "aws",
+        "conn_macro": "warehouse_db",
+        "date_col": "month_flag",
+        "date_type": "num"
+      },
+      "mode": "incremental",
+      "fromDate": "",
+      "toDate": "2024-12-31"
+    }
+  }
+}

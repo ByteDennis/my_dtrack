@@ -58,6 +58,7 @@ _SCHEMA = {
         ("source_left", "TEXT", ""),
         ("source_right", "TEXT", ""),
         ("col_mappings", "TEXT", ""),
+        ("col_rules", "TEXT", ""),
         ("created_at", "TEXT", ""),
     ],
     "_row_counts": [
@@ -402,26 +403,38 @@ def get_row_counts(
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
+    # Fetch all rows for this table — date filtering is done in Python
+    # because stored dt formats vary (ISO, YYYYMMDD, SAS numeric) and
+    # SQL string comparison doesn't work across formats.
     query = "SELECT dt, row_count FROM _row_counts WHERE source_table = ?"
     params = [source_table]
 
-    if from_date:
-        query += " AND dt >= ?"
-        params.append(from_date)
-    if to_date:
-        query += " AND dt <= ?"
-        params.append(to_date)
-
-    query += " ORDER BY dt"
-
-    if limit:
+    if limit and not from_date and not to_date:
         query += f" LIMIT {limit}"
 
     cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()
 
-    return [(parse_date(dt), count) for dt, count in rows]
+    # Parse all dates to canonical format (YYYY-MM-DD or YYYYMM), then filter.
+    # YYYYMM dates need comparison against YYYYMM-truncated from/to dates.
+    parsed = [(parse_date(dt), count) for dt, count in rows]
+
+    if from_date:
+        from_ym = from_date[:4] + from_date[5:7]  # "2024-12-23" -> "202412"
+        parsed = [(dt, c) for dt, c in parsed
+                  if (dt >= from_date if len(dt) == 10 else dt >= from_ym)]
+    if to_date:
+        to_ym = to_date[:4] + to_date[5:7]
+        parsed = [(dt, c) for dt, c in parsed
+                  if (dt <= to_date if len(dt) == 10 else dt <= to_ym)]
+
+    parsed.sort(key=lambda r: r[0])
+
+    if limit and (from_date or to_date):
+        parsed = parsed[:limit]
+
+    return parsed
 
 
 def insert_col_stats(db_path: str, stats: List[Dict]) -> None:
@@ -882,7 +895,7 @@ def oracle_connect(conn_macro: str):
 
     Returns an oracledb connection object, or None when mocking.
     """
-    if os.environ.get('DTRACK_ORACLE_MOCK'):
+    if os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ORACLE_MOCK'):
         print(f"[mock] Skipping Oracle connection for '{conn_macro}'")
         return None
 
@@ -928,7 +941,7 @@ def discover_columns(conn, table_name: str) -> Dict[str, str]:
     """
     import csv
 
-    mock_dir = os.environ.get('DTRACK_ORACLE_MOCK')
+    mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ORACLE_MOCK')
     if mock_dir:
         csv_path = os.path.join(mock_dir, f"{table_name}_columns.csv")
         if not os.path.exists(csv_path):
@@ -1499,6 +1512,63 @@ def get_pair_col_map_from_db(db_path: str, pair_name: str) -> Dict[str, str]:
         "SELECT col_mappings FROM _table_pairs WHERE pair_name = ?",
         (pair_name,)
     )
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if row and row[0]:
+        return json.loads(row[0])
+    return {}
+
+
+def ensure_col_rules_column(db_path: str) -> None:
+    """Add col_rules column to _table_pairs if it doesn't exist."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("ALTER TABLE _table_pairs ADD COLUMN col_rules TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    conn.commit()
+    conn.close()
+
+
+def update_pair_col_rules(db_path: str, pair_name: str, rules_data: dict) -> None:
+    """Save col_rules JSON for a pair in _table_pairs."""
+    import json
+
+    ensure_col_rules_column(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    rules_json = json.dumps(rules_data) if rules_data else None
+    cursor.execute(
+        "UPDATE _table_pairs SET col_rules = ? WHERE pair_name = ?",
+        (rules_json, pair_name)
+    )
+
+    if cursor.rowcount == 0:
+        conn.close()
+        raise ValueError(f"Pair '{pair_name}' not found in database")
+
+    conn.commit()
+    conn.close()
+
+
+def get_pair_col_rules(db_path: str, pair_name: str) -> dict:
+    """Load col_rules JSON for a pair from _table_pairs."""
+    import json
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            "SELECT col_rules FROM _table_pairs WHERE pair_name = ?",
+            (pair_name,)
+        )
+    except sqlite3.OperationalError:
+        conn.close()
+        return {}
 
     row = cursor.fetchone()
     conn.close()

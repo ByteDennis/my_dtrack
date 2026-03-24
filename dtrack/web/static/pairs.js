@@ -76,6 +76,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initModalHandlers();
     initDropHandlers();
     initSourceDropdowns();
+    initTestingMode();
 });
 
 // Navigation
@@ -100,6 +101,54 @@ function openSettingsModal() {
 
 function closeSettingsModal() {
     document.getElementById('settings-modal').classList.remove('active');
+}
+
+// Testing Mode
+async function initTestingMode() {
+    try {
+        const resp = await fetch('/api/testing');
+        const data = await resp.json();
+        const cb = document.getElementById('testing-mode');
+        if (cb) cb.checked = data.testing;
+        updateTestingStatus(data.testing, data.config_path);
+    } catch (e) {
+        // ignore — testing API may not exist in older versions
+    }
+}
+
+async function toggleTestingMode(enabled) {
+    try {
+        const resp = await fetch('/api/testing', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled}),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.ok) {
+            updateTestingStatus(data.testing, data.config_path);
+            await loadPairs();
+            showSuccess(enabled ? 'Testing mode enabled — using mock data' : 'Testing mode disabled — using real config');
+        } else {
+            document.getElementById('testing-mode').checked = !enabled;
+            const reason = data.error || data.detail || `HTTP ${resp.status}`;
+            showError(`Testing mode failed: ${reason}`);
+        }
+    } catch (e) {
+        document.getElementById('testing-mode').checked = !enabled;
+        showError(`Testing mode failed: ${e.message}`);
+    }
+}
+
+function updateTestingStatus(testing, configPath) {
+    const statusDiv = document.getElementById('testing-status');
+    if (!statusDiv) return;
+    if (testing) {
+        statusDiv.style.display = 'block';
+        statusDiv.style.color = '#2e7d32';
+        statusDiv.textContent = `Active — config: ${configPath}`;
+    } else {
+        statusDiv.style.display = 'none';
+    }
 }
 
 function applyGlobalSettings() {
@@ -265,19 +314,49 @@ function setQuickDate(days) {
     document.getElementById('global-to-date').valueAsDate = today;
 }
 
+function loadJsonConfig() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = async () => {
+        const file = input.files[0];
+        if (!file) return;
+        if (!confirm(`Load "${file.name}"? This will wipe current pairs and replace with the new config.`)) return;
+
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            const resp = await fetch('/api/config/upload', {method: 'POST', body: formData});
+            const data = await resp.json();
+
+            if (resp.ok && data.ok) {
+                await loadPairs();
+                showSuccess(`Loaded ${data.pairs} pairs from ${file.name} (${data.registered} registered in DB)`);
+            } else {
+                showError(`Load JSON failed: ${data.error || data.detail || 'HTTP ' + resp.status}`);
+            }
+        } catch (err) {
+            showError(`Load JSON failed: ${err.message}`);
+        }
+    };
+    input.click();
+}
+
 // Pair Management
 async function loadPairs() {
     try {
         const response = await fetch('/api/pairs/list');
         const data = await response.json();
 
-        if (data.pairs) {
+        if (response.ok && data.pairs) {
             pairs = data.pairs;
             renderPairs();
+        } else {
+            showError(`Load pairs failed: ${data.error || data.detail || 'HTTP ' + response.status}`);
         }
     } catch (error) {
         console.error('Failed to load pairs:', error);
-        showError('Failed to load pairs from database');
+        showError(`Load pairs failed: ${error.message}`);
     }
 }
 
@@ -426,6 +505,7 @@ function showAddPairModal() {
     editingPairIndex = -1;
     document.getElementById('modal-title').textContent = 'Add New Pair';
     clearPairForm();
+    document.getElementById('query-preview-panel').style.display = 'none';
     document.getElementById('pair-modal').classList.add('active');
     updateEffectiveRange();
 }
@@ -467,6 +547,7 @@ function editPair(index) {
     document.getElementById('pair-from-date').value = pair.fromDate || '';
     document.getElementById('pair-to-date').value = pair.toDate || '';
 
+    document.getElementById('query-preview-panel').style.display = 'none';
     document.getElementById('pair-modal').classList.add('active');
 
     // Update effective range display
@@ -649,8 +730,74 @@ function setVintage(side, type) {
     }
 }
 
-function testPair() {
-    alert('Test query preview coming soon!');
+async function toggleQueryPreview() {
+    const panel = document.getElementById('query-preview-panel');
+    const visible = panel.style.display !== 'none';
+
+    if (visible) {
+        panel.style.display = 'none';
+        return;
+    }
+
+    // Resolve dates
+    const globalFrom = document.getElementById('global-from-date')?.value || '';
+    const globalTo = document.getElementById('global-to-date')?.value || '';
+    const fromDate = document.getElementById('pair-from-date').value || globalFrom || '';
+    const toDate = document.getElementById('pair-to-date').value || globalTo || '';
+
+    const body = {
+        pair_name: document.getElementById('pair-name').value || 'pair',
+        left: {
+            source: document.getElementById('left-source').value,
+            conn_macro: document.getElementById('left-conn').value,
+            table: document.getElementById('left-table').value,
+            name: document.getElementById('left-table').value.toLowerCase(),
+            date_col: document.getElementById('left-date-col').value,
+            date_type: document.getElementById('left-date-type').value,
+            where: document.getElementById('left-where').value,
+            vintage: document.getElementById('left-vintage').value,
+            processed: document.getElementById('left-cte').value,
+        },
+        right: {
+            source: document.getElementById('right-source').value,
+            conn_macro: document.getElementById('right-conn').value,
+            table: document.getElementById('right-table').value,
+            name: document.getElementById('right-table').value.toLowerCase(),
+            date_col: document.getElementById('right-date-col').value,
+            date_type: document.getElementById('right-date-type').value,
+            where: document.getElementById('right-where').value,
+            vintage: document.getElementById('right-vintage').value,
+            processed: document.getElementById('right-cte').value,
+        },
+        fromDate,
+        toDate,
+        njob_left: parseInt(document.getElementById('global-njob-left')?.value) || 0,
+        njob_right: parseInt(document.getElementById('global-njob-right')?.value) || 0,
+    };
+
+    try {
+        const resp = await fetch('/api/preview', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            document.getElementById('query-preview-left').textContent =
+                `Error: ${data.error || data.detail || 'Preview failed'}`;
+            document.getElementById('query-preview-right').textContent = '';
+        } else {
+            document.getElementById('query-preview-left').textContent =
+                data.left ? `${data.left.sql}\n\nOutput: ${data.left.output_file}` : '(no left config)';
+            document.getElementById('query-preview-right').textContent =
+                data.right ? `${data.right.sql}\n\nOutput: ${data.right.output_file}` : '(no right config)';
+        }
+    } catch (e) {
+        document.getElementById('query-preview-left').textContent = `Error: ${e.message}`;
+        document.getElementById('query-preview-right').textContent = '';
+    }
+
+    panel.style.display = 'block';
 }
 
 // Generation
@@ -665,102 +812,72 @@ async function previewQueries() {
     const modal = document.getElementById('preview-modal');
     const content = document.getElementById('preview-content');
 
-    // Get global dates for context
     const globalFrom = document.getElementById('global-from-date')?.value || '';
     const globalTo = document.getElementById('global-to-date')?.value || '';
 
-    let html = '';
+    content.innerHTML = '<div style="padding:20px; color:var(--jp-ui-font-color2);">Loading previews...</div>';
+    modal.classList.add('active');
 
-    selected.forEach(pair => {
-        const fromDate = pair.fromDate || globalFrom || '2024-01-01';
-        const toDate = pair.toDate || globalTo || '2024-12-31';
-        const mode = pair.mode || 'incremental';
+    // Fetch previews from backend in parallel
+    const results = await Promise.all(selected.map(async pair => {
+        const fromDate = pair.fromDate || globalFrom || '';
+        const toDate = pair.toDate || globalTo || '';
+        try {
+            const resp = await fetch('/api/preview', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    pair_name: pair.name,
+                    left: pair.left,
+                    right: pair.right,
+                    fromDate, toDate,
+                    njob_left: parseInt(document.getElementById('global-njob-left')?.value) || 0,
+                    njob_right: parseInt(document.getElementById('global-njob-right')?.value) || 0,
+                }),
+            });
+            const data = await resp.json();
+            return {pair, data, error: resp.ok ? null : (data.error || 'Preview failed')};
+        } catch (e) {
+            return {pair, data: null, error: e.message};
+        }
+    }));
+
+    let html = '';
+    for (const {pair, data, error} of results) {
+        const leftSql = error ? `Error: ${error}` : (data?.left?.sql || '(no left config)');
+        const rightSql = error ? '' : (data?.right?.sql || '(no right config)');
+        const leftFile = data?.left?.output_file || '';
+        const rightFile = data?.right?.output_file || '';
 
         html += `
             <div style="margin-bottom: 24px;">
                 <h3 style="font-size: 14px; font-weight: 600; color: var(--jp-brand-color1); margin-bottom: 12px;">
                     ${pair.name}
                 </h3>
-
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
                     <div>
                         <div style="font-weight: 600; font-size: 12px; color: var(--jp-ui-font-color1); margin-bottom: 8px;">
                             LEFT (${pair.left.source})
                         </div>
-                        <pre style="background: var(--jp-layout-color1); padding: 12px; border-radius: 4px; border: 1px solid var(--jp-border-color0); font-size: 11px; overflow-x: auto; margin: 0;">${generateQueryPreview(pair, 'left', fromDate, toDate, mode)}</pre>
-                        <div style="margin-top: 8px; font-size: 11px; color: var(--jp-ui-font-color2);">
-                            Output: ${pair.name}_left_row.${pair.left.source === 'aws' ? 'sql' : 'sas'}
-                        </div>
+                        <pre style="background: var(--jp-layout-color1); padding: 12px; border-radius: 4px; border: 1px solid var(--jp-border-color0); font-size: 11px; overflow-x: auto; margin: 0;">${_escapeHtml(leftSql)}</pre>
+                        ${leftFile ? `<div style="margin-top: 8px; font-size: 11px; color: var(--jp-ui-font-color2);">Output: ${leftFile}</div>` : ''}
                     </div>
-
                     <div>
                         <div style="font-weight: 600; font-size: 12px; color: var(--jp-ui-font-color1); margin-bottom: 8px;">
                             RIGHT (${pair.right.source})
                         </div>
-                        <pre style="background: var(--jp-layout-color1); padding: 12px; border-radius: 4px; border: 1px solid var(--jp-border-color0); font-size: 11px; overflow-x: auto; margin: 0;">${generateQueryPreview(pair, 'right', fromDate, toDate, mode)}</pre>
-                        <div style="margin-top: 8px; font-size: 11px; color: var(--jp-ui-font-color2);">
-                            Output: ${pair.name}_right_row.${pair.right.source === 'aws' ? 'sql' : 'sas'}
-                        </div>
+                        <pre style="background: var(--jp-layout-color1); padding: 12px; border-radius: 4px; border: 1px solid var(--jp-border-color0); font-size: 11px; overflow-x: auto; margin: 0;">${_escapeHtml(rightSql)}</pre>
+                        ${rightFile ? `<div style="margin-top: 8px; font-size: 11px; color: var(--jp-ui-font-color2);">Output: ${rightFile}</div>` : ''}
                     </div>
                 </div>
             </div>
         `;
-    });
-
+    }
     content.innerHTML = html;
-    modal.classList.add('active');
 }
 
-function generateQueryPreview(pair, side, fromDate, toDate, mode) {
-    const config = pair[side];
-    const vintage = config.vintage || config.date_col;
-    const whereClause = config.where || '';
-
-    if (config.source === 'aws') {
-        // AWS/Athena SQL
-        let sql = `SELECT\n  ${vintage} AS date_value,\n  COUNT(*) AS row_count\n`;
-        sql += `FROM ${config.conn_macro}.${config.table}\n`;
-
-        const conditions = [];
-        if (fromDate) conditions.push(`${config.date_col} >= DATE '${fromDate}'`);
-        if (toDate) conditions.push(`${config.date_col} <= DATE '${toDate}'`);
-        if (whereClause) conditions.push(`(${whereClause})`);
-
-        if (conditions.length > 0) {
-            sql += `WHERE ${conditions.join('\n  AND ')}\n`;
-        }
-
-        sql += `GROUP BY ${vintage}\n`;
-        sql += `ORDER BY date_value;`;
-
-        return sql;
-    } else {
-        // SAS/Oracle
-        let sas = `proc sql;\n`;
-        sas += `  %${config.conn_macro}\n`;
-        sas += `  create table work.${pair.name}_${side}_row as\n`;
-        sas += `  select * from connection to oracle (\n`;
-        sas += `    SELECT\n`;
-        sas += `      ${vintage} AS date_value,\n`;
-        sas += `      COUNT(*) AS row_count\n`;
-        sas += `    FROM ${config.table}\n`;
-
-        const conditions = [];
-        if (fromDate) conditions.push(`${config.date_col} >= DATE '${fromDate}'`);
-        if (toDate) conditions.push(`${config.date_col} <= DATE '${toDate}'`);
-        if (whereClause) conditions.push(`(${whereClause})`);
-
-        if (conditions.length > 0) {
-            sas += `    WHERE ${conditions.join('\n      AND ')}\n`;
-        }
-
-        sas += `    GROUP BY ${vintage}\n`;
-        sas += `  );\n`;
-        sas += `  disconnect from oracle;\n`;
-        sas += `quit;`;
-
-        return sas;
-    }
+function _escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function closePreviewModal() {
@@ -797,14 +914,16 @@ async function generateAll() {
     if (hasSas) {
         const fromArg = globalFrom ? ` --from ${globalFrom}` : '';
         const toArg = globalTo ? ` --to ${globalTo}` : '';
-        const cmd = `dtrack gen-sas ${_configBasename()} ./sas/ --type row${fromArg}${toArg}`;
+        const sasDir = document.getElementById('global-sas-outdir')?.value || './sas/';
+        const cmd = `dtrack gen-sas ${_configBasename()} ${sasDir} --type row${fromArg}${toArg}`;
         commands.push({platform: 'sas', cmd, label: 'SAS/Oracle'});
     }
 
     if (hasAws) {
         const fromArg = globalFrom ? ` --from ${globalFrom}` : '';
         const toArg = globalTo ? ` --to ${globalTo}` : '';
-        const cmd = `dtrack gen-aws ${_configBasename()} ./csv/ --type row${fromArg}${toArg}`;
+        const awsDir = document.getElementById('global-aws-outdir')?.value || './csv/';
+        const cmd = `dtrack gen-aws ${_configBasename()} ${awsDir} --type row${fromArg}${toArg}`;
         commands.push({platform: 'aws', cmd, label: 'AWS/Athena'});
     }
 
@@ -853,10 +972,16 @@ async function generateAll() {
             const body = {
                 platform,
                 type: 'row',
-                outdir: platform === 'aws' ? './csv/' : './sas/',
+                outdir: platform === 'aws'
+                    ? (document.getElementById('global-aws-outdir')?.value || './csv/')
+                    : (document.getElementById('global-sas-outdir')?.value || './sas/'),
             };
             if (globalFrom) body.from_date = globalFrom;
             if (globalTo) body.to_date = globalTo;
+            if (platform === 'aws') {
+                const nj = parseInt(document.getElementById('global-njob-right')?.value);
+                if (nj > 0) body.max_workers = nj;
+            }
 
             const resp = await fetch('/api/extract', {
                 method: 'POST',

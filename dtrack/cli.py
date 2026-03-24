@@ -213,9 +213,9 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
     import csv as csv_mod
 
     if conn_macro and source.lower() == 'aws':
-        mock_dir = os.environ.get('DTRACK_ATHENA_MOCK')
+        mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ATHENA_MOCK')
         if mock_dir:
-            mock_csv = os.path.join(mock_dir, conn_macro, raw_table, 'columns.csv')
+            mock_csv = os.path.join(mock_dir, f"{store_name}_columns.csv")
             if not os.path.exists(mock_csv):
                 print(f"WARNING: [mock] File not found: {mock_csv}, skipping {store_name}")
                 return
@@ -1077,7 +1077,7 @@ def main():
         env_dir = os.path.dirname(found) if found else os.getcwd()
         load_dotenv(found)
 
-    for mock_var in ('DTRACK_ORACLE_MOCK', 'DTRACK_ATHENA_MOCK'):
+    for mock_var in ('DTRACK_MOCK', 'DTRACK_ORACLE_MOCK', 'DTRACK_ATHENA_MOCK'):
         mock_dir = os.environ.get(mock_var)
         if mock_dir and not os.path.isabs(mock_dir):
             os.environ[mock_var] = os.path.join(env_dir, mock_dir)

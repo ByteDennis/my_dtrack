@@ -1,4 +1,4 @@
-"""SAS dataset platform builder for local SAS datasets ($ prefix)."""
+"""SAS dataset platform builder for local SAS datasets (source=sas)."""
 
 import os
 from .base import (
@@ -8,14 +8,13 @@ from .base import (
 
 
 class SASBuilder(PlatformBuilder):
-    """Builder for local SAS datasets ($ prefix in processed field)."""
+    """Builder for local SAS datasets (source=sas)."""
 
     def __init__(self, tbl_cfg, db_path=None):
         super().__init__(tbl_cfg, db_path)
-        processed = tbl_cfg.get('processed', '')
-        if isinstance(processed, list):
-            processed = " ".join(processed)
-        self.sas_dataset = processed[1:].strip() if processed.startswith('$') else processed
+        conn = tbl_cfg.get('conn_macro', '')
+        table = tbl_cfg.get('table', '')
+        self.sas_dataset = f"{conn}.{table}" if conn else table
 
     def build_row_sql(self, date_filter):
         """Build SAS proc sql for row counts."""

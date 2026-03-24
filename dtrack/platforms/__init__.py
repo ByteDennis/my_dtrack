@@ -24,13 +24,9 @@ def detect_platform(tbl_cfg):
     if explicit in _REGISTRY:
         return explicit
 
-    processed = tbl_cfg.get('processed')
-    if isinstance(processed, list):
-        processed = " ".join(processed)
-    if processed and processed.startswith('$'):
-        return 'sas'
-
     source = tbl_cfg.get('source', '').lower()
+    if source == 'sas':
+        return 'sas'
     if source in ('pcds', 'oracle'):
         return 'oracle'
     if source == 'aws':

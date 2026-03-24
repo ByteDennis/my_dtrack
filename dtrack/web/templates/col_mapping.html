@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dtrack - Col Mapping</title>
+    <link rel="stylesheet" href="/static/style_v2.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>dtrack</h1>
+        </div>
+        <div class="header-right">
+            <select id="step-selector" onchange="navigateToStep(this.value)">
+                <option value="pairs">Row Gen</option>
+                <option value="load_row">Load Row</option>
+                <option value="row_compare">Row Compare</option>
+                <option value="col_mapping" selected>Col Mapping</option>
+                <option value="col_gen">Col Gen</option>
+                <option value="load_col">Load Col</option>
+                <option value="col_compare">Col Compare</option>
+            </select>
+            <div class="db-status" id="db-status" title="Database connected"></div>
+        </div>
+    </header>
+
+    <main>
+        <section class="card">
+            <div class="section-header">
+                <h2>COLUMN MAPPING</h2>
+                <div class="actions">
+                    <button class="btn-secondary" onclick="downloadAllCSV()">Export CSV</button>
+                </div>
+            </div>
+            <div id="pairs-accordion" class="pairs-accordion">
+                <div class="empty-message">Loading pairs...</div>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/col_mapping.js"></script>
+</body>
+</html>

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dtrack - Row Compare</title>
+    <link rel="stylesheet" href="/static/style_v2.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>dtrack</h1>
+        </div>
+        <div class="header-right">
+            <select id="step-selector" onchange="navigateToStep(this.value)">
+                <option value="pairs">Row Gen</option>
+                <option value="load_row">Load Row</option>
+                <option value="row_compare" selected>Row Compare</option>
+                <option value="col_mapping">Col Mapping</option>
+                <option value="col_gen">Col Gen</option>
+                <option value="load_col">Load Col</option>
+                <option value="col_compare">Col Compare</option>
+            </select>
+            <div class="db-status" id="db-status" title="Database connected"></div>
+        </div>
+    </header>
+
+    <main>
+        <!-- GLOBAL CONTROLS -->
+        <section class="card">
+            <div class="section-header">
+                <h2>ROW COMPARE</h2>
+                <div class="actions" style="display:flex; align-items:center; gap:12px;">
+                    <input type="text" id="global-title" placeholder="Report title" style="width:160px; font-size:12px;">
+                    <input type="text" id="global-subtitle" placeholder="Subtitle" style="width:160px; font-size:12px;">
+                    <label style="font-size:12px; display:flex; align-items:center; gap:4px;">
+                        From: <input type="date" id="global-from" style="width:140px;">
+                    </label>
+                    <label style="font-size:12px; display:flex; align-items:center; gap:4px;">
+                        To: <input type="date" id="global-to" style="width:140px;">
+                    </label>
+                    <button class="btn-primary" onclick="runAll()">Run All</button>
+                </div>
+            </div>
+            <div id="pairs-accordion" class="pairs-accordion">
+                <div class="empty-message">Loading pairs...</div>
+            </div>
+        </section>
+
+        <!-- EXPORT BAR -->
+        <section class="card">
+            <div style="display:flex; justify-content:flex-end; gap:12px;">
+                <button class="btn-secondary" onclick="downloadHTML()">Download HTML</button>
+                <button class="btn-secondary" onclick="downloadAllCSV()">Download CSV (all)</button>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/row_compare.js"></script>
+</body>
+</html>

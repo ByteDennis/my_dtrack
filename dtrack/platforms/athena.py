@@ -184,6 +184,23 @@ def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None, date_d
     return f"date_trunc('{unit}', {cast_expr})"
 
 
+def _format_athena_date_bound(date_str, date_type):
+    """Format a YYYY-MM-DD date as the correct Athena SQL literal."""
+    dtype = date_type.lower() if date_type else ""
+
+    if dtype in ('num', 'integer', 'int', 'number'):
+        return date_str.replace('-', '')
+    if dtype == 'string_compact':
+        return f"'{date_str.replace('-', '')}'"
+    if dtype in ('string_dash', 'string'):
+        return f"'{date_str}'"
+    if dtype in ('timestamp', 'datetime'):
+        return f"TIMESTAMP '{date_str} 00:00:00'"
+    if dtype == 'date':
+        return f"DATE '{date_str}'"
+    return f"'{date_str}'"
+
+
 # ---------------------------------------------------------------------------
 # Column discovery
 # ---------------------------------------------------------------------------
@@ -446,8 +463,49 @@ SELECT COUNT(*) AS col_missing FROM {full_table} WHERE {wc} AND {col} IS NULL AN
 # ---------------------------------------------------------------------------
 
 def _extract_aws_mock(config_path, outdir, types, db_path, mock_dir):
+    """Legacy mock entry — called when WHERE hasn't been injected yet."""
     from .oracle import _extract_mock
-    return _extract_mock(config_path, outdir, types, db_path, mock_dir, ('aws',))
+    _extract_mock(config_path, outdir, types, db_path, mock_dir, ('aws',))
+
+
+def _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir):
+    """Mock extraction with WHERE-injected tables — writes CSVs + combined .sql file."""
+    from .oracle import _extract_mock_tables
+    _extract_mock_tables(aws_tables, outdir, types, mock_dir)
+
+    # Write single combined .sql file for verification
+    if "row" in (types or ["row"]):
+        _write_combined_sql(aws_tables, outdir, "row")
+
+
+def _write_combined_sql(aws_tables, outdir, extract_type):
+    """Write a single combined .sql file with all AWS table queries."""
+    from datetime import datetime
+    blocks = [f"-- dtrack AWS {extract_type} extraction queries",
+              f"-- Generated: {datetime.now().isoformat()}", ""]
+
+    for tbl in aws_tables:
+        qname = qualified_name(tbl)
+        database = tbl.get('conn_macro', '')
+        table = tbl.get('table', '')
+        date_col = tbl.get('date_col', '')
+        raw_full = f"{database}.{table}"
+        full_table, cte_prefix = resolve_table(tbl, raw_full)
+        where = tbl.get('where', '')
+        where_clause = f"WHERE {where}" if where else ""
+        sql = f"""{cte_prefix}SELECT {date_col} AS date_value, COUNT(*) AS row_count
+FROM {full_table}
+{where_clause}
+GROUP BY {date_col}
+ORDER BY date_value;"""
+        blocks.append(f"-- {qname}")
+        blocks.append(sql.strip())
+        blocks.append("")
+
+    sql_path = os.path.join(outdir, f"extract_{extract_type}.sql")
+    with open(sql_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(blocks))
+    print(f"  SQL: {sql_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -473,18 +531,7 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
     if types is None:
         types = ["row", "col"]
 
-    # Mock mode: read from pre-built CSVs
-    mock_dir = os.environ.get('DTRACK_ATHENA_MOCK')
-    if mock_dir:
-        _extract_aws_mock(config_path, outdir, types, db_path, mock_dir)
-        return
-
-    try:
-        import pyathena  # noqa: F401
-    except ImportError:
-        print("Error: pyathena is required for AWS extraction")
-        print("Install with: pip install 'dtrack[aws]'")
-        return
+    mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ATHENA_MOCK')
 
     with open(config_path, 'r') as f:
         config = json.load(f)
@@ -512,14 +559,29 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
             date_col = tbl.get('date_col', '')
             if not date_col:
                 continue
+            date_type = (tbl.get('date_type') or '').lower()
             bounds = []
             if from_date:
-                bounds.append(f"{date_col} >= '{from_date}'")
+                lit = _format_athena_date_bound(from_date, date_type)
+                bounds.append(f"{date_col} >= {lit}")
             if to_date:
-                bounds.append(f"{date_col} <= '{to_date}'")
+                lit = _format_athena_date_bound(to_date, date_type)
+                bounds.append(f"{date_col} <= {lit}")
             extra = " AND ".join(bounds)
             existing = tbl.get('where', '').strip()
             tbl['where'] = f"({existing}) AND {extra}" if existing else extra
+    # Mock mode: copy CSVs + write SQL files, then return
+    if mock_dir:
+        _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir)
+        return
+
+    try:
+        import pyathena  # noqa: F401
+    except ImportError:
+        print("Error: pyathena is required for AWS extraction")
+        print("Install with: pip install 'dtrack[aws]'")
+        return
+
     if db_path and "col" in types:
         fill_columns_from_meta(aws_tables, db_path)
 
@@ -775,6 +837,10 @@ FROM FreqTable{p_agg_group}"""
     cursor.close()
     conn.close()
 
+    # Write combined SQL file for all row queries
+    if "row" in types:
+        _write_combined_sql(aws_tables, outdir, "row")
+
     # Export timing log
     if timing_records:
         timing_path = os.path.join(outdir, '_timing.csv')
@@ -815,17 +881,14 @@ def discover_aws_columns(config_path, outdir, db_path=None):
         return
 
     # Mock mode: read from pre-built CSVs
-    mock_dir = os.environ.get('DTRACK_ATHENA_MOCK')
+    mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ATHENA_MOCK')
     if mock_dir:
         _extract_aws_mock(config_path, outdir, [], db_path, mock_dir)
         # discover-only just needs columns
         for tbl_cfg in aws_tables:
             name = tbl_cfg['name']
             qname = qualified_name(tbl_cfg)
-            database = tbl_cfg['conn_macro']
-            table = tbl_cfg['table']
-            tbl_mock_dir = os.path.join(mock_dir, database, table)
-            cols_src = os.path.join(tbl_mock_dir, 'columns.csv')
+            cols_src = os.path.join(mock_dir, f"{qname}_columns.csv")
             if os.path.exists(cols_src):
                 import shutil
                 cols_dst = os.path.join(outdir, f"{qname}_columns.csv")

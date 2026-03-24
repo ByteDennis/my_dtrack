@@ -51,6 +51,9 @@ def detect_format(value: str) -> str:
         return "YYYYMMDD"
     if re.match(r'^\d{6}$', value):
         return "YYYYMM"
+    if re.match(r'^\d{5,}$', value):
+        num = int(value)
+        return "SAS_DATETIME" if num >= 100_000_000 else "SAS_DATE"
     raise ValueError(f"Unable to detect date format: {value}")
 
 
@@ -107,6 +110,20 @@ def parse_date(value: str) -> str:
     # Try YYYYMM format (6 digits) - keep as-is, don't convert to date
     if re.match(r'^\d{6}$', value):
         return value  # Return YYYYMM as-is (e.g., "202401")
+
+    # SAS numeric date/datetime: integer days or seconds since 1960-01-01
+    if re.match(r'^\d{5,}$', value):
+        sas_epoch = datetime(1960, 1, 1)
+        num = int(value)
+        # SAS datetime (seconds) produces huge numbers (>= ~1.6B for year 2010+)
+        # SAS date (days) produces smaller numbers (~18000 for year 2010)
+        if num >= 100_000_000:
+            # SAS datetime: seconds since 1960-01-01
+            dt = sas_epoch + timedelta(seconds=num)
+        else:
+            # SAS date: days since 1960-01-01
+            dt = sas_epoch + timedelta(days=num)
+        return dt.strftime("%Y-%m-%d")
 
     raise ValueError(f"Unable to parse date: {value}")
 

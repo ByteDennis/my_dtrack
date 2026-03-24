@@ -41,7 +41,10 @@
                     <input type="checkbox" id="select-all-pairs" onchange="selectAllPairs(this.checked)">
                     <h2 style="margin:0;">PAIRS</h2>
                 </label>
-                <button class="btn-primary" onclick="showAddPairModal()">+ Add Pair</button>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn-secondary" onclick="loadJsonConfig()">Load JSON</button>
+                    <button class="btn-primary" onclick="showAddPairModal()">+ Add Pair</button>
+                </div>
             </div>
             <div id="pairs-list" class="pairs-list">
                 <!-- Pairs will be loaded here -->
@@ -219,10 +222,24 @@
                     </div>
                 </div>
 
+                <!-- Query Preview (toggled by Preview Query button) -->
+                <div id="query-preview-panel" class="query-preview-panel" style="display:none;">
+                    <div class="pair-sides" style="gap:12px;">
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-weight:600; font-size:12px; margin-bottom:4px;">LEFT</div>
+                            <pre id="query-preview-left" class="query-preview-code"></pre>
+                        </div>
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-weight:600; font-size:12px; margin-bottom:4px;">RIGHT</div>
+                            <pre id="query-preview-right" class="query-preview-code"></pre>
+                        </div>
+                    </div>
+                </div>
+
             </div>
             <div class="modal-footer">
                 <button class="btn-secondary" onclick="closePairModal()">Cancel</button>
-                <button class="btn-secondary" onclick="testPair()">Test Query</button>
+                <button class="btn-secondary" onclick="toggleQueryPreview()">Preview Query</button>
                 <div style="flex:1"></div>
                 <button class="btn-text" onclick="showVintageTips()" title="Show vintage function examples">Help</button>
                 <button class="btn-primary" onclick="savePair()">Save Pair</button>
@@ -249,32 +266,72 @@
 
     <!-- Settings Modal -->
     <div id="settings-modal" class="modal">
-        <div class="modal-content">
+        <div class="modal-content" style="max-width:520px;">
             <div class="modal-header">
                 <h3>Global Settings</h3>
                 <button class="modal-close" onclick="closeSettingsModal()">&times;</button>
             </div>
-            <div class="modal-body">
-                <div class="form-group">
-                    <label>Default Mode</label>
-                    <div class="radio-group">
-                        <label><input type="radio" name="global-mode" value="incremental" checked> Incremental</label>
-                        <label><input type="radio" name="global-mode" value="full"> Full Refresh</label>
+            <div class="modal-body" style="padding:16px 20px;">
+                <!-- Row 1: Mode + Testing side by side -->
+                <div style="display:flex; gap:24px; margin-bottom:16px;">
+                    <div style="flex:1;">
+                        <label class="settings-label">Mode</label>
+                        <div class="radio-group" style="margin-top:6px;">
+                            <label><input type="radio" name="global-mode" value="incremental" checked> Incremental</label>
+                            <label><input type="radio" name="global-mode" value="full"> Full</label>
+                        </div>
+                    </div>
+                    <div style="flex:1;">
+                        <label class="settings-label">Environment</label>
+                        <label class="checkbox-inline" style="margin-top:6px;">
+                            <input type="checkbox" id="testing-mode" onchange="toggleTestingMode(this.checked)">
+                            Testing Mode
+                        </label>
+                        <div id="testing-status" style="font-size:10px; margin-top:2px; display:none;"></div>
                     </div>
                 </div>
-                <div class="form-group">
-                    <label>Default Date Range</label>
-                    <div class="date-range">
-                        <input type="date" id="global-from-date" value="">
-                        <span>to</span>
-                        <input type="date" id="global-to-date" value="">
+
+                <!-- Row 2: Date Range -->
+                <div style="margin-bottom:16px;">
+                    <label class="settings-label">Default Date Range</label>
+                    <div style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+                        <input type="date" id="global-from-date" value="" style="flex:1;">
+                        <span style="color:var(--jp-ui-font-color2);">to</span>
+                        <input type="date" id="global-to-date" value="" style="flex:1;">
                     </div>
-                    <div class="quick-dates">
-                        <button onclick="setQuickDate(7)">Last 7d</button>
-                        <button onclick="setQuickDate(30)">Last 30d</button>
-                        <button onclick="setQuickDate('week')">This week</button>
-                        <button onclick="setQuickDate('month')">This month</button>
+                    <div class="quick-dates" style="margin-top:6px;">
+                        <button onclick="setQuickDate(7)">7d</button>
+                        <button onclick="setQuickDate(30)">30d</button>
+                        <button onclick="setQuickDate(90)">90d</button>
+                        <button onclick="setQuickDate('week')">This wk</button>
+                        <button onclick="setQuickDate('month')">This mo</button>
                         <button onclick="clearGlobalDates()">Clear</button>
+                    </div>
+                </div>
+
+                <!-- Row 3: Output Directory -->
+                <div style="display:flex; gap:24px;">
+                    <div style="flex:1;">
+                        <label class="settings-label">SAS Output Dir</label>
+                        <input type="text" id="global-sas-outdir" value="./sas/" style="width:100%; margin-top:6px;">
+                    </div>
+                    <div style="flex:1;">
+                        <label class="settings-label">AWS Output Dir</label>
+                        <input type="text" id="global-aws-outdir" value="./csv/" style="width:100%; margin-top:6px;">
+                    </div>
+                </div>
+
+                <!-- Row 4: Parallelism -->
+                <div style="display:flex; gap:24px; margin-top:16px;">
+                    <div style="flex:1;">
+                        <label class="settings-label">Oracle Parallel (hint)</label>
+                        <input type="number" id="global-njob-left" value="4" min="1" max="32" style="width:100%; margin-top:6px;">
+                        <div style="font-size:10px; color:var(--jp-ui-font-color2); margin-top:2px;">/*+ PARALLEL(N) */ in SQL</div>
+                    </div>
+                    <div style="flex:1;">
+                        <label class="settings-label">AWS Workers</label>
+                        <input type="number" id="global-njob-right" value="4" min="1" max="32" style="width:100%; margin-top:6px;">
+                        <div style="font-size:10px; color:var(--jp-ui-font-color2); margin-top:2px;">ThreadPool max_workers</div>
                     </div>
                 </div>
             </div>

@@ -19,7 +19,7 @@ from .stats import compute_column_stats
 
 
 # Column name aliases for automatic detection
-DATE_ALIASES = {'rpg_dt', 'eff_dt', 'dt', 'date', 'run_date', 'snap_dt', 'snapshot_dt'}
+DATE_ALIASES = {'rpg_dt', 'eff_dt', 'dt', 'date', 'run_date', 'snap_dt', 'snapshot_dt', 'date_value'}
 COUNT_ALIASES = {'row_count', 'rowcount', 'count', 'cnt', 'rows'}
 
 

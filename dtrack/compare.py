@@ -1,6 +1,8 @@
 """Comparison functionality for row counts and column statistics."""
 
 import json
+import re
+from fnmatch import fnmatch
 from .db import get_row_counts, get_col_stats, get_table_pair, list_table_pairs
 from .date_utils import parse_date
 
@@ -333,3 +335,81 @@ def match_columns_from_dicts(left_cols, right_cols, left_label="left", right_lab
         print(f"\nWritten to: {outfile}")
 
     return result
+
+
+def _wildcard_transform(value, pat_from, pat_to):
+    """Transform a value by matching pat_from (fnmatch with *) and applying pat_to.
+
+    The * in pat_from captures the variable portion, which replaces * in pat_to.
+
+    >>> _wildcard_transform("AMT_TOTAL", "AMT_*", "amount_*")
+    'amount_TOTAL'
+    >>> _wildcard_transform("STATUS", "AMT_*", "amount_*")
+    """
+    # Convert fnmatch pattern to regex to capture the * part
+    if '*' not in pat_from:
+        if value == pat_from:
+            return pat_to
+        return None
+
+    # Escape everything except *, then replace * with capture group
+    regex = ''
+    for ch in pat_from:
+        if ch == '*':
+            regex += '(.*)'
+        else:
+            regex += re.escape(ch)
+
+    m = re.fullmatch(regex, value, re.IGNORECASE)
+    if not m:
+        return None
+
+    captured = m.group(1)
+    return pat_to.replace('*', captured)
+
+
+def apply_column_rules(rules, unmatched_left, unmatched_right):
+    """Evaluate wildcard/regex rules against unmatched columns.
+
+    Args:
+        rules: list of rule dicts with pattern_left, pattern_right, type
+        unmatched_left: list of column name strings
+        unmatched_right: list of column name strings
+
+    Returns:
+        (new_mappings, rule_sources) where:
+        - new_mappings: {left_col: right_col} for matched columns
+        - rule_sources: {left_col: "rule:N"} indicating which rule matched
+    """
+    new_mappings = {}
+    rule_sources = {}
+    right_set = set(unmatched_right)
+
+    for rule_idx, rule in enumerate(rules):
+        pat_left = rule.get("pattern_left", "")
+        pat_right = rule.get("pattern_right", "")
+        rule_type = rule.get("type", "wildcard")
+
+        for left_col in list(unmatched_left):
+            if left_col in new_mappings:
+                continue
+
+            if rule_type == "wildcard":
+                transformed = _wildcard_transform(left_col, pat_left, pat_right)
+                if transformed and transformed in right_set:
+                    new_mappings[left_col] = transformed
+                    rule_sources[left_col] = f"rule:{rule_idx}"
+                    right_set.discard(transformed)
+            elif rule_type == "regex":
+                try:
+                    m = re.fullmatch(pat_left, left_col, re.IGNORECASE)
+                    if m:
+                        transformed = m.expand(pat_right)
+                        if transformed in right_set:
+                            new_mappings[left_col] = transformed
+                            rule_sources[left_col] = f"rule:{rule_idx}"
+                            right_set.discard(transformed)
+                except re.error:
+                    continue
+
+    return new_mappings, rule_sources

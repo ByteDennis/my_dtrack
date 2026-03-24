@@ -11,7 +11,7 @@ from pathlib import Path
 import glob
 
 from fastapi import FastAPI, Request, Query, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -28,6 +28,8 @@ templates = Jinja2Templates(directory=_dir / "templates")
 # These are set by serve() before uvicorn.run()
 _db_path: str = ""
 _config_path: str = ""
+_original_config_path: str = ""  # saved when switching to testing mode
+_testing_mode: bool = False
 
 
 def _cfg():
@@ -50,6 +52,14 @@ async def pairs_page(request: Request):
 @app.get("/load_row", response_class=HTMLResponse)
 async def load_row_page(request: Request):
     return templates.TemplateResponse("load_row.html", {"request": request})
+
+@app.get("/row_compare", response_class=HTMLResponse)
+async def row_compare_page(request: Request):
+    return templates.TemplateResponse("row_compare.html", {"request": request})
+
+@app.get("/col_mapping", response_class=HTMLResponse)
+async def col_mapping_page(request: Request):
+    return templates.TemplateResponse("col_mapping.html", {"request": request})
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +130,7 @@ async def api_extract(request: Request):
     from_date = body.get("from_date")
     to_date = body.get("to_date")
     outdir = body.get("outdir", "./csv/" if platform == "aws" else "./sas/")
+    max_workers = body.get("max_workers")
 
     buf = io.StringIO()
     try:
@@ -127,7 +138,8 @@ async def api_extract(request: Request):
             if platform == "aws":
                 from ..platforms.athena import extract_aws
                 extract_aws(_config_path, outdir, types=[extract_type],
-                            db_path=_db_path, from_date=from_date, to_date=to_date)
+                            db_path=_db_path, from_date=from_date, to_date=to_date,
+                            max_workers=int(max_workers) if max_workers else None)
             else:
                 from ..platforms.oracle import gen_sas
                 gen_sas(_config_path, outdir, types=[extract_type],
@@ -370,6 +382,26 @@ async def api_update_config(request: Request):
 # Pair management (new UI)
 # ---------------------------------------------------------------------------
 
+@app.post("/api/pairs/reload")
+async def api_reload_pairs():
+    """Wipe all pairs and reload from the current config JSON on disk."""
+    try:
+        from ..config import load_unified_config
+        config = load_unified_config(_config_path)
+
+        # Wipe existing pairs in config, then re-read from file
+        # (this forces a clean slate from whatever config file is active)
+        n_pairs = len(config.get("pairs", {}))
+
+        # Re-sync into database
+        registered = _sync_config_pairs(config)
+
+        return {"ok": True, "pairs": n_pairs, "registered": registered,
+                "config_path": _config_path}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/pairs/list")
 async def api_list_pairs():
     """List all pairs with their full configuration."""
@@ -499,10 +531,8 @@ async def api_load_row_files(request: Request):
         for file_path in files:
             # Infer table info from filename
             filename = Path(file_path).stem
-            parts = filename.split('_')
 
             # Find matching table in config
-            # This is a simplified approach - you might need more robust matching
             for tbl in get_all_tables_from_unified(config):
                 qname = qualified_name(tbl)
                 if qname.lower() in filename.lower():
@@ -519,6 +549,613 @@ async def api_load_row_files(request: Request):
                     break
 
         return {"ok": True, "loaded": loaded}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/load/row/upload")
+async def api_load_row_upload(
+    file: UploadFile = File(...),
+    table_name: str = "",
+    mode: str = "upsert",
+):
+    """Upload a CSV file and load row counts into a specific table.
+
+    Accepts multipart form data with:
+      - file: the CSV file
+      - table_name: target table name (e.g. 'pcds_cust_daily')
+      - mode: 'upsert' (default) or 'replace'
+    """
+    import tempfile
+
+    if not table_name:
+        return JSONResponse(status_code=400, content={"error": "table_name is required"})
+
+    try:
+        # Write uploaded file to temp location
+        content = await file.read()
+        with tempfile.NamedTemporaryFile(
+            mode='wb', suffix='.csv', delete=False
+        ) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # Count existing rows for this table to compute new vs updated
+        from ..db import get_row_counts, get_metadata
+        existing_rows = {}
+        try:
+            for dt, count in get_row_counts(_db_path, table_name):
+                existing_rows[dt] = count
+        except Exception:
+            pass  # table may not exist yet
+
+        # Find table config for metadata
+        from ..config import load_unified_config, get_all_tables_from_unified
+        from ..platforms.base import qualified_name
+
+        config = load_unified_config(_config_path)
+        tbl_cfg = None
+        for tbl in get_all_tables_from_unified(config):
+            if qualified_name(tbl).lower() == table_name.lower():
+                tbl_cfg = tbl
+                break
+
+        from ..loader import load_row_counts
+        # date_col=None lets the CSV parser auto-detect (date_value, dt, date, etc.)
+        # date_var_override stores the source DB column name in metadata
+        load_row_counts(
+            db_path=_db_path,
+            file_or_folder=tmp_path,
+            table_name=table_name,
+            mode=mode,
+            source=tbl_cfg.get("source") if tbl_cfg else None,
+            date_col=None,
+            date_var_override=tbl_cfg.get("date_col") if tbl_cfg else None,
+            where_clause=tbl_cfg.get("where", "") if tbl_cfg else "",
+        )
+
+        # Compute new vs updated dates
+        new_rows = {}
+        try:
+            for dt, count in get_row_counts(_db_path, table_name):
+                new_rows[dt] = count
+        except Exception:
+            pass
+
+        new_dates = len(set(new_rows.keys()) - set(existing_rows.keys()))
+        updated_dates = len(set(new_rows.keys()) & set(existing_rows.keys()))
+
+        # Clean up temp file
+        os.unlink(tmp_path)
+
+        return {
+            "ok": True,
+            "loaded": len(new_rows),
+            "new_dates": new_dates,
+            "updated_dates": updated_dates,
+        }
+    except Exception as e:
+        import traceback
+        return JSONResponse(status_code=500, content={
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+        })
+
+
+@app.post("/api/load/row/path")
+async def api_load_row_path(request: Request):
+    """Load a server-side CSV file by path into a specific table.
+
+    Body: {path, table_name, mode}
+    """
+    body = await request.json()
+    csv_path = body.get("path", "")
+    table_name = body.get("table_name", "")
+    mode = body.get("mode", "upsert")
+
+    if not csv_path or not table_name:
+        return JSONResponse(status_code=400, content={
+            "error": "path and table_name are required"
+        })
+
+    if not os.path.exists(csv_path):
+        return JSONResponse(status_code=404, content={
+            "error": f"File not found: {csv_path}"
+        })
+
+    try:
+        from ..db import get_row_counts
+        from ..config import load_unified_config, get_all_tables_from_unified
+        from ..platforms.base import qualified_name
+
+        # Count existing rows
+        existing_rows = {}
+        try:
+            for dt, count in get_row_counts(_db_path, table_name):
+                existing_rows[dt] = count
+        except Exception:
+            pass
+
+        # Find table config
+        config = load_unified_config(_config_path)
+        tbl_cfg = None
+        for tbl in get_all_tables_from_unified(config):
+            if qualified_name(tbl).lower() == table_name.lower():
+                tbl_cfg = tbl
+                break
+
+        from ..loader import load_row_counts
+        # date_col=None lets the CSV parser auto-detect (date_value, dt, date, etc.)
+        load_row_counts(
+            db_path=_db_path,
+            file_or_folder=csv_path,
+            table_name=table_name,
+            mode=mode,
+            source=tbl_cfg.get("source") if tbl_cfg else None,
+            date_col=None,
+            date_var_override=tbl_cfg.get("date_col") if tbl_cfg else None,
+            where_clause=tbl_cfg.get("where", "") if tbl_cfg else "",
+        )
+
+        # Compute new vs updated
+        new_rows = {}
+        try:
+            for dt, count in get_row_counts(_db_path, table_name):
+                new_rows[dt] = count
+        except Exception:
+            pass
+
+        new_dates = len(set(new_rows.keys()) - set(existing_rows.keys()))
+        updated_dates = len(set(new_rows.keys()) & set(existing_rows.keys()))
+
+        return {
+            "ok": True,
+            "loaded": len(new_rows),
+            "new_dates": new_dates,
+            "updated_dates": updated_dates,
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+
+@app.get("/api/scan/folder")
+async def api_scan_folder(dir: str = "./csv/"):
+    """Scan a server-side folder for CSV files and return file info."""
+    try:
+        dir_path = Path(dir)
+        if not dir_path.exists():
+            return JSONResponse(status_code=404, content={
+                "error": f"Folder not found: {dir}"
+            })
+
+        files = []
+        for csv_file in sorted(dir_path.glob("*.csv")):
+            # Read first few lines for row count and date range
+            rows = 0
+            min_date = ''
+            max_date = ''
+            try:
+                with open(csv_file, 'r') as f:
+                    import csv as csv_mod
+                    reader = csv_mod.DictReader(f)
+                    headers = [h.lower().strip() for h in (reader.fieldnames or [])]
+                    date_aliases = {'dt', 'date', 'rpg_dt', 'eff_dt', 'run_date',
+                                    'snap_dt', 'snapshot_dt', 'date_value'}
+                    date_col = None
+                    for h in headers:
+                        if h in date_aliases:
+                            date_col = h
+                            break
+
+                    dates = []
+                    for row in reader:
+                        rows += 1
+                        if date_col and row.get(date_col):
+                            dates.append(row[date_col].strip())
+
+                    if dates:
+                        dates.sort()
+                        min_date = dates[0]
+                        max_date = dates[-1]
+            except Exception:
+                pass
+
+            files.append({
+                "name": csv_file.name,
+                "path": str(csv_file.resolve()),
+                "rows": rows,
+                "minDate": min_date,
+                "maxDate": max_date,
+            })
+
+        return {"files": files}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Row Compare API
+# ---------------------------------------------------------------------------
+
+# NOTE: Export routes must be defined BEFORE {pair_name} routes to avoid
+# FastAPI matching "export" as a pair_name parameter.
+
+@app.post("/api/compare/row/export/html")
+async def api_compare_row_export_html(request: Request):
+    """Generate full HTML report for all pairs.
+
+    Body (optional): {
+        "from_date": "", "to_date": "",
+        "pairs": {
+            "pair_name": {
+                "excluded_dates": [...],
+                "comment_left": "", "comment_right": "",
+                "time_left": "", "time_right": ""
+            }, ...
+        }
+    }
+
+    When pairs dict is provided, uses live UI state for exclusions/annotations.
+    Otherwise falls back to saved DB/config state.
+    """
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    from_date = body.get("from_date", "")
+    to_date = body.get("to_date", "")
+    title = body.get("title", "") or "Row Count Comparison"
+    subtitle = body.get("subtitle", "") or None
+    live_pairs = body.get("pairs", {})
+
+    try:
+        from ..db import list_table_pairs, get_metadata, get_row_comparison
+        from ..compare import compare_row_counts
+        from ..html_export import generate_row_count_html, create_row_count_table, wrap_html_document
+        from ..config import load_unified_config
+
+        pairs = list_table_pairs(_db_path)
+        config = load_unified_config(_config_path)
+        sections = []
+
+        for pair in pairs:
+            pname = pair["pair_name"]
+            pair_cfg = config.get("pairs", {}).get(pname, {})
+            if pair_cfg.get("skip"):
+                continue
+
+            comparison = compare_row_counts(
+                _db_path, pair["table_left"], pair["table_right"],
+                from_date=from_date or None, to_date=to_date or None,
+            )
+
+            # Use live UI state if provided, otherwise fall back to saved
+            live = live_pairs.get(pname, {})
+            if live.get("excluded_dates") is not None:
+                excluded = set(live["excluded_dates"])
+            else:
+                saved = get_row_comparison(_db_path, pname)
+                excluded = set(saved["excluded_dates"]) if saved and saved.get("excluded_dates") else set()
+
+            if excluded:
+                comparison["matching"] = [(dt, c) for dt, c in comparison["matching"] if dt not in excluded]
+                comparison["mismatched"] = [(dt, l, r) for dt, l, r in comparison["mismatched"] if dt not in excluded]
+                comparison["only_left"] = [(dt, c) for dt, c in comparison["only_left"] if dt not in excluded]
+                comparison["only_right"] = [(dt, c) for dt, c in comparison["only_right"] if dt not in excluded]
+
+            meta_left = get_metadata(_db_path, pair["table_left"])
+            meta_right = get_metadata(_db_path, pair["table_right"])
+
+            # Annotations: prefer live UI state, fall back to config
+            if live:
+                comment_left = live.get("comment_left", "")
+                comment_right = live.get("comment_right", "")
+                time_left = live.get("time_left", "")
+                time_right = live.get("time_right", "")
+                time_map = {"left": time_left, "right": time_right} if (time_left or time_right) else None
+            else:
+                comment_map = pair_cfg.get("comment_map", {}).get("row", {})
+                comment_left = comment_map.get("left", "")
+                comment_right = comment_map.get("right", "")
+                time_map = pair_cfg.get("time_map", {}).get("row", {}) or None
+
+            html = generate_row_count_html(
+                pair_name=pname,
+                source_left=pair.get("source_left", "left"),
+                source_right=pair.get("source_right", "right"),
+                table_left=pair["table_left"],
+                table_right=pair["table_right"],
+                comparison=comparison,
+                metadata_left=meta_left,
+                metadata_right=meta_right,
+                comment_left=comment_left,
+                comment_right=comment_right,
+                time_map=time_map,
+                left_cfg=pair_cfg.get("left"),
+                right_cfg=pair_cfg.get("right"),
+            )
+            sections.append(html)
+
+        table = create_row_count_table(sections)
+        doc = wrap_html_document(title, [table], subtitle=subtitle)
+
+        return HTMLResponse(content=doc)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/compare/row/export/csv/{pair_name}")
+async def api_compare_row_export_csv(pair_name: str, from_date: str = "", to_date: str = ""):
+    """Generate CSV export for one pair's row comparison."""
+    import csv as csv_mod
+
+    try:
+        from ..db import get_table_pair, get_row_comparison
+        from ..compare import compare_row_counts
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        comparison = compare_row_counts(
+            _db_path, pair["table_left"], pair["table_right"],
+            from_date=from_date or None, to_date=to_date or None,
+        )
+
+        saved = get_row_comparison(_db_path, pair_name)
+        excluded = set(saved["excluded_dates"]) if saved and saved.get("excluded_dates") else set()
+
+        summary = comparison["summary"]
+        left_min, left_max = summary["date_range_left"]
+        right_min, right_max = summary["date_range_right"]
+        overlap_start = overlap_end = None
+        if left_min and right_min and left_max and right_max:
+            overlap_start = max(left_min, right_min)
+            overlap_end = min(left_max, right_max)
+            if overlap_start > overlap_end:
+                overlap_start = overlap_end = None
+
+        buf = io.StringIO()
+        writer = csv_mod.writer(buf)
+        writer.writerow(["category", "in_overlap", "excluded", "date", "left_count", "right_count", "diff"])
+
+        rows = []
+        for dt, count in comparison["matching"]:
+            in_ov = overlap_start and overlap_end and overlap_start <= dt <= overlap_end
+            rows.append(("match", in_ov, dt in excluded, dt, count, count, 0))
+        for dt, l, r in comparison["mismatched"]:
+            in_ov = overlap_start and overlap_end and overlap_start <= dt <= overlap_end
+            rows.append(("mismatch", in_ov, dt in excluded, dt, l, r, r - l))
+        for dt, count in comparison["only_left"]:
+            in_ov = overlap_start and overlap_end and overlap_start <= dt <= overlap_end
+            rows.append(("left_only", in_ov, dt in excluded, dt, count, "", ""))
+        for dt, count in comparison["only_right"]:
+            in_ov = overlap_start and overlap_end and overlap_start <= dt <= overlap_end
+            rows.append(("right_only", in_ov, dt in excluded, dt, "", count, ""))
+
+        rows.sort(key=lambda r: r[3])
+        for row in rows:
+            writer.writerow(row)
+
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={pair_name}_row_compare.csv"},
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/compare/row/{pair_name}")
+async def api_compare_row_pair(pair_name: str, from_date: str = "", to_date: str = ""):
+    """Run row comparison for a single pair and return structured JSON."""
+    try:
+        from ..db import get_table_pair, get_metadata, get_row_comparison
+        from ..compare import compare_row_counts
+        from ..config import load_unified_config
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        comparison = compare_row_counts(
+            _db_path, pair["table_left"], pair["table_right"],
+            from_date=from_date or None, to_date=to_date or None,
+        )
+
+        meta_left = get_metadata(_db_path, pair["table_left"]) or {}
+        meta_right = get_metadata(_db_path, pair["table_right"]) or {}
+
+        # Load saved comparison state
+        saved = get_row_comparison(_db_path, pair_name)
+
+        # Load annotations from config
+        config = load_unified_config(_config_path)
+        pair_cfg = config.get("pairs", {}).get(pair_name, {})
+        comment_map = pair_cfg.get("comment_map", {}).get("row", {})
+        time_map = pair_cfg.get("time_map", {}).get("row", {})
+
+        # Build date rows
+        summary = comparison["summary"]
+        left_min, left_max = summary["date_range_left"]
+        right_min, right_max = summary["date_range_right"]
+
+        # Calculate overlap
+        overlap_start = overlap_end = None
+        if left_min and right_min and left_max and right_max:
+            overlap_start = max(left_min, right_min)
+            overlap_end = min(left_max, right_max)
+            if overlap_start > overlap_end:
+                overlap_start = overlap_end = None
+
+        dates = []
+        for dt, count in comparison["matching"]:
+            in_overlap = overlap_start and overlap_end and overlap_start <= dt <= overlap_end
+            dates.append({"dt": dt, "left": count, "right": count, "diff": 0, "status": "match", "in_overlap": bool(in_overlap)})
+        for dt, l, r in comparison["mismatched"]:
+            in_overlap = overlap_start and overlap_end and overlap_start <= dt <= overlap_end
+            dates.append({"dt": dt, "left": l, "right": r, "diff": r - l, "status": "mismatch", "in_overlap": bool(in_overlap)})
+        for dt, count in comparison["only_left"]:
+            in_overlap = overlap_start and overlap_end and overlap_start <= dt <= overlap_end
+            dates.append({"dt": dt, "left": count, "right": None, "diff": None, "status": "left_only", "in_overlap": bool(in_overlap)})
+        for dt, count in comparison["only_right"]:
+            in_overlap = overlap_start and overlap_end and overlap_start <= dt <= overlap_end
+            dates.append({"dt": dt, "left": None, "right": count, "diff": None, "status": "right_only", "in_overlap": bool(in_overlap)})
+
+        dates.sort(key=lambda d: d["dt"])
+
+        return {
+            "pair_name": pair_name,
+            "table_left": pair["table_left"],
+            "table_right": pair["table_right"],
+            "source_left": pair.get("source_left", ""),
+            "source_right": pair.get("source_right", ""),
+            "summary": {
+                "count_left": summary["count_left"],
+                "count_right": summary["count_right"],
+                "total_left": summary["total_left"],
+                "total_right": summary["total_right"],
+                "date_range_left": list(summary["date_range_left"]),
+                "date_range_right": list(summary["date_range_right"]),
+                "overlap_start": overlap_start,
+                "overlap_end": overlap_end,
+                "n_match": len(comparison["matching"]),
+                "n_mismatch": len(comparison["mismatched"]),
+                "n_left_only": len(comparison["only_left"]),
+                "n_right_only": len(comparison["only_right"]),
+            },
+            "dates": dates,
+            "saved": {
+                "excluded_dates": saved["excluded_dates"] if saved else [],
+                "matching_dates": saved["matching_dates"] if saved else [],
+            },
+            "annotations": {
+                "comment_left": comment_map.get("left", ""),
+                "comment_right": comment_map.get("right", ""),
+                "time_left": time_map.get("left", ""),
+                "time_right": time_map.get("right", ""),
+            },
+            "meta_left": {
+                "date_var": meta_left.get("date_var"),
+                "vintage": meta_left.get("vintage"),
+            },
+            "meta_right": {
+                "date_var": meta_right.get("date_var"),
+                "vintage": meta_right.get("vintage"),
+            },
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.put("/api/compare/row/{pair_name}")
+async def api_save_row_comparison(pair_name: str, request: Request):
+    """Save row comparison state: excluded dates, comments, times."""
+    body = await request.json()
+    try:
+        from ..db import save_row_comparison, get_table_pair
+        from ..config import load_unified_config, save_unified_config
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        excluded_dates = body.get("excluded_dates", [])
+        matching_dates = body.get("matching_dates", [])
+        comment_left = body.get("comment_left", "")
+        comment_right = body.get("comment_right", "")
+        time_left = body.get("time_left", "")
+        time_right = body.get("time_right", "")
+
+        # Compute overlap from matching dates
+        overlap_start = min(matching_dates) if matching_dates else None
+        overlap_end = max(matching_dates) if matching_dates else None
+
+        save_row_comparison(
+            _db_path, pair_name,
+            overlap_start=overlap_start,
+            overlap_end=overlap_end,
+            matching_dates=matching_dates,
+            excluded_dates=excluded_dates,
+        )
+
+        # Save annotations to config
+        config = load_unified_config(_config_path)
+        pair_cfg = config.get("pairs", {}).get(pair_name, {})
+        if pair_cfg:
+            pair_cfg.setdefault("comment_map", {})["row"] = {
+                "left": comment_left, "right": comment_right,
+            }
+            pair_cfg.setdefault("time_map", {})["row"] = {
+                "left": time_left, "right": time_right,
+            }
+            save_unified_config(config, _config_path)
+
+        return {"ok": True, "matching": len(matching_dates), "excluded": len(excluded_dates)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/compare/row/{pair_name}/preview")
+async def api_compare_row_preview(pair_name: str, request: Request):
+    """Generate HTML preview for one pair's row comparison."""
+    body = await request.json()
+    try:
+        from ..db import get_table_pair, get_metadata
+        from ..compare import compare_row_counts
+        from ..html_export import generate_row_count_html
+        from ..config import load_unified_config
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        from_date = body.get("from_date")
+        to_date = body.get("to_date")
+        excluded_dates = set(body.get("excluded_dates", []))
+
+        comparison = compare_row_counts(
+            _db_path, pair["table_left"], pair["table_right"],
+            from_date=from_date, to_date=to_date,
+        )
+
+        # Filter out excluded dates from all categories
+        if excluded_dates:
+            comparison["matching"] = [(dt, c) for dt, c in comparison["matching"] if dt not in excluded_dates]
+            comparison["mismatched"] = [(dt, l, r) for dt, l, r in comparison["mismatched"] if dt not in excluded_dates]
+            comparison["only_left"] = [(dt, c) for dt, c in comparison["only_left"] if dt not in excluded_dates]
+            comparison["only_right"] = [(dt, c) for dt, c in comparison["only_right"] if dt not in excluded_dates]
+
+        meta_left = get_metadata(_db_path, pair["table_left"])
+        meta_right = get_metadata(_db_path, pair["table_right"])
+
+        config = load_unified_config(_config_path)
+        pair_cfg = config.get("pairs", {}).get(pair_name, {})
+
+        time_map = {}
+        tm = body.get("time_left") or body.get("time_right")
+        if body.get("time_left") or body.get("time_right"):
+            time_map = {"left": body.get("time_left", ""), "right": body.get("time_right", "")}
+
+        html = generate_row_count_html(
+            pair_name=pair_name,
+            source_left=pair.get("source_left", "left"),
+            source_right=pair.get("source_right", "right"),
+            table_left=pair["table_left"],
+            table_right=pair["table_right"],
+            comparison=comparison,
+            metadata_left=meta_left,
+            metadata_right=meta_right,
+            comment_left=body.get("comment_left", ""),
+            comment_right=body.get("comment_right", ""),
+            time_map=time_map or None,
+            left_cfg=pair_cfg.get("left"),
+            right_cfg=pair_cfg.get("right"),
+        )
+
+        # Wrap in a minimal table
+        from ..html_export import create_row_count_table
+        table_html = create_row_count_table([html])
+
+        return {"html": table_html}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -776,14 +1413,429 @@ async def api_update_annotations(pair_name: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Query preview
+# ---------------------------------------------------------------------------
+
+@app.post("/api/preview")
+async def api_preview(request: Request):
+    """Generate preview SQL for a pair's left and right sides.
+
+    Body: {pair_name, left: {...}, right: {...}, fromDate, toDate}
+    Returns: {left: {sql, output_file}, right: {sql, output_file}}
+    """
+    body = await request.json()
+    pair_name = body.get("pair_name", "pair")
+    from_date = body.get("fromDate", "")
+    to_date = body.get("toDate", "")
+    njob_left = body.get("njob_left", 0)
+    njob_right = body.get("njob_right", 0)
+
+    result = {}
+    for side in ("left", "right"):
+        cfg = body.get(side, {})
+        if not cfg.get("table"):
+            continue
+        parallel = njob_left if side == "left" else njob_right
+        result[side] = _build_preview_sql(
+            pair_name, side, cfg, from_date, to_date, parallel=parallel
+        )
+
+    return result
+
+
+def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
+    """Build preview SQL for one side of a pair."""
+    source = (cfg.get("source") or "").lower()
+    date_col = cfg.get("date_col", "")
+    date_type = (cfg.get("date_type") or "").lower()
+    vintage_raw = cfg.get("vintage", "")
+    where_clause = cfg.get("where", "")
+    processed = cfg.get("processed", "")
+    table = cfg.get("table", "")
+    conn_macro = cfg.get("conn_macro", "")
+
+    is_oracle = source in ("pcds", "oracle")
+    is_sas = source == "sas"
+    is_aws = source == "aws"
+
+    # --- SELECT/GROUP BY expression (with TRUNC/datepart for bucketing) ---
+    select_expr = _preview_select_expr(date_col, date_type, source)
+    if vintage_raw:
+        select_expr = vintage_raw
+
+    # --- WHERE uses raw column (no TRUNC), adjusts literals instead ---
+    where_col = date_col
+
+    # --- Resolve table and CTE ---
+    cte_prefix = ""
+    query_table = table
+
+    if is_sas:
+        query_table = f"{conn_macro}.{table}" if conn_macro else table
+    elif is_aws:
+        if processed:
+            alias = f"{pair_name}_{side}"
+            cte_prefix = f"WITH {alias} AS (\n  {processed}\n)\n"
+            query_table = alias
+        else:
+            query_table = f"{conn_macro}.{table}" if conn_macro else table
+    else:  # oracle/pcds
+        if processed:
+            alias = cfg.get("name", f"{pair_name}_{side}")
+            cte_prefix = f"WITH {alias} AS ({processed}) "
+            query_table = alias
+
+    # --- WHERE conditions ---
+    conditions = []
+    _lit = lambda d: _preview_date_literal(d, date_type, is_sas, source)
+    if from_date and to_date:
+        conditions.append(f"{where_col} BETWEEN {_lit(from_date)} AND {_lit(to_date)}")
+    elif from_date:
+        conditions.append(f"{where_col} >= {_lit(from_date)}")
+    elif to_date:
+        conditions.append(f"{where_col} <= {_lit(to_date)}")
+    if where_clause:
+        conditions.append(f"({where_clause})")
+
+    where_str = ""
+    if conditions:
+        where_str = "WHERE " + "\n      AND ".join(conditions)
+
+    # --- Parallel hint ---
+    parallel_int = int(parallel) if parallel else 0
+    ora_hint = f" /*+ PARALLEL({parallel_int}) */" if parallel_int > 1 and (is_oracle or is_sas) else ""
+    aws_hint = f"  -- max_workers={parallel_int}" if parallel_int > 1 and is_aws else ""
+
+    # --- Build SQL by platform ---
+    output_file = f"{pair_name}_{side}_row"
+
+    if is_aws:
+        sql = f"""{cte_prefix}SELECT
+  {select_expr} AS date_value,
+  COUNT(*) AS row_count
+FROM {query_table}
+{where_str}
+GROUP BY {select_expr}
+ORDER BY date_value;{aws_hint}""".strip()
+        return {"sql": sql, "output_file": f"{output_file}.sql"}
+
+    elif is_sas:
+        # SAS setup + proc sql on local dataset
+        setup = ""
+        if processed:
+            setup = f"{processed}\n\n"
+        indent_where = where_str.replace("\n", "\n    ") if where_str else ""
+        sql = f"""{setup}proc sql;
+  create table work.{output_file} as
+  select
+    {select_expr} as date_value,
+    count(*) as row_count
+  from {query_table}
+  {indent_where}
+  group by {select_expr};
+quit;""".strip()
+        return {"sql": sql, "output_file": f"{output_file}.sas"}
+
+    else:
+        # Oracle via SAS proc sql passthrough
+        indent_where = ("    " + where_str.replace("\n", "\n    ")) if where_str else ""
+        inner_sql = f"""{cte_prefix}SELECT{ora_hint}
+      {select_expr} AS date_value,
+      COUNT(*) AS row_count
+    FROM {query_table}
+    {indent_where}
+    GROUP BY {select_expr}"""
+        sql = f"""proc sql;
+  %{conn_macro}
+  create table work.{output_file} as
+  select * from connection to oracle (
+    {inner_sql.strip()}
+  );
+  disconnect from oracle;
+quit;""".strip()
+        return {"sql": sql, "output_file": f"{output_file}.sas"}
+
+
+def _preview_select_expr(date_col, date_type, source):
+    """Build the date expression for SELECT/GROUP BY (bucketing to day level)."""
+    dtype = date_type.lower() if date_type else ""
+
+    if source in ("pcds", "oracle"):
+        if dtype == "timestamp":
+            return f"TRUNC({date_col})"
+        return date_col
+    elif source == "sas":
+        if dtype in ("datetime", "timestamp"):
+            return f"datepart({date_col})"
+        return date_col
+    elif source == "aws":
+        if dtype in ("timestamp", "datetime"):
+            return f"CAST({date_col} AS DATE)"
+        return date_col
+    return date_col
+
+
+def _preview_date_literal(date_str, date_type, is_sas=False, source=""):
+    """Format a YYYY-MM-DD date string as the correct SQL literal for the date type.
+
+    For timestamp columns, uses TIMESTAMP literals so the raw column can be
+    compared without wrapping in TRUNC (preserves index usage).
+    """
+    if not date_str:
+        return "''"
+    dtype = date_type.lower() if date_type else ""
+
+    if dtype in ("num", "integer", "int", "number"):
+        return date_str.replace("-", "")
+
+    if dtype == "string_compact":
+        return f"'{date_str.replace('-', '')}'"
+
+    if dtype in ("string_dash", "string"):
+        return f"'{date_str}'"
+
+    if is_sas and dtype in ("datetime", "date", "timestamp"):
+        # SAS date literal: '01JAN2024'd
+        try:
+            from datetime import datetime as _dt
+            d = _dt.strptime(date_str, "%Y-%m-%d")
+            if dtype in ("datetime", "timestamp"):
+                return f"'{d.strftime('%d%b%Y').upper()}:00:00:00'dt"
+            return f"'{d.strftime('%d%b%Y').upper()}'d"
+        except ValueError:
+            return f"'{date_str}'"
+
+    # Oracle/Athena timestamp: use TIMESTAMP literal
+    if dtype == "timestamp" and source in ("pcds", "oracle"):
+        return f"TIMESTAMP '{date_str} 00:00:00'"
+    if dtype in ("timestamp", "datetime") and source == "aws":
+        return f"TIMESTAMP '{date_str} 00:00:00'"
+
+    # Oracle/Athena date: DATE literal
+    if dtype in ("date",):
+        return f"DATE '{date_str}'"
+
+    return f"'{date_str}'"
+
+
+# ---------------------------------------------------------------------------
+# Column Mapping API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/pairs/{pair_name}/columns")
+async def api_get_pair_columns(pair_name: str):
+    """Return left/right columns, current col_mappings, col_rules, and auto-match results."""
+    try:
+        from ..db import (
+            get_table_pair, get_column_meta, get_pair_col_map_from_db,
+            get_pair_col_rules, ensure_col_rules_column,
+        )
+        from ..compare import match_columns_from_dicts
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        ensure_col_rules_column(_db_path)
+
+        # Get column metadata for both sides
+        left_meta = get_column_meta(_db_path, pair["table_left"])
+        right_meta = get_column_meta(_db_path, pair["table_right"])
+
+        left_cols = {c["column_name"]: c.get("data_type", "") for c in left_meta}
+        right_cols = {c["column_name"]: c.get("data_type", "") for c in right_meta}
+
+        # Get existing mappings and rules
+        col_mappings = get_pair_col_map_from_db(_db_path, pair_name)
+        col_rules_data = get_pair_col_rules(_db_path, pair_name)
+
+        # Determine unmapped columns
+        mapped_left = set(col_mappings.keys())
+        mapped_right = set(col_mappings.values())
+        unmapped_left = {k: v for k, v in left_cols.items() if k not in mapped_left}
+        unmapped_right = {k: v for k, v in right_cols.items() if k not in mapped_right}
+
+        # Auto-match unmapped columns
+        auto_result = match_columns_from_dicts(
+            unmapped_left, unmapped_right,
+            left_label=pair.get("source_left", "left"),
+            right_label=pair.get("source_right", "right"),
+        )
+
+        return {
+            "pair_name": pair_name,
+            "table_left": pair["table_left"],
+            "table_right": pair["table_right"],
+            "source_left": pair.get("source_left", ""),
+            "source_right": pair.get("source_right", ""),
+            "left_columns": left_cols,
+            "right_columns": right_cols,
+            "col_mappings": col_mappings,
+            "col_rules": col_rules_data,
+            "auto_match": auto_result.get("matched", {}),
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.put("/api/pairs/{pair_name}/col-mappings")
+async def api_save_col_mappings(pair_name: str, request: Request):
+    """Save flat mappings + rules + sources."""
+    body = await request.json()
+    try:
+        from ..db import (
+            get_table_pair, update_pair_col_map,
+            update_pair_col_rules, ensure_col_rules_column,
+        )
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        ensure_col_rules_column(_db_path)
+
+        mappings = body.get("mappings", {})
+        rules_data = body.get("rules", {})
+
+        update_pair_col_map(_db_path, pair_name, mappings)
+        update_pair_col_rules(_db_path, pair_name, rules_data)
+
+        return {"ok": True, "mapped": len(mappings)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/pairs/{pair_name}/col-mappings/csv")
+async def api_col_mappings_csv(pair_name: str):
+    """Download CSV with columns: status, left_column, left_type, right_column, right_type."""
+    import csv as csv_mod
+
+    try:
+        from ..db import get_table_pair, get_column_meta, get_pair_col_map_from_db
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        left_meta = get_column_meta(_db_path, pair["table_left"])
+        right_meta = get_column_meta(_db_path, pair["table_right"])
+
+        left_types = {c["column_name"]: c.get("data_type", "") for c in left_meta}
+        right_types = {c["column_name"]: c.get("data_type", "") for c in right_meta}
+
+        col_mappings = get_pair_col_map_from_db(_db_path, pair_name)
+        source_left = pair.get("source_left", "left")
+        source_right = pair.get("source_right", "right")
+
+        buf = io.StringIO()
+        writer = csv_mod.writer(buf)
+        writer.writerow(["status", "left_column", "left_type", "right_column", "right_type"])
+
+        # Mapped columns
+        for left_col, right_col in sorted(col_mappings.items()):
+            writer.writerow([
+                "matched",
+                left_col,
+                left_types.get(left_col, ""),
+                right_col,
+                right_types.get(right_col, ""),
+            ])
+
+        # Left-only
+        mapped_left = set(col_mappings.keys())
+        for col in sorted(left_types.keys()):
+            if col not in mapped_left:
+                writer.writerow([
+                    f"{source_left}-only",
+                    col,
+                    left_types.get(col, ""),
+                    "",
+                    "",
+                ])
+
+        # Right-only
+        mapped_right = set(col_mappings.values())
+        for col in sorted(right_types.keys()):
+            if col not in mapped_right:
+                writer.writerow([
+                    f"{source_right}-only",
+                    "",
+                    "",
+                    col,
+                    right_types.get(col, ""),
+                ])
+
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={pair_name}_col_mappings.csv"},
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Testing mode
+# ---------------------------------------------------------------------------
+
+@app.get("/api/testing")
+async def api_testing_status():
+    """Return current testing mode state."""
+    return {"testing": _testing_mode, "config_path": _config_path}
+
+
+@app.post("/api/testing")
+async def api_testing_toggle(request: Request):
+    """Toggle testing mode on/off.
+
+    When enabled: sets DTRACK_MOCK env var, swaps config to testing/config.json.
+    When disabled: restores original config, unsets DTRACK_MOCK.
+    """
+    global _config_path, _original_config_path, _testing_mode
+
+    body = await request.json()
+    enable = body.get("enabled", False)
+
+    testing_dir = Path(__file__).parent.parent.parent / "testing"
+    mock_dir = testing_dir / "mock"
+    test_config = testing_dir / "config.json"
+
+    if enable:
+        if not test_config.exists():
+            return JSONResponse(status_code=404, content={
+                "error": f"Testing config not found: {test_config}"
+            })
+        if not mock_dir.exists():
+            return JSONResponse(status_code=404, content={
+                "error": f"Mock data not found: {mock_dir}"
+            })
+        _original_config_path = _config_path
+        _config_path = str(test_config.resolve())
+        os.environ["DTRACK_MOCK"] = str(mock_dir.resolve())
+        _testing_mode = True
+        return {"ok": True, "testing": True,
+                "config_path": _config_path,
+                "mock_dir": str(mock_dir.resolve())}
+    else:
+        if _original_config_path:
+            _config_path = _original_config_path
+            _original_config_path = ""
+        os.environ.pop("DTRACK_MOCK", None)
+        _testing_mode = False
+        return {"ok": True, "testing": False, "config_path": _config_path}
+
+
+# ---------------------------------------------------------------------------
 # Server entry point
 # ---------------------------------------------------------------------------
 
 def serve(db_path: str, config_path: str, port: int = 8080, host: str = "0.0.0.0"):
     """Start the dtrack web server."""
-    global _db_path, _config_path
+    global _db_path, _config_path, _original_config_path
     _db_path = os.path.abspath(db_path)
     _config_path = os.path.abspath(config_path)
+    _original_config_path = _config_path
 
     import uvicorn
     print(f"dtrack web UI")

@@ -1,7 +1,7 @@
 # dtrack justfile
 
-db := "project.db"
-config := "example/pairs.json"
+db := "testing/project.db"
+config := "testing/config.json"
 port := "8080"
 
 # list recipes

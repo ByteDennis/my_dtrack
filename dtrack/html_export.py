@@ -186,12 +186,14 @@ def generate_row_count_html(
     only_right_style = 'color:#c62828; font-weight:600;' if len(only_right_in_overlap) > 0 else ''
     mismatch_style = 'color:#c62828; font-weight:600;' if n_mismatch > 0 else ''
     summary_text = f'<span style="{only_left_style}">{source_left} only: {n_only_left}</span>, <span style="{only_right_style}">{source_right} only: {n_only_right}</span>, <span style="color:green;">days match: {n_match}</span>, <span style="{mismatch_style}">days mismatch: {n_mismatch}</span>'
+    # Paperclip icon for CSV attachment placeholder
+    attach_icon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px; margin-left:8px;"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>'
 
     html += f'''            <tr>
                 <td colspan="6" style="border:1px solid #ccc; padding:4px;">
                     <details style="margin:0;">
                         <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">
-                            {summary_text}
+                            {summary_text}{attach_icon}
                         </summary>
                         <div style="padding:8px; font-size:12px;">
 '''
@@ -411,12 +413,13 @@ def generate_column_stats_html(
     # Details row with summary stats
     diff_style = 'color:#c62828; font-weight:600;' if n_diff > 0 else 'color:green;'
     summary_text = f'{n_cols} columns: <span style="color:green;">{n_match} match</span>, <span style="{diff_style}">{n_diff} diff</span> ({cols_display})'
+    attach_icon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px; margin-left:8px;"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>'
 
     html += f'''            <tr>
                 <td colspan="7" style="border:1px solid #ccc; padding:4px;">
                     <details style="margin:0;">
                         <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">
-                            {summary_text}
+                            {summary_text}{attach_icon}
                         </summary>
                         <div style="padding:8px; font-size:12px;">
 '''

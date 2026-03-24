@@ -155,6 +155,45 @@ def _sas_quote(s):
     return s.replace("'", "''")
 
 
+def _format_date_bound(date_str, date_type, is_sas_src=False):
+    """Format a YYYY-MM-DD date string as the correct SQL literal for WHERE clauses.
+
+    For Oracle tables (inside SAS passthrough), uses Oracle SQL syntax.
+    For SAS tables (SAS proc sql), uses SAS date literal syntax.
+    """
+    dtype = date_type.lower() if date_type else ""
+
+    # Numeric types: bare integer (YYYYMMDD)
+    if dtype in ('num', 'integer', 'int', 'number'):
+        return date_str.replace('-', '')
+
+    # String types
+    if dtype == 'string_compact':
+        return f"'{date_str.replace('-', '')}'"
+    if dtype in ('string_dash', 'string'):
+        return f"'{date_str}'"
+
+    # SAS source: SAS date/datetime literals
+    if is_sas_src:
+        from datetime import datetime as _dt
+        try:
+            d = _dt.strptime(date_str, "%Y-%m-%d")
+            if dtype in ('datetime', 'timestamp'):
+                return f"'{d.strftime('%d%b%Y').upper()}:00:00:00'dt"
+            return f"'{d.strftime('%d%b%Y').upper()}'d"
+        except ValueError:
+            return f"'{date_str}'"
+
+    # Oracle: TIMESTAMP or DATE literals
+    if dtype == 'timestamp':
+        return f"TIMESTAMP '{date_str} 00:00:00'"
+    if dtype == 'date':
+        return f"DATE '{date_str}'"
+
+    # Fallback: string literal
+    return f"'{date_str}'"
+
+
 # ---------------------------------------------------------------------------
 # SAS code generation helpers
 # ---------------------------------------------------------------------------
@@ -162,15 +201,19 @@ def _sas_quote(s):
 def _resolve_table_and_cte(tbl_cfg):
     """Resolve table name and CTE prefix from config.
 
-    Returns (table, cte_prefix, is_sas_table).
+    Returns (table, cte_prefix, is_sas_dataset).
     """
     table = tbl_cfg['table']
+
+    if is_sas_table(tbl_cfg):
+        conn = tbl_cfg.get('conn_macro', '')
+        sas_table = f"{conn}.{table}" if conn else table
+        return sas_table, "", True
+
     processed = tbl_cfg.get('processed')
     if isinstance(processed, list):
         processed = " ".join(processed)
 
-    if processed and processed.startswith('$'):
-        return processed[1:].strip(), "", True
     if processed:
         alias = tbl_cfg['name']
         return alias, f"WITH {alias} AS ({processed}) ", False
@@ -188,15 +231,15 @@ def _gen_sas_proc_contents(sas_tables, out_dir='.'):
 
     blocks = ["/* Column metadata discovery for SAS datasets */"]
     for tbl_cfg in sas_tables:
-        processed = tbl_cfg.get('processed', '')
-        if isinstance(processed, list):
-            processed = " ".join(processed)
+        conn = tbl_cfg.get('conn_macro', '')
+        table = tbl_cfg.get('table', '')
+        sas_dataset = f"{conn}.{table}" if conn else table
         replacements = {
             '/*{SN}*/': sas_safe_name(tbl_cfg['name']),
             '/*{QNAME}*/': qualified_name(tbl_cfg),
             '/*{SOURCE}*/': tbl_cfg.get('source', 'pcds'),
             '/*{TABLE}*/': tbl_cfg['name'],
-            '/*{SAS_DATASET}*/': processed[1:].strip(),
+            '/*{SAS_DATASET}*/': sas_dataset,
         }
         block = template
         for k, v in replacements.items():
@@ -230,8 +273,8 @@ def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
 
         safe_ds = sas_safe_name(qname, 29)
 
-        if processed and processed.startswith('$'):
-            sas_table = processed[1:].strip()
+        if is_sas_table(tbl_cfg):
+            sas_table = f"{conn_macro}.{table}"
             where = _oracle_where_to_sas(raw_where, quote=False)
             date_expr = _sas_date_transform(date_col, transform) if transform else date_col
             sas_datalines.append(f"{sas_table}|{safe_ds}|{qname}|{date_expr}|{where}")
@@ -242,13 +285,15 @@ def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
                 table = name
             oracle_datalines.append(f"{table}|{safe_ds}|{qname}|{date_expr}|{conn_macro}|{idx}|{where}")
 
-    # CTE %let statements for Oracle processed tables
+    # CTE %let statements for Oracle processed tables (not SAS)
     cte_lines = []
     for idx, tbl_cfg in enumerate(pcds_tables, 1):
+        if is_sas_table(tbl_cfg):
+            continue
         processed = tbl_cfg.get('processed')
         if isinstance(processed, list):
             processed = " ".join(processed)
-        if processed and not processed.startswith('$'):
+        if processed:
             name = tbl_cfg['name']
             cte_lines.append(f"%let _cte{idx} = WITH {name} AS ({processed});")
 
@@ -493,20 +538,27 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             date_col = tbl.get('date_col', '')
             if not date_col:
                 continue
+            date_type = (tbl.get('date_type') or '').lower()
+            is_sas_src = is_sas_table(tbl)
             bounds = []
             if from_date:
-                bounds.append(f"{date_col} >= '{from_date}'")
+                lit = _format_date_bound(from_date, date_type, is_sas_src)
+                bounds.append(f"{date_col} >= {lit}")
             if to_date:
-                bounds.append(f"{date_col} <= '{to_date}'")
+                lit = _format_date_bound(to_date, date_type, is_sas_src)
+                bounds.append(f"{date_col} <= {lit}")
             extra = " AND ".join(bounds)
             existing = tbl.get('where', '').strip()
             tbl['where'] = f"({existing}) AND {extra}" if existing else extra
 
-    pcds_tables = [t for t in all_tables if t.get('source', '').lower() in ('pcds', 'oracle')]
+    pcds_tables = [t for t in all_tables if t.get('source', '').lower() in ('pcds', 'oracle', 'sas')]
 
     if not pcds_tables:
         print("No PCDS/Oracle tables found in config")
         return
+
+    # Check for mock mode — still generate SAS files but also copy mock CSVs
+    mock_dir = get_mock_dir()
 
     # Use os.environ (already loaded from dtrack.conf by CLI)
     env_src = os.environ
@@ -516,15 +568,20 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     for key in ['PCDS_USR', 'EMAIL_TO', 'SAS_LIB', 'OUT_DIR', 'SEED']:
         if key in env_src:
             env_vars[key] = env_src[key]
+        elif mock_dir and key in ('PCDS_USR', 'EMAIL_TO'):
+            env_vars[key] = f"MOCK_{key}"
 
     # Connection macro passwords (e.g., PCDS_PWD, PB23_PWD, PB30_PWD)
-    # Skip $ (SAS dataset) tables -- they don't need Oracle credentials
+    # SAS-source tables don't need Oracle credentials
     oracle_tables = [t for t in pcds_tables if not is_sas_table(t)]
     conn_macros = set(t.get('conn_macro', 'pcds') for t in oracle_tables)
     for conn_macro in conn_macros:
         pwd_key = f"{conn_macro.upper()}_PWD"
         if pwd_key in env_src:
             env_vars[pwd_key] = env_src[pwd_key]
+        elif mock_dir:
+            # In mock mode, use placeholder credentials
+            env_vars[pwd_key] = f"MOCK_{conn_macro.upper()}_PWD"
         else:
             raise KeyError(f"{pwd_key} not found in config or environment")
 
@@ -534,6 +591,8 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             k = f"{user_key.upper()}{suffix}"
             if k in env_src:
                 env_vars[k] = env_src[k]
+            elif mock_dir:
+                env_vars[k] = f"MOCK_{k}"
             else:
                 raise KeyError(f"{k} not found in config or environment")
 
@@ -670,10 +729,8 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     if env_path:
         print(f"  Credentials: from {env_path}")
 
-    # Check for mock mode - extract from mock CSVs instead of running SAS
-    mock_dir = os.environ.get('DTRACK_ORACLE_MOCK')
+    # In mock mode, also copy mock CSVs to outdir
     if mock_dir:
-        print()
         _extract_oracle_mock(config_path, outdir, types, db_path, mock_dir)
 
 
@@ -683,6 +740,9 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 
 def _extract_mock(config_path, outdir, types, db_path, mock_dir, source_filter):
     """Extract from mock CSV files instead of real database.
+
+    Mock directory uses flat layout: {qname}_row.csv, {qname}_col.csv
+    where qname = {source}_{name} (from qualified_name()).
 
     Args:
         source_filter: Source type(s) to filter, e.g. ('pcds', 'oracle') or ('aws',)
@@ -699,29 +759,16 @@ def _extract_mock(config_path, outdir, types, db_path, mock_dir, source_filter):
         print(f"No {'/'.join(source_filter)} tables found in config")
         return
 
-    is_aws = 'aws' in source_filter
-
     for tbl_cfg in tables:
-        name = tbl_cfg['name']
         qname = qualified_name(tbl_cfg)
+        source = tbl_cfg.get('source', '')
+        table = tbl_cfg['table']
+        print(f"\n[mock] Extracting: {qname} ({source}/{table})")
 
-        if is_aws:
-            database = tbl_cfg['conn_macro']
-            table = tbl_cfg['table']
-            label = f"{database}.{table}"
-            mock_base = os.path.join(mock_dir, database, table)
-            row_src, col_src = os.path.join(mock_base, 'row.csv'), os.path.join(mock_base, 'col.csv')
-        else:
-            table = tbl_cfg['table']
-            label = table
-            row_src = os.path.join(mock_dir, f"{table}_row.csv")
-            col_src = os.path.join(mock_dir, f"{table}_col.csv")
-
-        print(f"\n[mock] Extracting: {name} ({label})")
-
-        for typ, src in [("row", row_src), ("col", col_src)]:
+        for typ in ("row", "col"):
             if typ not in types:
                 continue
+            src = os.path.join(mock_dir, f"{qname}_{typ}.csv")
             dst = os.path.join(outdir, f"{qname}_{typ}.csv")
             if os.path.exists(src):
                 shutil.copy2(src, dst)
@@ -736,9 +783,42 @@ def _extract_mock(config_path, outdir, types, db_path, mock_dir, source_filter):
     print(f"\n[mock] Extraction complete. Output in: {outdir}")
 
 
-# Backward-compatible wrappers
+def get_mock_dir():
+    """Return mock directory from DTRACK_MOCK (preferred) or legacy env vars."""
+    return os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ORACLE_MOCK')
+
+
 def _extract_oracle_mock(config_path, outdir, types, db_path, mock_dir):
-    return _extract_mock(config_path, outdir, types, db_path, mock_dir, ('pcds', 'oracle'))
+    return _extract_mock(config_path, outdir, types, db_path, mock_dir, ('pcds', 'oracle', 'sas'))
+
+
+def _extract_mock_tables(tables, outdir, types, mock_dir):
+    """Copy mock CSVs for a pre-built list of table configs."""
+    import shutil
+    os.makedirs(outdir, exist_ok=True)
+
+    for tbl_cfg in tables:
+        qname = qualified_name(tbl_cfg)
+        source = tbl_cfg.get('source', '')
+        table = tbl_cfg['table']
+        print(f"\n[mock] Extracting: {qname} ({source}/{table})")
+
+        for typ in ("row", "col"):
+            if typ not in types:
+                continue
+            src = os.path.join(mock_dir, f"{qname}_{typ}.csv")
+            dst = os.path.join(outdir, f"{qname}_{typ}.csv")
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+                with open(dst) as f:
+                    n_rows = sum(1 for _ in f) - 1
+                label_str = "Row counts" if typ == "row" else "Column stats"
+                unit = "dates" if typ == "row" else "rows"
+                print(f"  [mock] {label_str}: {dst} ({n_rows} {unit})")
+            else:
+                print(f"  [mock] File not found: {src}")
+
+    print(f"\n[mock] Extraction complete. Output in: {outdir}")
 
 
 # ---------------------------------------------------------------------------
