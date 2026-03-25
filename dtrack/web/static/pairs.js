@@ -72,7 +72,7 @@ const VINTAGE_PRESETS = {
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
     loadPairs();
-    initDateDefaults();
+    loadGlobalSettings();
     initModalHandlers();
     initDropHandlers();
     initSourceDropdowns();
@@ -163,6 +163,7 @@ function applyGlobalSettings() {
         pair.toDate = toDate;
     });
 
+    saveGlobalSettings();
     renderPairs();
     closeSettingsModal();
     showSuccess('Global settings applied to all pairs');
@@ -281,9 +282,54 @@ function updateConnOptions(side) {
     }
 }
 
-// Date Handling
-function initDateDefaults() {
-    // Start with empty dates (no restriction)
+// Global Settings — load from config, save back on apply
+async function loadGlobalSettings() {
+    try {
+        const resp = await fetch('/api/config');
+        if (!resp.ok) return;
+        const config = await resp.json();
+        const s = config.settings || {};
+
+        // Mode
+        const modeVal = s.mode || 'incremental';
+        const modeRadio = document.querySelector(`input[name="global-mode"][value="${modeVal}"]`);
+        if (modeRadio) modeRadio.checked = true;
+
+        // Date range
+        if (s.from_date) document.getElementById('global-from-date').value = s.from_date;
+        if (s.to_date) document.getElementById('global-to-date').value = s.to_date;
+
+        // Output dirs
+        if (s.sas_outdir) document.getElementById('global-sas-outdir').value = s.sas_outdir;
+        if (s.aws_outdir) document.getElementById('global-aws-outdir').value = s.aws_outdir;
+
+        // Parallelism
+        if (s.njob_left != null) document.getElementById('global-njob-left').value = s.njob_left;
+        if (s.njob_right != null) document.getElementById('global-njob-right').value = s.njob_right;
+    } catch (e) {
+        // Non-critical — use hardcoded defaults
+    }
+}
+
+async function saveGlobalSettings() {
+    const settings = {
+        mode: document.querySelector('input[name="global-mode"]:checked').value,
+        from_date: document.getElementById('global-from-date').value || '',
+        to_date: document.getElementById('global-to-date').value || '',
+        sas_outdir: document.getElementById('global-sas-outdir').value || './sas/',
+        aws_outdir: document.getElementById('global-aws-outdir').value || './csv/',
+        njob_left: parseInt(document.getElementById('global-njob-left').value) || 4,
+        njob_right: parseInt(document.getElementById('global-njob-right').value) || 4,
+    };
+    try {
+        await fetch('/api/config', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({settings}),
+        });
+    } catch (e) {
+        console.error('Failed to save global settings:', e);
+    }
 }
 
 function clearGlobalDates() {
@@ -579,7 +625,7 @@ function clearPairForm() {
 
 async function savePair() {
     const pairData = {
-        name: document.getElementById('pair-name').value.trim(),
+        pair_name: document.getElementById('pair-name').value.trim(),
         description: document.getElementById('pair-desc').value.trim(),
         left: {
             source: document.getElementById('left-source').value,
@@ -607,7 +653,7 @@ async function savePair() {
     };
 
     // Validation
-    if (!pairData.name) {
+    if (!pairData.pair_name) {
         alert('Pair name is required');
         return;
     }
@@ -621,7 +667,7 @@ async function savePair() {
     }
 
     try {
-        const url = editingPairIndex >= 0 ? `/api/pairs/${pairData.name}` : '/api/pairs';
+        const url = editingPairIndex >= 0 ? `/api/pairs/${pairData.pair_name}` : '/api/pairs';
         const method = editingPairIndex >= 0 ? 'PUT' : 'POST';
 
         const response = await fetch(url, {
@@ -637,7 +683,7 @@ async function savePair() {
 
         closePairModal();
         await loadPairs();
-        showSuccess(`Pair "${pairData.name}" saved successfully`);
+        showSuccess(`Pair "${pairData.pair_name}" saved successfully`);
     } catch (error) {
         console.error('Save pair error:', error);
         showError(error.message);
@@ -899,120 +945,175 @@ async function generateAll() {
     const log = document.getElementById('generation-log');
     log.innerHTML = '';
 
-    // Resolve dates: pair-level overrides, then global, then empty
     const globalFrom = document.getElementById('global-from-date')?.value || '';
     const globalTo = document.getElementById('global-to-date')?.value || '';
 
-    // Group selected pairs by platform (sas-like vs aws)
-    const awsSources = new Set(['aws']);
-    const hasAws = selected.some(p => awsSources.has(p.left.source) || awsSources.has(p.right.source));
-    const hasSas = selected.some(p => !awsSources.has(p.left.source) || !awsSources.has(p.right.source));
+    // --- Step 1: Fetch all previews ---
+    logMessage(`Generating queries for ${selected.length} pair(s)...`, 'info');
 
-    // Build CLI command strings for display
-    const commands = [];
+    const results = await Promise.all(selected.map(async pair => {
+        const fromDate = pair.fromDate || globalFrom || '';
+        const toDate = pair.toDate || globalTo || '';
+        try {
+            const resp = await fetch('/api/preview', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    pair_name: pair.name,
+                    left: pair.left,
+                    right: pair.right,
+                    fromDate, toDate,
+                    njob_left: parseInt(document.getElementById('global-njob-left')?.value) || 0,
+                    njob_right: parseInt(document.getElementById('global-njob-right')?.value) || 0,
+                }),
+            });
+            const data = await resp.json();
+            return {pair, data, error: resp.ok ? null : (data.error || 'Preview failed')};
+        } catch (e) {
+            return {pair, data: null, error: e.message};
+        }
+    }));
+
+    // --- Step 2: Render two-column review (SAS/Oracle | AWS/Athena) ---
+    const reviewDiv = document.createElement('div');
+    reviewDiv.id = 'generate-review';
+    reviewDiv.innerHTML = `
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+            <div style="font-weight:600; font-size:13px; color:var(--jp-ui-font-color1); border-bottom:1px solid var(--jp-border-color0); padding-bottom:6px;">
+                SAS / Oracle
+            </div>
+            <div style="font-weight:600; font-size:13px; color:var(--jp-ui-font-color1); border-bottom:1px solid var(--jp-border-color0); padding-bottom:6px;">
+                AWS / Athena
+            </div>
+        </div>
+    `;
+
+    for (const {pair, data, error} of results) {
+        const leftSql = error ? `Error: ${error}` : (data?.left?.sql || '(no SAS/Oracle config)');
+        const rightSql = error ? '' : (data?.right?.sql || '(no AWS config)');
+        const leftFile = data?.left?.output_file || '';
+        const rightFile = data?.right?.output_file || '';
+
+        const pairDiv = document.createElement('div');
+        pairDiv.style.cssText = 'margin-bottom:20px;';
+        pairDiv.innerHTML = `
+            <div style="font-size:13px; font-weight:600; color:var(--jp-brand-color1); margin-bottom:8px;">
+                ${_escapeHtml(pair.name)}
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+                <div>
+                    <pre style="background:var(--jp-layout-color1); padding:10px; border-radius:4px; border:1px solid var(--jp-border-color0); font-size:11px; overflow-x:auto; margin:0; white-space:pre-wrap; max-height:240px; overflow-y:auto;">${_escapeHtml(leftSql)}</pre>
+                    ${leftFile ? `<div style="margin-top:4px; font-size:10px; color:var(--jp-ui-font-color2);">Output: ${_escapeHtml(leftFile)}</div>` : ''}
+                </div>
+                <div>
+                    <pre style="background:var(--jp-layout-color1); padding:10px; border-radius:4px; border:1px solid var(--jp-border-color0); font-size:11px; overflow-x:auto; margin:0; white-space:pre-wrap; max-height:240px; overflow-y:auto;">${_escapeHtml(rightSql)}</pre>
+                    ${rightFile ? `<div style="margin-top:4px; font-size:10px; color:var(--jp-ui-font-color2);">Output: ${_escapeHtml(rightFile)}</div>` : ''}
+                </div>
+            </div>
+        `;
+        reviewDiv.appendChild(pairDiv);
+    }
+    log.appendChild(reviewDiv);
+
+    // --- Step 3: Auto-generate SAS file ---
+    const awsSources = new Set(['aws', 'csv']);
+    const hasSas = selected.some(p => !awsSources.has(p.left?.source) || !awsSources.has(p.right?.source));
+    const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
 
     if (hasSas) {
-        const fromArg = globalFrom ? ` --from ${globalFrom}` : '';
-        const toArg = globalTo ? ` --to ${globalTo}` : '';
-        const sasDir = document.getElementById('global-sas-outdir')?.value || './sas/';
-        const cmd = `dtrack gen-sas ${_configBasename()} ${sasDir} --type row${fromArg}${toArg}`;
-        commands.push({platform: 'sas', cmd, label: 'SAS/Oracle'});
-    }
-
-    if (hasAws) {
-        const fromArg = globalFrom ? ` --from ${globalFrom}` : '';
-        const toArg = globalTo ? ` --to ${globalTo}` : '';
-        const awsDir = document.getElementById('global-aws-outdir')?.value || './csv/';
-        const cmd = `dtrack gen-aws ${_configBasename()} ${awsDir} --type row${fromArg}${toArg}`;
-        commands.push({platform: 'aws', cmd, label: 'AWS/Athena'});
-    }
-
-    // Show commands and confirm/cancel buttons
-    logMessage(`${selected.length} pair(s) selected — review commands below:`, 'info');
-
-    commands.forEach(({cmd, label}) => {
-        const entry = document.createElement('div');
-        entry.style.cssText = 'margin-bottom:8px;';
-        entry.innerHTML = `
-            <div style="font-size:11px; color: var(--jp-ui-font-color2); margin-bottom:2px;">${label}</div>
-            <pre class="log-command">${cmd}</pre>
-        `;
-        log.appendChild(entry);
-    });
-
-    // Add confirm/cancel buttons
-    const btnRow = document.createElement('div');
-    btnRow.className = 'log-entry';
-    btnRow.style.cssText = 'display:flex; gap:8px; padding:8px 0;';
-    btnRow.innerHTML = `
-        <button class="btn-primary" id="confirm-generate">Confirm</button>
-        <button class="btn-secondary" id="cancel-generate">Cancel</button>
-    `;
-    log.appendChild(btnRow);
-    log.scrollTop = log.scrollHeight;
-
-    // Wait for user action
-    const action = await new Promise(resolve => {
-        document.getElementById('confirm-generate').onclick = () => resolve('confirm');
-        document.getElementById('cancel-generate').onclick = () => resolve('cancel');
-    });
-
-    btnRow.remove();
-
-    if (action === 'cancel') {
-        logMessage('Cancelled.', 'info');
-        return;
-    }
-
-    // Execute each platform command
-    for (const {platform, cmd, label} of commands) {
-        logMessage(`Running ${label} extraction...`, 'info');
-
+        logMessage('Generating SAS file...', 'info');
         try {
             const body = {
-                platform,
+                platform: 'sas',
                 type: 'row',
-                outdir: platform === 'aws'
-                    ? (document.getElementById('global-aws-outdir')?.value || './csv/')
-                    : (document.getElementById('global-sas-outdir')?.value || './sas/'),
+                outdir: document.getElementById('global-sas-outdir')?.value || './sas/',
             };
             if (globalFrom) body.from_date = globalFrom;
             if (globalTo) body.to_date = globalTo;
-            if (platform === 'aws') {
-                const nj = parseInt(document.getElementById('global-njob-right')?.value);
-                if (nj > 0) body.max_workers = nj;
-            }
 
             const resp = await fetch('/api/extract', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(body),
             });
-
             const result = await resp.json();
-
             if (result.ok) {
-                // Show backend output line by line
                 if (result.output) {
                     result.output.trim().split('\n').forEach(line => {
                         if (line.trim()) logMessage(line, 'info');
                     });
                 }
-                logMessage(`${label} extraction complete.`, 'success');
+                logMessage('SAS file generated.', 'success');
             } else {
-                logMessage(`${label} error: ${result.error}`, 'error');
-                if (result.output) {
-                    result.output.trim().split('\n').forEach(line => {
-                        if (line.trim()) logMessage(line, 'error');
-                    });
-                }
+                logMessage(`SAS generation error: ${result.error}`, 'error');
             }
         } catch (err) {
-            logMessage(`${label} request failed: ${err.message}`, 'error');
+            logMessage(`SAS generation failed: ${err.message}`, 'error');
         }
     }
 
-    logMessage('Done.', 'success');
+    // --- Step 4: Show Run AWS button ---
+    if (hasAws) {
+        const btnRow = document.createElement('div');
+        btnRow.style.cssText = 'display:flex; gap:8px; padding:12px 0; border-top:1px solid var(--jp-border-color0); margin-top:8px;';
+        btnRow.innerHTML = `
+            <button class="btn-primary" id="run-aws-btn">Run AWS Extraction</button>
+            <span id="aws-run-status" style="font-size:12px; color:var(--jp-ui-font-color2); align-self:center;"></span>
+        `;
+        log.appendChild(btnRow);
+        log.scrollTop = log.scrollHeight;
+
+        document.getElementById('run-aws-btn').onclick = async () => {
+            const btn = document.getElementById('run-aws-btn');
+            const status = document.getElementById('aws-run-status');
+            btn.disabled = true;
+            btn.textContent = 'Running...';
+            status.textContent = '';
+
+            logMessage('Running AWS/Athena extraction...', 'info');
+            try {
+                const body = {
+                    platform: 'aws',
+                    type: 'row',
+                    outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
+                };
+                if (globalFrom) body.from_date = globalFrom;
+                if (globalTo) body.to_date = globalTo;
+                const nj = parseInt(document.getElementById('global-njob-right')?.value);
+                if (nj > 0) body.max_workers = nj;
+
+                const resp = await fetch('/api/extract', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body),
+                });
+                const result = await resp.json();
+                if (result.ok) {
+                    if (result.output) {
+                        result.output.trim().split('\n').forEach(line => {
+                            if (line.trim()) logMessage(line, 'info');
+                        });
+                    }
+                    logMessage('AWS extraction complete.', 'success');
+                    btn.textContent = 'Done';
+                    status.style.color = 'var(--jp-success-color1)';
+                    status.textContent = 'Extraction complete';
+                } else {
+                    logMessage(`AWS error: ${result.error}`, 'error');
+                    btn.textContent = 'Retry AWS Extraction';
+                    btn.disabled = false;
+                    status.style.color = 'var(--jp-error-color1)';
+                    status.textContent = result.error;
+                }
+            } catch (err) {
+                logMessage(`AWS request failed: ${err.message}`, 'error');
+                btn.textContent = 'Retry AWS Extraction';
+                btn.disabled = false;
+            }
+        };
+    } else {
+        logMessage('Done.', 'success');
+    }
 }
 
 function _configBasename() {

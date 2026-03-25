@@ -366,9 +366,11 @@ async def api_update_config(request: Request):
                 else:
                     config["pairs"][pname] = pcfg
 
-        # Merge top-level metadata
+        # Merge top-level metadata and settings
         if "metadata" in body:
             config.setdefault("metadata", {}).update(body["metadata"])
+        if "settings" in body:
+            config.setdefault("settings", {}).update(body["settings"])
 
         save_unified_config(config, _config_path)
         _sync_config_pairs(config)
@@ -439,15 +441,54 @@ async def api_update_pair(pair_name: str, request: Request):
 
     try:
         from ..config import load_unified_config, save_unified_config
+        from ..platforms.base import qualified_name
+        from ..db import register_table_pair, update_metadata
         config = load_unified_config(_config_path)
 
         if pair_name not in config.get("pairs", {}):
             return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
 
-        # Update the pair configuration
-        config["pairs"][pair_name].update(body)
+        pair_cfg = config["pairs"][pair_name]
+
+        # Update only valid pair-config keys (not frontend-only fields like pair_name)
+        _PAIR_KEYS = {"left", "right", "col_map", "description", "mode",
+                       "fromDate", "toDate", "dateRangeMode", "overlap",
+                       "skip", "ignore_rows", "ignore_columns",
+                       "col_type_overrides", "where_map", "time_map",
+                       "comment_map", "diff_map"}
+        for key in _PAIR_KEYS:
+            if key in body:
+                pair_cfg[key] = body[key]
+
+        # Ensure 'name' is set on left/right (required by config schema)
+        for side in ("left", "right"):
+            if side in pair_cfg:
+                _ensure_name(pair_cfg[side])
 
         save_unified_config(config, _config_path)
+
+        # Re-register in DB to keep it in sync
+        left = pair_cfg.get("left", {})
+        right = pair_cfg.get("right", {})
+        if left.get("name") and right.get("name"):
+            table_left = qualified_name(left)
+            table_right = qualified_name(right)
+            register_table_pair(
+                _db_path, pair_name, table_left, table_right,
+                source_left=left.get("source"),
+                source_right=right.get("source"),
+                col_mappings=pair_cfg.get("col_map") or None,
+            )
+            for tbl_cfg in [left, right]:
+                qname = qualified_name(tbl_cfg)
+                update_metadata(_db_path, {
+                    "table_name": qname,
+                    "source": tbl_cfg.get("source"),
+                    "source_table": tbl_cfg.get("table"),
+                    "date_var": tbl_cfg.get("date_col"),
+                    "data_type": "row",
+                })
+
         return {"ok": True, "pair_name": pair_name}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
@@ -1240,12 +1281,16 @@ async def api_add_pair(request: Request):
         _ensure_name(left)
         _ensure_name(right)
 
-        # Build pair config
+        # Build pair config — only persist valid pair-config keys
         pair_cfg = {
             "left": left,
             "right": right,
             "col_map": body.get("col_map", {}),
         }
+        for key in ("description", "mode", "fromDate", "toDate",
+                     "dateRangeMode", "overlap"):
+            if key in body:
+                pair_cfg[key] = body[key]
         config.setdefault("pairs", {})[pair_name] = pair_cfg
         save_unified_config(config, _config_path)
 
