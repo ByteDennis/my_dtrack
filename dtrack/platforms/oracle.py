@@ -332,6 +332,41 @@ def _gen_sas_row_datadriven(oracle_tables, sas_lib='WORK', out_dir='.'):
     return '\n\n'.join(parts)
 
 
+def _gen_sas_row_hadoop(hadoop_tables, sas_lib='WORK', out_dir='.'):
+    """Generate data-driven SAS row extraction for Hadoop/Hive tables."""
+    hdp_datalines = []
+
+    for idx, tbl_cfg in enumerate(hadoop_tables, 1):
+        table = tbl_cfg['table']
+        date_col = tbl_cfg['date_col']
+        qname = qualified_name(tbl_cfg)
+        conn_macro = tbl_cfg.get('conn_macro', 'hdp')
+        raw_where = tbl_cfg.get('where', '')
+        date_bounds = tbl_cfg.get('_date_bounds', '')
+        transform = tbl_cfg.get('date_transform', '')
+
+        safe_ds = sas_safe_name(qname, 29)
+
+        where = raw_where
+        if date_bounds:
+            where = f"({where}) AND {date_bounds}" if where else date_bounds
+        date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
+        hdp_datalines.append(f"{table}|{safe_ds}|{qname}|{date_expr}|{conn_macro}|{idx}|{where}")
+
+    if not hdp_datalines:
+        return ''
+
+    redo = str(int(os.environ.get('SAS_ROW_REDO', '0')))
+    tpl_dir = os.path.join(os.path.dirname(__file__), 'templates')
+
+    with open(os.path.join(tpl_dir, 'rows_hadoop.sas')) as f:
+        tpl = f.read()
+    tpl = tpl.replace('/*{CTE_VARS}*/', '')
+    tpl = tpl.replace('/*{ROW_REDO}*/', redo)
+    tpl = tpl.replace('/*{HDP_DATALINES}*/', '\n'.join(hdp_datalines))
+    return tpl
+
+
 def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     """Generate SAS macro for column statistics using the columns.sas template.
 
@@ -561,10 +596,10 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             if bounds:
                 tbl['_date_bounds'] = " AND ".join(bounds)
 
-    oracle_tables = [t for t in all_tables if t.get('source', '').lower() in ('oracle', 'sas')]
+    oracle_tables = [t for t in all_tables if t.get('source', '').lower() in ('oracle', 'sas', 'hadoop')]
 
     if not oracle_tables:
-        print("No Oracle/SAS tables found in config")
+        print("No Oracle/SAS/Hadoop tables found in config")
         return
 
     # Check for mock mode — still generate SAS files but also copy mock CSVs
@@ -581,10 +616,14 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         elif mock_dir and key in ('PCDS_USR', 'EMAIL_TO'):
             env_vars[key] = f"MOCK_{key}"
 
+    # Separate Hadoop tables from Oracle/SAS
+    hadoop_tables = [t for t in oracle_tables if t.get('source', '').lower() == 'hadoop']
+    oracle_tables = [t for t in oracle_tables if t.get('source', '').lower() != 'hadoop']
+
     # Connection macro passwords (e.g., PCDS_PWD, PB23_PWD, PB30_PWD)
     # SAS-source tables don't need Oracle credentials
-    oracle_tables = [t for t in oracle_tables if not is_sas_table(t)]
-    conn_macros = set(t.get('conn_macro', 'pb23') for t in oracle_tables)
+    oracle_only = [t for t in oracle_tables if not is_sas_table(t)]
+    conn_macros = set(t.get('conn_macro', 'pb23') for t in oracle_only)
     for conn_macro in conn_macros:
         pwd_key = f"{conn_macro.upper()}_PWD"
         if pwd_key in env_src:
@@ -594,6 +633,14 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             env_vars[pwd_key] = f"MOCK_{conn_macro.upper()}_PWD"
         else:
             raise KeyError(f"{pwd_key} not found in config or environment")
+
+    # Hadoop connection env vars
+    hadoop_conn_macros = set(t.get('conn_macro', 'hdp') for t in hadoop_tables)
+    for key in ['HDP_SERVER', 'HDP_URI', 'SAS_HADOOP_JAR_PATH', 'SAS_HADOOP_CONFIG_PATH']:
+        if key in env_src:
+            env_vars[key] = env_src[key]
+        elif mock_dir:
+            env_vars[key] = f"MOCK_{key}"
 
     # User override credentials (e.g., TMP_USR, TMP_PWD)
     for user_key in set(t.get('user', '') for t in oracle_tables if t.get('user')):
@@ -637,6 +684,10 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         # Data-driven row extraction (single block for all tables)
         macro_parts.append("/* --- Row extraction (data-driven) --- */")
         macro_parts.append(_gen_sas_row_datadriven(oracle_tables, sas_lib, out_dir))
+
+        if hadoop_tables:
+            macro_parts.append("/* --- Hadoop row extraction (data-driven) --- */")
+            macro_parts.append(_gen_sas_row_hadoop(hadoop_tables, sas_lib, out_dir))
 
     if "col" in types:
         for tbl in oracle_tables:
@@ -699,6 +750,30 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             f'%mend {macro};'
         )
 
+    # Hadoop connection macros
+    if hadoop_tables:
+        hdp_server = env_vars.get('HDP_SERVER', '')
+        hdp_uri = env_vars.get('HDP_URI', '')
+        jar_path = env_vars.get('SAS_HADOOP_JAR_PATH', '')
+        config_path = env_vars.get('SAS_HADOOP_CONFIG_PATH', '')
+        conn_macro_lines.append('')
+        conn_macro_lines.append('/* Hadoop connection setup */')
+        if jar_path:
+            conn_macro_lines.append(f'options set=SAS_HADOOP_JAR_PATH="{jar_path}";')
+        if config_path:
+            conn_macro_lines.append(f'options set=SAS_HADOOP_CONFIG_PATH="{config_path}";')
+        for macro in sorted(hadoop_conn_macros):
+            conn_macro_lines.append(
+                f'\n%macro {macro};\n'
+                f'  server="{hdp_server}"\n'
+                f'  port=10000\n'
+                f'  schema={macro}\n'
+                f'  subprotocol=hive2\n'
+                f'  login_timeout=300\n'
+                f'  uri="{hdp_uri}"\n'
+                f'%mend {macro};'
+            )
+
     # Build user credential %let statements for override accounts
     user_overrides = set(t.get('user', '') for t in oracle_tables if t.get('user'))
     cred_lines = []
@@ -754,27 +829,17 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 # Column discovery and CSV writing
 # ---------------------------------------------------------------------------
 
-def _discover_and_write_columns(all_tables, outdir, db_path, outdir_map=None):
-    """Discover columns for all tables and write {qname}_columns.csv files.
+def _discover_and_write_columns(all_tables, outdir, db_path):
+    """Discover columns for AWS tables and write {qname}_columns.csv files.
 
-    For Oracle tables: uses discover_columns (live or mock).
     For AWS tables: uses _discover_columns_athena.
-    For SAS/Hadoop/unknown: skipped (placeholder for future).
-
-    Also saves column metadata to _column_meta in the database.
-
-    Args:
-        outdir: Default output directory for column CSVs.
-        outdir_map: Optional dict mapping source name to output directory,
-                     e.g. {"oracle": "./sas/", "aws": "./csv/"}.
+    For Oracle/SAS/Hadoop: column discovery is done via the generated SAS file.
+    If _column_meta already exists in DB, writes CSV from that.
     """
     import csv as csv_mod
     from ..db import insert_column_meta, get_column_meta
 
     os.makedirs(outdir, exist_ok=True)
-
-    # Group connections to avoid reconnecting per table
-    oracle_conns = {}
     aws_cursors = {}
 
     for tbl in all_tables:
@@ -784,26 +849,11 @@ def _discover_and_write_columns(all_tables, outdir, db_path, outdir_map=None):
         conn_macro = tbl.get('conn_macro', '')
         columns = None
 
-        # First check if we already have column metadata in DB
+        # Check existing DB metadata first
         existing = get_column_meta(db_path, qname)
         if existing:
             columns = {c["column_name"]: c.get("data_type", "") for c in existing}
             print(f"  {qname}: found {len(columns)} columns in _column_meta")
-        elif source == 'oracle':
-            try:
-                if conn_macro not in oracle_conns:
-                    from ..db import oracle_connect
-                    print(f"  {qname}: connecting to Oracle ({conn_macro})...")
-                    oracle_conns[conn_macro] = oracle_connect(conn_macro)
-                from ..db import discover_columns
-                columns = discover_columns(oracle_conns[conn_macro], raw_table)
-                if columns:
-                    insert_column_meta(db_path, qname, columns, source=source)
-                    print(f"  {qname}: discovered {len(columns)} columns from Oracle")
-                else:
-                    print(f"  {qname}: no columns found in Oracle")
-            except Exception as e:
-                print(f"  {qname}: Oracle column discovery failed ({e})")
         elif source == 'aws':
             try:
                 database = conn_macro or tbl.get('database', '')
@@ -822,16 +872,13 @@ def _discover_and_write_columns(all_tables, outdir, db_path, outdir_map=None):
                     print(f"  {qname}: no columns found in Athena")
             except Exception as e:
                 print(f"  {qname}: Athena column discovery failed ({e})")
-        elif source in ('sas', 'hadoop', ''):
-            # Placeholder — SAS/Hadoop column discovery not yet implemented
-            print(f"  {qname}: skipped (source={source or 'unknown'}, not yet supported)")
         else:
-            print(f"  {qname}: skipped (source={source})")
+            # Oracle/SAS/Hadoop — columns discovered via generated SAS file
+            print(f"  {qname}: columns will be discovered by SAS (source={source})")
+            continue
 
         if columns:
-            tbl_outdir = (outdir_map or {}).get(source, outdir)
-            os.makedirs(tbl_outdir, exist_ok=True)
-            col_csv = os.path.join(tbl_outdir, f"{qname}_columns.csv")
+            col_csv = os.path.join(outdir, f"{qname}_columns.csv")
             with open(col_csv, 'w', newline='') as f:
                 writer = csv_mod.writer(f)
                 writer.writerow(['COLUMN_NAME', 'DATA_TYPE'])
@@ -839,12 +886,6 @@ def _discover_and_write_columns(all_tables, outdir, db_path, outdir_map=None):
                     writer.writerow([col_name, col_type])
             print(f"  {qname}: wrote {len(columns)} columns to {col_csv}")
 
-    # Clean up connections
-    for conn in oracle_conns.values():
-        try:
-            conn.close()
-        except Exception:
-            pass
     for cursor in aws_cursors.values():
         try:
             cursor.close()

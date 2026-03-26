@@ -81,6 +81,8 @@ async function refreshDbStatus() {
         const rows = pairs.map(p => {
             const lr = p.left.row_count || 0;
             const rr = p.right.row_count || 0;
+            const lc = p.left.col_count || 0;
+            const rc = p.right.col_count || 0;
             const ld = p.left.min_date && p.left.max_date
                 ? `${p.left.min_date} &rarr; ${p.left.max_date}` : '&mdash;';
             const rd = p.right.min_date && p.right.max_date
@@ -91,6 +93,12 @@ async function refreshDbStatus() {
             const rBadge = rr > 0
                 ? `<span class="status-badge ready">${rr.toLocaleString()}</span>`
                 : `<span class="status-badge warning">0</span>`;
+            const lColBadge = lc > 0
+                ? `<span class="status-badge ready">${lc}</span>`
+                : `<button class="btn-text" style="font-size:11px;" onclick="uploadColCsv('${p.table_left}', '${p.source_left}')">upload</button>`;
+            const rColBadge = rc > 0
+                ? `<span class="status-badge ready">${rc}</span>`
+                : `<button class="btn-text" style="font-size:11px;" onclick="uploadColCsv('${p.table_right}', '${p.source_right}')">upload</button>`;
             const safeName = p.pair_name.replace(/'/g, "\\'");
 
             return `<tr>
@@ -101,23 +109,48 @@ async function refreshDbStatus() {
                 <td>L</td>
                 <td style="text-align:right;">${lBadge}</td>
                 <td class="date-cell">${ld}</td>
+                <td style="text-align:center;">${lColBadge}</td>
             </tr><tr>
                 <td>R</td>
                 <td style="text-align:right;">${rBadge}</td>
                 <td class="date-cell">${rd}</td>
+                <td style="text-align:center;">${rColBadge}</td>
             </tr>`;
         }).join('');
 
         el.innerHTML = `
             <table class="data-table compact">
                 <thead><tr>
-                    <th style="width:3em;"></th><th>Pair</th><th></th><th style="text-align:right;">Rows</th><th>Date Range</th>
+                    <th style="width:3em;"></th><th>Pair</th><th></th><th style="text-align:right;">Rows</th><th>Date Range</th><th style="text-align:center;">Cols</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;
     } catch (e) {
         el.innerHTML = '<div class="empty-message">Failed to load status</div>';
     }
+}
+
+function uploadColCsv(tableName, source) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.csv';
+    input.onchange = async () => {
+        const file = input.files[0];
+        if (!file) return;
+        const form = new FormData();
+        form.append('file', file);
+        form.append('table_name', tableName);
+        form.append('source', source);
+        try {
+            const resp = await fetch('/api/load/columns/upload', { method: 'POST', body: form });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || 'Upload failed');
+            await refreshDbStatus();
+        } catch (e) {
+            alert('Column upload failed: ' + e.message);
+        }
+    };
+    input.click();
 }
 
 async function deletePairFromDb(pairName) {

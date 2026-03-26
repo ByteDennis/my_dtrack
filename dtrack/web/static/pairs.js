@@ -1019,6 +1019,7 @@ async function generateAll() {
             type: 'row',
             sas_outdir: document.getElementById('global-sas-outdir')?.value || './sas/',
             aws_outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
+            pair_names: selected.map(p => p.name),
         };
         if (globalFrom) genBody.from_date = globalFrom;
         if (globalTo) genBody.to_date = globalTo;

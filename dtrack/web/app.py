@@ -76,7 +76,7 @@ async def col_mapping_page(request: Request):
 @app.get("/api/status")
 async def api_status():
     """Return pairs + metadata + date ranges."""
-    from ..db import list_table_pairs, get_metadata
+    from ..db import list_table_pairs, get_metadata, get_column_meta
     from ..config import load_unified_config, get_all_tables_from_unified
 
     pairs = list_table_pairs(_db_path)
@@ -87,6 +87,8 @@ async def api_status():
         pname = pair["pair_name"]
         meta_left = get_metadata(_db_path, pair["table_left"])
         meta_right = get_metadata(_db_path, pair["table_right"])
+        cols_left = get_column_meta(_db_path, pair["table_left"])
+        cols_right = get_column_meta(_db_path, pair["table_right"])
 
         pair_cfg = config.get("pairs", {}).get(pname, {})
 
@@ -102,12 +104,14 @@ async def api_status():
                 "max_date": (meta_left or {}).get("max_date_loaded"),
                 "data_type": (meta_left or {}).get("data_type"),
                 "row_count": (meta_left or {}).get("row_count_total"),
+                "col_count": len(cols_left),
             },
             "right": {
                 "min_date": (meta_right or {}).get("min_date_loaded"),
                 "max_date": (meta_right or {}).get("max_date_loaded"),
                 "data_type": (meta_right or {}).get("data_type"),
                 "row_count": (meta_right or {}).get("row_count_total"),
+                "col_count": len(cols_right),
             },
             "col_mappings": len(pair.get("col_mappings", {}) or {}),
         })
@@ -239,6 +243,7 @@ async def api_generate_files(request: Request):
     to_date = body.get("to_date")
     sas_outdir = _resolve(body.get("sas_outdir", "./sas/"))
     aws_outdir = _resolve(body.get("aws_outdir", "./csv/"))
+    pair_names = body.get("pair_names")  # None = all pairs
 
     buf = io.StringIO()
     results = {"sas_file": None, "sql_file": None}
@@ -249,8 +254,19 @@ async def api_generate_files(request: Request):
             from ..platforms.oracle import load_tables_from_config, inject_where_from_config
 
             config = load_unified_config(_config_path)
-            all_tables = load_tables_from_config(config)
-            inject_where_from_config(all_tables, config)
+
+            # Filter config to selected pairs before loading tables
+            if pair_names:
+                filtered_config = dict(config)
+                filtered_config["pairs"] = {
+                    k: v for k, v in config.get("pairs", {}).items()
+                    if k in pair_names
+                }
+            else:
+                filtered_config = config
+
+            all_tables = load_tables_from_config(filtered_config)
+            inject_where_from_config(all_tables, filtered_config)
 
             # Inject date bounds
             if from_date or to_date:
@@ -279,13 +295,24 @@ async def api_generate_files(request: Request):
                         existing = tbl.get('where', '').strip()
                         tbl['where'] = f"({existing}) AND {extra}" if existing else extra
 
-            # Generate SAS file
+            # Generate SAS file — use filtered config if pairs selected
             oracle_tables = [t for t in all_tables
                              if t.get('source', '').lower() in ('oracle', 'sas', 'hadoop')]
             if oracle_tables:
                 from ..platforms.oracle import gen_sas
-                gen_sas(_config_path, sas_outdir, types=[extract_type],
-                        db_path=_db_path, from_date=from_date, to_date=to_date)
+                if pair_names:
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+                        json.dump(filtered_config, tmp, indent=2)
+                        tmp_path = tmp.name
+                    try:
+                        gen_sas(tmp_path, sas_outdir, types=[extract_type],
+                                db_path=_db_path, from_date=from_date, to_date=to_date)
+                    finally:
+                        os.unlink(tmp_path)
+                else:
+                    gen_sas(_config_path, sas_outdir, types=[extract_type],
+                            db_path=_db_path, from_date=from_date, to_date=to_date)
                 results["sas_file"] = os.path.join(sas_outdir, f"extract_{extract_type}.sas")
 
             # Generate SQL file
@@ -854,6 +881,43 @@ async def api_load_row_upload(
             "ok": False,
             "error": f"{type(e).__name__}: {e}",
         })
+
+
+@app.post("/api/load/columns/upload")
+async def api_load_columns_upload(
+    file: UploadFile = File(...),
+    table_name: str = "",
+    source: str = "",
+):
+    """Upload a column metadata CSV and load into _column_meta.
+
+    CSV should have headers: COLUMN_NAME, DATA_TYPE (or column_name, data_type).
+    """
+    import csv as csv_mod
+
+    if not table_name:
+        return JSONResponse(status_code=400, content={"error": "table_name is required"})
+
+    try:
+        from ..db import insert_column_meta
+
+        content = await file.read()
+        text = content.decode("utf-8")
+        reader = csv_mod.DictReader(io.StringIO(text))
+        columns = {}
+        for row in reader:
+            col_name = row.get('column_name') or row.get('COLUMN_NAME', '')
+            dtype = row.get('data_type') or row.get('DATA_TYPE', '')
+            if col_name:
+                columns[col_name] = dtype
+
+        if not columns:
+            return JSONResponse(status_code=400, content={"error": "No columns found in CSV"})
+
+        count = insert_column_meta(_db_path, table_name, columns, source=source or None)
+        return {"ok": True, "loaded": count, "table_name": table_name}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/api/load/row/path")
@@ -2056,19 +2120,6 @@ async def api_get_pair_columns_csv(pair_name: str, side: str = "left"):
         table_name = pair[tbl_key].upper()
         col_meta = get_column_meta(_db_path, pair[tbl_key])
 
-        def extended_type(dt):
-            """Map data_type to Float, Integer, or blank."""
-            if not dt:
-                return ""
-            low = dt.lower()
-            if low in ("number", "numeric", "decimal", "float", "double", "real",
-                        "float64", "double precision"):
-                return "Float"
-            if low in ("int", "integer", "bigint", "smallint", "tinyint",
-                        "int64", "int32", "long", "short"):
-                return "Integer"
-            return ""
-
         buf = io.StringIO()
         writer = csv_mod.writer(buf)
         writer.writerow(["TABLE_NAME", "COLUMN_NAME", "DATA_TYPE", "DATA_TYPE_EXTENDED", "MANDATORY"])
@@ -2079,7 +2130,7 @@ async def api_get_pair_columns_csv(pair_name: str, side: str = "left"):
                 table_name,
                 col["column_name"].upper(),
                 dt,
-                extended_type(col.get("data_type", "")),
+                "",
                 "",
             ])
 
@@ -2106,18 +2157,6 @@ async def api_get_pair_columns_excel(pair_name: str):
         if not pair:
             return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
 
-        def extended_type(dt):
-            if not dt:
-                return ""
-            low = dt.lower()
-            if low in ("number", "numeric", "decimal", "float", "double", "real",
-                        "float64", "double precision"):
-                return "Float"
-            if low in ("int", "integer", "bigint", "smallint", "tinyint",
-                        "int64", "int32", "long", "short"):
-                return "Integer"
-            return ""
-
         wb = Workbook()
         for idx, side in enumerate(("left", "right")):
             tbl_key = "table_left" if side == "left" else "table_right"
@@ -2135,7 +2174,7 @@ async def api_get_pair_columns_excel(pair_name: str):
             ws.append(["TABLE_NAME", "COLUMN_NAME", "DATA_TYPE", "DATA_TYPE_EXTENDED", "MANDATORY"])
             for col in sorted(col_meta, key=lambda c: c["column_name"]):
                 dt = (col.get("data_type") or "").upper()
-                ws.append([table_name, col["column_name"].upper(), dt, extended_type(col.get("data_type", "")), ""])
+                ws.append([table_name, col["column_name"].upper(), dt, "", ""])
 
         buf = io.BytesIO()
         wb.save(buf)

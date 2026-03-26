@@ -29,32 +29,32 @@ DATE_COLUMN_TYPES = [
 DATE_LITERAL_FORMATS = {
     "hadoop": {
         "date": {"from": "DATE '{value}'", "to": "DATE '{value}'"},
-        "timestamp": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value_next} 00:00:00'"},
-        "datetime": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value_next} 00:00:00'"},
+        "timestamp": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value} 23:59:59'"},
+        "datetime": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value} 23:59:59'"},
         "num": {"from": "{sas_num}", "to": "{sas_num}"},
         "string_dash": {"from": "'{value}'", "to": "'{value}'"},
         "string_compact": {"from": "'{value_compact}'", "to": "'{value_compact}'"},
     },
     "oracle": {
         "date": {"from": "DATE '{value}'", "to": "DATE '{value}'"},
-        "timestamp": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value_next} 00:00:00'"},
-        "datetime": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value_next} 00:00:00'"},
+        "timestamp": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value} 23:59:59'"},
+        "datetime": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value} 23:59:59'"},
         "num": {"from": "{sas_num}", "to": "{sas_num}"},
         "string_dash": {"from": "'{value}'", "to": "'{value}'"},
         "string_compact": {"from": "'{value_compact}'", "to": "'{value_compact}'"},
     },
     "aws": {
         "date": {"from": "DATE '{value}'", "to": "DATE '{value}'"},
-        "timestamp": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value_next} 00:00:00'"},
-        "datetime": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value_next} 00:00:00'"},
+        "timestamp": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value} 23:59:59'"},
+        "datetime": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value} 23:59:59'"},
         "num": {"from": "{sas_num}", "to": "{sas_num}"},
         "string_dash": {"from": "'{value}'", "to": "'{value}'"},
         "string_compact": {"from": "'{value_compact}'", "to": "'{value_compact}'"},
     },
     "sas": {
         "date": {"from": "'{value_sas}'d", "to": "'{value_sas}'d"},
-        "timestamp": {"from": "'{value_sas}:00:00:00'dt", "to": "'{value_next_sas}:00:00:00'dt"},
-        "datetime": {"from": "'{value_sas}:00:00:00'dt", "to": "'{value_next_sas}:00:00:00'dt"},
+        "timestamp": {"from": "'{value_sas}:00:00:00'dt", "to": "'{value_sas}:23:59:59'dt"},
+        "datetime": {"from": "'{value_sas}:00:00:00'dt", "to": "'{value_sas}:23:59:59'dt"},
         "num": {"from": "{sas_num}", "to": "{sas_num}"},
         "string_dash": {"from": "'{value}'", "to": "'{value}'"},
         "string_compact": {"from": "'{value_compact}'", "to": "'{value_compact}'"},
@@ -62,12 +62,11 @@ DATE_LITERAL_FORMATS = {
 }
 
 # Operator to use with upper bound based on date type
-# For datetime/timestamp, use < (less than) with next day
-# For date/string/num, use <= (less than or equal) with same day
+# All use <= (inclusive) — timestamp/datetime use same day 23:59:59
 DATE_UPPER_BOUND_OPERATORS = {
     "date": "<=",
-    "timestamp": "<",  # Exclusive upper bound (next day)
-    "datetime": "<",   # Exclusive upper bound (next day)
+    "timestamp": "<=",
+    "datetime": "<=",
     "num": "<=",
     "string_dash": "<=",
     "string_compact": "<=",
