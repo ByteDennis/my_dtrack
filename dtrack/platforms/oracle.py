@@ -155,13 +155,15 @@ def _sas_quote(s):
     return s.replace("'", "''")
 
 
-def _format_date_bound(date_str, date_type, is_sas_src=False):
+def _format_date_bound(date_str, date_type, is_sas_src=False, is_upper=False):
     """Format a YYYY-MM-DD date string as the correct SQL literal for WHERE clauses.
 
     For Oracle tables (inside SAS passthrough), uses Oracle SQL syntax.
     For SAS tables (SAS proc sql), uses SAS date literal syntax.
+    For timestamp/datetime upper bounds, uses 23:59:59 instead of 00:00:00.
     """
     dtype = date_type.lower() if date_type else ""
+    time_part = "23:59:59" if is_upper else "00:00:00"
 
     # Numeric types: bare integer (YYYYMMDD)
     if dtype in ('num', 'integer', 'int', 'number'):
@@ -179,14 +181,14 @@ def _format_date_bound(date_str, date_type, is_sas_src=False):
         try:
             d = _dt.strptime(date_str, "%Y-%m-%d")
             if dtype in ('datetime', 'timestamp'):
-                return f"'{d.strftime('%d%b%Y').upper()}:00:00:00'dt"
+                return f"'{d.strftime('%d%b%Y').upper()}:{time_part}'dt"
             return f"'{d.strftime('%d%b%Y').upper()}'d"
         except ValueError:
             return f"'{date_str}'"
 
     # Oracle: TIMESTAMP or DATE literals
     if dtype == 'timestamp':
-        return f"TIMESTAMP '{date_str} 00:00:00'"
+        return f"TIMESTAMP '{date_str} {time_part}'"
     if dtype == 'date':
         return f"DATE '{date_str}'"
 
@@ -588,10 +590,10 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             is_sas_src = is_sas_table(tbl)
             bounds = []
             if from_date:
-                lit = _format_date_bound(from_date, date_type, is_sas_src)
+                lit = _format_date_bound(from_date, date_type, is_sas_src, is_upper=False)
                 bounds.append(f"{date_col} >= {lit}")
             if to_date:
-                lit = _format_date_bound(to_date, date_type, is_sas_src)
+                lit = _format_date_bound(to_date, date_type, is_sas_src, is_upper=True)
                 bounds.append(f"{date_col} <= {lit}")
             if bounds:
                 tbl['_date_bounds'] = " AND ".join(bounds)

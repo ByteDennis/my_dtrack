@@ -184,9 +184,10 @@ def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None, date_d
     return f"date_trunc('{unit}', {cast_expr})"
 
 
-def _format_athena_date_bound(date_str, date_type):
+def _format_athena_date_bound(date_str, date_type, is_upper=False):
     """Format a YYYY-MM-DD date as the correct Athena SQL literal."""
     dtype = date_type.lower() if date_type else ""
+    time_part = "23:59:59" if is_upper else "00:00:00"
 
     if dtype in ('num', 'integer', 'int', 'number'):
         return date_str.replace('-', '')
@@ -195,7 +196,7 @@ def _format_athena_date_bound(date_str, date_type):
     if dtype in ('string_dash', 'string'):
         return f"'{date_str}'"
     if dtype in ('timestamp', 'datetime'):
-        return f"TIMESTAMP '{date_str} 00:00:00'"
+        return f"TIMESTAMP '{date_str} {time_part}'"
     if dtype == 'date':
         return f"DATE '{date_str}'"
     return f"'{date_str}'"
@@ -516,10 +517,10 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
             date_type = (tbl.get('date_type') or '').lower()
             bounds = []
             if from_date:
-                lit = _format_athena_date_bound(from_date, date_type)
+                lit = _format_athena_date_bound(from_date, date_type, is_upper=False)
                 bounds.append(f"{date_col} >= {lit}")
             if to_date:
-                lit = _format_athena_date_bound(to_date, date_type)
+                lit = _format_athena_date_bound(to_date, date_type, is_upper=True)
                 bounds.append(f"{date_col} <= {lit}")
             extra = " AND ".join(bounds)
             existing = tbl.get('where', '').strip()

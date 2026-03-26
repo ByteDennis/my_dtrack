@@ -13,8 +13,6 @@ proc contents data=/*{SAS_DATASET}*/ out=_meta_/*{SN}*/ noprint; run;
 proc sql;
     create table _colmeta_/*{SN}*/ as
     select
-        '/*{SOURCE}*/' as source length=32,
-        '/*{TABLE}*/' as table length=128,
         name as column_name length=64,
         case
             when type = 1 and (upcase(format) like '%DATETIME%'
@@ -33,10 +31,10 @@ proc sql;
             else 'UNKNOWN'
         end as data_type length=32
     from _meta_/*{SN}*/
-    order by name;
+    order by varnum;
 quit;
 
-proc export data=_colmeta_/*{SN}*/ outfile="&out_dir.//*{QNAME}*/_meta.csv"
+proc export data=_colmeta_/*{SN}*/ outfile="&out_dir.//*{QNAME}*/_columns.csv"
     dbms=csv replace;
     putnames=yes;
 run;

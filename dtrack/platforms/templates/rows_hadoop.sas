@@ -47,6 +47,46 @@ run;
 
     proc export data=cache.rc_&dsname outfile="&_outpath" dbms=csv replace; run;
     %log_time(table=&qname, step=row, outpath=&out_dir.);
+
+    /* Column metadata: fetch 1 row, proc contents → _columns.csv */
+    %local _colpath;
+    %let _colpath = &out_dir./&qname._columns.csv;
+    %if %sysfunc(fileexist(&_colpath)) = 0 %then %do;
+        proc sql inobs=max;
+            connect to hadoop (%&conn_macro);
+            create table _s_&dsname as
+            select * from connection to hadoop (
+                select * from &table limit 1
+            );
+            disconnect from hadoop;
+        quit;
+        proc contents data=_s_&dsname out=_m_&dsname noprint; run;
+        proc sql;
+            create table _c_&dsname as
+            select
+                name as column_name length=64,
+                case
+                    when type = 1 and (upcase(format) like '%DATETIME%'
+                        or upcase(format) like '%TIME%'
+                        or upcase(informat) like '%DATETIME%'
+                        or upcase(informat) like '%TIME%')
+                        then 'DATETIME'
+                    when type = 1 and (upcase(format) like '%DATE%'
+                        or upcase(format) like '%DDMMYY%'
+                        or upcase(format) like '%MMDDYY%'
+                        or upcase(format) like '%YYMMDD%'
+                        or upcase(informat) like '%DATE%')
+                        then 'DATE'
+                    when type = 1 then 'NUMBER'
+                    when type = 2 then cats('VARCHAR(', length, ')')
+                    else 'UNKNOWN'
+                end as data_type length=32
+            from _m_&dsname
+            order by varnum;
+        quit;
+        proc export data=_c_&dsname outfile="&_colpath" dbms=csv replace; run;
+        proc delete data=_s_&dsname _m_&dsname _c_&dsname; run;
+    %end;
 %mend _row_hadoop;
 
 data _null_;

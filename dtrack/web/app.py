@@ -280,16 +280,16 @@ async def api_generate_files(request: Request):
                     if source == 'aws':
                         from ..platforms.athena import _format_athena_date_bound
                         if from_date:
-                            bounds.append(f"{date_col} >= {_format_athena_date_bound(from_date, date_type)}")
+                            bounds.append(f"{date_col} >= {_format_athena_date_bound(from_date, date_type, is_upper=False)}")
                         if to_date:
-                            bounds.append(f"{date_col} <= {_format_athena_date_bound(to_date, date_type)}")
+                            bounds.append(f"{date_col} <= {_format_athena_date_bound(to_date, date_type, is_upper=True)}")
                     else:
                         from ..platforms.oracle import _format_date_bound, is_sas_table
                         is_sas = is_sas_table(tbl)
                         if from_date:
-                            bounds.append(f"{date_col} >= {_format_date_bound(from_date, date_type, is_sas)}")
+                            bounds.append(f"{date_col} >= {_format_date_bound(from_date, date_type, is_sas, is_upper=False)}")
                         if to_date:
-                            bounds.append(f"{date_col} <= {_format_date_bound(to_date, date_type, is_sas)}")
+                            bounds.append(f"{date_col} <= {_format_date_bound(to_date, date_type, is_sas, is_upper=True)}")
                     if bounds:
                         extra = " AND ".join(bounds)
                         existing = tbl.get('where', '').strip()
