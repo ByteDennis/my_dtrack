@@ -451,8 +451,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type):
         sql = f"""{cte_prefix}SELECT {date_col} AS date_value, COUNT(*) AS row_count
 FROM {full_table}
 {where_clause}
-GROUP BY {date_col}
-ORDER BY date_value;"""
+GROUP BY {date_col};"""
         blocks.append(f"-- {qname}")
         blocks.append(sql.strip())
         blocks.append("")

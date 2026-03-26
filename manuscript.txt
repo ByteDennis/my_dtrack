@@ -1,0 +1,641 @@
+================================================================================
+DTRACK CODEBASE MANUSCRIPT — CONCISE REFERENCE
+================================================================================
+
+1. PROJECT STRUCTURE
+================================================================================
+
+dtrack/
+├── cli.py              CLI entry: argparse commands (init, load-row, serve, etc.)
+├── db.py               SQLite ops (schema, CRUD for all tables)
+├── loader.py           CSV → DB (row counts, col stats)
+├── compare.py          Row/col comparison logic between paired tables
+├── stats.py            Column statistics computation (pandas)
+├── config.py           JSON config parsing (unified pair format)
+├── date_utils.py       Date parsing, format detection, vintage bucketing
+├── constants.py        UI constants (sources, date types, formats)
+├── html_export.py      HTML report generation
+├── pipeline.py         Full pipeline orchestration
+├── interact.py         CLI interactive prompts
+│
+├── platforms/
+│   ├── base.py         Shared helpers: qualified_name(), sas_safe_name(), is_sas_table()
+│   ├── oracle.py       SAS code generation: gen_sas() + all template fillers
+│   ├── athena.py       AWS Athena extraction + SQL generation
+│   └── templates/
+│       ├── template.sas      Base SAS wrapper (credentials, libname, helpers)
+│       ├── rows_oracle.sas   Oracle row count + column discovery
+│       ├── rows_sas.sas      SAS dataset row count + column discovery
+│       ├── rows_hadoop.sas   Hadoop row count + column discovery
+│       ├── columns.sas       Column statistics extraction
+│       └── meta.sas          SAS dataset metadata (proc contents)
+│
+└── web/
+    ├── app.py              FastAPI backend (all /api/* endpoints)
+    ├── templates/          Jinja2 HTML pages
+    │   ├── index.html          Homepage (pair status, generate, load)
+    │   ├── pairs.html          Pair management
+    │   ├── load_row.html       Row data loading
+    │   ├── row_compare.html    Row comparison
+    │   └── col_mapping.html    Column mapping editor
+    └── static/             Frontend JS + CSS
+        ├── pairs.js            Pair CRUD, generate, config upload
+        ├── load_row.js         Scan folders, upload CSVs
+        ├── row_compare.js      Compare, preview, export
+        ├── col_mapping.js      Auto-match, rules, save mappings
+        └── style_v2.css        Styles
+
+
+2. DATA FLOW: GENERATE → RUN SAS → LOAD
+================================================================================
+
+  [Browser]                    [FastAPI]                  [SAS Server]
+      │                            │                           │
+      │ POST /api/generate         │                           │
+      │ {type:"row", from_date,    │                           │
+      │  to_date, pair_names}      │                           │
+      ├──────────────────────────>│                           │
+      │                            │                           │
+      │                     gen_sas() in oracle.py:            │
+      │                     1. load config JSON                │
+      │                     2. filter tables by pair_names     │
+      │                     3. inject date bounds              │
+      │                     4. fill row templates              │
+      │                        (rows_oracle/sas/hadoop.sas)   │
+      │                     5. fill template.sas wrapper       │
+      │                     6. write extract_row.sas           │
+      │                            │                           │
+      │<──────────────────────────│                           │
+      │ {sas_file: "path/to/      │                           │
+      │  extract_row.sas"}         │                           │
+      │                            │                           │
+      │            USER RUNS SAS FILE MANUALLY                │
+      │                            │          ┌───────────────│
+      │                            │          │ For each table:│
+      │                            │          │ 1. row count   │
+      │                            │          │    GROUP BY    │
+      │                            │          │    → _row.csv  │
+      │                            │          │ 2. fetch 1 row │
+      │                            │          │    proc contents│
+      │                            │          │    → _columns.csv
+      │                            │          └───────────────│
+      │                            │                           │
+      │ POST /api/load/row         │                           │
+      │ {folder: "/output/path"}   │                           │
+      ├──────────────────────────>│                           │
+      │                     For each table:                    │
+      │                     1. read {qname}_row.csv            │
+      │                        → upsert into _row_counts       │
+      │                     2. read {qname}_columns.csv        │
+      │                        → upsert into _column_meta      │
+      │<──────────────────────────│                           │
+
+
+3. SAS TEMPLATE RENDERING
+================================================================================
+
+Python (oracle.py)              SAS Template
+─────────────────────          ────────────────────
+gen_sas()                       template.sas
+  │                               {conn_macros}     ← connection setup
+  │                               {table_macros}    ← all code blocks below
+  │                               {runner}          ← execution calls
+  │
+  ├─ _gen_sas_row_datadriven()  rows_oracle.sas  (Oracle tables)
+  │   builds pipe-delimited       {ORA_DATALINES}  ← table|dsname|qname|...
+  │   datalines per table         {CTE_VARS}       ← %let _cteN = WITH...
+  │                               {ROW_REDO}       ← 0 or 1
+  │
+  │                             rows_sas.sas     (SAS $ tables)
+  │   same function, splits       {SAS_DATALINES}
+  │   by is_sas_table()
+  │
+  ├─ _gen_sas_row_hadoop()      rows_hadoop.sas  (Hadoop tables)
+  │                               {HDP_DATALINES}
+  │
+  ├─ _gen_sas_proc_contents()   meta.sas         (SAS $ tables only)
+  │                               {SN}, {QNAME}, {SAS_DATASET}
+  │
+  └─ _gen_sas_col_local()       columns.sas      (column stats)
+                                  per-table macro with vintage handling
+
+KEY: Each row template macro now does BOTH:
+  - Row count query   → {qname}_row.csv
+  - Column discovery  → {qname}_columns.csv (fetch 1 row + proc contents)
+
+
+4. KEY API ENDPOINTS
+================================================================================
+
+GET  /api/status                Pairs + metadata + date ranges + col counts
+POST /api/generate              Generate SAS/SQL extraction files
+POST /api/load/row              Load row CSVs + column CSVs from folder
+POST /api/load/columns/upload   Upload single column metadata CSV
+POST /api/compare/row           Run row comparison for pairs
+POST /api/compare/col           Run column comparison for pairs
+GET  /api/pairs/{name}/columns  Get column mappings for a pair
+PUT  /api/pairs/{name}/col-mappings  Save column mappings
+PUT  /api/config                Update config JSON
+
+Serve: dtrack serve <db_path> --config <config.json> --port 8080
+Framework: FastAPI + uvicorn (async)
+
+
+5. DATABASE SCHEMA (SQLite)
+================================================================================
+
+_metadata       table_name PK, source, db, source_table, date_var, ...
+_row_counts     source_table + dt PK, row_count
+_col_stats      source_table + column_name + dt PK, col_type, n_total, ...
+_column_meta    source_table + column_name PK, data_type, source
+_table_pairs    pair_name PK, table_left, table_right, col_mappings (JSON)
+_row_comparison pair_name PK, overlap_start/end, matching/excluded_dates (JSON)
+_col_comparison pair_name PK, columns_compared, matched/diff_columns (JSON)
+_sample_date    pair_name + table_name PK, samples (JSON)
+
+
+6. WHAT CHANGED (THIS SESSION) — TROUBLESHOOT THESE
+================================================================================
+
+A) SAS TEMPLATES: Added column discovery to row macros
+   Files: rows_oracle.sas, rows_sas.sas, rows_hadoop.sas
+
+   Each %_row_* macro now has a column metadata block after the row export:
+   ┌─────────────────────────────────────────────────────┐
+   │ %if %sysfunc(fileexist(&_colpath)) = 0 %then %do;  │  ← skip if exists
+   │   Oracle:  SELECT * FROM table WHERE ROWNUM <= 1    │
+   │   Hadoop:  SELECT * FROM table LIMIT 1              │
+   │   SAS:     proc contents data=&table                │
+   │                                                     │
+   │   proc contents → _m_&dsname                        │
+   │   SQL type mapping → _c_&dsname                     │
+   │   proc export → {qname}_columns.csv                 │
+   │   proc delete cleanup                               │
+   └─────────────────────────────────────────────────────┘
+
+   THINGS THAT CAN GO WRONG:
+   - Dataset name overflow: _s_&dsname, _m_&dsname, _c_&dsname
+     each prefix is 3 chars, dsname is max 29 = 32 total (SAS limit)
+   - Oracle CTE tables: uses &_cte_val for the WITH clause,
+     same as row query. If CTE is complex, SELECT * may fail.
+   - Hadoop LIMIT 1: syntax differences from Oracle's ROWNUM
+   - Empty table: proc contents on 0-row result should still work
+     (proc contents reads schema, not data)
+   - Connection reuse: Oracle macro opens/closes connection per call,
+     column discovery opens a second connection to same server
+
+B) meta.sas: Changed output format
+   - Was: {qname}_meta.csv with columns: source, table, column_name, data_type
+   - Now: {qname}_columns.csv with columns: column_name, data_type
+   - Removed source/table columns, changed order to varnum (was name)
+   - This matches the loader expectation in app.py line 375
+
+C) athena.py: Removed ORDER BY from row count SQL
+   - _write_combined_sql() no longer appends ORDER BY date_value
+   - Row counts are sorted in Python after loading anyway
+
+D) oracle.py: Removed _gen_sas_meta_oracle / _gen_sas_meta_hadoop
+   - These were initially added as separate template renderers
+   - Deleted because column discovery is now inside row macros
+   - No separate meta template files for Oracle/Hadoop
+
+
+7. DEBUGGING GUIDE
+================================================================================
+
+A) BACKEND (Python FastAPI) — VSCode Attach Debugger
+   ─────────────────────────────────────────────────
+   The server runs as:  dtrack serve db.db --config config.json --port 8080
+   Which calls:         uvicorn.run(app, host=host, port=port)
+
+   TO DEBUG WITH ATTACH:
+   1. Install debugpy:  pip install debugpy
+   2. Start server with debugpy:
+      python -m debugpy --listen 5678 --wait-for-client \
+        -m dtrack.cli serve db.db --config config.json --port 8080
+   3. VSCode launch.json:
+      {
+        "name": "Attach dtrack",
+        "type": "debugpy",
+        "request": "attach",
+        "connect": {"host": "localhost", "port": 5678}
+      }
+   4. Set breakpoints in app.py, oracle.py, etc.
+
+   ASYNC FUNCTIONS (async def api_generate, etc.):
+   - Breakpoints work normally — debugpy handles async/await
+   - uvicorn runs the event loop; when your breakpoint hits,
+     that specific request pauses but the server stays alive
+   - You CAN step through await calls
+   - CAVEAT: If you pause too long, the browser request may timeout
+     (fetch default timeout). The backend still resumes though.
+
+   KEY BREAKPOINT LOCATIONS:
+   - app.py ~line 233: /api/generate endpoint (start of generation)
+   - app.py ~line 298: gen_sas() call
+   - app.py ~line 354: /api/load/row endpoint (loading CSVs)
+   - app.py ~line 375: column CSV loading
+   - oracle.py gen_sas(): template filling
+   - oracle.py _gen_sas_row_datadriven(): dataline building
+
+B) FRONTEND (JavaScript) — Browser DevTools
+   ─────────────────────────────────────────
+   All JS is in dtrack/web/static/*.js (no build step, plain JS)
+
+   TO DEBUG:
+   1. Open browser → F12 → Sources tab
+   2. Find files under localhost:8080/static/
+   3. Set breakpoints in pairs.js, load_row.js, etc.
+
+   TO DEBUG FETCH REQUESTS:
+   1. F12 → Network tab
+   2. Filter by "Fetch/XHR"
+   3. Click any request to see:
+      - Headers tab: URL, method, request headers
+      - Payload tab: POST body (JSON)
+      - Response tab: JSON response from backend
+      - Timing tab: how long it took
+
+   KEY JS FILES AND WHAT THEY DO:
+   - pairs.js: "Generate" button → POST /api/generate
+     Look for: fetch('/api/generate', ...)
+   - load_row.js: "Load" button → POST /api/load/row
+     Look for: fetch('/api/load/row', ...)
+
+   TO ADD console.log FOR DEBUGGING:
+   Edit the JS files directly in dtrack/web/static/
+   Refresh browser (Ctrl+Shift+R for hard refresh to bypass cache)
+
+   COMMON JS ISSUES:
+   - Stale cache: Always hard-refresh (Ctrl+Shift+R)
+   - CORS: Not an issue (same-origin, FastAPI serves static)
+   - Async fetch: All fetch() calls return Promises
+     Use Network tab to see actual request/response
+
+C) SAS CODE DEBUGGING
+   ──────────────────
+   The generated .sas file is standalone — run it in SAS directly.
+   Check the SAS log for:
+   - NOTE: [qname] SQL: ...    ← shows the actual query
+   - NOTE: Cached ...           ← skipped due to cache
+   - ERROR: ...                 ← something failed
+
+   To force re-run: set environment var SAS_ROW_REDO=1
+   The column CSV is skipped if file exists; delete it to force re-run.
+
+
+8. QUICK REFERENCE: CONFIG FORMAT
+================================================================================
+
+{
+  "pairs": {
+    "my_pair": {
+      "skip": false,
+      "left": {
+        "source": "oracle",          ← oracle | sas | hadoop | aws
+        "name": "my_table",
+        "table": "SCHEMA.TABLE",
+        "conn_macro": "pb23",         ← Oracle connection macro
+        "date_col": "LOAD_DT",
+        "date_transform": "trunc",    ← trunc | to_char_YYYYMM | ...
+        "where": "STATUS = 'A'",
+        "data_type": "DATE",          ← DATE | TIMESTAMP | NUMBER | STRING
+        "processed": "SELECT ...",    ← optional CTE
+        "vintage": "monthly"          ← all | monthly | weekly | sample
+      },
+      "right": { ... }
+    }
+  }
+}
+
+
+9. HTTP METHODS — FULL EXAMPLES FROM THIS CODEBASE
+================================================================================
+
+All frontend↔backend communication follows the same pattern:
+  HTML button → JS function → fetch() HTTP request → FastAPI route → Python → JSON response
+
+A) GET — Read data, no body
+   ─────────────────────────
+
+   JS (pairs.js:385):
+       const response = await fetch('/api/pairs/list');
+       const data = await response.json();
+       pairs = data.pairs;
+
+   Python (app.py:608):
+       @app.get("/api/pairs/list")
+       async def api_list_pairs():
+           config = load_unified_config(_config_path)
+           return {"pairs": [...]}
+
+   ┌─────────────────────────────────────────────────────┐
+   │ Browser → GET /api/pairs/list → no body             │
+   │ Server  → {"pairs": [{name: "customer_daily",...}]} │
+   └─────────────────────────────────────────────────────┘
+   TIP: You can test any GET by visiting the URL in browser directly.
+
+
+B) PUT — Update data, JSON body
+   ────────────────────────────
+
+   JS (pairs.js:661-668):
+       const pairData = {                    // 1. read form inputs into JS object
+           pair_name: "customer_daily",
+           left: {source: "oracle", table: "SCHEMA.TBL", ...},
+           right: {...}
+       };
+       const response = await fetch(         // 2. send HTTP request
+           `/api/pairs/customer_daily`,      //    URL (pair_name is in the path)
+           {
+               method: 'PUT',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify(pairData)  // 3. dict → JSON text string
+           }
+       );
+
+   Python (app.py:638-641):
+       @app.put("/api/pairs/{pair_name}")            # {pair_name} = URL path variable
+       async def api_update_pair(pair_name: str, request: Request):
+           body = await request.json()               # JSON text → Python dict
+           # pair_name = "customer_daily"  (from URL)
+           # body = {"pair_name": "customer_daily", "left": {...}, ...}  (from body)
+
+   ┌─────────────────────────────────────────────────────┐
+   │ Browser → PUT /api/pairs/customer_daily             │
+   │           Body: {"pair_name":"customer_daily",...}   │
+   │ Server  → {"ok": true}                              │
+   └─────────────────────────────────────────────────────┘
+
+
+C) POST — Create/action, JSON body (same as PUT but for new data)
+   ──────────────────────────────────────────────────────────────
+
+   JS (pairs.js, when creating new pair):
+       const response = await fetch('/api/pairs', {
+           method: 'POST',
+           headers: {'Content-Type': 'application/json'},
+           body: JSON.stringify(pairData)
+       });
+
+   Python (app.py:1615):
+       @app.post("/api/pairs")
+       async def api_add_pair(request: Request):
+           body = await request.json()
+
+   POST vs PUT: POST = create new, PUT = update existing. Same mechanics.
+
+
+D) POST — No body (trigger an action)
+   ───────────────────────────────────
+
+   JS:
+       await fetch('/api/init', {method: 'POST'});
+
+   Python (app.py:122):
+       @app.post("/api/init")
+       async def api_init():               # ← no request param needed
+           init_database(_db_path)
+           return {"action": "created"}
+
+   ┌─────────────────────────────────────────────────────┐
+   │ Browser → POST /api/init → no body                  │
+   │ Server  → {"action": "created"}                     │
+   └─────────────────────────────────────────────────────┘
+
+
+E) DELETE — With query parameter
+   ─────────────────────────────
+
+   JS (load_row.js:159):
+       await fetch(`/api/pairs/customer_daily?purge=1`, {method: 'DELETE'});
+                                            ^^^^^^^^^ query parameter
+
+   Python (app.py:1689-1690):
+       @app.delete("/api/pairs/{pair_name}")
+       async def api_delete_pair(pair_name: str, purge: int = Query(0)):
+           # pair_name = "customer_daily"   (from URL path)
+           # purge = 1                      (from ?purge=1 query string)
+
+   ┌─────────────────────────────────────────────────────┐
+   │ Browser → DELETE /api/pairs/customer_daily?purge=1  │
+   │ Server  → {"ok": true, "deleted_from": "config+db"} │
+   └─────────────────────────────────────────────────────┘
+   Query params go AFTER the ? in the URL. FastAPI maps them to function args.
+
+
+F) POST — File upload (FormData, NOT JSON)
+   ───────────────────────────────────────
+
+   JS (load_row.js:140-145):
+       const form = new FormData();           // NOT JSON — binary form data
+       form.append('file', file);             // the actual CSV file
+       form.append('table_name', tableName);  // extra text fields
+       form.append('source', source);
+       const resp = await fetch('/api/load/columns/upload', {
+           method: 'POST',
+           body: form                         // NO headers — browser sets them auto
+       });
+
+   Python (app.py:886-891):
+       @app.post("/api/load/columns/upload")
+       async def api_load_columns_upload(
+           file: UploadFile = File(...),     # ← the uploaded file
+           table_name: str = "",             # ← form field (NOT from JSON)
+           source: str = "",                 # ← form field
+       ):
+           content = await file.read()       # read file bytes
+           text = content.decode("utf-8")    # bytes → string
+
+   ┌─────────────────────────────────────────────────────┐
+   │ Browser → POST /api/load/columns/upload             │
+   │           Content-Type: multipart/form-data          │
+   │           file: <binary CSV data>                    │
+   │           table_name: "oracle_customer"              │
+   │           source: "oracle"                           │
+   │ Server  → {"ok": true, "loaded": 42}                │
+   └─────────────────────────────────────────────────────┘
+   KEY DIFFERENCE: File uploads use FormData (not JSON.stringify).
+   FastAPI receives file as UploadFile, other fields as function args.
+   NO Content-Type header in JS — browser auto-sets multipart boundary.
+
+
+SUMMARY TABLE:
+┌──────────┬────────────────────┬──────────────────────────────────────┐
+│ Method   │ JS sends           │ Python receives                      │
+├──────────┼────────────────────┼──────────────────────────────────────┤
+│ GET      │ fetch(url)         │ no args (or query params)            │
+│ POST     │ fetch(url, {       │ body = await request.json()          │
+│ PUT      │   method: 'PUT',   │   OR                                 │
+│          │   body: JSON...    │ file: UploadFile (for FormData)      │
+│          │ })                 │                                      │
+│ DELETE   │ fetch(url,         │ path params + Query() params         │
+│          │   {method:'DELETE'}│                                      │
+├──────────┼────────────────────┼──────────────────────────────────────┤
+│ URL path │ /api/pairs/{name}  │ def func(name: str)                  │
+│ Query    │ ?purge=1           │ def func(purge: int = Query(0))      │
+│ JSON body│ body:JSON.stringify│ body = await request.json()           │
+│ FormData │ body: new FormData │ file: UploadFile, field: str = ""    │
+└──────────┴────────────────────┴──────────────────────────────────────┘
+
+
+10. PRACTICAL DEBUGGING TIPS (VSCODE)
+================================================================================
+
+A) PYTHON ASYNC DEBUGGING IN VSCODE
+   ─────────────────────────────────
+
+   SETUP (one-time):
+   1. pip install debugpy
+   2. Create .vscode/launch.json:
+
+      {
+        "version": "0.2.0",
+        "configurations": [
+          {
+            "name": "dtrack serve",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "dtrack.cli",
+            "args": ["serve", "your.db", "--config", "config.json", "--port", "8080"],
+            "justMyCode": true
+          },
+          {
+            "name": "Attach to dtrack",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {"host": "localhost", "port": 5678}
+          }
+        ]
+      }
+
+   OPTION 1 — LAUNCH (easier, recommended):
+   - F5 in VSCode with "dtrack serve" selected
+   - Breakpoints work immediately
+   - Output visible in VSCode Debug Console
+
+   OPTION 2 — ATTACH (if already running):
+   - Terminal: python -m debugpy --listen 5678 --wait-for-client -m dtrack.cli serve ...
+   - F5 in VSCode with "Attach to dtrack" selected
+
+   ASYNC FUNCTIONS — WHAT'S DIFFERENT:
+   - Breakpoints work normally on async def, nothing special
+   - "Step Over" (F10) on an `await` jumps to the next line after it resolves
+   - "Step Into" (F11) on an `await` goes INTO the awaited function
+   - The call stack shows the coroutine chain, not threads
+   - Other requests keep working while you're paused on one
+
+   COMMON FUNCTIONS TO SET BREAKPOINTS ON:
+
+   app.py:
+     async def api_generate()      ← POST /api/generate (SAS/SQL generation)
+     async def api_load_row()      ← POST /api/load/row (loading CSVs)
+     async def api_status()        ← GET /api/status (homepage data)
+     async def api_compare_row()   ← POST /api/compare/row
+
+   oracle.py:
+     def gen_sas()                 ← Main SAS generation (NOT async, called from async)
+     def _gen_sas_row_datadriven() ← Builds row template datalines
+
+   config.py:
+     def load_unified_config()     ← Parses config JSON
+     def load_tables_from_config() ← Extracts table list from config
+
+   USEFUL DEBUGGER FEATURES:
+   - WATCH panel: add expressions like `len(oracle_tables)`, `tbl_cfg['name']`
+   - DEBUG CONSOLE (bottom): type any Python expression while paused
+     e.g. print(json.dumps(tbl_cfg, indent=2))
+   - CONDITIONAL BREAKPOINT: right-click breakpoint → Edit →
+     e.g. qname == "oracle_my_table"  (only breaks for that table)
+   - LOGPOINT: right-click gutter → Add Logpoint →
+     e.g. "gen_sas called with {len(oracle_tables)} tables"
+     (prints without stopping — like print() but no code change)
+
+
+B) JAVASCRIPT DEBUGGING IN VSCODE
+   ───────────────────────────────
+
+   OPTION 1 — BROWSER DEVTOOLS (simpler, recommended):
+   - F12 in Chrome/Edge → Sources tab
+   - Ctrl+P → type filename (e.g. pairs.js) → set breakpoints
+   - Breakpoints persist across refreshes
+
+   OPTION 2 — VSCODE WITH BROWSER:
+   Add to .vscode/launch.json:
+      {
+        "name": "Chrome: dtrack",
+        "type": "chrome",
+        "request": "launch",
+        "url": "http://localhost:8080",
+        "webRoot": "${workspaceFolder}/dtrack/web/static"
+      }
+   Then F5 → opens Chrome with VSCode debugger attached
+   Set breakpoints directly in VSCode on .js files
+
+   DEBUGGING FETCH REQUESTS:
+   ─────────────────────────
+   Every frontend action is a fetch() call. To trace one:
+
+   1. Network tab (F12 → Network → filter "Fetch/XHR")
+      - See request payload (what JS sent)
+      - See response body (what Python returned)
+      - See status code (200, 400, 500)
+      - Red = error, click to see error message
+
+   2. Console tab
+      - Errors show with stack trace + clickable file:line links
+      - Add temporary logging:
+        console.log('data:', JSON.stringify(data, null, 2));
+
+   3. Sources tab breakpoints
+      - Break BEFORE fetch: see what data is being sent
+      - Break in .then()/.catch(): see response handling
+
+   COMMON JS FUNCTIONS TO SET BREAKPOINTS ON:
+
+   pairs.js:
+     generateCode()          ← "Generate" button click
+     function sendGenerate()  ← actual fetch to /api/generate
+     loadConfig()            ← config JSON upload
+
+   load_row.js:
+     scanFolder()            ← scan output folder for CSVs
+     loadRows()              ← POST /api/load/row
+     uploadColumns()         ← upload column metadata CSV
+
+   row_compare.js:
+     compareRow()            ← POST /api/compare/row
+     exportHtml()            ← export comparison report
+
+   col_mapping.js:
+     loadColumns()           ← GET /api/pairs/{name}/columns
+     saveMapping()           ← PUT /api/pairs/{name}/col-mappings
+     autoMatch()             ← run auto-match algorithm
+
+   QUICK JS DEBUGGING TRICKS:
+   - Add `debugger;` anywhere in JS → browser pauses there (like a breakpoint)
+   - Right-click element → Inspect → see which JS handles it
+   - Console: copy(data) → copies variable to clipboard as JSON
+   - Console: $0 → references currently selected DOM element
+   - Network tab → right-click request → "Copy as fetch" → paste in Console to replay
+
+
+C) DEBUGGING THE FULL FLOW (frontend → backend)
+   ─────────────────────────────────────────────
+
+   Example: Debug "Generate" button click
+
+   1. Set JS breakpoint in pairs.js at the fetch('/api/generate'...) call
+   2. Set Python breakpoint in app.py at async def api_generate()
+   3. Click "Generate" in browser
+   4. JS breakpoint hits → inspect the request body in Variables panel
+   5. Press Continue (F5) → request goes to backend
+   6. Python breakpoint hits → inspect args, step through gen_sas()
+   7. Press Continue → response goes back to browser
+   8. Check Network tab → see the response JSON
+
+   TIP: Use Network tab "Preserve log" checkbox to keep requests
+   across page navigations.
+
+   TIP: If backend returns 500, the error traceback prints in the
+   terminal where uvicorn is running (or VSCode Debug Console).
