@@ -91,8 +91,12 @@ async function refreshDbStatus() {
             const rBadge = rr > 0
                 ? `<span class="status-badge ready">${rr.toLocaleString()}</span>`
                 : `<span class="status-badge warning">0</span>`;
+            const safeName = p.pair_name.replace(/'/g, "\\'");
 
             return `<tr>
+                <td rowspan="2" style="vertical-align:middle; text-align:center;">
+                    <button class="btn btn-sm btn-danger" onclick="deletePairFromDb('${safeName}')" title="Delete pair and all data">&times;</button>
+                </td>
                 <td rowspan="2" style="vertical-align:middle; font-weight:600;">${p.pair_name}</td>
                 <td>L</td>
                 <td style="text-align:right;">${lBadge}</td>
@@ -107,12 +111,25 @@ async function refreshDbStatus() {
         el.innerHTML = `
             <table class="data-table compact">
                 <thead><tr>
-                    <th>Pair</th><th></th><th style="text-align:right;">Rows</th><th>Date Range</th>
+                    <th style="width:3em;"></th><th>Pair</th><th></th><th style="text-align:right;">Rows</th><th>Date Range</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;
     } catch (e) {
         el.innerHTML = '<div class="empty-message">Failed to load status</div>';
+    }
+}
+
+async function deletePairFromDb(pairName) {
+    if (!confirm(`Delete pair "${pairName}" and all its data?`)) return;
+    try {
+        const resp = await fetch(`/api/pairs/${encodeURIComponent(pairName)}?purge=1`, {method: 'DELETE'});
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Delete failed');
+        await refreshDbStatus();
+        await loadKnownTables();
+    } catch (e) {
+        alert('Delete failed: ' + e.message);
     }
 }
 

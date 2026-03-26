@@ -404,48 +404,15 @@ function downloadCSV(name) {
     const params = new URLSearchParams();
     if (from) params.set('from_date', from);
     if (to) params.set('to_date', to);
-    window.open(`/api/compare/row/export/csv/${name}?${params}`, '_blank');
+    window.open(`/api/compare/row/export/excel/${name}?${params}`, '_blank');
 }
 
 async function downloadAllCSV() {
-    const from = document.getElementById('global-from').value;
-    const to = document.getElementById('global-to').value;
-    const params = new URLSearchParams();
-    if (from) params.set('from_date', from);
-    if (to) params.set('to_date', to);
-
-    // Fetch each pair's CSV and combine into one file
-    let combined = '';
-    let first = true;
     for (const p of pairsData) {
         if (p.skip) continue;
-        try {
-            const res = await fetch(`/api/compare/row/export/csv/${p.pair_name}?${params}`);
-            const text = await res.text();
-            const lines = text.split('\n');
-            if (first) {
-                // Include header + pair_name column
-                combined += 'pair_name,' + lines[0] + '\n';
-                first = false;
-            }
-            // Append data rows (skip header), prepend pair name
-            for (let i = 1; i < lines.length; i++) {
-                const line = lines[i].trim();
-                if (line) combined += p.pair_name + ',' + line + '\n';
-            }
-        } catch (e) {
-            console.error(`CSV export failed for ${p.pair_name}:`, e);
-        }
+        downloadCSV(p.pair_name);
+        await new Promise(r => setTimeout(r, 500));
     }
-
-    // Trigger download
-    const blob = new Blob([combined], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'row_compare_all.csv';
-    a.click();
-    URL.revokeObjectURL(url);
 }
 
 // ---------------------------------------------------------------------------

@@ -57,6 +57,7 @@ function pairAccordionHTML(p) {
     return `
     <div class="rc-pair" id="pair-${name}">
         <div class="rc-pair-header" onclick="togglePair('${name}')">
+            <button class="btn-text cm-unmap-btn" style="margin-right:4px; font-size:14px;" onclick="event.stopPropagation(); deletePair('${name}')" title="Delete pair and all data">&times;</button>
             <span class="pair-expand">${ICON.chevron}</span>
             <span class="pair-name">${name}</span>
             <span class="rc-pair-status" id="status-${name}">
@@ -173,8 +174,15 @@ function renderPairBody(name) {
     const nMapped = Object.keys(mappings).length;
     const nUnmatched = unmappedLeft.length + unmappedRight.length;
 
-    // Summary
-    let html = `<div class="cm-summary">${nMapped} mapped &middot; ${nUnmatched} unmatched</div>`;
+    // Summary + CSV download links
+    const srcLeft = (cache.source_left || 'left').toUpperCase();
+    const srcRight = (cache.source_right || 'right').toUpperCase();
+    let html = `<div class="cm-summary" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>${nMapped} mapped &middot; ${nUnmatched} unmatched</span>
+        <span style="display:flex; gap:8px;">
+            <a href="/api/pairs/${name}/columns/excel" class="btn-text" download>Excel</a>
+        </span>
+    </div>`;
 
     // Mapped section
     html += `
@@ -187,21 +195,21 @@ function renderPairBody(name) {
             <div class="cm-table-wrap">
             <table class="data-table compact">
                 <thead><tr>
-                    <th>Left Column</th><th>L Type</th>
+                    <th>Left</th>
                     <th style="text-align:center; width:30px;"></th>
-                    <th>Right Column</th><th>R Type</th>
+                    <th>Right</th>
                     <th>Source</th><th style="text-align:center; width:40px;">Unmap</th>
                 </tr></thead>
                 <tbody>
                 ${Object.entries(mappings).sort((a,b) => a[0].localeCompare(b[0])).map(([left, right]) => {
                     const src = sources[left] || 'manual';
                     const srcClass = src.startsWith('rule') ? 'rule' : src;
+                    const lType = left_columns[left] ? ` (${esc(left_columns[left])})` : '';
+                    const rType = right_columns[right] ? ` (${esc(right_columns[right])})` : '';
                     return `<tr>
-                        <td class="cm-col-name">${esc(left)}</td>
-                        <td class="cm-col-type">${esc(left_columns[left] || '')}</td>
+                        <td class="cm-col-name">${esc(left)}${lType}</td>
                         <td style="text-align:center; color:var(--jp-ui-font-color3);">&rarr;</td>
-                        <td class="cm-col-name">${esc(right)}</td>
-                        <td class="cm-col-type">${esc(right_columns[right] || '')}</td>
+                        <td class="cm-col-name">${esc(right)}${rType}</td>
                         <td><span class="cm-source cm-source-${srcClass}">${esc(src)}</span></td>
                         <td style="text-align:center;">
                             <button class="btn-text cm-unmap-btn" onclick="unmapColumn('${name}', '${escAttr(left)}')" title="Unmap">&times;</button>
@@ -214,8 +222,28 @@ function renderPairBody(name) {
         </div>
     </details>`;
 
-    // Unmatched section
+    // Unmatched section — side-by-side text view (no dropdowns)
     if (nUnmatched > 0) {
+        // Merge both sides into a unified sorted list
+        const allUnmatched = [];
+        const leftSet = new Set(unmappedLeft);
+        const rightSet = new Set(unmappedRight);
+        const allCols = [...new Set([...unmappedLeft.map(c => c.toLowerCase()), ...unmappedRight.map(c => c.toLowerCase())])].sort();
+        // Build lookup by lowercase
+        const leftByLower = {};
+        for (const c of unmappedLeft) leftByLower[c.toLowerCase()] = c;
+        const rightByLower = {};
+        for (const c of unmappedRight) rightByLower[c.toLowerCase()] = c;
+
+        for (const key of allCols) {
+            const lCol = leftByLower[key] || null;
+            const rCol = rightByLower[key] || null;
+            allUnmatched.push({ left: lCol, right: rCol });
+        }
+
+        const srcLeft = (cache.source_left || 'LEFT').toUpperCase();
+        const srcRight = (cache.source_right || 'RIGHT').toUpperCase();
+
         html += `
         <details class="rc-details" open>
             <summary class="rc-details-summary">
@@ -223,36 +251,22 @@ function renderPairBody(name) {
                 <span>Unmatched (${nUnmatched})</span>
             </summary>
             <div class="rc-details-body">
-                <div class="cm-table-wrap">
-                <table class="data-table compact">
+                <div class="cm-table-wrap" style="max-height:150px; overflow:auto;">
+                <table class="data-table compact" style="font-family:var(--jp-code-font-family); font-size:12px;">
                     <thead><tr>
-                        <th>Side</th><th>Column</th><th>Type</th><th>Map to</th>
+                        <th>LEFT (${esc(srcLeft)})</th>
+                        <th style="width:20px;"></th>
+                        <th>RIGHT (${esc(srcRight)})</th>
                     </tr></thead>
                     <tbody>
-                    ${unmappedLeft.map(col => {
-                        return `<tr>
-                            <td><span class="cm-side-badge cm-side-left">LEFT</span></td>
-                            <td class="cm-col-name">${esc(col)}</td>
-                            <td class="cm-col-type">${esc(left_columns[col] || '')}</td>
-                            <td>
-                                <select class="cm-map-select" onchange="manualMap('${name}', '${escAttr(col)}', this.value, 'left')">
-                                    <option value="">-- select right col --</option>
-                                    ${unmappedRight.map(r => `<option value="${escAttr(r)}">${esc(r)} (${esc(right_columns[r] || '')})</option>`).join('')}
-                                </select>
-                            </td>
-                        </tr>`;
-                    }).join('')}
-                    ${unmappedRight.map(col => {
-                        return `<tr>
-                            <td><span class="cm-side-badge cm-side-right">RIGHT</span></td>
-                            <td class="cm-col-name">${esc(col)}</td>
-                            <td class="cm-col-type">${esc(right_columns[col] || '')}</td>
-                            <td>
-                                <select class="cm-map-select" onchange="manualMap('${name}', this.value, '${escAttr(col)}', 'right')">
-                                    <option value="">-- select left col --</option>
-                                    ${unmappedLeft.map(l => `<option value="${escAttr(l)}">${esc(l)} (${esc(left_columns[l] || '')})</option>`).join('')}
-                                </select>
-                            </td>
+                    ${allUnmatched.map(row => {
+                        const lName = row.left ? esc(row.left) : '';
+                        const rName = row.right ? esc(row.right) : '';
+                        const rowClass = (row.left && row.right) ? ' style="color:var(--jp-warn-color0);"' : '';
+                        return `<tr${rowClass}>
+                            <td class="cm-col-name">${lName}</td>
+                            <td></td>
+                            <td class="cm-col-name">${rName}</td>
                         </tr>`;
                     }).join('')}
                     </tbody>
@@ -262,33 +276,26 @@ function renderPairBody(name) {
         </details>`;
     }
 
-    // Rules section
+    // Rules section (always visible)
     html += `
-    <details class="rc-details">
-        <summary class="rc-details-summary">
-            ${ICON.details}
-            <span>Rules (${rules.length})</span>
-        </summary>
-        <div class="rc-details-body">
-            <div class="cm-table-wrap">
-            <table class="data-table compact" id="rules-table-${name}">
-                <thead><tr>
-                    <th>Pattern Left</th><th>Pattern Right</th><th>Type</th>
-                    <th style="text-align:center;">Matches</th>
-                    <th style="text-align:center; width:80px;">Actions</th>
-                </tr></thead>
-                <tbody>
-                ${rules.map((rule, idx) => ruleRowHTML(name, rule, idx)).join('')}
-                </tbody>
-            </table>
-            </div>
-            <div style="margin-top:8px; display:flex; gap:8px;">
-                <button class="btn-secondary" onclick="addRule('${name}')">+ Add Rule</button>
-                <button class="btn-primary" onclick="applyRules('${name}')">Apply Rules</button>
-                <button class="btn-danger" onclick="clearAllMappings('${name}')">Clear All</button>
-            </div>
+    <div style="margin-top:8px;">
+        <div style="font-weight:600; font-size:12px; margin-bottom:4px;">Rules (${rules.length})</div>
+        <div class="cm-table-wrap">
+        <table class="data-table compact" id="rules-table-${name}">
+            <thead><tr>
+                <th>Pattern Left</th><th>Pattern Right</th><th>Type</th>
+                <th style="text-align:center;">Matches</th>
+                <th style="text-align:center; width:120px;">Actions</th>
+            </tr></thead>
+            <tbody>
+            ${rules.map((rule, idx) => ruleRowHTML(name, rule, idx)).join('')}
+            </tbody>
+        </table>
         </div>
-    </details>`;
+        <div style="margin-top:8px; display:flex; gap:8px;">
+            <button class="btn-secondary" onclick="addRule('${name}')">+ Add Rule</button>
+        </div>
+    </div>`;
 
     body.innerHTML = html;
 }
@@ -308,10 +315,14 @@ function ruleRowHTML(name, rule, idx) {
             </select>
         </td>
         <td style="text-align:center;" id="rule-matches-${name}-${idx}">
-            <button class="btn-text" onclick="testRule('${name}', ${idx})">Test</button>
+            <span style="color:var(--jp-ui-font-color3);">—</span>
         </td>
         <td style="text-align:center;">
-            <button class="btn-text cm-unmap-btn" onclick="deleteRule('${name}', ${idx})">&times;</button>
+            <span style="display:inline-flex; gap:4px;">
+                <button class="btn-text" onclick="testRule('${name}', ${idx})">Test</button>
+                <button class="btn-text" onclick="applySingleRule('${name}', ${idx})">Apply</button>
+                <button class="btn-text cm-unmap-btn" onclick="deleteRule('${name}', ${idx})">&times;</button>
+            </span>
         </td>
     </tr>`;
 }
@@ -422,6 +433,34 @@ function applyRules(name) {
     debouncedSync(name);
 }
 
+function applySingleRule(name, idx) {
+    const cache = mappingCache[name];
+    if (!cache || !cache.rules[idx]) return;
+
+    const mappedRight = new Set(Object.values(cache.mappings));
+    const unmappedLeft = Object.keys(cache.left_columns).filter(c => !(c in cache.mappings));
+    const unmappedRight = Object.keys(cache.right_columns).filter(c => !mappedRight.has(c));
+
+    const result = applyColumnRulesJS([cache.rules[idx]], unmappedLeft, unmappedRight);
+    const n = Object.keys(result.mappings).length;
+
+    if (n === 0) {
+        notify('No matches found', 'error');
+        return;
+    }
+
+    // Merge results — fix rule index references to actual index
+    for (const [left, right] of Object.entries(result.mappings)) {
+        cache.mappings[left] = right;
+        cache.sources[left] = `rule:${idx}`;
+    }
+
+    renderPairBody(name);
+    updateStatusBadge(name);
+    debouncedSync(name);
+    notify(`Applied: ${n} column(s) mapped`, 'success');
+}
+
 function clearAllMappings(name) {
     const cache = mappingCache[name];
     if (!cache) return;
@@ -480,11 +519,45 @@ function applyColumnRulesJS(rules, unmappedLeft, unmappedRight) {
 }
 
 function wildcardTransform(value, patFrom, patTo) {
-    if (!patFrom.includes('*')) {
+    if (!patFrom.includes('*') && !patFrom.includes('(')) {
         return value === patFrom ? patTo : null;
     }
 
-    // Convert fnmatch * pattern to regex
+    // Support paired alternation: (a|b) on left maps to (A|B) on right
+    // e.g. patFrom="Axff_(and|has)" patTo="Axincdff_(AND|have)"
+    // "Axff_and" -> captures "and" -> index 0 -> "AND"
+    // "Axff_has" -> captures "has" -> index 1 -> "have"
+    if (patFrom.includes('(') && patTo.includes('(')) {
+        // Extract alternation groups from both patterns
+        const leftAltMatch = patFrom.match(/\(([^)]+)\)/);
+        const rightAltMatch = patTo.match(/\(([^)]+)\)/);
+        if (leftAltMatch && rightAltMatch) {
+            const leftAlts = leftAltMatch[1].split('|');
+            const rightAlts = rightAltMatch[1].split('|');
+            // Build regex from left pattern: replace (a|b) with capturing group
+            const reStr = patFrom.replace(/\(([^)]+)\)/, '(' + leftAlts.map(a =>
+                a.replace(/[.*+?^${}|[\]\\]/g, '\\$&')
+            ).join('|') + ')');
+            // Also convert * to (.*)
+            const fullRe = reStr.replace(/\*/g, '(.*)');
+            const m = value.match(new RegExp(`^${fullRe}$`, 'i'));
+            if (!m) return null;
+            // Find which alternation matched
+            const captured = m[1];
+            const altIdx = leftAlts.findIndex(a => a.toLowerCase() === captured.toLowerCase());
+            if (altIdx >= 0 && altIdx < rightAlts.length) {
+                const replacement = rightAlts[altIdx];
+                let result = patTo.replace(/\([^)]+\)/, replacement);
+                // Handle * if present
+                if (m[2] !== undefined) {
+                    result = result.replace('*', m[2]);
+                }
+                return result;
+            }
+        }
+    }
+
+    // Standard * wildcard
     let regex = '';
     for (const ch of patFrom) {
         if (ch === '*') regex += '(.*)';
@@ -495,6 +568,22 @@ function wildcardTransform(value, patFrom, patTo) {
     if (!m) return null;
 
     return patTo.replace('*', m[1]);
+}
+
+// ---------------------------------------------------------------------------
+// Delete pair
+// ---------------------------------------------------------------------------
+async function deletePair(name) {
+    if (!confirm(`Delete pair "${name}" and all its data?`)) return;
+    try {
+        const resp = await fetch(`/api/pairs/${encodeURIComponent(name)}?purge=1`, { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Delete failed');
+        delete mappingCache[name];
+        await loadPairs();
+    } catch (e) {
+        alert('Delete failed: ' + e.message);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -531,18 +620,16 @@ async function syncPair(name) {
 }
 
 // ---------------------------------------------------------------------------
-// CSV Export
+// Excel Export
 // ---------------------------------------------------------------------------
-function downloadCSV(name) {
-    window.open(`/api/pairs/${name}/col-mappings/csv`, '_blank');
+function downloadExcel(name) {
+    window.open(`/api/pairs/${name}/columns/excel`, '_blank');
 }
 
-async function downloadAllCSV() {
-    // Download CSV for each pair that has mappings
+async function downloadAllExcel() {
     for (const p of pairsData) {
-        if (mappingCache[p.pair_name] && Object.keys(mappingCache[p.pair_name].mappings).length > 0) {
-            downloadCSV(p.pair_name);
-        }
+        downloadExcel(p.pair_name);
+        await new Promise(r => setTimeout(r, 500));
     }
 }
 

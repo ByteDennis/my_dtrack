@@ -782,6 +782,51 @@ def list_table_pairs(db_path: str) -> List[Dict]:
     return result
 
 
+def delete_pair(db_path: str, pair_name: str) -> Dict:
+    """
+    Delete a pair and all associated data from the database.
+
+    Drops the left/right row-count tables, removes _metadata and _col_stats
+    rows, and deletes the _table_pairs entry. All in one transaction.
+
+    Args:
+        db_path: Path to SQLite database file
+        pair_name: Name of the pair to delete
+
+    Returns:
+        Dictionary with deleted pair info, or raises ValueError if not found
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT table_left, table_right FROM _table_pairs WHERE pair_name = ?",
+                   (pair_name,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise ValueError(f"Pair '{pair_name}' not found in database")
+
+    table_left, table_right = row["table_left"], row["table_right"]
+    tables = [t for t in (table_left, table_right) if t]
+
+    try:
+        for t in tables:
+            cursor.execute(f"DROP TABLE IF EXISTS [{t}]")
+            cursor.execute("DELETE FROM _metadata WHERE table_name = ?", (t,))
+            try:
+                cursor.execute("DELETE FROM _col_stats WHERE table_name = ?", (t,))
+            except sqlite3.OperationalError:
+                pass  # _col_stats may not exist
+
+        cursor.execute("DELETE FROM _table_pairs WHERE pair_name = ?", (pair_name,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {"pair_name": pair_name, "table_left": table_left, "table_right": table_right}
+
+
 def insert_column_meta(
     db_path: str,
     source_table: str,
@@ -963,7 +1008,7 @@ def discover_columns(conn, table_name: str) -> Dict[str, str]:
         "DATA_SCALE, NULLABLE "
         "FROM ALL_TAB_COLUMNS WHERE TABLE_NAME = :tbl "
         "ORDER BY COLUMN_ID",
-        {"tbl": table_name}
+        {"tbl": table_name.upper()}
     )
     columns = {}
     for row in cursor.fetchall():

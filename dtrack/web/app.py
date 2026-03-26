@@ -297,6 +297,11 @@ async def api_generate_files(request: Request):
                 _write_combined_sql(aws_tables, aws_outdir, extract_type)
                 results["sql_file"] = os.path.join(aws_outdir, f"extract_{extract_type}.sql")
 
+            # Discover columns for AWS tables (Oracle/SAS handled by gen_sas above)
+            if aws_tables:
+                from ..platforms.oracle import _discover_and_write_columns
+                _discover_and_write_columns(aws_tables, aws_outdir, _db_path)
+
         return {"ok": True, "output": buf.getvalue(), **results}
     except Exception as e:
         return JSONResponse(status_code=500, content={
@@ -322,7 +327,8 @@ async def api_load(request: Request):
 
             if load_type == "row":
                 from ..loader import load_row_counts
-                from ..db import get_row_counts
+                from ..db import get_row_counts, insert_column_meta
+                import csv as csv_mod
                 for tbl in tables:
                     qname = qualified_name(tbl)
                     csv_path = os.path.join(folder, f"{qname}_row.csv")
@@ -337,6 +343,21 @@ async def api_load(request: Request):
                     )
                     rows = get_row_counts(_db_path, qname)
                     print(f"{qname}: {len(rows)} date buckets loaded")
+
+                    # Also load column metadata if available
+                    col_csv = os.path.join(folder, f"{qname}_columns.csv")
+                    if os.path.exists(col_csv):
+                        columns = {}
+                        with open(col_csv, 'r', newline='') as f:
+                            reader = csv_mod.DictReader(f)
+                            for row in reader:
+                                col_name = row.get('column_name') or row.get('COLUMN_NAME', '')
+                                dtype = row.get('data_type') or row.get('DATA_TYPE', '')
+                                if col_name:
+                                    columns[col_name] = dtype
+                        if columns:
+                            insert_column_meta(_db_path, qname, columns, source=tbl.get("source"))
+                            print(f"{qname}: {len(columns)} columns loaded")
             else:
                 from ..loader import load_precomputed_col_stats
                 from ..db import get_metadata
@@ -1139,6 +1160,132 @@ async def api_compare_row_export_csv(pair_name: str, from_date: str = "", to_dat
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.get("/api/compare/row/export/count-csv/{pair_name}")
+async def api_compare_row_export_count_csv(
+    pair_name: str, side: str = "left", from_date: str = "", to_date: str = ""
+):
+    """Generate a single-side count CSV: DATE_COL (SOURCE), COUNT (SOURCE)."""
+    import csv as csv_mod
+
+    try:
+        from ..db import get_table_pair, get_metadata
+        from ..compare import compare_row_counts
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        if side not in ("left", "right"):
+            return JSONResponse(status_code=400, content={"error": "side must be 'left' or 'right'"})
+
+        comparison = compare_row_counts(
+            _db_path, pair["table_left"], pair["table_right"],
+            from_date=from_date or None, to_date=to_date or None,
+        )
+
+        # Determine column header names
+        tbl_key = "table_left" if side == "left" else "table_right"
+        src_key = "source_left" if side == "left" else "source_right"
+        meta = get_metadata(_db_path, pair[tbl_key]) or {}
+        date_var = (meta.get("date_var") or "DT").upper()
+        source = (pair.get(src_key) or side).upper()
+
+        # Collect (date, count) rows for the requested side
+        rows = []
+        for dt, count in comparison["matching"]:
+            rows.append((dt, count))
+        for dt, l, r in comparison["mismatched"]:
+            rows.append((dt, l if side == "left" else r))
+        if side == "left":
+            for dt, count in comparison["only_left"]:
+                rows.append((dt, count))
+        else:
+            for dt, count in comparison["only_right"]:
+                rows.append((dt, count))
+
+        rows.sort(key=lambda r: r[0])
+
+        buf = io.StringIO()
+        writer = csv_mod.writer(buf)
+        writer.writerow([f"{date_var} ({source})", f"COUNT ({source})"])
+        for dt, count in rows:
+            writer.writerow([dt, count])
+
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={pair_name}_{side}_counts.csv"},
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/compare/row/export/excel/{pair_name}")
+async def api_compare_row_export_excel(
+    pair_name: str, from_date: str = "", to_date: str = ""
+):
+    """Generate Excel with two sheets (left counts, right counts) for one pair."""
+    try:
+        from openpyxl import Workbook
+        from ..db import get_table_pair, get_metadata
+        from ..compare import compare_row_counts
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        comparison = compare_row_counts(
+            _db_path, pair["table_left"], pair["table_right"],
+            from_date=from_date or None, to_date=to_date or None,
+        )
+
+        def _build_side(side):
+            tbl_key = "table_left" if side == "left" else "table_right"
+            src_key = "source_left" if side == "left" else "source_right"
+            meta = get_metadata(_db_path, pair[tbl_key]) or {}
+            date_var = (meta.get("date_var") or "DT").upper()
+            source = (pair.get(src_key) or side).upper()
+
+            rows = []
+            for dt, count in comparison["matching"]:
+                rows.append((dt, count))
+            for dt, l, r in comparison["mismatched"]:
+                rows.append((dt, l if side == "left" else r))
+            if side == "left":
+                for dt, count in comparison["only_left"]:
+                    rows.append((dt, count))
+            else:
+                for dt, count in comparison["only_right"]:
+                    rows.append((dt, count))
+            rows.sort(key=lambda r: r[0])
+            return date_var, source, rows
+
+        wb = Workbook()
+
+        for idx, side in enumerate(("left", "right")):
+            date_var, source, rows = _build_side(side)
+            if idx == 0:
+                ws = wb.active
+                ws.title = source
+            else:
+                ws = wb.create_sheet(title=source)
+            ws.append([f"{date_var} ({source})", f"COUNT ({source})"])
+            for dt, count in rows:
+                ws.append([dt, count])
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={pair_name}_counts.xlsx"},
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/compare/row/{pair_name}")
 async def api_compare_row_pair(pair_name: str, from_date: str = "", to_date: str = ""):
     """Run row comparison for a single pair and return structured JSON."""
@@ -1476,20 +1623,30 @@ async def api_add_pair(request: Request):
 
 
 @app.delete("/api/pairs/{pair_name}")
-async def api_delete_pair(pair_name: str):
-    """Remove a pair from config."""
+async def api_delete_pair(pair_name: str, purge: int = Query(0)):
+    """Remove a pair from config. With purge=1, also remove all DB data."""
     try:
         from ..config import load_unified_config
         config = load_unified_config(_config_path)
 
-        if pair_name not in config.get("pairs", {}):
+        found_in_config = pair_name in config.get("pairs", {})
+
+        if found_in_config:
+            del config["pairs"][pair_name]
+            with open(_config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+
+        found_in_db = False
+        if purge:
+            from ..db import delete_pair
+            try:
+                delete_pair(_db_path, pair_name)
+                found_in_db = True
+            except ValueError:
+                pass  # pair may not be registered in DB
+
+        if not found_in_config and not found_in_db:
             return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
-
-        del config["pairs"][pair_name]
-
-        # Write directly (skip validation — may have 0 pairs temporarily)
-        with open(_config_path, 'w') as f:
-            json.dump(config, f, indent=2)
 
         return {"ok": True, "deleted": pair_name}
     except Exception as e:
@@ -1873,6 +2030,121 @@ async def api_get_pair_columns(pair_name: str):
             "col_rules": col_rules_data,
             "auto_match": auto_result.get("matched", {}),
         }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/pairs/{pair_name}/columns/csv")
+async def api_get_pair_columns_csv(pair_name: str, side: str = "left"):
+    """Generate a column metadata CSV for one side of a pair.
+
+    Columns: TABLE_NAME, COLUMN_NAME, DATA_TYPE, DATA_TYPE_EXTENDED, MANDATORY
+    """
+    import csv as csv_mod
+
+    try:
+        from ..db import get_table_pair, get_column_meta
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        if side not in ("left", "right"):
+            return JSONResponse(status_code=400, content={"error": "side must be 'left' or 'right'"})
+
+        tbl_key = "table_left" if side == "left" else "table_right"
+        table_name = pair[tbl_key].upper()
+        col_meta = get_column_meta(_db_path, pair[tbl_key])
+
+        def extended_type(dt):
+            """Map data_type to Float, Integer, or blank."""
+            if not dt:
+                return ""
+            low = dt.lower()
+            if low in ("number", "numeric", "decimal", "float", "double", "real",
+                        "float64", "double precision"):
+                return "Float"
+            if low in ("int", "integer", "bigint", "smallint", "tinyint",
+                        "int64", "int32", "long", "short"):
+                return "Integer"
+            return ""
+
+        buf = io.StringIO()
+        writer = csv_mod.writer(buf)
+        writer.writerow(["TABLE_NAME", "COLUMN_NAME", "DATA_TYPE", "DATA_TYPE_EXTENDED", "MANDATORY"])
+
+        for col in sorted(col_meta, key=lambda c: c["column_name"]):
+            dt = (col.get("data_type") or "").upper()
+            writer.writerow([
+                table_name,
+                col["column_name"].upper(),
+                dt,
+                extended_type(col.get("data_type", "")),
+                "",
+            ])
+
+        buf.seek(0)
+        src_key = "source_left" if side == "left" else "source_right"
+        source = pair.get(src_key, side)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={pair_name}_{source}_columns.csv"},
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/pairs/{pair_name}/columns/excel")
+async def api_get_pair_columns_excel(pair_name: str):
+    """Generate Excel with two sheets (left columns, right columns) for one pair."""
+    try:
+        from openpyxl import Workbook
+        from ..db import get_table_pair, get_column_meta
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        def extended_type(dt):
+            if not dt:
+                return ""
+            low = dt.lower()
+            if low in ("number", "numeric", "decimal", "float", "double", "real",
+                        "float64", "double precision"):
+                return "Float"
+            if low in ("int", "integer", "bigint", "smallint", "tinyint",
+                        "int64", "int32", "long", "short"):
+                return "Integer"
+            return ""
+
+        wb = Workbook()
+        for idx, side in enumerate(("left", "right")):
+            tbl_key = "table_left" if side == "left" else "table_right"
+            src_key = "source_left" if side == "left" else "source_right"
+            table_name = pair[tbl_key].upper()
+            source = (pair.get(src_key) or side).upper()
+            col_meta = get_column_meta(_db_path, pair[tbl_key])
+
+            if idx == 0:
+                ws = wb.active
+                ws.title = source
+            else:
+                ws = wb.create_sheet(title=source)
+
+            ws.append(["TABLE_NAME", "COLUMN_NAME", "DATA_TYPE", "DATA_TYPE_EXTENDED", "MANDATORY"])
+            for col in sorted(col_meta, key=lambda c: c["column_name"]):
+                dt = (col.get("data_type") or "").upper()
+                ws.append([table_name, col["column_name"].upper(), dt, extended_type(col.get("data_type", "")), ""])
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={pair_name}_columns.xlsx"},
+        )
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 

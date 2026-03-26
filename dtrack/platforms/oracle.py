@@ -739,9 +739,117 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     if env_path:
         print(f"  Credentials: from {env_path}")
 
+    # Discover and save column metadata CSVs (Oracle/SAS tables only)
+    sas_tables = [t for t in all_tables
+                  if t.get('source', '').lower() in ('oracle', 'sas', 'hadoop', '')]
+    if db_path and sas_tables:
+        _discover_and_write_columns(sas_tables, outdir, db_path)
+
     # In mock mode, also copy mock CSVs to outdir
     if mock_dir:
         _extract_oracle_mock(config_path, outdir, types, db_path, mock_dir)
+
+
+# ---------------------------------------------------------------------------
+# Column discovery and CSV writing
+# ---------------------------------------------------------------------------
+
+def _discover_and_write_columns(all_tables, outdir, db_path, outdir_map=None):
+    """Discover columns for all tables and write {qname}_columns.csv files.
+
+    For Oracle tables: uses discover_columns (live or mock).
+    For AWS tables: uses _discover_columns_athena.
+    For SAS/Hadoop/unknown: skipped (placeholder for future).
+
+    Also saves column metadata to _column_meta in the database.
+
+    Args:
+        outdir: Default output directory for column CSVs.
+        outdir_map: Optional dict mapping source name to output directory,
+                     e.g. {"oracle": "./sas/", "aws": "./csv/"}.
+    """
+    import csv as csv_mod
+    from ..db import insert_column_meta, get_column_meta
+
+    os.makedirs(outdir, exist_ok=True)
+
+    # Group connections to avoid reconnecting per table
+    oracle_conns = {}
+    aws_cursors = {}
+
+    for tbl in all_tables:
+        source = (tbl.get('source') or '').lower()
+        qname = qualified_name(tbl)
+        raw_table = tbl['table']
+        conn_macro = tbl.get('conn_macro', '')
+        columns = None
+
+        # First check if we already have column metadata in DB
+        existing = get_column_meta(db_path, qname)
+        if existing:
+            columns = {c["column_name"]: c.get("data_type", "") for c in existing}
+            print(f"  {qname}: found {len(columns)} columns in _column_meta")
+        elif source == 'oracle':
+            try:
+                if conn_macro not in oracle_conns:
+                    from ..db import oracle_connect
+                    print(f"  {qname}: connecting to Oracle ({conn_macro})...")
+                    oracle_conns[conn_macro] = oracle_connect(conn_macro)
+                from ..db import discover_columns
+                columns = discover_columns(oracle_conns[conn_macro], raw_table)
+                if columns:
+                    insert_column_meta(db_path, qname, columns, source=source)
+                    print(f"  {qname}: discovered {len(columns)} columns from Oracle")
+                else:
+                    print(f"  {qname}: no columns found in Oracle")
+            except Exception as e:
+                print(f"  {qname}: Oracle column discovery failed ({e})")
+        elif source == 'aws':
+            try:
+                database = conn_macro or tbl.get('database', '')
+                if database not in aws_cursors:
+                    from ..platforms.athena import athena_connect, aws_creds_renew
+                    print(f"  {qname}: connecting to Athena ({database})...")
+                    aws_creds_renew()
+                    conn = athena_connect(data_base=database)
+                    aws_cursors[database] = conn.cursor()
+                from ..platforms.athena import _discover_columns_athena
+                columns = _discover_columns_athena(aws_cursors[database], database, raw_table)
+                if columns:
+                    insert_column_meta(db_path, qname, columns, source=source)
+                    print(f"  {qname}: discovered {len(columns)} columns from Athena")
+                else:
+                    print(f"  {qname}: no columns found in Athena")
+            except Exception as e:
+                print(f"  {qname}: Athena column discovery failed ({e})")
+        elif source in ('sas', 'hadoop', ''):
+            # Placeholder — SAS/Hadoop column discovery not yet implemented
+            print(f"  {qname}: skipped (source={source or 'unknown'}, not yet supported)")
+        else:
+            print(f"  {qname}: skipped (source={source})")
+
+        if columns:
+            tbl_outdir = (outdir_map or {}).get(source, outdir)
+            os.makedirs(tbl_outdir, exist_ok=True)
+            col_csv = os.path.join(tbl_outdir, f"{qname}_columns.csv")
+            with open(col_csv, 'w', newline='') as f:
+                writer = csv_mod.writer(f)
+                writer.writerow(['COLUMN_NAME', 'DATA_TYPE'])
+                for col_name, col_type in sorted(columns.items()):
+                    writer.writerow([col_name, col_type])
+            print(f"  {qname}: wrote {len(columns)} columns to {col_csv}")
+
+    # Clean up connections
+    for conn in oracle_conns.values():
+        try:
+            conn.close()
+        except Exception:
+            pass
+    for cursor in aws_cursors.values():
+        try:
+            cursor.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
