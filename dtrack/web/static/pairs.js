@@ -5,18 +5,16 @@ let editingPairIndex = -1;
 
 // Constants (should match constants.py)
 const DATA_SOURCES = [
-    {value: "pcds", label: "SAS/Oracle"},
+    {value: "oracle", label: "SAS/Oracle"},
     {value: "hadoop", label: "SAS/Hadoop"},
-    {value: "oracle", label: "Oracle Direct"},
     {value: "sas", label: "SAS Dataset"},
     {value: "aws", label: "AWS/Athena"},
     {value: "csv", label: "CSV"},
 ];
 
 const CONNECTION_MACROS = {
-    "pcds": ["pcds", "pb23", "pb30"],
+    "oracle": ["pb23", "pb30"],
     "hadoop": ["hdp", "hadoop_prod"],
-    "oracle": ["pcds", "pb23", "pb30"],
     "sas": ["work", "sasuser"],
     "aws": ["analytics_db", "warehouse_db", "mydb"],
     "csv": [],
@@ -32,13 +30,6 @@ const DATE_COLUMN_TYPES = [
 ];
 
 const VINTAGE_PRESETS = {
-    "pcds": {
-        "day": "{col}",
-        "week": "TRUNC({col}, 'IW')",
-        "month": "TRUNC({col}, 'MM')",
-        "quarter": "TRUNC({col}, 'Q')",
-        "year": "TRUNC({col}, 'YYYY')",
-    },
     "hadoop": {
         "day": "{col}",
         "week": "TRUNC({col}, 'IW')",
@@ -240,7 +231,7 @@ function initSourceDropdowns() {
     });
 
     // Set default selections
-    leftSource.value = 'pcds';
+    leftSource.value = 'oracle';
     rightSource.value = 'aws';
 
     // Initialize connection options
@@ -609,7 +600,7 @@ function clearPairForm() {
     document.getElementById('pair-desc').value = '';
 
     ['left', 'right'].forEach(side => {
-        document.getElementById(`${side}-source`).value = side === 'left' ? 'pcds' : 'aws';
+        document.getElementById(`${side}-source`).value = side === 'left' ? 'oracle' : 'aws';
         document.getElementById(`${side}-conn`).value = '';
         document.getElementById(`${side}-table`).value = '';
         document.getElementById(`${side}-date-col`).value = '';
@@ -766,7 +757,7 @@ function setVintage(side, type) {
     const source = document.getElementById(`${side}-source`).value;
     const dateCol = document.getElementById(`${side}-date-col`).value || 'date_col';
 
-    const templates = VINTAGE_PRESETS[source] || VINTAGE_PRESETS['pcds'];
+    const templates = VINTAGE_PRESETS[source] || VINTAGE_PRESETS['oracle'];
     const template = templates[type];
 
     if (template) {
@@ -974,7 +965,12 @@ async function generateAll() {
         }
     }));
 
-    // --- Step 2: Render two-column review (SAS/Oracle | AWS/Athena) ---
+    // --- Step 2: Detect platforms ---
+    const awsSources = new Set(['aws', 'csv']);
+    const hasSas = selected.some(p => !awsSources.has(p.left?.source) || !awsSources.has(p.right?.source));
+    const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
+
+    // --- Step 3: Render two-column review (SAS/Oracle | AWS/Athena) ---
     const reviewDiv = document.createElement('div');
     reviewDiv.id = 'generate-review';
     reviewDiv.innerHTML = `
@@ -982,8 +978,9 @@ async function generateAll() {
             <div style="font-weight:600; font-size:13px; color:var(--jp-ui-font-color1); border-bottom:1px solid var(--jp-border-color0); padding-bottom:6px;">
                 SAS / Oracle
             </div>
-            <div style="font-weight:600; font-size:13px; color:var(--jp-ui-font-color1); border-bottom:1px solid var(--jp-border-color0); padding-bottom:6px;">
-                AWS / Athena
+            <div style="display:flex; justify-content:space-between; align-items:center; font-weight:600; font-size:13px; color:var(--jp-ui-font-color1); border-bottom:1px solid var(--jp-border-color0); padding-bottom:6px;">
+                <span>AWS / Athena</span>
+                ${hasAws ? `<button class="btn-primary" id="run-aws-btn" style="font-size:11px; padding:3px 10px;">Run AWS Extraction</button>` : ''}
             </div>
         </div>
     `;
@@ -1015,104 +1012,114 @@ async function generateAll() {
     }
     log.appendChild(reviewDiv);
 
-    // --- Step 3: Auto-generate SAS file ---
-    const awsSources = new Set(['aws', 'csv']);
-    const hasSas = selected.some(p => !awsSources.has(p.left?.source) || !awsSources.has(p.right?.source));
-    const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
+    // --- Step 4: Generate SAS + SQL files (no extraction yet) ---
+    logMessage('Generating files...', 'info');
+    try {
+        const genBody = {
+            type: 'row',
+            sas_outdir: document.getElementById('global-sas-outdir')?.value || './sas/',
+            aws_outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
+        };
+        if (globalFrom) genBody.from_date = globalFrom;
+        if (globalTo) genBody.to_date = globalTo;
 
-    if (hasSas) {
-        logMessage('Generating SAS file...', 'info');
-        try {
-            const body = {
-                platform: 'sas',
-                type: 'row',
-                outdir: document.getElementById('global-sas-outdir')?.value || './sas/',
-            };
-            if (globalFrom) body.from_date = globalFrom;
-            if (globalTo) body.to_date = globalTo;
-
-            const resp = await fetch('/api/extract', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(body),
-            });
-            const result = await resp.json();
-            if (result.ok) {
-                if (result.output) {
-                    result.output.trim().split('\n').forEach(line => {
-                        if (line.trim()) logMessage(line, 'info');
-                    });
-                }
-                logMessage('SAS file generated.', 'success');
-            } else {
-                logMessage(`SAS generation error: ${result.error}`, 'error');
+        const resp = await fetch('/api/generate', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(genBody),
+        });
+        const result = await resp.json();
+        if (result.ok) {
+            if (result.output) {
+                result.output.trim().split('\n').forEach(line => {
+                    if (line.trim()) logMessage(line, 'info');
+                });
             }
-        } catch (err) {
-            logMessage(`SAS generation failed: ${err.message}`, 'error');
+            if (result.sas_file) logMessage(`SAS file: ${result.sas_file}`, 'success');
+            if (result.sql_file) logMessage(`SQL file: ${result.sql_file}`, 'success');
+        } else {
+            logMessage(`File generation error: ${result.error}`, 'error');
         }
+    } catch (err) {
+        logMessage(`File generation failed: ${err.message}`, 'error');
     }
 
-    // --- Step 4: Show Run AWS button ---
+    // --- Step 5: Wire up Run AWS button (reads extract_row.sql, streams progress) ---
     if (hasAws) {
-        const btnRow = document.createElement('div');
-        btnRow.style.cssText = 'display:flex; gap:8px; padding:12px 0; border-top:1px solid var(--jp-border-color0); margin-top:8px;';
-        btnRow.innerHTML = `
-            <button class="btn-primary" id="run-aws-btn">Run AWS Extraction</button>
-            <span id="aws-run-status" style="font-size:12px; color:var(--jp-ui-font-color2); align-self:center;"></span>
-        `;
-        log.appendChild(btnRow);
-        log.scrollTop = log.scrollHeight;
-
-        document.getElementById('run-aws-btn').onclick = async () => {
-            const btn = document.getElementById('run-aws-btn');
-            const status = document.getElementById('aws-run-status');
+        const btn = document.getElementById('run-aws-btn');
+        btn.onclick = async () => {
             btn.disabled = true;
             btn.textContent = 'Running...';
-            status.textContent = '';
 
-            logMessage('Running AWS/Athena extraction...', 'info');
+            logMessage('Running AWS extraction from extract_row.sql...', 'info');
             try {
-                const body = {
-                    platform: 'aws',
+                const reqBody = {
                     type: 'row',
                     outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
                 };
-                if (globalFrom) body.from_date = globalFrom;
-                if (globalTo) body.to_date = globalTo;
                 const nj = parseInt(document.getElementById('global-njob-right')?.value);
-                if (nj > 0) body.max_workers = nj;
+                if (nj > 0) reqBody.max_workers = nj;
 
-                const resp = await fetch('/api/extract', {
+                const resp = await fetch('/api/extract/run-sql', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(body),
+                    body: JSON.stringify(reqBody),
                 });
-                const result = await resp.json();
-                if (result.ok) {
-                    if (result.output) {
-                        result.output.trim().split('\n').forEach(line => {
-                            if (line.trim()) logMessage(line, 'info');
-                        });
+
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, {stream: true});
+
+                    // Parse SSE events from buffer
+                    const parts = buffer.split('\n\n');
+                    buffer = parts.pop(); // keep incomplete chunk
+
+                    for (const part of parts) {
+                        let eventType = 'message';
+                        let data = '';
+                        for (const line of part.split('\n')) {
+                            if (line.startsWith('event: ')) eventType = line.slice(7);
+                            else if (line.startsWith('data: ')) data = line.slice(6);
+                        }
+                        if (!data) continue;
+                        const msg = JSON.parse(data);
+
+                        if (eventType === 'progress') {
+                            const status = msg.ok
+                                ? `${msg.rows} dates, ${msg.elapsed}s`
+                                : `FAIL: ${msg.error}`;
+                            logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
+                            btn.textContent = `Running ${msg.done}/${msg.total}...`;
+                        } else if (eventType === 'done') {
+                            if (msg.ok) {
+                                logMessage(`AWS extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
+                                btn.textContent = 'Done';
+                                btn.style.background = 'var(--jp-success-color1)';
+                            } else if (msg.results) {
+                                const failed = msg.results.filter(r => !r.ok);
+                                failed.forEach(r => logMessage(`  FAILED: ${r.name} — ${r.error}`, 'error'));
+                                logMessage(`${msg.succeeded}/${msg.total} succeeded, ${msg.failed} failed`, 'error');
+                                btn.textContent = 'Retry';
+                                btn.disabled = false;
+                            } else {
+                                logMessage(`AWS error: ${msg.error}`, 'error');
+                                btn.textContent = 'Retry';
+                                btn.disabled = false;
+                            }
+                        }
                     }
-                    logMessage('AWS extraction complete.', 'success');
-                    btn.textContent = 'Done';
-                    status.style.color = 'var(--jp-success-color1)';
-                    status.textContent = 'Extraction complete';
-                } else {
-                    logMessage(`AWS error: ${result.error}`, 'error');
-                    btn.textContent = 'Retry AWS Extraction';
-                    btn.disabled = false;
-                    status.style.color = 'var(--jp-error-color1)';
-                    status.textContent = result.error;
                 }
             } catch (err) {
                 logMessage(`AWS request failed: ${err.message}`, 'error');
-                btn.textContent = 'Retry AWS Extraction';
+                btn.textContent = 'Retry';
                 btn.disabled = false;
             }
         };
-    } else {
-        logMessage('Done.', 'success');
     }
 }
 

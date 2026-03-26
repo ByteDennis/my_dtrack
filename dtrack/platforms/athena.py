@@ -218,52 +218,6 @@ def _discover_columns_athena(cursor, database, table):
 
 
 # ---------------------------------------------------------------------------
-# Row extraction
-# ---------------------------------------------------------------------------
-
-def _extract_row_athena(cursor, tbl_cfg, outdir):
-    """Extract row counts from Athena table. Returns (csv_path, elapsed_seconds)."""
-    import time
-    from datetime import datetime
-
-    database = tbl_cfg['conn_macro']
-    table = tbl_cfg['table']
-    date_col = tbl_cfg['date_col']
-    name = tbl_cfg['name']
-    qname = qualified_name(tbl_cfg)
-    where = tbl_cfg.get('where', '')
-
-    raw_full_table = f"{database}.{table}"
-    full_table, cte_prefix = resolve_table(tbl_cfg, raw_full_table)
-    date_expr = date_col
-    where_clause = f"WHERE {where}" if where else ""
-
-    sql = f"""{cte_prefix}
-        SELECT {date_expr} AS date_value, COUNT(*) AS row_count
-        FROM {full_table}
-        {where_clause}
-        GROUP BY {date_expr}
-    """
-
-    start_time = time.time()
-    start_timestamp = datetime.now().isoformat()
-    cursor.execute(sql)
-    rows = cursor.fetchall()
-    elapsed = time.time() - start_time
-    end_timestamp = datetime.now().isoformat()
-
-    csv_path = os.path.join(outdir, f"{qname}_row.csv")
-    with open(csv_path, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['date_value', 'row_count'])
-        for row in rows:
-            writer.writerow([row[0], row[1]])
-
-    print(f"  Row counts: {csv_path} ({len(rows)} dates, {elapsed:.1f}s)")
-    return csv_path, elapsed, start_timestamp, end_timestamp
-
-
-# ---------------------------------------------------------------------------
 # Query helpers
 # ---------------------------------------------------------------------------
 
@@ -585,12 +539,26 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
     if db_path and "col" in types:
         fill_columns_from_meta(aws_tables, db_path)
 
-    aws_creds_renew()
-    conn = athena_connect(data_base=aws_tables[0].get('conn_macro'))
-    cursor = conn.cursor()
-
     # Track timing for all extractions
     timing_records = []
+
+    # --- Row extraction: write SQL file then run it ---
+    if "row" in types:
+        _write_combined_sql(aws_tables, outdir, "row")
+        sql_path = os.path.join(outdir, "extract_row.sql")
+        row_results = run_sql_file(sql_path, outdir, max_workers=max_workers, db_path=db_path)
+        for r in row_results:
+            timing_records.append({
+                'table': r['name'], 'step': 'row',
+                'start': r['start'], 'end': '',
+                'elapsed_sec': r['elapsed'],
+            })
+
+    # --- Col extraction: needs per-column logic, uses cursor directly ---
+    if "col" in types:
+        aws_creds_renew()
+        conn = athena_connect(data_base=aws_tables[0].get('conn_macro'))
+        cursor = conn.cursor()
 
     for tbl_cfg in aws_tables:
         name = tbl_cfg['name']
@@ -598,20 +566,11 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
         table = tbl_cfg['table']
         date_col = tbl_cfg['date_col']
         raw_full_table = f"{database}.{table}"
-        full_table, cte_prefix = resolve_table(tbl_cfg, raw_full_table)
 
-        print(f"\nExtracting: {name} ({raw_full_table})")
+        if "col" not in types:
+            continue
 
-        if "row" in types:
-            aws_creds_renew()
-            csv_path, elapsed, start_ts, end_ts = _extract_row_athena(cursor, tbl_cfg, outdir)
-            timing_records.append({
-                'table': name,
-                'step': 'row',
-                'start': start_ts,
-                'end': end_ts,
-                'elapsed_sec': elapsed,
-            })
+        print(f"\nExtracting columns: {name} ({raw_full_table})")
 
         if "col" in types:
             import time
@@ -834,12 +793,9 @@ FROM FreqTable{p_agg_group}"""
                     'elapsed_sec': col_elapsed,
                 })
 
-    cursor.close()
-    conn.close()
-
-    # Write combined SQL file for all row queries
-    if "row" in types:
-        _write_combined_sql(aws_tables, outdir, "row")
+    if "col" in types:
+        cursor.close()
+        conn.close()
 
     # Export timing log
     if timing_records:
@@ -852,6 +808,162 @@ FROM FreqTable{p_agg_group}"""
         print(f"\nTiming log: {timing_path}")
 
     print(f"\nExtraction complete. Output in: {outdir}")
+
+
+# ---------------------------------------------------------------------------
+# SQL-file-based extraction (parse → run)
+# ---------------------------------------------------------------------------
+
+def parse_sql_file(sql_path):
+    """Parse a combined SQL file into named query blocks.
+
+    Returns list of dicts: [{"name": "aws_cust_daily", "sql": "SELECT ..."}]
+
+    The file format uses '-- {qname}' as block markers.  Everything between
+    two markers (or between a marker and EOF) is one query.  Header lines
+    (starting with '-- dtrack' or '-- Generated') are skipped.
+    """
+    with open(sql_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+
+    blocks = []
+    current_name = None
+    current_lines = []
+
+    for line in text.split('\n'):
+        stripped = line.strip()
+        # Skip header comments
+        if stripped.startswith('-- dtrack') or stripped.startswith('-- Generated'):
+            continue
+        # Block marker: "-- some_name" (single token after --)
+        if stripped.startswith('-- ') and not stripped.startswith('-- ['):
+            marker = stripped[3:].strip()
+            # Only treat as a block marker if it looks like a qname (no spaces)
+            if marker and ' ' not in marker:
+                # Save previous block
+                if current_name is not None:
+                    sql = '\n'.join(current_lines).strip().rstrip(';').strip()
+                    if sql:
+                        blocks.append({"name": current_name, "sql": sql})
+                current_name = marker
+                current_lines = []
+                continue
+        current_lines.append(line)
+
+    # Save last block
+    if current_name is not None:
+        sql = '\n'.join(current_lines).strip().rstrip(';').strip()
+        if sql:
+            blocks.append({"name": current_name, "sql": sql})
+
+    return blocks
+
+
+def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=None):
+    """Read extract_row.sql, parse into blocks, and execute each via Athena.
+
+    Writes per-table CSVs: {outdir}/{qname}_row.csv
+    Supports parallel execution via ThreadPoolExecutor.
+
+    Args:
+        on_progress: Optional callback(result_dict) called after each query
+                     completes. Useful for streaming progress to web/terminal.
+
+    Returns list of result dicts with timing info.
+    """
+    import sys
+    import time
+    from datetime import datetime
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    blocks = parse_sql_file(sql_path)
+    if not blocks:
+        print(f"No query blocks found in {sql_path}")
+        return []
+
+    os.makedirs(outdir, exist_ok=True)
+    _max_workers = max_workers or int(os.environ.get('MAX_WORKERS', '4'))
+
+    msg = f"  Parsed {len(blocks)} queries from {sql_path}, workers={_max_workers}"
+    print(msg, file=sys.stderr)
+
+    results = []
+    _done_count = [0]  # mutable counter for threads
+
+    def _run_block(block):
+        qname = block['name']
+        sql = block['sql']
+        start_time = time.time()
+        start_ts = datetime.now().isoformat()
+
+        try:
+            aws_creds_renew()
+            conn = athena_connect()
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            elapsed = time.time() - start_time
+
+            csv_path = os.path.join(outdir, f"{qname}_row.csv")
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['date_value', 'row_count'])
+                for row in rows:
+                    writer.writerow([row[0], row[1]])
+
+            result = {"name": qname, "ok": True, "rows": len(rows),
+                      "elapsed": round(elapsed, 1), "start": start_ts,
+                      "csv_path": csv_path}
+        except Exception as e:
+            elapsed = time.time() - start_time
+            result = {"name": qname, "ok": False, "error": str(e),
+                      "elapsed": round(elapsed, 1), "start": start_ts}
+
+        _done_count[0] += 1
+        n = _done_count[0]
+        total = len(blocks)
+        status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
+        msg = f"  [{n}/{total}] {qname}: {status} ({elapsed:.1f}s)"
+        print(msg, file=sys.stderr)
+
+        if on_progress:
+            result["done"] = n
+            result["total"] = total
+            on_progress(result)
+
+        return result
+
+    if _max_workers <= 1:
+        for block in blocks:
+            results.append(_run_block(block))
+    else:
+        with ThreadPoolExecutor(max_workers=_max_workers) as pool:
+            futures = {pool.submit(_run_block, b): b for b in blocks}
+            for fut in as_completed(futures):
+                results.append(fut.result())
+
+    results.sort(key=lambda r: r['name'])
+
+    # Write timing log
+    timing_path = os.path.join(outdir, '_timing.csv')
+    with open(timing_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['table', 'step', 'start', 'elapsed_sec', 'status'])
+        writer.writeheader()
+        for r in results:
+            writer.writerow({
+                'table': r['name'], 'step': 'row', 'start': r['start'],
+                'elapsed_sec': r['elapsed'],
+                'status': 'ok' if r['ok'] else r.get('error', 'failed'),
+            })
+    print(f"\nTiming: {timing_path}")
+
+    ok_count = sum(1 for r in results if r['ok'])
+    fail_count = len(results) - ok_count
+    print(f"Done: {ok_count} succeeded, {fail_count} failed")
+
+    return results
 
 
 # ---------------------------------------------------------------------------

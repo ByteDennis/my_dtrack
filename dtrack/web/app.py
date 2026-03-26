@@ -27,9 +27,16 @@ templates = Jinja2Templates(directory=_dir / "templates")
 
 # These are set by serve() before uvicorn.run()
 _db_path: str = ""
+_db_dir: str = ""  # directory containing the database — all relative paths resolve from here
 _config_path: str = ""
 _original_config_path: str = ""  # saved when switching to testing mode
 _testing_mode: bool = False
+
+
+def _resolve(rel_path: str) -> str:
+    """Resolve a path relative to the database directory."""
+    p = os.path.join(_db_dir, rel_path)
+    return os.path.normpath(p)
 
 
 def _cfg():
@@ -129,7 +136,7 @@ async def api_extract(request: Request):
     extract_type = body.get("type", "row")  # "row" or "col"
     from_date = body.get("from_date")
     to_date = body.get("to_date")
-    outdir = body.get("outdir", "./csv/" if platform == "aws" else "./sas/")
+    outdir = _resolve(body.get("outdir", "./csv/" if platform == "aws" else "./sas/"))
     max_workers = body.get("max_workers")
 
     buf = io.StringIO()
@@ -151,12 +158,158 @@ async def api_extract(request: Request):
         })
 
 
+@app.post("/api/extract/run-sql")
+async def api_run_sql_file(request: Request):
+    """Execute queries from extract_row.sql via Athena.
+
+    Streams progress as Server-Sent Events (SSE).  Each completed query
+    emits a 'progress' event; the final message is a 'done' event with
+    summary.  Progress also prints to the terminal (stderr).
+
+    Body: {outdir, max_workers, type}
+    """
+    import queue
+    import threading
+
+    body = await request.json()
+    extract_type = body.get("type", "row")
+    outdir = _resolve(body.get("outdir", "./csv/"))
+    max_workers = body.get("max_workers")
+
+    sql_path = os.path.join(outdir, f"extract_{extract_type}.sql")
+    if not os.path.exists(sql_path):
+        return JSONResponse(status_code=404, content={
+            "ok": False, "error": f"SQL file not found: {sql_path}"
+        })
+
+    progress_q = queue.Queue()
+
+    def _on_progress(result):
+        progress_q.put(result)
+
+    def _run():
+        try:
+            from ..platforms.athena import run_sql_file
+            results = run_sql_file(
+                sql_path, outdir,
+                max_workers=int(max_workers) if max_workers else None,
+                db_path=_db_path,
+                on_progress=_on_progress,
+            )
+            ok_count = sum(1 for r in results if r.get("ok"))
+            fail_count = len(results) - ok_count
+            progress_q.put({"_done": True, "ok": fail_count == 0,
+                            "results": results, "total": len(results),
+                            "succeeded": ok_count, "failed": fail_count})
+        except Exception as e:
+            progress_q.put({"_done": True, "ok": False, "error": str(e)})
+
+    async def _stream():
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        while True:
+            # Poll the queue (non-blocking in async context)
+            import asyncio
+            try:
+                msg = progress_q.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.2)
+                continue
+
+            if msg.get("_done"):
+                msg.pop("_done")
+                yield f"event: done\ndata: {json.dumps(msg)}\n\n"
+                break
+            else:
+                yield f"event: progress\ndata: {json.dumps(msg)}\n\n"
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/generate")
+async def api_generate_files(request: Request):
+    """Generate SAS and SQL files without running extraction.
+
+    Writes extract_row.sas (for Oracle/SAS tables) and extract_row.sql
+    (for AWS tables) to their respective output directories.
+    """
+    body = await request.json()
+    extract_type = body.get("type", "row")
+    from_date = body.get("from_date")
+    to_date = body.get("to_date")
+    sas_outdir = _resolve(body.get("sas_outdir", "./sas/"))
+    aws_outdir = _resolve(body.get("aws_outdir", "./csv/"))
+
+    buf = io.StringIO()
+    results = {"sas_file": None, "sql_file": None}
+
+    try:
+        with redirect_stdout(buf), redirect_stderr(buf):
+            from ..config import load_unified_config
+            from ..platforms.oracle import load_tables_from_config, inject_where_from_config
+
+            config = load_unified_config(_config_path)
+            all_tables = load_tables_from_config(config)
+            inject_where_from_config(all_tables, config)
+
+            # Inject date bounds
+            if from_date or to_date:
+                for tbl in all_tables:
+                    date_col = tbl.get('date_col', '')
+                    if not date_col:
+                        continue
+                    date_type = (tbl.get('date_type') or '').lower()
+                    source = tbl.get('source', '').lower()
+                    bounds = []
+                    if source == 'aws':
+                        from ..platforms.athena import _format_athena_date_bound
+                        if from_date:
+                            bounds.append(f"{date_col} >= {_format_athena_date_bound(from_date, date_type)}")
+                        if to_date:
+                            bounds.append(f"{date_col} <= {_format_athena_date_bound(to_date, date_type)}")
+                    else:
+                        from ..platforms.oracle import _format_date_bound, is_sas_table
+                        is_sas = is_sas_table(tbl)
+                        if from_date:
+                            bounds.append(f"{date_col} >= {_format_date_bound(from_date, date_type, is_sas)}")
+                        if to_date:
+                            bounds.append(f"{date_col} <= {_format_date_bound(to_date, date_type, is_sas)}")
+                    if bounds:
+                        extra = " AND ".join(bounds)
+                        existing = tbl.get('where', '').strip()
+                        tbl['where'] = f"({existing}) AND {extra}" if existing else extra
+
+            # Generate SAS file
+            oracle_tables = [t for t in all_tables
+                             if t.get('source', '').lower() in ('oracle', 'sas', 'hadoop')]
+            if oracle_tables:
+                from ..platforms.oracle import gen_sas
+                gen_sas(_config_path, sas_outdir, types=[extract_type],
+                        db_path=_db_path, from_date=from_date, to_date=to_date)
+                results["sas_file"] = os.path.join(sas_outdir, f"extract_{extract_type}.sas")
+
+            # Generate SQL file
+            aws_tables = [t for t in all_tables
+                          if t.get('source', '').lower() == 'aws']
+            if aws_tables:
+                from ..platforms.athena import _write_combined_sql
+                os.makedirs(aws_outdir, exist_ok=True)
+                _write_combined_sql(aws_tables, aws_outdir, extract_type)
+                results["sql_file"] = os.path.join(aws_outdir, f"extract_{extract_type}.sql")
+
+        return {"ok": True, "output": buf.getvalue(), **results}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "ok": False, "error": str(e), "output": buf.getvalue()
+        })
+
+
 @app.post("/api/load")
 async def api_load(request: Request):
     """Run load-row or load-col."""
     body = await request.json()
     load_type = body.get("type", "row")  # "row" or "col"
-    folder = body.get("folder", "./csv/")
+    folder = _resolve(body.get("folder", "./csv/"))
 
     buf = io.StringIO()
     try:
@@ -298,7 +451,7 @@ async def api_query(request: Request):
 @app.get("/api/report/{report_type}")
 async def api_report(report_type: str):
     """Serve generated HTML report."""
-    output_dir = os.path.join(os.getcwd(), "output")
+    output_dir = _resolve("output")
     filename = f"compare_{report_type}.html"
     path = os.path.join(output_dir, filename)
     if os.path.exists(path):
@@ -498,10 +651,9 @@ async def api_update_pair(pair_name: str, request: Request):
 async def api_scan_csv(dir: str = "./output/", type: str = "row"):
     """Scan directory for CSV files."""
     try:
-        import glob
         from pathlib import Path
 
-        dir_path = Path(dir)
+        dir_path = Path(_resolve(dir))
         if not dir_path.exists():
             return {"files": []}
 
@@ -604,7 +756,7 @@ async def api_load_row_upload(
 
     Accepts multipart form data with:
       - file: the CSV file
-      - table_name: target table name (e.g. 'pcds_cust_daily')
+      - table_name: target table name (e.g. 'oracle_cust_daily')
       - mode: 'upsert' (default) or 'replace'
     """
     import tempfile
@@ -691,6 +843,8 @@ async def api_load_row_path(request: Request):
     """
     body = await request.json()
     csv_path = body.get("path", "")
+    if csv_path and not os.path.isabs(csv_path):
+        csv_path = _resolve(csv_path)
     table_name = body.get("table_name", "")
     mode = body.get("mode", "upsert")
 
@@ -763,7 +917,7 @@ async def api_load_row_path(request: Request):
 async def api_scan_folder(dir: str = "./csv/"):
     """Scan a server-side folder for CSV files and return file info."""
     try:
-        dir_path = Path(dir)
+        dir_path = Path(_resolve(dir))
         if not dir_path.exists():
             return JSONResponse(status_code=404, content={
                 "error": f"Folder not found: {dir}"
@@ -1253,7 +1407,7 @@ async def api_add_pair(request: Request):
 
     Body: {
         "pair_name": "cust_daily",
-        "left": {"source": "pcds", "table": "CUST_DAILY", "conn_macro": "pcds", "date_col": "RPT_DT"},
+        "left": {"source": "oracle", "table": "CUST_DAILY", "conn_macro": "pb23", "date_col": "RPT_DT"},
         "right": {"source": "aws", "table": "cust_daily", "conn_macro": "mydb", "date_col": "rpt_dt"},
         "col_map": {}
     }
@@ -1499,7 +1653,7 @@ def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
     table = cfg.get("table", "")
     conn_macro = cfg.get("conn_macro", "")
 
-    is_oracle = source in ("pcds", "oracle")
+    is_oracle = source == "oracle"
     is_sas = source == "sas"
     is_aws = source == "aws"
 
@@ -1524,7 +1678,7 @@ def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
             query_table = alias
         else:
             query_table = f"{conn_macro}.{table}" if conn_macro else table
-    else:  # oracle/pcds
+    else:  # oracle
         if processed:
             alias = cfg.get("name", f"{pair_name}_{side}")
             cte_prefix = f"WITH {alias} AS ({processed}) "
@@ -1605,7 +1759,7 @@ def _preview_select_expr(date_col, date_type, source):
     """Build the date expression for SELECT/GROUP BY (bucketing to day level)."""
     dtype = date_type.lower() if date_type else ""
 
-    if source in ("pcds", "oracle"):
+    if source == "oracle":
         if dtype == "timestamp":
             return f"TRUNC({date_col})"
         return date_col
@@ -1651,7 +1805,7 @@ def _preview_date_literal(date_str, date_type, is_sas=False, source=""):
             return f"'{date_str}'"
 
     # Oracle/Athena timestamp: use TIMESTAMP literal
-    if dtype == "timestamp" and source in ("pcds", "oracle"):
+    if dtype == "timestamp" and source == "oracle":
         return f"TIMESTAMP '{date_str} 00:00:00'"
     if dtype in ("timestamp", "datetime") and source == "aws":
         return f"TIMESTAMP '{date_str} 00:00:00'"
@@ -1877,14 +2031,16 @@ async def api_testing_toggle(request: Request):
 
 def serve(db_path: str, config_path: str, port: int = 8080, host: str = "0.0.0.0"):
     """Start the dtrack web server."""
-    global _db_path, _config_path, _original_config_path
+    global _db_path, _db_dir, _config_path, _original_config_path
     _db_path = os.path.abspath(db_path)
+    _db_dir = os.path.dirname(_db_path)
     _config_path = os.path.abspath(config_path)
     _original_config_path = _config_path
 
     import uvicorn
     print(f"dtrack web UI")
-    print(f"  Database: {_db_path}")
-    print(f"  Config:   {_config_path}")
-    print(f"  URL:      http://localhost:{port}")
+    print(f"  Database:  {_db_path}")
+    print(f"  Config:    {_config_path}")
+    print(f"  Base dir:  {_db_dir}")
+    print(f"  URL:       http://localhost:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")

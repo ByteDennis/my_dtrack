@@ -28,6 +28,7 @@ function navigateToStep(step) {
 
 async function loadKnownTables() {
     try {
+        // Primary: DB-registered pairs (have qualified table names)
         const resp = await fetch('/api/status');
         const data = await resp.json();
         knownTables = (data.pairs || []).map(p => ({
@@ -37,6 +38,25 @@ async function loadKnownTables() {
             source_left: p.source_left || '',
             source_right: p.source_right || '',
         }));
+
+        // Fallback: also load from config (pairs may not be in DB yet)
+        const cfgResp = await fetch('/api/pairs/list');
+        const cfgData = await cfgResp.json();
+        const existing = new Set(knownTables.map(t => t.pair_name));
+        for (const p of (cfgData.pairs || [])) {
+            if (existing.has(p.name)) continue;
+            const leftName = (p.left?.name || p.left?.table || '').toLowerCase();
+            const rightName = (p.right?.name || p.right?.table || '').toLowerCase();
+            const leftSource = p.left?.source || '';
+            const rightSource = p.right?.source || '';
+            knownTables.push({
+                pair_name: p.name,
+                table_left: leftSource ? `${leftSource}_${leftName}` : leftName,
+                table_right: rightSource ? `${rightSource}_${rightName}` : rightName,
+                source_left: leftSource,
+                source_right: rightSource,
+            });
+        }
     } catch (e) {
         console.error('Failed to load tables:', e);
     }

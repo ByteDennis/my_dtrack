@@ -16,7 +16,7 @@ libname cache "{sas_cache_dir}";
 
 /* pull_data macro (REDO=1 default = always re-pull)
    user=/pwd= override credentials (e.g. temp access account) */
-%MACRO pull_data(SQL_QUERY, SQL_TBL, REDO=1, server=pcds, user=, pwd=);
+%MACRO pull_data(SQL_QUERY, SQL_TBL, REDO=1, server=pb23, user=, pwd=);
   %IF %SYSFUNC(exist(&SQL_TBL.)) AND %eval(&REDO = 0) %THEN %DO;
     %PUT WARNING: &SQL_TBL. already exists, skip;
   %END;

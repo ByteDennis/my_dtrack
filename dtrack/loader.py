@@ -139,7 +139,7 @@ def load_row_counts(
         table_name: Name of the table to create/update
         mode: Load mode (replace, append, upsert)
         vintage: Time granularity
-        source: Data source identifier (aws, pcds, oracle)
+        source: Data source identifier (aws, oracle, sas)
         db_name: Database or service name
         source_table: Original table name
         date_col: Date column name for CSV parsing (auto-detected if None)

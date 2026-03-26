@@ -34,7 +34,7 @@ def generate_row_count_html(
 
     Args:
         pair_name: Name of the table pair
-        source_left: Left source label (e.g., "pcds", "oracle")
+        source_left: Left source label (e.g., "oracle", "aws")
         source_right: Right source label (e.g., "aws")
         table_left: Left table name
         table_right: Right table name

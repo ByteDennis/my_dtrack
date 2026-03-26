@@ -8,7 +8,6 @@ from .athena import AthenaBuilder
 
 _REGISTRY = {
     'oracle': OracleBuilder,
-    'pcds': OracleBuilder,
     'sas': SASBuilder,
     'athena': AthenaBuilder,
     'aws': AthenaBuilder,
@@ -27,7 +26,7 @@ def detect_platform(tbl_cfg):
     source = tbl_cfg.get('source', '').lower()
     if source == 'sas':
         return 'sas'
-    if source in ('pcds', 'oracle'):
+    if source == 'oracle':
         return 'oracle'
     if source == 'aws':
         return 'athena'

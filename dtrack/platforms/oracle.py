@@ -237,7 +237,7 @@ def _gen_sas_proc_contents(sas_tables, out_dir='.'):
         replacements = {
             '/*{SN}*/': sas_safe_name(tbl_cfg['name']),
             '/*{QNAME}*/': qualified_name(tbl_cfg),
-            '/*{SOURCE}*/': tbl_cfg.get('source', 'pcds'),
+            '/*{SOURCE}*/': tbl_cfg.get('source', 'oracle'),
             '/*{TABLE}*/': tbl_cfg['name'],
             '/*{SAS_DATASET}*/': sas_dataset,
         }
@@ -249,7 +249,7 @@ def _gen_sas_proc_contents(sas_tables, out_dir='.'):
     return '\n'.join(blocks)
 
 
-def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
+def _gen_sas_row_datadriven(oracle_tables, sas_lib='WORK', out_dir='.'):
     """Generate data-driven SAS row extraction using template files.
 
     Builds mapping datasets and reusable macros for two modes:
@@ -259,13 +259,14 @@ def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
     oracle_datalines = []
     sas_datalines = []
 
-    for idx, tbl_cfg in enumerate(pcds_tables, 1):
+    for idx, tbl_cfg in enumerate(oracle_tables, 1):
         table = tbl_cfg['table']
         date_col = tbl_cfg['date_col']
         name = tbl_cfg['name']
         qname = qualified_name(tbl_cfg)
-        conn_macro = tbl_cfg.get('conn_macro', 'pcds')
+        conn_macro = tbl_cfg.get('conn_macro', 'pb23')
         raw_where = tbl_cfg.get('where', '')
+        date_bounds = tbl_cfg.get('_date_bounds', '')
         transform = tbl_cfg.get('date_transform', '')
         processed = tbl_cfg.get('processed')
         if isinstance(processed, list):
@@ -276,10 +277,17 @@ def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
         if is_sas_table(tbl_cfg):
             sas_table = f"{conn_macro}.{table}"
             where = _oracle_where_to_sas(raw_where, quote=False)
+            # Append date bounds (already in SAS literal format, no quoting needed)
+            if date_bounds:
+                where = f"({where}) AND {date_bounds}" if where else date_bounds
             date_expr = _sas_date_transform(date_col, transform) if transform else date_col
             sas_datalines.append(f"{sas_table}|{safe_ds}|{qname}|{date_expr}|{where}")
         else:
+            # SAS-quote user WHERE (doubles single quotes for SAS macro),
+            # then append date bounds raw (they use Oracle SQL syntax, not SAS)
             where = _sas_quote(raw_where)
+            if date_bounds:
+                where = f"({where}) AND {date_bounds}" if where else date_bounds
             date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
             if processed:
                 table = name
@@ -287,7 +295,7 @@ def _gen_sas_row_datadriven(pcds_tables, sas_lib='WORK', out_dir='.'):
 
     # CTE %let statements for Oracle processed tables (not SAS)
     cte_lines = []
-    for idx, tbl_cfg in enumerate(pcds_tables, 1):
+    for idx, tbl_cfg in enumerate(oracle_tables, 1):
         if is_sas_table(tbl_cfg):
             continue
         processed = tbl_cfg.get('processed')
@@ -336,9 +344,12 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     date_col = tbl_cfg['date_col']
     columns = tbl_cfg.get('columns', {})
     where = tbl_cfg.get('where', '')
+    date_bounds = tbl_cfg.get('_date_bounds', '')
+    if date_bounds:
+        where = f"({where}) AND {date_bounds}" if where else date_bounds
     transform = tbl_cfg.get('date_transform', '')
     vintage = tbl_cfg.get('vintage', 'all')
-    conn_macro = tbl_cfg.get('conn_macro', 'pcds')
+    conn_macro = tbl_cfg.get('conn_macro', 'pb23')
     user_override = tbl_cfg.get('user', '')
     redo = int(os.environ.get('SAS_COL_REDO', '0'))
 
@@ -515,7 +526,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         config_path: Path to extraction config JSON (supports both old and unified formats)
         outdir: Directory to write the combined .sas file
         types: List of types to generate ("row", "col"). Default: both.
-        env_path: Path to .env file with pcds_usr, pcds_pw, email_to, lib_path
+        env_path: Path to .env file with oracle_usr, oracle_pw, email_to, lib_path
         db_path: Path to database for column metadata and where_map filtering
         vintage: Date bucketing granularity (day, week, month, quarter, year)
         from_date: Start date for incremental extraction (YYYY-MM-DD)
@@ -532,7 +543,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     all_tables = load_tables_from_config(config)
     inject_where_from_config(all_tables, config)
 
-    # Inject --from-date / --to-date bounds into WHERE clauses
+    # Build date bounds per table (stored separately to avoid SAS quote mangling)
     if from_date or to_date:
         for tbl in all_tables:
             date_col = tbl.get('date_col', '')
@@ -547,14 +558,13 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             if to_date:
                 lit = _format_date_bound(to_date, date_type, is_sas_src)
                 bounds.append(f"{date_col} <= {lit}")
-            extra = " AND ".join(bounds)
-            existing = tbl.get('where', '').strip()
-            tbl['where'] = f"({existing}) AND {extra}" if existing else extra
+            if bounds:
+                tbl['_date_bounds'] = " AND ".join(bounds)
 
-    pcds_tables = [t for t in all_tables if t.get('source', '').lower() in ('pcds', 'oracle', 'sas')]
+    oracle_tables = [t for t in all_tables if t.get('source', '').lower() in ('oracle', 'sas')]
 
-    if not pcds_tables:
-        print("No PCDS/Oracle tables found in config")
+    if not oracle_tables:
+        print("No Oracle/SAS tables found in config")
         return
 
     # Check for mock mode — still generate SAS files but also copy mock CSVs
@@ -573,8 +583,8 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 
     # Connection macro passwords (e.g., PCDS_PWD, PB23_PWD, PB30_PWD)
     # SAS-source tables don't need Oracle credentials
-    oracle_tables = [t for t in pcds_tables if not is_sas_table(t)]
-    conn_macros = set(t.get('conn_macro', 'pcds') for t in oracle_tables)
+    oracle_tables = [t for t in oracle_tables if not is_sas_table(t)]
+    conn_macros = set(t.get('conn_macro', 'pb23') for t in oracle_tables)
     for conn_macro in conn_macros:
         pwd_key = f"{conn_macro.upper()}_PWD"
         if pwd_key in env_src:
@@ -586,7 +596,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             raise KeyError(f"{pwd_key} not found in config or environment")
 
     # User override credentials (e.g., TMP_USR, TMP_PWD)
-    for user_key in set(t.get('user', '') for t in pcds_tables if t.get('user')):
+    for user_key in set(t.get('user', '') for t in oracle_tables if t.get('user')):
         for suffix in ('_USR', '_PWD'):
             k = f"{user_key.upper()}{suffix}"
             if k in env_src:
@@ -602,8 +612,8 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         template = f.read()
 
     if db_path and "col" in types:
-        fill_columns_from_meta(pcds_tables, db_path)
-    for tbl in pcds_tables:
+        fill_columns_from_meta(oracle_tables, db_path)
+    for tbl in oracle_tables:
         if vintage:
             tbl['vintage'] = vintage
         elif 'vintage' not in tbl:
@@ -617,7 +627,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 
     # Emit proc contents for $ (SAS dataset) tables to export column metadata CSVs
     sas_dataset_tables = [
-        t for t in pcds_tables
+        t for t in oracle_tables
         if is_sas_table(t)
     ]
     if sas_dataset_tables:
@@ -626,10 +636,10 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     if "row" in types:
         # Data-driven row extraction (single block for all tables)
         macro_parts.append("/* --- Row extraction (data-driven) --- */")
-        macro_parts.append(_gen_sas_row_datadriven(pcds_tables, sas_lib, out_dir))
+        macro_parts.append(_gen_sas_row_datadriven(oracle_tables, sas_lib, out_dir))
 
     if "col" in types:
-        for tbl in pcds_tables:
+        for tbl in oracle_tables:
             name = tbl['name']
             macro_parts.append(f"/* --- {name}: {tbl['table']} (col) --- */")
             macro_parts.append(_gen_sas_col_local(tbl, db_path, sas_lib, out_dir))
@@ -644,7 +654,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         runner_parts.append("")
 
     if "col" in types:
-        for tbl in pcds_tables:
+        for tbl in oracle_tables:
             name = tbl['name']
             sn = sas_safe_name(name)
             runner_parts.append(f"%start_timer();")
@@ -690,7 +700,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         )
 
     # Build user credential %let statements for override accounts
-    user_overrides = set(t.get('user', '') for t in pcds_tables if t.get('user'))
+    user_overrides = set(t.get('user', '') for t in oracle_tables if t.get('user'))
     cred_lines = []
     for user_key in sorted(user_overrides):
         usr_var = f"{user_key.upper()}_USR"
@@ -724,7 +734,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         f.write(sas_content)
 
     print(f"  Generated: {sas_path}")
-    print(f"  Tables: {len(pcds_tables)}")
+    print(f"  Tables: {len(oracle_tables)}")
     print(f"  Types: {', '.join(types)}")
     if env_path:
         print(f"  Credentials: from {env_path}")
@@ -745,7 +755,7 @@ def _extract_mock(config_path, outdir, types, db_path, mock_dir, source_filter):
     where qname = {source}_{name} (from qualified_name()).
 
     Args:
-        source_filter: Source type(s) to filter, e.g. ('pcds', 'oracle') or ('aws',)
+        source_filter: Source type(s) to filter, e.g. ('oracle', 'sas') or ('aws',)
     """
     import shutil
 
@@ -789,7 +799,7 @@ def get_mock_dir():
 
 
 def _extract_oracle_mock(config_path, outdir, types, db_path, mock_dir):
-    return _extract_mock(config_path, outdir, types, db_path, mock_dir, ('pcds', 'oracle', 'sas'))
+    return _extract_mock(config_path, outdir, types, db_path, mock_dir, ('oracle', 'sas'))
 
 
 def _extract_mock_tables(tables, outdir, types, mock_dir):

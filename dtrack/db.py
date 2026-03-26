@@ -795,7 +795,7 @@ def insert_column_meta(
         db_path: Path to SQLite database file
         source_table: Table name these columns belong to
         columns: Dictionary mapping column names to data types
-        source: Source identifier (e.g., 'pcds', 'aws')
+        source: Source identifier (e.g., 'oracle', 'aws')
 
     Returns:
         Number of columns inserted/updated
@@ -859,7 +859,6 @@ def get_column_meta(db_path: str, source_table: str) -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 MACRO2SVC = {
-    "pcds": "pcds_svc",
     "pb23": "pcbs_mkt_comnn",
     "pb30": "pcbs_mkt_comnn_30",
 }

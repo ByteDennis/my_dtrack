@@ -2,9 +2,8 @@
 
 # Data source types
 DATA_SOURCES = [
-    {"value": "pcds", "label": "SAS/Oracle"},
+    {"value": "oracle", "label": "SAS/Oracle"},
     {"value": "hadoop", "label": "SAS/Hadoop"},
-    {"value": "oracle", "label": "Oracle Direct"},
     {"value": "sas", "label": "SAS Dataset"},
     {"value": "aws", "label": "AWS/Athena"},
     {"value": "csv", "label": "CSV"},
@@ -28,14 +27,6 @@ DATE_COLUMN_TYPES = [
 # - Lower bound (>=): Use date at 00:00:00
 # - Upper bound (<): Use NEXT day at 00:00:00 (exclusive) to capture all records including 23:59:59.999
 DATE_LITERAL_FORMATS = {
-    "pcds": {
-        "date": {"from": "DATE '{value}'", "to": "DATE '{value}'"},
-        "timestamp": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value_next} 00:00:00'"},  # to uses NEXT day
-        "datetime": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value_next} 00:00:00'"},  # to uses NEXT day
-        "num": {"from": "{sas_num}", "to": "{sas_num}"},
-        "string_dash": {"from": "'{value}'", "to": "'{value}'"},
-        "string_compact": {"from": "'{value_compact}'", "to": "'{value_compact}'"},
-    },
     "hadoop": {
         "date": {"from": "DATE '{value}'", "to": "DATE '{value}'"},
         "timestamp": {"from": "TIMESTAMP '{value} 00:00:00'", "to": "TIMESTAMP '{value_next} 00:00:00'"},
@@ -84,9 +75,8 @@ DATE_UPPER_BOUND_OPERATORS = {
 
 # Connection macros by source type
 CONNECTION_MACROS = {
-    "pcds": ["pcds", "pb23", "pb30"],
+    "oracle": ["pb23", "pb30"],
     "hadoop": ["hdp", "hadoop_prod"],
-    "oracle": ["pcds", "pb23", "pb30"],
     "sas": ["work", "sasuser"],
     "aws": ["analytics_db", "warehouse_db", "mydb"],
     "csv": [],
@@ -94,13 +84,6 @@ CONNECTION_MACROS = {
 
 # Vintage presets for different platforms
 VINTAGE_PRESETS = {
-    "pcds": {
-        "day": "{col}",
-        "week": "TRUNC({col}, 'IW')",
-        "month": "TRUNC({col}, 'MM')",
-        "quarter": "TRUNC({col}, 'Q')",
-        "year": "TRUNC({col}, 'YYYY')",
-    },
     "hadoop": {
         "day": "{col}",
         "week": "TRUNC({col}, 'IW')",
