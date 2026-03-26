@@ -510,6 +510,7 @@ def cmd_compare_row(args):
                 where_map=wm, time_map=time_map,
                 comment_left=cm.get('left', ''), comment_right=cm.get('right', ''),
                 left_cfg=pair_cfg.get('left'), right_cfg=pair_cfg.get('right'),
+                description=pair_cfg.get('description', ''),
             )
             row_sections.append(section)
         gm = config.get('metadata', {})

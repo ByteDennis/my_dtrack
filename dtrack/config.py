@@ -15,8 +15,6 @@ def validate_unified_pair(pair_name, pair_config):
         tbl = pair_config[side]
         if not isinstance(tbl, dict):
             raise ValueError(f"Pair '{pair_name}': '{side}' must be a dictionary")
-        if "name" not in tbl:
-            raise ValueError(f"Pair '{pair_name}': {side} table must have 'name' field")
         if "source" not in tbl:
             raise ValueError(f"Pair '{pair_name}': {side} table must have 'source' field")
 
@@ -49,7 +47,10 @@ def validate_unified_config(config):
 
 
 def load_unified_config(config_path):
-    """Load unified configuration from JSON file."""
+    """Load unified configuration from JSON file.
+
+    Auto-injects 'name' = pair_name into left/right if not set.
+    """
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
@@ -58,14 +59,30 @@ def load_unified_config(config_path):
         config = json.load(f)
 
     validate_unified_config(config)
+
+    # Auto-derive name from pair_name
+    for pair_name, pair_cfg in config.get("pairs", {}).items():
+        for side in ("left", "right"):
+            side_cfg = pair_cfg.get(side, {})
+            if "name" not in side_cfg:
+                side_cfg["name"] = pair_name
+
     return config
 
 
 def save_unified_config(config, config_path):
-    """Save unified configuration to JSON file."""
-    validate_unified_config(config)
+    """Save unified configuration to JSON file.
+
+    Strips 'name' from left/right since it's auto-derived from pair_name on load.
+    """
+    import copy
+    out = copy.deepcopy(config)
+    for pair_cfg in out.get("pairs", {}).values():
+        for side in ("left", "right"):
+            pair_cfg.get(side, {}).pop("name", None)
+    validate_unified_config(out)
     with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
+        json.dump(out, f, indent=2)
 
 
 def get_all_tables_from_unified(config):

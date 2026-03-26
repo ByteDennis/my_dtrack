@@ -214,7 +214,7 @@ def _resolve_table_and_cte(tbl_cfg):
 
     processed = tbl_cfg.get('processed')
     if isinstance(processed, list):
-        processed = " ".join(processed)
+        processed = "\n".join(processed)
 
     if processed:
         alias = tbl_cfg['name']
@@ -712,6 +712,11 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             sn = sas_safe_name(name)
             runner_parts.append(f"%start_timer();")
             runner_parts.append(f"%get_colstats_{sn}();")
+            # Reset after each table so errors don't block the next one
+            runner_parts.append(f"%if &SYSERR > 4 %then %do;")
+            runner_parts.append(f"    %put ERROR: [{name}] Col extraction failed (SYSERR=&SYSERR) - continuing;")
+            runner_parts.append(f"    options obs=max nosyntaxcheck;")
+            runner_parts.append(f"%end;")
             runner_parts.append(f"%log_time(table={name}, step=col, outpath=&out_dir.);")
             qname = qualified_name(tbl)
             runner_parts.append(

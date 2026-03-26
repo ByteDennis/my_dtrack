@@ -463,6 +463,169 @@ GROUP BY {date_col};"""
 
 
 # ---------------------------------------------------------------------------
+# Per-table column extraction helper
+# ---------------------------------------------------------------------------
+
+def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vintage=None):
+    """Extract column stats for one AWS table -> {qname}_col.csv.
+
+    Returns a timing dict on success, or None if skipped.
+    """
+    import time
+    from datetime import datetime
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    name = tbl_cfg['name']
+    database = tbl_cfg['conn_macro']
+    table = tbl_cfg['table']
+    date_col = tbl_cfg['date_col']
+    raw_full_table = f"{database}.{table}"
+    full_table, cte_prefix = resolve_table(tbl_cfg, raw_full_table)
+
+    print(f"\nExtracting columns: {name} ({raw_full_table})")
+
+    columns = tbl_cfg.get('columns', {})
+    if not columns:
+        print(f"  WARNING: No columns specified for {name}. "
+              f"Use 'dtrack load-columns --source aws' or provide columns in config.")
+        return None
+
+    non_date_cols = [(c, d) for c, d in columns.items() if c.lower() != date_col.lower()]
+
+    # Compute unified date filter from database matching dates
+    table_vintage = tbl_cfg.get('vintage', vintage)
+    date_filter = compute_date_filter(tbl_cfg, db_path, table_vintage)
+
+    # Set up SQL log file
+    global _sql_log_file
+    qname = qualified_name(tbl_cfg)
+    log_path = os.path.join(outdir, f"{qname}_col.sql")
+    with open(log_path, 'w', encoding='utf-8') as f:
+        f.write(f"-- SQL queries for {qname} col extraction\n-- {datetime.now().isoformat()}\n\n")
+    _sql_log_file = log_path
+
+    col_start_time = time.time()
+    col_start_ts = datetime.now().isoformat()
+
+    _max_workers = max_workers or (int(os.environ['MAX_WORKERS']) if os.environ.get('MAX_WORKERS') else 4)
+
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = None
+
+    # Build WHERE clause and vintage parameters for _extract_col_athena
+    extract_cfg = dict(tbl_cfg)
+    orig_where = tbl_cfg.get('where', '')
+    effective_vintage = date_filter.get('vintage', 'all')
+    extract_date_dtype = date_filter.get('date_dtype')
+    extract_date_format = date_filter.get('date_format')
+
+    if date_filter['filter_type'] == 'between':
+        from ..date_utils import bucket_date
+        buckets = {}
+        for dt in date_filter['dates']:
+            buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
+        dw = build_date_between_clause(
+            date_col, date_filter['min_date'], date_filter['max_date'],
+            extract_date_dtype, date_format=date_filter.get('date_format'))
+        extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
+        print(f"  {len(buckets)} vintage buckets ({effective_vintage}) -- GROUP BY")
+    elif date_filter['filter_type'] == 'in_list':
+        dw = build_date_in_clause(
+            date_col, date_filter['dates'], extract_date_dtype,
+            date_format=date_filter.get('date_format'))
+        extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
+        effective_vintage = 'all'
+        extract_date_dtype = None
+
+    bucket_desc = 'sample' if date_filter['filter_type'] == 'in_list' else effective_vintage
+    dt_label = 'sample' if date_filter['filter_type'] == 'in_list' else None
+
+    # Summary instead of full SQL preview
+    where_summary = extract_cfg.get('where', '(none)').strip() or '(none)'
+    print(f"  {len(non_date_cols)} columns, WHERE: {where_summary}")
+
+    # Run extraction
+    all_stats = []
+
+    if _max_workers <= 1:
+        col_iter = non_date_cols
+        if tqdm is not None:
+            col_iter = tqdm(col_iter, desc=f"  {name} [{bucket_desc}]", unit="col")
+        for col, dtype in col_iter:
+            try:
+                stats = _extract_col_athena(
+                    extract_cfg, col, dtype, full_table, cte_prefix,
+                    database=database, vintage=effective_vintage,
+                    date_dtype=extract_date_dtype, date_format=extract_date_format,
+                    dt_label=dt_label)
+                all_stats.extend(stats)
+            except Exception as e:
+                print(f"  Warning: Failed to extract {col}: {e}")
+    else:
+        def _extract_one(col_dtype, _cfg=extract_cfg, _lbl=dt_label):
+            col, dtype = col_dtype
+            return _extract_col_athena(
+                _cfg, col, dtype, full_table, cte_prefix,
+                database=database, vintage=effective_vintage,
+                date_dtype=extract_date_dtype, date_format=extract_date_format,
+                dt_label=_lbl)
+
+        with ThreadPoolExecutor(max_workers=_max_workers) as executor:
+            futures = {executor.submit(_extract_one, (c, d)): c for c, d in non_date_cols}
+            completed_iter = as_completed(futures)
+            if tqdm is not None:
+                completed_iter = tqdm(completed_iter, total=len(futures),
+                                     desc=f"  {name} [{bucket_desc}]", unit="col")
+            for future in completed_iter:
+                col_name = futures[future]
+                try:
+                    stats = future.result()
+                    all_stats.extend(stats)
+                except Exception as e:
+                    print(f"  Warning: Failed to extract {col_name}: {e}")
+
+    _sql_log_file = None
+    print(f"  SQL log: {log_path}")
+    col_elapsed = time.time() - col_start_time
+    col_end_ts = datetime.now().isoformat()
+
+    if not all_stats:
+        return None
+
+    # Write CSV
+    csv_path = os.path.join(outdir, f"{qname}_col.csv")
+    fieldnames = [
+        'column_name', 'dt', 'col_type', 'n_total', 'n_missing',
+        'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
+    ]
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for stat in sorted(all_stats, key=lambda x: (x['column_name'], x['dt'])):
+            writer.writerow({k: stat.get(k, '') for k in fieldnames})
+
+    # Compute total sampled records
+    first_col = all_stats[0]['column_name']
+    total_records = 0
+    for s in all_stats:
+        if s['column_name'] == first_col:
+            try:
+                total_records += int(float(s.get('n_total', 0) or 0))
+            except (ValueError, TypeError):
+                pass
+    records_info = f", ~{total_records:,} records" if total_records else ""
+    print(f"  Column stats: {csv_path} ({len(all_stats)} rows, {col_elapsed:.1f}s{records_info})")
+
+    return {
+        'table': name, 'step': 'col',
+        'start': col_start_ts, 'end': col_end_ts,
+        'elapsed_sec': col_elapsed,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main extraction entry point
 # ---------------------------------------------------------------------------
 
@@ -478,7 +641,7 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
         max_workers: Max parallel workers for column extraction
         db_path: Optional database path to save discovered columns to _column_meta
         vintage: Date bucketing granularity (day, week, month, quarter, year)
-        force: Skip confirmation prompts
+        force: Unused (kept for backward compatibility)
         from_date: Start date for incremental extraction (YYYY-MM-DD)
         to_date: End date for incremental extraction (YYYY-MM-DD)
     """
@@ -560,240 +723,21 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
         conn = athena_connect(data_base=aws_tables[0].get('conn_macro'))
         cursor = conn.cursor()
 
-    for tbl_cfg in aws_tables:
-        name = tbl_cfg['name']
-        database = tbl_cfg['conn_macro']
-        table = tbl_cfg['table']
-        date_col = tbl_cfg['date_col']
-        raw_full_table = f"{database}.{table}"
-
-        if "col" not in types:
-            continue
-
-        print(f"\nExtracting columns: {name} ({raw_full_table})")
-
-        if "col" in types:
-            import time
-            from datetime import datetime
-
-            columns = tbl_cfg.get('columns', {})
-            if not columns:
-                print(f"  WARNING: No columns specified for {name}. "
-                      f"Use 'dtrack load-columns --source aws' or provide columns in config.")
-                continue
-
-            # Extract column stats
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            all_stats = []
-            non_date_cols = [(c, d) for c, d in columns.items() if c.lower() != date_col.lower()]
-
-            # Compute unified date filter -- always from database matching dates
-            table_vintage = tbl_cfg.get('vintage', vintage)
-            date_filter = compute_date_filter(tbl_cfg, db_path, table_vintage)
-
-            # Set up SQL log file for this table
-            global _sql_log_file
-            qname = qualified_name(tbl_cfg)
-            log_path = os.path.join(outdir, f"{qname}_col.sql")
-            with open(log_path, 'w', encoding='utf-8') as f:
-                f.write(f"-- SQL queries for {qname} col extraction\n-- {datetime.now().isoformat()}\n\n")
-            _sql_log_file = log_path
-
-            col_start_time = time.time()
-            col_start_ts = datetime.now().isoformat()
-
-            # Priority: CLI arg > MAX_WORKERS env var > default 4
-            _max_workers = max_workers or (int(os.environ['MAX_WORKERS']) if os.environ.get('MAX_WORKERS') else 4)
-
+        for tbl_cfg in aws_tables:
             try:
-                from tqdm import tqdm
-            except ImportError:
-                tqdm = None
-
-            # Build WHERE clause and vintage parameters for _extract_col_athena
-            extract_cfg = dict(tbl_cfg)
-            orig_where = tbl_cfg.get('where', '')
-            effective_vintage = date_filter.get('vintage', 'all')
-            extract_date_dtype = date_filter.get('date_dtype')
-            extract_date_format = date_filter.get('date_format')
-
-            if date_filter['filter_type'] == 'between':
-                # Single WHERE covering full range; GROUP BY handles bucketing
-                from ..date_utils import bucket_date
-                buckets = {}
-                for dt in date_filter['dates']:
-                    buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
-                dw = build_date_between_clause(
-                    date_col, date_filter['min_date'], date_filter['max_date'],
-                    extract_date_dtype, date_format=date_filter.get('date_format'))
-                extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
-                print(f"  {len(buckets)} vintage buckets ({effective_vintage}) -- GROUP BY")
-            elif date_filter['filter_type'] == 'in_list':
-                # Sample: IN list, literal dt_label
-                dw = build_date_in_clause(
-                    date_col, date_filter['dates'], extract_date_dtype,
-                    date_format=date_filter.get('date_format'))
-                extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
-                effective_vintage = 'all'  # no GROUP BY for sample
-                extract_date_dtype = None
-
-            bucket_desc = 'sample' if date_filter['filter_type'] == 'in_list' else effective_vintage
-            dt_label = 'sample' if date_filter['filter_type'] == 'in_list' else None
-
-            # Preview: show SQL for the first column, ask before executing anything
-            if non_date_cols and not os.environ.get('DTRACK_NO_PREVIEW') and not force:
-                preview_col, preview_dtype = non_date_cols[0]
-                preview_numeric = is_numeric_type(preview_dtype, is_oracle=False)
-                preview_wc = extract_cfg.get('where', '').strip() or "(1=1)"
-
-                # Build dt_select / group_by for preview
-                if dt_label is not None:
-                    p_dt_select = f"'{dt_label}' AS dt"
-                    p_group_by = ""
-                elif effective_vintage == 'all':
-                    p_dt_select = "'all' AS dt"
-                    p_group_by = ""
-                else:
-                    p_vt = extract_cfg.get('vintage_transform', None)
-                    p_dt_expr = _vintage_date_expr_athena(date_col, effective_vintage, p_vt, date_dtype=extract_date_dtype, date_format=extract_date_format)
-                    p_dt_select = f"CAST({p_dt_expr} AS VARCHAR) AS dt"
-                    p_group_by = f"\nGROUP BY {p_dt_expr}"
-
-                if preview_numeric:
-                    preview_sql = f"""{cte_prefix}
-SELECT
-    {p_dt_select},
-    '{preview_dtype}' AS col_type,
-    COUNT(*) AS n_total,
-    COUNT(*) - COUNT({preview_col}) AS n_missing,
-    COUNT(DISTINCT {preview_col}) AS n_unique,
-    AVG(CAST({preview_col} AS DOUBLE)) AS mean,
-    STDDEV_SAMP(CAST({preview_col} AS DOUBLE)) AS std,
-    MIN({preview_col}) AS min_val,
-    MAX({preview_col}) AS max_val
-FROM {full_table} WHERE {preview_wc}{p_group_by}"""
-                else:
-                    # Categorical: FreqTable CTE with freq-based stats
-                    if effective_vintage == 'all' or dt_label is not None:
-                        p_freq_dt = ""
-                        p_freq_group = ""
-                        p_agg_group = ""
-                        p_agg_dt = p_dt_select
-                    else:
-                        p_vt = extract_cfg.get('vintage_transform', None)
-                        p_dt_expr = _vintage_date_expr_athena(date_col, effective_vintage, p_vt, date_dtype=extract_date_dtype, date_format=extract_date_format)
-                        p_freq_dt = f"CAST({p_dt_expr} AS VARCHAR) AS dt,"
-                        p_freq_group = f", {p_dt_expr}"
-                        p_agg_group = "\nGROUP BY dt"
-                        p_agg_dt = "dt"
-                    preview_sql = f"""{cte_prefix}
-WITH FreqTable AS (
-    SELECT
-        {p_freq_dt}
-        {preview_col} AS p_col,
-        COUNT(*) AS value_freq
-    FROM {full_table} WHERE {preview_wc}
-    GROUP BY {preview_col}{p_freq_group}
-)
-SELECT
-    {p_agg_dt},
-    '{preview_dtype}' AS col_type,
-    SUM(value_freq) AS n_total,
-    COUNT(value_freq) AS n_unique,
-    AVG(CAST(value_freq AS DOUBLE)) AS mean,
-    STDDEV_SAMP(CAST(value_freq AS DOUBLE)) AS std,
-    MIN(value_freq) AS min_val,
-    MAX(value_freq) AS max_val
-FROM FreqTable{p_agg_group}"""
-
-                print(f"\n  -- Preview SQL for: {preview_col} ({preview_dtype})")
-                print(f"  {preview_sql.strip()}")
-                print(f"  ;")
-                print(f"\n  {len(non_date_cols)} columns total")
-                resp = input("  Proceed? [y]es / [q]uit: ").strip().lower()
-                if resp in ('q', 'quit', 'n', 'no'):
-                    print("  Skipped col extraction.")
-                    continue
-
-            if _max_workers <= 1:
-                col_iter = non_date_cols
-                if tqdm is not None:
-                    col_iter = tqdm(col_iter, desc=f"  {name} [{bucket_desc}]", unit="col")
-                for col, dtype in col_iter:
-                    try:
-                        stats = _extract_col_athena(
-                            extract_cfg, col, dtype, full_table, cte_prefix,
-                            database=database, vintage=effective_vintage,
-                            date_dtype=extract_date_dtype, date_format=extract_date_format,
-                            dt_label=dt_label)
-                        all_stats.extend(stats)
-                    except Exception as e:
-                        print(f"  Warning: Failed to extract {col}: {e}")
-            else:
-                def _extract_one(col_dtype, _cfg=extract_cfg, _lbl=dt_label):
-                    col, dtype = col_dtype
-                    return _extract_col_athena(
-                        _cfg, col, dtype, full_table, cte_prefix,
-                        database=database, vintage=effective_vintage,
-                        date_dtype=extract_date_dtype, date_format=extract_date_format,
-                        dt_label=_lbl)
-
-                with ThreadPoolExecutor(max_workers=_max_workers) as executor:
-                    futures = {executor.submit(_extract_one, (c, d)): c for c, d in non_date_cols}
-                    completed_iter = as_completed(futures)
-                    if tqdm is not None:
-                        completed_iter = tqdm(completed_iter, total=len(futures),
-                                             desc=f"  {name} [{bucket_desc}]", unit="col")
-                    for future in completed_iter:
-                        col_name = futures[future]
-                        try:
-                            stats = future.result()
-                            all_stats.extend(stats)
-                        except Exception as e:
-                            print(f"  Warning: Failed to extract {col_name}: {e}")
-
-            _sql_log_file = None
-            print(f"  SQL log: {log_path}")
-            col_elapsed = time.time() - col_start_time
-            col_end_ts = datetime.now().isoformat()
-
-            # Write CSV
-            if all_stats:
-                qname = qualified_name(tbl_cfg)
-                csv_path = os.path.join(outdir, f"{qname}_col.csv")
-                fieldnames = [
-                    'column_name', 'dt', 'col_type', 'n_total', 'n_missing',
-                    'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
-                ]
-                with open(csv_path, 'w', newline='') as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    for stat in sorted(all_stats, key=lambda x: (x['column_name'], x['dt'])):
-                        writer.writerow({k: stat.get(k, '') for k in fieldnames})
-
-                # Compute total sampled records (n_total summed across vintages for one column)
-                first_col = all_stats[0]['column_name'] if all_stats else None
-                total_records = 0
-                if first_col:
-                    for s in all_stats:
-                        if s['column_name'] == first_col:
-                            try:
-                                total_records += int(float(s.get('n_total', 0) or 0))
-                            except (ValueError, TypeError):
-                                pass
-                records_info = f", ~{total_records:,} records" if total_records else ""
-                print(f"  Column stats: {csv_path} ({len(all_stats)} rows, {col_elapsed:.1f}s{records_info})")
-
+                result = _extract_cols_for_table(
+                    tbl_cfg, outdir, max_workers=max_workers, db_path=db_path, vintage=vintage)
+                if result:
+                    timing_records.append(result)
+            except Exception as e:
+                print(f"  ERROR extracting columns for {tbl_cfg['name']}: {e}")
+                print(f"  Skipping to next table...")
                 timing_records.append({
-                    'table': name,
-                    'step': 'col',
-                    'start': col_start_ts,
-                    'end': col_end_ts,
-                    'elapsed_sec': col_elapsed,
+                    'table': tbl_cfg['name'], 'step': 'col',
+                    'start': '', 'end': '',
+                    'elapsed_sec': 0, 'status': str(e),
                 })
 
-    if "col" in types:
         cursor.close()
         conn.close()
 

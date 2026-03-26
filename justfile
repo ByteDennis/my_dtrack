@@ -17,56 +17,56 @@ install-core:
     uv pip install -e .
 
 # start web UI
-serve:
-    dtrack serve {{db}} --config {{config}} --port {{port}}
+serve *args:
+    dtrack serve {{db}} --config {{config}} --port {{port}} {{args}}
 
-# init or refresh database
-init:
-    dtrack init {{db}}
+# init or refresh database (just init / just init --force)
+init *args:
+    dtrack init {{db}} {{args}}
 
 # refresh database schema (add missing columns)
-refresh:
-    dtrack refresh {{db}}
+refresh *args:
+    dtrack refresh {{db}} {{args}}
 
 # load pairs from config JSON
-load-map:
-    dtrack load-map {{db}} {{config}} --type row
+load-map *args:
+    dtrack load-map {{db}} {{config}} --type row {{args}}
 
 # list all pairs
-pairs:
-    dtrack list-pairs {{db}} -v
+pairs *args:
+    dtrack list-pairs {{db}} -v {{args}}
 
 # generate SAS extraction scripts
-gen-sas outdir="./sas/":
-    dtrack gen-sas {{config}} {{outdir}} --db {{db}}
+gen-sas outdir="./sas/" *args:
+    dtrack gen-sas {{config}} {{outdir}} --db {{db}} {{args}}
 
 # generate AWS/Athena extraction scripts
-gen-aws outdir="./sql/":
-    dtrack gen-aws {{config}} {{outdir}} --db {{db}}
+gen-aws outdir="./sql/" *args:
+    dtrack gen-aws {{config}} {{outdir}} --db {{db}} {{args}}
 
 # load row count CSVs
-load-row folder="./csv/":
-    dtrack load-row {{db}} {{folder}}
+load-row folder="./csv/" *args:
+    dtrack load-row {{db}} {{folder}} {{args}}
 
 # load column stat CSVs
-load-col folder="./csv/":
-    dtrack load-col {{db}} {{folder}}
+load-col folder="./csv/" *args:
+    dtrack load-col {{db}} {{folder}} {{args}}
 
 # compare row counts for a pair
-compare-row pair:
-    dtrack compare-row {{db}} --pair {{pair}}
+compare-row pair *args:
+    dtrack compare-row {{db}} --pair {{pair}} {{args}}
 
 # compare column stats for a pair
-compare-col pair:
-    dtrack compare-col {{db}} --pair {{pair}}
+compare-col pair *args:
+    dtrack compare-col {{db}} --pair {{pair}} {{args}}
 
 # run a SQL query against the database
-query sql:
-    dtrack query {{db}} "{{sql}}"
+query sql *args:
+    dtrack query {{db}} "{{sql}}" {{args}}
 
 # show database status
-status:
-    dtrack status {{db}}
+status *args:
+    dtrack status {{db}} {{args}}
 
 # run tests
 test *args:

@@ -614,6 +614,12 @@ async def api_list_pairs():
 
         pairs_list = []
         for pair_name, pair_cfg in config.get("pairs", {}).items():
+            # Normalize processed: list → newline-joined string for web UI
+            for side in ("left", "right"):
+                side_cfg = pair_cfg.get(side, {})
+                p = side_cfg.get("processed", "")
+                if isinstance(p, list):
+                    side_cfg["processed"] = "\n".join(p)
             pairs_list.append({
                 "name": pair_name,
                 "description": pair_cfg.get("description", ""),
@@ -661,17 +667,18 @@ async def api_update_pair(pair_name: str, request: Request):
             if key in body:
                 pair_cfg[key] = body[key]
 
-        # Ensure 'name' is set on left/right (required by config schema)
         for side in ("left", "right"):
             if side in pair_cfg:
-                _ensure_name(pair_cfg[side])
+                _prepare_side(pair_cfg[side])
 
         save_unified_config(config, _config_path)
 
-        # Re-register in DB to keep it in sync
+        # Inject name for DB registration (auto-derived, not persisted)
         left = pair_cfg.get("left", {})
         right = pair_cfg.get("right", {})
-        if left.get("name") and right.get("name"):
+        left["name"] = pair_name
+        right["name"] = pair_name
+        if left.get("source") and right.get("source"):
             table_left = qualified_name(left)
             table_right = qualified_name(right)
             register_table_pair(
@@ -1150,6 +1157,7 @@ async def api_compare_row_export_html(request: Request):
                 time_map=time_map,
                 left_cfg=pair_cfg.get("left"),
                 right_cfg=pair_cfg.get("right"),
+                description=pair_cfg.get("description", ""),
             )
             sections.append(html)
 
@@ -1555,6 +1563,7 @@ async def api_compare_row_preview(pair_name: str, request: Request):
             time_map=time_map or None,
             left_cfg=pair_cfg.get("left"),
             right_cfg=pair_cfg.get("right"),
+            description=pair_cfg.get("description", ""),
         )
 
         # Wrap in a minimal table
@@ -1642,9 +1651,8 @@ async def api_add_pair(request: Request):
 
         config = load_unified_config(_config_path)
 
-        # Ensure 'name' is set (required by config schema) — default to lowercase table
-        _ensure_name(left)
-        _ensure_name(right)
+        _prepare_side(left)
+        _prepare_side(right)
 
         # Build pair config — only persist valid pair-config keys
         pair_cfg = {
@@ -1659,7 +1667,9 @@ async def api_add_pair(request: Request):
         config.setdefault("pairs", {})[pair_name] = pair_cfg
         save_unified_config(config, _config_path)
 
-        # Register in DB
+        # Inject name for DB registration (auto-derived, not persisted)
+        left["name"] = pair_name
+        right["name"] = pair_name
         table_left = qualified_name(left)
         table_right = qualified_name(right)
         register_table_pair(
@@ -1717,13 +1727,19 @@ async def api_delete_pair(pair_name: str, purge: int = Query(0)):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-def _ensure_name(tbl_cfg):
-    """Ensure tbl_cfg has 'name' key (required by config schema).
+def _prepare_side(tbl_cfg):
+    """Prepare a left/right config for saving.
 
-    Defaults to lowercase version of 'table' if not set.
+    - Strips 'name' (auto-derived from pair_name on load)
+    - Converts processed string to list for readable JSON
     """
-    if "name" not in tbl_cfg:
-        tbl_cfg["name"] = tbl_cfg.get("table", "").lower()
+    tbl_cfg.pop("name", None)
+    # Store processed as list for readable JSON
+    p = tbl_cfg.get("processed", "")
+    if isinstance(p, str) and p.strip():
+        tbl_cfg["processed"] = [line for line in p.split("\n") if line.strip()]
+    elif not p:
+        tbl_cfg.pop("processed", None)
 
 
 def _sync_config_pairs(config):
@@ -1737,8 +1753,12 @@ def _sync_config_pairs(config):
             continue
         left = pair_cfg.get("left", {})
         right = pair_cfg.get("right", {})
-        if not left.get("name") or not right.get("name"):
+        if not left.get("source") or not right.get("source"):
             continue
+
+        # Auto-derive name from pair_name (may not be set if config was loaded raw)
+        left.setdefault("name", pair_name)
+        right.setdefault("name", pair_name)
 
         table_left = qualified_name(left)
         table_right = qualified_name(right)
@@ -2347,6 +2367,15 @@ def serve(db_path: str, config_path: str, port: int = 8080, host: str = "0.0.0.0
     _db_dir = os.path.dirname(_db_path)
     _config_path = os.path.abspath(config_path)
     _original_config_path = _config_path
+
+    # Sync config pairs into DB on startup
+    try:
+        from ..config import load_unified_config
+        config = load_unified_config(_config_path)
+        n = _sync_config_pairs(config)
+        print(f"  Synced {n} pairs from config → DB")
+    except Exception as e:
+        print(f"  Warning: could not sync pairs: {e}")
 
     import uvicorn
     print(f"dtrack web UI")

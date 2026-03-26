@@ -18,7 +18,7 @@ data _ora_map;
 run;
 
 %macro _row_oracle(table=, dsname=, qname=, date_expr=, conn_macro=, where_clause=, idx=);
-    %local _outpath _cte_val;
+    %local _outpath _cte_val _rc;
     %let _outpath = &out_dir./&qname._row.csv;
 
     %if &_row_redo = 0 and %sysfunc(exist(cache.rc_&dsname)) %then %do;
@@ -45,6 +45,13 @@ run;
         disconnect from oracle;
     quit;
 
+    %let _rc = &SYSERR;
+    %if &_rc > 4 %then %do;
+        %put ERROR: [&qname] Row extraction failed (SYSERR=&_rc) - skipping to next table;
+        options obs=max nosyntaxcheck;
+        %return;
+    %end;
+
     proc export data=cache.rc_&dsname outfile="&_outpath" dbms=csv replace; run;
     %log_time(table=&qname, step=row, outpath=&out_dir.);
 
@@ -61,6 +68,13 @@ run;
             );
             disconnect from oracle;
         quit;
+
+        %if &SYSERR > 4 %then %do;
+            %put WARNING: [&qname] Column metadata fetch failed - skipping metadata;
+            options obs=max nosyntaxcheck;
+            %return;
+        %end;
+
         proc contents data=_s_&dsname out=_m_&dsname noprint; run;
         proc sql;
             create table _c_&dsname as

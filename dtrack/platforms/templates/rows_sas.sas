@@ -35,6 +35,12 @@ run;
         group by &date_expr;
     quit;
 
+    %if &SYSERR > 4 %then %do;
+        %put ERROR: [&qname] Row extraction failed (SYSERR=&SYSERR) - skipping to next table;
+        options obs=max nosyntaxcheck;
+        %return;
+    %end;
+
     proc export data=cache.rc_&dsname outfile="&_outpath" dbms=csv replace; run;
     %log_time(table=&qname, step=row, outpath=&out_dir.);
 

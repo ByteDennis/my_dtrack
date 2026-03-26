@@ -28,6 +28,7 @@ def generate_row_count_html(
     comment_right: str = '',
     left_cfg: Optional[Dict] = None,
     right_cfg: Optional[Dict] = None,
+    description: str = '',
 ) -> str:
     """
     Generate HTML table rows for row count comparison.
@@ -43,6 +44,7 @@ def generate_row_count_html(
         metadata_right: Optional metadata for right table
         comment_left: Optional comment for left source (shown as ⓘ tooltip)
         comment_right: Optional comment for right source (shown as ⓘ tooltip)
+        description: Optional description to show instead of pair_name in banner
 
     Returns:
         HTML string with table rows
@@ -56,13 +58,14 @@ def generate_row_count_html(
     n_only_right = len(comparison['only_right'])
 
     # Build banner text
-    banner_text = pair_name
+    label = description or pair_name
+    banner_text = label
     if left_cfg and right_cfg:
         tbl_l = left_cfg.get('table', table_left).upper()
         tbl_r = right_cfg.get('table', table_right).upper()
         conn_l = left_cfg.get('conn_macro', '').upper()
         conn_r = right_cfg.get('conn_macro', '').upper()
-        banner_text = f'{pair_name} | <b>{tbl_l}</b>{f" ({conn_l})" if conn_l else ""} | <b>{tbl_r}</b>{f" ({conn_r})" if conn_r else ""}'
+        banner_text = f'{label} | <b>{tbl_l}</b>{f" ({conn_l})" if conn_l else ""} | <b>{tbl_r}</b>{f" ({conn_r})" if conn_r else ""}'
 
     # Generate HTML rows
     html = f'''
@@ -297,6 +300,7 @@ def generate_column_stats_html(
     comment_right: str = '',
     left_cfg: Optional[Dict] = None,
     right_cfg: Optional[Dict] = None,
+    description: str = '',
 ) -> str:
     """
     Generate HTML table rows for column statistics comparison.
@@ -311,6 +315,7 @@ def generate_column_stats_html(
         col_mappings: Column mappings used
         comment_left: Optional comment for left source (shown as ⓘ tooltip)
         comment_right: Optional comment for right source (shown as ⓘ tooltip)
+        description: Optional description to show instead of pair_name in banner
 
     Returns:
         HTML string with table rows
@@ -347,13 +352,14 @@ def generate_column_stats_html(
         cols_display = ', '.join(sorted(cols_with_diffs)) if cols_with_diffs else 'None'
 
     # Build banner text
-    banner_text = pair_name
+    label = description or pair_name
+    banner_text = label
     if left_cfg and right_cfg:
         tbl_l = left_cfg.get('table', table_left).upper()
         tbl_r = right_cfg.get('table', table_right).upper()
         conn_l = left_cfg.get('conn_macro', '').upper()
         conn_r = right_cfg.get('conn_macro', '').upper()
-        banner_text = f'{pair_name} | <b>{tbl_l}</b>{f" ({conn_l})" if conn_l else ""} | <b>{tbl_r}</b>{f" ({conn_r})" if conn_r else ""}'
+        banner_text = f'{label} | <b>{tbl_l}</b>{f" ({conn_l})" if conn_l else ""} | <b>{tbl_r}</b>{f" ({conn_r})" if conn_r else ""}'
 
     # Generate HTML rows
     html = f'''
