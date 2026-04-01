@@ -45,14 +45,14 @@ async function loadKnownTables() {
         const existing = new Set(knownTables.map(t => t.pair_name));
         for (const p of (cfgData.pairs || [])) {
             if (existing.has(p.name)) continue;
-            const leftName = (p.left?.name || p.left?.table || '').toLowerCase();
-            const rightName = (p.right?.name || p.right?.table || '').toLowerCase();
+            const leftTable = (p.left?.table || '');
+            const rightTable = (p.right?.table || '');
             const leftSource = p.left?.source || '';
             const rightSource = p.right?.source || '';
             knownTables.push({
                 pair_name: p.name,
-                table_left: leftSource ? `${leftSource}_${leftName}` : leftName,
-                table_right: rightSource ? `${rightSource}_${rightName}` : rightName,
+                table_left: leftSource ? `${leftSource}_${leftTable}` : leftTable,
+                table_right: rightSource ? `${rightSource}_${rightTable}` : rightTable,
                 source_left: leftSource,
                 source_right: rightSource,
             });
