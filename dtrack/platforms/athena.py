@@ -955,6 +955,8 @@ def discover_aws_columns(config_path, outdir, db_path=None):
                     with open(cols_src, 'r', newline='') as f:
                         reader = csv.DictReader(f)
                         for row in reader:
+                            # Strip whitespace from keys to handle \r\n line endings
+                            row = {k.strip(): v for k, v in row.items()}
                             col_name = row.get('column_name') or row.get('COLUMN_NAME', '')
                             col_type = row.get('data_type') or row.get('DATA_TYPE', '')
                             if col_name:

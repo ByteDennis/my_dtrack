@@ -26,10 +26,10 @@ def is_numeric_type(data_type, is_oracle=True):
 
 
 def qualified_name(tbl_cfg):
-    """Derive storage/file name: {source}_{table}."""
+    """Derive storage/file name: {source}_{name}."""
     source = tbl_cfg.get('source', '')
-    table = tbl_cfg['table']
-    return f"{source}_{table}" if source else table
+    name = tbl_cfg['name']
+    return f"{source}_{name}" if source else name
 
 
 def sas_safe_name(name, max_len=18):

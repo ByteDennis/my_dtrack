@@ -559,3 +559,38 @@ ORDER BY last_active_time DESC
 FETCH FIRST 1 ROW ONLY;
 ```
 
+  ┌──────────────────────┬─────────────────────────────────────────────────────────────────────────────────────────┐
+  │         File         │                                         Purpose                                         │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────┤
+  │ oracle_bench.py      │ 13 experiments (10 from effective_sql.txt + 3 dtrack-specific), Python-side timing only │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────┤
+  │ bench_config.json    │ Connection config with ENV: prefix support                                              │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────┤
+  │ bench_analysis.ipynb │ Load results, summary stats, bar charts, Mann-Whitney U tests, markdown export          │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────┤
+  │ run_bench.sh         │ Bash wrapper for flexible CLI usage                                                     │
+  └──────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────┘
+
+  Removed:
+  - Spool experiment (deleted)
+  - Session tuning experiment (deleted — you're on python-oracledb now)
+  - All CREATE TABLE/DROP TABLE/CREATE INDEX — read-only, no setup/teardown
+
+  Changed:
+  - bulk_collect → fetch_batch — Python-side fetchone() vs fetchmany(5000) (the Python equivalent of bulk collect vs row-by-row)
+  - All experiments now use --table/--date-col/--num-col/--cat-col/--pk-col CLI args — swap tables freely
+  - --append flag to accumulate results across multiple tables into one JSON file
+  - bind_variables uses ROWID fallback when no --pk-col specified
+
+  New file: bench_sas.sas
+  - Same 10 experiments as Python, using SAS PROC SQL passthrough loop with %datetime() timing
+  - Edit %let vars at top to set table/columns
+  - Outputs bench_sas_results.csv — load into the notebook alongside Python results for SAS vs Python comparison
+
+  Usage examples:
+  # Test dtrack queries on two different tables
+  ./run_bench.sh --table HR.EMP --date-col HIRE_DT --num-col SALARY --dtrack
+  ./run_bench.sh --table SALES.ORDERS --date-col ORDER_DT --num-col TOTAL --dtrack --append
+
+  # All experiments on one table
+  ./run_bench.sh --table SCHEMA.BIG_TABLE --date-col DT --num-col AMT --pk-col ID -n 3

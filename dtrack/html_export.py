@@ -222,7 +222,13 @@ def generate_row_count_html(
                 sign = '+' if diff > 0 else ''
                 html += f'                                            <tr><td style="padding:2px; font-size:10px;">{dt}</td><td style="padding:2px; font-size:10px;">{count_left:,}</td><td style="padding:2px; font-size:10px;">{count_right:,}</td><td style="padding:2px; font-size:10px;">{sign}{diff:,}</td></tr>\n'
             if n_mismatch > 10:
-                html += f'                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#999;">... and {n_mismatch - 10} more</td></tr>\n'
+                extra_mm = n_mismatch - 10
+                html += f'                                            <tr><td colspan="4" style="padding:0;"><details style="margin:2px 0;"><summary style="cursor:pointer; font-style:italic; font-size:10px; color:#999; padding:2px; list-style:none;">... and {extra_mm} more</summary><table style="border-collapse:collapse; width:100%;">\n'
+                for dt, count_left, count_right in comparison['mismatched'][10:]:
+                    diff = count_right - count_left
+                    sign = '+' if diff > 0 else ''
+                    html += f'                                            <tr><td style="padding:2px; font-size:10px;">{dt}</td><td style="padding:2px; font-size:10px;">{count_left:,}</td><td style="padding:2px; font-size:10px;">{count_right:,}</td><td style="padding:2px; font-size:10px;">{sign}{diff:,}</td></tr>\n'
+                html += '                                            </table></details></td></tr>\n'
             html += '                                        </table>\n'
         else:
             html += '                                        <p style="margin:4px 0; color:#999;">No mismatches</p>\n'
@@ -234,17 +240,21 @@ def generate_row_count_html(
             html += f'                                        <p style="margin:4px 0; font-weight:600; text-align:center;">{source_left}-Only Dates ({n_only_left})</p>\n'
             html += '                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">\n'
             html += f'                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_left}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_right}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>\n'
-            # In-overlap rows (date in red, rest black)
+            # In-overlap rows (date in red, rest black) — expandable
             for dt, count in only_left_in_overlap[:10]:
                 html += f'                                            <tr><td style="padding:2px; font-size:10px; color:#c62828;">{dt}</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-{count:,}</td></tr>\n'
             if len(only_left_in_overlap) > 10:
-                html += f'                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#c62828;">... and {len(only_left_in_overlap) - 10} more in overlap</td></tr>\n'
+                extra = len(only_left_in_overlap) - 10
+                html += f'                                            <tr><td colspan="4" style="padding:0;"><details style="margin:2px 0;"><summary style="cursor:pointer; font-style:italic; font-size:10px; color:#c62828; padding:2px; list-style:none;">... and {extra} more in overlap</summary><table style="border-collapse:collapse; width:100%;">\n'
+                for dt, count in only_left_in_overlap[10:]:
+                    html += f'                                            <tr><td style="padding:2px; font-size:10px; color:#c62828;">{dt}</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-{count:,}</td></tr>\n'
+                html += '                                            </table></details></td></tr>\n'
             # Outside-overlap: 1 gray row + summary
             if only_left_outside:
                 dt0, c0 = only_left_outside[0]
                 html += f'                                            <tr style="color:#999;"><td style="padding:2px; font-size:10px;">{dt0}</td><td style="padding:2px; font-size:10px;">{c0:,}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-{c0:,}</td></tr>\n'
                 if len(only_left_outside) > 1:
-                    html += f'                                            <tr><td colspan="4" style="padding:4px 2px 2px; font-style:italic; font-size:10px; color:#999;">... {len(only_left_outside) - 1} more outside overlap</td></tr>\n'
+                    html += f'                                            <tr><td colspan="4" style="padding:4px 2px 2px; font-style:italic; font-size:10px; color:#999;">... and {len(only_left_outside) - 1} more outside overlap</td></tr>\n'
             html += '                                        </table>\n'
         else:
             html += f'                                        <p style="margin:4px 0; color:#999;">No {source_left}-Only dates</p>\n'
@@ -256,17 +266,21 @@ def generate_row_count_html(
             html += f'                                        <p style="margin:4px 0; font-weight:600; text-align:center;">{source_right}-Only Dates ({n_only_right})</p>\n'
             html += '                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">\n'
             html += f'                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_left}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_right}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>\n'
-            # In-overlap rows (date in red, rest black)
+            # In-overlap rows (date in red, rest black) — expandable
             for dt, count in only_right_in_overlap[:10]:
                 html += f'                                            <tr><td style="padding:2px; font-size:10px; color:#c62828;">{dt}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">+{count:,}</td></tr>\n'
             if len(only_right_in_overlap) > 10:
-                html += f'                                            <tr><td colspan="4" style="padding:2px; font-style:italic; font-size:10px; color:#c62828;">... and {len(only_right_in_overlap) - 10} more in overlap</td></tr>\n'
+                extra = len(only_right_in_overlap) - 10
+                html += f'                                            <tr><td colspan="4" style="padding:0;"><details style="margin:2px 0;"><summary style="cursor:pointer; font-style:italic; font-size:10px; color:#c62828; padding:2px; list-style:none;">... and {extra} more in overlap</summary><table style="border-collapse:collapse; width:100%;">\n'
+                for dt, count in only_right_in_overlap[10:]:
+                    html += f'                                            <tr><td style="padding:2px; font-size:10px; color:#c62828;">{dt}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">+{count:,}</td></tr>\n'
+                html += '                                            </table></details></td></tr>\n'
             # Outside-overlap: 1 gray row + summary
             if only_right_outside:
                 dt0, c0 = only_right_outside[0]
                 html += f'                                            <tr style="color:#999;"><td style="padding:2px; font-size:10px;">{dt0}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">{c0:,}</td><td style="padding:2px; font-size:10px;">+{c0:,}</td></tr>\n'
                 if len(only_right_outside) > 1:
-                    html += f'                                            <tr><td colspan="4" style="padding:4px 2px 2px; font-style:italic; font-size:10px; color:#999;">... {len(only_right_outside) - 1} more outside overlap</td></tr>\n'
+                    html += f'                                            <tr><td colspan="4" style="padding:4px 2px 2px; font-style:italic; font-size:10px; color:#999;">... and {len(only_right_outside) - 1} more outside overlap</td></tr>\n'
             html += '                                        </table>\n'
         else:
             html += f'                                        <p style="margin:4px 0; color:#999;">No {source_right}-Only dates</p>\n'

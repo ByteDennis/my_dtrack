@@ -179,6 +179,8 @@ def cmd_load_columns(args):
             with open(csv_path, 'r', newline='') as f:
                 reader = csv_mod.DictReader(f)
                 for row in reader:
+                    # Strip whitespace from keys to handle \r\n line endings
+                    row = {k.strip(): v for k, v in row.items()}
                     src = row.get('source') or row.get('SOURCE', '')
                     tbl = row.get('table') or row.get('TABLE', '')
                     col = row.get('column_name') or row.get('COLUMN_NAME', '')
@@ -223,6 +225,8 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
             with open(mock_csv, 'r', newline='') as f:
                 reader = csv_mod.DictReader(f)
                 for row in reader:
+                    # Strip whitespace from keys to handle \r\n line endings
+                    row = {k.strip(): v for k, v in row.items()}
                     name = row.get('column_name') or row.get('COLUMN_NAME', '')
                     dtype = row.get('data_type') or row.get('DATA_TYPE', '')
                     if name:

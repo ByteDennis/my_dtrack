@@ -45,14 +45,13 @@ async function loadKnownTables() {
         const existing = new Set(knownTables.map(t => t.pair_name));
         for (const p of (cfgData.pairs || [])) {
             if (existing.has(p.name)) continue;
-            const leftTable = (p.left?.table || '');
-            const rightTable = (p.right?.table || '');
+            // Use pair_name for qualified name (consistent with backend)
             const leftSource = p.left?.source || '';
             const rightSource = p.right?.source || '';
             knownTables.push({
                 pair_name: p.name,
-                table_left: leftSource ? `${leftSource}_${leftTable}` : leftTable,
-                table_right: rightSource ? `${rightSource}_${rightTable}` : rightTable,
+                table_left: leftSource ? `${leftSource}_${p.name}` : p.name,
+                table_right: rightSource ? `${rightSource}_${p.name}` : p.name,
                 source_left: leftSource,
                 source_right: rightSource,
             });
@@ -346,28 +345,37 @@ function parseCSV(file) {
 
 function autoMatch(filename) {
     let stem = filename.replace(/\.csv$/i, '');
-    stem = stem.replace(/_(row|col)$/i, '');
+    stem = stem.replace(/_(row|col|column|columns)$/i, '');
 
     const noMatch = { matched: false, tableName: '', side: '', pairName: '' };
 
+    console.log(`[autoMatch] filename="${filename}" stem="${stem}"`);
+    console.log(`[autoMatch] knownTables (${knownTables.length}):`,
+        knownTables.map(t => `${t.pair_name}: L=${t.table_left} R=${t.table_right}`));
+
     for (const pair of knownTables) {
         if (stem.toLowerCase() === pair.table_left.toLowerCase()) {
+            console.log(`[autoMatch] EXACT match left: ${pair.table_left}`);
             return { matched: true, tableName: pair.table_left, side: 'left', pairName: pair.pair_name };
         }
         if (stem.toLowerCase() === pair.table_right.toLowerCase()) {
+            console.log(`[autoMatch] EXACT match right: ${pair.table_right}`);
             return { matched: true, tableName: pair.table_right, side: 'right', pairName: pair.pair_name };
         }
     }
 
     for (const pair of knownTables) {
         if (stem.toLowerCase().startsWith(pair.table_left.toLowerCase())) {
+            console.log(`[autoMatch] STARTS match left: ${pair.table_left}`);
             return { matched: true, tableName: pair.table_left, side: 'left', pairName: pair.pair_name };
         }
         if (stem.toLowerCase().startsWith(pair.table_right.toLowerCase())) {
+            console.log(`[autoMatch] STARTS match right: ${pair.table_right}`);
             return { matched: true, tableName: pair.table_right, side: 'right', pairName: pair.pair_name };
         }
     }
 
+    console.log(`[autoMatch] NO MATCH for stem="${stem}"`);
     return noMatch;
 }
 
@@ -509,23 +517,51 @@ async function loadSelected() {
 
         try {
             let resp;
+            const isColumnFile = entry.name.toLowerCase().includes('_column');
 
             if (entry.file) {
                 const formData = new FormData();
                 formData.append('file', entry.file);
                 formData.append('table_name', entry.tableName);
-                formData.append('mode', 'upsert');
-                resp = await fetch('/api/load/row/upload', { method: 'POST', body: formData });
+
+                if (isColumnFile) {
+                    // Column metadata file
+                    const source = entry.side === 'left'
+                        ? knownTables.find(t => t.table_left === entry.tableName)?.source_left
+                        : knownTables.find(t => t.table_right === entry.tableName)?.source_right;
+                    formData.append('source', source || '');
+                    resp = await fetch('/api/load/columns/upload', { method: 'POST', body: formData });
+                } else {
+                    // Row count file
+                    formData.append('mode', 'upsert');
+                    resp = await fetch('/api/load/row/upload', { method: 'POST', body: formData });
+                }
             } else if (entry.serverPath) {
-                resp = await fetch('/api/load/row/path', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        path: entry.serverPath,
-                        table_name: entry.tableName,
-                        mode: 'upsert',
-                    }),
-                });
+                if (isColumnFile) {
+                    // Column metadata via server path
+                    const source = entry.side === 'left'
+                        ? knownTables.find(t => t.table_left === entry.tableName)?.source_left
+                        : knownTables.find(t => t.table_right === entry.tableName)?.source_right;
+                    resp = await fetch('/api/load/columns/path', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            path: entry.serverPath,
+                            table_name: entry.tableName,
+                            source: source || '',
+                        }),
+                    });
+                } else {
+                    resp = await fetch('/api/load/row/path', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            path: entry.serverPath,
+                            table_name: entry.tableName,
+                            mode: 'upsert',
+                        }),
+                    });
+                }
             } else {
                 logEntry(`  SKIP ${entry.name}: no file or path`, 'error');
                 continue;
@@ -534,7 +570,11 @@ async function loadSelected() {
             const data = await resp.json();
 
             if (data.ok) {
-                logEntry(`  OK ${entry.tableName}: ${data.loaded} rows (${data.new_dates} new, ${data.updated_dates} updated)`, 'success');
+                if (isColumnFile) {
+                    logEntry(`  OK ${entry.tableName}: ${data.loaded} columns loaded`, 'success');
+                } else {
+                    logEntry(`  OK ${entry.tableName}: ${data.loaded} rows (${data.new_dates} new, ${data.updated_dates} updated)`, 'success');
+                }
                 successCount++;
             } else {
                 logEntry(`  FAIL ${entry.name}: ${data.error || 'Unknown error'}`, 'error');

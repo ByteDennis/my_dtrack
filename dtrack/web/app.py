@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import glob
 
-from fastapi import FastAPI, Request, Query, UploadFile, File
+from fastapi import FastAPI, Request, Query, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -378,6 +378,8 @@ async def api_load(request: Request):
                         with open(col_csv, 'r', newline='') as f:
                             reader = csv_mod.DictReader(f)
                             for row in reader:
+                                # Strip whitespace from keys to handle \r\n line endings
+                                row = {k.strip(): v for k, v in row.items()}
                                 col_name = row.get('column_name') or row.get('COLUMN_NAME', '')
                                 dtype = row.get('data_type') or row.get('DATA_TYPE', '')
                                 if col_name:
@@ -780,6 +782,10 @@ async def api_load_row_files(request: Request):
             # Infer table info from filename
             filename = Path(file_path).stem
 
+            # Skip non-row CSV files (columns, col, etc.)
+            if not filename.lower().endswith('_row'):
+                continue
+
             # Find matching table in config
             for tbl in get_all_tables_from_unified(config):
                 qname = qualified_name(tbl)
@@ -804,8 +810,8 @@ async def api_load_row_files(request: Request):
 @app.post("/api/load/row/upload")
 async def api_load_row_upload(
     file: UploadFile = File(...),
-    table_name: str = "",
-    mode: str = "upsert",
+    table_name: str = Form(""),
+    mode: str = Form("upsert"),
 ):
     """Upload a CSV file and load row counts into a specific table.
 
@@ -893,8 +899,8 @@ async def api_load_row_upload(
 @app.post("/api/load/columns/upload")
 async def api_load_columns_upload(
     file: UploadFile = File(...),
-    table_name: str = "",
-    source: str = "",
+    table_name: str = Form(""),
+    source: str = Form(""),
 ):
     """Upload a column metadata CSV and load into _column_meta.
 
@@ -913,10 +919,54 @@ async def api_load_columns_upload(
         reader = csv_mod.DictReader(io.StringIO(text))
         columns = {}
         for row in reader:
+            # Strip whitespace from keys to handle \r\n line endings
+            row = {k.strip(): v for k, v in row.items()}
             col_name = row.get('column_name') or row.get('COLUMN_NAME', '')
             dtype = row.get('data_type') or row.get('DATA_TYPE', '')
             if col_name:
                 columns[col_name] = dtype
+
+        if not columns:
+            return JSONResponse(status_code=400, content={"error": "No columns found in CSV"})
+
+        count = insert_column_meta(_db_path, table_name, columns, source=source or None)
+        return {"ok": True, "loaded": count, "table_name": table_name}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/load/columns/path")
+async def api_load_columns_path(request: Request):
+    """Load a server-side column metadata CSV by path.
+
+    Body: {path, table_name, source}
+    """
+    import csv as csv_mod
+
+    body = await request.json()
+    csv_path = body.get("path", "")
+    if csv_path and not os.path.isabs(csv_path):
+        csv_path = _resolve(csv_path)
+    table_name = body.get("table_name", "")
+    source = body.get("source", "")
+
+    if not table_name:
+        return JSONResponse(status_code=400, content={"error": "table_name is required"})
+    if not csv_path or not os.path.exists(csv_path):
+        return JSONResponse(status_code=400, content={"error": f"File not found: {csv_path}"})
+
+    try:
+        from ..db import insert_column_meta
+
+        columns = {}
+        with open(csv_path, 'r', newline='') as f:
+            reader = csv_mod.DictReader(f)
+            for row in reader:
+                row = {k.strip(): v for k, v in row.items()}
+                col_name = row.get('column_name') or row.get('COLUMN_NAME', '')
+                dtype = row.get('data_type') or row.get('DATA_TYPE', '')
+                if col_name:
+                    columns[col_name] = dtype
 
         if not columns:
             return JSONResponse(status_code=400, content={"error": "No columns found in CSV"})
