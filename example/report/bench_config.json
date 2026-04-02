@@ -1,0 +1,7 @@
+{
+  "dsn": "host:1521/service_name",
+  "user": "ENV:ORACLE_USER",
+  "password": "ENV:ORACLE_PASSWORD",
+  "iterations": 5,
+  "arraysize": 5000
+}
