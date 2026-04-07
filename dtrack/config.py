@@ -30,6 +30,33 @@ def validate_unified_pair(pair_name, pair_config):
             raise ValueError(f"Pair '{pair_name}': 'col_type_overrides' must be a dict")
 
 
+def validate_date_types(date_types):
+    """Validate the optional date_types configuration block.
+
+    Each custom type must have: label (string), category (date|number|string),
+    format (string). Optional: date_transform, parse_to_date (SQL with {col}).
+    """
+    if not isinstance(date_types, dict):
+        raise ValueError("'date_types' must be a dictionary")
+    valid_categories = ("date", "number", "string")
+    for type_key, type_cfg in date_types.items():
+        if not isinstance(type_cfg, dict):
+            raise ValueError(f"date_types['{type_key}'] must be a dictionary")
+        if "label" not in type_cfg or not isinstance(type_cfg["label"], str):
+            raise ValueError(f"date_types['{type_key}'] must have a string 'label'")
+        cat = type_cfg.get("category", "")
+        if cat not in valid_categories:
+            raise ValueError(
+                f"date_types['{type_key}'].category must be one of {valid_categories}, got '{cat}'"
+            )
+        if "format" not in type_cfg or not isinstance(type_cfg["format"], str):
+            raise ValueError(f"date_types['{type_key}'] must have a string 'format'")
+        # Optional SQL expression fields
+        for opt_key in ("date_transform", "parse_to_date"):
+            if opt_key in type_cfg and not isinstance(type_cfg[opt_key], str):
+                raise ValueError(f"date_types['{type_key}'].{opt_key} must be a string")
+
+
 def validate_unified_config(config):
     """Validate unified configuration format."""
     if "pairs" not in config:
@@ -44,6 +71,10 @@ def validate_unified_config(config):
 
     for pair_name, pair_config in pairs.items():
         validate_unified_pair(pair_name, pair_config)
+
+    # Validate optional date_types block
+    if "date_types" in config:
+        validate_date_types(config["date_types"])
 
 
 def load_unified_config(config_path):
@@ -74,6 +105,7 @@ def save_unified_config(config, config_path):
     """Save unified configuration to JSON file.
 
     Strips 'name' from left/right since it's auto-derived from pair_name on load.
+    Preserves top-level keys like date_types, settings, metadata.
     """
     import copy
     out = copy.deepcopy(config)

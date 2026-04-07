@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dtrack - Load Col Data</title>
+    <link rel="stylesheet" href="/static/style_v2.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>dtrack</h1>
+        </div>
+        <div class="header-right">
+            <select id="step-selector" onchange="navigateToStep(this.value)">
+                <option value="pairs">Row Gen</option>
+                <option value="load_row">Load Row</option>
+                <option value="row_compare">Row Compare</option>
+                <option value="col_mapping">Col Mapping</option>
+                <option value="col_gen">Col Gen</option>
+                <option value="load_col" selected>Load Col</option>
+                <option value="col_compare">Col Compare</option>
+            </select>
+            <div class="db-status" id="db-status" title="Database connected"></div>
+        </div>
+    </header>
+
+    <main>
+        <!-- DATABASE STATUS -->
+        <section class="card">
+            <div class="section-header">
+                <h2>DATABASE STATUS</h2>
+            </div>
+            <div id="db-summary">
+                <div class="empty-message">Loading...</div>
+            </div>
+        </section>
+
+        <!-- DROP ZONE -->
+        <section class="card" id="drop-section">
+            <div class="section-header">
+                <h2>LOAD COL DATA</h2>
+            </div>
+            <div class="folder-path-bar">
+                <label>Folder:</label>
+                <input type="text" id="folder-path" value="./csv/" placeholder="/path/to/csv/files/">
+                <button class="btn-secondary" id="scan-folder-btn">Scan</button>
+            </div>
+            <div class="drop-zone" id="drop-zone">
+                <div class="drop-zone-content">
+                    <div class="drop-icon">&#128193;</div>
+                    <div class="drop-text">Drop col stats CSV files here or click to browse</div>
+                    <input type="file" id="file-input" multiple accept=".csv" style="display:none">
+                    <button class="btn-secondary" id="browse-btn">Browse Files</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- MATCHED FILES -->
+        <section class="card" id="match-section" style="display:none">
+            <div class="section-header">
+                <h2>MATCHED FILES</h2>
+                <div class="actions">
+                    <button class="btn-text" id="drop-more-btn">+ Drop more</button>
+                </div>
+            </div>
+            <div id="file-list" class="file-match-list">
+            </div>
+            <div class="file-actions">
+                <button class="btn-primary" id="load-btn" disabled>Load Selected (0)</button>
+            </div>
+        </section>
+
+        <!-- RUN LOG -->
+        <section class="card" id="log-section" style="display:none">
+            <div class="section-header">
+                <h2>RUN LOG</h2>
+                <button class="btn-text" id="clear-log-btn">Clear</button>
+            </div>
+            <div id="run-log" class="log-output">
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/load_col.js"></script>
+</body>
+</html>

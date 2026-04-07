@@ -68,6 +68,22 @@ async def row_compare_page(request: Request):
 async def col_mapping_page(request: Request):
     return templates.TemplateResponse("col_mapping.html", {"request": request})
 
+@app.get("/col_gen", response_class=HTMLResponse)
+async def col_gen_page(request: Request):
+    return templates.TemplateResponse("col_gen.html", {"request": request})
+
+@app.get("/load_col", response_class=HTMLResponse)
+async def load_col_page(request: Request):
+    return templates.TemplateResponse("load_col.html", {"request": request})
+
+@app.get("/col_compare", response_class=HTMLResponse)
+async def col_compare_page(request: Request):
+    return templates.TemplateResponse("col_compare.html", {"request": request})
+
+@app.get("/benchmark", response_class=HTMLResponse)
+async def benchmark_page(request: Request):
+    return templates.TemplateResponse("benchmark.html", {"request": request})
+
 
 # ---------------------------------------------------------------------------
 # API routes
@@ -569,11 +585,13 @@ async def api_update_config(request: Request):
                 else:
                     config["pairs"][pname] = pcfg
 
-        # Merge top-level metadata and settings
+        # Merge top-level metadata, settings, and date_types
         if "metadata" in body:
             config.setdefault("metadata", {}).update(body["metadata"])
         if "settings" in body:
             config.setdefault("settings", {}).update(body["settings"])
+        if "date_types" in body:
+            config.setdefault("date_types", {}).update(body["date_types"])
 
         save_unified_config(config, _config_path)
         _sync_config_pairs(config)
@@ -1111,6 +1129,295 @@ async def api_scan_folder(dir: str = "./csv/"):
 
 
 # ---------------------------------------------------------------------------
+# Col Stats Load API
+# ---------------------------------------------------------------------------
+
+@app.post("/api/load/col-stats/upload")
+async def api_load_col_stats_upload(
+    file: UploadFile = File(...),
+    table_name: str = Form(""),
+    mode: str = Form("upsert"),
+):
+    """Upload pre-computed column stats CSV.
+
+    CSV should have: column_name, dt, col_type, n_total, n_missing, n_unique,
+    mean, std, min_val, max_val, top_10
+    """
+    import tempfile
+
+    if not table_name:
+        return JSONResponse(status_code=400, content={"error": "table_name is required"})
+
+    try:
+        content = await file.read()
+        with tempfile.NamedTemporaryFile(
+            mode='wb', suffix='.csv', delete=False
+        ) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        from ..loader import load_precomputed_col_stats
+        from ..config import load_unified_config, get_all_tables_from_unified
+        from ..platforms.base import qualified_name
+
+        # Find table config for vintage info
+        config = load_unified_config(_config_path)
+        tbl_cfg = None
+        for tbl in get_all_tables_from_unified(config):
+            if qualified_name(tbl).lower() == table_name.lower():
+                tbl_cfg = tbl
+                break
+
+        table_vintage = "day"
+        if tbl_cfg:
+            table_vintage = tbl_cfg.get("vintage") or "day"
+        else:
+            from ..db import get_metadata
+            meta = get_metadata(_db_path, table_name)
+            if meta:
+                table_vintage = meta.get("vintage") or "day"
+
+        count = load_precomputed_col_stats(
+            db_path=_db_path,
+            csv_path=tmp_path,
+            table_name=table_name,
+            mode=mode,
+            source=tbl_cfg.get("source") if tbl_cfg else None,
+            vintage=table_vintage,
+        )
+
+        os.unlink(tmp_path)
+
+        return {"ok": True, "loaded": count, "table_name": table_name}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "ok": False, "error": f"{type(e).__name__}: {e}",
+        })
+
+
+@app.post("/api/load/col-stats/path")
+async def api_load_col_stats_path(request: Request):
+    """Load col stats from server-side path.
+
+    Body: {path, table_name, mode}
+    """
+    body = await request.json()
+    csv_path = body.get("path", "")
+    if csv_path and not os.path.isabs(csv_path):
+        csv_path = _resolve(csv_path)
+    table_name = body.get("table_name", "")
+    mode = body.get("mode", "upsert")
+
+    if not table_name:
+        return JSONResponse(status_code=400, content={"error": "table_name is required"})
+    if not csv_path or not os.path.exists(csv_path):
+        return JSONResponse(status_code=400, content={"error": f"File not found: {csv_path}"})
+
+    try:
+        from ..loader import load_precomputed_col_stats
+        from ..config import load_unified_config, get_all_tables_from_unified
+        from ..platforms.base import qualified_name
+        from ..db import get_metadata
+
+        config = load_unified_config(_config_path)
+        tbl_cfg = None
+        for tbl in get_all_tables_from_unified(config):
+            if qualified_name(tbl).lower() == table_name.lower():
+                tbl_cfg = tbl
+                break
+
+        table_vintage = "day"
+        if tbl_cfg:
+            table_vintage = tbl_cfg.get("vintage") or "day"
+        else:
+            meta = get_metadata(_db_path, table_name)
+            if meta:
+                table_vintage = meta.get("vintage") or "day"
+
+        count = load_precomputed_col_stats(
+            db_path=_db_path,
+            csv_path=csv_path,
+            table_name=table_name,
+            mode=mode,
+            source=tbl_cfg.get("source") if tbl_cfg else None,
+            vintage=table_vintage,
+        )
+
+        return {"ok": True, "loaded": count, "table_name": table_name}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+
+@app.get("/api/status/col")
+async def api_status_col():
+    """Return col stats summary per table (count of stat rows)."""
+    try:
+        conn = sqlite3.connect(_db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        status = {}
+        try:
+            cursor.execute(
+                "SELECT source_table, COUNT(*) as cnt FROM _col_stats GROUP BY source_table"
+            )
+            for row in cursor.fetchall():
+                status[row["source_table"]] = row["cnt"]
+        except sqlite3.OperationalError:
+            pass  # _col_stats may not exist
+
+        conn.close()
+        return {"status": status}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Col Compare API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/compare/col/{pair_name}")
+async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str = ""):
+    """Compare col stats for a single pair and return JSON."""
+    try:
+        from ..db import (
+            get_table_pair, get_col_stats, get_pair_col_map_from_db,
+            get_column_meta,
+        )
+
+        pair = get_table_pair(_db_path, pair_name)
+        if not pair:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        table_left = pair["table_left"]
+        table_right = pair["table_right"]
+
+        # Get col mappings
+        col_mappings = get_pair_col_map_from_db(_db_path, pair_name)
+
+        # If no explicit mappings, auto-match by name
+        if not col_mappings:
+            left_meta = get_column_meta(_db_path, table_left)
+            right_meta = get_column_meta(_db_path, table_right)
+            left_cols = {c["column_name"]: c.get("data_type", "") for c in left_meta}
+            right_cols = {c["column_name"]: c.get("data_type", "") for c in right_meta}
+
+            from ..compare import match_columns_from_dicts
+            auto = match_columns_from_dicts(left_cols, right_cols)
+            col_mappings = auto.get("matched", {})
+
+        # Get col stats for both sides
+        stats_left = get_col_stats(
+            _db_path, table_left,
+            from_date=from_date or None,
+            to_date=to_date or None,
+        )
+        stats_right = get_col_stats(
+            _db_path, table_right,
+            from_date=from_date or None,
+            to_date=to_date or None,
+        )
+
+        # Organize stats by column name (aggregate latest date or all)
+        def agg_stats(stats_list):
+            """Aggregate stats per column — take the latest date entry."""
+            by_col = {}
+            for s in stats_list:
+                col = s["column_name"]
+                if col not in by_col or (s.get("dt", "") > by_col[col].get("dt", "")):
+                    by_col[col] = s
+            return by_col
+
+        left_agg = agg_stats(stats_left)
+        right_agg = agg_stats(stats_right)
+
+        mapped_left = set(col_mappings.keys())
+        mapped_right = set(col_mappings.values())
+
+        # Build matched columns comparison
+        matched = []
+        n_diff = 0
+        for left_col, right_col in sorted(col_mappings.items()):
+            ls = left_agg.get(left_col, {})
+            rs = right_agg.get(right_col, {})
+
+            has_diff = False
+            # Check if key stats differ
+            for key in ("n_total", "n_missing", "n_unique"):
+                lv = ls.get(key, "")
+                rv = rs.get(key, "")
+                if str(lv) != str(rv) and (lv or rv):
+                    has_diff = True
+                    break
+
+            if has_diff:
+                n_diff += 1
+
+            matched.append({
+                "left_col": left_col,
+                "right_col": right_col,
+                "left_type": ls.get("col_type", ""),
+                "right_type": rs.get("col_type", ""),
+                "left_n_total": ls.get("n_total", ""),
+                "right_n_total": rs.get("n_total", ""),
+                "left_n_missing": ls.get("n_missing", ""),
+                "right_n_missing": rs.get("n_missing", ""),
+                "left_n_unique": ls.get("n_unique", ""),
+                "right_n_unique": rs.get("n_unique", ""),
+                "left_mean": ls.get("mean", ""),
+                "right_mean": rs.get("mean", ""),
+                "left_std": ls.get("std", ""),
+                "right_std": rs.get("std", ""),
+                "has_diff": has_diff,
+            })
+
+        # Left-only columns
+        all_left_cols = set(left_agg.keys())
+        left_only = []
+        for col in sorted(all_left_cols - mapped_left):
+            s = left_agg.get(col, {})
+            left_only.append({
+                "column_name": col,
+                "col_type": s.get("col_type", ""),
+                "n_total": s.get("n_total", ""),
+                "n_missing": s.get("n_missing", ""),
+                "n_unique": s.get("n_unique", ""),
+            })
+
+        # Right-only columns
+        all_right_cols = set(right_agg.keys())
+        right_only = []
+        for col in sorted(all_right_cols - mapped_right):
+            s = right_agg.get(col, {})
+            right_only.append({
+                "column_name": col,
+                "col_type": s.get("col_type", ""),
+                "n_total": s.get("n_total", ""),
+                "n_missing": s.get("n_missing", ""),
+                "n_unique": s.get("n_unique", ""),
+            })
+
+        return {
+            "pair_name": pair_name,
+            "table_left": table_left,
+            "table_right": table_right,
+            "source_left": pair.get("source_left", ""),
+            "source_right": pair.get("source_right", ""),
+            "summary": {
+                "n_matched": len(matched),
+                "n_diff": n_diff,
+                "n_left_only": len(left_only),
+                "n_right_only": len(right_only),
+            },
+            "matched": matched,
+            "left_only": left_only,
+            "right_only": right_only,
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
 # Row Compare API
 # ---------------------------------------------------------------------------
 
@@ -1284,9 +1591,14 @@ async def api_compare_row_export_csv(pair_name: str, from_date: str = "", to_dat
 
 @app.get("/api/compare/row/export/count-csv/{pair_name}")
 async def api_compare_row_export_count_csv(
-    pair_name: str, side: str = "left", from_date: str = "", to_date: str = ""
+    pair_name: str, side: str = "left", from_date: str = "", to_date: str = "",
+    common_only: bool = True,
 ):
-    """Generate a single-side count CSV: DATE_COL (SOURCE), COUNT (SOURCE)."""
+    """Generate a single-side count CSV: DATE_COL (SOURCE), COUNT (SOURCE).
+
+    When common_only=True (default), only dates within the overlap range of
+    both sides are included.
+    """
     import csv as csv_mod
 
     try:
@@ -1305,6 +1617,23 @@ async def api_compare_row_export_count_csv(
             from_date=from_date or None, to_date=to_date or None,
         )
 
+        # Compute overlap range
+        overlap_start = overlap_end = None
+        if common_only:
+            summary = comparison["summary"]
+            left_min, left_max = summary["date_range_left"]
+            right_min, right_max = summary["date_range_right"]
+            if left_min and right_min and left_max and right_max:
+                overlap_start = max(left_min, right_min)
+                overlap_end = min(left_max, right_max)
+                if overlap_start > overlap_end:
+                    overlap_start = overlap_end = None
+
+        def _in_range(dt):
+            if not common_only or not overlap_start:
+                return True
+            return overlap_start <= dt <= overlap_end
+
         # Determine column header names
         tbl_key = "table_left" if side == "left" else "table_right"
         src_key = "source_left" if side == "left" else "source_right"
@@ -1312,18 +1641,23 @@ async def api_compare_row_export_count_csv(
         date_var = (meta.get("date_var") or "DT").upper()
         source = (pair.get(src_key) or side).upper()
 
-        # Collect (date, count) rows for the requested side
+        # Collect (date, count) rows for the requested side — common range only
         rows = []
         for dt, count in comparison["matching"]:
-            rows.append((dt, count))
+            if _in_range(dt):
+                rows.append((dt, count))
         for dt, l, r in comparison["mismatched"]:
-            rows.append((dt, l if side == "left" else r))
-        if side == "left":
-            for dt, count in comparison["only_left"]:
-                rows.append((dt, count))
-        else:
-            for dt, count in comparison["only_right"]:
-                rows.append((dt, count))
+            if _in_range(dt):
+                rows.append((dt, l if side == "left" else r))
+        if not common_only:
+            if side == "left":
+                for dt, count in comparison["only_left"]:
+                    if _in_range(dt):
+                        rows.append((dt, count))
+            else:
+                for dt, count in comparison["only_right"]:
+                    if _in_range(dt):
+                        rows.append((dt, count))
 
         rows.sort(key=lambda r: r[0])
 
@@ -1345,9 +1679,14 @@ async def api_compare_row_export_count_csv(
 
 @app.get("/api/compare/row/export/excel/{pair_name}")
 async def api_compare_row_export_excel(
-    pair_name: str, from_date: str = "", to_date: str = ""
+    pair_name: str, from_date: str = "", to_date: str = "",
+    common_only: bool = True,
 ):
-    """Generate Excel with two sheets (left counts, right counts) for one pair."""
+    """Generate Excel with two sheets (left counts, right counts) for one pair.
+
+    When common_only=True (default), only dates within the overlap range of
+    both sides are included.
+    """
     try:
         from openpyxl import Workbook
         from ..db import get_table_pair, get_metadata
@@ -1362,6 +1701,23 @@ async def api_compare_row_export_excel(
             from_date=from_date or None, to_date=to_date or None,
         )
 
+        # Compute overlap range
+        overlap_start = overlap_end = None
+        if common_only:
+            summary = comparison["summary"]
+            left_min, left_max = summary["date_range_left"]
+            right_min, right_max = summary["date_range_right"]
+            if left_min and right_min and left_max and right_max:
+                overlap_start = max(left_min, right_min)
+                overlap_end = min(left_max, right_max)
+                if overlap_start > overlap_end:
+                    overlap_start = overlap_end = None
+
+        def _in_range(dt):
+            if not common_only or not overlap_start:
+                return True
+            return overlap_start <= dt <= overlap_end
+
         def _build_side(side):
             tbl_key = "table_left" if side == "left" else "table_right"
             src_key = "source_left" if side == "left" else "source_right"
@@ -1371,15 +1727,20 @@ async def api_compare_row_export_excel(
 
             rows = []
             for dt, count in comparison["matching"]:
-                rows.append((dt, count))
+                if _in_range(dt):
+                    rows.append((dt, count))
             for dt, l, r in comparison["mismatched"]:
-                rows.append((dt, l if side == "left" else r))
-            if side == "left":
-                for dt, count in comparison["only_left"]:
-                    rows.append((dt, count))
-            else:
-                for dt, count in comparison["only_right"]:
-                    rows.append((dt, count))
+                if _in_range(dt):
+                    rows.append((dt, l if side == "left" else r))
+            if not common_only:
+                if side == "left":
+                    for dt, count in comparison["only_left"]:
+                        if _in_range(dt):
+                            rows.append((dt, count))
+                else:
+                    for dt, count in comparison["only_right"]:
+                        if _in_range(dt):
+                            rows.append((dt, count))
             rows.sort(key=lambda r: r[0])
             return date_var, source, rows
 
@@ -2074,6 +2435,9 @@ def _preview_date_literal(date_str, date_type, is_sas=False, source=""):
     if not date_str:
         return "''"
     dtype = date_type.lower() if date_type else ""
+
+    if dtype == "num_yyyymm":
+        return date_str.replace("-", "")[:6]
 
     if dtype in ("num", "integer", "int", "number"):
         return date_str.replace("-", "")

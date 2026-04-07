@@ -1,0 +1,152 @@
+================================================================================
+COPILOT PROMPT — PCDS Oracle Query Performance Optimization (PPT)
+================================================================================
+Use this file to generate a PowerPoint presentation. The MAIN PROMPT section
+is the primary input (< 2000 tokens). SLIDE DETAIL sections provide per-slide
+content when the copilot needs more specifics. Code snippet placeholders are
+marked [SNIPPET] — paste actual SQL/Python there before generating.
+
+================================================================================
+MAIN PROMPT (< 2000 tokens)
+================================================================================
+
+Create a professional 14-slide presentation titled "PCDS Oracle Query
+Performance Optimization — Summary of Findings".
+
+Theme: Clean corporate, dark blue/white. Use monospace font for SQL/code.
+Charts use log scale where indicated. Accent color for speed-up values > 10x.
+
+SLIDE LAYOUT:
+
+1. TITLE SLIDE
+   Title: PCDS Oracle Query Performance Optimization
+   Subtitle: Summary of Findings — SQL Strategy Benchmarks
+   Footer: Tested via python-oracledb with SAS/ACCESS reference timings
+
+2. EXECUTIVE SUMMARY
+   Heading: "Key Result: 10x-20x faster queries, some over 100x"
+   One-sentence intro, then this results table:
+
+   | # | Strategy                | Before   | After  | Speed-Up | SAS Ref     |
+   |---|-------------------------|----------|--------|----------|-------------|
+   | 1 | Date range WHERE        | 80 s     | 0.05 s | 1600x    | 81->0.05 s  |
+   | 2 | Direct GROUP BY         | 7.9 s    | 2.3 s  | 3.5x     | 8->2.3 s    |
+   | 3 | Skip unnecessary CTE    | 11 s     | 1.3 s  | 8x       | 12->1.3 s   |
+   | 4 | PARALLEL(4) hint        | 2.1 s    | 3.9 s  | none     | no gain     |
+   | 5 | ARRAYSIZE 100->5000     | 20.8 s   | 1.3 s  | 16x      | 1.5->1.3 s  |
+   | 6 | Bind variables          | (est.)   | (est.) | ~10x     | auto binds  |
+   | 7 | Partition pruning       | 54 s     | 0.3 s  | 180x     | 60->0.3 s   |
+   | 8 | RESULT_CACHE hint       | 10.5 s   | 0.47 s | 22x      | N/A         |
+   | 9 | Batch fetch (fetchmany) | (est.)   | (est.) | ~15x     | bulk fetch  |
+
+   Highlight rows 1, 7, 8 (highest gains). Gray out row 4 (no gain).
+
+3. PERFORMANCE CHART
+   Horizontal bar chart, LOG SCALE y-axis.
+   Title: "Speed-Up Factor by Strategy (log scale)"
+   Bars for strategies 1-9 ordered by speed-up descending.
+   Draw a red dashed reference line at 20x.
+   Label each bar with its speed-up value.
+   Omit strategy 4 (no gain) or show as 1x baseline.
+
+4-12. STRATEGY SLIDES (one per strategy, numbered 1-9)
+   Each slide follows this layout:
+   - Title: "#{n}. {Strategy Name}"
+   - Left column (60%): Goal (1-2 sentences), then code snippet box [SNIPPET]
+   - Right column (40%): Outcome callout box with before/after times,
+     speed-up badge, and 2-sentence explanation
+   - Bottom: one-line takeaway in italic
+
+13. KEY TAKEAWAYS
+    Bullet list:
+    - Avoid functions on indexed/partitioned date columns (WHERE, GROUP BY)
+    - Tune client fetch sizes (arraysize, fetchmany) for bulk reads
+    - Use RESULT_CACHE for repeated read-heavy queries
+    - Bind variables reduce parse overhead for looped queries
+    - PARALLEL hints limited by SESSIONS_PER_USER=3 in our environment
+    - SAS runtimes closely track Oracle — optimization benefits both
+
+14. CAVEATS & ENVIRONMENT
+    - Oracle via python-oracledb, SAS via SAS/ACCESS passthrough
+    - SESSIONS_PER_USER = 3 (constrains PARALLEL)
+    - 5 iterations per experiment, averaged
+    - Tables: V_TRAN_L (partitioned), V_PCO_LN_TU_CA, V_LOGON_ATMPT_LOG
+    - Results are environment-specific; verify on target system
+
+
+================================================================================
+SLIDE DETAIL PROMPTS (use individually if copilot needs per-slide guidance)
+================================================================================
+
+--- Slide 4: #1. Avoid TRUNC(date) in WHERE ---
+Goal: Speed up date filters by using range predicates instead of TRUNC(),
+which disables index/partition usage on the date column.
+[SNIPPET]
+Outcome: 80 s -> 0.05 s (1600x). Range condition enabled index on EFF_DT
+and partition pruning. SAS showed identical benefit when filter passed through
+as date range. Biggest single improvement in the benchmark.
+Takeaway: Never wrap indexed date columns in functions inside WHERE clauses.
+
+--- Slide 5: #2. Avoid TRUNC(date) in GROUP BY ---
+Goal: Group by the date column directly instead of TRUNC(date_col) to allow
+index usage and avoid per-row function overhead.
+[SNIPPET]
+Outcome: 7.9 s -> 2.3 s (3.5x). Direct grouping utilized index on DW_BUS_DT.
+Modest but consistent improvement. SAS showed similar pattern.
+Takeaway: If data is already at the needed granularity, group by the column directly.
+
+--- Slide 6: #3. Skip Unnecessary CTE ---
+Goal: Eliminate overhead of trivial CTEs. For simple one-off aggregations,
+a direct query avoids extra parsing and execution steps.
+[SNIPPET]
+Outcome: 11 s -> 1.3 s (8x). The CTE wrapper added overhead without benefit
+for a single-use aggregation. SAS performance was analogous.
+Takeaway: Use direct queries for simple aggregations; reserve CTEs for reuse.
+
+--- Slide 7: #4. Parallel Query (PARALLEL hint) ---
+Goal: Accelerate large aggregations via Oracle parallel execution with
+PARALLEL(table, 4) hint.
+[SNIPPET]
+Outcome: No gain (2.1 s serial vs 3.9 s parallel). SESSIONS_PER_USER=3 limited
+available threads; coordination overhead outweighed any benefit.
+Takeaway: Parallel hints require sufficient session slots. Check DBA limits first.
+
+--- Slide 8: #5. Client Fetch Tuning (ARRAYSIZE) ---
+Goal: Reduce network round-trips for large result sets by increasing the
+Python cursor arraysize from 100 (default) to 5000.
+[SNIPPET]
+Outcome: 20.8 s -> 1.3 s (16x) for 200k rows. Fewer round-trips between client
+and DB. SAS already uses large fetch blocks (~1.3-1.5 s baseline).
+Takeaway: Always set arraysize >= 5000 for bulk data retrieval in Python.
+
+--- Slide 9: #6. Bind Variables ---
+Goal: Reduce SQL parsing overhead for repetitive lookups by using bind
+parameters instead of literal values in looped queries.
+[SNIPPET]
+Outcome: ~10x estimated improvement for 500 single-row lookups. Bind parameters
+allow Oracle to reuse execution plans. SAS uses binds automatically.
+Takeaway: For batch/looped queries, always use bind parameters.
+
+--- Slide 10: #7. Partition Pruning (TO_CHAR vs date range) ---
+Goal: Enable Oracle partition pruning by filtering with native date range
+instead of TO_CHAR() on the partition key.
+[SNIPPET]
+Outcome: 54 s -> 0.3 s (180x). TO_CHAR forced full-partition scan; date range
+restricted scan to January 2024 partition only. Second-highest gain.
+Takeaway: Never apply functions to partition key columns in WHERE clauses.
+
+--- Slide 11: #8. RESULT_CACHE Hint ---
+Goal: Leverage Oracle's server-side result cache for repeated identical
+queries using the /*+ RESULT_CACHE */ hint.
+[SNIPPET]
+Outcome: 10.5 s -> 0.47 s avg across 5 runs (22x). First run is normal speed;
+subsequent runs return cached results sub-second. Cache invalidated on DML.
+Takeaway: Use RESULT_CACHE for read-heavy, repeatedly executed queries.
+
+--- Slide 12: #9. Batch Fetching (fetchone vs fetchmany) ---
+Goal: Minimize application-level overhead by fetching rows in batches of 5000
+instead of one-by-one with fetchone().
+[SNIPPET]
+Outcome: ~15x estimated improvement for 100k rows. Reduces Python-to-DB call
+count dramatically. SAS handles this internally with bulk fetch.
+Takeaway: Use fetchmany() or set large arraysize; never loop with fetchone().

@@ -24,7 +24,8 @@ const DATE_COLUMN_TYPES = [
     {value: "date", label: "Date"},
     {value: "timestamp", label: "Timestamp"},
     {value: "datetime", label: "DateTime"},
-    {value: "num", label: "Number (SAS date)"},
+    {value: "num", label: "Number (YYYYMMDD)"},
+    {value: "num_yyyymm", label: "Number (YYYYMM)"},
     {value: "string_dash", label: "String (YYYY-MM-DD)"},
     {value: "string_compact", label: "String (YYYYMMDD)"},
 ];
@@ -247,9 +248,103 @@ function initSourceDropdowns() {
         rightDateType.add(new Option(type.label, type.value));
     });
 
+    // Merge custom date_types from config into dropdowns
+    _loadCustomDateTypes(leftDateType, rightDateType);
+
     // Set default to 'date'
     leftDateType.value = 'date';
     rightDateType.value = 'date';
+}
+
+async function _loadCustomDateTypes(leftSelect, rightSelect) {
+    try {
+        const resp = await fetch('/api/config');
+        if (!resp.ok) return;
+        const config = await resp.json();
+        const customTypes = config.date_types || {};
+
+        // Add custom types after built-in types
+        for (const [key, cfg] of Object.entries(customTypes)) {
+            // Skip if already a built-in type
+            if (DATE_COLUMN_TYPES.some(t => t.value === key)) continue;
+            leftSelect.add(new Option(cfg.label || key, key));
+            rightSelect.add(new Option(cfg.label || key, key));
+        }
+
+        // Add "+ Custom" option at the end
+        leftSelect.add(new Option('+ Custom...', '__custom__'));
+        rightSelect.add(new Option('+ Custom...', '__custom__'));
+
+        // Wire up custom type creation on selection
+        leftSelect.addEventListener('change', () => _onDateTypeChange(leftSelect, rightSelect));
+        rightSelect.addEventListener('change', () => _onDateTypeChange(rightSelect, leftSelect));
+    } catch (e) {
+        // Non-critical — built-in types still work
+        console.error('Failed to load custom date types:', e);
+    }
+}
+
+async function _onDateTypeChange(changedSelect, otherSelect) {
+    if (changedSelect.value !== '__custom__') return;
+
+    const label = prompt('Custom date type label (e.g. "Monthly Number"):');
+    if (!label) {
+        changedSelect.value = 'date';
+        return;
+    }
+    const key = prompt('Type key (e.g. "my_monthly_num", no spaces):');
+    if (!key || !key.match(/^[a-z0-9_]+$/)) {
+        alert('Key must be lowercase alphanumeric with underscores only.');
+        changedSelect.value = 'date';
+        return;
+    }
+    const category = prompt('Category (date, number, or string):');
+    if (!['date', 'number', 'string'].includes(category)) {
+        alert('Category must be one of: date, number, string');
+        changedSelect.value = 'date';
+        return;
+    }
+    const format = prompt('Format pattern (e.g. YYYYMM, YYYYMMDD, YYYY-MM-DD):');
+    if (!format) {
+        changedSelect.value = 'date';
+        return;
+    }
+
+    const dateTransform = prompt('SQL date_transform expression (optional, use {col} placeholder):') || undefined;
+    const parseToDate = prompt('SQL parse_to_date expression (optional, use {col} placeholder):') || undefined;
+
+    const newType = {label, category, format};
+    if (dateTransform) newType.date_transform = dateTransform;
+    if (parseToDate) newType.parse_to_date = parseToDate;
+
+    // Save to config via PUT /api/config
+    try {
+        const resp = await fetch('/api/config', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({date_types: {[key]: newType}}),
+        });
+        if (!resp.ok) {
+            const data = await resp.json();
+            alert(`Failed to save custom type: ${data.error || 'unknown error'}`);
+            changedSelect.value = 'date';
+            return;
+        }
+
+        // Add the new option to both selects (before the "+ Custom..." option)
+        const customOptL = changedSelect.querySelector('option[value="__custom__"]');
+        const customOptR = otherSelect.querySelector('option[value="__custom__"]');
+        const newOptL = new Option(label, key);
+        const newOptR = new Option(label, key);
+        changedSelect.insertBefore(newOptL, customOptL);
+        otherSelect.insertBefore(newOptR, customOptR);
+
+        changedSelect.value = key;
+        showSuccess(`Custom date type "${label}" saved`);
+    } catch (e) {
+        alert(`Failed to save custom type: ${e.message}`);
+        changedSelect.value = 'date';
+    }
 }
 
 function updateConnOptions(side) {

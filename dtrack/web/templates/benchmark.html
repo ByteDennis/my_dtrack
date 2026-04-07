@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dtrack - SQL Benchmark</title>
+    <link rel="stylesheet" href="/static/style_v2.css">
+    <style>
+        /* Benchmark-specific styles */
+        .bench-pair-card {
+            border: 1px solid var(--jp-border-color0);
+            border-radius: var(--jp-border-radius);
+            padding: 12px 16px;
+            margin-bottom: 8px;
+            background: var(--jp-layout-color1);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .bench-pair-card .pair-info { flex: 1; }
+        .bench-pair-card .pair-label {
+            font-weight: 600;
+            font-size: 13px;
+            color: var(--jp-ui-font-color0);
+        }
+        .bench-pair-card .pair-detail {
+            font-size: 11px;
+            color: var(--jp-ui-font-color2);
+            margin-top: 2px;
+        }
+        .bench-pair-card .pair-actions {
+            display: flex;
+            gap: 4px;
+        }
+
+        .strategies-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px 20px;
+        }
+        .strategy-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            border: 1px solid var(--jp-border-color0);
+            border-radius: var(--jp-border-radius);
+            background: var(--jp-layout-color1);
+            font-size: 12px;
+            cursor: pointer;
+            user-select: none;
+            min-width: 160px;
+        }
+        .strategy-item:hover {
+            border-color: var(--jp-brand-color0);
+        }
+        .strategy-item.custom {
+            border-style: dashed;
+        }
+        .strategy-item input[type="checkbox"] { margin: 0; }
+        .strategy-item .strat-name { font-weight: 600; }
+        .strategy-item .strat-desc {
+            font-size: 10px;
+            color: var(--jp-ui-font-color2);
+            margin-left: auto;
+        }
+
+        .sql-tabs {
+            display: flex;
+            gap: 0;
+            border-bottom: 2px solid var(--jp-border-color0);
+            margin-bottom: 12px;
+        }
+        .sql-tab {
+            padding: 8px 16px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            background: none;
+            color: var(--jp-ui-font-color2);
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+        }
+        .sql-tab.active {
+            color: var(--jp-brand-color1);
+            border-bottom-color: var(--jp-brand-color1);
+        }
+        .sql-tab-content { display: none; }
+        .sql-tab-content.active { display: block; }
+
+        .sql-block {
+            background: var(--jp-layout-color2);
+            border: 1px solid var(--jp-border-color0);
+            border-radius: var(--jp-border-radius);
+            padding: 12px;
+            margin-bottom: 12px;
+            position: relative;
+        }
+        .sql-block h4 {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--jp-ui-font-color2);
+            margin-bottom: 8px;
+        }
+        .sql-block pre {
+            font-family: var(--jp-code-font-family);
+            font-size: 12px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            margin: 0;
+            color: var(--jp-ui-font-color0);
+        }
+        .sql-block .copy-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            font-size: 10px;
+            padding: 2px 8px;
+        }
+
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        .results-table th {
+            background: var(--jp-layout-color2);
+            border: 1px solid var(--jp-border-color0);
+            padding: 8px 12px;
+            text-align: center;
+            font-weight: 700;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--jp-ui-font-color1);
+        }
+        .results-table td {
+            border: 1px solid var(--jp-border-color0);
+            padding: 6px 10px;
+            text-align: center;
+        }
+        .results-table td:first-child {
+            text-align: left;
+            font-weight: 600;
+        }
+        .results-table td:nth-child(2) {
+            text-align: left;
+            font-size: 11px;
+            color: var(--jp-ui-font-color2);
+        }
+        .results-table input[type="number"] {
+            width: 80px;
+            text-align: center;
+            border: 1px solid var(--jp-border-color1);
+            border-radius: var(--jp-border-radius-sm);
+            padding: 4px 6px;
+            font-size: 12px;
+            font-family: var(--jp-code-font-family);
+        }
+        .results-table .ratio {
+            font-weight: 700;
+            font-family: var(--jp-code-font-family);
+        }
+        .results-table .ratio.fast { color: var(--jp-success-color0); }
+        .results-table .ratio.slow { color: var(--jp-error-color0); }
+        .results-table .ratio.neutral { color: var(--jp-ui-font-color2); }
+        .results-table .est {
+            color: var(--jp-ui-font-color3);
+            font-style: italic;
+        }
+
+        .sas-code-block {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border-radius: var(--jp-border-radius);
+            padding: 16px;
+            font-family: var(--jp-code-font-family);
+            font-size: 12px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            overflow-x: auto;
+            max-height: 500px;
+            overflow-y: auto;
+            position: relative;
+        }
+        .sas-code-block .sas-comment { color: #6a9955; }
+        .sas-code-block .sas-macro { color: #569cd6; }
+        .sas-code-block .sas-keyword { color: #c586c0; }
+
+        .pair-results-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 0;
+            border-bottom: 1px solid var(--jp-border-color0);
+            margin-bottom: 12px;
+            cursor: pointer;
+        }
+        .pair-results-header h3 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--jp-ui-font-color0);
+        }
+        .pair-results-header .toggle-icon {
+            font-size: 10px;
+            color: var(--jp-ui-font-color2);
+            transition: transform 0.15s;
+        }
+        .pair-results-header .toggle-icon.open { transform: rotate(90deg); }
+
+        .add-custom-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        .add-custom-row input {
+            font-size: 12px;
+            padding: 6px 10px;
+            border: 1px dashed var(--jp-border-color1);
+            border-radius: var(--jp-border-radius);
+            width: 180px;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>dtrack</h1>
+        </div>
+        <div class="header-right">
+            <a href="/pairs" style="text-decoration:none; color:var(--jp-brand-color0); font-size:12px;">&#8592; Pipeline</a>
+            <span style="font-weight:600; color:var(--jp-ui-font-color1); font-size:13px; letter-spacing:0.5px;">SQL BENCHMARK</span>
+            <div class="db-status" id="db-status" title="Benchmark page">&#9679;</div>
+        </div>
+    </header>
+
+    <main>
+        <!-- BENCHMARK PAIRS -->
+        <section class="card">
+            <div class="section-header">
+                <h2>BENCHMARK PAIRS</h2>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn-secondary" onclick="importPairsFromPipeline()">Import from Pipeline</button>
+                    <button class="btn-primary" onclick="showAddPairModal()">+ Add Pair</button>
+                </div>
+            </div>
+            <div id="bench-pairs-list">
+                <!-- Pair cards rendered here -->
+            </div>
+            <div id="bench-pairs-empty" class="empty-state" style="display:none;">
+                No benchmark pairs configured. Click "+ Add Pair" to get started.
+            </div>
+        </section>
+
+        <!-- STRATEGIES -->
+        <section class="card">
+            <div class="section-header">
+                <h2>STRATEGIES</h2>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn-text" onclick="selectAllStrategies(true)">Select All</button>
+                    <button class="btn-text" onclick="selectAllStrategies(false)">Clear</button>
+                </div>
+            </div>
+            <div id="strategies-grid" class="strategies-grid">
+                <!-- Strategy checkboxes rendered by JS -->
+            </div>
+            <div class="add-custom-row">
+                <input type="text" id="custom-strategy-name" placeholder="Custom strategy name...">
+                <button class="btn-text" onclick="addCustomStrategy()">+ Add</button>
+            </div>
+        </section>
+
+        <!-- ACTIONS -->
+        <section class="card">
+            <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+                <button class="btn-secondary" onclick="previewSQL()">Preview SQL</button>
+                <button class="btn-primary" onclick="generateSAS()">Generate SAS</button>
+                <button class="btn-secondary" onclick="showResultsTable()">Show Results Table</button>
+                <div style="flex:1;"></div>
+                <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--jp-ui-font-color2);">
+                    SAS Multiplier:
+                    <input type="number" id="sas-multiplier" value="20" min="1" max="100" step="1"
+                           style="width:60px; text-align:center;" onchange="recalcAllResults()">
+                    <span>x</span>
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--jp-ui-font-color2);">
+                    Iterations:
+                    <input type="number" id="bench-iterations" value="5" min="1" max="50" step="1"
+                           style="width:50px; text-align:center;">
+                </label>
+            </div>
+        </section>
+
+        <!-- SQL PREVIEW SECTION -->
+        <section class="card" id="sql-preview-section" style="display:none;">
+            <div class="section-header">
+                <h2>SQL PREVIEW</h2>
+                <button class="btn-text" onclick="document.getElementById('sql-preview-section').style.display='none'">Close</button>
+            </div>
+            <div id="sql-preview-tabs" class="sql-tabs">
+                <!-- Pair tabs rendered by JS -->
+            </div>
+            <div id="sql-preview-content">
+                <!-- SQL preview content rendered by JS -->
+            </div>
+        </section>
+
+        <!-- SAS CODE SECTION -->
+        <section class="card" id="sas-code-section" style="display:none;">
+            <div class="section-header">
+                <h2>SAS CODE</h2>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn-text" onclick="copySASCode()">Copy</button>
+                    <button class="btn-secondary" onclick="downloadSAS()">Download .sas</button>
+                    <button class="btn-text" onclick="document.getElementById('sas-code-section').style.display='none'">Close</button>
+                </div>
+            </div>
+            <div id="sas-tabs" class="sql-tabs">
+                <!-- Pair tabs for SAS -->
+            </div>
+            <div id="sas-code-content">
+                <!-- SAS code block rendered by JS -->
+            </div>
+        </section>
+
+        <!-- RESULTS COMPARISON -->
+        <section class="card" id="results-section" style="display:none;">
+            <div class="section-header">
+                <h2>RESULTS COMPARISON</h2>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn-secondary" onclick="importResults()">Import JSON</button>
+                    <button class="btn-secondary" onclick="exportResults()">Export JSON</button>
+                    <button class="btn-text" onclick="clearAllResults()">Clear</button>
+                </div>
+            </div>
+            <div id="results-content">
+                <!-- Results tables rendered by JS -->
+            </div>
+        </section>
+    </main>
+
+    <!-- Add/Edit Pair Modal -->
+    <div id="bench-pair-modal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3 id="bench-modal-title">Add Benchmark Pair</h3>
+                <button class="modal-close" onclick="closePairModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Pair Name *</label>
+                        <input type="text" id="bench-pair-name" placeholder="customer_daily">
+                    </div>
+                </div>
+
+                <div class="pair-sides">
+                    <!-- LEFT SIDE (Oracle / PCDS) -->
+                    <div class="pair-side">
+                        <h4>LEFT (Oracle / PCDS)</h4>
+                        <div class="form-group">
+                            <label>Table Name *</label>
+                            <input type="text" id="bench-left-table" placeholder="SCHEMA.TABLE_NAME">
+                        </div>
+                        <div class="form-group">
+                            <label>Date Column *</label>
+                            <input type="text" id="bench-left-date-col" placeholder="LOAD_DT">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Numeric Column</label>
+                                <input type="text" id="bench-left-num-col" placeholder="AMOUNT">
+                            </div>
+                            <div class="form-group">
+                                <label>Categorical Column</label>
+                                <input type="text" id="bench-left-cat-col" placeholder="STATUS">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Connection Macro *</label>
+                            <select id="bench-left-conn">
+                                <option value="pb23">pb23</option>
+                                <option value="pb30">pb30</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- RIGHT SIDE (AWS) -->
+                    <div class="pair-side">
+                        <h4>RIGHT (AWS)</h4>
+                        <div class="form-group">
+                            <label>Table Name *</label>
+                            <input type="text" id="bench-right-table" placeholder="db_name.table_name">
+                        </div>
+                        <div class="form-group">
+                            <label>Date Column *</label>
+                            <input type="text" id="bench-right-date-col" placeholder="load_dt">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Numeric Column</label>
+                                <input type="text" id="bench-right-num-col" placeholder="amount">
+                            </div>
+                            <div class="form-group">
+                                <label>Categorical Column</label>
+                                <input type="text" id="bench-right-cat-col" placeholder="status">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Connection Macro *</label>
+                            <select id="bench-right-conn">
+                                <option value="analytics_db">analytics_db</option>
+                                <option value="warehouse_db">warehouse_db</option>
+                                <option value="mydb">mydb</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="closePairModal()">Cancel</button>
+                <div style="flex:1"></div>
+                <button class="btn-primary" onclick="saveBenchPair()">Save Pair</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Import Results Modal -->
+    <div id="import-modal" class="modal">
+        <div class="modal-content" style="max-width:520px;">
+            <div class="modal-header">
+                <h3>Import Benchmark Results</h3>
+                <button class="modal-close" onclick="closeImportModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="font-size:12px; color:var(--jp-ui-font-color2); margin-bottom:12px;">
+                    Paste JSON output from <code>oracle_bench.py</code> (bench_results.json) or enter results manually in the table.
+                </p>
+                <textarea id="import-json" rows="12" style="width:100%; font-family:var(--jp-code-font-family); font-size:11px;"
+                    placeholder='[{"experiment":"index_where","variant":"fast_range","elapsed_sec":0.123,"rows":100,"table":"SCHEMA.TABLE"}]'></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="closeImportModal()">Cancel</button>
+                <button class="btn-primary" onclick="doImportResults()">Import</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/benchmark.js"></script>
+</body>
+</html>

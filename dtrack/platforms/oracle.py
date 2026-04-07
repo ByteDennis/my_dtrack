@@ -155,17 +155,34 @@ def _sas_quote(s):
     return s.replace("'", "''")
 
 
-def _format_date_bound(date_str, date_type, is_sas_src=False, is_upper=False):
+def _format_date_bound(date_str, date_type, is_sas_src=False, is_upper=False,
+                       custom_date_types=None):
     """Format a YYYY-MM-DD date string as the correct SQL literal for WHERE clauses.
 
     For Oracle tables (inside SAS passthrough), uses Oracle SQL syntax.
     For SAS tables (SAS proc sql), uses SAS date literal syntax.
     For timestamp/datetime upper bounds, uses 23:59:59 instead of 00:00:00.
+    Accepts optional custom_date_types dict for extensible type handling.
     """
     dtype = date_type.lower() if date_type else ""
     time_part = "23:59:59" if is_upper else "00:00:00"
 
+    # Check custom date types
+    if custom_date_types and dtype in custom_date_types:
+        from .base import reformat_date
+        custom = custom_date_types[dtype]
+        cat = custom.get('category', 'string')
+        fmt = custom.get('format')
+        if cat == 'number':
+            return reformat_date(date_str, fmt)
+        elif cat == 'date':
+            return f"DATE '{date_str}'"
+        else:  # string
+            return f"'{reformat_date(date_str, fmt)}'"
+
     # Numeric types: bare integer (YYYYMMDD)
+    if dtype == 'num_yyyymm':
+        return date_str[:4] + date_str[5:7]
     if dtype in ('num', 'integer', 'int', 'number'):
         return date_str.replace('-', '')
 
@@ -370,6 +387,7 @@ def _gen_sas_row_hadoop(hadoop_tables, sas_lib='WORK', out_dir='.'):
 
 
 def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
+    # NOTE: Uses explicit column references — never SELECT *
     """Generate SAS macro for column statistics using the columns.sas template.
 
     Fills template placeholders with: column map, base SQL, vintage map,

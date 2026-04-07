@@ -21,6 +21,7 @@
                 <option value="load_col">Load Col</option>
                 <option value="col_compare">Col Compare</option>
             </select>
+            <a href="/benchmark" style="text-decoration:none;"><button type="button">Benchmark</button></a>
             <button onclick="openSettingsModal()">Settings</button>
             <button onclick="showHelp()">Help</button>
             <div class="db-status" id="db-status" title="Database connected">●</div>
@@ -120,9 +121,12 @@
                             </div>
                             <div class="form-group">
                                 <label>Date Type *</label>
-                                <select id="left-date-type">
-                                    <!-- Populated by JS -->
-                                </select>
+                                <div style="display:flex; gap:4px; align-items:center;">
+                                    <select id="left-date-type" style="flex:1;">
+                                        <!-- Populated by JS -->
+                                    </select>
+                                    <button type="button" class="btn-text" style="padding:2px 6px; font-size:14px;" onclick="document.getElementById('left-date-type').value='__custom__'; _onDateTypeChange(document.getElementById('left-date-type'), document.getElementById('right-date-type'));" title="Add custom date type">+</button>
+                                </div>
                             </div>
                         </div>
                         <div class="form-group">
@@ -172,9 +176,12 @@
                             </div>
                             <div class="form-group">
                                 <label>Date Type *</label>
-                                <select id="right-date-type">
-                                    <!-- Populated by JS -->
-                                </select>
+                                <div style="display:flex; gap:4px; align-items:center;">
+                                    <select id="right-date-type" style="flex:1;">
+                                        <!-- Populated by JS -->
+                                    </select>
+                                    <button type="button" class="btn-text" style="padding:2px 6px; font-size:14px;" onclick="document.getElementById('right-date-type').value='__custom__'; _onDateTypeChange(document.getElementById('right-date-type'), document.getElementById('left-date-type'));" title="Add custom date type">+</button>
+                                </div>
                             </div>
                         </div>
                         <div class="form-group">

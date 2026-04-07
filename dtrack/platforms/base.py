@@ -87,15 +87,29 @@ def reformat_date(d, date_format):
     return str(d)
 
 
-def build_date_in_clause(date_col, dates, date_dtype, is_sas=False, date_format=None):
+def build_date_in_clause(date_col, dates, date_dtype, is_sas=False, date_format=None,
+                         custom_date_types=None):
     """Build WHERE fragment for date IN (...) based on column type.
 
     Splits into multiple IN groups for Oracle's 1000-item limit.
+    Accepts optional custom_date_types dict for extensible type handling.
     """
     dtype = (date_dtype or '').upper()
     is_string = dtype.startswith(('CHAR', 'VARCHAR', 'STRING', 'TEXT'))
 
-    if dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
+    # Check custom date types first
+    if custom_date_types and date_dtype and date_dtype.lower() in custom_date_types:
+        custom = custom_date_types[date_dtype.lower()]
+        cat = custom.get('category', 'string')
+        fmt = custom.get('format')
+        if cat == 'number':
+            formatted = [reformat_date(d, fmt) for d in dates]
+        elif cat == 'date':
+            formatted = [f"DATE '{d}'" for d in dates]
+        else:  # string
+            formatted = [f"'{reformat_date(d, fmt)}'" for d in dates]
+        col_expr = date_col
+    elif dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
         formatted = [str(d) for d in dates]
         col_expr = date_col
     elif is_string:
@@ -127,10 +141,30 @@ def build_date_in_clause(date_col, dates, date_dtype, is_sas=False, date_format=
     return "(" + " OR ".join(parts) + ")"
 
 
-def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=False, date_format=None):
-    """Build WHERE fragment using BETWEEN based on column type."""
+def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=False, date_format=None,
+                              custom_date_types=None):
+    """Build WHERE fragment using BETWEEN based on column type.
+
+    Accepts optional custom_date_types dict for extensible type handling.
+    """
     dtype = (date_dtype or '').upper()
     is_string = dtype.startswith(('CHAR', 'VARCHAR', 'STRING', 'TEXT'))
+
+    # Check custom date types first
+    if custom_date_types and date_dtype and date_dtype.lower() in custom_date_types:
+        custom = custom_date_types[date_dtype.lower()]
+        cat = custom.get('category', 'string')
+        fmt = custom.get('format')
+        if cat == 'number':
+            fmt_min = reformat_date(min_date, fmt)
+            fmt_max = reformat_date(max_date, fmt)
+            return f"{date_col} BETWEEN {fmt_min} AND {fmt_max}"
+        elif cat == 'date':
+            return f"{date_col} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
+        else:  # string
+            fmt_min = reformat_date(min_date, fmt)
+            fmt_max = reformat_date(max_date, fmt)
+            return f"{date_col} BETWEEN '{fmt_min}' AND '{fmt_max}'"
 
     if dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
         return f"{date_col} BETWEEN {min_date} AND {max_date}"
@@ -319,6 +353,7 @@ def _sample_matching_dates(db_path, tbl_cfg, matching_dates, n_sample=100):
 
 
 def build_stats_sql(table, col, date_col, where="", col_type="numeric", dialect="oracle"):
+    # NOTE: Uses explicit column references — never SELECT *
     """Build column statistics SQL for Oracle or Athena."""
     where_clause = f"AND {where}" if where else ""
     is_athena = dialect == "athena"
@@ -347,6 +382,7 @@ GROUP BY {date_col}""".strip()
 
 
 def build_top10_sql(table, col, date_col, where="", dialect="oracle"):
+    # NOTE: Uses explicit column references — never SELECT *
     """Build top 10 frequency SQL for Oracle or Athena."""
     where_clause = f"AND {where}" if where else ""
     alias = " t" if dialect == "athena" else ""

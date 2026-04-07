@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dtrack - Col Generation</title>
+    <link rel="stylesheet" href="/static/style_v2.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>dtrack</h1>
+        </div>
+        <div class="header-right">
+            <select id="step-selector" onchange="navigateToStep(this.value)">
+                <option value="pairs">Row Gen</option>
+                <option value="load_row">Load Row</option>
+                <option value="row_compare">Row Compare</option>
+                <option value="col_mapping">Col Mapping</option>
+                <option value="col_gen" selected>Col Gen</option>
+                <option value="load_col">Load Col</option>
+                <option value="col_compare">Col Compare</option>
+            </select>
+            <button onclick="openSettingsModal()">Settings</button>
+            <button onclick="showHelp()">Help</button>
+            <div class="db-status" id="db-status" title="Database connected"></div>
+        </div>
+    </header>
+
+    <div class="io-bar">
+        <span class="io-label">INPUT:</span> Database (project.db)
+        <span class="io-separator">|</span>
+        <span class="io-label">OUTPUT:</span> SAS/SQL files (col stats) &rarr; <span id="output-dir">output/</span>
+    </div>
+
+    <main>
+        <!-- PAIRS SECTION -->
+        <section class="card">
+            <div class="section-header">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                    <input type="checkbox" id="select-all-pairs" onchange="selectAllPairs(this.checked)">
+                    <h2 style="margin:0;">PAIRS</h2>
+                </label>
+            </div>
+            <div id="pairs-list" class="pairs-list">
+                <!-- Pairs will be loaded here -->
+            </div>
+            <div id="pairs-empty" class="empty-state" style="display:none">
+                No pairs configured yet. Go to Row Gen to add pairs.
+            </div>
+        </section>
+
+        <!-- ACTIONS -->
+        <section class="card">
+            <div class="action-buttons" style="border-top:none; padding-top:0; margin-top:0">
+                <button class="btn-primary" onclick="generateAll()">Generate Col Scripts</button>
+            </div>
+        </section>
+
+        <!-- RUNNING LOGS -->
+        <section class="card">
+            <div class="section-header">
+                <h2>RUNNING LOGS</h2>
+                <button class="btn-text" onclick="clearLog()">Clear</button>
+            </div>
+            <div id="generation-log" class="log-output">
+                <div class="log-empty">No files generated yet.</div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal">
+        <div class="modal-content" style="max-width:520px;">
+            <div class="modal-header">
+                <h3>Global Settings</h3>
+                <button class="modal-close" onclick="closeSettingsModal()">&times;</button>
+            </div>
+            <div class="modal-body" style="padding:16px 20px;">
+                <!-- Date Range -->
+                <div style="margin-bottom:16px;">
+                    <label class="settings-label">Default Date Range</label>
+                    <div style="display:flex; align-items:center; gap:8px; margin-top:6px;">
+                        <input type="date" id="global-from-date" value="" style="flex:1;">
+                        <span style="color:var(--jp-ui-font-color2);">to</span>
+                        <input type="date" id="global-to-date" value="" style="flex:1;">
+                    </div>
+                    <div class="quick-dates" style="margin-top:6px;">
+                        <button onclick="setQuickDate(7)">7d</button>
+                        <button onclick="setQuickDate(30)">30d</button>
+                        <button onclick="setQuickDate(90)">90d</button>
+                        <button onclick="setQuickDate('week')">This wk</button>
+                        <button onclick="setQuickDate('month')">This mo</button>
+                        <button onclick="clearGlobalDates()">Clear</button>
+                    </div>
+                </div>
+
+                <!-- Output Directory -->
+                <div style="display:flex; gap:24px;">
+                    <div style="flex:1;">
+                        <label class="settings-label">SAS Output Dir</label>
+                        <input type="text" id="global-sas-outdir" value="./sas/" style="width:100%; margin-top:6px;">
+                    </div>
+                    <div style="flex:1;">
+                        <label class="settings-label">AWS Output Dir</label>
+                        <input type="text" id="global-aws-outdir" value="./csv/" style="width:100%; margin-top:6px;">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" onclick="closeSettingsModal()">Cancel</button>
+                <button class="btn-primary" onclick="applySettings()">Apply</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/col_gen.js"></script>
+</body>
+</html>
