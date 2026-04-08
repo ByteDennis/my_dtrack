@@ -1284,6 +1284,8 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
             get_table_pair, get_col_stats, get_pair_col_map_from_db,
             get_column_meta,
         )
+        from ..config import load_unified_config, get_col_type_overrides
+        from ..compare import resolve_col_type
 
         pair = get_table_pair(_db_path, pair_name)
         if not pair:
@@ -1291,6 +1293,10 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
 
         table_left = pair["table_left"]
         table_right = pair["table_right"]
+
+        # Load col_type_overrides from config
+        config = load_unified_config(_config_path)
+        col_type_overrides = get_col_type_overrides(config, pair_name)
 
         # Get col mappings
         col_mappings = get_pair_col_map_from_db(_db_path, pair_name)
@@ -1337,9 +1343,19 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
         # Build matched columns comparison
         matched = []
         n_diff = 0
+        n_type_mismatch = 0
         for left_col, right_col in sorted(col_mappings.items()):
             ls = left_agg.get(left_col, {})
             rs = right_agg.get(right_col, {})
+
+            left_type = ls.get("col_type", "")
+            right_type = rs.get("col_type", "")
+            type_mismatch = bool(left_type and right_type and left_type != right_type)
+            resolved_type = resolve_col_type(left_type, right_type, col_type_overrides, left_col)
+            has_override = left_col in col_type_overrides
+
+            if type_mismatch:
+                n_type_mismatch += 1
 
             has_diff = False
             # Check if key stats differ
@@ -1350,14 +1366,29 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
                     has_diff = True
                     break
 
+            # Also check numeric stats if resolved type is numeric
+            if not has_diff and resolved_type == "numeric":
+                for key in ("mean", "std"):
+                    lv = ls.get(key, "")
+                    rv = rs.get(key, "")
+                    try:
+                        if lv and rv and abs(float(lv) - float(rv)) > 0.01:
+                            has_diff = True
+                            break
+                    except (ValueError, TypeError):
+                        pass
+
             if has_diff:
                 n_diff += 1
 
             matched.append({
                 "left_col": left_col,
                 "right_col": right_col,
-                "left_type": ls.get("col_type", ""),
-                "right_type": rs.get("col_type", ""),
+                "left_type": left_type,
+                "right_type": right_type,
+                "resolved_type": resolved_type,
+                "type_mismatch": type_mismatch,
+                "has_override": has_override,
                 "left_n_total": ls.get("n_total", ""),
                 "right_n_total": rs.get("n_total", ""),
                 "left_n_missing": ls.get("n_missing", ""),
@@ -1368,6 +1399,10 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
                 "right_mean": rs.get("mean", ""),
                 "left_std": ls.get("std", ""),
                 "right_std": rs.get("std", ""),
+                "left_min": ls.get("min_val", ""),
+                "right_min": rs.get("min_val", ""),
+                "left_max": ls.get("max_val", ""),
+                "right_max": rs.get("max_val", ""),
                 "has_diff": has_diff,
             })
 
@@ -1403,11 +1438,13 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
             "table_right": table_right,
             "source_left": pair.get("source_left", ""),
             "source_right": pair.get("source_right", ""),
+            "col_type_overrides": col_type_overrides,
             "summary": {
                 "n_matched": len(matched),
                 "n_diff": n_diff,
                 "n_left_only": len(left_only),
                 "n_right_only": len(right_only),
+                "n_type_mismatch": n_type_mismatch,
             },
             "matched": matched,
             "left_only": left_only,
@@ -2618,6 +2655,42 @@ async def api_get_pair_columns_excel(pair_name: str):
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename={pair_name}_columns.xlsx"},
         )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/pairs/{pair_name}/col-type-overrides")
+async def api_get_col_type_overrides(pair_name: str):
+    """Get column type overrides for a pair."""
+    try:
+        from ..config import load_unified_config, get_col_type_overrides
+        config = load_unified_config(_config_path)
+        overrides = get_col_type_overrides(config, pair_name)
+        return {"ok": True, "pair_name": pair_name, "overrides": overrides}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.put("/api/pairs/{pair_name}/col-type-overrides")
+async def api_save_col_type_overrides(pair_name: str, request: Request):
+    """Save column type overrides for a pair.
+
+    Body: {overrides: {col_name: "numeric"|"categorical", ...}}
+    """
+    body = await request.json()
+    try:
+        from ..config import load_unified_config, save_unified_config, set_col_type_override
+
+        config = load_unified_config(_config_path)
+        if pair_name not in config.get("pairs", {}):
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        overrides = body.get("overrides", {})
+        # Replace the entire overrides dict
+        config["pairs"][pair_name]["col_type_overrides"] = overrides
+        save_unified_config(config, _config_path)
+
+        return {"ok": True, "pair_name": pair_name, "saved": len(overrides)}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 

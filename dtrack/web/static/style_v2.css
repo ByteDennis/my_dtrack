@@ -1402,6 +1402,48 @@ input[type="checkbox"] {
     color: var(--jp-brand-color1);
 }
 
+.rc-chip.type-mismatch {
+    background: rgba(255, 152, 0, 0.15);
+    color: #e65100;
+}
+
+/* Type override controls */
+.type-mismatch-cell {
+    background: rgba(255, 152, 0, 0.06);
+}
+
+.type-override-select {
+    font-size: 11px;
+    padding: 2px 4px;
+    border: 1px solid var(--jp-border-color1);
+    border-radius: 3px;
+    background: var(--jp-layout-color0);
+    color: var(--jp-ui-font-color0);
+    cursor: pointer;
+}
+
+.type-override-select:focus {
+    outline: 2px solid var(--jp-brand-color1);
+    outline-offset: -1px;
+}
+
+.type-detail {
+    font-size: 10px;
+    color: var(--jp-ui-font-color2);
+    margin-top: 2px;
+}
+
+.override-badge {
+    font-size: 9px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--jp-brand-color1);
+    color: white;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
 /* Annotations */
 .rc-annotations {
     background: var(--jp-layout-color1);

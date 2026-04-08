@@ -189,6 +189,8 @@ def _format_athena_date_bound(date_str, date_type, is_upper=False):
     dtype = date_type.lower() if date_type else ""
     time_part = "23:59:59" if is_upper else "00:00:00"
 
+    if dtype == 'num_yyyymm':
+        return date_str[:4] + date_str[5:7]
     if dtype in ('num', 'integer', 'int', 'number'):
         return date_str.replace('-', '')
     if dtype == 'string_compact':
