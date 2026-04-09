@@ -28,7 +28,7 @@ function showHelp() {
 }
 
 // ---------------------------------------------------------------------------
-// Settings Modal
+// Settings Modal (global defaults)
 // ---------------------------------------------------------------------------
 function openSettingsModal() {
     document.getElementById('settings-modal').classList.add('active');
@@ -79,9 +79,17 @@ async function saveGlobalSettings() {
 }
 
 function applySettings() {
+    // Apply global from/to/mode to all pairs as defaults
+    const globalFrom = document.getElementById('global-from-date').value || '';
+    const globalTo = document.getElementById('global-to-date').value || '';
+    pairs.forEach(p => {
+        if (!p.fromDate) p.fromDate = globalFrom;
+        if (!p.toDate) p.toDate = globalTo;
+    });
     saveGlobalSettings();
+    renderPairs();
     closeSettingsModal();
-    showSuccess('Settings saved');
+    showSuccess('Global settings applied to all pairs');
 }
 
 function clearGlobalDates() {
@@ -107,7 +115,7 @@ function setQuickDate(days) {
 }
 
 // ---------------------------------------------------------------------------
-// Load Pairs
+// Load Pairs (from config, with per-pair settings)
 // ---------------------------------------------------------------------------
 async function loadPairs() {
     try {
@@ -118,7 +126,6 @@ async function loadPairs() {
         const pairsData = await pairsResp.json();
         const statusData = await statusResp.json();
 
-        // Build a lookup from status data
         const statusMap = {};
         for (const p of (statusData.pairs || [])) {
             statusMap[p.pair_name] = p;
@@ -129,6 +136,9 @@ async function loadPairs() {
             description: p.description || '',
             left: p.left || {},
             right: p.right || {},
+            mode: p.mode || 'incremental',
+            fromDate: p.fromDate || '',
+            toDate: p.toDate || '',
             selected: false,
             expanded: false,
             status: statusMap[p.name] || null,
@@ -142,8 +152,17 @@ async function loadPairs() {
 }
 
 // ---------------------------------------------------------------------------
-// Render Pairs
+// Render Pairs (with per-pair from/to, vintage, mode)
 // ---------------------------------------------------------------------------
+const VINTAGE_OPTIONS = ['', 'day', 'week', 'month', 'quarter', 'year', 'all'];
+
+function vintageSelect(id, value) {
+    const opts = VINTAGE_OPTIONS.map(v =>
+        `<option value="${v}" ${v === (value || '') ? 'selected' : ''}>${v || 'default'}</option>`
+    ).join('');
+    return `<select id="${id}" style="width:100px; font-size:11px;" onchange="pairFieldChanged()">${opts}</select>`;
+}
+
 function renderPairs() {
     const container = document.getElementById('pairs-list');
     const emptyState = document.getElementById('pairs-empty');
@@ -167,6 +186,8 @@ function renderPairs() {
         const rightColBadge = rightCols > 0
             ? `<span class="status-badge ready">${rightCols} cols</span>`
             : `<span class="status-badge warning">no cols</span>`;
+
+        const modeChecked = pair.mode !== 'full' ? 'checked' : '';
 
         return `
         <div class="pair-item ${pair.selected ? 'selected' : ''}" id="pair-${index}">
@@ -199,6 +220,12 @@ function renderPairs() {
                             <span class="pair-info-label">Columns:</span>
                             <span class="pair-info-value">${leftCols}</span>
                         </div>
+                        <div class="pair-info-row">
+                            <span class="pair-info-label">Vintage:</span>
+                            <span class="pair-info-value" onclick="event.stopPropagation()">
+                                ${vintageSelect(`vintage-left-${index}`, pair.left.vintage)}
+                            </span>
+                        </div>
                     </div>
                     <div class="pair-side-info">
                         <div class="pair-side-title">Right</div>
@@ -214,25 +241,68 @@ function renderPairs() {
                             <span class="pair-info-label">Columns:</span>
                             <span class="pair-info-value">${rightCols}</span>
                         </div>
+                        <div class="pair-info-row">
+                            <span class="pair-info-label">Vintage:</span>
+                            <span class="pair-info-value" onclick="event.stopPropagation()">
+                                ${vintageSelect(`vintage-right-${index}`, pair.right.vintage)}
+                            </span>
+                        </div>
                     </div>
+                </div>
+                <!-- Per-pair date range and mode -->
+                <div style="display:flex; align-items:center; gap:12px; margin-top:10px; font-size:12px; flex-wrap:wrap;" onclick="event.stopPropagation()">
+                    <label style="display:flex; align-items:center; gap:4px;">
+                        From: <input type="date" id="from-${index}" value="${pair.fromDate || ''}" style="width:130px; font-size:11px;" onchange="pairFieldChanged()">
+                    </label>
+                    <label style="display:flex; align-items:center; gap:4px;">
+                        To: <input type="date" id="to-${index}" value="${pair.toDate || ''}" style="width:130px; font-size:11px;" onchange="pairFieldChanged()">
+                    </label>
+                    <label style="display:flex; align-items:center; gap:4px;">
+                        <input type="checkbox" id="mode-incr-${index}" ${modeChecked} onchange="pairFieldChanged()">
+                        Incremental
+                    </label>
                 </div>
             </div>
         </div>`;
     }).join('');
 }
 
+// Read edited per-pair values back into the pairs array
+function syncPairFields() {
+    pairs.forEach((pair, index) => {
+        const fromEl = document.getElementById(`from-${index}`);
+        const toEl = document.getElementById(`to-${index}`);
+        const modeEl = document.getElementById(`mode-incr-${index}`);
+        const vintLeftEl = document.getElementById(`vintage-left-${index}`);
+        const vintRightEl = document.getElementById(`vintage-right-${index}`);
+
+        if (fromEl) pair.fromDate = fromEl.value;
+        if (toEl) pair.toDate = toEl.value;
+        if (modeEl) pair.mode = modeEl.checked ? 'incremental' : 'full';
+        if (vintLeftEl) pair.left.vintage = vintLeftEl.value;
+        if (vintRightEl) pair.right.vintage = vintRightEl.value;
+    });
+}
+
+function pairFieldChanged() {
+    syncPairFields();
+}
+
 function togglePair(index) {
     pairs[index].expanded = !pairs[index].expanded;
+    syncPairFields(); // preserve edits before re-render
     renderPairs();
 }
 
 function togglePairSelection(index) {
+    syncPairFields();
     pairs[index].selected = !pairs[index].selected;
     syncSelectAllCheckbox();
     renderPairs();
 }
 
 function selectAllPairs(selected) {
+    syncPairFields();
     pairs.forEach(p => p.selected = selected);
     syncSelectAllCheckbox();
     renderPairs();
@@ -248,9 +318,36 @@ function syncSelectAllCheckbox() {
 }
 
 // ---------------------------------------------------------------------------
-// Generation
+// Save per-pair settings to config (so server reads correct vintage/dates)
+// ---------------------------------------------------------------------------
+async function savePairSettings(selected) {
+    const results = await Promise.all(selected.map(async pair => {
+        try {
+            await fetch(`/api/pairs/${pair.name}`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    left: pair.left,
+                    right: pair.right,
+                    mode: pair.mode,
+                    fromDate: pair.fromDate,
+                    toDate: pair.toDate,
+                }),
+            });
+            return {name: pair.name, ok: true};
+        } catch (e) {
+            return {name: pair.name, ok: false, error: e.message};
+        }
+    }));
+    return results;
+}
+
+// ---------------------------------------------------------------------------
+// Generation (uses per-pair settings)
 // ---------------------------------------------------------------------------
 async function generateAll() {
+    syncPairFields();
+
     const selected = pairs.filter(p => p.selected);
     if (selected.length === 0) {
         alert('No pairs selected');
@@ -260,10 +357,37 @@ async function generateAll() {
     const log = document.getElementById('generation-log');
     log.innerHTML = '';
 
+    // Fall back to global settings for pairs without per-pair dates
     const globalFrom = document.getElementById('global-from-date')?.value || '';
     const globalTo = document.getElementById('global-to-date')?.value || '';
 
+    // Save per-pair settings to config BEFORE generating
+    // so the server reads the correct vintage/dates/mode
+    logMessage('Saving pair settings to config...', 'info');
+    const saveResults = await savePairSettings(selected);
+    const saveFails = saveResults.filter(r => !r.ok);
+    if (saveFails.length) {
+        saveFails.forEach(r => logMessage(`  WARN: failed to save ${r.name}: ${r.error}`, 'error'));
+    }
+
     logMessage(`Generating col scripts for ${selected.length} pair(s)...`, 'info');
+    for (const p of selected) {
+        const from = p.fromDate || globalFrom;
+        const to = p.toDate || globalTo;
+        const lv = p.left.vintage || '';
+        const rv = p.right.vintage || '';
+        logMessage(`  ${p.name}: ${from || '...'} → ${to || '...'} | L-vintage: ${lv || 'default'} | R-vintage: ${rv || 'default'} | mode: ${p.mode}`, 'info');
+    }
+
+    // Detect if any selected pair has AWS source
+    const awsSources = new Set(['aws', 'csv']);
+    const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
+
+    // Use the widest date range across all selected pairs for SQL generation
+    const allFroms = selected.map(p => p.fromDate || globalFrom).filter(Boolean);
+    const allTos = selected.map(p => p.toDate || globalTo).filter(Boolean);
+    const effectiveFrom = allFroms.length ? allFroms.sort()[0] : '';
+    const effectiveTo = allTos.length ? allTos.sort().reverse()[0] : '';
 
     try {
         const genBody = {
@@ -272,8 +396,8 @@ async function generateAll() {
             aws_outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
             pair_names: selected.map(p => p.name),
         };
-        if (globalFrom) genBody.from_date = globalFrom;
-        if (globalTo) genBody.to_date = globalTo;
+        if (effectiveFrom) genBody.from_date = effectiveFrom;
+        if (effectiveTo) genBody.to_date = effectiveTo;
 
         const resp = await fetch('/api/generate', {
             method: 'POST',
@@ -292,9 +416,94 @@ async function generateAll() {
             logMessage('Col script generation complete.', 'success');
         } else {
             logMessage(`Generation error: ${result.error}`, 'error');
+            return;
         }
     } catch (err) {
         logMessage(`Generation failed: ${err.message}`, 'error');
+        return;
+    }
+
+    // Show Run AWS button if AWS tables exist
+    if (hasAws) {
+        const btnDiv = document.createElement('div');
+        btnDiv.style.cssText = 'margin:12px 0; display:flex; gap:12px; align-items:center;';
+        btnDiv.innerHTML = `<button class="btn-primary" id="run-aws-col-btn">Run AWS Extraction</button>`;
+        log.appendChild(btnDiv);
+
+        document.getElementById('run-aws-col-btn').onclick = () => runAwsColExtraction();
+    }
+}
+
+async function runAwsColExtraction() {
+    const btn = document.getElementById('run-aws-col-btn');
+    btn.disabled = true;
+    btn.textContent = 'Running...';
+
+    logMessage('Running AWS col extraction from extract_col.sql...', 'info');
+
+    try {
+        const reqBody = {
+            type: 'col',
+            outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
+        };
+
+        const resp = await fetch('/api/extract/run-sql', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(reqBody),
+        });
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, {stream: true});
+
+            const parts = buffer.split('\n\n');
+            buffer = parts.pop();
+
+            for (const part of parts) {
+                let eventType = 'message';
+                let data = '';
+                for (const line of part.split('\n')) {
+                    if (line.startsWith('event: ')) eventType = line.slice(7);
+                    else if (line.startsWith('data: ')) data = line.slice(6);
+                }
+                if (!data) continue;
+                const msg = JSON.parse(data);
+
+                if (eventType === 'progress') {
+                    const status = msg.ok
+                        ? `${msg.rows} rows, ${msg.elapsed}s`
+                        : `FAIL: ${msg.error}`;
+                    logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
+                    btn.textContent = `Running ${msg.done}/${msg.total}...`;
+                } else if (eventType === 'done') {
+                    if (msg.ok) {
+                        logMessage(`AWS col extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
+                        btn.textContent = 'Done';
+                        btn.style.background = 'var(--jp-success-color1)';
+                    } else if (msg.results) {
+                        const failed = msg.results.filter(r => !r.ok);
+                        failed.forEach(r => logMessage(`  FAILED: ${r.name} — ${r.error}`, 'error'));
+                        logMessage(`${msg.succeeded}/${msg.total} succeeded, ${msg.failed} failed`, 'error');
+                        btn.textContent = 'Retry';
+                        btn.disabled = false;
+                    } else {
+                        logMessage(`AWS error: ${msg.error}`, 'error');
+                        btn.textContent = 'Retry';
+                        btn.disabled = false;
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        logMessage(`AWS request failed: ${err.message}`, 'error');
+        btn.textContent = 'Retry';
+        btn.disabled = false;
     }
 }
 

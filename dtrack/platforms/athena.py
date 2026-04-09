@@ -269,8 +269,8 @@ def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database
     """
     date_col = tbl_cfg['date_col']
     where = tbl_cfg.get('where', '')
-    if vintage is None:
-        vintage = tbl_cfg.get('vintage', 'all')
+    if not vintage:
+        vintage = tbl_cfg.get('vintage', 'all') or 'all'
     numeric = is_numeric_type(dtype, is_oracle=False)
 
     wc = where.strip() if where else "(1=1)"
@@ -435,7 +435,7 @@ def _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir):
         _write_combined_sql(aws_tables, outdir, "row")
 
 
-def _write_combined_sql(aws_tables, outdir, extract_type):
+def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
     """Write a single combined .sql file with all AWS table queries."""
     from datetime import datetime
     blocks = [f"-- dtrack AWS {extract_type} extraction queries",
@@ -449,14 +449,135 @@ def _write_combined_sql(aws_tables, outdir, extract_type):
         raw_full = f"{database}.{table}"
         full_table, cte_prefix = resolve_table(tbl, raw_full)
         where = tbl.get('where', '')
-        where_clause = f"WHERE {where}" if where else ""
-        sql = f"""{cte_prefix}SELECT {date_col} AS date_value, COUNT(*) AS row_count
+
+        if extract_type == "col":
+            columns = tbl.get('columns', {})
+            if not columns:
+                blocks.append(f"-- {qname}")
+                blocks.append(f"-- SKIP: no columns defined for {qname}")
+                blocks.append("")
+                continue
+
+            col_list = [(c, d) for c, d in columns.items()
+                        if c.lower() != date_col.lower()]
+            if not col_list:
+                blocks.append(f"-- {qname}")
+                blocks.append(f"-- SKIP: no non-date columns for {qname}")
+                blocks.append("")
+                continue
+
+            # Compute vintage-based date filter (same as SAS path)
+            vintage = tbl.get('vintage', 'all') or 'all'
+            date_filter = compute_date_filter(tbl, db_path, vintage) if db_path else {
+                'vintage': vintage, 'filter_type': 'none', 'dates': [],
+                'date_dtype': None, 'date_format': None,
+            }
+            effective_vintage = date_filter['vintage']
+
+            # Build vintage buckets
+            if date_filter['filter_type'] == 'between':
+                from ..date_utils import bucket_date
+                buckets = {}
+                for dt in date_filter['dates']:
+                    buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
+                vintage_specs = []
+                for bucket_key, dates in sorted(buckets.items()):
+                    bmin, bmax = min(dates), max(dates)
+                    dw = build_date_between_clause(
+                        date_col, bmin, bmax,
+                        date_filter['date_dtype'],
+                        date_format=date_filter.get('date_format'),
+                    )
+                    vintage_specs.append((bucket_key, dw))
+                print(f"  {qname}: vintage={vintage}, {len(vintage_specs)} buckets")
+            elif date_filter['filter_type'] == 'in_list':
+                dw = build_date_in_clause(
+                    date_col, date_filter['dates'],
+                    date_filter['date_dtype'],
+                    date_format=date_filter.get('date_format'),
+                )
+                vintage_specs = [('sample', dw)]
+                print(f"  {qname}: vintage={vintage}, sample {len(date_filter['dates'])} dates")
+            else:
+                # vintage=all or no db: no date filter, aggregate everything
+                vintage_specs = [('all', None)]
+                print(f"  {qname}: vintage={vintage}, no date filter")
+
+            # Generate per (column, bucket) SQL blocks
+            for col_name, col_dtype in col_list:
+                is_num = is_numeric_type(col_dtype, is_oracle=False)
+                for dt_label, date_where in vintage_specs:
+                    # Build WHERE clause
+                    parts = []
+                    if where.strip():
+                        parts.append(where.strip())
+                    if date_where:
+                        parts.append(date_where)
+                    wc = " AND ".join(f"({p})" for p in parts) if parts else "1=1"
+
+                    # dt expression: synthetic label (no GROUP BY) for bucketed
+                    dt_expr = f"'{dt_label}'"
+                    # Block name includes bucket for multi-bucket vintages
+                    block_suffix = f"/{dt_label}" if len(vintage_specs) > 1 else ""
+
+                    if is_num:
+                        sql = f"""{cte_prefix}SELECT
+    {dt_expr} AS dt,
+    '{col_name}' AS column_name,
+    'numeric' AS col_type,
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col_name}) AS n_missing,
+    COUNT(DISTINCT {col_name}) AS n_unique,
+    CAST(AVG(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS mean,
+    CAST(STDDEV_SAMP(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS std,
+    CAST(MIN({col_name}) AS VARCHAR) AS min_val,
+    CAST(MAX({col_name}) AS VARCHAR) AS max_val,
+    '' AS top_10
+FROM {full_table}
+WHERE {wc};"""
+                    else:
+                        sql = f"""{cte_prefix}WITH freq AS (
+    SELECT
+        CAST({col_name} AS VARCHAR) AS p_col,
+        COUNT(*) AS cnt
+    FROM {full_table}
+    WHERE {wc}
+    GROUP BY {col_name}
+),
+ranked AS (
+    SELECT p_col, cnt,
+        ROW_NUMBER() OVER (ORDER BY cnt DESC, p_col ASC) AS rn
+    FROM freq
+)
+SELECT
+    {dt_expr} AS dt,
+    '{col_name}' AS column_name,
+    'categorical' AS col_type,
+    (SELECT SUM(cnt) FROM freq) AS n_total,
+    COALESCE((SELECT cnt FROM freq WHERE p_col IS NULL), 0) AS n_missing,
+    (SELECT COUNT(*) FROM freq) AS n_unique,
+    CAST((SELECT AVG(CAST(cnt AS DOUBLE)) FROM freq) AS VARCHAR) AS mean,
+    CAST((SELECT STDDEV_SAMP(CAST(cnt AS DOUBLE)) FROM freq) AS VARCHAR) AS std,
+    CAST((SELECT MIN(cnt) FROM freq) AS VARCHAR) AS min_val,
+    CAST((SELECT MAX(cnt) FROM freq) AS VARCHAR) AS max_val,
+    COALESCE((SELECT ARRAY_JOIN(ARRAY_AGG(
+        COALESCE(p_col, 'NULL') || '(' || CAST(cnt AS VARCHAR) || ')'
+        ORDER BY cnt DESC
+    ), '; ') FROM ranked WHERE rn <= 10), '') AS top_10;"""
+
+                    blocks.append(f"-- {qname}/{col_name}{block_suffix}")
+                    blocks.append(sql.strip())
+                    blocks.append("")
+        else:
+            # Row count query
+            where_clause = f"WHERE {where}" if where else ""
+            sql = f"""{cte_prefix}SELECT {date_col} AS date_value, COUNT(*) AS row_count
 FROM {full_table}
 {where_clause}
 GROUP BY {date_col};"""
-        blocks.append(f"-- {qname}")
-        blocks.append(sql.strip())
-        blocks.append("")
+            blocks.append(f"-- {qname}")
+            blocks.append(sql.strip())
+            blocks.append("")
 
     sql_path = os.path.join(outdir, f"extract_{extract_type}.sql")
     with open(sql_path, 'w', encoding='utf-8') as f:
@@ -806,9 +927,12 @@ def parse_sql_file(sql_path):
 
 
 def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=None):
-    """Read extract_row.sql, parse into blocks, and execute each via Athena.
+    """Read extract_{type}.sql, parse into blocks, and execute each via Athena.
 
-    Writes per-table CSVs: {outdir}/{qname}_row.csv
+    Writes per-table CSVs:
+      row type: {outdir}/{qname}_row.csv  (date_value, row_count)
+      col type: {outdir}/{qname}_col.csv  (dt, column_name, col_type, n_total, ...)
+
     Supports parallel execution via ThreadPoolExecutor.
 
     Args:
@@ -827,6 +951,12 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
         print(f"No query blocks found in {sql_path}")
         return []
 
+    # Detect type from filename: extract_col.sql → col, else row
+    basename = os.path.basename(sql_path)
+    is_col = "extract_col" in basename
+    file_suffix = "_col.csv" if is_col else "_row.csv"
+    step_label = "col" if is_col else "row"
+
     os.makedirs(outdir, exist_ok=True)
     _max_workers = max_workers or int(os.environ.get('MAX_WORKERS', '4'))
 
@@ -836,8 +966,17 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
     results = []
     _done_count = [0]  # mutable counter for threads
 
+    _COL_HEADERS = [
+        'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
+        'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
+    ]
+
+    # For col mode, collect rows per table (blocks named "qname/col_name")
+    _col_rows_lock = threading.Lock()
+    _col_rows_by_table = {}  # qname -> list of row dicts
+
     def _run_block(block):
-        qname = block['name']
+        block_name = block['name']
         sql = block['sql']
         start_time = time.time()
         start_ts = datetime.now().isoformat()
@@ -848,30 +987,42 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
             cursor = conn.cursor()
             cursor.execute(sql)
             rows = cursor.fetchall()
+            col_names = [desc[0] for desc in cursor.description] if cursor.description else []
             cursor.close()
             conn.close()
             elapsed = time.time() - start_time
 
-            csv_path = os.path.join(outdir, f"{qname}_row.csv")
-            with open(csv_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['date_value', 'row_count'])
+            if is_col:
+                # Block name is "qname/col_name" — group by qname
+                qname = block_name.split('/')[0] if '/' in block_name else block_name
+                parsed_rows = []
                 for row in rows:
-                    writer.writerow([row[0], row[1]])
+                    row_dict = dict(zip(col_names, row))
+                    parsed_rows.append([row_dict.get(h, '') for h in _COL_HEADERS])
+                with _col_rows_lock:
+                    _col_rows_by_table.setdefault(qname, []).extend(parsed_rows)
+            else:
+                csv_path = os.path.join(outdir, f"{block_name}{file_suffix}")
+                with open(csv_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['date_value', 'row_count'])
+                    for row in rows:
+                        writer.writerow([row[0], row[1]])
 
-            result = {"name": qname, "ok": True, "rows": len(rows),
-                      "elapsed": round(elapsed, 1), "start": start_ts,
-                      "csv_path": csv_path}
+            result = {"name": block_name, "ok": True, "rows": len(rows),
+                      "elapsed": round(elapsed, 1), "start": start_ts}
+            if not is_col:
+                result["csv_path"] = os.path.join(outdir, f"{block_name}{file_suffix}")
         except Exception as e:
             elapsed = time.time() - start_time
-            result = {"name": qname, "ok": False, "error": str(e),
+            result = {"name": block_name, "ok": False, "error": str(e),
                       "elapsed": round(elapsed, 1), "start": start_ts}
 
         _done_count[0] += 1
         n = _done_count[0]
         total = len(blocks)
         status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
-        msg = f"  [{n}/{total}] {qname}: {status} ({elapsed:.1f}s)"
+        msg = f"  [{n}/{total}] {block_name}: {status} ({elapsed:.1f}s)"
         print(msg, file=sys.stderr)
 
         if on_progress:
@@ -890,6 +1041,17 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
             for fut in as_completed(futures):
                 results.append(fut.result())
 
+    # For col mode, write one CSV per table from collected rows
+    if is_col:
+        for qname, row_data in _col_rows_by_table.items():
+            csv_path = os.path.join(outdir, f"{qname}_col.csv")
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(_COL_HEADERS)
+                for row in row_data:
+                    writer.writerow(row)
+            print(f"  Wrote {len(row_data)} rows to {csv_path}")
+
     results.sort(key=lambda r: r['name'])
 
     # Write timing log
@@ -899,7 +1061,7 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
         writer.writeheader()
         for r in results:
             writer.writerow({
-                'table': r['name'], 'step': 'row', 'start': r['start'],
+                'table': r['name'], 'step': step_label, 'start': r['start'],
                 'elapsed_sec': r['elapsed'],
                 'status': 'ok' if r['ok'] else r.get('error', 'failed'),
             })

@@ -261,7 +261,10 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
         print(f"  [date filter] {vintage} | {len(matching_dates)} sampled dates | range: {result['min_date']} to {result['max_date']}")
         return result
 
-    if tbl_cfg.get('_where_from_config'):
+    # Table has a WHERE clause (from where_map or direct config "where")
+    has_where = tbl_cfg.get('_where_from_config') or bool(tbl_cfg.get('where', '').strip())
+
+    if has_where or matching_dates:
         if matching_dates:
             from ..date_utils import bucket_date
             buckets = {}
@@ -277,13 +280,6 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
         else:
             print(f"  [date filter] vintage: {vintage} | no matching dates found")
         return result
-
-    is_aws = tbl_cfg.get('source', '').lower() == 'aws'
-    if is_aws:
-        raise ValueError(
-            f"No where_map found for {qname} in config. "
-            f"Please add a where_map to the pair config."
-        )
 
     if not matching_dates:
         print(f"  [date filter] no matching dates for {qname}, skipping filter")

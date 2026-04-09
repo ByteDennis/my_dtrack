@@ -72,7 +72,7 @@ async function refreshDbStatus() {
             return;
         }
 
-        // Also fetch col stats summary
+        // Also fetch col stats summary (includes date history)
         let colStatus = {};
         try {
             const colResp = await fetch('/api/status/col');
@@ -82,22 +82,54 @@ async function refreshDbStatus() {
             // Non-critical
         }
 
+        // Fetch per-pair config for vintage info
+        let pairConfigs = {};
+        try {
+            const cfgResp = await fetch('/api/pairs/list');
+            const cfgData = await cfgResp.json();
+            for (const pc of (cfgData.pairs || [])) {
+                pairConfigs[pc.name] = pc;
+            }
+        } catch (e) {
+            // Non-critical
+        }
+
+        function colInfo(tableName) {
+            const info = colStatus[tableName];
+            if (!info) return { count: 0, dates: [], min: null, max: null };
+            return {
+                count: info.count || 0,
+                dates: info.dates || [],
+                min: info.min_date || null,
+                max: info.max_date || null,
+            };
+        }
+
+        function dateBadge(info) {
+            if (!info.dates.length) return '<span class="file-meta">no dates</span>';
+            const n = info.dates.length;
+            return `<span class="file-meta">${n} date${n !== 1 ? 's' : ''}: ${info.min} &rarr; ${info.max}</span>`;
+        }
+
         const rows = pairs.map(p => {
             const lc = p.left.col_count || 0;
             const rc = p.right.col_count || 0;
-            const lColStats = colStatus[p.table_left] || 0;
-            const rColStats = colStatus[p.table_right] || 0;
+            const lInfo = colInfo(p.table_left);
+            const rInfo = colInfo(p.table_right);
+            const cfg = pairConfigs[p.pair_name] || {};
+            const lVintage = (cfg.left || {}).vintage || '';
+            const rVintage = (cfg.right || {}).vintage || '';
             const lColBadge = lc > 0
                 ? `<span class="status-badge ready">${lc}</span>`
                 : `<span class="status-badge warning">0</span>`;
             const rColBadge = rc > 0
                 ? `<span class="status-badge ready">${rc}</span>`
                 : `<span class="status-badge warning">0</span>`;
-            const lStatsBadge = lColStats > 0
-                ? `<span class="status-badge ready">${lColStats.toLocaleString()}</span>`
+            const lStatsBadge = lInfo.count > 0
+                ? `<span class="status-badge ready">${lInfo.count.toLocaleString()}</span>`
                 : `<span class="status-badge warning">0</span>`;
-            const rStatsBadge = rColStats > 0
-                ? `<span class="status-badge ready">${rColStats.toLocaleString()}</span>`
+            const rStatsBadge = rInfo.count > 0
+                ? `<span class="status-badge ready">${rInfo.count.toLocaleString()}</span>`
                 : `<span class="status-badge warning">0</span>`;
 
             return `<tr>
@@ -105,17 +137,21 @@ async function refreshDbStatus() {
                 <td>L</td>
                 <td style="text-align:center;">${lColBadge}</td>
                 <td style="text-align:right;">${lStatsBadge}</td>
+                <td>${dateBadge(lInfo)}</td>
+                <td><span class="file-meta">${lVintage || 'all'}</span></td>
             </tr><tr>
                 <td>R</td>
                 <td style="text-align:center;">${rColBadge}</td>
                 <td style="text-align:right;">${rStatsBadge}</td>
+                <td>${dateBadge(rInfo)}</td>
+                <td><span class="file-meta">${rVintage || 'all'}</span></td>
             </tr>`;
         }).join('');
 
         el.innerHTML = `
             <table class="data-table compact">
                 <thead><tr>
-                    <th>Pair</th><th></th><th style="text-align:center;">Cols</th><th style="text-align:right;">Col Stats</th>
+                    <th>Pair</th><th></th><th style="text-align:center;">Cols</th><th style="text-align:right;">Col Stats</th><th>Date Range (DB)</th><th>Vintage</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;
@@ -195,8 +231,10 @@ async function scanFolder() {
         for (const f of files) {
             if (fileEntries.some(e => e.name === f.name)) continue;
 
-            const match = autoMatch(f.name);
             const fileType = detectFileType(f.name);
+            if (fileType === 'skip') continue;  // ignore _row.csv, _columns.csv, etc.
+
+            const match = autoMatch(f.name);
             fileEntries.push({
                 file: null,
                 serverPath: f.path,
@@ -229,9 +267,11 @@ async function processFiles(files) {
     for (const file of files) {
         if (fileEntries.some(e => e.name === file.name)) continue;
 
+        const fileType = detectFileType(file.name);
+        if (fileType === 'skip') continue;  // ignore _row.csv, _columns.csv, etc.
+
         const { rows } = await parseCSV(file);
         const match = autoMatch(file.name);
-        const fileType = detectFileType(file.name);
 
         fileEntries.push({
             file,
@@ -266,13 +306,16 @@ function parseCSV(file) {
 // ---------------------------------------------------------------------------
 function detectFileType(filename) {
     const lower = filename.toLowerCase();
-    if (lower.includes('_columns') || lower.includes('_column_meta')) {
-        return 'columns';  // column metadata (COLUMN_NAME, DATA_TYPE)
+    // Only accept *_col.csv as col stats
+    if (lower.endsWith('_col.csv')) {
+        return 'col_stats';
     }
-    if (lower.includes('_col') || lower.includes('_stats')) {
-        return 'col_stats';  // column statistics
+    // Column metadata: *_columns.csv or *_column_meta.csv
+    if (lower.endsWith('_columns.csv') || lower.includes('_column_meta')) {
+        return 'columns';
     }
-    return 'col_stats';  // default assumption for Load Col page
+    // Everything else: skip (_row.csv, _timing.csv, _columns.csv, etc.)
+    return 'skip';
 }
 
 // ---------------------------------------------------------------------------

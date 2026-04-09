@@ -465,10 +465,17 @@ def load_precomputed_col_stats(
 
     insert_col_stats(db_path, stats)
 
-    # Compute date range from loaded stats
+    # Compute date range from loaded stats (already canonical YYYY-MM-DD)
     dt_values = [s["dt"] for s in stats if s.get("dt")]
-    min_dt = min(dt_values) if dt_values else None
-    max_dt = max(dt_values) if dt_values else None
+    # Parse to canonical form in case any failed parse_date above
+    canonical_dts = []
+    for d in dt_values:
+        try:
+            canonical_dts.append(parse_date(d))
+        except ValueError:
+            canonical_dts.append(d)
+    min_dt = min(canonical_dts) if canonical_dts else None
+    max_dt = max(canonical_dts) if canonical_dts else None
 
     # For upsert mode, expand existing range
     if mode == "upsert" and (min_dt or max_dt):

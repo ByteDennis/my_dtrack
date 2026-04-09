@@ -337,13 +337,18 @@ async def api_generate_files(request: Request):
             if aws_tables:
                 from ..platforms.athena import _write_combined_sql
                 os.makedirs(aws_outdir, exist_ok=True)
-                _write_combined_sql(aws_tables, aws_outdir, extract_type)
-                results["sql_file"] = os.path.join(aws_outdir, f"extract_{extract_type}.sql")
 
-            # Discover columns for AWS tables (Oracle/SAS handled by gen_sas above)
-            if aws_tables:
+                # Discover columns for AWS tables (needed for col stats SQL)
                 from ..platforms.oracle import _discover_and_write_columns
                 _discover_and_write_columns(aws_tables, aws_outdir, _db_path)
+
+                # Fill columns from _column_meta into table configs for col SQL gen
+                if extract_type == "col":
+                    from ..platforms.base import fill_columns_from_meta
+                    fill_columns_from_meta(aws_tables, _db_path)
+
+                _write_combined_sql(aws_tables, aws_outdir, extract_type, db_path=_db_path)
+                results["sql_file"] = os.path.join(aws_outdir, f"extract_{extract_type}.sql")
 
         return {"ok": True, "output": buf.getvalue(), **results}
     except Exception as e:
@@ -1250,7 +1255,8 @@ async def api_load_col_stats_path(request: Request):
 
 @app.get("/api/status/col")
 async def api_status_col():
-    """Return col stats summary per table (count of stat rows)."""
+    """Return col stats summary per table (count, date range, distinct dates)."""
+    from ..date_utils import parse_date
     try:
         conn = sqlite3.connect(_db_path)
         conn.row_factory = sqlite3.Row
@@ -1258,11 +1264,35 @@ async def api_status_col():
 
         status = {}
         try:
+            # Get count per table
             cursor.execute(
                 "SELECT source_table, COUNT(*) as cnt FROM _col_stats GROUP BY source_table"
             )
             for row in cursor.fetchall():
-                status[row["source_table"]] = row["cnt"]
+                status[row["source_table"]] = {"count": row["cnt"]}
+
+            # Get all distinct dates per table for full history
+            cursor.execute(
+                "SELECT source_table, dt FROM _col_stats GROUP BY source_table, dt"
+            )
+            dates_by_table = {}
+            for row in cursor.fetchall():
+                tbl = row["source_table"]
+                raw_dt = row["dt"]
+                if tbl not in dates_by_table:
+                    dates_by_table[tbl] = []
+                try:
+                    dates_by_table[tbl].append(parse_date(raw_dt))
+                except ValueError:
+                    dates_by_table[tbl].append(raw_dt)
+
+            for tbl, dates in dates_by_table.items():
+                dates.sort()
+                if tbl in status:
+                    status[tbl]["dates"] = dates
+                    status[tbl]["min_date"] = dates[0] if dates else None
+                    status[tbl]["max_date"] = dates[-1] if dates else None
+
         except sqlite3.OperationalError:
             pass  # _col_stats may not exist
 
@@ -1278,14 +1308,15 @@ async def api_status_col():
 
 @app.get("/api/compare/col/{pair_name}")
 async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str = ""):
-    """Compare col stats for a single pair and return JSON."""
+    """Compare col stats for a single pair — returns per-vintage comparisons."""
     try:
         from ..db import (
             get_table_pair, get_col_stats, get_pair_col_map_from_db,
-            get_column_meta,
+            get_column_meta, get_metadata,
         )
         from ..config import load_unified_config, get_col_type_overrides
-        from ..compare import resolve_col_type
+        from ..compare import compare_column_stats, resolve_col_type, _has_col_differences
+        from ..date_utils import parse_date
 
         pair = get_table_pair(_db_path, pair_name)
         if not pair:
@@ -1294,39 +1325,102 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
         table_left = pair["table_left"]
         table_right = pair["table_right"]
 
-        # Load col_type_overrides from config
         config = load_unified_config(_config_path)
         col_type_overrides = get_col_type_overrides(config, pair_name)
 
-        # Get col mappings
+        # Col mappings
         col_mappings = get_pair_col_map_from_db(_db_path, pair_name)
-
-        # If no explicit mappings, auto-match by name
         if not col_mappings:
             left_meta = get_column_meta(_db_path, table_left)
             right_meta = get_column_meta(_db_path, table_right)
             left_cols = {c["column_name"]: c.get("data_type", "") for c in left_meta}
             right_cols = {c["column_name"]: c.get("data_type", "") for c in right_meta}
-
             from ..compare import match_columns_from_dicts
             auto = match_columns_from_dicts(left_cols, right_cols)
             col_mappings = auto.get("matched", {})
 
-        # Get col stats for both sides
-        stats_left = get_col_stats(
-            _db_path, table_left,
+        # Full comparison (all dates, like CLI compare-col)
+        comparison = compare_column_stats(
+            _db_path, table_left, table_right,
+            columns=list(col_mappings.keys()) if col_mappings else None,
+            col_mappings=col_mappings,
             from_date=from_date or None,
             to_date=to_date or None,
-        )
-        stats_right = get_col_stats(
-            _db_path, table_right,
-            from_date=from_date or None,
-            to_date=to_date or None,
+            col_type_overrides=col_type_overrides,
         )
 
-        # Organize stats by column name (aggregate latest date or all)
-        def agg_stats(stats_list):
-            """Aggregate stats per column — take the latest date entry."""
+        # Get all left/right column names for left-only/right-only
+        stats_left = get_col_stats(_db_path, table_left,
+                                   from_date=from_date or None, to_date=to_date or None)
+        stats_right = get_col_stats(_db_path, table_right,
+                                    from_date=from_date or None, to_date=to_date or None)
+        all_left_cols = set(s["column_name"] for s in stats_left)
+        all_right_cols = set(s["column_name"] for s in stats_right)
+        mapped_left = set(col_mappings.keys())
+        mapped_right = set(col_mappings.values())
+
+        # Organize by vintage: {vintage_label: {col_name: comparison_entry}}
+        vintages = {}  # ordered list of {label, dt, columns: [...]}
+        vintage_order = []  # maintain order by dt
+
+        # Collect all vintages and per-vintage column comparisons
+        n_diff_cols = 0
+        n_type_mismatch = 0
+        diff_col_names = set()
+
+        for left_col, comps in comparison.items():
+            for comp in comps:
+                vl = comp.get("vintage_label") or comp.get("dt", "")
+                dt = comp.get("dt", "")
+                if vl not in vintages:
+                    vintages[vl] = {"label": vl, "dt": dt, "columns": []}
+                    vintage_order.append(vl)
+
+                has_diff = _has_col_differences(comp)
+                if has_diff:
+                    diff_col_names.add(left_col)
+
+                if comp.get("col_type_left") and comp.get("col_type_right") and \
+                   comp["col_type_left"] != comp["col_type_right"]:
+                    n_type_mismatch += 1
+
+                vintages[vl]["columns"].append({
+                    "left_col": comp.get("left_col", left_col),
+                    "right_col": comp.get("right_col", left_col),
+                    "col_type": comp.get("col_type", ""),
+                    "col_type_left": comp.get("col_type_left", ""),
+                    "col_type_right": comp.get("col_type_right", ""),
+                    "type_mismatch": comp.get("col_type_left", "") != comp.get("col_type_right", ""),
+                    "has_override": left_col in col_type_overrides,
+                    "n_total_left": comp.get("n_total_left", 0),
+                    "n_total_right": comp.get("n_total_right", 0),
+                    "n_total_diff": comp.get("n_total_diff", 0),
+                    "n_missing_left": comp.get("n_missing_left", 0),
+                    "n_missing_right": comp.get("n_missing_right", 0),
+                    "n_missing_diff": comp.get("n_missing_diff", 0),
+                    "n_unique_left": comp.get("n_unique_left", 0),
+                    "n_unique_right": comp.get("n_unique_right", 0),
+                    "n_unique_diff": comp.get("n_unique_diff", 0),
+                    "mean_left": comp.get("mean_left"),
+                    "mean_right": comp.get("mean_right"),
+                    "mean_diff": comp.get("mean_diff"),
+                    "std_left": comp.get("std_left"),
+                    "std_right": comp.get("std_right"),
+                    "std_diff": comp.get("std_diff"),
+                    "min_left": comp.get("min_left", ""),
+                    "min_right": comp.get("min_right", ""),
+                    "max_left": comp.get("max_left", ""),
+                    "max_right": comp.get("max_right", ""),
+                    "has_diff": has_diff,
+                })
+
+        n_diff_cols = len(diff_col_names)
+
+        # Build vintage list in date order
+        vintage_list = [vintages[vl] for vl in vintage_order]
+
+        # Left-only and right-only columns (from latest stats)
+        def _latest(stats_list):
             by_col = {}
             for s in stats_list:
                 col = s["column_name"]
@@ -1334,103 +1428,25 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
                     by_col[col] = s
             return by_col
 
-        left_agg = agg_stats(stats_left)
-        right_agg = agg_stats(stats_right)
+        left_agg = _latest(stats_left)
+        right_agg = _latest(stats_right)
 
-        mapped_left = set(col_mappings.keys())
-        mapped_right = set(col_mappings.values())
+        left_only = [
+            {"column_name": c, "col_type": left_agg[c].get("col_type", ""),
+             "n_total": left_agg[c].get("n_total", ""), "n_missing": left_agg[c].get("n_missing", ""),
+             "n_unique": left_agg[c].get("n_unique", "")}
+            for c in sorted(all_left_cols - mapped_left) if c in left_agg
+        ]
+        right_only = [
+            {"column_name": c, "col_type": right_agg[c].get("col_type", ""),
+             "n_total": right_agg[c].get("n_total", ""), "n_missing": right_agg[c].get("n_missing", ""),
+             "n_unique": right_agg[c].get("n_unique", "")}
+            for c in sorted(all_right_cols - mapped_right) if c in right_agg
+        ]
 
-        # Build matched columns comparison
-        matched = []
-        n_diff = 0
-        n_type_mismatch = 0
-        for left_col, right_col in sorted(col_mappings.items()):
-            ls = left_agg.get(left_col, {})
-            rs = right_agg.get(right_col, {})
-
-            left_type = ls.get("col_type", "")
-            right_type = rs.get("col_type", "")
-            type_mismatch = bool(left_type and right_type and left_type != right_type)
-            resolved_type = resolve_col_type(left_type, right_type, col_type_overrides, left_col)
-            has_override = left_col in col_type_overrides
-
-            if type_mismatch:
-                n_type_mismatch += 1
-
-            has_diff = False
-            # Check if key stats differ
-            for key in ("n_total", "n_missing", "n_unique"):
-                lv = ls.get(key, "")
-                rv = rs.get(key, "")
-                if str(lv) != str(rv) and (lv or rv):
-                    has_diff = True
-                    break
-
-            # Also check numeric stats if resolved type is numeric
-            if not has_diff and resolved_type == "numeric":
-                for key in ("mean", "std"):
-                    lv = ls.get(key, "")
-                    rv = rs.get(key, "")
-                    try:
-                        if lv and rv and abs(float(lv) - float(rv)) > 0.01:
-                            has_diff = True
-                            break
-                    except (ValueError, TypeError):
-                        pass
-
-            if has_diff:
-                n_diff += 1
-
-            matched.append({
-                "left_col": left_col,
-                "right_col": right_col,
-                "left_type": left_type,
-                "right_type": right_type,
-                "resolved_type": resolved_type,
-                "type_mismatch": type_mismatch,
-                "has_override": has_override,
-                "left_n_total": ls.get("n_total", ""),
-                "right_n_total": rs.get("n_total", ""),
-                "left_n_missing": ls.get("n_missing", ""),
-                "right_n_missing": rs.get("n_missing", ""),
-                "left_n_unique": ls.get("n_unique", ""),
-                "right_n_unique": rs.get("n_unique", ""),
-                "left_mean": ls.get("mean", ""),
-                "right_mean": rs.get("mean", ""),
-                "left_std": ls.get("std", ""),
-                "right_std": rs.get("std", ""),
-                "left_min": ls.get("min_val", ""),
-                "right_min": rs.get("min_val", ""),
-                "left_max": ls.get("max_val", ""),
-                "right_max": rs.get("max_val", ""),
-                "has_diff": has_diff,
-            })
-
-        # Left-only columns
-        all_left_cols = set(left_agg.keys())
-        left_only = []
-        for col in sorted(all_left_cols - mapped_left):
-            s = left_agg.get(col, {})
-            left_only.append({
-                "column_name": col,
-                "col_type": s.get("col_type", ""),
-                "n_total": s.get("n_total", ""),
-                "n_missing": s.get("n_missing", ""),
-                "n_unique": s.get("n_unique", ""),
-            })
-
-        # Right-only columns
-        all_right_cols = set(right_agg.keys())
-        right_only = []
-        for col in sorted(all_right_cols - mapped_right):
-            s = right_agg.get(col, {})
-            right_only.append({
-                "column_name": col,
-                "col_type": s.get("col_type", ""),
-                "n_total": s.get("n_total", ""),
-                "n_missing": s.get("n_missing", ""),
-                "n_unique": s.get("n_unique", ""),
-            })
+        # Metadata
+        meta_left = get_metadata(_db_path, table_left) or {}
+        meta_right = get_metadata(_db_path, table_right) or {}
 
         return {
             "pair_name": pair_name,
@@ -1440,15 +1456,24 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
             "source_right": pair.get("source_right", ""),
             "col_type_overrides": col_type_overrides,
             "summary": {
-                "n_matched": len(matched),
-                "n_diff": n_diff,
+                "n_matched": len(col_mappings),
+                "n_diff": n_diff_cols,
                 "n_left_only": len(left_only),
                 "n_right_only": len(right_only),
                 "n_type_mismatch": n_type_mismatch,
+                "n_vintages": len(vintage_list),
             },
-            "matched": matched,
+            "vintages": vintage_list,
             "left_only": left_only,
             "right_only": right_only,
+            "meta_left": {
+                "vintage": meta_left.get("vintage"),
+                "date_var": meta_left.get("date_var"),
+            },
+            "meta_right": {
+                "vintage": meta_right.get("vintage"),
+                "date_var": meta_right.get("date_var"),
+            },
         }
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})

@@ -403,7 +403,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     if date_bounds:
         where = f"({where}) AND {date_bounds}" if where else date_bounds
     transform = tbl_cfg.get('date_transform', '')
-    vintage = tbl_cfg.get('vintage', 'all')
+    vintage = tbl_cfg.get('vintage', 'all') or 'all'
     conn_macro = tbl_cfg.get('conn_macro', 'pb23')
     user_override = tbl_cfg.get('user', '')
     redo = int(os.environ.get('SAS_COL_REDO', '0'))
@@ -683,7 +683,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     for tbl in oracle_tables:
         if vintage:
             tbl['vintage'] = vintage
-        elif 'vintage' not in tbl:
+        elif not tbl.get('vintage'):
             tbl['vintage'] = 'all'
     # Pass sas_lib and out_dir to table configs
     sas_lib = env_vars['SAS_LIB']

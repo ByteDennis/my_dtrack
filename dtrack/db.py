@@ -420,6 +420,15 @@ def get_row_counts(
     # YYYYMM dates need comparison against YYYYMM-truncated from/to dates.
     parsed = [(parse_date(dt), count) for dt, count in rows]
 
+    # Dedup: multiple raw formats can map to the same canonical date
+    # (e.g. "20260321" and "21Mar2026" both → "2026-03-21").
+    # Keep the higher count when duplicates exist.
+    deduped = {}
+    for dt, count in parsed:
+        if dt not in deduped or count > deduped[dt]:
+            deduped[dt] = count
+    parsed = list(deduped.items())
+
     if from_date:
         from_ym = from_date[:4] + from_date[5:7]  # "2024-12-23" -> "202412"
         parsed = [(dt, c) for dt, c in parsed
@@ -509,29 +518,69 @@ def get_col_stats(
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
+    # Fetch all rows for this table — date filtering is done in Python
+    # because stored dt formats vary (ISO, YYYYMMDD, SAS datetime) and
+    # SQL string comparison doesn't work across formats.
     query = "SELECT * FROM _col_stats WHERE source_table = ?"
     params = [source_table]
 
     if column_name:
         query += " AND column_name = ?"
         params.append(column_name)
-    if from_date:
-        query += " AND dt >= ?"
-        params.append(from_date)
-    if to_date:
-        query += " AND dt <= ?"
-        params.append(to_date)
-
-    query += " ORDER BY dt, column_name"
-
-    if limit:
-        query += f" LIMIT {limit}"
 
     cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()
 
-    return [dict(row) for row in rows]
+    results = [dict(row) for row in rows]
+
+    # Parse dates to canonical form for filtering and sorting
+    if from_date or to_date:
+        filtered = []
+        for r in results:
+            raw_dt = r.get("dt", "")
+            if not raw_dt:
+                continue
+            try:
+                canon = parse_date(raw_dt)
+            except ValueError:
+                canon = raw_dt
+            if from_date and canon < from_date:
+                continue
+            if to_date and canon > to_date:
+                continue
+            filtered.append(r)
+        results = filtered
+
+    # Dedup: multiple raw formats can map to the same canonical date
+    # (e.g. "23MAR2026:00:00:00" and "2026-03-23" for same column).
+    # Keep the last entry seen per (column_name, canonical_dt).
+    deduped = {}
+    for r in results:
+        raw = r.get("dt", "")
+        try:
+            canon = parse_date(raw)
+        except ValueError:
+            canon = raw
+        key = (r.get("column_name", ""), canon)
+        deduped[key] = r
+    results = list(deduped.values())
+
+    # Sort by parsed date, then column name
+    def _sort_key(r):
+        raw = r.get("dt", "")
+        try:
+            canon = parse_date(raw)
+        except ValueError:
+            canon = raw
+        return (canon, r.get("column_name", ""))
+
+    results.sort(key=_sort_key)
+
+    if limit:
+        results = results[:limit]
+
+    return results
 
 
 def update_metadata(db_path: str, metadata: Dict) -> None:
