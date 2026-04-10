@@ -21,6 +21,7 @@
                 <option value="load_col" selected>Load Col</option>
                 <option value="col_compare">Col Compare</option>
             </select>
+            <button class="btn-text" id="refresh-db-btn" onclick="refreshDB()" title="Refresh DB schema + metadata">Refresh DB</button>
             <div class="db-status" id="db-status" title="Database connected"></div>
         </div>
     </header>
@@ -82,6 +83,7 @@
         </section>
     </main>
 
+    <script src="/static/common.js"></script>
     <script src="/static/load_col.js"></script>
 </body>
 </html>

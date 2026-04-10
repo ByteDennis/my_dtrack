@@ -15,17 +15,11 @@ _SCHEMA = {
     "_metadata": [
         ("table_name", "TEXT", "PRIMARY KEY"),
         ("source", "TEXT", ""),
-        ("db", "TEXT", ""),
         ("source_table", "TEXT", ""),
         ("date_var", "TEXT", ""),
-        ("source_file", "TEXT", ""),
-        ("loaded_at", "TEXT", ""),
-        ("last_updated", "TEXT", ""),
         ("row_count_total", "INTEGER", ""),
-        ("load_mode", "TEXT", ""),
         ("vintage", "TEXT", ""),
         ("data_type", "TEXT", ""),
-        ("where_clause", "TEXT", ""),
         ("date_format", "TEXT", ""),
         ("min_date_loaded", "TEXT", ""),
         ("max_date_loaded", "TEXT", ""),
@@ -72,6 +66,7 @@ _SCHEMA = {
         ("overlap_end", "TEXT", ""),
         ("matching_dates", "TEXT", ""),
         ("excluded_dates", "TEXT", ""),
+        ("non_matching_dates", "TEXT", ""),
         ("created_at", "TEXT", ""),
         ("query_time", "TEXT", ""),
         ("where_left", "TEXT", ""),
@@ -121,19 +116,12 @@ def init_database(db_path: str) -> None:
         CREATE TABLE IF NOT EXISTS _metadata (
             table_name TEXT PRIMARY KEY,
             source TEXT,
-            db TEXT,
             source_table TEXT,
             date_var TEXT,
-            source_file TEXT,
-            loaded_at TEXT,
-            last_updated TEXT,
             row_count_total INTEGER,
-            load_mode TEXT,
             vintage TEXT,
             data_type TEXT,
-            where_clause TEXT,
             date_format TEXT,
-            pair_side TEXT,
             min_date_loaded TEXT,
             max_date_loaded TEXT
         )
@@ -289,16 +277,18 @@ def refresh_database(db_path: str) -> Dict[str, str]:
         expected = {name: dtype for name, dtype, _ in schema_cols}
         expected_names = [name for name, _, _ in schema_cols]
 
-        # Check for type conflicts
+        # Check for type conflicts or extra columns
         conflict = False
         for col_name, col_type in expected.items():
             if col_name in existing and existing[col_name].upper() != col_type.upper():
                 conflict = True
                 break
 
-        if conflict:
-            # Back up data, drop, recreate
-            # Find overlapping columns to preserve data
+        extra_cols = [c for c in existing if c not in expected]
+        needs_rebuild = conflict or bool(extra_cols)
+
+        if needs_rebuild:
+            # Rebuild table: back up data, drop, recreate with clean schema
             overlap_cols = [c for c in expected_names if c in existing]
             has_data = False
             if overlap_cols:
@@ -315,7 +305,13 @@ def refresh_database(db_path: str) -> Dict[str, str]:
             else:
                 cursor.execute(f"DROP TABLE {table_name}")
                 cursor.execute(_build_create_sql(table_name))
-            actions[table_name] = 'recreated'
+
+            detail = []
+            if extra_cols:
+                detail.append(f"-{', '.join(extra_cols)}")
+            if conflict:
+                detail.append("type fix")
+            actions[table_name] = f'rebuilt ({"; ".join(detail)})'
             continue
 
         # Check for missing columns
@@ -323,7 +319,6 @@ def refresh_database(db_path: str) -> Dict[str, str]:
         if missing:
             for col_name in missing:
                 col_type = expected[col_name]
-                # Find constraint
                 constraint = next(c for n, t, c in schema_cols if n == col_name)
                 col_def = col_type
                 if constraint == "DEFAULT CURRENT_TIMESTAMP":
@@ -594,71 +589,32 @@ def update_metadata(db_path: str, metadata: Dict) -> None:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # Check if metadata exists
-    cursor.execute(
-        "SELECT loaded_at FROM _metadata WHERE table_name = ?",
-        (metadata["table_name"],)
-    )
-    existing = cursor.fetchone()
-
-    now = datetime.now().isoformat()
-
-    if existing:
-        # Update existing metadata
-        loaded_at = existing[0]
-        metadata["loaded_at"] = loaded_at
-        metadata["last_updated"] = now
-    else:
-        # New metadata
-        metadata["loaded_at"] = now
-        metadata["last_updated"] = now
-
     # Set defaults for optional fields
     metadata.setdefault("source", None)
-    metadata.setdefault("db", None)
     metadata.setdefault("source_table", None)
     metadata.setdefault("date_var", None)
-    metadata.setdefault("source_file", None)
     metadata.setdefault("row_count_total", None)
-    metadata.setdefault("load_mode", None)
     metadata.setdefault("vintage", None)
     metadata.setdefault("data_type", None)
-    metadata.setdefault("where_clause", None)
     metadata.setdefault("date_format", None)
-    metadata.setdefault("pair_side", None)
     metadata.setdefault("min_date_loaded", None)
     metadata.setdefault("max_date_loaded", None)
 
-    # Ensure newer columns exist (for DBs created before these features)
-    for col in ('where_clause', 'date_format', 'pair_side', 'min_date_loaded', 'max_date_loaded'):
-        try:
-            cursor.execute(f"ALTER TABLE _metadata ADD COLUMN {col} TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already exists
-
     cursor.execute("""
         INSERT OR REPLACE INTO _metadata (
-            table_name, source, db, source_table, date_var,
-            source_file, loaded_at, last_updated, row_count_total,
-            load_mode, vintage, data_type, where_clause, date_format, pair_side,
+            table_name, source, source_table, date_var,
+            row_count_total, vintage, data_type, date_format,
             min_date_loaded, max_date_loaded
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         metadata["table_name"],
         metadata["source"],
-        metadata["db"],
         metadata["source_table"],
         metadata["date_var"],
-        metadata["source_file"],
-        metadata["loaded_at"],
-        metadata["last_updated"],
         metadata["row_count_total"],
-        metadata["load_mode"],
         metadata["vintage"],
         metadata["data_type"],
-        metadata["where_clause"],
         metadata["date_format"],
-        metadata["pair_side"],
         metadata["min_date_loaded"],
         metadata["max_date_loaded"],
     ))
@@ -680,6 +636,88 @@ def patch_metadata(db_path: str, table_name: str, **fields) -> None:
     cursor.execute(f"UPDATE _metadata SET {sets} WHERE table_name = ?", vals)
     conn.commit()
     conn.close()
+
+
+def refresh_metadata_from_data(db_path: str) -> int:
+    """Recompute NULL metadata fields from actual _row_counts and _col_stats data.
+
+    For each table in _metadata, fills in:
+      - min_date_loaded, max_date_loaded (from _row_counts or _col_stats)
+      - row_count_total (from _row_counts)
+      - data_type (row/col based on which tables have data)
+    Does NOT overwrite fields that already have values.
+
+    Returns number of tables updated.
+    """
+    from .date_utils import parse_date
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Get all metadata rows
+    cursor.execute("SELECT * FROM _metadata")
+    meta_rows = [dict(r) for r in cursor.fetchall()]
+
+    updated = 0
+    for meta in meta_rows:
+        tname = meta["table_name"]
+        patches = {}
+
+        # Recompute from _row_counts
+        cursor.execute(
+            "SELECT dt, row_count FROM _row_counts WHERE source_table = ?", (tname,))
+        row_data = cursor.fetchall()
+        if row_data:
+            canonical_dates = []
+            total = 0
+            for dt, count in row_data:
+                total += count
+                try:
+                    canonical_dates.append(parse_date(dt))
+                except ValueError:
+                    canonical_dates.append(dt)
+            canonical_dates.sort()
+
+            if not meta.get("min_date_loaded") and canonical_dates:
+                patches["min_date_loaded"] = canonical_dates[0]
+            if not meta.get("max_date_loaded") and canonical_dates:
+                patches["max_date_loaded"] = canonical_dates[-1]
+            if not meta.get("row_count_total"):
+                patches["row_count_total"] = total
+            if not meta.get("data_type"):
+                patches["data_type"] = "row"
+
+        # Recompute from _col_stats
+        cursor.execute(
+            "SELECT dt FROM _col_stats WHERE source_table = ? GROUP BY dt", (tname,))
+        col_dates = cursor.fetchall()
+        if col_dates:
+            canonical = []
+            for (dt,) in col_dates:
+                try:
+                    canonical.append(parse_date(dt))
+                except ValueError:
+                    canonical.append(dt)
+            canonical.sort()
+
+            # Only fill if row data didn't already set these
+            if not meta.get("min_date_loaded") and "min_date_loaded" not in patches and canonical:
+                patches["min_date_loaded"] = canonical[0]
+            if not meta.get("max_date_loaded") and "max_date_loaded" not in patches and canonical:
+                patches["max_date_loaded"] = canonical[-1]
+            if not meta.get("data_type") and "data_type" not in patches:
+                patches["data_type"] = "col"
+
+        if patches:
+            sets = ", ".join(f"{k} = ?" for k in patches)
+            vals = list(patches.values()) + [tname]
+            cursor.execute(f"UPDATE _metadata SET {sets} WHERE table_name = ?", vals)
+            updated += 1
+
+    conn.commit()
+    conn.close()
+    return updated
 
 
 def get_metadata(db_path: str, table_name: str) -> Optional[Dict]:
@@ -750,17 +788,6 @@ def register_table_pair(
         col_mappings_json,
         created_at,
     ))
-
-    # Update pair_side in _metadata for both tables
-    for tbl_name, side in [(table_left, 'left'), (table_right, 'right')]:
-        try:
-            cursor.execute("ALTER TABLE _metadata ADD COLUMN pair_side TEXT")
-        except sqlite3.OperationalError:
-            pass
-        cursor.execute(
-            "UPDATE _metadata SET pair_side = ? WHERE table_name = ?",
-            (side, tbl_name)
-        )
 
     conn.commit()
     conn.close()
@@ -1073,6 +1100,7 @@ def save_row_comparison(
     overlap_end: Optional[str],
     matching_dates: List[str],
     excluded_dates: List[str],
+    non_matching_dates: Optional[List[str]] = None,
     query_time: Optional[str] = None,
     where_left: Optional[str] = None,
     where_right: Optional[str] = None,
@@ -1083,43 +1111,19 @@ def save_row_comparison(
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # Ensure table exists with all columns
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS _row_comparison (
-            pair_name TEXT PRIMARY KEY,
-            overlap_start TEXT,
-            overlap_end TEXT,
-            matching_dates TEXT,
-            excluded_dates TEXT,
-            created_at TEXT,
-            query_time TEXT,
-            where_left TEXT,
-            where_right TEXT
-        )
-    """)
-
-    # Ensure where_left and where_right columns exist (for old databases)
-    try:
-        cursor.execute("ALTER TABLE _row_comparison ADD COLUMN where_left TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE _row_comparison ADD COLUMN where_right TEXT")
-    except sqlite3.OperationalError:
-        pass
-
     cursor.execute("""
         INSERT OR REPLACE INTO _row_comparison (
             pair_name, overlap_start, overlap_end,
-            matching_dates, excluded_dates, created_at, query_time,
-            where_left, where_right
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            matching_dates, excluded_dates, non_matching_dates,
+            created_at, query_time, where_left, where_right
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         pair_name,
         overlap_start,
         overlap_end,
         json.dumps(sorted(matching_dates)),
         json.dumps(sorted(excluded_dates)),
+        json.dumps(sorted(non_matching_dates)) if non_matching_dates else '[]',
         datetime.now().isoformat(),
         query_time,
         where_left,

@@ -126,7 +126,6 @@ def cmd_load_row(args):
             source_table=tbl.get('table', ''),
             date_col=args.date_var,
             date_var_override=tbl.get('date_col'),
-            where_clause=tbl.get('where', ''),
         )
         rows = get_row_counts(args.project_db, qname)
         total = sum(count for _, count in rows)

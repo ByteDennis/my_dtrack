@@ -139,6 +139,7 @@ async function loadPairs() {
             mode: p.mode || 'incremental',
             fromDate: p.fromDate || '',
             toDate: p.toDate || '',
+            excludeDates: (p.excludeDates || []).join(', '),
             selected: false,
             expanded: false,
             status: statusMap[p.name] || null,
@@ -249,7 +250,7 @@ function renderPairs() {
                         </div>
                     </div>
                 </div>
-                <!-- Per-pair date range and mode -->
+                <!-- Per-pair date range, mode, exclude dates -->
                 <div style="display:flex; align-items:center; gap:12px; margin-top:10px; font-size:12px; flex-wrap:wrap;" onclick="event.stopPropagation()">
                     <label style="display:flex; align-items:center; gap:4px;">
                         From: <input type="date" id="from-${index}" value="${pair.fromDate || ''}" style="width:130px; font-size:11px;" onchange="pairFieldChanged()">
@@ -260,6 +261,14 @@ function renderPairs() {
                     <label style="display:flex; align-items:center; gap:4px;">
                         <input type="checkbox" id="mode-incr-${index}" ${modeChecked} onchange="pairFieldChanged()">
                         Incremental
+                    </label>
+                </div>
+                <div style="margin-top:8px; font-size:12px;" onclick="event.stopPropagation()">
+                    <label style="display:flex; align-items:flex-start; gap:4px;">
+                        Exclude dates:
+                        <input type="text" id="exclude-${index}" value="${pair.excludeDates || ''}"
+                            placeholder="e.g. 2025-01-01, 2025-12-25" style="flex:1; font-size:11px;"
+                            onchange="pairFieldChanged()">
                     </label>
                 </div>
             </div>
@@ -275,12 +284,14 @@ function syncPairFields() {
         const modeEl = document.getElementById(`mode-incr-${index}`);
         const vintLeftEl = document.getElementById(`vintage-left-${index}`);
         const vintRightEl = document.getElementById(`vintage-right-${index}`);
+        const excludeEl = document.getElementById(`exclude-${index}`);
 
         if (fromEl) pair.fromDate = fromEl.value;
         if (toEl) pair.toDate = toEl.value;
         if (modeEl) pair.mode = modeEl.checked ? 'incremental' : 'full';
         if (vintLeftEl) pair.left.vintage = vintLeftEl.value;
         if (vintRightEl) pair.right.vintage = vintRightEl.value;
+        if (excludeEl) pair.excludeDates = excludeEl.value;
     });
 }
 
@@ -323,6 +334,8 @@ function syncSelectAllCheckbox() {
 async function savePairSettings(selected) {
     const results = await Promise.all(selected.map(async pair => {
         try {
+            // Parse exclude dates string into array
+            const excludeArr = (pair.excludeDates || '').split(/[,;\s]+/).map(s => s.trim()).filter(Boolean);
             await fetch(`/api/pairs/${pair.name}`, {
                 method: 'PUT',
                 headers: {'Content-Type': 'application/json'},
@@ -332,6 +345,7 @@ async function savePairSettings(selected) {
                     mode: pair.mode,
                     fromDate: pair.fromDate,
                     toDate: pair.toDate,
+                    excludeDates: excludeArr,
                 }),
             });
             return {name: pair.name, ok: true};
@@ -476,10 +490,13 @@ async function runAwsColExtraction() {
                 const msg = JSON.parse(data);
 
                 if (eventType === 'progress') {
+                    const tblProg = msg.table_total
+                        ? ` (${msg.table} ${msg.table_done}/${msg.table_total})`
+                        : '';
                     const status = msg.ok
                         ? `${msg.rows} rows, ${msg.elapsed}s`
                         : `FAIL: ${msg.error}`;
-                    logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
+                    logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}${tblProg}`, msg.ok ? 'info' : 'error');
                     btn.textContent = `Running ${msg.done}/${msg.total}...`;
                 } else if (eventType === 'done') {
                     if (msg.ok) {

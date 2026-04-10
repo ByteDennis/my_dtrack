@@ -13,6 +13,7 @@ from .base import (
     resolve_table,
     build_date_between_clause,
     build_date_in_clause,
+    build_date_range_with_gaps,
     compute_date_filter,
     load_tables_from_config,
     fill_columns_from_meta,
@@ -499,27 +500,53 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
 
     vintage_calls = []
     if date_filter['filter_type'] == 'between':
-        # Per-bucket queries: dt = bucket label (Python-computed), no vintage transform in SQL
+        # Data-driven vintage: build argument table, then loop with call execute
         from ..date_utils import bucket_date
         buckets = {}
         for dt in date_filter['dates']:
             buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
         n = len(buckets)
+
+        # Build _v_args_ dataset: v_idx, dt_label, date_where
+        arg_rows = []
         for v_idx, (bucket_key, dates) in enumerate(sorted(buckets.items()), 1):
-            bmin, bmax = min(dates), max(dates)
-            dw = build_date_between_clause(date_col, bmin, bmax, date_dtype, is_sas=is_sas, date_format=date_filter.get('date_format'))
-            bucket_sql = _make_sql(f"'{bucket_key}'")
-            full_sql = f"{bucket_sql} WHERE {dw} {base_where}"
-            vintage_calls.append(_symputx_sql(full_sql))
-            vintage_calls.append(
-                f"    %_process_vintage(raw_ds=_raw_{sn}, "
-                f"cache_ds=cache._cs_{sn}_v{v_idx});")
+            dw = build_date_range_with_gaps(date_col, dates, date_dtype, is_sas=is_sas, date_format=date_filter.get('date_format'))
+            dw_escaped = dw.replace("'", "''")
+            arg_rows.append(
+                f"        v_idx={v_idx}; dt_label='{bucket_key}'; "
+                f"date_where='{dw_escaped}'; output;")
+
+        # Static SQL parts (no date_where, no dt_label — those come from dataset)
+        base_sql_tpl = f"{cte_prefix}SELECT"
+        col_part = f"{col_list_str} FROM {table}"
+        base_where_escaped = base_where.replace("'", "''") if base_where.strip() else ""
+
+        vintage_calls.append(f"    /* {n} vintage buckets — data-driven */")
+        vintage_calls.append(f"    data _v_args_;")
+        vintage_calls.append(f"        length v_idx 8 dt_label $32 date_where $4000;")
+        for row in arg_rows:
+            vintage_calls.append(row)
+        vintage_calls.append(f"    run;")
+        vintage_calls.append(f"")
+        vintage_calls.append(f"    data _null_;")
+        vintage_calls.append(f"        set _v_args_;")
+        vintage_calls.append(f"        length _full_sql $8000 _cmd $4000;")
+        vintage_calls.append(f"        _full_sql = '{base_sql_tpl} ' || quote(strip(dt_label)) || ' AS dt, {col_part}';")
+        vintage_calls.append(f"        _full_sql = strip(_full_sql) || ' WHERE ' || strip(date_where);")
+        if base_where_escaped:
+            vintage_calls.append(f"        _full_sql = strip(_full_sql) || ' {base_where_escaped}';")
+        vintage_calls.append(f'        call execute(\'data _null_; call symputx("_full_sql", "\' || tranwrd(strip(_full_sql), \'"\', \'""\') || \'"); run;\');')
+        vintage_calls.append(f"        _cmd = '%nrstr(%_process_vintage)(raw_ds=_raw_{sn}, cache_ds=cache._cs_{sn}_v' || strip(put(v_idx, best.)) || ')';")
+        vintage_calls.append(f"        call execute(_cmd);")
+        vintage_calls.append(f"    run;")
+        vintage_calls.append(f"    proc delete data=_v_args_; run;")
+
         cache_list = " ".join(f"cache._cs_{sn}_v{i}" for i in range(1, n + 1))
         stack_caches = (f"    data _colstats_{sn};\n"
                         f"        set {cache_list};\n"
                         f"    run;")
     elif date_filter['filter_type'] == 'in_list':
-        # Sample dates: treated as one bucket
+        # Sample dates: single bucket
         dw = build_date_in_clause(
             date_col, date_filter['dates'], date_dtype, is_sas=is_sas,
             date_format=date_filter.get('date_format'),

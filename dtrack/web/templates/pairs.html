@@ -24,7 +24,8 @@
             <a href="/benchmark" style="text-decoration:none;"><button type="button">Benchmark</button></a>
             <button onclick="openSettingsModal()">Settings</button>
             <button onclick="showHelp()">Help</button>
-            <div class="db-status" id="db-status" title="Database connected">●</div>
+            <button class="btn-text" id="refresh-db-btn" onclick="refreshDB()" title="Refresh DB schema + metadata">Refresh DB</button>
+            <div class="db-status" id="db-status" title="Database connected"></div>
         </div>
     </header>
 
@@ -349,6 +350,7 @@
         </div>
     </div>
 
+    <script src="/static/common.js"></script>
     <script src="/static/pairs.js"></script>
 </body>
 </html>

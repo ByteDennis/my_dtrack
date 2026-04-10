@@ -194,6 +194,51 @@ def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=F
         return f"{date_col} BETWEEN '{fmt_min}' AND '{fmt_max}'"
 
 
+def build_date_range_with_gaps(date_col, matching_dates, date_dtype,
+                               is_sas=False, date_format=None, custom_date_types=None):
+    """Build BETWEEN clause with NOT IN for gap dates within the range.
+
+    matching_dates: list of YYYY-MM-DD dates that should be included.
+    Any dates in the BETWEEN range that aren't in matching_dates get excluded.
+
+    Returns a WHERE fragment like:
+        date_col BETWEEN '2025-01-06' AND '2025-01-10'
+        AND NOT (date_col IN ('2025-01-09'))
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
+    bmin, bmax = min(matching_dates), max(matching_dates)
+    between = build_date_between_clause(
+        date_col, bmin, bmax, date_dtype,
+        is_sas=is_sas, date_format=date_format,
+        custom_date_types=custom_date_types,
+    )
+
+    # Find gap dates
+    matching_set = set(matching_dates)
+    try:
+        d = _dt.strptime(bmin, "%Y-%m-%d")
+        d_max = _dt.strptime(bmax, "%Y-%m-%d")
+        gaps = []
+        while d <= d_max:
+            ds = d.strftime("%Y-%m-%d")
+            if ds not in matching_set:
+                gaps.append(ds)
+            d += _td(days=1)
+    except ValueError:
+        gaps = []
+
+    if not gaps:
+        return between
+
+    not_in = build_date_in_clause(
+        date_col, gaps, date_dtype,
+        is_sas=is_sas, date_format=date_format,
+        custom_date_types=custom_date_types,
+    )
+    return f"{between} AND NOT ({not_in})"
+
+
 def compute_date_filter(tbl_cfg, db_path, vintage):
     """Compute date filter once in Python for both SAS and Athena paths.
 

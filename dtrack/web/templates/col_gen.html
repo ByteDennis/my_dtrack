@@ -23,6 +23,7 @@
             </select>
             <button onclick="openSettingsModal()">Settings</button>
             <button onclick="showHelp()">Help</button>
+            <button class="btn-text" id="refresh-db-btn" onclick="refreshDB()" title="Refresh DB schema + metadata">Refresh DB</button>
             <div class="db-status" id="db-status" title="Database connected"></div>
         </div>
     </header>
@@ -114,6 +115,7 @@
         </div>
     </div>
 
+    <script src="/static/common.js"></script>
     <script src="/static/col_gen.js"></script>
 </body>
 </html>

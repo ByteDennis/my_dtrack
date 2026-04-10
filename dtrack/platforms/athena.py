@@ -12,6 +12,7 @@ from .base import (
     resolve_table,
     build_date_between_clause,
     build_date_in_clause,
+    build_date_range_with_gaps,
     compute_date_filter,
     load_tables_from_config,
     fill_columns_from_meta,
@@ -474,7 +475,29 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
             }
             effective_vintage = date_filter['vintage']
 
-            # Build vintage buckets
+            # Build exclude dates NOT IN clause (per-pair, from config)
+            # Uses build_date_in_clause to format dates correctly for the column type
+            exclude_dates = tbl.get('_exclude_dates', [])
+            exclude_clause = ""
+            if exclude_dates:
+                date_dtype = date_filter.get('date_dtype')
+                date_format = date_filter.get('date_format')
+                in_clause = build_date_in_clause(
+                    date_col, exclude_dates, date_dtype,
+                    date_format=date_format,
+                )
+                # Negate: IN → NOT IN
+                exclude_clause = f"NOT ({in_clause})"
+                print(f"  {qname}: excluding {len(exclude_dates)} dates")
+
+            # Determine SQL generation mode:
+            #   'bucket'   — matching dates exist, one query per bucket (synthetic dt)
+            #   'trunc'    — no matching dates but vintage != 'all', use DATE_TRUNC + GROUP BY
+            #   'all'      — vintage='all', aggregate everything, dt='all'
+            #   'sample'   — sample@N dates, aggregate with dt='sample'
+            _TRUNC_MAP = {'day': 'day', 'week': 'week', 'month': 'month',
+                          'quarter': 'quarter', 'year': 'year'}
+
             if date_filter['filter_type'] == 'between':
                 from ..date_utils import bucket_date
                 buckets = {}
@@ -482,13 +505,13 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                     buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
                 vintage_specs = []
                 for bucket_key, dates in sorted(buckets.items()):
-                    bmin, bmax = min(dates), max(dates)
-                    dw = build_date_between_clause(
-                        date_col, bmin, bmax,
+                    dw = build_date_range_with_gaps(
+                        date_col, dates,
                         date_filter['date_dtype'],
                         date_format=date_filter.get('date_format'),
                     )
                     vintage_specs.append((bucket_key, dw))
+                sql_mode = 'bucket'
                 print(f"  {qname}: vintage={vintage}, {len(vintage_specs)} buckets")
             elif date_filter['filter_type'] == 'in_list':
                 dw = build_date_in_clause(
@@ -497,31 +520,114 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                     date_format=date_filter.get('date_format'),
                 )
                 vintage_specs = [('sample', dw)]
+                sql_mode = 'sample'
                 print(f"  {qname}: vintage={vintage}, sample {len(date_filter['dates'])} dates")
+            elif vintage in _TRUNC_MAP:
+                # No matching dates, but vintage specified → use DATE_TRUNC + GROUP BY
+                vintage_specs = []
+                sql_mode = 'trunc'
+                print(f"  {qname}: vintage={vintage}, no matching dates -> DATE_TRUNC fallback")
             else:
-                # vintage=all or no db: no date filter, aggregate everything
+                # vintage='all': aggregate everything
                 vintage_specs = [('all', None)]
+                sql_mode = 'all'
                 print(f"  {qname}: vintage={vintage}, no date filter")
 
-            # Generate per (column, bucket) SQL blocks
+            # Generate per-column SQL blocks
+            # Build base WHERE: table where + exclude dates
+            wc_parts = []
+            if where.strip():
+                wc_parts.append(where.strip())
+            if exclude_clause:
+                wc_parts.append(exclude_clause)
+            wc_base = " AND ".join(f"({p})" for p in wc_parts) if wc_parts else "1=1"
+
             for col_name, col_dtype in col_list:
                 is_num = is_numeric_type(col_dtype, is_oracle=False)
-                for dt_label, date_where in vintage_specs:
-                    # Build WHERE clause
-                    parts = []
-                    if where.strip():
-                        parts.append(where.strip())
-                    if date_where:
-                        parts.append(date_where)
-                    wc = " AND ".join(f"({p})" for p in parts) if parts else "1=1"
 
-                    # dt expression: synthetic label (no GROUP BY) for bucketed
-                    dt_expr = f"'{dt_label}'"
-                    # Block name includes bucket for multi-bucket vintages
-                    block_suffix = f"/{dt_label}" if len(vintage_specs) > 1 else ""
-
+                if sql_mode == 'trunc':
+                    # DATE_TRUNC fallback: GROUP BY truncated date
+                    trunc_expr = f"CAST(DATE_TRUNC('{_TRUNC_MAP[vintage]}', {date_col}) AS VARCHAR)"
                     if is_num:
                         sql = f"""{cte_prefix}SELECT
+    {trunc_expr} AS dt,
+    '{col_name}' AS column_name,
+    'numeric' AS col_type,
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col_name}) AS n_missing,
+    COUNT(DISTINCT {col_name}) AS n_unique,
+    CAST(AVG(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS mean,
+    CAST(STDDEV_SAMP(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS std,
+    CAST(MIN({col_name}) AS VARCHAR) AS min_val,
+    CAST(MAX({col_name}) AS VARCHAR) AS max_val,
+    '' AS top_10
+FROM {full_table}
+WHERE {wc_base}
+GROUP BY {trunc_expr};"""
+                    else:
+                        sql = f"""{cte_prefix}WITH freq AS (
+    SELECT {trunc_expr} AS dt,
+        CAST({col_name} AS VARCHAR) AS p_col,
+        COUNT(*) AS cnt
+    FROM {full_table}
+    WHERE {wc_base}
+    GROUP BY {trunc_expr}, {col_name}
+),
+ranked AS (
+    SELECT dt, p_col, cnt,
+        ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn
+    FROM freq
+),
+top_n AS (
+    SELECT dt,
+        ARRAY_JOIN(ARRAY_AGG(
+            COALESCE(p_col, 'NULL') || '(' || CAST(cnt AS VARCHAR) || ')'
+            ORDER BY cnt DESC
+        ), '; ') AS top_10
+    FROM ranked WHERE rn <= 10
+    GROUP BY dt
+),
+stats AS (
+    SELECT dt,
+        SUM(cnt) AS n_total,
+        COALESCE(SUM(CASE WHEN p_col IS NULL THEN cnt ELSE 0 END), 0) AS n_missing,
+        COUNT(*) AS n_unique,
+        CAST(AVG(CAST(cnt AS DOUBLE)) AS VARCHAR) AS mean,
+        CAST(STDDEV_SAMP(CAST(cnt AS DOUBLE)) AS VARCHAR) AS std,
+        CAST(MIN(cnt) AS VARCHAR) AS min_val,
+        CAST(MAX(cnt) AS VARCHAR) AS max_val
+    FROM freq
+    GROUP BY dt
+)
+SELECT
+    s.dt,
+    '{col_name}' AS column_name,
+    'categorical' AS col_type,
+    s.n_total, s.n_missing, s.n_unique,
+    s.mean, s.std, s.min_val, s.max_val,
+    COALESCE(t.top_10, '') AS top_10
+FROM stats s
+LEFT JOIN top_n t ON s.dt = t.dt
+ORDER BY s.dt;"""
+                    blocks.append(f"-- {qname}/{col_name}")
+                    blocks.append(sql.strip())
+                    blocks.append("")
+
+                else:
+                    # bucket / sample / all modes: one block per (column, bucket)
+                    for dt_label, date_where in vintage_specs:
+                        parts = []
+                        if where.strip():
+                            parts.append(where.strip())
+                        if date_where:
+                            parts.append(date_where)
+                        wc = " AND ".join(f"({p})" for p in parts) if parts else "1=1"
+
+                        dt_expr = f"'{dt_label}'"
+                        block_suffix = f"/{dt_label}" if len(vintage_specs) > 1 else ""
+
+                        if is_num:
+                            sql = f"""{cte_prefix}SELECT
     {dt_expr} AS dt,
     '{col_name}' AS column_name,
     'numeric' AS col_type,
@@ -535,8 +641,8 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
     '' AS top_10
 FROM {full_table}
 WHERE {wc};"""
-                    else:
-                        sql = f"""{cte_prefix}WITH freq AS (
+                        else:
+                            sql = f"""{cte_prefix}WITH freq AS (
     SELECT
         CAST({col_name} AS VARCHAR) AS p_col,
         COUNT(*) AS cnt
@@ -565,9 +671,9 @@ SELECT
         ORDER BY cnt DESC
     ), '; ') FROM ranked WHERE rn <= 10), '') AS top_10;"""
 
-                    blocks.append(f"-- {qname}/{col_name}{block_suffix}")
-                    blocks.append(sql.strip())
-                    blocks.append("")
+                        blocks.append(f"-- {qname}/{col_name}{block_suffix}")
+                        blocks.append(sql.strip())
+                        blocks.append("")
         else:
             # Row count query
             where_clause = f"WHERE {where}" if where else ""
@@ -649,8 +755,8 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
         buckets = {}
         for dt in date_filter['dates']:
             buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
-        dw = build_date_between_clause(
-            date_col, date_filter['min_date'], date_filter['max_date'],
+        dw = build_date_range_with_gaps(
+            date_col, date_filter['dates'],
             extract_date_dtype, date_format=date_filter.get('date_format'))
         extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
         print(f"  {len(buckets)} vintage buckets ({effective_vintage}) -- GROUP BY")
@@ -960,11 +1066,20 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
     os.makedirs(outdir, exist_ok=True)
     _max_workers = max_workers or int(os.environ.get('MAX_WORKERS', '4'))
 
-    msg = f"  Parsed {len(blocks)} queries from {sql_path}, workers={_max_workers}"
+    # Group blocks by table (qname) for per-table progress
+    table_blocks = {}  # qname -> [block, ...]
+    for block in blocks:
+        qname = block['name'].split('/')[0] if '/' in block['name'] else block['name']
+        table_blocks.setdefault(qname, []).append(block)
+
+    n_tables = len(table_blocks)
+    msg = f"  Parsed {len(blocks)} queries ({n_tables} tables) from {sql_path}, workers={_max_workers}"
     print(msg, file=sys.stderr)
 
     results = []
     _done_count = [0]  # mutable counter for threads
+    _table_done = {}  # qname -> {done: int, total: int}
+    _table_lock = threading.Lock()
 
     _COL_HEADERS = [
         'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
@@ -975,8 +1090,26 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
     _col_rows_lock = threading.Lock()
     _col_rows_by_table = {}  # qname -> list of row dicts
 
+    # Init per-table counters
+    for qname, tbl_blocks in table_blocks.items():
+        _table_done[qname] = {"done": 0, "total": len(tbl_blocks)}
+
+    try:
+        from tqdm import tqdm as _tqdm
+    except ImportError:
+        _tqdm = None
+
+    # Console tqdm bars per table (stderr)
+    _tqdm_bars = {}
+    if _tqdm and sys.stderr.isatty():
+        for i, (qname, tbl_blocks) in enumerate(table_blocks.items()):
+            _tqdm_bars[qname] = _tqdm(
+                total=len(tbl_blocks), desc=f"  {qname}",
+                unit="qry", position=i, file=sys.stderr, leave=True)
+
     def _run_block(block):
         block_name = block['name']
+        qname = block_name.split('/')[0] if '/' in block_name else block_name
         sql = block['sql']
         start_time = time.time()
         start_ts = datetime.now().isoformat()
@@ -993,8 +1126,6 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
             elapsed = time.time() - start_time
 
             if is_col:
-                # Block name is "qname/col_name" — group by qname
-                qname = block_name.split('/')[0] if '/' in block_name else block_name
                 parsed_rows = []
                 for row in rows:
                     row_dict = dict(zip(col_names, row))
@@ -1018,16 +1149,30 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
             result = {"name": block_name, "ok": False, "error": str(e),
                       "elapsed": round(elapsed, 1), "start": start_ts}
 
+        # Update counters
         _done_count[0] += 1
+        with _table_lock:
+            _table_done[qname]["done"] += 1
+            tbl_progress = _table_done[qname]
+
         n = _done_count[0]
         total = len(blocks)
-        status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
-        msg = f"  [{n}/{total}] {block_name}: {status} ({elapsed:.1f}s)"
-        print(msg, file=sys.stderr)
 
+        # Console tqdm update
+        if qname in _tqdm_bars:
+            _tqdm_bars[qname].update(1)
+        elif not _tqdm_bars:
+            # No tqdm — plain stderr
+            status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
+            print(f"  [{n}/{total}] {block_name}: {status} ({elapsed:.1f}s)", file=sys.stderr)
+
+        # Web progress callback — include per-table progress
         if on_progress:
             result["done"] = n
             result["total"] = total
+            result["table"] = qname
+            result["table_done"] = tbl_progress["done"]
+            result["table_total"] = tbl_progress["total"]
             on_progress(result)
 
         return result
@@ -1040,6 +1185,10 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
             futures = {pool.submit(_run_block, b): b for b in blocks}
             for fut in as_completed(futures):
                 results.append(fut.result())
+
+    # Close tqdm bars
+    for bar in _tqdm_bars.values():
+        bar.close()
 
     # For col mode, write one CSV per table from collected rows
     if is_col:

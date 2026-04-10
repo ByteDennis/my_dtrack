@@ -138,14 +138,26 @@ async def api_status():
 @app.post("/api/init")
 async def api_init():
     """Initialize or refresh the database."""
-    from ..db import init_database, refresh_database
+    from ..db import init_database, refresh_database, refresh_metadata_from_data
 
     if os.path.exists(_db_path):
         actions = refresh_database(_db_path)
-        return {"action": "refreshed", "details": actions}
+        n_meta = refresh_metadata_from_data(_db_path)
+        return {"action": "refreshed", "details": actions, "metadata_refreshed": n_meta}
     else:
         init_database(_db_path)
         return {"action": "created", "db_path": _db_path}
+
+
+@app.post("/api/refresh-metadata")
+async def api_refresh_metadata():
+    """Recompute NULL metadata fields from actual data in _row_counts and _col_stats."""
+    from ..db import refresh_metadata_from_data
+    try:
+        n = refresh_metadata_from_data(_db_path)
+        return {"ok": True, "updated": n}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/api/extract")
@@ -283,6 +295,15 @@ async def api_generate_files(request: Request):
 
             all_tables = load_tables_from_config(filtered_config)
             inject_where_from_config(all_tables, filtered_config)
+
+            # Inject excludeDates from pair config into table configs
+            for tbl in all_tables:
+                for pair_name in tbl.get('_pairs', []):
+                    pair_cfg = filtered_config.get('pairs', {}).get(pair_name, {})
+                    exc = pair_cfg.get('excludeDates', [])
+                    if exc:
+                        tbl['_exclude_dates'] = exc
+                        break
 
             # Inject date bounds
             if from_date or to_date:
@@ -654,6 +675,7 @@ async def api_list_pairs():
                 "dateRangeMode": pair_cfg.get("dateRangeMode", "global"),
                 "fromDate": pair_cfg.get("fromDate", ""),
                 "toDate": pair_cfg.get("toDate", ""),
+                "excludeDates": pair_cfg.get("excludeDates", []),
                 "overlap": pair_cfg.get("overlap", 7),
                 "lastLoaded": pair_cfg.get("lastLoaded", ""),
                 "selected": False,
@@ -687,7 +709,7 @@ async def api_update_pair(pair_name: str, request: Request):
                        "fromDate", "toDate", "dateRangeMode", "overlap",
                        "skip", "ignore_rows", "ignore_columns",
                        "col_type_overrides", "where_map", "time_map",
-                       "comment_map", "diff_map"}
+                       "comment_map", "diff_map", "excludeDates"}
         for key in _PAIR_KEYS:
             if key in body:
                 pair_cfg[key] = body[key]
@@ -714,13 +736,30 @@ async def api_update_pair(pair_name: str, request: Request):
             )
             for tbl_cfg in [left, right]:
                 qname = qualified_name(tbl_cfg)
-                update_metadata(_db_path, {
-                    "table_name": qname,
-                    "source": tbl_cfg.get("source"),
-                    "source_table": tbl_cfg.get("table"),
-                    "date_var": tbl_cfg.get("date_col"),
-                    "data_type": "row",
-                })
+                # Use patch to avoid wiping existing fields (min/max dates, etc.)
+                from ..db import patch_metadata, get_metadata as _get_meta
+                existing = _get_meta(_db_path, qname)
+                if existing:
+                    patch_fields = {}
+                    if tbl_cfg.get("source"):
+                        patch_fields["source"] = tbl_cfg["source"]
+                    if tbl_cfg.get("table"):
+                        patch_fields["source_table"] = tbl_cfg["table"]
+                    if tbl_cfg.get("date_col"):
+                        patch_fields["date_var"] = tbl_cfg["date_col"]
+                    if tbl_cfg.get("vintage"):
+                        patch_fields["vintage"] = tbl_cfg["vintage"]
+                    if patch_fields:
+                        patch_metadata(_db_path, qname, **patch_fields)
+                else:
+                    update_metadata(_db_path, {
+                        "table_name": qname,
+                        "source": tbl_cfg.get("source"),
+                        "source_table": tbl_cfg.get("table"),
+                        "date_var": tbl_cfg.get("date_col"),
+                        "vintage": tbl_cfg.get("vintage"),
+                        "data_type": "row",
+                    })
 
         return {"ok": True, "pair_name": pair_name}
     except Exception as e:
@@ -888,7 +927,6 @@ async def api_load_row_upload(
             source=tbl_cfg.get("source") if tbl_cfg else None,
             date_col=None,
             date_var_override=tbl_cfg.get("date_col") if tbl_cfg else None,
-            where_clause=tbl_cfg.get("where", "") if tbl_cfg else "",
         )
 
         # Compute new vs updated dates
@@ -1054,7 +1092,6 @@ async def api_load_row_path(request: Request):
             source=tbl_cfg.get("source") if tbl_cfg else None,
             date_col=None,
             date_var_override=tbl_cfg.get("date_col") if tbl_cfg else None,
-            where_clause=tbl_cfg.get("where", "") if tbl_cfg else "",
         )
 
         # Compute new vs updated
@@ -1947,14 +1984,16 @@ async def api_save_row_comparison(pair_name: str, request: Request):
 
         excluded_dates = body.get("excluded_dates", [])
         matching_dates = body.get("matching_dates", [])
+        non_matching_dates = body.get("non_matching_dates", [])
         comment_left = body.get("comment_left", "")
         comment_right = body.get("comment_right", "")
         time_left = body.get("time_left", "")
         time_right = body.get("time_right", "")
 
-        # Compute overlap from matching dates
-        overlap_start = min(matching_dates) if matching_dates else None
-        overlap_end = max(matching_dates) if matching_dates else None
+        # Compute overlap from matching + non-matching dates (full overlap range)
+        all_overlap_dates = matching_dates + non_matching_dates
+        overlap_start = min(all_overlap_dates) if all_overlap_dates else None
+        overlap_end = max(all_overlap_dates) if all_overlap_dates else None
 
         save_row_comparison(
             _db_path, pair_name,
@@ -1962,6 +2001,7 @@ async def api_save_row_comparison(pair_name: str, request: Request):
             overlap_end=overlap_end,
             matching_dates=matching_dates,
             excluded_dates=excluded_dates,
+            non_matching_dates=non_matching_dates,
         )
 
         # Save annotations to config
@@ -2216,9 +2256,17 @@ def _prepare_side(tbl_cfg):
 
 
 def _sync_config_pairs(config):
-    """Register all pairs from config into the database. Returns count."""
+    """Register all pairs from config into the database.
+
+    Uses patch_metadata for existing rows to avoid wiping data-derived fields.
+    Then calls refresh_metadata_from_data to recompute from _row_counts/_col_stats.
+    Returns count of pairs synced.
+    """
     from ..platforms.base import qualified_name
-    from ..db import register_table_pair, update_metadata
+    from ..db import (
+        register_table_pair, update_metadata, patch_metadata,
+        get_metadata, refresh_metadata_from_data,
+    )
 
     count = 0
     for pair_name, pair_cfg in config.get("pairs", {}).items():
@@ -2244,13 +2292,30 @@ def _sync_config_pairs(config):
 
         for tbl_cfg in [left, right]:
             qname = qualified_name(tbl_cfg)
-            update_metadata(_db_path, {
-                "table_name": qname,
+            existing = get_metadata(_db_path, qname)
+
+            # Config-derived fields
+            cfg_fields = {
                 "source": tbl_cfg.get("source"),
                 "source_table": tbl_cfg.get("table"),
                 "date_var": tbl_cfg.get("date_col"),
-            })
+            }
+            if tbl_cfg.get("vintage"):
+                cfg_fields["vintage"] = tbl_cfg["vintage"]
+
+            if existing:
+                # Patch without wiping data-derived fields
+                patch_metadata(_db_path, qname, **cfg_fields)
+            else:
+                cfg_fields["table_name"] = qname
+                update_metadata(_db_path, cfg_fields)
+
         count += 1
+
+    # Recompute data-derived fields (min/max dates, row_count_total, date_format)
+    # from actual _row_counts and _col_stats data
+    refresh_metadata_from_data(_db_path)
+
     return count
 
 

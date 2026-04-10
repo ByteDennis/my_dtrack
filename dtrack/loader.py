@@ -128,7 +128,6 @@ def load_row_counts(
     source_table: Optional[str] = None,
     date_col: Optional[str] = None,
     date_var_override: Optional[str] = None,
-    where_clause: Optional[str] = None,
 ) -> None:
     """
     Load row counts from CSV file(s) into the database.
@@ -144,7 +143,6 @@ def load_row_counts(
         source_table: Original table name
         date_col: Date column name for CSV parsing (auto-detected if None)
         date_var_override: Source DB column name to store in metadata (e.g. RPT_DT)
-        where_clause: Original WHERE clause from extract config
     """
     path = Path(file_or_folder)
 
@@ -207,15 +205,11 @@ def load_row_counts(
     update_metadata(db_path, {
         "table_name": table_name,
         "source": source,
-        "db": db_name,
         "source_table": source_table,
         "date_var": date_var_override or date_col,
-        "source_file": str(file_or_folder),
         "row_count_total": total_count,
-        "load_mode": mode,
         "vintage": vintage,
         "data_type": "row",
-        "where_clause": where_clause,
         "date_format": detected_format,
         "min_date_loaded": min_dt,
         "max_date_loaded": max_dt,
@@ -333,11 +327,8 @@ def load_column_data(
     update_metadata(db_path, {
         "table_name": source_table,
         "source": source,
-        "db": db_name,
         "source_table": source_table,
         "date_var": date_col,
-        "source_file": file_path,
-        "load_mode": mode,
         "vintage": vintage,
         "data_type": "col",
     })
@@ -490,10 +481,7 @@ def load_precomputed_col_stats(
     update_metadata(db_path, {
         "table_name": table_name,
         "source": source,
-        "db": db_name,
         "source_table": table_name,
-        "source_file": csv_path,
-        "load_mode": mode,
         "vintage": vintage,
         "data_type": "col",
         "min_date_loaded": min_dt,

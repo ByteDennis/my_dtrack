@@ -115,6 +115,9 @@ async function comparePair(name) {
             statusEl.innerHTML = `<span class="status-badge warning">${s.n_mismatch} mismatch</span>`;
         }
 
+        // Auto-save matching dates to _row_comparison so col_gen can use them
+        await syncPair(name);
+
         // Auto-refresh HTML preview
         refreshPreview(name);
     } catch (e) {
@@ -286,9 +289,17 @@ function toggleExclude(name, dt, excluded) {
 }
 
 function matchingSummaryText(name, data) {
-    const excluded = data._excludedSet ? data._excludedSet.size : 0;
-    const matching = data.summary.n_match;
-    return `Matching: <strong>${matching}</strong> &nbsp; Excluded: <strong>${excluded}</strong>`;
+    const manualExcl = data._excludedSet ? data._excludedSet.size : 0;
+    const s = data.summary;
+    const totalDates = s.n_match + s.n_mismatch + s.n_left_only + s.n_right_only;
+    const colGenDates = s.n_match - manualExcl;
+    const nonMatch = s.n_mismatch + s.n_left_only + s.n_right_only + manualExcl;
+
+    return `Matching: <strong>${s.n_match}</strong> &nbsp; `
+        + `Manual excl: <strong>${manualExcl}</strong> &nbsp; `
+        + `<span style="color:var(--jp-ui-font-color2);">Col Gen will use <strong>${colGenDates}</strong>/${totalDates} dates `
+        + `(${nonMatch} excluded: ${s.n_mismatch} mismatch, ${s.n_left_only} L-only, ${s.n_right_only} R-only`
+        + (manualExcl ? `, ${manualExcl} manual` : '') + `)</span>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -332,28 +343,57 @@ function debouncedSync(name) {
 
 async function syncPair(name) {
     const data = compareCache[name];
-    if (!data) return;
+    if (!data) {
+        apiLog(`syncPair(${name}): no data in cache — skipped`, 'error');
+        return;
+    }
+    if (!data._excludedSet) {
+        apiLog(`syncPair(${name}): _excludedSet not set — skipped`, 'error');
+        return;
+    }
+    if (!data.dates) {
+        apiLog(`syncPair(${name}): no dates array — skipped`, 'error');
+        return;
+    }
 
     const excluded = Array.from(data._excludedSet);
     const matching = data.dates
         .filter(d => d.status === 'match' && !data._excludedSet.has(d.dt))
         .map(d => d.dt);
 
+    // Non-matching dates within overlap (mismatch + left_only + right_only + manual excluded)
+    const ov_start = data.summary.overlap_start;
+    const ov_end = data.summary.overlap_end;
+    const nonMatching = data.dates
+        .filter(d => {
+            if (!ov_start || !ov_end) return false;
+            if (d.dt < ov_start || d.dt > ov_end) return false;
+            return d.status !== 'match' || data._excludedSet.has(d.dt);
+        })
+        .map(d => d.dt);
+
+    apiLog(`syncPair(${name}): saving ${matching.length} matching, ${nonMatching.length} non-matching in overlap, ${excluded.length} manual excluded`, 'info');
+
     try {
-        await fetch(`/api/compare/row/${name}`, {
+        const resp = await fetch(`/api/compare/row/${name}`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
                 excluded_dates: excluded,
                 matching_dates: matching,
+                non_matching_dates: nonMatching,
                 comment_left: document.getElementById(`comment-left-${name}`)?.value || '',
                 comment_right: document.getElementById(`comment-right-${name}`)?.value || '',
                 time_left: document.getElementById(`time-left-${name}`)?.value || '',
                 time_right: document.getElementById(`time-right-${name}`)?.value || '',
             }),
         });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            apiLog(`syncPair(${name}) PUT ${resp.status}: ${err.error || 'failed'}`, 'error');
+        }
     } catch (e) {
-        console.error(`Sync failed for ${name}:`, e);
+        apiLog(`syncPair(${name}) error: ${e.message}`, 'error');
     }
 }
 
