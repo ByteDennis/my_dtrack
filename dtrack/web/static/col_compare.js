@@ -96,6 +96,9 @@ async function comparePair(name) {
         } else {
             statusEl.innerHTML = `<span class="status-badge warning">${s.n_diff} diff</span>`;
         }
+
+        // Auto-save to _col_comparison
+        await syncColPair(name, data);
     } catch (e) {
         body.innerHTML = `<div class="empty-message" style="color:var(--jp-error-color0);">Error: ${e.message}</div>`;
     }
@@ -105,6 +108,41 @@ async function runAll() {
     for (const p of pairsData) {
         if (p.skip) continue;
         await comparePair(p.pair_name);
+    }
+}
+
+async function syncColPair(name, data) {
+    const vintages = data.vintages || [];
+    const allCols = new Set();
+    const matchedCols = new Set();
+    const diffCols = new Set();
+
+    for (const v of vintages) {
+        for (const c of (v.columns || [])) {
+            allCols.add(c.left_col);
+            if (c.has_diff) diffCols.add(c.left_col);
+            else matchedCols.add(c.left_col);
+        }
+    }
+    // Remove from matched if it differed in any vintage
+    for (const d of diffCols) matchedCols.delete(d);
+
+    try {
+        const resp = await fetch(`/api/compare/col/${name}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                columns_compared: Array.from(allCols),
+                matched_columns: Array.from(matchedCols),
+                diff_columns: Array.from(diffCols),
+            }),
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            console.error(`syncColPair(${name}) failed:`, err.error || resp.status);
+        }
+    } catch (e) {
+        console.error(`syncColPair(${name}) error:`, e);
     }
 }
 
@@ -183,71 +221,94 @@ function renderVintages(name, data) {
 function renderColTable(name, cols) {
     if (!cols.length) return '<div class="empty-message">No matched columns</div>';
 
-    const hasNumeric = cols.some(c => c.col_type === 'numeric');
+    // Sort: diff columns first
+    const sorted = [...cols].sort((a, b) => {
+        if (a.has_diff !== b.has_diff) return a.has_diff ? -1 : 1;
+        return (a.left_col || '').localeCompare(b.left_col || '');
+    });
 
-    const rows = cols.map(c => {
-        const statusIcon = c.has_diff
-            ? '<span style="color:var(--jp-warn-color0);">&#9888;</span>'
-            : '<span style="color:var(--jp-success-color0);">&#10003;</span>';
-        const typeBadge = c.type_mismatch
-            ? `<span style="color:var(--jp-warn-color0);">${esc(c.col_type_left)}/${esc(c.col_type_right)}</span>`
-            : esc(c.col_type);
+    // Stat rows to display
+    const statDefs = [
+        {label: 'Type',      keyL: 'col_type',       keyR: 'col_type',       isDiff: () => false, fmt: 'text'},
+        {label: 'N_Total',   keyL: 'n_total_left',   keyR: 'n_total_right',  isDiff: c => c.n_total_diff !== 0, fmt: 'int'},
+        {label: 'N_Missing', keyL: 'n_missing_left',  keyR: 'n_missing_right', isDiff: c => c.n_missing_diff !== 0, fmt: 'int'},
+        {label: 'N_Unique',  keyL: 'n_unique_left',   keyR: 'n_unique_right',  isDiff: c => c.n_unique_diff !== 0, fmt: 'int'},
+        {label: 'Mean',      keyL: 'mean_left',       keyR: 'mean_right',      isDiff: c => c.mean_diff != null && Math.abs(c.mean_diff) > 0.01, fmt: 'num'},
+        {label: 'Std',       keyL: 'std_left',        keyR: 'std_right',       isDiff: c => c.std_diff != null && Math.abs(c.std_diff) > 0.01, fmt: 'num'},
+        {label: 'Min',       keyL: 'min_left',        keyR: 'min_right',       isDiff: () => false, fmt: 'text'},
+        {label: 'Max',       keyL: 'max_left',        keyR: 'max_right',       isDiff: () => false, fmt: 'text'},
+    ];
 
-        let numCells = '';
-        if (hasNumeric) {
-            if (c.col_type === 'numeric') {
-                numCells = `
-                    <td style="text-align:right;">${fmtNum(c.mean_left)}</td>
-                    <td style="text-align:right;">${fmtNum(c.mean_right)}</td>
-                    <td style="text-align:right;">${fmtNum(c.std_left)}</td>
-                    <td style="text-align:right;">${fmtNum(c.std_right)}</td>`;
-            } else {
-                numCells = `<td colspan="4" style="text-align:center; color:var(--jp-ui-font-color2);">—</td>`;
+    function fmtCell(val, fmt) {
+        if (val == null || val === '') return '&mdash;';
+        if (fmt === 'int') return fmtVal(val);
+        if (fmt === 'num') return fmtNum(val);
+        return esc(String(val));
+    }
+
+    // Find which (col_idx, stat_idx) are diffs for coloring
+    const diffCells = new Set();
+    const problemCols = new Set();
+    sorted.forEach((c, ci) => {
+        statDefs.forEach((sd, si) => {
+            if (si > 0 && sd.isDiff(c)) {
+                diffCells.add(`${ci},${si}`);
+                problemCols.add(ci);
             }
-        }
+        });
+    });
 
-        const diffClass = c.has_diff ? ' rc-date-row mismatch' : '';
-
-        return `<tr class="${diffClass}">
-            <td>${statusIcon}</td>
-            <td>${esc(c.left_col)}</td>
-            <td>${esc(c.right_col !== c.left_col ? c.right_col : '')}</td>
-            <td>${typeBadge}</td>
-            <td style="text-align:right;">${fmtVal(c.n_total_left)}</td>
-            <td style="text-align:right;">${fmtVal(c.n_total_right)}</td>
-            <td style="text-align:right;">${fmtDiff(c.n_total_diff)}</td>
-            <td style="text-align:right;">${fmtVal(c.n_missing_left)}</td>
-            <td style="text-align:right;">${fmtVal(c.n_missing_right)}</td>
-            <td style="text-align:right;">${fmtVal(c.n_unique_left)}</td>
-            <td style="text-align:right;">${fmtVal(c.n_unique_right)}</td>
-            ${numCells}
-        </tr>`;
+    // Build header row (variable names)
+    const colHeaders = sorted.map((c, ci) => {
+        const icon = c.has_diff ? '<span style="color:var(--jp-warn-color0);">&#9888;</span> ' : '';
+        return `<th style="text-align:right; font-size:11px;">${icon}${esc(c.left_col)}</th>`;
     }).join('');
 
-    const numHeaders = hasNumeric ? `
-        <th style="text-align:right;">Mean L</th>
-        <th style="text-align:right;">Mean R</th>
-        <th style="text-align:right;">Std L</th>
-        <th style="text-align:right;">Std R</th>` : '';
+    // Build stat rows for one side
+    function buildSideRows(side, sideLabel, sourceLabel) {
+        const key = side === 'left' ? 'keyL' : 'keyR';
+        let html = `<tr><td colspan="${sorted.length + 1}" style="font-weight:600; padding-top:8px;">${esc(sourceLabel)}</td></tr>`;
+        html += `<tr><td style="font-weight:600;"></td>${colHeaders}</tr>`;
+        for (let si = 0; si < statDefs.length; si++) {
+            const sd = statDefs[si];
+            html += '<tr>';
+            html += `<td style="font-weight:600; font-size:11px; white-space:nowrap;">${sd.label}</td>`;
+            for (let ci = 0; ci < sorted.length; ci++) {
+                const c = sorted[ci];
+                const val = c[sd[key]];
+                let style = 'text-align:right; font-size:11px;';
+                if (diffCells.has(`${ci},${si}`)) {
+                    style += ' background:var(--jp-error-color2, #ffc7ce); color:var(--jp-error-color0, #c00);';
+                } else if (problemCols.has(ci) && si > 0) {
+                    style += ' background:var(--jp-success-color2, #c6efce);';
+                }
+                html += `<td style="${style}">${fmtCell(val, sd.fmt)}</td>`;
+            }
+            html += '</tr>';
+        }
+        return html;
+    }
+
+    // Get source labels from parent data
+    const data = compareCache[name] || {};
+    const srcLeft = (data.source_left || 'LEFT').toUpperCase();
+    const srcRight = (data.source_right || 'RIGHT').toUpperCase();
+    const tblLeft = data.table_left || '';
+    const tblRight = data.table_right || '';
+
+    const leftRows = buildSideRows('left', 'L', `${srcLeft}: ${tblLeft}`);
+    const rightRows = buildSideRows('right', 'R', `${srcRight}: ${tblRight}`);
+
 
     return `
-    <table class="data-table compact">
-        <thead><tr>
-            <th></th>
-            <th>Left Col</th>
-            <th>Right Col</th>
-            <th>Type</th>
-            <th style="text-align:right;">Total L</th>
-            <th style="text-align:right;">Total R</th>
-            <th style="text-align:right;">Diff</th>
-            <th style="text-align:right;">Miss L</th>
-            <th style="text-align:right;">Miss R</th>
-            <th style="text-align:right;">Uniq L</th>
-            <th style="text-align:right;">Uniq R</th>
-            ${numHeaders}
-        </tr></thead>
-        <tbody>${rows}</tbody>
-    </table>`;
+    <div class="rc-date-table-wrap" style="overflow-x:auto;">
+        <table class="data-table compact">
+            <tbody>
+                ${leftRows}
+                ${rightRows}
+            </tbody>
+        </table>
+    </div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +345,18 @@ function renderOnlyCols(cols, title) {
 }
 
 // ---------------------------------------------------------------------------
+// Export: Excel download
+// ---------------------------------------------------------------------------
+function downloadExcel() {
+    const from = document.getElementById('global-from')?.value || '';
+    const to = document.getElementById('global-to')?.value || '';
+    const params = new URLSearchParams();
+    if (from) params.set('from_date', from);
+    if (to) params.set('to_date', to);
+    window.open(`/api/compare/col/export/excel?${params}`, '_blank');
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 function fmtVal(n) {
@@ -317,5 +390,62 @@ function notify(msg, type = 'success') {
         el.style.background = type === 'error' ? 'var(--jp-error-color0)' : 'var(--jp-success-color0)';
         el.title = msg;
         setTimeout(() => { el.style.background = 'var(--jp-success-color0)'; }, 2000);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Export: HTML download
+// ---------------------------------------------------------------------------
+async function downloadHTML() {
+    try {
+        const res = await fetch('/api/compare/col/export/html', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                from_date: document.getElementById('global-from')?.value || '',
+                to_date: document.getElementById('global-to')?.value || '',
+                title: document.getElementById('global-title')?.value || '',
+                subtitle: document.getElementById('global-subtitle')?.value || '',
+            }),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            notify(`HTML export failed: ${err.error || res.status}`, 'error');
+            return;
+        }
+        const html = await res.text();
+        const blob = new Blob([html], { type: 'text/html' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'col_compare.html';
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        notify(`HTML export failed: ${e.message}`, 'error');
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Export: Save comparison logs
+// ---------------------------------------------------------------------------
+async function saveLogs() {
+    try {
+        const res = await fetch('/api/compare/col/export/log', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                from_date: document.getElementById('global-from')?.value || '',
+                to_date: document.getElementById('global-to')?.value || '',
+            }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+            notify(`Logs saved to ${data.outdir}`);
+        } else {
+            notify(`Log export failed: ${data.error}`, 'error');
+        }
+    } catch (e) {
+        notify(`Log export failed: ${e.message}`, 'error');
     }
 }

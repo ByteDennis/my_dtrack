@@ -70,7 +70,7 @@
             if first.dt then do; top_10 = ''; _rn = 0; end;
             if _rn < 10 then do;
                 _rn + 1;
-                _entry = catx('', strip(vvalue(p_col)), '(', strip(put(value_freq, best.)), ')');
+                _entry = cats(strip(vvalue(p_col)), '(', strip(put(value_freq, best.)), ')');
                 if top_10 = '' then top_10 = _entry;
                 else top_10 = catx('; ', top_10, _entry);
             end;
@@ -84,7 +84,7 @@
                 "&col" as column_name length=32,
                 'categorical' as col_type length=32,
                 sum(value_freq) as n_total,
-                count(value_freq) as n_unique,
+                sum(case when p_col is not missing then 1 else 0 end) as n_unique,
                 avg(value_freq) as mean,
                 std(value_freq) as std,
                 strip(put(min(value_freq), best32.)) as min_val length=200,

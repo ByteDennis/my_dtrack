@@ -20,6 +20,8 @@ const CONNECTION_MACROS = {
     "csv": [],
 };
 
+// Step 3 of adding a new date format: add {value, label} here.
+// See base.py DATE_TYPE_FORMATS comment block for full instructions.
 const DATE_COLUMN_TYPES = [
     {value: "date", label: "Date"},
     {value: "timestamp", label: "Timestamp"},
@@ -28,6 +30,9 @@ const DATE_COLUMN_TYPES = [
     {value: "num_yyyymm", label: "Number (YYYYMM)"},
     {value: "string_dash", label: "String (YYYY-MM-DD)"},
     {value: "string_compact", label: "String (YYYYMMDD)"},
+    {value: "string_mon", label: "String (DDMONYYYY)"},
+    {value: "string_mon_dash", label: "String (DD-MON-YYYY)"},
+    {value: "string_us", label: "String (MM/DD/YYYY)"},
 ];
 
 const VINTAGE_PRESETS = {

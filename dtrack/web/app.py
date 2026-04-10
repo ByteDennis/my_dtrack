@@ -160,6 +160,13 @@ async def api_refresh_metadata():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.get("/api/date-types")
+async def api_date_types():
+    """Return supported date_type values and their SQL format examples."""
+    from ..platforms.base import DATE_TYPE_FORMATS
+    return {"date_types": DATE_TYPE_FORMATS}
+
+
 @app.post("/api/extract")
 async def api_extract(request: Request):
     """Run gen-sas or gen-aws extraction."""
@@ -1343,6 +1350,23 @@ async def api_status_col():
 # Col Compare API
 # ---------------------------------------------------------------------------
 
+@app.put("/api/compare/col/{pair_name}")
+async def api_save_col_comparison(pair_name: str, request: Request):
+    """Save col comparison state to _col_comparison."""
+    body = await request.json()
+    try:
+        from ..db import save_col_comparison
+        save_col_comparison(
+            _db_path, pair_name,
+            columns_compared=body.get("columns_compared", []),
+            matched_columns=body.get("matched_columns", []),
+            diff_columns=body.get("diff_columns", []),
+        )
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/compare/col/{pair_name}")
 async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str = ""):
     """Compare col stats for a single pair — returns per-vintage comparisons."""
@@ -1448,6 +1472,8 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
                     "min_right": comp.get("min_right", ""),
                     "max_left": comp.get("max_left", ""),
                     "max_right": comp.get("max_right", ""),
+                    "top_10_left": comp.get("top_10_left", ""),
+                    "top_10_right": comp.get("top_10_right", ""),
                     "has_diff": has_diff,
                 })
 
@@ -1512,6 +1538,527 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
                 "date_var": meta_right.get("date_var"),
             },
         }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/compare/col/export/html")
+async def api_compare_col_export_html(request: Request):
+    """Generate full HTML report for col comparison (like CLI compare-col)."""
+    body = await request.json()
+    from_date = body.get("from_date", "")
+    to_date = body.get("to_date", "")
+    title = body.get("title", "")
+    subtitle = body.get("subtitle", "")
+
+    try:
+        from ..db import list_table_pairs, get_metadata, get_row_comparison
+        from ..config import load_unified_config, get_col_type_overrides
+        from ..compare import compare_column_stats
+        from ..html_export import generate_column_stats_html, create_column_stats_table, wrap_html_document
+
+        config = load_unified_config(_config_path)
+        pairs = list_table_pairs(_db_path)
+
+        row_sections = []
+        for pair in pairs:
+            pname = pair["pair_name"]
+            pair_cfg = config.get("pairs", {}).get(pname, {})
+            if pair_cfg.get("skip"):
+                continue
+
+            col_type_overrides = get_col_type_overrides(config, pname)
+            from ..db import get_pair_col_map_from_db, get_column_meta
+            col_mappings = get_pair_col_map_from_db(_db_path, pname)
+            if not col_mappings:
+                left_meta = get_column_meta(_db_path, pair["table_left"])
+                right_meta = get_column_meta(_db_path, pair["table_right"])
+                left_cols = {c["column_name"]: c.get("data_type", "") for c in left_meta}
+                right_cols = {c["column_name"]: c.get("data_type", "") for c in right_meta}
+                from ..compare import match_columns_from_dicts
+                auto = match_columns_from_dicts(left_cols, right_cols)
+                col_mappings = auto.get("matched", {})
+
+            # Get matching dates from row comparison
+            saved = get_row_comparison(_db_path, pname)
+            matched_dates = set(saved["matching_dates"]) if saved and saved.get("matching_dates") else None
+
+            comparison = compare_column_stats(
+                _db_path, pair["table_left"], pair["table_right"],
+                columns=list(col_mappings.keys()) if col_mappings else None,
+                col_mappings=col_mappings,
+                from_date=from_date or None,
+                to_date=to_date or None,
+                matched_dates=matched_dates,
+                col_type_overrides=col_type_overrides,
+            )
+
+            meta_left = get_metadata(_db_path, pair["table_left"]) or {}
+            meta_right = get_metadata(_db_path, pair["table_right"]) or {}
+            vintage = meta_left.get("vintage") or meta_right.get("vintage") or "day"
+
+            comment_map = pair_cfg.get("comment_map", {}).get("col", {})
+            time_map = pair_cfg.get("time_map", {}).get("col", {})
+
+            rows_html = generate_column_stats_html(
+                pair_name=pname,
+                source_left=pair.get("source_left", ""),
+                source_right=pair.get("source_right", ""),
+                table_left=pair["table_left"],
+                table_right=pair["table_right"],
+                comparison=comparison,
+                col_mappings=col_mappings,
+                metadata_left=meta_left,
+                metadata_right=meta_right,
+                time_map=time_map,
+                comment_left=comment_map.get("left", ""),
+                comment_right=comment_map.get("right", ""),
+            )
+            row_sections.append(rows_html)
+
+        table_html = create_column_stats_table(
+            row_sections,
+            vintage=meta_left.get("vintage") or "day" if pairs else "day",
+        )
+        doc = wrap_html_document(
+            title=title or "Column Statistics Comparison",
+            sections=[table_html],
+            subtitle=subtitle,
+        )
+
+        return HTMLResponse(content=doc)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/compare/col/export/log")
+async def api_compare_col_export_log(request: Request):
+    """Generate compact comparison log and save to {outdir}/{pair}_col.log files.
+
+    Returns the combined log text.
+    """
+    body = await request.json()
+    from_date = body.get("from_date", "")
+    to_date = body.get("to_date", "")
+
+    try:
+        from ..db import list_table_pairs, get_metadata, get_row_comparison
+        from ..config import load_unified_config, get_col_type_overrides
+        from ..compare import compare_column_stats, _has_col_differences
+        from ..db import get_pair_col_map_from_db, get_column_meta
+
+        config = load_unified_config(_config_path)
+        pairs = list_table_pairs(_db_path)
+        outdir = _resolve(config.get("settings", {}).get("aws_outdir", "./csv/"))
+        os.makedirs(outdir, exist_ok=True)
+
+        all_logs = []
+
+        for pair in pairs:
+            pname = pair["pair_name"]
+            pair_cfg = config.get("pairs", {}).get(pname, {})
+            if pair_cfg.get("skip"):
+                continue
+
+            col_type_overrides = get_col_type_overrides(config, pname)
+            col_mappings = get_pair_col_map_from_db(_db_path, pname)
+            if not col_mappings:
+                left_meta = get_column_meta(_db_path, pair["table_left"])
+                right_meta = get_column_meta(_db_path, pair["table_right"])
+                left_cols = {c["column_name"]: c.get("data_type", "") for c in left_meta}
+                right_cols = {c["column_name"]: c.get("data_type", "") for c in right_meta}
+                from ..compare import match_columns_from_dicts
+                auto = match_columns_from_dicts(left_cols, right_cols)
+                col_mappings = auto.get("matched", {})
+
+            saved = get_row_comparison(_db_path, pname)
+            matched_dates = set(saved["matching_dates"]) if saved and saved.get("matching_dates") else None
+
+            comparison = compare_column_stats(
+                _db_path, pair["table_left"], pair["table_right"],
+                columns=list(col_mappings.keys()) if col_mappings else None,
+                col_mappings=col_mappings,
+                from_date=from_date or None,
+                to_date=to_date or None,
+                matched_dates=matched_dates,
+                col_type_overrides=col_type_overrides,
+            )
+
+            meta_left = get_metadata(_db_path, pair["table_left"]) or {}
+            meta_right = get_metadata(_db_path, pair["table_right"]) or {}
+            vintage = meta_left.get("vintage") or meta_right.get("vintage") or "day"
+
+            log = _format_col_comparison_log(
+                pname, pair, comparison, vintage, col_mappings)
+
+            # Write per-pair log file
+            log_path = os.path.join(outdir, f"{pname}_col.log")
+            with open(log_path, 'w', encoding='utf-8') as f:
+                f.write(log)
+
+            all_logs.append(log)
+
+        combined = "\n".join(all_logs)
+        return {"ok": True, "log": combined, "outdir": outdir}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mappings):
+    """Format compact comparison log with diffs and top_10."""
+    from ..compare import _has_col_differences
+    lines = []
+    lines.append(f"=== {pair_name} ({pair['table_left']} vs {pair['table_right']}) ===")
+
+    # Organize by vintage
+    vintages = {}  # vintage_label -> {col: comp}
+    for col_name, comps in comparison.items():
+        for comp in comps:
+            vl = comp.get("vintage_label") or comp.get("dt", "")
+            vintages.setdefault(vl, {})[col_name] = comp
+
+    n_matched = len(col_mappings)
+    n_diff_cols = len(set(
+        col for col, comps in comparison.items()
+        for c in comps if _has_col_differences(c)
+    ))
+    lines.append(f"  vintage: {vintage} | {len(vintages)} vintages | "
+                 f"{n_matched} matched cols, {n_diff_cols} diff")
+    lines.append("")
+
+    for vl in sorted(vintages.keys()):
+        col_comps = vintages[vl]
+        diffs = {col: c for col, c in col_comps.items() if _has_col_differences(c)}
+
+        if not diffs:
+            lines.append(f"  MATCH: {vl} — all {len(col_comps)} columns match")
+            continue
+
+        lines.append(f"  DIFF: {vl}")
+        for col, c in sorted(diffs.items()):
+            parts = []
+            for stat in ("n_total", "n_missing", "n_unique"):
+                d = c.get(f"{stat}_diff", 0)
+                if d != 0:
+                    l = c.get(f"{stat}_left", 0)
+                    r = c.get(f"{stat}_right", 0)
+                    sign = "+" if d > 0 else ""
+                    parts.append(f"{stat} {sign}{d} ({l}->{r})")
+
+            if c.get("col_type") == "numeric":
+                for stat in ("mean", "std"):
+                    d = c.get(f"{stat}_diff")
+                    if d is not None and abs(d) > 0.01:
+                        l = c.get(f"{stat}_left")
+                        r = c.get(f"{stat}_right")
+                        lf = f"{l:.4f}" if l is not None else "?"
+                        rf = f"{r:.4f}" if r is not None else "?"
+                        sign = "+" if d > 0 else ""
+                        parts.append(f"{stat} {sign}{d:.4f} ({lf}->{rf})")
+
+            detail = "  ".join(parts) if parts else "values differ"
+            lines.append(f"    {col:<20s} {detail}")
+
+            # Top 10 for categorical columns
+            t10_l = c.get("top_10_left", "")
+            t10_r = c.get("top_10_right", "")
+            if t10_l or t10_r:
+                if t10_l != t10_r:
+                    lines.append(f"      top_10 L: {t10_l[:120]}")
+                    lines.append(f"      top_10 R: {t10_r[:120]}")
+                else:
+                    lines.append(f"      top_10:   {t10_l[:120]}")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Col Compare Excel Export
+# ---------------------------------------------------------------------------
+
+@app.get("/api/compare/col/export/excel")
+async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
+    """Generate Excel workbook for col comparison — one sheet per pair, transposed layout."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+        from ..db import (
+            list_table_pairs, get_metadata, get_row_comparison,
+            get_pair_col_map_from_db, get_column_meta,
+        )
+        from ..config import load_unified_config, get_col_type_overrides
+        from ..compare import compare_column_stats, _has_col_differences
+
+        config = load_unified_config(_config_path)
+        pairs = list_table_pairs(_db_path)
+
+        green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+        red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        bold = Font(bold=True)
+
+        wb = Workbook()
+        wb.remove(wb.active)  # remove default sheet
+
+        stat_rows = ["Type", "N_Total", "N_Missing", "N_Unique", "Mean", "Std", "Min", "Max"]
+        stat_keys_l = ["col_type", "n_total_left", "n_missing_left", "n_unique_left",
+                        "mean_left", "std_left", "min_left", "max_left"]
+        stat_keys_r = ["col_type", "n_total_right", "n_missing_right", "n_unique_right",
+                        "mean_right", "std_right", "min_right", "max_right"]
+
+        for pair in pairs:
+            pname = pair["pair_name"]
+            pair_cfg = config.get("pairs", {}).get(pname, {})
+            if pair_cfg.get("skip"):
+                continue
+
+            col_type_overrides = get_col_type_overrides(config, pname)
+            col_mappings = get_pair_col_map_from_db(_db_path, pname)
+            if not col_mappings:
+                left_meta = get_column_meta(_db_path, pair["table_left"])
+                right_meta = get_column_meta(_db_path, pair["table_right"])
+                left_cols = {c["column_name"]: c.get("data_type", "") for c in left_meta}
+                right_cols = {c["column_name"]: c.get("data_type", "") for c in right_meta}
+                from ..compare import match_columns_from_dicts
+                auto = match_columns_from_dicts(left_cols, right_cols)
+                col_mappings = auto.get("matched", {})
+
+            saved = get_row_comparison(_db_path, pname)
+            matched_dates = set(saved["matching_dates"]) if saved and saved.get("matching_dates") else None
+
+            comparison = compare_column_stats(
+                _db_path, pair["table_left"], pair["table_right"],
+                columns=list(col_mappings.keys()) if col_mappings else None,
+                col_mappings=col_mappings,
+                from_date=from_date or None, to_date=to_date or None,
+                matched_dates=matched_dates,
+                col_type_overrides=col_type_overrides,
+            )
+
+            meta_left = get_metadata(_db_path, pair["table_left"]) or {}
+            meta_right = get_metadata(_db_path, pair["table_right"]) or {}
+            source_left = (pair.get("source_left") or "LEFT").upper()
+            source_right = (pair.get("source_right") or "RIGHT").upper()
+            table_left = meta_left.get("source_table") or pair["table_left"]
+            table_right = meta_right.get("source_table") or pair["table_right"]
+
+            # Organize by vintage
+            vintages = {}
+            for col_name, comps in comparison.items():
+                for comp in comps:
+                    vl = comp.get("vintage_label") or comp.get("dt", "")
+                    vintages.setdefault(vl, []).append(comp)
+
+            # Sheet name: truncate to 31 chars (Excel limit)
+            ws = wb.create_sheet(title=pname[:31])
+            row_num = 1
+
+            for vl in sorted(vintages.keys()):
+                comps = vintages[vl]
+                has_diff = any(_has_col_differences(c) for c in comps)
+
+                # Sort: diff columns first, then matching, alphabetical within each group
+                comps.sort(key=lambda c: (0 if _has_col_differences(c) else 1, c.get("left_col", "")))
+                col_names = [c.get("left_col", "") for c in comps]
+
+                # Track which (col_index, stat_index) have diffs for red highlighting
+                diff_cells = set()  # (col_idx, stat_idx)
+                problem_cols = set()  # col indices with at least one diff
+                for ci, comp in enumerate(comps):
+                    if comp.get("n_total_diff", 0) != 0: diff_cells.add((ci, 1))
+                    if comp.get("n_missing_diff", 0) != 0: diff_cells.add((ci, 2))
+                    if comp.get("n_unique_diff", 0) != 0: diff_cells.add((ci, 3))
+                    md = comp.get("mean_diff")
+                    if md is not None and abs(md) > 0.01: diff_cells.add((ci, 4))
+                    sd = comp.get("std_diff")
+                    if sd is not None and abs(sd) > 0.01: diff_cells.add((ci, 5))
+                for ci, si in diff_cells:
+                    problem_cols.add(ci)
+
+                # Vintage header
+                ws.cell(row=row_num, column=1, value=f"Vintage: {vl}").font = bold
+                status_cell = ws.cell(row=row_num, column=2, value="FAIL" if has_diff else "PASS")
+                status_cell.fill = red_fill if has_diff else green_fill
+                status_cell.font = bold
+                row_num += 1
+
+                # Left block
+                ws.cell(row=row_num, column=1, value=source_left).font = bold
+                ws.cell(row=row_num, column=2, value=table_left)
+                row_num += 1
+                for ci, cn in enumerate(col_names):
+                    ws.cell(row=row_num, column=ci + 2, value=cn)
+                row_num += 1
+                for si, (stat_label, stat_key) in enumerate(zip(stat_rows, stat_keys_l)):
+                    ws.cell(row=row_num, column=1, value=stat_label).font = bold
+                    for ci, comp in enumerate(comps):
+                        val = comp.get(stat_key, "")
+                        if val is not None and val != "":
+                            try:
+                                val = float(val)
+                            except (ValueError, TypeError):
+                                pass
+                        cell = ws.cell(row=row_num, column=ci + 2, value=val if val != "" else None)
+                        if (ci, si) in diff_cells:
+                            cell.fill = red_fill
+                        elif ci in problem_cols and si > 0:
+                            # Matching stat on a problematic column → green
+                            cell.fill = green_fill
+                    row_num += 1
+
+                row_num += 1  # blank row
+
+                # Right block
+                ws.cell(row=row_num, column=1, value=source_right).font = bold
+                ws.cell(row=row_num, column=2, value=table_right)
+                row_num += 1
+                for ci, cn in enumerate(col_names):
+                    ws.cell(row=row_num, column=ci + 2, value=cn)
+                row_num += 1
+                for si, (stat_label, stat_key) in enumerate(zip(stat_rows, stat_keys_r)):
+                    ws.cell(row=row_num, column=1, value=stat_label).font = bold
+                    for ci, comp in enumerate(comps):
+                        val = comp.get(stat_key, "")
+                        if val is not None and val != "":
+                            try:
+                                val = float(val)
+                            except (ValueError, TypeError):
+                                pass
+                        cell = ws.cell(row=row_num, column=ci + 2, value=val if val != "" else None)
+                        if (ci, si) in diff_cells:
+                            cell.fill = red_fill
+                        elif ci in problem_cols and si > 0:
+                            cell.fill = green_fill
+                    row_num += 1
+
+                row_num += 2  # gap before next vintage
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=col_compare.xlsx"},
+        )
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Row Compare Excel Export (all pairs)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/compare/row/export/excel-all")
+async def api_compare_row_export_excel_all(from_date: str = "", to_date: str = ""):
+    """Generate Excel with one worksheet per pair for row comparison."""
+    try:
+        from openpyxl import Workbook
+        from ..db import list_table_pairs, get_metadata
+        from ..compare import compare_row_counts
+        from ..config import load_unified_config
+
+        config = load_unified_config(_config_path)
+        pairs = list_table_pairs(_db_path)
+
+        from openpyxl.styles import Font, PatternFill
+        red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        red_font = Font(color="CC0000")
+        bold = Font(bold=True)
+
+        wb = Workbook()
+        wb.remove(wb.active)
+
+        for pair in pairs:
+            pname = pair["pair_name"]
+            pair_cfg = config.get("pairs", {}).get(pname, {})
+            if pair_cfg.get("skip"):
+                continue
+
+            comparison = compare_row_counts(
+                _db_path, pair["table_left"], pair["table_right"],
+                from_date=from_date or None, to_date=to_date or None,
+            )
+
+            meta_left = get_metadata(_db_path, pair["table_left"]) or {}
+            meta_right = get_metadata(_db_path, pair["table_right"]) or {}
+            source_left = (pair.get("source_left") or "LEFT").upper()
+            source_right = (pair.get("source_right") or "RIGHT").upper()
+            table_left = meta_left.get("source_table") or pair["table_left"]
+            table_right = meta_right.get("source_table") or pair["table_right"]
+            date_var = meta_left.get("date_var") or meta_right.get("date_var") or ""
+            date_fmt = meta_left.get("date_format") or meta_right.get("date_format") or ""
+
+            ws = wb.create_sheet(title=pname[:31])
+
+            # Summary header
+            s = comparison["summary"]
+            overlap_start = overlap_end = None
+            lmin, lmax = s["date_range_left"]
+            rmin, rmax = s["date_range_right"]
+            if lmin and rmin and lmax and rmax:
+                overlap_start = max(lmin, rmin)
+                overlap_end = min(lmax, rmax)
+
+            ws.cell(row=1, column=1, value=f"{source_left}:").font = bold
+            ws.cell(row=1, column=2, value=table_left)
+            ws.cell(row=2, column=1, value=f"{source_right}:").font = bold
+            ws.cell(row=2, column=2, value=table_right)
+            date_label = f"{date_var} ({date_fmt})" if date_fmt else date_var
+            ws.cell(row=3, column=1, value="Date Variable:").font = bold
+            ws.cell(row=3, column=2, value=date_label)
+            ws.cell(row=4, column=1, value="Overlap:").font = bold
+            ws.cell(row=4, column=2, value=f"{overlap_start or '?'} -> {overlap_end or '?'}")
+            ws.cell(row=5, column=1, value="Matching:").font = bold
+            ws.cell(row=5, column=2, value=f"{s['count_left']} dates" if s.get('count_left') else "0")
+            ws.cell(row=6, column=1, value="Mismatch:").font = bold
+            ws.cell(row=6, column=2, value=len(comparison["mismatched"]))
+            ws.cell(row=7, column=1, value=f"{source_left} Only:").font = bold
+            ws.cell(row=7, column=2, value=len(comparison["only_left"]))
+            ws.cell(row=8, column=1, value=f"{source_right} Only:").font = bold
+            ws.cell(row=8, column=2, value=len(comparison["only_right"]))
+
+            # Date details header
+            row_num = 10
+            ws.cell(row=row_num, column=1, value="Date").font = bold
+            ws.cell(row=row_num, column=2, value=source_left).font = bold
+            ws.cell(row=row_num, column=3, value=source_right).font = bold
+            ws.cell(row=row_num, column=4, value="Status").font = bold
+            row_num += 1
+
+            # Build date rows: mismatches first, then matches
+            dates = []
+            for dt, l, r in comparison["mismatched"]:
+                dates.append((0, dt, l, r, "mismatch"))
+            for dt, count in comparison["only_left"]:
+                dates.append((0, dt, count, None, f"{source_left.lower()}_only"))
+            for dt, count in comparison["only_right"]:
+                dates.append((0, dt, None, count, f"{source_right.lower()}_only"))
+            for dt, count in comparison["matching"]:
+                dates.append((1, dt, count, count, "match"))
+            dates.sort(key=lambda r: (r[0], r[1]))
+
+            for sort_key, dt, left, right, status in dates:
+                ws.cell(row=row_num, column=1, value=dt)
+                ws.cell(row=row_num, column=2, value=left)
+                ws.cell(row=row_num, column=3, value=right)
+                ws.cell(row=row_num, column=4, value=status)
+                if status != "match":
+                    for col in range(1, 5):
+                        cell = ws.cell(row=row_num, column=col)
+                        cell.fill = red_fill
+                        cell.font = red_font
+                row_num += 1
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=row_compare.xlsx"},
+        )
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -2302,6 +2849,11 @@ def _sync_config_pairs(config):
             }
             if tbl_cfg.get("vintage"):
                 cfg_fields["vintage"] = tbl_cfg["vintage"]
+            # Derive date_format from config date_type
+            from ..platforms.base import DATE_TYPE_FORMATS
+            cfg_date_type = (tbl_cfg.get("date_type") or "").lower()
+            if cfg_date_type in DATE_TYPE_FORMATS:
+                cfg_fields["date_format"] = DATE_TYPE_FORMATS[cfg_date_type]
 
             if existing:
                 # Patch without wiping data-derived fields

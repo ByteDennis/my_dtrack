@@ -14,6 +14,7 @@ from .base import (
     build_date_between_clause,
     build_date_in_clause,
     build_date_range_with_gaps,
+    resolve_date_format,
     compute_date_filter,
     load_tables_from_config,
     fill_columns_from_meta,
@@ -432,6 +433,9 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     date_filter = compute_date_filter(tbl_cfg, db_path, vintage)
     date_dtype = date_filter['date_dtype']
     has_filter = date_filter['filter_type'] != 'none'
+
+    # Ensure date_format is set from config date_type
+    resolve_date_format(date_filter, tbl_cfg)
 
     # For SAS DATETIME columns, wrap with datepart() if not already handled by date_transform
     if is_sas and date_dtype and ('DATETIME' in date_dtype.upper() or 'TIMESTAMP' in date_dtype.upper()):

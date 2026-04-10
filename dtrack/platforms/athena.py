@@ -13,6 +13,7 @@ from .base import (
     build_date_between_clause,
     build_date_in_clause,
     build_date_range_with_gaps,
+    resolve_date_format,
     compute_date_filter,
     load_tables_from_config,
     fill_columns_from_meta,
@@ -475,6 +476,9 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
             }
             effective_vintage = date_filter['vintage']
 
+            # Ensure date_format is set from config date_type
+            resolve_date_format(date_filter, tbl)
+
             # Build exclude dates NOT IN clause (per-pair, from config)
             # Uses build_date_in_clause to format dates correctly for the column type
             exclude_dates = tbl.get('_exclude_dates', [])
@@ -584,14 +588,14 @@ top_n AS (
             COALESCE(p_col, 'NULL') || '(' || CAST(cnt AS VARCHAR) || ')'
             ORDER BY cnt DESC
         ), '; ') AS top_10
-    FROM ranked WHERE rn <= 10
+    FROM ranked WHERE rn <= 10 AND p_col IS NOT NULL
     GROUP BY dt
 ),
 stats AS (
     SELECT dt,
         SUM(cnt) AS n_total,
         COALESCE(SUM(CASE WHEN p_col IS NULL THEN cnt ELSE 0 END), 0) AS n_missing,
-        COUNT(*) AS n_unique,
+        SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique,
         CAST(AVG(CAST(cnt AS DOUBLE)) AS VARCHAR) AS mean,
         CAST(STDDEV_SAMP(CAST(cnt AS DOUBLE)) AS VARCHAR) AS std,
         CAST(MIN(cnt) AS VARCHAR) AS min_val,
@@ -661,7 +665,7 @@ SELECT
     'categorical' AS col_type,
     (SELECT SUM(cnt) FROM freq) AS n_total,
     COALESCE((SELECT cnt FROM freq WHERE p_col IS NULL), 0) AS n_missing,
-    (SELECT COUNT(*) FROM freq) AS n_unique,
+    (SELECT SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) FROM freq) AS n_unique,
     CAST((SELECT AVG(CAST(cnt AS DOUBLE)) FROM freq) AS VARCHAR) AS mean,
     CAST((SELECT STDDEV_SAMP(CAST(cnt AS DOUBLE)) FROM freq) AS VARCHAR) AS std,
     CAST((SELECT MIN(cnt) FROM freq) AS VARCHAR) AS min_val,
@@ -724,6 +728,9 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
     # Compute unified date filter from database matching dates
     table_vintage = tbl_cfg.get('vintage', vintage)
     date_filter = compute_date_filter(tbl_cfg, db_path, table_vintage)
+
+    # Ensure date_format is set from config date_type
+    resolve_date_format(date_filter, tbl_cfg)
 
     # Set up SQL log file
     global _sql_log_file

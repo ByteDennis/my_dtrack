@@ -16,6 +16,49 @@ ATHENA_NUMERIC_TYPES = {
     'double', 'float', 'decimal', 'real',
 }
 
+# ==========================================================================
+# DATE TYPE REGISTRY (single source of truth)
+#
+# To add a new date format:
+#   1. Add an entry to DATE_TYPE_FORMATS below (date_type → format label)
+#   2. Add a strftime pattern to reformat_date()'s fmt_map in this file (~line 80)
+#   3. Add a dropdown entry in pairs.js DATE_COLUMN_TYPES (~line 23)
+#
+# All platforms (SAS, Oracle, Athena) automatically pick up the new format
+# via resolve_date_format() — no per-platform changes needed.
+# ==========================================================================
+DATE_TYPE_FORMATS = {
+    # String types
+    'string_compact': 'YYYYMMDD',    # '20260115'
+    'string_dash':    'YYYY-MM-DD',  # '2026-01-15'
+    'string':         'YYYY-MM-DD',  # '2026-01-15'
+    'string_mon':     'DDMONYYYY',   # '15JAN2026'
+    'string_mon_dash':'DD-MON-YYYY', # '15-JAN-2026'
+    'string_us':      'MM/DD/YYYY',  # '01/15/2026'
+    # Numeric types (no quotes in SQL)
+    'num':            'YYYYMMDD',    # 20260115
+    'integer':        'YYYYMMDD',    # 20260115
+    'int':            'YYYYMMDD',    # 20260115
+    'number':         'YYYYMMDD',    # 20260115
+    'num_yyyymm':     'YYYYMM',     # 202601
+    # Native date/timestamp
+    'date':           'YYYY-MM-DD',  # DATE '2026-01-15'
+    'timestamp':      'YYYY-MM-DD',  # TIMESTAMP '2026-01-15 ...'
+    'datetime':       'YYYY-MM-DD',  # TIMESTAMP '2026-01-15 ...'
+}
+
+
+def resolve_date_format(date_filter, tbl_cfg):
+    """Ensure date_filter has date_format set.
+
+    Falls back to DATE_TYPE_FORMATS using the config's date_type.
+    Call this after compute_date_filter() before building SQL clauses.
+    """
+    if not date_filter.get('date_format'):
+        cfg_date_type = (tbl_cfg.get('date_type') or '').lower()
+        if cfg_date_type in DATE_TYPE_FORMATS:
+            date_filter['date_format'] = DATE_TYPE_FORMATS[cfg_date_type]
+
 
 def is_numeric_type(data_type, is_oracle=True):
     """Check if a data type string represents a numeric column."""
@@ -66,7 +109,11 @@ def is_sas_table(tbl_cfg):
 
 
 def reformat_date(d, date_format):
-    """Reformat a YYYY-MM-DD date string to the target date_format."""
+    """Reformat a YYYY-MM-DD date string to the target date_format.
+
+    Step 2 of adding a new date format: add a strftime pattern to fmt_map below.
+    See DATE_TYPE_FORMATS comment block above for full instructions.
+    """
     from datetime import datetime as _dt
     if not date_format or date_format == 'YYYY-MM-DD':
         return str(d)
@@ -74,12 +121,14 @@ def reformat_date(d, date_format):
         dt_obj = _dt.strptime(str(d), "%Y-%m-%d")
     except ValueError:
         return str(d)
+    # Format label → Python strftime pattern
+    # To add a new format: add 'LABEL': '%pattern' here
     fmt_map = {
-        'YYYYMMDD': '%Y%m%d',
-        'DDMONYYYY': '%d%b%Y',
-        'DD-MON-YYYY': '%d-%b-%Y',
-        'MM/DD/YYYY': '%m/%d/%Y',
-        'YYYYMM': '%Y%m',
+        'YYYYMMDD':    '%Y%m%d',       # 20260115
+        'DDMONYYYY':   '%d%b%Y',       # 15JAN2026
+        'DD-MON-YYYY': '%d-%b-%Y',     # 15-JAN-2026
+        'MM/DD/YYYY':  '%m/%d/%Y',     # 01/15/2026
+        'YYYYMM':      '%Y%m',         # 202601
     }
     py_fmt = fmt_map.get(date_format)
     if py_fmt:

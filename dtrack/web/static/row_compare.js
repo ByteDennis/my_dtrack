@@ -455,6 +455,15 @@ async function downloadAllCSV() {
     }
 }
 
+function downloadExcel() {
+    const from = document.getElementById('global-from').value;
+    const to = document.getElementById('global-to').value;
+    const params = new URLSearchParams();
+    if (from) params.set('from_date', from);
+    if (to) params.set('to_date', to);
+    window.open(`/api/compare/row/export/excel-all?${params}`, '_blank');
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
