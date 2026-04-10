@@ -673,7 +673,7 @@ SELECT
     COALESCE((SELECT ARRAY_JOIN(ARRAY_AGG(
         COALESCE(p_col, 'NULL') || '(' || CAST(cnt AS VARCHAR) || ')'
         ORDER BY cnt DESC
-    ), '; ') FROM ranked WHERE rn <= 10), '') AS top_10;"""
+    ), '; ') FROM ranked WHERE rn <= 10 AND p_col IS NOT NULL), '') AS top_10;"""
 
                         blocks.append(f"-- {qname}/{col_name}{block_suffix}")
                         blocks.append(sql.strip())

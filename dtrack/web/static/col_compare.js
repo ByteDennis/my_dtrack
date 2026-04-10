@@ -258,17 +258,20 @@ function renderColTable(name, cols) {
         });
     });
 
-    // Build header row (variable names)
-    const colHeaders = sorted.map((c, ci) => {
-        const icon = c.has_diff ? '<span style="color:var(--jp-warn-color0);">&#9888;</span> ' : '';
-        return `<th style="text-align:right; font-size:11px;">${icon}${esc(c.left_col)}</th>`;
-    }).join('');
+    // Build header row (variable names) — per side
+    function colHeadersForSide(side) {
+        return sorted.map((c, ci) => {
+            const name = side === 'left' ? c.left_col : (c.right_col || c.left_col);
+            const icon = c.has_diff ? '<span style="color:var(--jp-warn-color0);">&#9888;</span> ' : '';
+            return `<th style="text-align:right; font-size:11px;">${icon}${esc(name)}</th>`;
+        }).join('');
+    }
 
     // Build stat rows for one side
     function buildSideRows(side, sideLabel, sourceLabel) {
         const key = side === 'left' ? 'keyL' : 'keyR';
         let html = `<tr><td colspan="${sorted.length + 1}" style="font-weight:600; padding-top:8px;">${esc(sourceLabel)}</td></tr>`;
-        html += `<tr><td style="font-weight:600;"></td>${colHeaders}</tr>`;
+        html += `<tr><td style="font-weight:600;"></td>${colHeadersForSide(side)}</tr>`;
         for (let si = 0; si < statDefs.length; si++) {
             const sd = statDefs[si];
             html += '<tr>';

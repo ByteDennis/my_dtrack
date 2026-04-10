@@ -1860,7 +1860,8 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
 
                 # Sort: diff columns first, then matching, alphabetical within each group
                 comps.sort(key=lambda c: (0 if _has_col_differences(c) else 1, c.get("left_col", "")))
-                col_names = [c.get("left_col", "") for c in comps]
+                col_names_left = [c.get("left_col", "") for c in comps]
+                col_names_right = [c.get("right_col", "") or c.get("left_col", "") for c in comps]
 
                 # Track which (col_index, stat_index) have diffs for red highlighting
                 diff_cells = set()  # (col_idx, stat_idx)
@@ -1887,7 +1888,7 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
                 ws.cell(row=row_num, column=1, value=source_left).font = bold
                 ws.cell(row=row_num, column=2, value=table_left)
                 row_num += 1
-                for ci, cn in enumerate(col_names):
+                for ci, cn in enumerate(col_names_left):
                     ws.cell(row=row_num, column=ci + 2, value=cn)
                 row_num += 1
                 for si, (stat_label, stat_key) in enumerate(zip(stat_rows, stat_keys_l)):
@@ -1913,7 +1914,7 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
                 ws.cell(row=row_num, column=1, value=source_right).font = bold
                 ws.cell(row=row_num, column=2, value=table_right)
                 row_num += 1
-                for ci, cn in enumerate(col_names):
+                for ci, cn in enumerate(col_names_right):
                     ws.cell(row=row_num, column=ci + 2, value=cn)
                 row_num += 1
                 for si, (stat_label, stat_key) in enumerate(zip(stat_rows, stat_keys_r)):

@@ -247,29 +247,26 @@ def compare_column_stats(
                 "n_unique_diff": r_unique - l_unique,
             }
 
-            if resolved_type == "numeric":
-                l_mean = _safe_float(left_stat["mean"])
-                r_mean = _safe_float(right_stat["mean"])
-                l_std = _safe_float(left_stat["std"])
-                r_std = _safe_float(right_stat["std"])
+            # Always include mean/std/min/max (for both numeric and categorical)
+            l_mean = _safe_float(left_stat["mean"])
+            r_mean = _safe_float(right_stat["mean"])
+            l_std = _safe_float(left_stat["std"])
+            r_std = _safe_float(right_stat["std"])
+            comparison.update({
+                "mean_left": l_mean,
+                "mean_right": r_mean,
+                "mean_diff": (r_mean - l_mean if l_mean is not None and r_mean is not None else None),
+                "std_left": l_std,
+                "std_right": r_std,
+                "std_diff": (r_std - l_std if l_std is not None and r_std is not None else None),
+                "min_left": left_stat["min_val"],
+                "min_right": right_stat["min_val"],
+                "max_left": left_stat["max_val"],
+                "max_right": right_stat["max_val"],
+            })
+            # Categorical: add top_10
+            if resolved_type != "numeric":
                 comparison.update({
-                    "mean_left": l_mean,
-                    "mean_right": r_mean,
-                    "mean_diff": (r_mean - l_mean if l_mean is not None and r_mean is not None else None),
-                    "std_left": l_std,
-                    "std_right": r_std,
-                    "std_diff": (r_std - l_std if l_std is not None and r_std is not None else None),
-                    "min_left": left_stat["min_val"],
-                    "min_right": right_stat["min_val"],
-                    "max_left": left_stat["max_val"],
-                    "max_right": right_stat["max_val"],
-                })
-            else:
-                comparison.update({
-                    "min_left": left_stat["min_val"],
-                    "min_right": right_stat["min_val"],
-                    "max_left": left_stat["max_val"],
-                    "max_right": right_stat["max_val"],
                     "top_10_left": left_stat["top_10"],
                     "top_10_right": right_stat["top_10"],
                 })
