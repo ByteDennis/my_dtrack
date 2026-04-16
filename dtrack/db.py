@@ -413,7 +413,15 @@ def get_row_counts(
 
     # Parse all dates to canonical format (YYYY-MM-DD or YYYYMM), then filter.
     # YYYYMM dates need comparison against YYYYMM-truncated from/to dates.
-    parsed = [(parse_date(dt), count) for dt, count in rows]
+    # Skip rows with missing/unparseable dates (NULL, empty, or invalid format).
+    parsed = []
+    for dt, count in rows:
+        if dt is None or (isinstance(dt, str) and not dt.strip()):
+            continue
+        try:
+            parsed.append((parse_date(dt), count))
+        except (ValueError, AttributeError):
+            continue
 
     # Dedup: multiple raw formats can map to the same canonical date
     # (e.g. "20260321" and "21Mar2026" both → "2026-03-21").

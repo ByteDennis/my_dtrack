@@ -1,641 +1,1337 @@
 ================================================================================
-DTRACK CODEBASE MANUSCRIPT — CONCISE REFERENCE
+ DTRACK — COMPREHENSIVE WORKFLOW & TROUBLESHOOTING GUIDE
 ================================================================================
 
-1. PROJECT STRUCTURE
+ Author: Dennis
+ Last Updated: 2026-04-16
+ Purpose: End-to-end reference for understanding, debugging, and extending the
+          dtrack frontend + backend system.
+
+================================================================================
+TABLE OF CONTENTS
 ================================================================================
 
-dtrack/
-├── cli.py              CLI entry: argparse commands (init, load-row, serve, etc.)
-├── db.py               SQLite ops (schema, CRUD for all tables)
-├── loader.py           CSV → DB (row counts, col stats)
-├── compare.py          Row/col comparison logic between paired tables
-├── stats.py            Column statistics computation (pandas)
-├── config.py           JSON config parsing (unified pair format)
-├── date_utils.py       Date parsing, format detection, vintage bucketing
-├── constants.py        UI constants (sources, date types, formats)
-├── html_export.py      HTML report generation
-├── pipeline.py         Full pipeline orchestration
-├── interact.py         CLI interactive prompts
-│
-├── platforms/
-│   ├── base.py         Shared helpers: qualified_name(), sas_safe_name(), is_sas_table()
-│   ├── oracle.py       SAS code generation: gen_sas() + all template fillers
-│   ├── athena.py       AWS Athena extraction + SQL generation
-│   └── templates/
-│       ├── template.sas      Base SAS wrapper (credentials, libname, helpers)
-│       ├── rows_oracle.sas   Oracle row count + column discovery
-│       ├── rows_sas.sas      SAS dataset row count + column discovery
-│       ├── rows_hadoop.sas   Hadoop row count + column discovery
-│       ├── columns.sas       Column statistics extraction
-│       └── meta.sas          SAS dataset metadata (proc contents)
-│
-└── web/
-    ├── app.py              FastAPI backend (all /api/* endpoints)
-    ├── templates/          Jinja2 HTML pages
-    │   ├── index.html          Homepage (pair status, generate, load)
-    │   ├── pairs.html          Pair management
-    │   ├── load_row.html       Row data loading
-    │   ├── row_compare.html    Row comparison
-    │   └── col_mapping.html    Column mapping editor
-    └── static/             Frontend JS + CSS
-        ├── pairs.js            Pair CRUD, generate, config upload
-        ├── load_row.js         Scan folders, upload CSVs
-        ├── row_compare.js      Compare, preview, export
-        ├── col_mapping.js      Auto-match, rules, save mappings
-        └── style_v2.css        Styles
+ 1. Architecture Overview
+ 2. The 8-Step Workflow (UI Pages)
+ 3. Backend Module Map (Python)
+ 4. Frontend Module Map (JavaScript + HTML)
+ 5. Database Schema (SQLite)
+ 6. API Route Reference
+ 7. Deep Dive: Pairs Management
+ 8. Deep Dive: Row Count Loading
+ 9. Deep Dive: Row Count Comparison
+10. Deep Dive: Column Mapping
+11. Deep Dive: Column Script Generation (Col Gen)
+12. Deep Dive: Column Stats Loading
+13. Deep Dive: Column Comparison
+14. Deep Dive: HTML Export & Preview
+15. Deep Dive: Benchmark Page
+16. Data Flow: Date Handling Pipeline
+17. Data Flow: Overlap Range Calculation
+18. Data Flow: Excluded Dates & Col Gen Filtering
+19. Configuration System (JSON)
+20. Platform Connectors (Oracle, Athena, SAS)
+21. Common Bugs & Troubleshooting Recipes
+22. Modules Likely Obsolete / Candidates for Removal
+23. Quick Reference: "Where Do I Look?"
 
 
-2. DATA FLOW: GENERATE → RUN SAS → LOAD
+================================================================================
+ 1. ARCHITECTURE OVERVIEW
 ================================================================================
 
-  [Browser]                    [FastAPI]                  [SAS Server]
-      │                            │                           │
-      │ POST /api/generate         │                           │
-      │ {type:"row", from_date,    │                           │
-      │  to_date, pair_names}      │                           │
-      ├──────────────────────────>│                           │
-      │                            │                           │
-      │                     gen_sas() in oracle.py:            │
-      │                     1. load config JSON                │
-      │                     2. filter tables by pair_names     │
-      │                     3. inject date bounds              │
-      │                     4. fill row templates              │
-      │                        (rows_oracle/sas/hadoop.sas)   │
-      │                     5. fill template.sas wrapper       │
-      │                     6. write extract_row.sas           │
-      │                            │                           │
-      │<──────────────────────────│                           │
-      │ {sas_file: "path/to/      │                           │
-      │  extract_row.sas"}         │                           │
-      │                            │                           │
-      │            USER RUNS SAS FILE MANUALLY                │
-      │                            │          ┌───────────────│
-      │                            │          │ For each table:│
-      │                            │          │ 1. row count   │
-      │                            │          │    GROUP BY    │
-      │                            │          │    → _row.csv  │
-      │                            │          │ 2. fetch 1 row │
-      │                            │          │    proc contents│
-      │                            │          │    → _columns.csv
-      │                            │          └───────────────│
-      │                            │                           │
-      │ POST /api/load/row         │                           │
-      │ {folder: "/output/path"}   │                           │
-      ├──────────────────────────>│                           │
-      │                     For each table:                    │
-      │                     1. read {qname}_row.csv            │
-      │                        → upsert into _row_counts       │
-      │                     2. read {qname}_columns.csv        │
-      │                        → upsert into _column_meta      │
-      │<──────────────────────────│                           │
+dtrack is a data comparison tool that validates row counts and column-level
+statistics between two data sources (e.g., Oracle vs. AWS Athena, SAS vs. CSV).
+
+TECH STACK:
+  Backend:   Python 3 + FastAPI (ASGI)
+  Frontend:  Vanilla JavaScript (no React/Vue) + Jinja2 HTML templates
+  Database:  SQLite (single file, local)
+  Platforms: Oracle (via cx_Oracle), AWS Athena (via pyathena), SAS, CSV
+
+DEPLOYMENT:
+  FastAPI serves both the API and the static frontend.
+  Launched via: `python -m dtrack.cli serve --db <path> --config <path>`
+  Runs on uvicorn, default port 8000.
+
+FILE LAYOUT:
+  dtrack/
+  ├── web/
+  │   ├── app.py              ← ALL FastAPI routes (~3,500 lines)
+  │   ├── static/
+  │   │   ├── common.js       ← Shared utils (fetch interceptor, API log)
+  │   │   ├── pairs.js        ← Pairs management page
+  │   │   ├── load_row.js     ← Row count CSV loading
+  │   │   ├── row_compare.js  ← Row count comparison
+  │   │   ├── col_mapping.js  ← Column mapping editor
+  │   │   ├── col_gen.js      ← Column script generation
+  │   │   ├── load_col.js     ← Column stats CSV loading
+  │   │   ├── col_compare.js  ← Column stats comparison
+  │   │   ├── benchmark.js    ← SQL benchmark playground
+  │   │   ├── app.js          ← Legacy index page (old UI)
+  │   │   ├── style_v2.css    ← Active stylesheet
+  │   │   └── style.css       ← Legacy stylesheet
+  │   └── templates/
+  │       ├── pairs.html       ← Homepage / pair configuration
+  │       ├── load_row.html
+  │       ├── row_compare.html
+  │       ├── col_mapping.html
+  │       ├── col_gen.html
+  │       ├── load_col.html
+  │       ├── col_compare.html
+  │       ├── benchmark.html
+  │       └── index.html       ← Legacy page (old UI)
+  ├── db.py                ← SQLite operations (~1,800 lines)
+  ├── compare.py           ← Comparison algorithms
+  ├── date_utils.py        ← Date parsing / format detection
+  ├── config.py            ← JSON config load/save/validate
+  ├── constants.py         ← UI constants (sources, date types, macros)
+  ├── html_export.py       ← HTML report generation for export
+  ├── loader.py            ← CSV→DB loading (row counts + col stats)
+  ├── stats.py             ← Column statistics computation
+  ├── pipeline.py          ← CLI pipeline orchestration
+  ├── cli.py               ← Click/argparse CLI
+  ├── interact.py          ← Interactive prompts (CLI only)
+  └── platforms/
+      ├── base.py          ← Base class, date format registry
+      ├── oracle.py        ← SAS/Oracle script generation
+      ├── athena.py        ← AWS Athena query execution
+      └── sas.py           ← SAS dataset handling
 
 
-3. SAS TEMPLATE RENDERING
+================================================================================
+ 2. THE 8-STEP WORKFLOW (UI PAGES)
 ================================================================================
 
-Python (oracle.py)              SAS Template
-─────────────────────          ────────────────────
-gen_sas()                       template.sas
-  │                               {conn_macros}     ← connection setup
-  │                               {table_macros}    ← all code blocks below
-  │                               {runner}          ← execution calls
-  │
-  ├─ _gen_sas_row_datadriven()  rows_oracle.sas  (Oracle tables)
-  │   builds pipe-delimited       {ORA_DATALINES}  ← table|dsname|qname|...
-  │   datalines per table         {CTE_VARS}       ← %let _cteN = WITH...
-  │                               {ROW_REDO}       ← 0 or 1
-  │
-  │                             rows_sas.sas     (SAS $ tables)
-  │   same function, splits       {SAS_DATALINES}
-  │   by is_sas_table()
-  │
-  ├─ _gen_sas_row_hadoop()      rows_hadoop.sas  (Hadoop tables)
-  │                               {HDP_DATALINES}
-  │
-  ├─ _gen_sas_proc_contents()   meta.sas         (SAS $ tables only)
-  │                               {SN}, {QNAME}, {SAS_DATASET}
-  │
-  └─ _gen_sas_col_local()       columns.sas      (column stats)
-                                  per-table macro with vintage handling
+The UI follows a linear wizard workflow. Each step has:
+  - An HTML template (in templates/)
+  - A JavaScript file (in static/)
+  - One or more API endpoints (in app.py)
 
-KEY: Each row template macro now does BOTH:
-  - Row count query   → {qname}_row.csv
-  - Column discovery  → {qname}_columns.csv (fetch 1 row + proc contents)
+  ┌──────────────────────────────────────────────────────────────┐
+  │  Step 1: PAIRS  (/pairs)                                     │
+  │  Configure table pairs: left source, right source, date cols │
+  │  JS: pairs.js  |  API: /api/pairs, /api/config               │
+  ├──────────────────────────────────────────────────────────────┤
+  │  Step 2: LOAD ROW  (/load_row)                               │
+  │  Upload/load row count CSVs into the database                │
+  │  JS: load_row.js  |  API: /api/load/row, /api/extract        │
+  ├──────────────────────────────────────────────────────────────┤
+  │  Step 3: ROW COMPARE  (/row_compare)                         │
+  │  Compare row counts between left and right sources           │
+  │  JS: row_compare.js  |  API: /api/compare/row/{pair_name}    │
+  ├──────────────────────────────────────────────────────────────┤
+  │  Step 4: COL MAPPING  (/col_mapping)                         │
+  │  Map columns between left and right (rename/alias matching)  │
+  │  JS: col_mapping.js  |  API: /api/pairs/{pair_name}/col-*    │
+  ├──────────────────────────────────────────────────────────────┤
+  │  Step 5: COL GEN  (/col_gen)                                 │
+  │  Generate SAS/SQL extraction scripts for column statistics   │
+  │  JS: col_gen.js  |  API: /api/generate, /api/extract         │
+  ├──────────────────────────────────────────────────────────────┤
+  │  Step 6: LOAD COL  (/load_col)                               │
+  │  Upload/load column statistics CSVs into the database        │
+  │  JS: load_col.js  |  API: /api/load/col-stats/*              │
+  ├──────────────────────────────────────────────────────────────┤
+  │  Step 7: COL COMPARE  (/col_compare)                         │
+  │  Compare column statistics between left and right sources    │
+  │  JS: col_compare.js  |  API: /api/compare/col/{pair_name}    │
+  ├──────────────────────────────────────────────────────────────┤
+  │  Step 8: BENCHMARK  (/benchmark)                             │
+  │  SQL performance benchmark playground                        │
+  │  JS: benchmark.js  |  API: /api/extract/run-sql              │
+  └──────────────────────────────────────────────────────────────┘
+
+Each page has a navigation bar at the top with step buttons. Clicking a step
+calls navigateToStep() which redirects to the corresponding route.
 
 
-4. KEY API ENDPOINTS
+================================================================================
+ 3. BACKEND MODULE MAP (Python)
 ================================================================================
 
-GET  /api/status                Pairs + metadata + date ranges + col counts
-POST /api/generate              Generate SAS/SQL extraction files
-POST /api/load/row              Load row CSVs + column CSVs from folder
-POST /api/load/columns/upload   Upload single column metadata CSV
-POST /api/compare/row           Run row comparison for pairs
-POST /api/compare/col           Run column comparison for pairs
-GET  /api/pairs/{name}/columns  Get column mappings for a pair
-PUT  /api/pairs/{name}/col-mappings  Save column mappings
-PUT  /api/config                Update config JSON
+3.1  web/app.py  (THE MONOLITH — ~3,500 lines)
+     ─────────────────────────────────────────
+     Contains ALL FastAPI routes. This is the single entry point for every
+     API call the frontend makes. It imports from other modules as needed.
 
-Serve: dtrack serve <db_path> --config <config.json> --port 8080
-Framework: FastAPI + uvicorn (async)
+     KEY SECTIONS (by line ranges):
+       Lines 1-90:       App setup, page routes
+       Lines 92-137:     GET /api/status (pair + metadata overview)
+       Lines 138-270:    /api/init, /api/extract, /api/extract/run-sql
+       Lines 268-520:    /api/generate, /api/load, /api/compare/row (batch),
+                         /api/compare/col (batch), /api/query
+       Lines 550-640:    /api/report, /api/config (get/put/upload)
+       Lines 641-840:    /api/pairs/* (CRUD, reload, list, scan)
+       Lines 835-1250:   /api/load/row/*, /api/load/columns/*, /api/load/col-stats/*
+       Lines 1300-1780:  /api/compare/col/{pair_name}, /api/compare/col/export/*
+       Lines 1780-2070:  /api/compare/row/export/* (excel, CSV, count-CSV)
+       Lines 2074-2170:  /api/compare/row/export/html (full HTML report)
+       Lines 2176-2420:  /api/compare/row/export/csv, count-csv, excel per pair
+       Lines 2419-2570:  /api/compare/row/{pair_name} (GET: run, PUT: save)
+       Lines 2572-2640:  /api/compare/row/{pair_name}/preview
+       Lines 2640-2900:  /api/status/row, /api/clear/row, /api/pairs (POST/DELETE),
+                         /api/pairs/{pair_name}/annotations
+       Lines 2950-3160:  /api/preview (SAS/SQL code preview)
+       Lines 3160-3450:  /api/pairs/{pair_name}/columns, col-type-overrides,
+                         col-mappings
+       Lines 3442-end:   /api/testing (testing mode toggle)
+
+     TROUBLESHOOTING ENTRY POINT: When an API call fails, search app.py for the
+     route path to find the handler. The handler usually imports from other
+     modules (db.py, compare.py, etc.) — follow the imports to the root cause.
+
+3.2  db.py  (~1,800 lines)
+     ──────────────────────
+     All SQLite operations. Every table creation, insert, update, query.
+
+     KEY FUNCTIONS:
+       init_database()           — Creates all tables (_metadata, _row_counts, etc.)
+       refresh_database()        — Adds missing columns to existing tables
+       get_row_counts()          — Fetches row counts with date parsing + filtering
+       upsert_row_counts()       — Inserts/replaces row counts
+       insert_col_stats()        — Bulk insert column statistics
+       get_col_stats()           — Fetches column stats for a table+date
+       get_metadata()            — Gets table metadata (date_var, vintage, etc.)
+       update_metadata()         — Sets metadata fields
+       list_table_pairs()        — Lists all configured pairs
+       register_table_pair()     — Creates a new pair
+       save_row_comparison()     — Saves row comparison state (overlap, matching dates)
+       get_row_comparison()      — Retrieves saved row comparison
+       save_col_comparison()     — Saves column comparison state
+       get_col_comparison()      — Retrieves saved column comparison
+       get_column_meta()         — Gets column names + data types for a table
+       insert_column_meta()      — Stores column metadata
+       sync_config_to_db()       — Syncs JSON config pairs → DB _table_pairs
+
+     TROUBLESHOOTING: If data doesn't appear in the UI, check these functions
+     first. Common issues: missing table (init_database not run), data not
+     inserted (check upsert_row_counts), wrong table name (qualified_name
+     mismatch between config and DB).
+
+3.3  compare.py  (~400 lines)
+     ─────────────────────────
+     Pure comparison logic, no I/O.
+
+     KEY FUNCTIONS:
+       compare_row_counts()      — Compares two tables' row counts by date
+                                   Returns: matching, mismatched, only_left, only_right
+       compare_column_stats()    — Compares column-level statistics
+       get_column_mapping()      — Resolves column name mappings between tables
+       resolve_col_type()        — Resolves disagreeing column types
+       match_columns_from_dicts() — Auto-matches columns by name similarity
+
+3.4  date_utils.py  (~320 lines)
+     ────────────────────────────
+     Date parsing, format detection, vintage bucketing.
+
+     KEY FUNCTIONS:
+       parse_date()              — Parses any date format → "YYYY-MM-DD" or "YYYYMM"
+       detect_format()           — Auto-detects date format from sample value
+       DateConverter             — Bidirectional format converter (canonical ↔ original)
+       bucket_date()             — Groups dates by vintage (day/week/month/quarter/year)
+       format_vintage_label()    — Human-readable vintage labels
+
+     TROUBLESHOOTING: If dates look wrong in the UI, add a print statement in
+     parse_date() to see what's being parsed. Common issue: SAS numeric dates
+     (days since 1960) vs timestamps (seconds since 1960).
+
+3.5  config.py  (~270 lines)
+     ────────────────────────
+     JSON configuration parsing and validation.
+
+     KEY FUNCTIONS:
+       load_unified_config()     — Loads + validates config JSON
+       save_unified_config()     — Saves config (strips auto-derived fields)
+       validate_unified_config() — Validates config structure
+       get_all_tables_from_unified() — Extracts all tables for extraction
+       get/set_pair_where_map()  — WHERE clause management
+       get/set_pair_col_map()    — Column mapping management
+       add_ignored_rows/columns() — HITL (human-in-the-loop) decisions
+
+3.6  html_export.py  (~300 lines)
+     ─────────────────────────────
+     Generates standalone HTML report tables for row count comparisons.
+
+     KEY FUNCTIONS:
+       generate_row_count_html() — Generates HTML for one pair's row comparison
+       create_row_count_table()  — Wraps multiple pair sections into a table
+       wrap_html_document()      — Wraps in full HTML document with styles
+
+3.7  loader.py
+     ──────────
+     CSV parsing and database loading for row counts and column statistics.
+
+     KEY FUNCTIONS:
+       load_row_counts()         — Parses CSV → inserts into _row_counts
+       load_column_data()        — Parses raw column data CSV → computes stats
+       load_precomputed_col_stats() — Loads pre-computed stats CSV directly
+       detect_date_column()      — Auto-detects date column by name aliases
+       detect_count_column()     — Auto-detects count column by name aliases
+
+3.8  stats.py
+     ─────────
+     Column statistics computation (mean, std, min, max, top-10, etc.).
+
+     KEY FUNCTIONS:
+       compute_column_stats()    — Computes stats for each column in a DataFrame
+       normalize_value()         — Normalizes values for consistent comparison
+
+3.9  constants.py
+     ─────────────
+     UI dropdown values: DATA_SOURCES, DATE_COLUMN_TYPES, DATE_LITERAL_FORMATS,
+     CONNECTION_MACROS, VINTAGE_PRESETS. These are duplicated in pairs.js for
+     the frontend (no build step to share them).
+
+3.10 pipeline.py
+     ────────────
+     CLI-only pipeline orchestration: init → extract → load → compare → HTML.
+     Coordinates the full end-to-end flow when run from the command line.
+
+3.11 cli.py
+     ───────
+     Argparse CLI entry point. Subcommands: init, serve, load, extract, compare,
+     gen-sas, gen-aws, pipeline. The `serve` command launches the web UI.
+
+3.12 interact.py
+     ────────────
+     Interactive terminal prompts for the CLI workflow (choice menus, confirmations).
+     Used only by cli.py, never by the web UI.
+
+3.13 platforms/base.py
+     ──────────────────
+     Base class for platform builders + date type registry (DATE_TYPE_FORMATS).
+     Helper functions: qualified_name(), is_numeric_type(), reformat_date().
+
+3.14 platforms/oracle.py  (~45KB)
+     ────────────────────────────
+     SAS/Oracle code generation: gen_sas() generates .sas extraction scripts.
+     Handles row count queries, column stats queries, WHERE clause building.
+
+3.15 platforms/athena.py  (~54KB)
+     ────────────────────────────
+     AWS Athena integration: extract_aws() runs queries against Athena.
+     Handles parallel query execution, CSV result collection, schema discovery.
+
+3.16 platforms/sas.py  (~1.5KB)
+     ──────────────────────────
+     Minimal SAS dataset reader. Used for reading local .sas7bdat files.
 
 
-5. DATABASE SCHEMA (SQLite)
+================================================================================
+ 4. FRONTEND MODULE MAP (JavaScript + HTML)
 ================================================================================
 
-_metadata       table_name PK, source, db, source_table, date_var, ...
-_row_counts     source_table + dt PK, row_count
-_col_stats      source_table + column_name + dt PK, col_type, n_total, ...
-_column_meta    source_table + column_name PK, data_type, source
-_table_pairs    pair_name PK, table_left, table_right, col_mappings (JSON)
-_row_comparison pair_name PK, overlap_start/end, matching/excluded_dates (JSON)
-_col_comparison pair_name PK, columns_compared, matched/diff_columns (JSON)
-_sample_date    pair_name + table_name PK, samples (JSON)
+4.1  common.js  (loaded on every page)
+     ──────────────────────────────────
+     Shared utilities:
+       refreshDB()    — POST /api/init to refresh the database
+       apiLog()       — Appends messages to the API log panel
+       fetch wrapper  — Intercepts all /api/ calls and logs timing + results
+
+     The fetch interceptor means every API call is automatically logged to the
+     API Log panel at the bottom of the page. This is invaluable for debugging.
+
+     HOW TO USE THE API LOG:
+       1. Click the "API Log" tab at bottom-right of any page
+       2. See timestamped entries for every API call
+       3. Errors appear in red with request body + error message
+       4. Success entries show response summary
+
+4.2  pairs.js  (53KB — largest frontend file)
+     ─────────────────────────────────────────
+     Pair configuration management. Handles:
+       - Adding/editing/deleting pairs
+       - Source selection (Oracle, AWS, SAS, CSV)
+       - Date column configuration (type, vintage, format)
+       - Connection macro selection
+       - Config JSON upload/download
+       - WHERE clause editing
+
+     STATE: pairs[] array, editingPairIndex
+     KEY FUNCTIONS:
+       renderPairsList()       — Renders the pair cards
+       addPair() / savePair()  — Creates/updates pair configuration
+       deletePair()            — Removes pair + all associated data
+       exportConfig()          — Downloads config JSON
+
+4.3  load_row.js  (27KB)
+     ────────────────────
+     Row count CSV loading. Drag-and-drop interface.
+     KEY FLOW:
+       Drop CSV → parseCSV → auto-match to pair/table → user confirms → loadSelected()
+       loadSelected() POSTs to /api/load/row/upload
+
+4.4  row_compare.js  (22KB)
+     ──────────────────────
+     Row count comparison page.
+     KEY FLOW:
+       On load → loadPairs() → runAll() → for each pair: comparePair()
+       comparePair() → GET /api/compare/row/{pair_name} → renderPairBody()
+       User can: exclude dates, add comments, set times → debouncedSync()
+       debouncedSync() → syncPair() → PUT /api/compare/row/{pair_name}
+       refreshPreview() → POST /api/compare/row/{pair_name}/preview
+
+     STATE: pairsData[], compareCache{}, data._excludedSet (Set per pair)
+
+4.5  col_mapping.js  (27KB)
+     ──────────────────────
+     Column name mapping between left and right tables.
+     KEY FLOW:
+       On load → loadPairs() → user expands pair → fetchMappings()
+       User maps columns → saveMappings()
+       Auto-match available via /api/pairs/{pair_name}/columns
+
+4.6  col_gen.js  (25KB)
+     ──────────────────
+     Column script generation page.
+     KEY FLOW:
+       On load → loadPairs() → user selects pairs → generateAll()
+       generateAll() → POST /api/generate (produces SAS or SQL scripts)
+       Can also run extraction directly via POST /api/extract
+
+4.7  load_col.js  (24KB)
+     ────────────────────
+     Column statistics CSV loading. Similar to load_row.js but for col stats.
+     KEY FLOW:
+       Drop CSV → parseCSV → auto-match → user confirms → loadSelected()
+       loadSelected() POSTs to /api/load/col-stats/upload
+
+4.8  col_compare.js  (19KB)
+     ──────────────────────
+     Column statistics comparison page.
+     KEY FLOW:
+       On load → loadPairs() → runAll() → for each pair: comparePair()
+       comparePair() → GET /api/compare/col/{pair_name} → renderPairBody()
+       Renders per-column diffs: type, n_total, n_missing, n_unique, mean, etc.
+
+4.9  benchmark.js  (36KB)
+     ────────────────────
+     SQL benchmark playground for testing query performance strategies.
+     Generates slow/fast query variants and runs them against Athena.
+
+4.10 app.js  (15KB)
+     ──────────────
+     Legacy index.html page logic. Old monolithic UI before the step-based
+     redesign. Still functional at /index.html but superseded by the
+     step-based pages.
+
+4.11 style_v2.css  (39KB)
+     ──────────────────────
+     Active stylesheet. Uses CSS variables for theming (dark mode support).
+     Key class prefixes:
+       .rc-*     — Row compare components
+       .cm-*     — Column mapping components
+       .card     — Card container
+       .btn-*    — Button variants
+       .data-table — Data table styling
+
+4.12 style.css  (6KB)
+     ──────────────────
+     Legacy stylesheet for the old index.html page.
 
 
-6. WHAT CHANGED (THIS SESSION) — TROUBLESHOOT THESE
+================================================================================
+ 5. DATABASE SCHEMA (SQLite)
 ================================================================================
 
-A) SAS TEMPLATES: Added column discovery to row macros
-   Files: rows_oracle.sas, rows_sas.sas, rows_hadoop.sas
+All tables are prefixed with underscore (_) to avoid conflicts with user data.
 
-   Each %_row_* macro now has a column metadata block after the row export:
-   ┌─────────────────────────────────────────────────────┐
-   │ %if %sysfunc(fileexist(&_colpath)) = 0 %then %do;  │  ← skip if exists
-   │   Oracle:  SELECT * FROM table WHERE ROWNUM <= 1    │
-   │   Hadoop:  SELECT * FROM table LIMIT 1              │
-   │   SAS:     proc contents data=&table                │
-   │                                                     │
-   │   proc contents → _m_&dsname                        │
-   │   SQL type mapping → _c_&dsname                     │
-   │   proc export → {qname}_columns.csv                 │
-   │   proc delete cleanup                               │
-   └─────────────────────────────────────────────────────┘
+  _metadata  (table_name TEXT PK)
+  ───────────────────────────────
+  Stores per-table metadata: source, date_var, vintage, date_format,
+  min/max dates loaded, row_count_total.
 
-   THINGS THAT CAN GO WRONG:
-   - Dataset name overflow: _s_&dsname, _m_&dsname, _c_&dsname
-     each prefix is 3 chars, dsname is max 29 = 32 total (SAS limit)
-   - Oracle CTE tables: uses &_cte_val for the WITH clause,
-     same as row query. If CTE is complex, SELECT * may fail.
-   - Hadoop LIMIT 1: syntax differences from Oracle's ROWNUM
-   - Empty table: proc contents on 0-row result should still work
-     (proc contents reads schema, not data)
-   - Connection reuse: Oracle macro opens/closes connection per call,
-     column discovery opens a second connection to same server
+  _row_counts  (source_table TEXT, dt TEXT, row_count INTEGER)
+  ────────────────────────────────────────────────────────────
+  Row counts per date per table. Composite PK: (source_table, dt).
+  The dt column stores dates in their original format from the source.
 
-B) meta.sas: Changed output format
-   - Was: {qname}_meta.csv with columns: source, table, column_name, data_type
-   - Now: {qname}_columns.csv with columns: column_name, data_type
-   - Removed source/table columns, changed order to varnum (was name)
-   - This matches the loader expectation in app.py line 375
+  _col_stats  (source_table, column_name, dt, col_type, ...)
+  ──────────────────────────────────────────────────────────
+  Column statistics per column per date. Fields: n_total, n_missing,
+  n_unique, mean, std, min_val, max_val, top_10, vintage_label.
+  Composite PK: (source_table, column_name, dt).
 
-C) athena.py: Removed ORDER BY from row count SQL
-   - _write_combined_sql() no longer appends ORDER BY date_value
-   - Row counts are sorted in Python after loading anyway
+  _column_meta  (source_table, column_name, data_type, source)
+  ─────────────────────────────────────────────────────────────
+  Column names and data types for each table. Used for type resolution
+  and column mapping suggestions.
 
-D) oracle.py: Removed _gen_sas_meta_oracle / _gen_sas_meta_hadoop
-   - These were initially added as separate template renderers
-   - Deleted because column discovery is now inside row macros
-   - No separate meta template files for Oracle/Hadoop
+  _table_pairs  (pair_name TEXT PK)
+  ─────────────────────────────────
+  Pair definitions: table_left, table_right, source_left, source_right,
+  col_mappings (JSON), col_rules (JSON), created_at.
+
+  _row_comparison  (pair_name TEXT PK)
+  ────────────────────────────────────
+  Saved row comparison state: overlap_start, overlap_end, matching_dates
+  (JSON array), excluded_dates (JSON array), non_matching_dates (JSON array).
+  This persists between sessions and feeds into col_gen date filtering.
+
+  _col_comparison  (pair_name TEXT PK)
+  ────────────────────────────────────
+  Saved column comparison state: columns_compared, matched_columns,
+  diff_columns, comparison_details (all JSON).
+
+  _sample_date  (pair_name, table_name, dt, sampled_at)
+  ─────────────────────────────────────────────────────
+  Sampled dates for vintage='sample' mode.
 
 
-7. DEBUGGING GUIDE
+================================================================================
+ 6. API ROUTE REFERENCE
 ================================================================================
 
-A) BACKEND (Python FastAPI) — VSCode Attach Debugger
-   ─────────────────────────────────────────────────
-   The server runs as:  dtrack serve db.db --config config.json --port 8080
-   Which calls:         uvicorn.run(app, host=host, port=port)
+PAGE ROUTES (return HTML):
+  GET  /                         → pairs.html (homepage)
+  GET  /pairs                    → pairs.html
+  GET  /load_row                 → load_row.html
+  GET  /row_compare              → row_compare.html
+  GET  /col_mapping              → col_mapping.html
+  GET  /col_gen                  → col_gen.html
+  GET  /load_col                 → load_col.html
+  GET  /col_compare              → col_compare.html
+  GET  /benchmark                → benchmark.html
 
-   TO DEBUG WITH ATTACH:
-   1. Install debugpy:  pip install debugpy
-   2. Start server with debugpy:
-      python -m debugpy --listen 5678 --wait-for-client \
-        -m dtrack.cli serve db.db --config config.json --port 8080
-   3. VSCode launch.json:
-      {
-        "name": "Attach dtrack",
-        "type": "debugpy",
-        "request": "attach",
-        "connect": {"host": "localhost", "port": 5678}
+STATUS & INIT:
+  GET  /api/status               → Pair list + metadata + date ranges
+  POST /api/init                 → Create or refresh database
+  POST /api/refresh-metadata     → Recompute metadata from data
+  GET  /api/date-types           → Supported date type formats
+
+CONFIG:
+  GET  /api/config               → Current config JSON
+  PUT  /api/config               → Update config JSON
+  POST /api/config/upload        → Upload config JSON file
+  POST /api/pairs/reload         → Reload pairs from config
+
+PAIR MANAGEMENT:
+  GET  /api/pairs/list           → List pairs from config
+  POST /api/pairs                → Create new pair
+  PUT  /api/pairs/{name}         → Update pair
+  DELETE /api/pairs/{name}       → Delete pair + data
+
+EXTRACTION:
+  POST /api/extract              → Run SAS/AWS extraction
+  POST /api/extract/run-sql      → Execute SQL files via Athena (SSE)
+  POST /api/generate             → Generate extraction scripts
+  POST /api/preview              → Preview generated SQL/SAS code
+
+ROW COUNT LOADING:
+  POST /api/load/row             → Load row counts (legacy)
+  POST /api/load/row/upload      → Upload CSV file with row counts
+  POST /api/load/row/path        → Load CSV from server path
+  GET  /api/scan/csv             → Scan directory for CSV files
+  GET  /api/scan/folder          → Scan folder for loadable files
+
+ROW COMPARISON:
+  GET  /api/compare/row/{name}   → Run row comparison for one pair
+  PUT  /api/compare/row/{name}   → Save row comparison state
+  POST /api/compare/row/{name}/preview → Generate HTML preview
+  POST /api/compare/row          → Run row comparison (batch, legacy)
+  GET  /api/status/row           → Row count loading status
+  POST /api/clear/row            → Clear row count data
+
+ROW EXPORT:
+  POST /api/compare/row/export/html           → Full HTML report (all pairs)
+  GET  /api/compare/row/export/csv/{name}     → CSV export for one pair
+  GET  /api/compare/row/export/count-csv/{name} → Count-only CSV export
+  GET  /api/compare/row/export/excel/{name}   → Excel export for one pair
+  GET  /api/compare/row/export/excel-all      → Excel export (all pairs)
+
+COLUMN METADATA:
+  GET  /api/pairs/{name}/columns              → Column list with types
+  GET  /api/pairs/{name}/columns/csv          → Columns as CSV
+  GET  /api/pairs/{name}/columns/excel        → Columns as Excel
+  GET  /api/pairs/{name}/col-type-overrides   → Type override settings
+  PUT  /api/pairs/{name}/col-type-overrides   → Update type overrides
+  PUT  /api/pairs/{name}/col-mappings         → Update column mappings
+  GET  /api/pairs/{name}/col-mappings/csv     → Column mappings as CSV
+
+COLUMN STATS LOADING:
+  POST /api/load/col-stats/upload  → Upload col stats CSV
+  POST /api/load/col-stats/path    → Load col stats from server path
+  POST /api/load/columns/upload    → Upload raw column data
+  POST /api/load/columns/path      → Load raw column data from path
+  GET  /api/status/col             → Column stats loading status
+
+COLUMN COMPARISON:
+  GET  /api/compare/col/{name}     → Run column comparison
+  PUT  /api/compare/col/{name}     → Save column comparison state
+  POST /api/compare/col/export/html  → Full col comparison HTML report
+  POST /api/compare/col/export/log   → Text log export
+  GET  /api/compare/col/export/excel → Excel export (all pairs)
+
+ANNOTATIONS:
+  GET  /api/pairs/{name}/annotations  → Get pair annotations
+  PUT  /api/pairs/{name}/annotations  → Update pair annotations
+
+TESTING:
+  GET  /api/testing              → Check testing mode status
+  POST /api/testing              → Toggle testing mode
+
+MISC:
+  POST /api/query                → Run ad-hoc SQL against the DB
+
+
+================================================================================
+ 7. DEEP DIVE: PAIRS MANAGEMENT
+================================================================================
+
+WHERE TO LOOK:
+  Frontend:  pairs.js + pairs.html
+  Backend:   app.py (lines 641-840, 2685-2880)
+  Config:    config.py
+  Database:  db.py → register_table_pair(), list_table_pairs()
+
+FLOW: Creating a new pair
+  1. User fills form in pairs.html (pair name, left source, right source,
+     date columns, vintage, connection macros, etc.)
+  2. JS calls POST /api/pairs with the pair configuration
+  3. Backend handler (app.py ~line 2685):
+     a. Validates config structure via config.py
+     b. Saves pair to config JSON via save_unified_config()
+     c. Registers pair in DB via sync_config_to_db() which calls
+        register_table_pair() for each pair
+     d. Returns success
+  4. JS refreshes the pair list
+
+IMPORTANT: Pairs exist in TWO places:
+  - The config JSON file (source of truth for configuration)
+  - The _table_pairs DB table (source of truth for data associations)
+  sync_config_to_db() keeps them in sync. If they diverge, use
+  POST /api/pairs/reload to re-sync.
+
+TABLE NAME CONVENTION:
+  Each side of a pair gets a "qualified name": {source}_{pair_name}
+  Example: pair "loans" with left=oracle, right=aws → "oracle_loans", "aws_loans"
+  This qualified name is used as the key in _row_counts, _col_stats, _metadata.
+  Generated by: platforms/base.py → qualified_name()
+
+TROUBLESHOOTING:
+  - "Pair not found" → Check _table_pairs in DB, check config JSON, try reload
+  - "No data" badge → Check _row_counts for the qualified table names
+  - Wrong source displayed → Check source_left/source_right in config
+
+
+================================================================================
+ 8. DEEP DIVE: ROW COUNT LOADING
+================================================================================
+
+WHERE TO LOOK:
+  Frontend:  load_row.js + load_row.html
+  Backend:   app.py (lines 835-1120)
+  Loader:    loader.py → load_row_counts()
+  Database:  db.py → upsert_row_counts(), get_row_counts()
+
+FLOW: Loading row counts from CSV
+  1. User drags CSV file(s) onto the drop zone
+  2. JS parses CSV client-side, auto-detects date/count columns
+  3. JS auto-matches filenames to configured pairs (by fuzzy name matching)
+  4. User confirms matches, clicks "Load Selected"
+  5. JS uploads CSV via POST /api/load/row/upload
+  6. Backend handler:
+     a. Receives file, calls loader.py → load_row_counts()
+     b. load_row_counts() detects date/count columns, parses dates via
+        date_utils.py → parse_date(), inserts into _row_counts
+     c. Updates _metadata with date range and total count
+  7. JS refreshes DB status display
+
+ALTERNATIVE LOADING PATHS:
+  - POST /api/load/row/path: Load CSV from a server-side file path
+  - POST /api/extract + /api/extract/run-sql: Extract directly from
+    Oracle/Athena (generates and runs SQL, saves results)
+
+CSV FORMAT EXPECTED:
+  - At least 2 columns: one date, one count
+  - Date column auto-detected by name: rpg_dt, eff_dt, dt, date, etc.
+  - Count column auto-detected: row_count, count, cnt, rows
+  - Dates can be any format (YYYY-MM-DD, DDMONYYYY, YYYYMMDD, etc.)
+
+TROUBLESHOOTING:
+  - "No date column found" → CSV column names don't match DATE_ALIASES in loader.py
+  - "0 rows loaded" → Check CSV format, ensure dates are parseable
+  - Dates look wrong → Add print() in date_utils.py → parse_date() to debug
+  - Duplicate dates → get_row_counts() deduplicates by keeping higher count
+
+
+================================================================================
+ 9. DEEP DIVE: ROW COUNT COMPARISON
+================================================================================
+
+WHERE TO LOOK:
+  Frontend:  row_compare.js + row_compare.html
+  Backend:   app.py (lines 2419-2570)
+  Compare:   compare.py → compare_row_counts()
+  Export:    html_export.py → generate_row_count_html()
+  Database:  db.py → get_row_counts(), save_row_comparison()
+
+FLOW: Running a row comparison
+  1. Page loads → loadPairs() fetches /api/status
+  2. runAll() iterates pairs, calls comparePair() for each
+
+  comparePair(name):
+    3. JS reads global date range from inputs (#global-from, #global-to)
+    4. GET /api/compare/row/{pair_name}?from_date=X&to_date=Y
+    5. Backend handler (app.py:2419):
+       a. get_table_pair() → finds pair in DB
+       b. compare_row_counts() → compares row counts (see below)
+       c. get_metadata() → gets date_var, vintage for both sides
+       d. get_row_comparison() → loads any saved state (excluded dates)
+       e. Calculates overlap range (see Section 17)
+       f. Builds date rows with status (match/mismatch/left_only/right_only)
+       g. Returns JSON with summary, dates[], saved state, annotations
+    6. JS renders via renderPairBody(name, data)
+    7. Auto-saves matching dates via syncPair() → PUT /api/compare/row/{pair_name}
+    8. Auto-generates HTML preview via refreshPreview()
+
+  compare_row_counts(db_path, table_left, table_right, from_date, to_date):
+    a. get_row_counts() for each side (with date filtering)
+    b. Builds dict_left, dict_right keyed by date string
+    c. Iterates all dates (union of both sides):
+       - Both sides, same count → "matching"
+       - Both sides, different count → "mismatched"
+       - Left only → "only_left"
+       - Right only → "only_right"
+    d. Computes summary: date_range_left, date_range_right, totals, counts
+
+FLOW: Saving comparison state (auto-save)
+  9. User toggles exclude checkbox → toggleExclude()
+  10. toggleExclude() updates data._excludedSet, triggers debouncedSync()
+  11. After 600ms debounce, syncPair() fires:
+      a. Collects: excluded dates, matching dates, non-matching dates in overlap
+      b. PUT /api/compare/row/{pair_name} with all state
+      c. Backend saves to _row_comparison table
+
+FLOW: HTML preview
+  12. refreshPreview() → POST /api/compare/row/{pair_name}/preview
+  13. Backend re-runs comparison, filters out excluded dates, generates HTML
+      via html_export.py → generate_row_count_html()
+  14. Returns HTML fragment rendered in the preview pane
+
+TROUBLESHOOTING:
+  - All dates show as "outside overlap" → Check date formats match between sides
+  - "Error: ..." in pair body → Check API log, backend logs
+  - Excluded dates not persisting → Check _row_comparison table in DB
+  - Preview shows stale data → Click Refresh button on preview section
+  - Missing dates after filtering → Check global-from/global-to inputs
+
+
+================================================================================
+10. DEEP DIVE: COLUMN MAPPING
+================================================================================
+
+WHERE TO LOOK:
+  Frontend:  col_mapping.js + col_mapping.html
+  Backend:   app.py (lines 3159-3440)
+  Database:  db.py → get_column_meta(), insert_column_meta()
+  Compare:   compare.py → get_column_mapping(), match_columns_from_dicts()
+
+FLOW:
+  1. User expands a pair → JS fetches column lists
+  2. GET /api/pairs/{pair_name}/columns → returns left + right column lists
+  3. User maps columns (drag-drop or dropdown) or uses auto-match
+  4. PUT /api/pairs/{pair_name}/col-mappings → saves mapping to config + DB
+
+PURPOSE:
+  When left and right tables have different column names (e.g., "acct_id" vs
+  "account_id"), mappings tell the column comparison which columns to compare.
+  Without mappings, only exact name matches are compared.
+
+TROUBLESHOOTING:
+  - "No columns" → Column metadata not loaded. Load col stats first, or check
+    _column_meta table
+  - Wrong mappings → Check col_mappings in _table_pairs or config JSON
+  - Auto-match too aggressive → Adjust fuzzy matching threshold in compare.py
+
+
+================================================================================
+11. DEEP DIVE: COLUMN SCRIPT GENERATION (COL GEN)
+================================================================================
+
+WHERE TO LOOK:
+  Frontend:  col_gen.js + col_gen.html
+  Backend:   app.py (lines 268-388) — /api/generate, /api/preview
+  Platforms: oracle.py → gen_sas(), athena.py → extract_aws()
+  Config:    constants.py → DATE_LITERAL_FORMATS, VINTAGE_PRESETS
+
+FLOW:
+  1. Page loads → loadPairs() and loadGlobalSettings()
+  2. User selects pairs, sets date range, output directory
+  3. Click "Generate" → POST /api/generate
+  4. Backend:
+     a. Loads config + pairs
+     b. For each pair+side, generates extraction SQL/SAS code:
+        - Row count query: SELECT date_col, COUNT(*) GROUP BY date_col
+        - Col stats query: SELECT date_col, col_name, count, mean, std, etc.
+     c. Respects: date filtering, vintage (day/week/month), WHERE clauses
+     d. Uses matching_dates from _row_comparison to filter which dates
+        to extract column stats for
+     e. Writes output files (.sas or .sql) to outdir
+  5. Returns file list to JS
+
+  The "matching_dates" filtering is critical: col gen only generates scripts
+  for dates where row counts matched, ensuring meaningful column comparison.
+
+TROUBLESHOOTING:
+  - "No matching dates" → Run row_compare first and ensure pairs have matches
+  - Wrong date format in SQL → Check date_type in pair config
+  - Missing WHERE clause → Check where_map in config
+  - SAS scripts have wrong macro → Check conn_macro in pair config
+
+
+================================================================================
+12. DEEP DIVE: COLUMN STATS LOADING
+================================================================================
+
+WHERE TO LOOK:
+  Frontend:  load_col.js + load_col.html
+  Backend:   app.py (lines 967-1250)
+  Loader:    loader.py → load_precomputed_col_stats(), load_column_data()
+  Stats:     stats.py → compute_column_stats()
+  Database:  db.py → insert_col_stats()
+
+TWO LOADING MODES:
+
+  Mode 1: Pre-computed stats CSV (from SAS/SQL output)
+    CSV has columns: column_name, dt, col_type, n_total, n_missing, etc.
+    Loaded directly via load_precomputed_col_stats()
+
+  Mode 2: Raw column data CSV
+    CSV has actual data (one row per record with all columns).
+    Python computes stats via stats.py → compute_column_stats()
+    Much slower but works when extraction scripts produce raw data.
+
+TROUBLESHOOTING:
+  - "0 columns loaded" → Check CSV format matches expected schema
+  - Column types wrong → Check col_type_overrides in config
+  - Missing dates in col stats → Check that dates were in matching set
+
+
+================================================================================
+13. DEEP DIVE: COLUMN COMPARISON
+================================================================================
+
+WHERE TO LOOK:
+  Frontend:  col_compare.js + col_compare.html
+  Backend:   app.py (lines 1300-1780)
+  Compare:   compare.py → compare_column_stats()
+  Database:  db.py → get_col_stats(), get_col_comparison()
+
+FLOW:
+  1. Page loads → loadPairs() → runAll()
+  2. For each pair, GET /api/compare/col/{pair_name}
+  3. Backend:
+     a. Gets saved row comparison → matching_dates
+     b. Calls compare_column_stats() with matched_dates filter
+     c. For each mapped column pair:
+        - Compares: n_total, n_missing, n_unique, mean, std, min, max
+        - Flags differences above threshold
+     d. Returns JSON with per-column diffs
+  4. JS renders column-by-column comparison cards
+
+  The matched_dates filter ensures column comparison only looks at dates
+  where row counts agree, making the comparison meaningful.
+
+TROUBLESHOOTING:
+  - "No col data" → Load column stats first (step 6)
+  - "0 columns compared" → Check column mappings (step 4)
+  - Unexpected diffs → Check col_type_overrides, might be type mismatch
+
+
+================================================================================
+14. DEEP DIVE: HTML EXPORT & PREVIEW
+================================================================================
+
+WHERE TO LOOK:
+  Export:    html_export.py → generate_row_count_html()
+  Backend:   app.py — POST /api/compare/row/export/html (line 2074)
+                       POST /api/compare/row/{name}/preview (line 2572)
+                       POST /api/compare/col/export/html (line 1545)
+
+ROW COMPARISON HTML:
+  generate_row_count_html() produces a self-contained HTML fragment for one pair:
+  - Banner row with pair name + table info
+  - Two data rows: left source, right source (date range, total, time)
+  - Overlap highlighting (blue for overlap bounds)
+  - Expandable details section with 3-column layout:
+    - Mismatched dates (count diff per date)
+    - Left-only dates (in-overlap=red, outside=gray)
+    - Right-only dates (in-overlap=red, outside=gray)
+
+  The full export wraps all pairs into a single HTML document with:
+  - Title/subtitle header
+  - Date range used
+  - Table structure with all pair sections
+  - Inline CSS styling (no external deps — the file stands alone)
+
+TROUBLESHOOTING:
+  - Preview empty → Click Refresh, check API log for errors
+  - Overlap highlighting wrong → Check date range calculation
+  - Export truncated → Check browser console for download errors
+
+
+================================================================================
+15. DEEP DIVE: BENCHMARK PAGE
+================================================================================
+
+WHERE TO LOOK:
+  Frontend:  benchmark.js + benchmark.html
+  Backend:   app.py — POST /api/extract/run-sql (line 200)
+
+PURPOSE:
+  Performance testing for SQL query strategies (e.g., TRUNC vs range for dates,
+  groupby optimization). Generates paired slow/fast queries, runs them, and
+  compares execution time.
+
+STRATEGIES (defined in benchmark.js):
+  - Index WHERE: TRUNC(date) vs date range
+  - Index GROUP BY: TRUNC GROUP BY vs direct
+  - Partition pruning: partition vs full scan
+  - COUNT strategies: COUNT(*) vs COUNT(1) vs SUM(1)
+
+FLOW:
+  1. User selects table, date column, strategies
+  2. JS generates SQL pairs (slow + fast)
+  3. POST /api/extract/run-sql executes via Athena with SSE progress streaming
+  4. Results show timing comparison
+
+TROUBLESHOOTING:
+  - Queries fail → Check Athena connection, table exists, permissions
+  - SSE not streaming → Check browser console for EventSource errors
+
+
+================================================================================
+16. DATA FLOW: DATE HANDLING PIPELINE
+================================================================================
+
+Dates flow through the system in this order:
+
+  SOURCE DATA (various formats)
+       │
+       ▼
+  loader.py → parse_date()           Converts any format → "YYYY-MM-DD" or "YYYYMM"
+       │
+       ▼
+  db.py → _row_counts (dt TEXT)      Stored as canonical strings
+       │
+       ▼
+  db.py → get_row_counts()           Reads and re-parses (handles dedup), applies
+       │                             date range filtering
+       ▼
+  compare.py → compare_row_counts()  Compares by date string matching
+       │
+       ▼
+  app.py → overlap calculation       max(left_min, right_min) to min(left_max, right_max)
+       │
+       ▼
+  row_compare.js → dateRowHTML()     Renders in browser
+
+SUPPORTED DATE FORMATS (parse_date handles all):
+  - YYYY-MM-DD, YYYY-MM-DD HH:MM:SS, YYYY-MM-DDTHH:MM:SS
+  - DDMONYYYY:HH:MM:SS, DDMONYYYY, DDMONYY
+  - DD-MON-YYYY, DD-MON-YY
+  - YYYYMMDD, YYYYMM, YYYY/MM/DD
+  - MM/DD/YYYY
+  - SAS numeric (days since 1960), SAS datetime (seconds since 1960)
+
+MISSING DATE HANDLING (as of the latest fix):
+  - NULL or empty dates in _row_counts are silently skipped during parsing
+  - Unparseable dates are also skipped (no crash, just excluded from results)
+  - Downstream code checks for None before computing overlap ranges
+
+
+================================================================================
+17. DATA FLOW: OVERLAP RANGE CALCULATION
+================================================================================
+
+The overlap range identifies the date window where BOTH sources have data.
+Dates inside the overlap are "expected to exist in both" — a missing date
+inside the overlap is flagged as a potential data gap (red in the report).
+
+CALCULATION ALGORITHM:
+  overlap_start = max(left_min_date, right_min_date)
+  overlap_end   = min(left_max_date, right_max_date)
+  If overlap_start > overlap_end → no overlap (disjoint date ranges)
+
+WHERE IT'S CALCULATED:
+  1. app.py:2454 (GET /api/compare/row/{pair_name})
+     Uses raw min/max from compare_row_counts() summary
+     Guards: if left_min and right_min and left_max and right_max
+
+  2. app.py:2541 (PUT /api/compare/row/{pair_name})
+     Recalculates from matching_dates + non_matching_dates
+     This is the "saved" version that persists to _row_comparison
+
+  3. html_export.py:127 (HTML report generation)
+     Recalculates for the report (may differ if dates were excluded)
+
+HOW OVERLAP AFFECTS THE UI:
+  - Dates outside overlap → gray/muted styling (.rc-outside-overlap)
+  - Left-only inside overlap → RED (potential data gap)
+  - Left-only outside overlap → GRAY (expected, data just hasn't synced)
+  - Same for right-only
+
+TROUBLESHOOTING:
+  - "All dates gray" → One side has much newer data, no overlap
+  - "No overlap shown" → Check date_range_left vs date_range_right in API response
+  - Missing date values crash the overlap calc → Fixed by guarding against None
+
+
+================================================================================
+18. DATA FLOW: EXCLUDED DATES & COL GEN FILTERING
+================================================================================
+
+EXCLUSION FLOW:
+  1. User checks "Excl" checkbox on a date row in row_compare
+  2. toggleExclude() adds date to data._excludedSet
+  3. debouncedSync() → syncPair() saves to backend:
+     - excluded_dates: manual exclusions
+     - matching_dates: dates with matching counts (minus exclusions)
+     - non_matching_dates: dates in overlap that don't match
+
+PERSISTENCE:
+  _row_comparison table stores:
+    excluded_dates     → JSON array of manually excluded date strings
+    matching_dates     → JSON array of date strings where counts match
+    non_matching_dates → JSON array of non-matching dates in overlap
+
+HOW COL GEN USES THIS:
+  When generating column extraction scripts (app.py ~line 1582):
+    saved = get_row_comparison(db_path, pair_name)
+    matched_dates = set(saved["matching_dates"])
+    # Only extract column stats for these dates
+
+  When running column comparison (compare.py ~line 240):
+    if matched_dates is not None:
+        all_dates = all_dates & matched_dates  # Intersect
+
+  This ensures column comparison is only done on dates where row counts
+  agree (the columns are meaningful to compare).
+
+
+================================================================================
+19. CONFIGURATION SYSTEM (JSON)
+================================================================================
+
+WHERE TO LOOK:
+  config.py          — Load/save/validate
+  app.py             — /api/config endpoints
+  pairs.js           — UI for editing
+
+CONFIG FILE STRUCTURE:
+  {
+    "pairs": {
+      "pair_name": {
+        "left": {
+          "source": "oracle",        // Data source type
+          "table": "SCHEMA.TABLE",   // Actual table name
+          "conn_macro": "pb23",      // SAS connection macro
+          "date_col": "RPG_DT",      // Date column name
+          "date_type": "date",       // Date column type
+          "vintage": "day",          // Aggregation level
+          "where": ""                // Optional WHERE clause
+        },
+        "right": {
+          "source": "aws",
+          "table": "database.table",
+          "date_col": "rpg_dt",
+          "date_type": "date",
+          "vintage": "day"
+        },
+        "skip": false,               // Skip this pair in batch operations
+        "description": "Loan data",  // Display label
+        "col_map": {                 // Column name mappings
+          "ACCT_ID": "acct_id"       //   left_col: right_col
+        },
+        "col_type_overrides": {},    // Force column types
+        "ignore_rows": [],           // Dates to always ignore
+        "ignore_columns": [],        // Columns to always ignore
+        "where_map": {               // Runtime WHERE clauses
+          "left": "",
+          "right": ""
+        },
+        "comment_map": {             // User annotations
+          "row": {"left": "", "right": ""},
+          "col": {"left": "", "right": ""}
+        },
+        "time_map": {                // Execution times
+          "row": {"left": "", "right": ""},
+          "col": {"left": "", "right": ""}
+        }
       }
-   4. Set breakpoints in app.py, oracle.py, etc.
-
-   ASYNC FUNCTIONS (async def api_generate, etc.):
-   - Breakpoints work normally — debugpy handles async/await
-   - uvicorn runs the event loop; when your breakpoint hits,
-     that specific request pauses but the server stays alive
-   - You CAN step through await calls
-   - CAVEAT: If you pause too long, the browser request may timeout
-     (fetch default timeout). The backend still resumes though.
-
-   KEY BREAKPOINT LOCATIONS:
-   - app.py ~line 233: /api/generate endpoint (start of generation)
-   - app.py ~line 298: gen_sas() call
-   - app.py ~line 354: /api/load/row endpoint (loading CSVs)
-   - app.py ~line 375: column CSV loading
-   - oracle.py gen_sas(): template filling
-   - oracle.py _gen_sas_row_datadriven(): dataline building
-
-B) FRONTEND (JavaScript) — Browser DevTools
-   ─────────────────────────────────────────
-   All JS is in dtrack/web/static/*.js (no build step, plain JS)
-
-   TO DEBUG:
-   1. Open browser → F12 → Sources tab
-   2. Find files under localhost:8080/static/
-   3. Set breakpoints in pairs.js, load_row.js, etc.
-
-   TO DEBUG FETCH REQUESTS:
-   1. F12 → Network tab
-   2. Filter by "Fetch/XHR"
-   3. Click any request to see:
-      - Headers tab: URL, method, request headers
-      - Payload tab: POST body (JSON)
-      - Response tab: JSON response from backend
-      - Timing tab: how long it took
-
-   KEY JS FILES AND WHAT THEY DO:
-   - pairs.js: "Generate" button → POST /api/generate
-     Look for: fetch('/api/generate', ...)
-   - load_row.js: "Load" button → POST /api/load/row
-     Look for: fetch('/api/load/row', ...)
-
-   TO ADD console.log FOR DEBUGGING:
-   Edit the JS files directly in dtrack/web/static/
-   Refresh browser (Ctrl+Shift+R for hard refresh to bypass cache)
-
-   COMMON JS ISSUES:
-   - Stale cache: Always hard-refresh (Ctrl+Shift+R)
-   - CORS: Not an issue (same-origin, FastAPI serves static)
-   - Async fetch: All fetch() calls return Promises
-     Use Network tab to see actual request/response
-
-C) SAS CODE DEBUGGING
-   ──────────────────
-   The generated .sas file is standalone — run it in SAS directly.
-   Check the SAS log for:
-   - NOTE: [qname] SQL: ...    ← shows the actual query
-   - NOTE: Cached ...           ← skipped due to cache
-   - ERROR: ...                 ← something failed
-
-   To force re-run: set environment var SAS_ROW_REDO=1
-   The column CSV is skipped if file exists; delete it to force re-run.
-
-
-8. QUICK REFERENCE: CONFIG FORMAT
-================================================================================
-
-{
-  "pairs": {
-    "my_pair": {
-      "skip": false,
-      "left": {
-        "source": "oracle",          ← oracle | sas | hadoop | aws
-        "name": "my_table",
-        "table": "SCHEMA.TABLE",
-        "conn_macro": "pb23",         ← Oracle connection macro
-        "date_col": "LOAD_DT",
-        "date_transform": "trunc",    ← trunc | to_char_YYYYMM | ...
-        "where": "STATUS = 'A'",
-        "data_type": "DATE",          ← DATE | TIMESTAMP | NUMBER | STRING
-        "processed": "SELECT ...",    ← optional CTE
-        "vintage": "monthly"          ← all | monthly | weekly | sample
-      },
-      "right": { ... }
-    }
+    },
+    "settings": {                    // Global settings
+      "from_date": "",
+      "to_date": "",
+      "sas_outdir": "./sas",
+      "aws_outdir": "./csv"
+    },
+    "date_types": {}                 // Custom date type definitions
   }
-}
+
+TROUBLESHOOTING:
+  - Config not loading → Check JSON syntax, run validate_unified_config()
+  - Changes not saving → Check file permissions on config path
+  - Pairs not showing → Check that config has "pairs" key with at least one entry
 
 
-9. HTTP METHODS — FULL EXAMPLES FROM THIS CODEBASE
+================================================================================
+20. PLATFORM CONNECTORS (Oracle, Athena, SAS)
 ================================================================================
 
-All frontend↔backend communication follows the same pattern:
-  HTML button → JS function → fetch() HTTP request → FastAPI route → Python → JSON response
+WHERE TO LOOK:
+  platforms/base.py    — Base class, date format registry
+  platforms/oracle.py  — SAS/Oracle script generation
+  platforms/athena.py  — AWS Athena query execution
+  platforms/sas.py     — SAS dataset reader
 
-A) GET — Read data, no body
-   ─────────────────────────
+ORACLE/SAS (oracle.py):
+  gen_sas() generates .sas files that:
+  - Connect to Oracle via libname/connection macro
+  - Run SELECT COUNT(*) ... GROUP BY date queries for row counts
+  - Run column-level stats queries for col stats
+  - Write results to CSV files
+  These .sas files must be run in a SAS session manually.
 
-   JS (pairs.js:385):
-       const response = await fetch('/api/pairs/list');
-       const data = await response.json();
-       pairs = data.pairs;
+ATHENA (athena.py):
+  extract_aws() directly executes queries:
+  - Connects to AWS Athena via pyathena
+  - Runs queries in parallel (ThreadPoolExecutor)
+  - Writes CSV results to disk
+  - Can also load results directly into the DB
 
-   Python (app.py:608):
-       @app.get("/api/pairs/list")
-       async def api_list_pairs():
-           config = load_unified_config(_config_path)
-           return {"pairs": [...]}
+SAS DATASET (sas.py):
+  Minimal: reads .sas7bdat files using pandas. Not widely used.
 
-   ┌─────────────────────────────────────────────────────┐
-   │ Browser → GET /api/pairs/list → no body             │
-   │ Server  → {"pairs": [{name: "customer_daily",...}]} │
-   └─────────────────────────────────────────────────────┘
-   TIP: You can test any GET by visiting the URL in browser directly.
+DATE FORMAT HANDLING:
+  Each platform needs dates formatted differently in SQL:
+  - Oracle: DATE 'YYYY-MM-DD'
+  - Athena: DATE 'YYYY-MM-DD'
+  - SAS: 'DDMONYYYY'd
+  constants.py → DATE_LITERAL_FORMATS maps (platform, type) → format template
+  base.py → resolve_date_format() resolves format from config
 
-
-B) PUT — Update data, JSON body
-   ────────────────────────────
-
-   JS (pairs.js:661-668):
-       const pairData = {                    // 1. read form inputs into JS object
-           pair_name: "customer_daily",
-           left: {source: "oracle", table: "SCHEMA.TBL", ...},
-           right: {...}
-       };
-       const response = await fetch(         // 2. send HTTP request
-           `/api/pairs/customer_daily`,      //    URL (pair_name is in the path)
-           {
-               method: 'PUT',
-               headers: {'Content-Type': 'application/json'},
-               body: JSON.stringify(pairData)  // 3. dict → JSON text string
-           }
-       );
-
-   Python (app.py:638-641):
-       @app.put("/api/pairs/{pair_name}")            # {pair_name} = URL path variable
-       async def api_update_pair(pair_name: str, request: Request):
-           body = await request.json()               # JSON text → Python dict
-           # pair_name = "customer_daily"  (from URL)
-           # body = {"pair_name": "customer_daily", "left": {...}, ...}  (from body)
-
-   ┌─────────────────────────────────────────────────────┐
-   │ Browser → PUT /api/pairs/customer_daily             │
-   │           Body: {"pair_name":"customer_daily",...}   │
-   │ Server  → {"ok": true}                              │
-   └─────────────────────────────────────────────────────┘
+TROUBLESHOOTING:
+  - SAS script has wrong date format → Check date_type in config
+  - Athena query fails → Check AWS credentials, table name, date column
+  - Connection macro wrong → Check conn_macro in pair config vs constants.py
 
 
-C) POST — Create/action, JSON body (same as PUT but for new data)
-   ──────────────────────────────────────────────────────────────
-
-   JS (pairs.js, when creating new pair):
-       const response = await fetch('/api/pairs', {
-           method: 'POST',
-           headers: {'Content-Type': 'application/json'},
-           body: JSON.stringify(pairData)
-       });
-
-   Python (app.py:1615):
-       @app.post("/api/pairs")
-       async def api_add_pair(request: Request):
-           body = await request.json()
-
-   POST vs PUT: POST = create new, PUT = update existing. Same mechanics.
-
-
-D) POST — No body (trigger an action)
-   ───────────────────────────────────
-
-   JS:
-       await fetch('/api/init', {method: 'POST'});
-
-   Python (app.py:122):
-       @app.post("/api/init")
-       async def api_init():               # ← no request param needed
-           init_database(_db_path)
-           return {"action": "created"}
-
-   ┌─────────────────────────────────────────────────────┐
-   │ Browser → POST /api/init → no body                  │
-   │ Server  → {"action": "created"}                     │
-   └─────────────────────────────────────────────────────┘
-
-
-E) DELETE — With query parameter
-   ─────────────────────────────
-
-   JS (load_row.js:159):
-       await fetch(`/api/pairs/customer_daily?purge=1`, {method: 'DELETE'});
-                                            ^^^^^^^^^ query parameter
-
-   Python (app.py:1689-1690):
-       @app.delete("/api/pairs/{pair_name}")
-       async def api_delete_pair(pair_name: str, purge: int = Query(0)):
-           # pair_name = "customer_daily"   (from URL path)
-           # purge = 1                      (from ?purge=1 query string)
-
-   ┌─────────────────────────────────────────────────────┐
-   │ Browser → DELETE /api/pairs/customer_daily?purge=1  │
-   │ Server  → {"ok": true, "deleted_from": "config+db"} │
-   └─────────────────────────────────────────────────────┘
-   Query params go AFTER the ? in the URL. FastAPI maps them to function args.
-
-
-F) POST — File upload (FormData, NOT JSON)
-   ───────────────────────────────────────
-
-   JS (load_row.js:140-145):
-       const form = new FormData();           // NOT JSON — binary form data
-       form.append('file', file);             // the actual CSV file
-       form.append('table_name', tableName);  // extra text fields
-       form.append('source', source);
-       const resp = await fetch('/api/load/columns/upload', {
-           method: 'POST',
-           body: form                         // NO headers — browser sets them auto
-       });
-
-   Python (app.py:886-891):
-       @app.post("/api/load/columns/upload")
-       async def api_load_columns_upload(
-           file: UploadFile = File(...),     # ← the uploaded file
-           table_name: str = "",             # ← form field (NOT from JSON)
-           source: str = "",                 # ← form field
-       ):
-           content = await file.read()       # read file bytes
-           text = content.decode("utf-8")    # bytes → string
-
-   ┌─────────────────────────────────────────────────────┐
-   │ Browser → POST /api/load/columns/upload             │
-   │           Content-Type: multipart/form-data          │
-   │           file: <binary CSV data>                    │
-   │           table_name: "oracle_customer"              │
-   │           source: "oracle"                           │
-   │ Server  → {"ok": true, "loaded": 42}                │
-   └─────────────────────────────────────────────────────┘
-   KEY DIFFERENCE: File uploads use FormData (not JSON.stringify).
-   FastAPI receives file as UploadFile, other fields as function args.
-   NO Content-Type header in JS — browser auto-sets multipart boundary.
-
-
-SUMMARY TABLE:
-┌──────────┬────────────────────┬──────────────────────────────────────┐
-│ Method   │ JS sends           │ Python receives                      │
-├──────────┼────────────────────┼──────────────────────────────────────┤
-│ GET      │ fetch(url)         │ no args (or query params)            │
-│ POST     │ fetch(url, {       │ body = await request.json()          │
-│ PUT      │   method: 'PUT',   │   OR                                 │
-│          │   body: JSON...    │ file: UploadFile (for FormData)      │
-│          │ })                 │                                      │
-│ DELETE   │ fetch(url,         │ path params + Query() params         │
-│          │   {method:'DELETE'}│                                      │
-├──────────┼────────────────────┼──────────────────────────────────────┤
-│ URL path │ /api/pairs/{name}  │ def func(name: str)                  │
-│ Query    │ ?purge=1           │ def func(purge: int = Query(0))      │
-│ JSON body│ body:JSON.stringify│ body = await request.json()           │
-│ FormData │ body: new FormData │ file: UploadFile, field: str = ""    │
-└──────────┴────────────────────┴──────────────────────────────────────┘
-
-
-10. PRACTICAL DEBUGGING TIPS (VSCODE)
+================================================================================
+21. COMMON BUGS & TROUBLESHOOTING RECIPES
 ================================================================================
 
-A) PYTHON ASYNC DEBUGGING IN VSCODE
-   ─────────────────────────────────
+BUG: Page shows "Error: ..." or blank content
+  1. Open API Log (click tab at bottom-right)
+  2. Find the failed request (red entries)
+  3. Note the endpoint and error message
+  4. Search app.py for that endpoint route
+  5. Add print/logging in the handler
+  6. Check the try/except — errors are usually caught and returned as JSON
 
-   SETUP (one-time):
-   1. pip install debugpy
-   2. Create .vscode/launch.json:
+BUG: Row counts don't match expected
+  1. Check _row_counts table: SELECT * FROM _row_counts WHERE source_table = '...'
+  2. Verify dates are in expected format (canonical YYYY-MM-DD)
+  3. Check if deduplication changed counts (get_row_counts keeps higher count)
+  4. Check date filters (global-from, global-to inputs)
 
-      {
-        "version": "0.2.0",
-        "configurations": [
-          {
-            "name": "dtrack serve",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "dtrack.cli",
-            "args": ["serve", "your.db", "--config", "config.json", "--port", "8080"],
-            "justMyCode": true
-          },
-          {
-            "name": "Attach to dtrack",
-            "type": "debugpy",
-            "request": "attach",
-            "connect": {"host": "localhost", "port": 5678}
-          }
-        ]
-      }
+BUG: Overlap range is wrong or missing
+  1. Check date_range_left and date_range_right in the API response
+  2. Verify dates are comparable strings (YYYY-MM-DD vs YYYYMM mixing?)
+  3. Check for NULL dates in _row_counts
+  4. Review overlap calculation in app.py:2454
 
-   OPTION 1 — LAUNCH (easier, recommended):
-   - F5 in VSCode with "dtrack serve" selected
-   - Breakpoints work immediately
-   - Output visible in VSCode Debug Console
+BUG: Column comparison shows 0 columns
+  1. Verify col stats are loaded: SELECT COUNT(*) FROM _col_stats WHERE source_table=...
+  2. Check column mappings: GET /api/pairs/{name}/col-mappings
+  3. Verify matching_dates exist: SELECT matching_dates FROM _row_comparison
+  4. If matching_dates is empty, no dates overlap for column comparison
 
-   OPTION 2 — ATTACH (if already running):
-   - Terminal: python -m debugpy --listen 5678 --wait-for-client -m dtrack.cli serve ...
-   - F5 in VSCode with "Attach to dtrack" selected
+BUG: Excluded dates don't persist
+  1. Check browser console for PUT errors
+  2. Verify _row_comparison table has the pair entry
+  3. Check that syncPair() is being called (look at API log)
 
-   ASYNC FUNCTIONS — WHAT'S DIFFERENT:
-   - Breakpoints work normally on async def, nothing special
-   - "Step Over" (F10) on an `await` jumps to the next line after it resolves
-   - "Step Into" (F11) on an `await` goes INTO the awaited function
-   - The call stack shows the coroutine chain, not threads
-   - Other requests keep working while you're paused on one
+BUG: HTML export looks different from preview
+  1. Preview uses real-time comparison data
+  2. Export also uses real-time data but may have different excluded dates
+  3. Check the POST body of the export call for pairs state
 
-   COMMON FUNCTIONS TO SET BREAKPOINTS ON:
+BUG: CSS looks broken
+  1. Check which stylesheet is loaded (style_v2.css vs style.css)
+  2. Clear browser cache (Ctrl+Shift+R)
+  3. Check CSS variables are defined in style_v2.css
 
-   app.py:
-     async def api_generate()      ← POST /api/generate (SAS/SQL generation)
-     async def api_load_row()      ← POST /api/load/row (loading CSVs)
-     async def api_status()        ← GET /api/status (homepage data)
-     async def api_compare_row()   ← POST /api/compare/row
+BUG: Date parsing fails
+  1. Check the raw dt value in _row_counts
+  2. Test with: python -c "from dtrack.date_utils import parse_date; print(parse_date('...'))"
+  3. If format not recognized, add to _DATE_FORMATS in date_utils.py
 
-   oracle.py:
-     def gen_sas()                 ← Main SAS generation (NOT async, called from async)
-     def _gen_sas_row_datadriven() ← Builds row template datalines
+DEBUGGING TECHNIQUE: API Log
+  Every page has an API Log panel. Click the "API Log" tab at bottom-right.
+  It shows:
+    - Every fetch() call to /api/* endpoints
+    - Request method, path, timing
+    - Response status and summary
+    - Error details with request body
+  This is the FIRST place to look when something doesn't work.
 
-   config.py:
-     def load_unified_config()     ← Parses config JSON
-     def load_tables_from_config() ← Extracts table list from config
+DEBUGGING TECHNIQUE: SQLite inspection
+  Open the DB file directly:
+    sqlite3 path/to/dtrack.db
+    .tables                    -- list all tables
+    .schema _row_counts        -- see table structure
+    SELECT * FROM _row_counts WHERE source_table = 'oracle_loans' LIMIT 5;
+    SELECT * FROM _row_comparison;
+    SELECT * FROM _metadata;
 
-   USEFUL DEBUGGER FEATURES:
-   - WATCH panel: add expressions like `len(oracle_tables)`, `tbl_cfg['name']`
-   - DEBUG CONSOLE (bottom): type any Python expression while paused
-     e.g. print(json.dumps(tbl_cfg, indent=2))
-   - CONDITIONAL BREAKPOINT: right-click breakpoint → Edit →
-     e.g. qname == "oracle_my_table"  (only breaks for that table)
-   - LOGPOINT: right-click gutter → Add Logpoint →
-     e.g. "gen_sas called with {len(oracle_tables)} tables"
-     (prints without stopping — like print() but no code change)
-
-
-B) JAVASCRIPT DEBUGGING IN VSCODE
-   ───────────────────────────────
-
-   OPTION 1 — BROWSER DEVTOOLS (simpler, recommended):
-   - F12 in Chrome/Edge → Sources tab
-   - Ctrl+P → type filename (e.g. pairs.js) → set breakpoints
-   - Breakpoints persist across refreshes
-
-   OPTION 2 — VSCODE WITH BROWSER:
-   Add to .vscode/launch.json:
-      {
-        "name": "Chrome: dtrack",
-        "type": "chrome",
-        "request": "launch",
-        "url": "http://localhost:8080",
-        "webRoot": "${workspaceFolder}/dtrack/web/static"
-      }
-   Then F5 → opens Chrome with VSCode debugger attached
-   Set breakpoints directly in VSCode on .js files
-
-   DEBUGGING FETCH REQUESTS:
-   ─────────────────────────
-   Every frontend action is a fetch() call. To trace one:
-
-   1. Network tab (F12 → Network → filter "Fetch/XHR")
-      - See request payload (what JS sent)
-      - See response body (what Python returned)
-      - See status code (200, 400, 500)
-      - Red = error, click to see error message
-
-   2. Console tab
-      - Errors show with stack trace + clickable file:line links
-      - Add temporary logging:
-        console.log('data:', JSON.stringify(data, null, 2));
-
-   3. Sources tab breakpoints
-      - Break BEFORE fetch: see what data is being sent
-      - Break in .then()/.catch(): see response handling
-
-   COMMON JS FUNCTIONS TO SET BREAKPOINTS ON:
-
-   pairs.js:
-     generateCode()          ← "Generate" button click
-     function sendGenerate()  ← actual fetch to /api/generate
-     loadConfig()            ← config JSON upload
-
-   load_row.js:
-     scanFolder()            ← scan output folder for CSVs
-     loadRows()              ← POST /api/load/row
-     uploadColumns()         ← upload column metadata CSV
-
-   row_compare.js:
-     compareRow()            ← POST /api/compare/row
-     exportHtml()            ← export comparison report
-
-   col_mapping.js:
-     loadColumns()           ← GET /api/pairs/{name}/columns
-     saveMapping()           ← PUT /api/pairs/{name}/col-mappings
-     autoMatch()             ← run auto-match algorithm
-
-   QUICK JS DEBUGGING TRICKS:
-   - Add `debugger;` anywhere in JS → browser pauses there (like a breakpoint)
-   - Right-click element → Inspect → see which JS handles it
-   - Console: copy(data) → copies variable to clipboard as JSON
-   - Console: $0 → references currently selected DOM element
-   - Network tab → right-click request → "Copy as fetch" → paste in Console to replay
+DEBUGGING TECHNIQUE: Python REPL
+  from dtrack.db import get_row_counts
+  from dtrack.compare import compare_row_counts
+  from dtrack.date_utils import parse_date
+  # Test individual functions in isolation
 
 
-C) DEBUGGING THE FULL FLOW (frontend → backend)
-   ─────────────────────────────────────────────
+================================================================================
+22. MODULES LIKELY OBSOLETE / CANDIDATES FOR REMOVAL
+================================================================================
 
-   Example: Debug "Generate" button click
+The following modules or components appear to be legacy, duplicated, or
+potentially obsolete based on the current codebase state:
 
-   1. Set JS breakpoint in pairs.js at the fetch('/api/generate'...) call
-   2. Set Python breakpoint in app.py at async def api_generate()
-   3. Click "Generate" in browser
-   4. JS breakpoint hits → inspect the request body in Variables panel
-   5. Press Continue (F5) → request goes to backend
-   6. Python breakpoint hits → inspect args, step through gen_sas()
-   7. Press Continue → response goes back to browser
-   8. Check Network tab → see the response JSON
+22.1  app.js  (web/static/app.js — 15KB)
+      ──────────────────────────────────
+      STATUS: LIKELY OBSOLETE
+      REASON: This was the original monolithic frontend for index.html (the
+      old single-page UI). The current UI uses the step-based workflow with
+      separate JS files (pairs.js, load_row.js, etc.). app.js duplicates
+      functionality that now lives in those per-page files.
+      RISK: Only needed if someone still accesses /index.html directly.
+      TO VERIFY: Check if index.html is linked from anywhere. If not,
+      both app.js and index.html can be removed.
 
-   TIP: Use Network tab "Preserve log" checkbox to keep requests
-   across page navigations.
+22.2  index.html  (web/templates/index.html — 8.4KB)
+      ───────────────────────────────────────────────
+      STATUS: LIKELY OBSOLETE
+      REASON: The old single-page UI. Superseded by pairs.html as the
+      homepage (/ redirects to pairs.html). Contains an older layout with
+      output panels and buttons that call app.js functions.
+      RISK: Same as app.js — only needed for legacy access.
+      TO VERIFY: Check if any links/bookmarks point to /index.html.
 
-   TIP: If backend returns 500, the error traceback prints in the
-   terminal where uvicorn is running (or VSCode Debug Console).
+22.3  style.css  (web/static/style.css — 6KB)
+      ─────────────────────────────────────────
+      STATUS: LIKELY OBSOLETE
+      REASON: The old stylesheet. style_v2.css (39KB) is the active
+      stylesheet used by all current templates. style.css was likely used
+      only by index.html.
+      RISK: Removing it could break the legacy index page.
+      TO VERIFY: Check which templates include style.css vs style_v2.css.
+
+22.4  interact.py  (dtrack/interact.py)
+      ──────────────────────────────────
+      STATUS: PARTIALLY OBSOLETE
+      REASON: Contains interactive terminal prompts (prompt_choice,
+      prompt_skip_pair, etc.) designed for the CLI workflow. With the web
+      UI now handling all user interaction, these prompts are only used by
+      cli.py's interactive mode. If you no longer use the CLI interactive
+      flow, this module is dead code.
+      RISK: Low — only cli.py imports from it.
+      TO VERIFY: Check if cli.py interactive commands are still used.
+
+22.5  pipeline.py  (dtrack/pipeline.py)
+      ──────────────────────────────────
+      STATUS: PARTIALLY OBSOLETE
+      REASON: Orchestrates the CLI pipeline (init → extract → load →
+      compare → HTML). The web UI handles each step independently via its
+      own API endpoints. If the CLI batch pipeline is no longer used,
+      pipeline.py serves no purpose.
+      RISK: Low — only used by cli.py's "pipeline" subcommand.
+      TO VERIFY: Check if anyone runs `dtrack pipeline` from the command line.
+
+22.6  sas.py  (dtrack/platforms/sas.py — 1.5KB)
+      ──────────────────────────────────────────
+      STATUS: POSSIBLY OBSOLETE
+      REASON: Minimal SAS dataset reader (only ~40 lines of real code).
+      Reads local .sas7bdat files. This is distinct from oracle.py which
+      generates SAS scripts to run against Oracle. If you never read local
+      SAS datasets, this module is unused.
+      RISK: Very low — small file, no side effects.
+      TO VERIFY: Search for imports of this module.
+
+22.7  POST /api/compare/row (batch, app.py line 465)
+      POST /api/compare/col (batch, app.py line 490)
+      POST /api/load (batch, app.py line 388)
+      ─────────────────────────────────────────────────
+      STATUS: LEGACY ENDPOINTS
+      REASON: These batch endpoints were used by the old CLI/monolithic UI.
+      The current web UI uses per-pair endpoints instead (GET/PUT
+      /api/compare/row/{pair_name}, etc.).
+      RISK: May still be used by cli.py.
+      TO VERIFY: Search for callers of these endpoints in JS and Python.
+
+22.8  constants.py  (dtrack/constants.py)
+      ────────────────────────────────────
+      STATUS: PARTIALLY DUPLICATED
+      REASON: DATA_SOURCES, DATE_COLUMN_TYPES, and VINTAGE_PRESETS are
+      duplicated in pairs.js (since there's no build step to share
+      constants between Python and JS). The Python-side constants are used
+      by oracle.py and athena.py for SQL generation. The JS-side copies
+      are used by pairs.js for dropdown rendering. If they drift apart,
+      subtle bugs result.
+      NOTE: Not obsolete per se, but the duplication is a maintenance risk.
+      Consider: Add an /api/constants endpoint that serves these values
+      to the frontend, eliminating the JS-side copies.
+
+22.9  DATE_UPPER_BOUND_OPERATORS in constants.py
+      ─────────────────────────────────────────────
+      STATUS: POSSIBLY OBSOLETE
+      REASON: All values are currently "<=". The dict exists to support
+      future differentiation (e.g., < for timestamp exclusive upper bounds)
+      but it's never varied. Could be replaced with a simple string.
+      RISK: Very low.
+
+22.10 batch compare/load endpoints in app.js
+      ────────────────────────────────────────
+      STATUS: OBSOLETE FRONTEND CODE
+      REASON: app.js calls batch endpoints that the per-page JS files
+      have replaced. If app.js is removed, these become unreachable.
+
+
+================================================================================
+23. QUICK REFERENCE: "WHERE DO I LOOK?"
+================================================================================
+
+QUESTION                                    LOOK HERE
+──────────────────────────────────────────  ─────────────────────────────────
+"A page is blank / shows error"             → API Log panel, then app.py route
+"Pair config is wrong"                      → config JSON + config.py
+"Pair not in DB"                            → _table_pairs table, sync_config_to_db()
+"Row counts are wrong"                      → _row_counts table, loader.py, parse_date()
+"Date format not recognized"                → date_utils.py → parse_date() + _DATE_FORMATS
+"Overlap calculation is off"                → app.py:2454, html_export.py:127
+"Excluded dates lost"                       → _row_comparison table, syncPair() in JS
+"Column comparison empty"                   → _col_stats table, matching_dates, col_map
+"HTML export broken"                        → html_export.py, /api/compare/row/export/html
+"CSS looks wrong"                           → style_v2.css, check which .css is linked
+"SAS script wrong"                          → oracle.py, constants.py date formats
+"Athena query fails"                        → athena.py, check AWS creds
+"Where does table name come from?"          → base.py → qualified_name()
+"Where are dates filtered?"                 → db.py:get_row_counts() lines 427-434
+"Where is overlap calculated?"              → app.py:2454, html_export.py:127
+"Where are excluded dates saved?"           → PUT /api/compare/row/{name} → _row_comparison
+"Where does col gen get its dates?"         → app.py ~line 1582, _row_comparison.matching_dates
+"How do I add a new date format?"           → base.py DATE_TYPE_FORMATS, pairs.js, constants.py
+"How do I add a new data source?"           → constants.py, pairs.js, create new platform file
+"How do I debug SQL generation?"            → POST /api/preview, or print in oracle.py/athena.py
+"Where is the main FastAPI app?"            → web/app.py (all routes in one file)
+"Where are API responses logged?"           → common.js fetch interceptor
+"What DB tables exist?"                     → db.py _SCHEMA dict (line 14)
+"How to inspect the DB?"                    → sqlite3 <db_path>, then .tables / .schema
+"How to test parse_date?"                   → python -c "from dtrack.date_utils import ..."
+
+================================================================================
+ END OF MANUSCRIPT
+================================================================================

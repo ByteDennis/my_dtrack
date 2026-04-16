@@ -121,10 +121,10 @@ def generate_row_count_html(
         time_left = _fmt_time(time_map.get(source_left, time_map.get('left', '—')))
         time_right = _fmt_time(time_map.get(source_right, time_map.get('right', '—')))
 
-    # Calculate overlap for highlighting
+    # Calculate overlap for highlighting (guard against None/missing dates)
     left_min, left_max = summary['date_range_left']
     right_min, right_max = summary['date_range_right']
-    has_overlap = left_min and right_min and left_max and right_max
+    has_overlap = bool(left_min and right_min and left_max and right_max)
     overlap_start = overlap_end = None
     if has_overlap:
         overlap_start = max(left_min, right_min)

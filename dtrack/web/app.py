@@ -2472,7 +2472,7 @@ async def api_compare_row_pair(pair_name: str, from_date: str = "", to_date: str
             in_overlap = overlap_start and overlap_end and overlap_start <= dt <= overlap_end
             dates.append({"dt": dt, "left": None, "right": count, "diff": None, "status": "right_only", "in_overlap": bool(in_overlap)})
 
-        dates.sort(key=lambda d: d["dt"])
+        dates.sort(key=lambda d: d["dt"] or "")
 
         return {
             "pair_name": pair_name,
@@ -2539,7 +2539,8 @@ async def api_save_row_comparison(pair_name: str, request: Request):
         time_right = body.get("time_right", "")
 
         # Compute overlap from matching + non-matching dates (full overlap range)
-        all_overlap_dates = matching_dates + non_matching_dates
+        # Filter out None/empty values that could cause min/max to fail
+        all_overlap_dates = [d for d in matching_dates + non_matching_dates if d]
         overlap_start = min(all_overlap_dates) if all_overlap_dates else None
         overlap_end = max(all_overlap_dates) if all_overlap_dates else None
 

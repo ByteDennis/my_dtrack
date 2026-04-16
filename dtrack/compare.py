@@ -98,8 +98,8 @@ def compare_row_counts(db_path, table_left, table_right, from_date=None, to_date
     rows_left = get_row_counts(db_path, table_left, from_date, to_date)
     rows_right = get_row_counts(db_path, table_right, from_date, to_date)
 
-    dict_left = {dt: count for dt, count in rows_left}
-    dict_right = {dt: count for dt, count in rows_right}
+    dict_left = {dt: count for dt, count in rows_left if dt}
+    dict_right = {dt: count for dt, count in rows_right if dt}
     all_dates = set(dict_left.keys()) | set(dict_right.keys())
 
     only_left = []
