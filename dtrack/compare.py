@@ -7,6 +7,62 @@ from .db import get_row_counts, get_col_stats, get_table_pair, list_table_pairs
 from .date_utils import parse_date
 
 
+def resolve_col_filter(col_map, include_patterns=None, exclude_patterns=None):
+    """Apply include/exclude glob patterns against col_map keys.
+
+    Patterns match LEFT column names only. Comparison is case-insensitive.
+    Include empty → all mapped pairs. Exclude is applied after include.
+    Patterns that match left names NOT present in col_map are surfaced
+    separately so the UI can warn about them.
+
+    Returns dict:
+        pairs:            [(left, right), ...] — effective (left, right) tuples
+        total_mapped:     len(col_map)
+        unmapped_matches: [left_name, ...] — patterns hit non-mapped left cols
+    """
+    include_patterns = [p.strip() for p in (include_patterns or []) if p and p.strip()]
+    exclude_patterns = [p.strip() for p in (exclude_patterns or []) if p and p.strip()]
+
+    mapped_left_lower = {l.lower(): l for l in (col_map or {}).keys()}
+
+    def _matches_any(name_lower, pats):
+        return any(fnmatch(name_lower, p.lower()) for p in pats)
+
+    if include_patterns:
+        kept_lower = {
+            k: orig for k, orig in mapped_left_lower.items()
+            if _matches_any(k, include_patterns)
+        }
+    else:
+        kept_lower = dict(mapped_left_lower)
+
+    if exclude_patterns:
+        kept_lower = {
+            k: orig for k, orig in kept_lower.items()
+            if not _matches_any(k, exclude_patterns)
+        }
+
+    kept = sorted(kept_lower.values(), key=str.lower)
+    pairs = [(l, col_map[l]) for l in kept]
+
+    # "Unmapped matches" — user's include pattern hit something, but it's not
+    # in col_map. Only meaningful when include patterns were given; otherwise
+    # nothing is "matched" explicitly.
+    unmapped_matches = []
+    if include_patterns:
+        all_left_cols = set()  # caller may pass a wider set via kwarg if desired
+        # We can only know mapped cols here; the caller (API endpoint) is
+        # responsible for comparing patterns against _column_meta too.
+        unmapped_matches = []
+
+    return {
+        "pairs": pairs,
+        "total_mapped": len(col_map or {}),
+        "effective_count": len(pairs),
+        "unmapped_matches": unmapped_matches,
+    }
+
+
 def _safe_int(val):
     """Parse a value to int, returning 0 for empty/None."""
     if val is None or val == '':

@@ -52,7 +52,12 @@ _SCHEMA = {
         ("source_left", "TEXT", ""),
         ("source_right", "TEXT", ""),
         ("col_mappings", "TEXT", ""),
+        # col_rules is legacy (unused). col_include / col_exclude hold JSON
+        # arrays of glob patterns that restrict which mapped columns get
+        # validated during Col Gen (include empty = all mapped).
         ("col_rules", "TEXT", ""),
+        ("col_include", "TEXT", ""),
+        ("col_exclude", "TEXT", ""),
         ("created_at", "TEXT", ""),
     ],
     "_row_counts": [
@@ -158,7 +163,9 @@ def init_database(db_path: str) -> None:
         )
     """)
 
-    # Create table pairs table for storing comparison mappings
+    # Create table pairs table for storing comparison mappings.
+    # col_rules is legacy. col_include/col_exclude hold JSON arrays of glob
+    # patterns used by the Col Gen filter.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS _table_pairs (
             pair_name TEXT PRIMARY KEY,
@@ -167,6 +174,9 @@ def init_database(db_path: str) -> None:
             source_left TEXT,
             source_right TEXT,
             col_mappings TEXT,
+            col_rules TEXT,
+            col_include TEXT,
+            col_exclude TEXT,
             created_at TEXT
         )
     """)
@@ -776,17 +786,39 @@ def register_table_pair(
     import json
     from datetime import datetime
 
+    # Lazy schema upgrade — tolerate legacy DBs missing any of these cols.
+    # Runs before we open our own connection to avoid write-lock contention.
+    ensure_col_rules_column(db_path)
+    ensure_col_filter_columns(db_path)
+
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    col_mappings_json = json.dumps(col_mappings) if col_mappings else None
+    # INSERT OR REPLACE resets every column to default/NULL for anything we
+    # don't name in the VALUES list. Read the existing row first so we can
+    # preserve col_mappings + col_rules + col_include + col_exclude when the
+    # caller didn't pass new values. Only col_mappings is updated from args;
+    # the rest are always preserved from the existing row.
+    cursor.execute(
+        "SELECT col_mappings, col_rules, col_include, col_exclude "
+        "FROM _table_pairs WHERE pair_name = ?",
+        (pair_name,),
+    )
+    existing = cursor.fetchone() or (None, None, None, None)
+    existing_map, existing_rules, existing_include, existing_exclude = existing
+
+    if col_mappings is None:
+        col_mappings_json = existing_map
+    else:
+        col_mappings_json = json.dumps(col_mappings) if col_mappings else None
+
     created_at = datetime.now().isoformat()
 
     cursor.execute("""
         INSERT OR REPLACE INTO _table_pairs (
             pair_name, table_left, table_right, source_left, source_right,
-            col_mappings, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            col_mappings, col_rules, col_include, col_exclude, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         pair_name,
         table_left,
@@ -794,6 +826,9 @@ def register_table_pair(
         source_left,
         source_right,
         col_mappings_json,
+        existing_rules,
+        existing_include,
+        existing_exclude,
         created_at,
     ))
 
@@ -1681,6 +1716,73 @@ def get_pair_col_rules(db_path: str, pair_name: str) -> dict:
     if row and row[0]:
         return json.loads(row[0])
     return {}
+
+
+def ensure_col_filter_columns(db_path: str) -> None:
+    """Add col_include / col_exclude columns to _table_pairs if missing.
+
+    Tolerates running on an already-migrated DB. Called opportunistically
+    before any read/write of these columns so older DBs get upgraded lazily
+    without requiring an explicit migration step.
+    """
+    conn = sqlite3.connect(db_path)
+    for col in ("col_include", "col_exclude"):
+        try:
+            conn.execute(f"ALTER TABLE _table_pairs ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
+    conn.close()
+
+
+def save_pair_col_filter(db_path: str, pair_name: str,
+                         include: Optional[list] = None,
+                         exclude: Optional[list] = None) -> None:
+    """Save include / exclude glob pattern lists for a pair.
+
+    Empty/None lists are stored as NULL so a missing filter is unambiguous.
+    """
+    import json
+    ensure_col_filter_columns(db_path)
+
+    include_json = json.dumps(list(include)) if include else None
+    exclude_json = json.dumps(list(exclude)) if exclude else None
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE _table_pairs SET col_include = ?, col_exclude = ? WHERE pair_name = ?",
+        (include_json, exclude_json, pair_name),
+    )
+    if cursor.rowcount == 0:
+        conn.close()
+        raise ValueError(f"Pair '{pair_name}' not found in database")
+    conn.commit()
+    conn.close()
+
+
+def get_pair_col_filter(db_path: str, pair_name: str) -> dict:
+    """Load {include: [...], exclude: [...]} for a pair from _table_pairs.
+
+    Returns {"include": [], "exclude": []} when nothing is set.
+    """
+    import json
+    ensure_col_filter_columns(db_path)
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT col_include, col_exclude FROM _table_pairs WHERE pair_name = ?",
+        (pair_name,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return {"include": [], "exclude": []}
+    inc = json.loads(row[0]) if row[0] else []
+    exc = json.loads(row[1]) if row[1] else []
+    return {"include": inc, "exclude": exc}
 
 
 def get_pair_where_map_from_db(db_path: str, pair_name: str) -> Optional[Dict[str, List[str]]]:

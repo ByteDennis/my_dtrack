@@ -462,9 +462,18 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
 
             col_list = [(c, d) for c, d in columns.items()
                         if c.lower() != date_col.lower()]
+
+            # Restrict to pair-level col_filter selection, if set. Empty/missing
+            # _selected_cols means "use all non-date cols" (legacy behavior).
+            selected = tbl.get('_selected_cols')
+            if selected:
+                wanted = {c.lower() for c in selected}
+                col_list = [(c, d) for c, d in col_list if c.lower() in wanted]
+
             if not col_list:
                 blocks.append(f"-- {qname}")
-                blocks.append(f"-- SKIP: no non-date columns for {qname}")
+                blocks.append(f"-- SKIP: no non-date columns for {qname}"
+                              + (" (col_filter left 0)" if selected else ""))
                 blocks.append("")
                 continue
 
@@ -502,6 +511,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
             _TRUNC_MAP = {'day': 'day', 'week': 'week', 'month': 'month',
                           'quarter': 'quarter', 'year': 'year'}
 
+            trunc_range_where = None
             if date_filter['filter_type'] == 'between':
                 from ..date_utils import bucket_date
                 buckets = {}
@@ -526,28 +536,39 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                 vintage_specs = [('sample', dw)]
                 sql_mode = 'sample'
                 print(f"  {qname}: vintage={vintage}, sample {len(date_filter['dates'])} dates")
-            elif (vintage in _TRUNC_MAP
-                  and tbl.get('_from_date') and tbl.get('_to_date')):
-                # No matching dates yet, but vintage + from/to set: synthesize
-                # per-bucket spans and emit one bare BETWEEN per bucket against
-                # the raw date column (literals in native format, no LHS func).
-                from ..date_utils import vintage_bucket_spans
-                spans = vintage_bucket_spans(tbl['_from_date'], tbl['_to_date'], vintage)
+            elif vintage in _TRUNC_MAP:
+                # Vintage set but no matching_dates from row-compare. Use
+                # DATE_TRUNC in SELECT/GROUP BY to produce all buckets in ONE
+                # scan per column — drastically fewer queries than emitting
+                # per-bucket BETWEEN blocks. WHERE stays bare so partition
+                # pruning still works.
                 vintage_specs = []
-                for bucket_key, bmin, bmax in spans:
-                    dw = build_date_between_clause(
-                        date_col, bmin, bmax,
+                sql_mode = 'trunc'
+                # Bare BETWEEN on WHERE when from/to set, so the one-shot
+                # scan is still bounded to the user's range.
+                trunc_range_where = None
+                if tbl.get('_from_date') and tbl.get('_to_date'):
+                    trunc_range_where = build_date_between_clause(
+                        date_col, tbl['_from_date'], tbl['_to_date'],
                         date_filter.get('date_dtype'),
                         date_format=date_filter.get('date_format'),
                     )
-                    vintage_specs.append((bucket_key, dw))
-                sql_mode = 'bucket'
-                print(f"  {qname}: vintage={vintage}, synthesized {len(vintage_specs)} buckets from {tbl['_from_date']} to {tbl['_to_date']}")
+                print(f"  {qname}: vintage={vintage}, trunc mode "
+                      f"(1 query per col, all buckets in one scan)")
             else:
                 # vintage='all' or no from/to bounds: aggregate everything
                 vintage_specs = [('all', None)]
                 sql_mode = 'all'
+                trunc_range_where = None
                 print(f"  {qname}: vintage={vintage}, no date filter")
+
+            # Summarize what we're emitting so the running-log line matches
+            # the SAS "cols x buckets = runs" format.
+            _buckets_count = 1 if sql_mode == 'trunc' else len(vintage_specs)
+            _runs = len(col_list) * _buckets_count
+            print(f"[AWS col] {qname}: {len(col_list)} cols x {_buckets_count} "
+                  f"{'bucketed query' if sql_mode == 'trunc' else 'buckets'} "
+                  f"= {_runs} runs")
 
             # Generate per-column SQL blocks
             # Build base WHERE: table where + exclude dates
@@ -558,10 +579,98 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                 wc_parts.append(exclude_clause)
             wc_base = " AND ".join(f"({p})" for p in wc_parts) if wc_parts else "1=1"
 
-            # One SQL block per (column, vintage bucket). The bucket label `dt`
-            # is emitted as a SQL string literal; the WHERE clause keeps the
-            # date column bare (no DATE_TRUNC / date_parse on the LHS) so
-            # Athena can use partition pruning and indexes.
+            # 'trunc' mode: ONE SQL per column, with DATE_TRUNC in SELECT/
+            # GROUP BY to produce all buckets in a single scan. WHERE stays
+            # bare so partition pruning still kicks in. This is the fast
+            # default when vintage is set but no row-compare data exists.
+            if sql_mode == 'trunc':
+                unit = _TRUNC_MAP[vintage]
+                trunc_col = _vintage_date_expr_athena(
+                    date_col, vintage,
+                    date_dtype=date_filter.get('date_dtype'),
+                    date_format=date_filter.get('date_format'),
+                )
+                trunc_expr = f"CAST({trunc_col} AS VARCHAR)"
+                # Base WHERE: user's WHERE + optional from/to bound. The
+                # date column is NEVER wrapped in WHERE so Athena can
+                # partition-prune. exclude_dates appended if set.
+                wc_parts_t = []
+                if where.strip():
+                    wc_parts_t.append(where.strip())
+                if trunc_range_where:
+                    wc_parts_t.append(trunc_range_where)
+                if exclude_clause:
+                    wc_parts_t.append(exclude_clause)
+                wc_t = " AND ".join(f"({p})" for p in wc_parts_t) if wc_parts_t else "1=1"
+
+                for col_name, col_dtype in col_list:
+                    is_num = is_numeric_type(col_dtype, is_oracle=False)
+                    if is_num:
+                        sql = f"""{cte_prefix}SELECT
+    {trunc_expr} AS dt,
+    '{col_name}' AS column_name,
+    'numeric' AS col_type,
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col_name}) AS n_missing,
+    COUNT(DISTINCT {col_name}) AS n_unique,
+    CAST(AVG(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS mean,
+    CAST(STDDEV_SAMP(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS std,
+    CAST(MIN({col_name}) AS VARCHAR) AS min_val,
+    CAST(MAX({col_name}) AS VARCHAR) AS max_val,
+    '' AS top_10
+FROM {full_table}
+WHERE {wc_t}
+GROUP BY {trunc_expr};"""
+                    else:
+                        sql = f"""{cte_prefix}WITH freq AS (
+    SELECT {trunc_expr} AS dt,
+           CAST({col_name} AS VARCHAR) AS p_col,
+           COUNT(*) AS cnt
+    FROM {full_table}
+    WHERE {wc_t}
+    GROUP BY {trunc_expr}, {col_name}
+),
+ranked AS (
+    SELECT dt, p_col, cnt,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn
+    FROM freq
+),
+top_n AS (
+    SELECT dt,
+           ARRAY_JOIN(ARRAY_AGG(
+               COALESCE(p_col, 'NULL') || '(' || CAST(cnt AS VARCHAR) || ')'
+               ORDER BY cnt DESC
+           ), '; ') AS top_10
+    FROM ranked WHERE rn <= 10 AND p_col IS NOT NULL
+    GROUP BY dt
+),
+stats AS (
+    SELECT dt,
+           SUM(cnt) AS n_total,
+           COALESCE(SUM(CASE WHEN p_col IS NULL THEN cnt ELSE 0 END), 0) AS n_missing,
+           SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique,
+           CAST(AVG(CAST(cnt AS DOUBLE)) AS VARCHAR) AS mean,
+           CAST(STDDEV_SAMP(CAST(cnt AS DOUBLE)) AS VARCHAR) AS std,
+           CAST(MIN(cnt) AS VARCHAR) AS min_val,
+           CAST(MAX(cnt) AS VARCHAR) AS max_val
+    FROM freq GROUP BY dt
+)
+SELECT s.dt, '{col_name}' AS column_name, 'categorical' AS col_type,
+       s.n_total, s.n_missing, s.n_unique,
+       s.mean, s.std, s.min_val, s.max_val,
+       COALESCE(t.top_10, '') AS top_10
+FROM stats s LEFT JOIN top_n t ON s.dt = t.dt
+ORDER BY s.dt;"""
+                    # Header name must be space-free so parse_sql_file picks
+                    # it up as a block marker. `_all` suffix conveys that this
+                    # block covers every bucket in one scan.
+                    blocks.append(f"-- {qname}/{col_name}/_all")
+                    blocks.append(sql.strip())
+                    blocks.append("")
+                continue  # next table; don't fall through to per-bucket loop
+
+            # bucket / sample / all modes: one block per (column, vintage bucket).
+            # dt_label is emitted as a SQL string literal; WHERE stays bare.
             for col_name, col_dtype in col_list:
                 is_num = is_numeric_type(col_dtype, is_oracle=False)
 
@@ -832,8 +941,24 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
 
     mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ATHENA_MOCK')
 
-    with open(config_path, 'r') as f:
-        config = json.load(f)
+    # Use load_unified_config so each side gets `name` auto-derived, and
+    # hydrate col_map + col_filter from _table_pairs (where the UI persists
+    # them). Without this, get_all_tables_from_unified sees empty col_map
+    # and col_filter can't produce _selected_cols — CLI runs would emit all
+    # columns even when the DB has include/exclude saved.
+    from ..config import load_unified_config
+    config = load_unified_config(config_path)
+    if db_path:
+        from ..db import get_pair_col_map_from_db, get_pair_col_filter
+        for pname, pcfg in config.get("pairs", {}).items():
+            if not pcfg.get("col_map"):
+                db_map = get_pair_col_map_from_db(db_path, pname)
+                if db_map:
+                    pcfg["col_map"] = db_map
+            if not pcfg.get("col_filter"):
+                cf = get_pair_col_filter(db_path, pname)
+                if cf.get("include") or cf.get("exclude"):
+                    pcfg["col_filter"] = cf
 
     os.makedirs(outdir, exist_ok=True)
 
@@ -1104,12 +1229,31 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
 
         # Update counters
         _done_count[0] += 1
+        table_just_finished = False
         with _table_lock:
             _table_done[qname]["done"] += 1
             tbl_progress = _table_done[qname]
+            if (is_col
+                    and tbl_progress["done"] == tbl_progress["total"]):
+                table_just_finished = True
 
         n = _done_count[0]
         total = len(blocks)
+
+        # Flush this table's CSV as soon as its last query completes —
+        # downstream Load Col can start picking up finished tables while
+        # other tables are still being extracted.
+        if table_just_finished:
+            with _col_rows_lock:
+                rows_for_qname = _col_rows_by_table.pop(qname, [])
+            csv_path = os.path.join(outdir, f"{qname}_col.csv")
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(_COL_HEADERS)
+                for r in rows_for_qname:
+                    writer.writerow(r)
+            print(f"  Wrote {len(rows_for_qname)} rows to {csv_path}",
+                  file=sys.stderr)
 
         # Console tqdm update
         if qname in _tqdm_bars:
@@ -1126,6 +1270,7 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
             result["table"] = qname
             result["table_done"] = tbl_progress["done"]
             result["table_total"] = tbl_progress["total"]
+            result["table_csv_written"] = table_just_finished
             on_progress(result)
 
         return result
@@ -1143,8 +1288,11 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
     for bar in _tqdm_bars.values():
         bar.close()
 
-    # For col mode, write one CSV per table from collected rows
-    if is_col:
+    # For col mode the per-table CSVs are written as each table finishes
+    # (see table_just_finished block above). Anything left in the buffer
+    # here means its last query failed or the counters drifted — flush
+    # whatever we have so the user isn't left with an empty CSV.
+    if is_col and _col_rows_by_table:
         for qname, row_data in _col_rows_by_table.items():
             csv_path = os.path.join(outdir, f"{qname}_col.csv")
             with open(csv_path, 'w', newline='') as f:
@@ -1152,7 +1300,8 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
                 writer.writerow(_COL_HEADERS)
                 for row in row_data:
                     writer.writerow(row)
-            print(f"  Wrote {len(row_data)} rows to {csv_path}")
+            print(f"  Wrote {len(row_data)} rows to {csv_path} "
+                  f"(partial — table had failures)")
 
     results.sort(key=lambda r: r['name'])
 

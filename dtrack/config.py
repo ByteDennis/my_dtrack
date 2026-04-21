@@ -148,6 +148,21 @@ def get_all_tables_from_unified(config):
             continue
         col_map = pair_config.get("col_map", {})
         pair_vintage = pair_config.get("vintage", "")
+        col_filter = pair_config.get("col_filter") or {}
+
+        # Resolve the pair's effective (left, right) col pairs after applying
+        # include/exclude patterns. Falls back to all of col_map if no filter.
+        selected_left, selected_right = [], []
+        if col_map:
+            from .compare import resolve_col_filter
+            resolved = resolve_col_filter(
+                col_map,
+                include_patterns=col_filter.get("include"),
+                exclude_patterns=col_filter.get("exclude"),
+            )
+            selected_left  = [l for l, _ in resolved["pairs"]]
+            selected_right = [r for _, r in resolved["pairs"]]
+
         for side in ["left", "right"]:
             table_cfg = pair_config[side].copy()
 
@@ -159,8 +174,10 @@ def get_all_tables_from_unified(config):
             if col_map:
                 if side == "left":
                     table_cfg["_col_map_columns"] = set(col_map.keys())
+                    table_cfg["_selected_cols"] = selected_left
                 else:
                     table_cfg["_col_map_columns"] = set(col_map.values())
+                    table_cfg["_selected_cols"] = selected_right
 
             source = table_cfg.get("source", "")
             name = table_cfg.get("name", "")
@@ -177,6 +194,18 @@ def get_all_tables_from_unified(config):
                         existing = t.get("_col_map_columns", set())
                         existing.update(table_cfg.get("_col_map_columns", set()))
                         t["_col_map_columns"] = existing
+                        # Union selected_cols across pairs that share the
+                        # same physical table so the single extraction covers
+                        # every pair's subset.
+                        new_sel = table_cfg.get("_selected_cols") or []
+                        if new_sel:
+                            cur = list(t.get("_selected_cols") or [])
+                            seen_cols = {c.lower() for c in cur}
+                            for c in new_sel:
+                                if c.lower() not in seen_cols:
+                                    cur.append(c)
+                                    seen_cols.add(c.lower())
+                            t["_selected_cols"] = cur
                         # If a later pair specifies a finer vintage for the same
                         # table, prefer it (otherwise first-pair vintage wins).
                         if pair_vintage and not t.get("vintage"):

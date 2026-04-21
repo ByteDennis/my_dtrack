@@ -168,10 +168,11 @@ async function loadColumns(name) {
         renderPairBody(name);
         updateStatusBadge(name);
 
-        // Auto-sync if auto-match added new mappings
-        if (Object.keys(autoMatch).length > 0) {
-            debouncedSync(name);
-        }
+        // Always sync so the DB reflects the current merged state (existing
+        // + new auto-matches), even when auto_match returned nothing new.
+        // Previously we only synced on new auto-matches, which left stale
+        // col_mappings in the DB when columns were added later.
+        debouncedSync(name);
     } catch (e) {
         body.innerHTML = `<div class="empty-message" style="color:var(--jp-error-color0);">Error: ${e.message}</div>`;
     }

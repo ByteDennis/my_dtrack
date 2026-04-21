@@ -131,20 +131,36 @@ async function loadPairs() {
             statusMap[p.pair_name] = p;
         }
 
-        pairs = (pairsData.pairs || []).map(p => ({
-            name: p.name,
-            description: p.description || '',
-            left: p.left || {},
-            right: p.right || {},
-            mode: p.mode || 'incremental',
-            vintage: p.vintage || '',
-            fromDate: p.fromDate || '',
-            toDate: p.toDate || '',
-            excludeDates: (p.excludeDates || []).join(', '),
-            selected: false,
-            expanded: false,
-            status: statusMap[p.name] || null,
-        }));
+        // Prefer locally-cached patterns (user may have typed but the server
+        // save is still in flight or failed). Falls back to what the server
+        // has persisted in dtrack.json.
+        const lsCache = (() => {
+            try { return JSON.parse(localStorage.getItem('dtrack_col_filter') || '{}'); }
+            catch { return {}; }
+        })();
+        pairs = (pairsData.pairs || []).map(p => {
+            const serverFilter = p.col_filter || {};
+            const cached = lsCache[p.name] || {};
+            const include = (cached.include && cached.include.length ? cached.include : serverFilter.include || []);
+            const exclude = (cached.exclude && cached.exclude.length ? cached.exclude : serverFilter.exclude || []);
+            return {
+                name: p.name,
+                description: p.description || '',
+                left: p.left || {},
+                right: p.right || {},
+                mode: p.mode || 'incremental',
+                vintage: p.vintage || '',
+                fromDate: p.fromDate || '',
+                toDate: p.toDate || '',
+                excludeDates: (p.excludeDates || []).join(', '),
+                colFilterInclude: include.join(', '),
+                colFilterExclude: exclude.join(', '),
+                filterPreview: null,   // {effective_count, total_mapped, pairs, unmapped_matches}
+                selected: false,
+                expanded: false,
+                status: statusMap[p.name] || null,
+            };
+        });
 
         renderPairs();
     } catch (e) {
@@ -209,6 +225,7 @@ function renderPairs() {
                         Vintage:
                         ${vintageSelect(`vintage-${index}`, pair.vintage, 'width:140px; font-size:12px; padding:2px 4px;')}
                     </label>
+                    <span id="filter-badge-${index}">${filterCountBadge(pair)}</span>
                     ${leftColBadge}
                     ${rightColBadge}
                 </div>
@@ -276,9 +293,209 @@ function renderPairs() {
                             onchange="pairFieldChanged()">
                     </label>
                 </div>
+
+                <!-- COLUMN SELECTION -->
+                <div class="col-filter-section" style="margin-top:12px; padding-top:10px; border-top:1px solid var(--jp-border-color1);"
+                     onclick="event.stopPropagation()">
+                    <div style="font-size:12px; font-weight:600; margin-bottom:6px; color:var(--jp-ui-font-color1);">
+                        COLUMN SELECTION
+                        <span style="font-weight:400; color:var(--jp-ui-font-color3);">
+                            — patterns match LEFT names; RIGHT resolved via col_map
+                        </span>
+                    </div>
+                    <div style="display:flex; gap:12px;">
+                        <label style="flex:1; display:flex; flex-direction:column; gap:2px; font-size:11px;">
+                            Include (empty = all mapped)
+                            <textarea id="filter-include-${index}" rows="2"
+                                placeholder="CUST_*, AMT_*, BAL_EUR"
+                                style="width:100%; font-family:var(--jp-code-font-family); font-size:11px; resize:vertical;"
+                                oninput="onColFilterInput(${index})">${_escapeHtml(pair.colFilterInclude || '')}</textarea>
+                        </label>
+                        <label style="flex:1; display:flex; flex-direction:column; gap:2px; font-size:11px;">
+                            Exclude (applied after include)
+                            <textarea id="filter-exclude-${index}" rows="2"
+                                placeholder="*_AUDIT*, *_TMP"
+                                style="width:100%; font-family:var(--jp-code-font-family); font-size:11px; resize:vertical;"
+                                oninput="onColFilterInput(${index})">${_escapeHtml(pair.colFilterExclude || '')}</textarea>
+                        </label>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px; font-size:11px;">
+                        <span id="filter-summary-${index}" style="color:var(--jp-ui-font-color2);">
+                            ${filterSummaryText(pair)}
+                        </span>
+                        <button class="btn-text" onclick="togglePreview(${index})" style="font-size:11px;">
+                            <span id="filter-preview-caret-${index}">&#9654;</span> Preview pairs
+                        </button>
+                    </div>
+                    <div id="filter-preview-${index}" style="display:none; margin-top:6px;"></div>
+                </div>
             </div>
         </div>`;
     }).join('');
+
+    // Trigger a preview for each expanded pair (shows initial effective count).
+    pairs.forEach((p, i) => { if (p.expanded) requestFilterPreview(i); });
+}
+
+// ---------------------------------------------------------------------------
+// Col-filter header badge + summary line + debounced preview
+// ---------------------------------------------------------------------------
+function filterCountBadge(pair) {
+    const prev = pair.filterPreview;
+    if (!prev) return '';
+    const n = prev.effective_count;
+    const total = prev.total_mapped || 0;
+    if (total === 0) return '';
+    const isFull = n === total && !(pair.colFilterInclude || pair.colFilterExclude);
+    if (isFull) return `<span class="status-badge ready">${total} pairs</span>`;
+    const kind = n > 0 ? 'ready' : 'warning';
+    return `<span class="status-badge ${kind}">${n}/${total} pairs</span>`;
+}
+
+function filterSummaryText(pair) {
+    const prev = pair.filterPreview;
+    if (!prev) return 'Loading preview...';
+    const n = prev.effective_count, total = prev.total_mapped || 0;
+    if (total === 0) return 'No col_map for this pair yet — define mappings in Col Mapping first.';
+    const extra = prev.unmapped_matches && prev.unmapped_matches.length
+        ? ` — ${prev.unmapped_matches.length} pattern match(es) NOT in col_map (ignored)`
+        : '';
+    return `Effective: ${n} / ${total} mapped pairs${extra}`;
+}
+
+const _filterDebounce = {};
+const _filterSaveDebounce = {};
+const _LS_KEY = 'dtrack_col_filter';  // localStorage namespace
+
+function _lsReadAll() {
+    try { return JSON.parse(localStorage.getItem(_LS_KEY) || '{}'); }
+    catch { return {}; }
+}
+function _lsWrite(pairName, include, exclude) {
+    const all = _lsReadAll();
+    if ((include || []).length || (exclude || []).length) {
+        all[pairName] = {include, exclude};
+    } else {
+        delete all[pairName];
+    }
+    try { localStorage.setItem(_LS_KEY, JSON.stringify(all)); } catch {}
+}
+
+function onColFilterInput(index) {
+    const pair = pairs[index];
+    pair.colFilterInclude = document.getElementById(`filter-include-${index}`).value;
+    pair.colFilterExclude = document.getElementById(`filter-exclude-${index}`).value;
+
+    // Mirror to localStorage immediately (synchronous, survives reload even if
+    // the server write is still in flight).
+    const parseList = s => (s || '').split(/[,\n;]/).map(t => t.trim()).filter(Boolean);
+    _lsWrite(pair.name, parseList(pair.colFilterInclude), parseList(pair.colFilterExclude));
+
+    clearTimeout(_filterDebounce[index]);
+    _filterDebounce[index] = setTimeout(() => requestFilterPreview(index), 300);
+    // Persist to dtrack.json so patterns survive page reload without
+    // needing to click Generate. Slower debounce to avoid chatty writes.
+    clearTimeout(_filterSaveDebounce[index]);
+    _filterSaveDebounce[index] = setTimeout(() => saveColFilter(index), 1000);
+}
+
+async function saveColFilter(index) {
+    const pair = pairs[index];
+    const parseList = s => (s || '').split(/[,\n;]/).map(t => t.trim()).filter(Boolean);
+    const include = parseList(pair.colFilterInclude);
+    const exclude = parseList(pair.colFilterExclude);
+    const col_filter = (include.length || exclude.length) ? {include, exclude} : null;
+    try {
+        await fetch(`/api/pairs/${encodeURIComponent(pair.name)}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({col_filter}),
+        });
+    } catch (e) {
+        console.error('[col_filter] save failed:', e);
+    }
+}
+
+async function requestFilterPreview(index) {
+    const pair = pairs[index];
+    const parseList = s => (s || '').split(/[,\n;]/).map(t => t.trim()).filter(Boolean);
+    const include = parseList(pair.colFilterInclude);
+    const exclude = parseList(pair.colFilterExclude);
+    try {
+        const resp = await fetch(`/api/pairs/${encodeURIComponent(pair.name)}/col_filter/preview`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({include, exclude}),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || 'preview failed');
+        pair.filterPreview = data;
+        updateFilterSummary(index);
+    } catch (e) {
+        console.error('[col_filter] preview failed:', e);
+    }
+}
+
+function updateFilterSummary(index) {
+    const pair = pairs[index];
+    const sum = document.getElementById(`filter-summary-${index}`);
+    if (sum) sum.textContent = filterSummaryText(pair);
+    const badge = document.getElementById(`filter-badge-${index}`);
+    if (badge) badge.innerHTML = filterCountBadge(pair);
+    const preview = document.getElementById(`filter-preview-${index}`);
+    if (preview && preview.style.display !== 'none') renderPreviewBody(index);
+}
+
+function togglePreview(index) {
+    const panel = document.getElementById(`filter-preview-${index}`);
+    const caret = document.getElementById(`filter-preview-caret-${index}`);
+    if (!panel) return;
+    const visible = panel.style.display !== 'none';
+    panel.style.display = visible ? 'none' : '';
+    if (caret) caret.innerHTML = visible ? '&#9654;' : '&#9660;';
+    if (!visible) renderPreviewBody(index);
+}
+
+function renderPreviewBody(index) {
+    const pair = pairs[index];
+    const panel = document.getElementById(`filter-preview-${index}`);
+    if (!panel) return;
+    const prev = pair.filterPreview;
+    if (!prev) { panel.innerHTML = '<div class="empty-message">Loading...</div>'; return; }
+    const rows = (prev.pairs || []).slice(0, 20).map(p =>
+        `<tr><td style="padding:2px 8px;">${_escapeHtml(p.left)}</td>` +
+        `<td style="padding:2px 4px; color:var(--jp-ui-font-color3);">&rarr;</td>` +
+        `<td style="padding:2px 8px;">${_escapeHtml(p.right)}${
+            p.left.toLowerCase() !== p.right.toLowerCase()
+                ? ' <span style="color:var(--jp-warn-color0); font-size:10px;">renamed</span>'
+                : ''
+        }</td></tr>`
+    ).join('');
+    const moreMsg = prev.pairs.length > 20
+        ? `<div style="color:var(--jp-ui-font-color3); padding:4px 8px; font-size:10px;">
+             …first 20 shown, ${prev.pairs.length - 20} more
+           </div>` : '';
+    const warnMsg = (prev.unmapped_matches || []).length
+        ? `<div style="color:var(--jp-warn-color0); padding:6px 8px; font-size:11px; border-top:1px solid var(--jp-border-color1); margin-top:4px;">
+             &#9888; ${prev.unmapped_matches.length} pattern match(es) NOT in col_map — ignored:<br>
+             <span style="font-family:var(--jp-code-font-family); font-size:10px;">
+               ${prev.unmapped_matches.slice(0, 30).map(_escapeHtml).join(', ')}
+               ${prev.unmapped_matches.length > 30 ? ', …' : ''}
+             </span>
+           </div>` : '';
+    panel.innerHTML = `
+        <div style="border:1px solid var(--jp-border-color1); border-radius:4px; background:var(--jp-layout-color1); font-size:11px;">
+            <table style="width:100%; border-collapse:collapse;">
+                <thead><tr style="background:var(--jp-layout-color2);">
+                    <th style="text-align:left; padding:3px 8px;">LEFT</th>
+                    <th></th>
+                    <th style="text-align:left; padding:3px 8px;">RIGHT</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+            ${moreMsg}
+            ${warnMsg}
+        </div>`;
 }
 
 // Read edited per-pair values back into the pairs array
@@ -339,6 +556,11 @@ async function savePairSettings(selected) {
         try {
             // Parse exclude dates string into array
             const excludeArr = (pair.excludeDates || '').split(/[,;\s]+/).map(s => s.trim()).filter(Boolean);
+            const parseList = s => (s || '').split(/[,\n;]/).map(t => t.trim()).filter(Boolean);
+            const include = parseList(pair.colFilterInclude);
+            const exclude = parseList(pair.colFilterExclude);
+            const col_filter = (include.length || exclude.length) ? {include, exclude} : null;
+
             await fetch(`/api/pairs/${pair.name}`, {
                 method: 'PUT',
                 headers: {'Content-Type': 'application/json'},
@@ -350,6 +572,7 @@ async function savePairSettings(selected) {
                     fromDate: pair.fromDate,
                     toDate: pair.toDate,
                     excludeDates: excludeArr,
+                    col_filter,
                 }),
             });
             return {name: pair.name, ok: true};
@@ -400,11 +623,12 @@ async function generateAll() {
     const awsSources = new Set(['aws', 'csv']);
     const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
 
-    // Use the widest date range across all selected pairs for SQL generation
-    const allFroms = selected.map(p => p.fromDate || globalFrom).filter(Boolean);
-    const allTos = selected.map(p => p.toDate || globalTo).filter(Boolean);
-    const effectiveFrom = allFroms.length ? allFroms.sort()[0] : '';
-    const effectiveTo = allTos.length ? allTos.sort().reverse()[0] : '';
+    // The backend resolves per-pair fromDate/toDate from the config (set by
+    // each card's From/To inputs via savePairSettings above). We only pass
+    // the GLOBAL defaults here as a fallback for pairs that don't set their
+    // own — do not flatten per-pair dates into a single widest range.
+    const effectiveFrom = globalFrom;
+    const effectiveTo = globalTo;
 
     try {
         const genBody = {

@@ -363,6 +363,23 @@ async def api_generate_files(request: Request):
             else:
                 filtered_config = config
 
+            # col_map and col_filter live in _table_pairs, not dtrack.json.
+            # Hydrate them into the in-memory config so get_all_tables_from_unified
+            # can resolve include/exclude patterns and produce _selected_cols.
+            from ..db import get_pair_col_map_from_db, get_pair_col_filter
+            for pname, pcfg in filtered_config.get("pairs", {}).items():
+                if not pcfg.get("col_map"):
+                    db_map = get_pair_col_map_from_db(_db_path, pname)
+                    if db_map:
+                        pcfg["col_map"] = db_map
+                if not pcfg.get("col_filter"):
+                    cf = get_pair_col_filter(_db_path, pname)
+                    if cf.get("include") or cf.get("exclude"):
+                        pcfg["col_filter"] = cf
+                print(f"[hydrate] {pname}: "
+                      f"col_map={len(pcfg.get('col_map') or {})} entries, "
+                      f"col_filter={pcfg.get('col_filter') or 'NONE'}")
+
             all_tables = load_tables_from_config(filtered_config)
             inject_where_from_config(all_tables, filtered_config)
 
@@ -375,36 +392,54 @@ async def api_generate_files(request: Request):
                         tbl['_exclude_dates'] = exc
                         break
 
-            # Inject date bounds
-            if from_date or to_date:
-                for tbl in all_tables:
-                    date_col = tbl.get('date_col', '')
-                    if not date_col:
-                        continue
-                    date_type = (tbl.get('date_type') or '').lower()
-                    source = tbl.get('source', '').lower()
-                    bounds = []
-                    if source == 'aws':
-                        from ..platforms.athena import _format_athena_date_bound
-                        if from_date:
-                            bounds.append(f"{date_col} >= {_format_athena_date_bound(from_date, date_type, is_upper=False)}")
-                        if to_date:
-                            bounds.append(f"{date_col} <= {_format_athena_date_bound(to_date, date_type, is_upper=True)}")
-                    else:
-                        from ..platforms.oracle import _format_date_bound, is_sas_table
-                        is_sas = is_sas_table(tbl)
-                        if from_date:
-                            bounds.append(f"{date_col} >= {_format_date_bound(from_date, date_type, is_sas, is_upper=False)}")
-                        if to_date:
-                            bounds.append(f"{date_col} <= {_format_date_bound(to_date, date_type, is_sas, is_upper=True)}")
-                    if bounds:
-                        extra = " AND ".join(bounds)
-                        existing = tbl.get('where', '').strip()
-                        tbl['where'] = f"({existing}) AND {extra}" if existing else extra
-                    # Stash canonical from/to so col-stats can synthesize
-                    # vintage buckets when no row-compare data is loaded yet.
-                    tbl['_from_date'] = from_date
-                    tbl['_to_date'] = to_date
+            # Inject date bounds. Per-pair fromDate/toDate (set on the card)
+            # overrides the request-level globals; when a pair has neither
+            # its own nor a global value, the table skips the bound.
+            for tbl in all_tables:
+                date_col = tbl.get('date_col', '')
+                if not date_col:
+                    continue
+                # Resolve per-pair dates from the first pair this table
+                # belongs to. In multi-pair-per-table cases the first
+                # pair's dates win (same behavior as col_filter dedup).
+                pair_from, pair_to = None, None
+                for pn in tbl.get('_pairs', []):
+                    pc = filtered_config.get('pairs', {}).get(pn, {})
+                    pair_from = pc.get('fromDate') or pair_from
+                    pair_to = pc.get('toDate') or pair_to
+                    if pair_from and pair_to:
+                        break
+                eff_from = pair_from or from_date
+                eff_to   = pair_to   or to_date
+                if not (eff_from or eff_to):
+                    continue
+
+                date_type = (tbl.get('date_type') or '').lower()
+                source = tbl.get('source', '').lower()
+                bounds = []
+                if source == 'aws':
+                    from ..platforms.athena import _format_athena_date_bound
+                    if eff_from:
+                        bounds.append(f"{date_col} >= {_format_athena_date_bound(eff_from, date_type, is_upper=False)}")
+                    if eff_to:
+                        bounds.append(f"{date_col} <= {_format_athena_date_bound(eff_to, date_type, is_upper=True)}")
+                else:
+                    from ..platforms.oracle import _format_date_bound, is_sas_table
+                    is_sas = is_sas_table(tbl)
+                    if eff_from:
+                        bounds.append(f"{date_col} >= {_format_date_bound(eff_from, date_type, is_sas, is_upper=False)}")
+                    if eff_to:
+                        bounds.append(f"{date_col} <= {_format_date_bound(eff_to, date_type, is_sas, is_upper=True)}")
+                if bounds:
+                    extra = " AND ".join(bounds)
+                    existing = tbl.get('where', '').strip()
+                    tbl['where'] = f"({existing}) AND {extra}" if existing else extra
+                # Stash the resolved from/to so col-stats can synthesize
+                # vintage buckets when no row-compare data is loaded yet.
+                tbl['_from_date'] = eff_from
+                tbl['_to_date'] = eff_to
+                print(f"[date bounds] {tbl['name']}: from={eff_from} to={eff_to} "
+                      f"(source: {'pair' if (pair_from or pair_to) else 'global'})")
 
             # Generate SAS file — use filtered config if pairs selected
             oracle_tables = [t for t in all_tables
@@ -855,6 +890,9 @@ async def api_list_pairs():
                 p = side_cfg.get("processed", "")
                 if isinstance(p, list):
                     side_cfg["processed"] = "\n".join(p)
+            # col_filter lives in _table_pairs (not config). Fetch per-pair.
+            from ..db import get_pair_col_filter
+            cf = get_pair_col_filter(_db_path, pair_name)
             pairs_list.append({
                 "name": pair_name,
                 "description": pair_cfg.get("description", ""),
@@ -862,6 +900,7 @@ async def api_list_pairs():
                 "right": pair_cfg.get("right", {}),
                 "mode": pair_cfg.get("mode", "incremental"),
                 "vintage": pair_cfg.get("vintage", ""),
+                "col_filter": cf if (cf.get("include") or cf.get("exclude")) else None,
                 "dateRangeMode": pair_cfg.get("dateRangeMode", "global"),
                 "fromDate": pair_cfg.get("fromDate", ""),
                 "toDate": pair_cfg.get("toDate", ""),
@@ -896,7 +935,8 @@ async def api_update_pair(pair_name: str, request: Request):
 
         # Update only valid pair-config keys (not frontend-only fields like pair_name)
         _PAIR_KEYS = {"left", "right", "col_map", "description", "mode",
-                       "vintage", "fromDate", "toDate", "dateRangeMode", "overlap",
+                       "vintage",
+                       "fromDate", "toDate", "dateRangeMode", "overlap",
                        "skip", "ignore_rows", "ignore_columns",
                        "col_type_overrides", "where_map", "time_map",
                        "comment_map", "diff_map", "excludeDates"}
@@ -954,6 +994,19 @@ async def api_update_pair(pair_name: str, request: Request):
                         "vintage": pair_vintage,
                         "data_type": "row",
                     })
+
+        # Save col_filter AFTER register_table_pair — so even if that path
+        # somehow wipes the columns again, our write is the last one and
+        # persists. Surface errors to the frontend instead of swallowing.
+        if "col_filter" in body:
+            from ..db import save_pair_col_filter
+            cf = body.get("col_filter") or {}
+            save_pair_col_filter(
+                _db_path, pair_name,
+                include=cf.get("include"),
+                exclude=cf.get("exclude"),
+            )
+            print(f"[col_filter] {pair_name}: include={cf.get('include')} exclude={cf.get('exclude')}")
 
         return {"ok": True, "pair_name": pair_name}
     except Exception as e:
@@ -3346,6 +3399,67 @@ def _preview_date_literal(date_str, date_type, is_sas=False, source=""):
 # ---------------------------------------------------------------------------
 # Column Mapping API
 # ---------------------------------------------------------------------------
+
+@app.post("/api/pairs/{pair_name}/col_filter/preview")
+async def api_col_filter_preview(pair_name: str, request: Request):
+    """Resolve include/exclude patterns against the pair's col_map and return
+    the effective (left → right) pairs plus a warning for patterns that hit
+    left columns not in col_map.
+
+    Body: {"include": ["CUST_*", ...], "exclude": ["*_AUDIT*", ...]}
+    """
+    from fnmatch import fnmatch
+
+    body = await request.json()
+    include = [p.strip() for p in (body.get("include") or []) if p and p.strip()]
+    exclude = [p.strip() for p in (body.get("exclude") or []) if p and p.strip()]
+    try:
+        from ..config import load_unified_config
+        from ..db import get_table_pair, get_column_meta, get_pair_col_map_from_db
+        from ..compare import resolve_col_filter
+
+        config = load_unified_config(_config_path)
+        pair_cfg = config.get("pairs", {}).get(pair_name)
+        if not pair_cfg:
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+
+        # Prefer DB-stored col_map (col_mapping page writes there), fall back
+        # to the one in the JSON config if it exists.
+        col_map = get_pair_col_map_from_db(_db_path, pair_name) or pair_cfg.get("col_map") or {}
+
+        resolved = resolve_col_filter(col_map, include, exclude)
+        pairs = resolved["pairs"]
+
+        # Patterns can also name left cols that aren't in col_map — e.g. the
+        # user picked a column that hasn't been mapped. Surface that so the
+        # card can warn explicitly.
+        unmapped_matches = []
+        if include:
+            pair = get_table_pair(_db_path, pair_name)
+            left_meta = get_column_meta(_db_path, pair["table_left"]) if pair else []
+            mapped_left_lower = {l.lower() for l in col_map}
+            include_lower = [p.lower() for p in include]
+            for cm in left_meta:
+                cn = cm["column_name"]
+                cnl = cn.lower()
+                if cnl in mapped_left_lower:
+                    continue
+                if any(fnmatch(cnl, p) for p in include_lower):
+                    # But if also in exclude, skip
+                    if any(fnmatch(cnl, p.lower()) for p in exclude):
+                        continue
+                    unmapped_matches.append(cn)
+
+        return {
+            "ok": True,
+            "total_mapped": resolved["total_mapped"],
+            "effective_count": resolved["effective_count"],
+            "pairs": [{"left": l, "right": r} for l, r in pairs],
+            "unmapped_matches": sorted(unmapped_matches, key=str.lower),
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 @app.get("/api/pairs/{pair_name}/columns")
 async def api_get_pair_columns(pair_name: str):

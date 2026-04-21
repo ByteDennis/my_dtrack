@@ -332,7 +332,7 @@ def _gen_sas_row_datadriven(oracle_tables, sas_lib='WORK', out_dir='.'):
     parts = []
 
     if oracle_datalines:
-        with open(os.path.join(tpl_dir, 'rows_oracle.sas')) as f:
+        with open(os.path.join(tpl_dir, 'rows_oracle.sas'), encoding='utf-8') as f:
             tpl = f.read()
         tpl = tpl.replace('/*{CTE_VARS}*/', '\n'.join(cte_lines))
         tpl = tpl.replace('/*{ROW_REDO}*/', redo)
@@ -340,7 +340,7 @@ def _gen_sas_row_datadriven(oracle_tables, sas_lib='WORK', out_dir='.'):
         parts.append(tpl)
 
     if sas_datalines:
-        with open(os.path.join(tpl_dir, 'rows_sas.sas')) as f:
+        with open(os.path.join(tpl_dir, 'rows_sas.sas'), encoding='utf-8') as f:
             tpl = f.read()
         # If Oracle block already emitted redo, don't duplicate
         if oracle_datalines:
@@ -380,7 +380,7 @@ def _gen_sas_row_hadoop(hadoop_tables, sas_lib='WORK', out_dir='.'):
     redo = str(int(os.environ.get('SAS_ROW_REDO', '0')))
     tpl_dir = os.path.join(os.path.dirname(__file__), 'templates')
 
-    with open(os.path.join(tpl_dir, 'rows_hadoop.sas')) as f:
+    with open(os.path.join(tpl_dir, 'rows_hadoop.sas'), encoding='utf-8') as f:
         tpl = f.read()
     tpl = tpl.replace('/*{CTE_VARS}*/', '')
     tpl = tpl.replace('/*{ROW_REDO}*/', redo)
@@ -388,8 +388,610 @@ def _gen_sas_row_hadoop(hadoop_tables, sas_lib='WORK', out_dir='.'):
     return tpl
 
 
+def _date_trunc_expr(source, date_col, date_type, vintage):
+    """SQL expression that truncates date_col to the vintage unit and
+    returns a 'YYYY-MM-DD' string. Goes in SELECT/GROUP BY ONLY -- WHERE
+    stays bare so partition pruning still works.
+
+    Returns None when the (source, date_type, vintage) combination isn't
+    supported; the caller falls back to per-bucket mode.
+
+    Supported:
+      oracle + any standard date_type + {day,week,month,quarter,year}
+      hadoop + string_compact YYYYMMDD     + {day,month,quarter,year}
+      hadoop + string_dash YYYY-MM-DD       + {day,month,year}
+    """
+    src = (source or '').lower()
+    dtype = (date_type or '').lower()
+
+    if vintage not in ('day', 'week', 'month', 'quarter', 'year'):
+        return None
+
+    if src == 'oracle':
+        if dtype == 'string_compact':
+            parsed = f"TO_DATE({date_col}, 'YYYYMMDD')"
+        elif dtype in ('num', 'integer', 'int', 'number'):
+            parsed = f"TO_DATE(TO_CHAR({date_col}), 'YYYYMMDD')"
+        elif dtype in ('string_dash', 'string'):
+            parsed = f"TO_DATE({date_col}, 'YYYY-MM-DD')"
+        elif dtype in ('date', 'timestamp', 'datetime'):
+            parsed = date_col
+        else:
+            return None
+        unit_map = {'day': 'DD', 'week': 'IW', 'month': 'MM',
+                    'quarter': 'Q', 'year': 'YYYY'}
+        unit = unit_map[vintage]
+        return f"TO_CHAR(TRUNC({parsed}, '{unit}'), 'YYYY-MM-DD')"
+
+    if src == 'hadoop':
+        if dtype == 'string_compact':
+            if vintage == 'day':
+                return (f"concat(substr({date_col},1,4),'-',"
+                        f"substr({date_col},5,2),'-',substr({date_col},7,2))")
+            if vintage == 'month':
+                return (f"concat(substr({date_col},1,4),'-',"
+                        f"substr({date_col},5,2),'-01')")
+            if vintage == 'year':
+                return f"concat(substr({date_col},1,4),'-01-01')"
+            if vintage == 'quarter':
+                return (f"concat(substr({date_col},1,4),'-',"
+                        f"case when substr({date_col},5,2) in ('01','02','03') then '01' "
+                        f"when substr({date_col},5,2) in ('04','05','06') then '04' "
+                        f"when substr({date_col},5,2) in ('07','08','09') then '07' "
+                        f"else '10' end,'-01')")
+            if vintage == 'week':
+                # Monday-anchored (Hive date_trunc 'week' follows ISO).
+                # Requires Hive 2.1+ for date_trunc.
+                parsed = f"from_unixtime(unix_timestamp({date_col},'yyyyMMdd'))"
+                return f"date_format(date_trunc('week',{parsed}),'yyyy-MM-dd')"
+        if dtype in ('string_dash', 'string'):
+            if vintage == 'day':
+                return date_col
+            if vintage == 'month':
+                return f"concat(substr({date_col},1,7),'-01')"
+            if vintage == 'year':
+                return f"concat(substr({date_col},1,4),'-01-01')"
+            if vintage == 'quarter':
+                return (f"concat(substr({date_col},1,4),'-',"
+                        f"case when substr({date_col},6,2) in ('01','02','03') then '01' "
+                        f"when substr({date_col},6,2) in ('04','05','06') then '04' "
+                        f"when substr({date_col},6,2) in ('07','08','09') then '07' "
+                        f"else '10' end,'-01')")
+            if vintage == 'week':
+                return f"date_format(date_trunc('week',cast({date_col} as date)),'yyyy-MM-dd')"
+        return None
+
+    return None
+
+
+_SAS_COL_HELPERS = r"""
+/* =====================================================================
+ * Shared helper macros for column stats -- used by the flat-driver runner.
+ * Emitted once per extract_col.sas (not per-table) so every (qname, bucket,
+ * col) row can dispatch through a common pull+aggregate path.
+ * ===================================================================== */
+
+%macro _col_numeric(raw_ds=, col=, out_ds=);
+    proc sql noprint;
+        create table &out_ds as
+        select dt,
+            "&col" as column_name length=32,
+            'numeric' as col_type length=32,
+            count(*) as n_total,
+            count(*) - count(&col) as n_missing,
+            count(distinct &col) as n_unique,
+            avg(&col) as mean,
+            std(&col) as std,
+            strip(put(min(&col), best32.)) as min_val length=200,
+            strip(put(max(&col), best32.)) as max_val length=200,
+            '' as top_10 length=2000
+        from &raw_ds
+        group by dt;
+    quit;
+%mend _col_numeric;
+
+%macro _col_categorical(raw_ds=, col=, out_ds=);
+    proc sql noprint;
+        create table _freq_raw_ as
+        select dt, &col as p_col, count(*) as value_freq
+        from &raw_ds
+        group by dt, &col;
+    quit;
+    proc sort data=_freq_raw_ out=_freq_sorted_;
+        by dt descending value_freq p_col;
+    run;
+    data _t10_(keep=dt top_10);
+        length top_10 $2000 _entry $200;
+        set _freq_sorted_; by dt;
+        where p_col is not missing;
+        retain top_10 _rn;
+        if first.dt then do; top_10=''; _rn=0; end;
+        if _rn < 10 then do;
+            _rn + 1;
+            _entry = cats(strip(vvalue(p_col)), '(', strip(put(value_freq, best.)), ')');
+            if top_10 = '' then top_10 = _entry;
+            else top_10 = catx('; ', top_10, _entry);
+        end;
+        if last.dt then output;
+    run;
+    proc sql noprint;
+        create table _agg_ as
+        select dt,
+            "&col" as column_name length=32,
+            'categorical' as col_type length=32,
+            sum(value_freq) as n_total,
+            sum(case when p_col is not missing then 1 else 0 end) as n_unique,
+            avg(value_freq) as mean,
+            std(value_freq) as std,
+            strip(put(min(value_freq), best32.)) as min_val length=200,
+            strip(put(max(value_freq), best32.)) as max_val length=200
+        from _freq_raw_ group by dt;
+    quit;
+    proc sql noprint;
+        create table _miss_ as
+        select dt, coalesce(value_freq, 0) as n_missing
+        from _freq_raw_ where p_col is missing;
+    quit;
+    proc sort data=_agg_; by dt; run;
+    proc sort data=_t10_; by dt; run;
+    proc sort data=_miss_; by dt; run;
+    data &out_ds;
+        merge _agg_(in=a) _t10_(in=b) _miss_(in=c);
+        by dt;
+        if a;
+        if not b then top_10='';
+        if not c then n_missing=0;
+    run;
+    proc datasets lib=work nolist;
+        delete _freq_raw_ _freq_sorted_ _t10_ _agg_ _miss_;
+    quit;
+%mend _col_categorical;
+
+/* _pull_one_col reads driver-row values from macro vars (set by the dispatcher)
+ * and does: pull -> aggregate one col -> append to per-qname cache dataset.
+ * &_source selects the engine: sas | oracle | hadoop. Hadoop uses its own
+ * `connect to hadoop` passthrough (NOT %pull_data, which is Oracle-only).
+ */
+%macro _pull_one_col();
+    %if %upcase(&_mode) = GROUPED %then %do;
+        %if %upcase(&_coltype) = NUMERIC %then %_pull_grouped_numeric();
+        %else %_pull_grouped_categorical();
+        %return;
+    %end;
+
+    /* ---- bucket mode: per-(bucket, col) raw pull + SAS-side aggregate ---- */
+    %local _raw _cache;
+    %let _raw = _raw_onecol;
+    %let _cache = cache._cs_&_qname;
+
+    %if %upcase(&_source) = SAS %then %do;
+        proc sql noprint;
+            create table &_raw as
+            select "&_dt_label" as dt, &_col
+            from &_sas_table
+            where &_date_where
+            %if %length(%superq(_base_where)) > 0 %then AND (&_base_where) ;
+            ;
+        quit;
+    %end;
+    %else %if %upcase(&_source) = HADOOP %then %do;
+        proc sql;
+            connect to hadoop (%&_conn_macro);
+            create table &_raw as
+            select * from connection to hadoop (
+                SELECT "&_dt_label" AS dt, &_col
+                FROM &_sas_table
+                WHERE &_date_where
+                %if %length(%superq(_base_where)) > 0 %then AND (&_base_where) ;
+            );
+            disconnect from hadoop;
+        quit;
+    %end;
+    %else %do;
+        /* oracle -- goes through %pull_data for cache/redo handling */
+        %local _full_sql;
+        %let _full_sql = SELECT "&_dt_label" AS dt, &_col FROM &_sas_table WHERE &_date_where;
+        %if %length(%superq(_base_where)) > 0 %then
+            %let _full_sql = &_full_sql AND (&_base_where);
+        %pull_data(%superq(_full_sql), &_raw, server=&_conn_macro);
+    %end;
+
+    %if %upcase(&_coltype) = NUMERIC %then %do;
+        %_col_numeric(raw_ds=&_raw, col=&_col, out_ds=_cstat);
+    %end;
+    %else %do;
+        %_col_categorical(raw_ds=&_raw, col=&_col, out_ds=_cstat);
+    %end;
+
+    proc append base=&_cache data=_cstat force; run;
+    proc delete data=&_raw _cstat; run;
+%mend _pull_one_col;
+
+
+/* Grouped numeric: ONE SQL that returns pre-aggregated stats per bucket.
+ * Uses &_dt_expr (platform-specific truncate expression) in SELECT/GROUP BY;
+ * WHERE stays bare so partition pruning still works.
+ */
+%macro _pull_grouped_numeric();
+    %local _cache _sql;
+    %let _cache = cache._cs_&_qname;
+
+    %let _sql = SELECT &_dt_expr AS dt,
+                       COUNT(*) AS n_total,
+                       COUNT(*) - COUNT(&_col) AS n_missing,
+                       COUNT(DISTINCT &_col) AS n_unique,
+                       AVG(&_col) AS mean,
+                       STDDEV(&_col) AS std,
+                       MIN(&_col) AS min_val,
+                       MAX(&_col) AS max_val
+                FROM &_sas_table
+                WHERE &_date_where
+                %if %length(%superq(_base_where)) > 0 %then AND (&_base_where) ;
+                GROUP BY &_dt_expr;
+
+    %if %upcase(&_source) = HADOOP %then %do;
+        proc sql;
+            connect to hadoop (%&_conn_macro);
+            create table _grp_one as
+            select * from connection to hadoop (&_sql);
+            disconnect from hadoop;
+        quit;
+    %end;
+    %else %do;
+        %pull_data(%superq(_sql), _grp_one, server=&_conn_macro);
+    %end;
+
+    /* Widen to cache schema (column_name/col_type/min_val/max_val/top_10). */
+    data _cstat;
+        length column_name $32 col_type $32 min_val $200 max_val $200 top_10 $2000;
+        set _grp_one;
+        column_name = "&_col";
+        col_type = 'numeric';
+        min_val = strip(put(min_val, best32.));
+        max_val = strip(put(max_val, best32.));
+        top_10 = '';
+    run;
+    proc append base=&_cache data=_cstat force; run;
+    proc delete data=_grp_one _cstat; run;
+%mend _pull_grouped_numeric;
+
+
+/* Grouped categorical: DB returns (dt, col_value, value_freq) rows; SAS
+ * computes top-10 per dt and rolls up stats locally (cheap -- dozens of
+ * rows per bucket at most). Skips the big GROUP BY we used to do in SAS.
+ */
+%macro _pull_grouped_categorical();
+    %local _cache _sql;
+    %let _cache = cache._cs_&_qname;
+
+    %let _sql = SELECT &_dt_expr AS dt, &_col AS p_col, COUNT(*) AS value_freq
+                FROM &_sas_table
+                WHERE &_date_where
+                %if %length(%superq(_base_where)) > 0 %then AND (&_base_where) ;
+                GROUP BY &_dt_expr, &_col;
+
+    %if %upcase(&_source) = HADOOP %then %do;
+        proc sql;
+            connect to hadoop (%&_conn_macro);
+            create table _freq_raw_ as
+            select * from connection to hadoop (&_sql);
+            disconnect from hadoop;
+        quit;
+    %end;
+    %else %do;
+        %pull_data(%superq(_sql), _freq_raw_, server=&_conn_macro);
+    %end;
+
+    /* Same top-10 + rollup logic as %_col_categorical, skipping its first
+     * "build freq" step (DB already did it). */
+    proc sort data=_freq_raw_ out=_freq_sorted_;
+        by dt descending value_freq p_col;
+    run;
+    data _t10_(keep=dt top_10);
+        length top_10 $2000 _entry $200;
+        set _freq_sorted_; by dt;
+        where p_col is not missing;
+        retain top_10 _rn;
+        if first.dt then do; top_10=''; _rn=0; end;
+        if _rn < 10 then do;
+            _rn + 1;
+            _entry = cats(strip(vvalue(p_col)), '(', strip(put(value_freq, best.)), ')');
+            if top_10 = '' then top_10 = _entry;
+            else top_10 = catx('; ', top_10, _entry);
+        end;
+        if last.dt then output;
+    run;
+    proc sql noprint;
+        create table _agg_ as
+        select dt,
+            "&_col" as column_name length=32,
+            'categorical' as col_type length=32,
+            sum(value_freq) as n_total,
+            sum(case when p_col is not missing then 1 else 0 end) as n_unique,
+            avg(value_freq) as mean,
+            std(value_freq) as std,
+            strip(put(min(value_freq), best32.)) as min_val length=200,
+            strip(put(max(value_freq), best32.)) as max_val length=200
+        from _freq_raw_ group by dt;
+    quit;
+    proc sql noprint;
+        create table _miss_ as
+        select dt, coalesce(value_freq, 0) as n_missing
+        from _freq_raw_ where p_col is missing;
+    quit;
+    proc sort data=_agg_; by dt; run;
+    proc sort data=_t10_; by dt; run;
+    proc sort data=_miss_; by dt; run;
+    data _cstat;
+        merge _agg_(in=a) _t10_(in=b) _miss_(in=c);
+        by dt;
+        if a;
+        if not b then top_10='';
+        if not c then n_missing=0;
+    run;
+    proc append base=&_cache data=_cstat force; run;
+    proc datasets lib=work nolist;
+        delete _freq_raw_ _freq_sorted_ _t10_ _agg_ _miss_ _cstat;
+    quit;
+%mend _pull_grouped_categorical;
+
+%macro _export_col_stats(qname=, outdir=);
+    %if %sysfunc(exist(cache._cs_&qname)) %then %do;
+        data _colstats_;
+            set cache._cs_&qname;
+            length dt_fmt $10;
+            if vtype(dt)='N' then dt_fmt = put(dt, yymmdd10.);
+            else dt_fmt = strip(vvalue(dt));
+            drop dt; rename dt_fmt = dt;
+        run;
+        proc export data=_colstats_
+            outfile="&outdir./&qname._col.csv"
+            dbms=csv replace;
+        run;
+        proc delete data=_colstats_; run;
+        %put NOTE: Exported col stats for &qname to &outdir./&qname._col.csv;
+    %end;
+    %else %do;
+        %put WARNING: No cache found for &qname -- nothing exported;
+    %end;
+%mend _export_col_stats;
+"""
+
+
+def _gen_sas_col_driver(tables, db_path=None, out_dir='.'):
+    """Emit a flat-driver SAS block that replaces per-table get_colstats_SN
+    macros with ONE cross-table driver dataset + a single dispatcher.
+
+    Driver has one row per (qname, bucket, col). Dispatcher reads each row,
+    queues a data-step that symputxes driver-row values into macro vars,
+    then invokes %_pull_one_col (shared helper above). Per-qname CSV export
+    runs at the end from cache._cs_<qname>.
+    """
+    from .base import (build_date_range_with_gaps, build_date_between_clause,
+                       build_date_in_clause, compute_date_filter,
+                       resolve_date_format)
+
+    driver_rows = []
+    qnames_order = []  # preserve order for CSV export calls
+
+    for tbl_cfg in tables:
+        name = tbl_cfg['name']
+        qname = qualified_name(tbl_cfg)
+        date_col = tbl_cfg['date_col']
+        vintage = tbl_cfg.get('vintage', 'all') or 'all'
+        conn_macro = tbl_cfg.get('conn_macro', 'pb23')
+        columns = tbl_cfg.get('columns', {})
+        where = tbl_cfg.get('where', '')
+        date_bounds = tbl_cfg.get('_date_bounds', '')
+        base_where = where
+        if date_bounds:
+            base_where = f"({where}) AND {date_bounds}" if where.strip() else date_bounds
+
+        col_list = [(c, d) for c, d in columns.items() if c.upper() != date_col.upper()]
+        selected = tbl_cfg.get('_selected_cols')
+        if selected:
+            wanted = {c.lower() for c in selected}
+            col_list = [(c, d) for c, d in col_list if c.lower() in wanted]
+        if not col_list:
+            print(f"  {qname}: 0 cols (col_filter or empty) -- skipping")
+            continue
+
+        table, cte_prefix, is_sas = _resolve_table_and_cte(tbl_cfg)
+        is_sas_int = 1 if is_sas else 0
+        # Route the pull by source. rows_hadoop.sas uses
+        # `connect to hadoop (%&conn_macro)`; %pull_data only speaks Oracle.
+        tbl_source = (tbl_cfg.get('source') or 'oracle').lower()
+        if is_sas:
+            tbl_source = 'sas'
+
+        # Wrap SAS datetime date columns with datepart() for in-SQL filtering.
+        date_filter = compute_date_filter(tbl_cfg, db_path, vintage)
+        date_dtype = date_filter['date_dtype']
+        resolve_date_format(date_filter, tbl_cfg)
+        effective_vintage = date_filter['vintage']
+
+        # Synthesize vintage spans from from/to if no matching_dates.
+        if (date_filter['filter_type'] == 'none'
+                and effective_vintage in ('day', 'week', 'month', 'quarter', 'year')
+                and tbl_cfg.get('_from_date') and tbl_cfg.get('_to_date')):
+            from ..date_utils import vintage_bucket_spans
+            spans = vintage_bucket_spans(
+                tbl_cfg['_from_date'], tbl_cfg['_to_date'], effective_vintage,
+            )
+            if spans:
+                date_filter['filter_type'] = 'between'
+                date_filter['vintage_spans'] = spans
+
+        # Decide extraction mode for this table.
+        # GROUPED mode: one SQL per col with GROUP BY <trunc expr>. Requires
+        # contiguous from..to range (vintage_spans) on oracle/hadoop with
+        # a date_type we know how to truncate. Otherwise fall back to
+        # per-bucket mode (raw pulls + SAS-side aggregation).
+        dt_expr = None
+        use_grouped = (
+            tbl_source in ('oracle', 'hadoop') and
+            effective_vintage in ('day', 'week', 'month', 'quarter', 'year') and
+            date_filter.get('filter_type') == 'between' and
+            'vintage_spans' in date_filter
+        )
+        if use_grouped:
+            dt_expr = _date_trunc_expr(
+                tbl_source, date_col, tbl_cfg.get('date_type'),
+                effective_vintage,
+            )
+        if dt_expr is None:
+            use_grouped = False
+
+        bucket_specs = []  # (bucket_key, date_where_sql) -- populated only in bucket mode
+        if use_grouped:
+            # One bare BETWEEN spanning the whole range; WHERE stays bare.
+            spans = date_filter['vintage_spans']
+            full_min = spans[0][1]
+            full_max = spans[-1][2]
+            full_where = build_date_between_clause(
+                date_col, full_min, full_max, date_dtype,
+                is_sas=is_sas, date_format=date_filter.get('date_format'),
+            )
+        elif date_filter['filter_type'] == 'between':
+            if 'vintage_spans' in date_filter:
+                for bucket_key, bmin, bmax in date_filter['vintage_spans']:
+                    dw = build_date_between_clause(
+                        date_col, bmin, bmax, date_dtype,
+                        is_sas=is_sas, date_format=date_filter.get('date_format'),
+                    )
+                    bucket_specs.append((bucket_key, dw))
+            else:
+                from ..date_utils import bucket_date
+                buckets = {}
+                for dt in date_filter['dates']:
+                    buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
+                for bucket_key, dates in sorted(buckets.items()):
+                    dw = build_date_range_with_gaps(
+                        date_col, dates, date_dtype,
+                        is_sas=is_sas, date_format=date_filter.get('date_format'),
+                    )
+                    bucket_specs.append((bucket_key, dw))
+        elif date_filter['filter_type'] == 'in_list':
+            dw = build_date_in_clause(
+                date_col, date_filter['dates'], date_dtype,
+                is_sas=is_sas, date_format=date_filter.get('date_format'),
+            )
+            bucket_specs.append(('sample', dw))
+        else:
+            # No filter -- pull everything with dt='all'. No date_where.
+            bucket_specs.append(('all', '1=1'))
+
+        qnames_order.append(qname)
+
+        if use_grouped:
+            # One driver row per col. SQL does all the bucketing in-DB via
+            # GROUP BY &_dt_expr; dispatcher calls %_pull_grouped_* based on
+            # col_type. Query count: N_cols (not N_cols x N_buckets).
+            for col_name, col_dtype in col_list:
+                col_type = 'numeric' if is_numeric_type(col_dtype, is_oracle=True) else 'categorical'
+                driver_rows.append({
+                    'qname': qname,
+                    'sas_table': table,
+                    'conn_macro': conn_macro,
+                    'dt_label': 'grouped',       # unused in grouped mode
+                    'date_where': full_where,
+                    'base_where': base_where,
+                    'col_name': col_name,
+                    'col_type': col_type,
+                    'is_sas': is_sas_int,
+                    'source': tbl_source,
+                    'mode': 'grouped',
+                    'dt_expr': dt_expr,
+                })
+            n_buckets_est = len(date_filter.get('vintage_spans') or [])
+            print(f"[SAS col] {qname}: {len(col_list)} cols (grouped, "
+                  f"~{n_buckets_est} buckets produced per col) = {len(col_list)} runs")
+            continue
+
+        for bucket_key, date_where in bucket_specs:
+            for col_name, col_dtype in col_list:
+                col_type = 'numeric' if is_numeric_type(col_dtype, is_oracle=True) else 'categorical'
+                driver_rows.append({
+                    'qname': qname,
+                    'sas_table': table,
+                    'conn_macro': conn_macro,
+                    'dt_label': bucket_key,
+                    'date_where': date_where,
+                    'base_where': base_where,
+                    'col_name': col_name,
+                    'col_type': col_type,
+                    'is_sas': is_sas_int,
+                    'source': tbl_source,
+                    'mode': 'bucket',
+                    'dt_expr': '',
+                })
+        print(f"[SAS col] {qname}: {len(col_list)} cols x {len(bucket_specs)} buckets "
+              f"= {len(col_list) * len(bucket_specs)} runs")
+
+    if not driver_rows:
+        return "\n/* No col extraction rows generated (col_filter zeroed everything out). */\n"
+    print(f"[SAS col] TOTAL: {len(qnames_order)} tables, {len(driver_rows)} driver rows")
+
+    def _sas_escape(s):
+        return str(s).replace("'", "''")
+
+    # Assemble SAS text
+    parts = [_SAS_COL_HELPERS, "", "/* Flat driver: one row per (qname, bucket, col) */"]
+    parts.append("data _driver_col_;")
+    parts.append("    length qname $64 sas_table $128 conn_macro $16")
+    parts.append("           col_name $32 col_type $12 dt_label $16")
+    parts.append("           date_where $4000 base_where $4000")
+    parts.append("           source $16 mode $8 dt_expr $1000 is_sas 8;")
+    for r in driver_rows:
+        parts.append(
+            f"    qname='{_sas_escape(r['qname'])}'; "
+            f"sas_table='{_sas_escape(r['sas_table'])}'; "
+            f"conn_macro='{_sas_escape(r['conn_macro'])}'; "
+            f"col_name='{_sas_escape(r['col_name'])}'; "
+            f"col_type='{r['col_type']}'; "
+            f"dt_label='{_sas_escape(r['dt_label'])}'; "
+            f"date_where='{_sas_escape(r['date_where'])}'; "
+            f"base_where='{_sas_escape(r['base_where'])}'; "
+            f"source='{r['source']}'; "
+            f"mode='{r.get('mode', 'bucket')}'; "
+            f"dt_expr='{_sas_escape(r.get('dt_expr', ''))}'; "
+            f"is_sas={r['is_sas']}; output;"
+        )
+    parts.append("run;")
+    parts.append("")
+    parts.append("/* Dispatcher: per-row pull + aggregate + append */")
+    parts.append("data _null_;")
+    parts.append("    set _driver_col_;")
+    parts.append("    length _cmd $8000;")
+    parts.append("    _cmd = cats(")
+    parts.append("        'data _null_;',")
+    parts.append("        'call symputx(\"_qname\", ', quote(strip(qname)), ');',")
+    parts.append("        'call symputx(\"_sas_table\", ', quote(strip(sas_table)), ');',")
+    parts.append("        'call symputx(\"_conn_macro\", ', quote(strip(conn_macro)), ');',")
+    parts.append("        'call symputx(\"_col\", ', quote(strip(col_name)), ');',")
+    parts.append("        'call symputx(\"_coltype\", ', quote(strip(col_type)), ');',")
+    parts.append("        'call symputx(\"_dt_label\", ', quote(strip(dt_label)), ');',")
+    parts.append("        'call symputx(\"_date_where\", ', quote(strip(date_where)), ');',")
+    parts.append("        'call symputx(\"_base_where\", ', quote(strip(base_where)), ');',")
+    parts.append("        'call symputx(\"_is_sas\", ', quote(put(is_sas, 1.)), ');',")
+    parts.append("        'call symputx(\"_source\", ', quote(strip(source)), ');',")
+    parts.append("        'call symputx(\"_mode\", ', quote(strip(mode)), ');',")
+    parts.append("        'call symputx(\"_dt_expr\", ', quote(strip(dt_expr)), ');',")
+    parts.append("        'run;',")
+    parts.append("        '%nrstr(%_pull_one_col)();'")
+    parts.append("    );")
+    parts.append("    call execute(_cmd);")
+    parts.append("run;")
+    parts.append("")
+    parts.append("/* Per-qname CSV export */")
+    for q in qnames_order:
+        parts.append(f"%_export_col_stats(qname={q}, outdir=&out_dir);")
+
+    return "\n".join(parts)
+
+
 def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
-    # NOTE: Uses explicit column references — never SELECT *
+    # NOTE: Uses explicit column references -- never SELECT *
     """Generate SAS macro for column statistics using the columns.sas template.
 
     Fills template placeholders with: column map, base SQL, vintage map,
@@ -416,6 +1018,19 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     col_list = [(c, d) for c, d in columns.items() if c.upper() != date_col.upper()]
     if not col_list:
         return f"%macro get_colstats_{sn}();\n    %put WARNING: No non-date columns to extract for {name};\n%mend get_colstats_{sn};"
+
+    # Restrict to the pair's col_filter selection (case-insensitive), if set.
+    # Empty/missing _selected_cols means "extract all non-date cols" (legacy).
+    selected = tbl_cfg.get('_selected_cols')
+    print(f"  [col_filter] {name}: _selected_cols={'<absent>' if selected is None else f'{len(selected)} cols'}, before={len(col_list)} cols")
+    if selected:
+        wanted = {c.lower() for c in selected}
+        col_list = [(c, d) for c, d in col_list if c.lower() in wanted]
+        print(f"  [col_filter] {name}: after filter={len(col_list)} cols")
+        if not col_list:
+            return (f"%macro get_colstats_{sn}();\n"
+                    f"    %put WARNING: col_filter left 0 columns for {name};\n"
+                    f"%mend get_colstats_{sn};")
 
     num_cols = [c for c, d in col_list if is_numeric_type(d, is_oracle=True)]
     cat_cols = [c for c, d in col_list if not is_numeric_type(d, is_oracle=True)]
@@ -447,7 +1062,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     # No intnx/date_trunc/vintage_transform needed in SQL.
     effective_vintage = date_filter['vintage']
 
-    # No row-compare data yet but vintage requests bucketing — compute
+    # No row-compare data yet but vintage requests bucketing -- compute
     # per-bucket (key, min, max) spans directly from from/to so the SAS macro
     # emits one BETWEEN query per month/week/etc. against the raw date column
     # (literals in the column's native format, no function on the LHS).
@@ -532,7 +1147,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
         # Data-driven vintage: build argument table, then loop with call execute.
         # Two flavors:
         #   - vintage_spans (synthesized from from/to): contiguous bucket spans,
-        #     one bare BETWEEN per bucket — no LHS function, no NOT IN gaps.
+        #     one bare BETWEEN per bucket -- no LHS function, no NOT IN gaps.
         #   - dates list (real row-compare data): may have gaps, use
         #     build_date_range_with_gaps which adds AND NOT (col IN (...)).
         from ..date_utils import bucket_date
@@ -565,12 +1180,12 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
                 f"        v_idx={v_idx}; dt_label='{bucket_key}'; "
                 f"date_where='{dw_escaped}'; output;")
 
-        # Static SQL parts (no date_where, no dt_label — those come from dataset)
+        # Static SQL parts (no date_where, no dt_label -- those come from dataset)
         base_sql_tpl = f"{cte_prefix}SELECT"
         col_part = f"{col_list_str} FROM {table}"
         base_where_escaped = base_where.replace("'", "''") if base_where.strip() else ""
 
-        vintage_calls.append(f"    /* {n} vintage buckets — data-driven */")
+        vintage_calls.append(f"    /* {n} vintage buckets -- data-driven */")
         vintage_calls.append(f"    data _v_args_;")
         vintage_calls.append(f"        length v_idx 8 dt_label $32 date_where $4000;")
         for row in arg_rows:
@@ -619,7 +1234,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
 
     # Load template and fill placeholders
     tmpl_path = os.path.join(os.path.dirname(__file__), 'templates', 'columns.sas')
-    with open(tmpl_path, 'r') as f:
+    with open(tmpl_path, 'r', encoding='utf-8') as f:
         tmpl = f.read()
 
     replacements = {
@@ -666,8 +1281,28 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     if types is None:
         types = ["row", "col"]
 
-    with open(config_path, 'r') as f:
-        config = json.load(f)
+    # Use load_unified_config (not raw json.load) so each side gets its
+    # `name` auto-derived from `table` via _derive_side_name. Without this,
+    # qualified_name(tbl) downstream hits KeyError on tbl['name'].
+    from ..config import load_unified_config
+    config = load_unified_config(config_path)
+
+    # Hydrate col_map and col_filter from _table_pairs (where the web UI
+    # persists them) into the in-memory config. Without this, get_all_tables_
+    # from_unified sees empty col_map and the col_filter can't produce
+    # _selected_cols -- CLI runs would emit all columns even though the DB
+    # has the include/exclude saved.
+    if db_path:
+        from ..db import get_pair_col_map_from_db, get_pair_col_filter
+        for pname, pcfg in config.get("pairs", {}).items():
+            if not pcfg.get("col_map"):
+                db_map = get_pair_col_map_from_db(db_path, pname)
+                if db_map:
+                    pcfg["col_map"] = db_map
+            if not pcfg.get("col_filter"):
+                cf = get_pair_col_filter(db_path, pname)
+                if cf.get("include") or cf.get("exclude"):
+                    pcfg["col_filter"] = cf
 
     os.makedirs(outdir, exist_ok=True)
 
@@ -702,7 +1337,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         print("No Oracle/SAS/Hadoop tables found in config")
         return
 
-    # Check for mock mode — still generate SAS files but also copy mock CSVs
+    # Check for mock mode -- still generate SAS files but also copy mock CSVs
     mock_dir = get_mock_dir()
 
     # Use os.environ (already loaded from dtrack.conf by CLI)
@@ -755,7 +1390,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 
     # Read template
     template_path = os.path.join(os.path.dirname(__file__), 'templates', 'template.sas')
-    with open(template_path, 'r') as f:
+    with open(template_path, 'r', encoding='utf-8') as f:
         template = f.read()
 
     # Col extraction uses proc sql passthrough through whatever conn_macro
@@ -795,10 +1430,12 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             macro_parts.append(_gen_sas_row_hadoop(hadoop_tables, sas_lib, out_dir))
 
     if "col" in types:
-        for tbl in all_col_tables:
-            name = tbl['name']
-            macro_parts.append(f"/* --- {name}: {tbl['table']} (col) --- */")
-            macro_parts.append(_gen_sas_col_local(tbl, db_path, sas_lib, out_dir))
+        # Flat-driver structure: ONE driver dataset across all tables, one
+        # dispatcher loop, shared helper macros. Replaces the per-table
+        # get_colstats_SN macro soup -- smaller extract_col.sas file, no
+        # 32K SAS line-length issues, and col_filter is honored per-row.
+        macro_parts.append("/* --- Col extraction (flat driver across all tables) --- */")
+        macro_parts.append(_gen_sas_col_driver(all_col_tables, db_path, out_dir))
 
     # Generate runner section
     runner_parts = []
@@ -810,36 +1447,28 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         runner_parts.append("")
 
     if "col" in types:
-        for tbl in all_col_tables:
-            name = tbl['name']
-            sn = sas_safe_name(name)
-            runner_parts.append(f"%start_timer();")
-            runner_parts.append(f"%get_colstats_{sn}();")
-            # Reset after each table so errors don't block the next one
-            runner_parts.append(f"%if &SYSERR > 4 %then %do;")
-            runner_parts.append(f"    %put ERROR: [{name}] Col extraction failed (SYSERR=&SYSERR) - continuing;")
-            runner_parts.append(f"    options obs=max nosyntaxcheck;")
-            runner_parts.append(f"%end;")
-            runner_parts.append(f"%log_time(table={name}, step=col, outpath=&out_dir.);")
-            qname = qualified_name(tbl)
-            runner_parts.append(
-                f'/* %send_email(subject=dtrack col done: {name}, '
-                f'body=Table {name} col extraction complete. '
-                f'Output: &out_dir./{qname}_col.csv); */'
-            )
-            runner_parts.append("")
-
-    # Email after all extractions
-    if "row" in types:
-        runner_parts.append(f"%let _job_end = %sysfunc(datetime());")
-        runner_parts.append(f"%let _job_elapsed = %sysevalf(&_job_end - &_job_start);")
-        runner_parts.append(
-            f'/* %send_email(subject=dtrack row extraction complete, '
-            f'body=Row extraction finished. '
-            f'Elapsed: %sysfunc(putn(%nrstr(&_job_elapsed), time8.)). '
-            f'Output: &out_dir.); */'
-        )
+        # Flat-driver dispatch runs inline in macro_parts (no per-table
+        # runner calls needed). Just note in the runner that col gen is
+        # handled by the driver block above.
+        runner_parts.append("/* Col extraction driven by _driver_col_ (block above) */")
+        runner_parts.append("%start_timer();")
+        runner_parts.append("%put NOTE: ===== Col extraction starting (flat driver) =====;")
+        runner_parts.append("%log_time(table=all, step=col, outpath=&out_dir.);")
         runner_parts.append("")
+
+    # Global summary email once the whole job (row + col) is done --
+    # one email per run, not per-table. Wrapped in /* ... */ the same way
+    # row gen used to do, so users opt in by uncommenting at run time.
+    runner_parts.append(f"%let _job_end = %sysfunc(datetime());")
+    runner_parts.append(f"%let _job_elapsed = %sysevalf(&_job_end - &_job_start);")
+    _types_label = " + ".join(types)
+    runner_parts.append(
+        f'/* %send_email(subject=dtrack extraction complete ({_types_label}), '
+        f'body=dtrack {_types_label} extraction finished. '
+        f'Elapsed: %sysfunc(putn(%nrstr(&_job_elapsed), time8.)). '
+        f'Output: &out_dir.); */'
+    )
+    runner_parts.append("")
 
     # Generate hash from runner content using SEED for reproducibility
     runner_content = '\n'.join(runner_parts)
@@ -988,7 +1617,7 @@ def _discover_and_write_columns(all_tables, outdir, db_path):
             except Exception as e:
                 print(f"  {qname}: Athena column discovery failed ({e})")
         else:
-            # Oracle/SAS/Hadoop — columns discovered via generated SAS file
+            # Oracle/SAS/Hadoop -- columns discovered via generated SAS file
             print(f"  {qname}: columns will be discovered by SAS (source={source})")
             continue
 

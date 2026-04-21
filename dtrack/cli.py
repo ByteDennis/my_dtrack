@@ -82,13 +82,19 @@ def _require_db(db_path):
 def cmd_init(args):
     """Initialize a new dtrack database."""
     db_path = args.project_db
-    if args.refresh:
+    # --migrate is an alias for --refresh; both run a data-preserving
+    # schema reconciliation via db.refresh_database.
+    if args.refresh or getattr(args, "migrate", False):
         if not os.path.exists(db_path):
             print(f"Error: Database not found: {db_path}")
             sys.exit(1)
-        from .db import refresh_database
+        from .db import refresh_database, ensure_col_filter_columns
         actions = refresh_database(db_path)
-        print(f"Refreshed database: {db_path}")
+        # Ensure the new col_include / col_exclude columns exist even if
+        # refresh_database didn't notice a schema diff.
+        ensure_col_filter_columns(db_path)
+        verb = "Migrated" if getattr(args, "migrate", False) else "Refreshed"
+        print(f"{verb} database: {db_path}")
         for table, action in sorted(actions.items()):
             print(f"  {table}: {action}")
         return
@@ -928,7 +934,13 @@ def main():
     p = sub.add_parser('init', help='Initialize database')
     p.add_argument('project_db')
     p.add_argument('--force', action='store_true')
-    p.add_argument('--refresh', action='store_true')
+    p.add_argument('--refresh', action='store_true',
+                   help='Rebuild schema; rename-create-copy preserves data in '
+                        'columns that exist in both old and new schemas.')
+    p.add_argument('--migrate', action='store_true',
+                   help='Alias of --refresh: idempotent data-preserving '
+                        'schema upgrade (adds new columns introduced by a '
+                        'newer dtrack, keeps existing data).')
 
     # load-row
     p = sub.add_parser('load-row', help='Load row counts from CSV folder')
