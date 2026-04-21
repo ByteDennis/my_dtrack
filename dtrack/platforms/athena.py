@@ -526,13 +526,25 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                 vintage_specs = [('sample', dw)]
                 sql_mode = 'sample'
                 print(f"  {qname}: vintage={vintage}, sample {len(date_filter['dates'])} dates")
-            elif vintage in _TRUNC_MAP:
-                # No matching dates, but vintage specified → use DATE_TRUNC + GROUP BY
+            elif (vintage in _TRUNC_MAP
+                  and tbl.get('_from_date') and tbl.get('_to_date')):
+                # No matching dates yet, but vintage + from/to set: synthesize
+                # per-bucket spans and emit one bare BETWEEN per bucket against
+                # the raw date column (literals in native format, no LHS func).
+                from ..date_utils import vintage_bucket_spans
+                spans = vintage_bucket_spans(tbl['_from_date'], tbl['_to_date'], vintage)
                 vintage_specs = []
-                sql_mode = 'trunc'
-                print(f"  {qname}: vintage={vintage}, no matching dates -> DATE_TRUNC fallback")
+                for bucket_key, bmin, bmax in spans:
+                    dw = build_date_between_clause(
+                        date_col, bmin, bmax,
+                        date_filter.get('date_dtype'),
+                        date_format=date_filter.get('date_format'),
+                    )
+                    vintage_specs.append((bucket_key, dw))
+                sql_mode = 'bucket'
+                print(f"  {qname}: vintage={vintage}, synthesized {len(vintage_specs)} buckets from {tbl['_from_date']} to {tbl['_to_date']}")
             else:
-                # vintage='all': aggregate everything
+                # vintage='all' or no from/to bounds: aggregate everything
                 vintage_specs = [('all', None)]
                 sql_mode = 'all'
                 print(f"  {qname}: vintage={vintage}, no date filter")
@@ -546,92 +558,26 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                 wc_parts.append(exclude_clause)
             wc_base = " AND ".join(f"({p})" for p in wc_parts) if wc_parts else "1=1"
 
+            # One SQL block per (column, vintage bucket). The bucket label `dt`
+            # is emitted as a SQL string literal; the WHERE clause keeps the
+            # date column bare (no DATE_TRUNC / date_parse on the LHS) so
+            # Athena can use partition pruning and indexes.
             for col_name, col_dtype in col_list:
                 is_num = is_numeric_type(col_dtype, is_oracle=False)
 
-                if sql_mode == 'trunc':
-                    # DATE_TRUNC fallback: GROUP BY truncated date
-                    trunc_expr = f"CAST(DATE_TRUNC('{_TRUNC_MAP[vintage]}', {date_col}) AS VARCHAR)"
+                for dt_label, date_where in vintage_specs:
+                    parts = []
+                    if where.strip():
+                        parts.append(where.strip())
+                    if date_where:
+                        parts.append(date_where)
+                    wc = " AND ".join(f"({p})" for p in parts) if parts else "1=1"
+
+                    dt_expr = f"'{dt_label}'"
+                    block_suffix = f"/{dt_label}" if len(vintage_specs) > 1 else ""
+
                     if is_num:
                         sql = f"""{cte_prefix}SELECT
-    {trunc_expr} AS dt,
-    '{col_name}' AS column_name,
-    'numeric' AS col_type,
-    COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col_name}) AS n_missing,
-    COUNT(DISTINCT {col_name}) AS n_unique,
-    CAST(AVG(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS mean,
-    CAST(STDDEV_SAMP(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS std,
-    CAST(MIN({col_name}) AS VARCHAR) AS min_val,
-    CAST(MAX({col_name}) AS VARCHAR) AS max_val,
-    '' AS top_10
-FROM {full_table}
-WHERE {wc_base}
-GROUP BY {trunc_expr};"""
-                    else:
-                        sql = f"""{cte_prefix}WITH freq AS (
-    SELECT {trunc_expr} AS dt,
-        CAST({col_name} AS VARCHAR) AS p_col,
-        COUNT(*) AS cnt
-    FROM {full_table}
-    WHERE {wc_base}
-    GROUP BY {trunc_expr}, {col_name}
-),
-ranked AS (
-    SELECT dt, p_col, cnt,
-        ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn
-    FROM freq
-),
-top_n AS (
-    SELECT dt,
-        ARRAY_JOIN(ARRAY_AGG(
-            COALESCE(p_col, 'NULL') || '(' || CAST(cnt AS VARCHAR) || ')'
-            ORDER BY cnt DESC
-        ), '; ') AS top_10
-    FROM ranked WHERE rn <= 10 AND p_col IS NOT NULL
-    GROUP BY dt
-),
-stats AS (
-    SELECT dt,
-        SUM(cnt) AS n_total,
-        COALESCE(SUM(CASE WHEN p_col IS NULL THEN cnt ELSE 0 END), 0) AS n_missing,
-        SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique,
-        CAST(AVG(CAST(cnt AS DOUBLE)) AS VARCHAR) AS mean,
-        CAST(STDDEV_SAMP(CAST(cnt AS DOUBLE)) AS VARCHAR) AS std,
-        CAST(MIN(cnt) AS VARCHAR) AS min_val,
-        CAST(MAX(cnt) AS VARCHAR) AS max_val
-    FROM freq
-    GROUP BY dt
-)
-SELECT
-    s.dt,
-    '{col_name}' AS column_name,
-    'categorical' AS col_type,
-    s.n_total, s.n_missing, s.n_unique,
-    s.mean, s.std, s.min_val, s.max_val,
-    COALESCE(t.top_10, '') AS top_10
-FROM stats s
-LEFT JOIN top_n t ON s.dt = t.dt
-ORDER BY s.dt;"""
-                    blocks.append(f"-- {qname}/{col_name}")
-                    blocks.append(sql.strip())
-                    blocks.append("")
-
-                else:
-                    # bucket / sample / all modes: one block per (column, bucket)
-                    for dt_label, date_where in vintage_specs:
-                        parts = []
-                        if where.strip():
-                            parts.append(where.strip())
-                        if date_where:
-                            parts.append(date_where)
-                        wc = " AND ".join(f"({p})" for p in parts) if parts else "1=1"
-
-                        dt_expr = f"'{dt_label}'"
-                        block_suffix = f"/{dt_label}" if len(vintage_specs) > 1 else ""
-
-                        if is_num:
-                            sql = f"""{cte_prefix}SELECT
     {dt_expr} AS dt,
     '{col_name}' AS column_name,
     'numeric' AS col_type,
@@ -645,8 +591,8 @@ ORDER BY s.dt;"""
     '' AS top_10
 FROM {full_table}
 WHERE {wc};"""
-                        else:
-                            sql = f"""{cte_prefix}WITH freq AS (
+                    else:
+                        sql = f"""{cte_prefix}WITH freq AS (
     SELECT
         CAST({col_name} AS VARCHAR) AS p_col,
         COUNT(*) AS cnt
@@ -675,9 +621,9 @@ SELECT
         ORDER BY cnt DESC
     ), '; ') FROM ranked WHERE rn <= 10 AND p_col IS NOT NULL), '') AS top_10;"""
 
-                        blocks.append(f"-- {qname}/{col_name}{block_suffix}")
-                        blocks.append(sql.strip())
-                        blocks.append("")
+                    blocks.append(f"-- {qname}/{col_name}{block_suffix}")
+                    blocks.append(sql.strip())
+                    blocks.append("")
         else:
             # Row count query
             where_clause = f"WHERE {where}" if where else ""

@@ -265,6 +265,69 @@ async def api_run_sql_file(request: Request):
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
+def _check_pair_buckets(filtered_config, pair_names, from_date, to_date):
+    """Emit a per-pair PASS/WARNING line confirming that left and right
+    will be queried with the SAME vintage bucket boundaries.
+
+    The log lines start with `[BUCKET CHECK]` so the col_gen UI can
+    highlight them green (PASS) or amber (WARNING).
+    """
+    from ..date_utils import vintage_bucket_spans, bucket_date
+    from ..db import get_row_comparison
+    from ..platforms.base import qualified_name
+    from ..config import _derive_side_name
+
+    for pname in pair_names:
+        pair_cfg = filtered_config.get("pairs", {}).get(pname)
+        if not pair_cfg:
+            continue
+        vintage = pair_cfg.get("vintage", "") or ""
+        if vintage in ("", "all"):
+            print(f"[BUCKET CHECK] pair={pname} | vintage={vintage or 'none'} | "
+                  f"single bucket on both sides | PASS")
+            continue
+
+        left_cfg = pair_cfg.get("left", {}).copy()
+        right_cfg = pair_cfg.get("right", {}).copy()
+        left_cfg["name"] = _derive_side_name(left_cfg, pname)
+        right_cfg["name"] = _derive_side_name(right_cfg, pname)
+
+        # Prefer real row-compare matching dates; fall back to from/to spans.
+        comp = get_row_comparison(_db_path, pname)
+        matching = (comp or {}).get("matching_dates") or []
+
+        def _keys_for(cfg):
+            if matching:
+                return sorted({bucket_date(d, vintage) for d in matching})
+            if from_date and to_date:
+                return [k for k, _, _ in vintage_bucket_spans(from_date, to_date, vintage)]
+            return []
+
+        left_keys = _keys_for(left_cfg)
+        right_keys = _keys_for(right_cfg)
+
+        if not left_keys and not right_keys:
+            print(f"[BUCKET CHECK] pair={pname} vintage={vintage} | "
+                  f"no row-compare data and no from/to set — both sides will "
+                  f"emit dt='all' | PASS")
+            continue
+
+        source = "row-compare matching dates" if matching else f"range {from_date}..{to_date}"
+        if left_keys == right_keys:
+            print(f"[BUCKET CHECK] pair={pname} vintage={vintage} | "
+                  f"{len(left_keys)} buckets ({left_keys[0]} .. {left_keys[-1]}) "
+                  f"identical on LEFT and RIGHT | source: {source} | PASS")
+        else:
+            # Find first divergence for the message
+            diff_idx = next(
+                (i for i, (a, b) in enumerate(zip(left_keys, right_keys)) if a != b),
+                min(len(left_keys), len(right_keys)),
+            )
+            print(f"[BUCKET CHECK] pair={pname} vintage={vintage} | "
+                  f"L={len(left_keys)} R={len(right_keys)} buckets | "
+                  f"first divergence at index {diff_idx} | source: {source} | WARNING")
+
+
 @app.post("/api/generate")
 async def api_generate_files(request: Request):
     """Generate SAS and SQL files without running extraction.
@@ -338,6 +401,10 @@ async def api_generate_files(request: Request):
                         extra = " AND ".join(bounds)
                         existing = tbl.get('where', '').strip()
                         tbl['where'] = f"({existing}) AND {extra}" if existing else extra
+                    # Stash canonical from/to so col-stats can synthesize
+                    # vintage buckets when no row-compare data is loaded yet.
+                    tbl['_from_date'] = from_date
+                    tbl['_to_date'] = to_date
 
             # Generate SAS file — use filtered config if pairs selected
             oracle_tables = [t for t in all_tables
@@ -377,6 +444,12 @@ async def api_generate_files(request: Request):
 
                 _write_combined_sql(aws_tables, aws_outdir, extract_type, db_path=_db_path)
                 results["sql_file"] = os.path.join(aws_outdir, f"extract_{extract_type}.sql")
+
+            # Cross-side bucket equality check (col extraction only — per-pair
+            # vintage must produce the same bucket boundaries on left & right
+            # so the downstream column comparison stays apples-to-apples).
+            if extract_type == "col" and pair_names:
+                _check_pair_buckets(filtered_config, pair_names, from_date, to_date)
 
         return {"ok": True, "output": buf.getvalue(), **results}
     except Exception as e:
@@ -562,6 +635,115 @@ async def api_report(report_type: str):
 # Config management
 # ---------------------------------------------------------------------------
 
+@app.post("/api/migrate/qnames")
+async def api_migrate_qnames():
+    """Reconcile _table_pairs / _column_meta / _col_stats / _row_counts /
+    _metadata / _sample_date with the per-side qnames derived from the
+    current config.
+
+    Prior to the per-side `name` derivation fix, pairs whose left.table !=
+    right.table == pair_name collapsed both sides to `{source}_{pair_name}`,
+    losing one side's stored rows. This endpoint:
+      1. Recomputes the correct (table_left, table_right) for every pair
+         from the config using _derive_side_name.
+      2. Updates _table_pairs to point at the new qnames.
+      3. For each qname table (_column_meta, _col_stats, _row_counts,
+         _metadata, _sample_date), renames rows from the old qname to the
+         new one when the new qname is otherwise empty (never overwrites).
+      4. Returns a per-pair report so the user knows which sides still
+         need a fresh extract.
+    """
+    import sqlite3
+    try:
+        from ..config import load_unified_config, _derive_side_name
+        from ..platforms.base import qualified_name
+
+        config = load_unified_config(_config_path)
+        conn = sqlite3.connect(_db_path)
+        cursor = conn.cursor()
+
+        # Tables keyed on a single qname column
+        qname_tables = [
+            ("_column_meta", "source_table"),
+            ("_col_stats", "source_table"),
+            ("_row_counts", "source_table"),
+            ("_metadata", "table_name"),
+            ("_sample_date", "table_name"),
+        ]
+
+        report = []
+        for pair_name, pair_cfg in config.get("pairs", {}).items():
+            left = dict(pair_cfg.get("left", {}))
+            right = dict(pair_cfg.get("right", {}))
+            left["name"] = _derive_side_name(left, pair_name)
+            right["name"] = _derive_side_name(right, pair_name)
+            new_left = qualified_name(left)
+            new_right = qualified_name(right)
+
+            cursor.execute(
+                "SELECT table_left, table_right FROM _table_pairs WHERE pair_name=?",
+                (pair_name,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                report.append({
+                    "pair": pair_name,
+                    "status": "not_registered",
+                    "new_left": new_left, "new_right": new_right,
+                })
+                continue
+            old_left, old_right = row
+
+            pair_report = {
+                "pair": pair_name,
+                "left":  {"old": old_left,  "new": new_left},
+                "right": {"old": old_right, "new": new_right},
+                "renamed": [], "skipped": [],
+            }
+
+            for side_label, old_q, new_q in (
+                ("left",  old_left,  new_left),
+                ("right", old_right, new_right),
+            ):
+                if old_q == new_q:
+                    continue
+                for tbl, col in qname_tables:
+                    cursor.execute(f"SELECT COUNT(*) FROM {tbl} WHERE {col}=?", (old_q,))
+                    n_old = cursor.fetchone()[0]
+                    if not n_old:
+                        continue
+                    cursor.execute(f"SELECT COUNT(*) FROM {tbl} WHERE {col}=?", (new_q,))
+                    n_new = cursor.fetchone()[0]
+                    if n_new:
+                        pair_report["skipped"].append({
+                            "table": tbl, "side": side_label,
+                            "reason": f"{new_q} already has {n_new} rows",
+                        })
+                        continue
+                    cursor.execute(
+                        f"UPDATE {tbl} SET {col}=? WHERE {col}=?", (new_q, old_q),
+                    )
+                    pair_report["renamed"].append({
+                        "table": tbl, "side": side_label, "n_rows": n_old,
+                    })
+
+            if old_left != new_left or old_right != new_right:
+                cursor.execute(
+                    "UPDATE _table_pairs SET table_left=?, table_right=? WHERE pair_name=?",
+                    (new_left, new_right, pair_name),
+                )
+            pair_report["status"] = "migrated" if (
+                pair_report["renamed"] or old_left != new_left or old_right != new_right
+            ) else "already_clean"
+            report.append(pair_report)
+
+        conn.commit()
+        conn.close()
+        return {"ok": True, "pairs": report}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+
 @app.get("/api/config")
 async def api_get_config():
     """Return the current config JSON."""
@@ -679,6 +861,7 @@ async def api_list_pairs():
                 "left": pair_cfg.get("left", {}),
                 "right": pair_cfg.get("right", {}),
                 "mode": pair_cfg.get("mode", "incremental"),
+                "vintage": pair_cfg.get("vintage", ""),
                 "dateRangeMode": pair_cfg.get("dateRangeMode", "global"),
                 "fromDate": pair_cfg.get("fromDate", ""),
                 "toDate": pair_cfg.get("toDate", ""),
@@ -713,7 +896,7 @@ async def api_update_pair(pair_name: str, request: Request):
 
         # Update only valid pair-config keys (not frontend-only fields like pair_name)
         _PAIR_KEYS = {"left", "right", "col_map", "description", "mode",
-                       "fromDate", "toDate", "dateRangeMode", "overlap",
+                       "vintage", "fromDate", "toDate", "dateRangeMode", "overlap",
                        "skip", "ignore_rows", "ignore_columns",
                        "col_type_overrides", "where_map", "time_map",
                        "comment_map", "diff_map", "excludeDates"}
@@ -727,11 +910,14 @@ async def api_update_pair(pair_name: str, request: Request):
 
         save_unified_config(config, _config_path)
 
-        # Inject name for DB registration (auto-derived, not persisted)
+        # Inject name for DB registration (auto-derived, not persisted).
+        # Each side derives its own name from `table` so left/right qnames
+        # don't collide when both sides share a source.
+        from ..config import _derive_side_name
         left = pair_cfg.get("left", {})
         right = pair_cfg.get("right", {})
-        left["name"] = pair_name
-        right["name"] = pair_name
+        left["name"] = _derive_side_name(left, pair_name)
+        right["name"] = _derive_side_name(right, pair_name)
         if left.get("source") and right.get("source"):
             table_left = qualified_name(left)
             table_right = qualified_name(right)
@@ -741,6 +927,7 @@ async def api_update_pair(pair_name: str, request: Request):
                 source_right=right.get("source"),
                 col_mappings=pair_cfg.get("col_map") or None,
             )
+            pair_vintage = pair_cfg.get("vintage", "")
             for tbl_cfg in [left, right]:
                 qname = qualified_name(tbl_cfg)
                 # Use patch to avoid wiping existing fields (min/max dates, etc.)
@@ -754,8 +941,8 @@ async def api_update_pair(pair_name: str, request: Request):
                         patch_fields["source_table"] = tbl_cfg["table"]
                     if tbl_cfg.get("date_col"):
                         patch_fields["date_var"] = tbl_cfg["date_col"]
-                    if tbl_cfg.get("vintage"):
-                        patch_fields["vintage"] = tbl_cfg["vintage"]
+                    if pair_vintage:
+                        patch_fields["vintage"] = pair_vintage
                     if patch_fields:
                         patch_metadata(_db_path, qname, **patch_fields)
                 else:
@@ -764,7 +951,7 @@ async def api_update_pair(pair_name: str, request: Request):
                         "source": tbl_cfg.get("source"),
                         "source_table": tbl_cfg.get("table"),
                         "date_var": tbl_cfg.get("date_col"),
-                        "vintage": tbl_cfg.get("vintage"),
+                        "vintage": pair_vintage,
                         "data_type": "row",
                     })
 
@@ -2729,9 +2916,12 @@ async def api_add_pair(request: Request):
         config.setdefault("pairs", {})[pair_name] = pair_cfg
         save_unified_config(config, _config_path)
 
-        # Inject name for DB registration (auto-derived, not persisted)
-        left["name"] = pair_name
-        right["name"] = pair_name
+        # Inject name for DB registration (auto-derived, not persisted).
+        # Each side derives its own name from `table` so left/right qnames
+        # don't collide when both sides share a source.
+        from ..config import _derive_side_name
+        left["name"] = _derive_side_name(left, pair_name)
+        right["name"] = _derive_side_name(right, pair_name)
         table_left = qualified_name(left)
         table_right = qualified_name(right)
         register_table_pair(

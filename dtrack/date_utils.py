@@ -278,6 +278,59 @@ def bucket_date(dt_str: str, vintage: str) -> str:
         raise ValueError(f"Invalid vintage: {vintage}. Must be one of: day, week, month, quarter, year")
 
 
+def vintage_bucket_spans(from_date: str, to_date: str, vintage: str):
+    """Compute (bucket_key, bucket_min, bucket_max) for each vintage bucket
+    that overlaps the [from_date, to_date] range, without enumerating days.
+
+    Args:
+        from_date: range start, YYYY-MM-DD
+        to_date:   range end (inclusive), YYYY-MM-DD
+        vintage:   day | week | month | quarter | year
+
+    Returns:
+        List of (bucket_key, bmin, bmax) tuples, all in YYYY-MM-DD format.
+        bmin is max(natural bucket start, from_date); bmax is min(natural
+        bucket end, to_date) — partial buckets at the edges are clipped.
+    """
+    d_start = datetime.strptime(from_date, "%Y-%m-%d")
+    d_end = datetime.strptime(to_date, "%Y-%m-%d")
+    if d_end < d_start:
+        return []
+
+    def _natural_end(d):
+        if vintage == "day":
+            return d
+        if vintage == "week":
+            return d + timedelta(days=6 - d.weekday())  # Sunday
+        if vintage == "month":
+            if d.month == 12:
+                next_month = d.replace(year=d.year + 1, month=1, day=1)
+            else:
+                next_month = d.replace(month=d.month + 1, day=1)
+            return next_month - timedelta(days=1)
+        if vintage == "quarter":
+            q_first_month = ((d.month - 1) // 3) * 3 + 1
+            next_q_first_month = q_first_month + 3
+            if next_q_first_month > 12:
+                first = d.replace(year=d.year + 1, month=1, day=1)
+            else:
+                first = d.replace(month=next_q_first_month, day=1)
+            return first - timedelta(days=1)
+        if vintage == "year":
+            return d.replace(year=d.year + 1, month=1, day=1) - timedelta(days=1)
+        raise ValueError(f"Invalid vintage: {vintage}")
+
+    spans = []
+    cur = d_start
+    while cur <= d_end:
+        bucket_key = bucket_date(cur.strftime("%Y-%m-%d"), vintage)
+        natural_end = _natural_end(cur)
+        bmax = min(natural_end, d_end)
+        spans.append((bucket_key, cur.strftime("%Y-%m-%d"), bmax.strftime("%Y-%m-%d")))
+        cur = bmax + timedelta(days=1)
+    return spans
+
+
 def format_vintage_label(dt_str: str, vintage: str) -> str:
     """Format a bucketed date as a human-readable label for HTML reports.
 

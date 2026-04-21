@@ -344,38 +344,35 @@ function parseCSV(file) {
 // ───────────────────────────────────────────────────────────────────
 
 function autoMatch(filename) {
-    let stem = filename.replace(/\.csv$/i, '');
-    stem = stem.replace(/_(row|col|column|columns)$/i, '');
-
     const noMatch = { matched: false, tableName: '', side: '', pairName: '' };
 
+    // Load-row page only handles *_row.csv — other suffixes belong to
+    // col_mapping (_columns.csv) or load_col (_col.csv).
+    const stripped = filename.replace(/\.csv$/i, '');
+    if (!/_row$/i.test(stripped)) {
+        console.log(`[autoMatch] rejected non-_row file: ${filename}`);
+        return noMatch;
+    }
+    const stem = stripped.replace(/_row$/i, '');
+
     console.log(`[autoMatch] filename="${filename}" stem="${stem}"`);
-    console.log(`[autoMatch] knownTables (${knownTables.length}):`,
-        knownTables.map(t => `${t.pair_name}: L=${t.table_left} R=${t.table_right}`));
 
     for (const pair of knownTables) {
         if (stem.toLowerCase() === pair.table_left.toLowerCase()) {
-            console.log(`[autoMatch] EXACT match left: ${pair.table_left}`);
             return { matched: true, tableName: pair.table_left, side: 'left', pairName: pair.pair_name };
         }
         if (stem.toLowerCase() === pair.table_right.toLowerCase()) {
-            console.log(`[autoMatch] EXACT match right: ${pair.table_right}`);
             return { matched: true, tableName: pair.table_right, side: 'right', pairName: pair.pair_name };
         }
     }
-
     for (const pair of knownTables) {
         if (stem.toLowerCase().startsWith(pair.table_left.toLowerCase())) {
-            console.log(`[autoMatch] STARTS match left: ${pair.table_left}`);
             return { matched: true, tableName: pair.table_left, side: 'left', pairName: pair.pair_name };
         }
         if (stem.toLowerCase().startsWith(pair.table_right.toLowerCase())) {
-            console.log(`[autoMatch] STARTS match right: ${pair.table_right}`);
             return { matched: true, tableName: pair.table_right, side: 'right', pairName: pair.pair_name };
         }
     }
-
-    console.log(`[autoMatch] NO MATCH for stem="${stem}"`);
     return noMatch;
 }
 

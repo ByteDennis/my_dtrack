@@ -1,7 +1,23 @@
 """JSON configuration parsing for table pairs (unified format only)."""
 
 import json
+import re
 from pathlib import Path
+
+
+def _derive_side_name(side_cfg, pair_name):
+    """Derive a SAS-safe identifier for a side from its `table` field.
+
+    Two sides of one pair often reference different physical tables (e.g.
+    left=v_xxxx, right=xxxx) — using pair_name for both would collide on
+    qualified_name() and overwrite the SAS get_colstats_{sn} macro.
+
+    Falls back to pair_name when `table` is missing.
+    """
+    tbl = (side_cfg.get("table") or "").strip()
+    if not tbl:
+        return pair_name
+    return re.sub(r"[^a-z0-9_]+", "_", tbl.lower()).strip("_") or pair_name
 
 
 def validate_unified_pair(pair_name, pair_config):
@@ -91,12 +107,13 @@ def load_unified_config(config_path):
 
     validate_unified_config(config)
 
-    # Auto-derive name from pair_name
+    # Auto-derive name from each side's `table` so left and right stay
+    # distinct identifiers even when they sit in the same pair.
     for pair_name, pair_cfg in config.get("pairs", {}).items():
         for side in ("left", "right"):
             side_cfg = pair_cfg.get(side, {})
             if "name" not in side_cfg:
-                side_cfg["name"] = pair_name
+                side_cfg["name"] = _derive_side_name(side_cfg, pair_name)
 
     return config
 
@@ -130,8 +147,14 @@ def get_all_tables_from_unified(config):
         if pair_config.get("skip"):
             continue
         col_map = pair_config.get("col_map", {})
+        pair_vintage = pair_config.get("vintage", "")
         for side in ["left", "right"]:
             table_cfg = pair_config[side].copy()
+
+            # Pair-level vintage propagates to both sides; per-side override wins
+            # only if the per-side dict already specifies one (legacy configs).
+            if pair_vintage and not table_cfg.get("vintage"):
+                table_cfg["vintage"] = pair_vintage
 
             if col_map:
                 if side == "left":
@@ -154,6 +177,10 @@ def get_all_tables_from_unified(config):
                         existing = t.get("_col_map_columns", set())
                         existing.update(table_cfg.get("_col_map_columns", set()))
                         t["_col_map_columns"] = existing
+                        # If a later pair specifies a finer vintage for the same
+                        # table, prefer it (otherwise first-pair vintage wins).
+                        if pair_vintage and not t.get("vintage"):
+                            t["vintage"] = pair_vintage
                         break
 
     return tables

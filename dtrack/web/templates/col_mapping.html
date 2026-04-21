@@ -38,9 +38,51 @@
                 <div class="empty-message">Loading pairs...</div>
             </div>
         </section>
+
+        <!-- LOAD COLUMNS CSV — same drop-zone / scan UI as Load Row / Load Col -->
+        <section class="card" id="drop-section">
+            <div class="section-header">
+                <h2>LOAD COLUMNS CSV</h2>
+            </div>
+            <div class="folder-path-bar">
+                <label>Folder:</label>
+                <input type="text" id="folder-path" value="./csv/" placeholder="/path/to/csv/files/">
+                <button class="btn-secondary" id="scan-folder-btn">Scan</button>
+            </div>
+            <div class="drop-zone" id="drop-zone">
+                <div class="drop-zone-content">
+                    <div class="drop-icon">&#128193;</div>
+                    <div class="drop-text">Drop *_columns.csv files here or click to browse</div>
+                    <input type="file" id="file-input" multiple accept=".csv" style="display:none">
+                    <button class="btn-secondary" id="browse-btn">Browse Files</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="card" id="match-section" style="display:none">
+            <div class="section-header">
+                <h2>MATCHED FILES</h2>
+                <div class="actions">
+                    <button class="btn-text" id="drop-more-btn">+ Drop more</button>
+                </div>
+            </div>
+            <div id="file-list" class="file-match-list"></div>
+            <div class="file-actions">
+                <button class="btn-primary" id="load-btn" disabled>Load Selected (0)</button>
+            </div>
+        </section>
+
+        <section class="card" id="log-section" style="display:none">
+            <div class="section-header">
+                <h2>RUN LOG</h2>
+                <button class="btn-text" id="clear-log-btn">Clear</button>
+            </div>
+            <div id="run-log" class="log-output"></div>
+        </section>
     </main>
 
     <script src="/static/common.js"></script>
+    <script src="/static/csv_loader.js"></script>
     <script src="/static/col_mapping.js"></script>
 </body>
 </html>

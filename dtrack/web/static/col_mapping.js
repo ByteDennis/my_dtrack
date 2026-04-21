@@ -26,7 +26,53 @@ let mappingCache = {};  // pair_name -> {mappings, rules, sources, left_columns,
 // ---------------------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', async () => {
     await loadPairs();
+    initColumnsLoader();
 });
+
+// Wire up the shared drop-zone / scan / match / load UI in the
+// "LOAD COLUMNS CSV" section. Same component used by load_row and load_col.
+function initColumnsLoader() {
+    if (typeof createCsvLoader !== 'function') return;
+    const knownTables = { current: [] };
+    const refreshKnownTables = async () => {
+        try {
+            const resp = await fetch('/api/status');
+            const data = await resp.json();
+            knownTables.current = (data.pairs || []).map(p => ({
+                pair_name: p.pair_name,
+                table_left: p.table_left,
+                table_right: p.table_right,
+                source_left: p.source_left || '',
+                source_right: p.source_right || '',
+            }));
+        } catch (e) { /* leave empty */ }
+    };
+    refreshKnownTables();
+
+    const extras = (entry, known) => {
+        const pair = known.find(p =>
+            p.table_left === entry.tableName || p.table_right === entry.tableName);
+        const source = !pair ? ''
+            : (entry.side === 'left' ? pair.source_left : pair.source_right);
+        return source ? { source } : {};
+    };
+
+    createCsvLoader({
+        suffix: 'columns',
+        uploadEndpoint: '/api/load/columns/upload',
+        pathEndpoint:   '/api/load/columns/path',
+        loadVerb: 'columns',
+        extraFormFields: extras,
+        extraBodyFields: extras,
+        knownTables,
+        afterLoad: async () => {
+            // Refresh every expanded pair's column lists so the mapped/
+            // unmatched lists reflect the newly-loaded _column_meta rows.
+            for (const name of Object.keys(mappingCache)) delete mappingCache[name];
+            for (const p of pairsData) await loadColumns(p.pair_name);
+        },
+    }).init();
+}
 
 async function loadPairs() {
     try {
@@ -174,11 +220,17 @@ function renderPairBody(name) {
     const nMapped = Object.keys(mappings).length;
     const nUnmatched = unmappedLeft.length + unmappedRight.length;
 
-    // Summary + CSV download links
+    // Summary + CSV download. Loading column-meta CSVs is handled by the
+    // shared drop-zone / scan UI below the accordion (see initColumnsLoader).
     const srcLeft = (cache.source_left || 'left').toUpperCase();
     const srcRight = (cache.source_right || 'right').toUpperCase();
+    const nLeftCols = Object.keys(cache.left_columns).length;
+    const nRightCols = Object.keys(cache.right_columns).length;
     let html = `<div class="cm-summary" style="display:flex; justify-content:space-between; align-items:center;">
-        <span>${nMapped} mapped &middot; ${nUnmatched} unmatched</span>
+        <span>${nMapped} mapped &middot; ${nUnmatched} unmatched &middot;
+              <span style="color:var(--jp-ui-font-color3);">
+                L=${nLeftCols} cols, R=${nRightCols} cols
+              </span></span>
         <span style="display:flex; gap:8px;">
             <a href="/api/pairs/${name}/columns/excel" class="btn-text" download>Excel</a>
         </span>

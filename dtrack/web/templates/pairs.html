@@ -135,17 +135,6 @@
                             <textarea id="left-where" rows="2" placeholder="STATUS='A' AND REGION='US'"></textarea>
                         </div>
                         <div class="form-group">
-                            <label>Vintage (bucketing function)</label>
-                            <input type="text" id="left-vintage" placeholder="TRUNC(RPT_DT,'IW')">
-                            <div class="preset-buttons">
-                                <button onclick="setVintage('left', 'day')">Day</button>
-                                <button onclick="setVintage('left', 'week')">Week</button>
-                                <button onclick="setVintage('left', 'month')">Month</button>
-                                <button onclick="setVintage('left', 'quarter')">Quarter</button>
-                                <button onclick="setVintage('left', 'year')">Year</button>
-                            </div>
-                        </div>
-                        <div class="form-group">
                             <label>CTE/Processed (optional)</label>
                             <textarea id="left-cte" rows="3" placeholder="WITH base AS (SELECT * FROM raw WHERE ...)"></textarea>
                         </div>
@@ -188,17 +177,6 @@
                         <div class="form-group">
                             <label>WHERE Clause</label>
                             <textarea id="right-where" rows="2" placeholder="status='ACTIVE' AND region='US'"></textarea>
-                        </div>
-                        <div class="form-group">
-                            <label>Vintage (bucketing function)</label>
-                            <input type="text" id="right-vintage" placeholder="DATE_TRUNC('week', rpt_date)">
-                            <div class="preset-buttons">
-                                <button onclick="setVintage('right', 'day')">Day</button>
-                                <button onclick="setVintage('right', 'week')">Week</button>
-                                <button onclick="setVintage('right', 'month')">Month</button>
-                                <button onclick="setVintage('right', 'quarter')">Quarter</button>
-                                <button onclick="setVintage('right', 'year')">Year</button>
-                            </div>
                         </div>
                         <div class="form-group">
                             <label>CTE/Processed (optional)</label>
@@ -249,7 +227,6 @@
                 <button class="btn-secondary" onclick="closePairModal()">Cancel</button>
                 <button class="btn-secondary" onclick="toggleQueryPreview()">Preview Query</button>
                 <div style="flex:1"></div>
-                <button class="btn-text" onclick="showVintageTips()" title="Show vintage function examples">Help</button>
                 <button class="btn-primary" onclick="savePair()">Save Pair</button>
             </div>
         </div>

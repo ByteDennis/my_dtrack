@@ -306,15 +306,11 @@ function parseCSV(file) {
 // ---------------------------------------------------------------------------
 function detectFileType(filename) {
     const lower = filename.toLowerCase();
-    // Only accept *_col.csv as col stats
+    // Load-col page only handles *_col.csv. _columns.csv belongs to
+    // col_mapping; _row.csv to load_row; everything else is skipped.
     if (lower.endsWith('_col.csv')) {
         return 'col_stats';
     }
-    // Column metadata: *_columns.csv or *_column_meta.csv
-    if (lower.endsWith('_columns.csv') || lower.includes('_column_meta')) {
-        return 'columns';
-    }
-    // Everything else: skip (_row.csv, _timing.csv, _columns.csv, etc.)
     return 'skip';
 }
 
@@ -322,9 +318,11 @@ function detectFileType(filename) {
 // Auto-match filename to known DB table
 // ---------------------------------------------------------------------------
 function autoMatch(filename) {
-    let stem = filename.replace(/\.csv$/i, '');
-    // Strip col-related suffixes
-    stem = stem.replace(/_(col|column|columns|stats|col_stats)$/i, '');
+    const stripped = filename.replace(/\.csv$/i, '');
+    if (!/_col$/i.test(stripped)) {
+        return { matched: false, tableName: '', side: '', pairName: '' };
+    }
+    const stem = stripped.replace(/_col$/i, '');
 
     const noMatch = { matched: false, tableName: '', side: '', pairName: '' };
 

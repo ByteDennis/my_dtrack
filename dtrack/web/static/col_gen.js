@@ -137,6 +137,7 @@ async function loadPairs() {
             left: p.left || {},
             right: p.right || {},
             mode: p.mode || 'incremental',
+            vintage: p.vintage || '',
             fromDate: p.fromDate || '',
             toDate: p.toDate || '',
             excludeDates: (p.excludeDates || []).join(', '),
@@ -156,12 +157,16 @@ async function loadPairs() {
 // Render Pairs (with per-pair from/to, vintage, mode)
 // ---------------------------------------------------------------------------
 const VINTAGE_OPTIONS = ['', 'day', 'week', 'month', 'quarter', 'year', 'all'];
+const VINTAGE_LABELS = {
+    '': '— none —', day: 'day', week: 'week', month: 'month',
+    quarter: 'quarter', year: 'year', all: 'all (single bucket)',
+};
 
-function vintageSelect(id, value) {
+function vintageSelect(id, value, extraStyle = '') {
     const opts = VINTAGE_OPTIONS.map(v =>
-        `<option value="${v}" ${v === (value || '') ? 'selected' : ''}>${v || 'default'}</option>`
+        `<option value="${v}" ${v === (value || '') ? 'selected' : ''}>${VINTAGE_LABELS[v] || v}</option>`
     ).join('');
-    return `<select id="${id}" style="width:100px; font-size:11px;" onchange="pairFieldChanged()">${opts}</select>`;
+    return `<select id="${id}" style="${extraStyle}" onchange="pairFieldChanged()" onclick="event.stopPropagation()">${opts}</select>`;
 }
 
 function renderPairs() {
@@ -199,7 +204,11 @@ function renderPairs() {
                     onchange="togglePairSelection(${index})">
                 <span class="pair-expand">${pair.expanded ? '&#9654;' : '&#9660;'}</span>
                 <span class="pair-name">${pair.name}</span>
-                <div style="display:flex; gap:8px; margin-left:auto;">
+                <div style="display:flex; gap:8px; align-items:center; margin-left:auto;">
+                    <label style="display:flex; align-items:center; gap:4px; font-size:12px; font-weight:600; color:var(--jp-ui-font-color1);" onclick="event.stopPropagation()">
+                        Vintage:
+                        ${vintageSelect(`vintage-${index}`, pair.vintage, 'width:140px; font-size:12px; padding:2px 4px;')}
+                    </label>
                     ${leftColBadge}
                     ${rightColBadge}
                 </div>
@@ -222,10 +231,8 @@ function renderPairs() {
                             <span class="pair-info-value">${leftCols}</span>
                         </div>
                         <div class="pair-info-row">
-                            <span class="pair-info-label">Vintage:</span>
-                            <span class="pair-info-value" onclick="event.stopPropagation()">
-                                ${vintageSelect(`vintage-left-${index}`, pair.left.vintage)}
-                            </span>
+                            <span class="pair-info-label">Date Type:</span>
+                            <span class="pair-info-value">${pair.left.date_type || ''}</span>
                         </div>
                     </div>
                     <div class="pair-side-info">
@@ -243,10 +250,8 @@ function renderPairs() {
                             <span class="pair-info-value">${rightCols}</span>
                         </div>
                         <div class="pair-info-row">
-                            <span class="pair-info-label">Vintage:</span>
-                            <span class="pair-info-value" onclick="event.stopPropagation()">
-                                ${vintageSelect(`vintage-right-${index}`, pair.right.vintage)}
-                            </span>
+                            <span class="pair-info-label">Date Type:</span>
+                            <span class="pair-info-value">${pair.right.date_type || ''}</span>
                         </div>
                     </div>
                 </div>
@@ -282,15 +287,13 @@ function syncPairFields() {
         const fromEl = document.getElementById(`from-${index}`);
         const toEl = document.getElementById(`to-${index}`);
         const modeEl = document.getElementById(`mode-incr-${index}`);
-        const vintLeftEl = document.getElementById(`vintage-left-${index}`);
-        const vintRightEl = document.getElementById(`vintage-right-${index}`);
+        const vintEl = document.getElementById(`vintage-${index}`);
         const excludeEl = document.getElementById(`exclude-${index}`);
 
         if (fromEl) pair.fromDate = fromEl.value;
         if (toEl) pair.toDate = toEl.value;
         if (modeEl) pair.mode = modeEl.checked ? 'incremental' : 'full';
-        if (vintLeftEl) pair.left.vintage = vintLeftEl.value;
-        if (vintRightEl) pair.right.vintage = vintRightEl.value;
+        if (vintEl) pair.vintage = vintEl.value;
         if (excludeEl) pair.excludeDates = excludeEl.value;
     });
 }
@@ -343,6 +346,7 @@ async function savePairSettings(selected) {
                     left: pair.left,
                     right: pair.right,
                     mode: pair.mode,
+                    vintage: pair.vintage,
                     fromDate: pair.fromDate,
                     toDate: pair.toDate,
                     excludeDates: excludeArr,
@@ -388,9 +392,8 @@ async function generateAll() {
     for (const p of selected) {
         const from = p.fromDate || globalFrom;
         const to = p.toDate || globalTo;
-        const lv = p.left.vintage || '';
-        const rv = p.right.vintage || '';
-        logMessage(`  ${p.name}: ${from || '...'} → ${to || '...'} | L-vintage: ${lv || 'default'} | R-vintage: ${rv || 'default'} | mode: ${p.mode}`, 'info');
+        const v = p.vintage || 'none';
+        logMessage(`  ${p.name}: ${from || '...'} → ${to || '...'} | vintage: ${v} | mode: ${p.mode}`, 'info');
     }
 
     // Detect if any selected pair has AWS source
@@ -422,7 +425,13 @@ async function generateAll() {
         if (result.ok) {
             if (result.output) {
                 result.output.trim().split('\n').forEach(line => {
-                    if (line.trim()) logMessage(line, 'info');
+                    if (!line.trim()) return;
+                    let type = 'info';
+                    if (line.includes('[BUCKET CHECK]')) {
+                        if (/\bPASS\b/.test(line)) type = 'success';
+                        else if (/\bWARNING\b/.test(line)) type = 'warning';
+                    }
+                    logMessage(line, type);
                 });
             }
             if (result.sas_file) logMessage(`SAS file: ${result.sas_file}`, 'success');
@@ -538,7 +547,10 @@ function logMessage(message, type = 'info') {
     if (empty) empty.remove();
 
     const time = new Date().toLocaleTimeString();
-    const className = type === 'success' ? 'log-success' : type === 'error' ? 'log-error' : '';
+    const className = type === 'success' ? 'log-success'
+        : type === 'error' ? 'log-error'
+        : type === 'warning' ? 'log-warning'
+        : '';
 
     const entry = document.createElement('div');
     entry.className = 'log-entry';

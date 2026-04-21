@@ -447,6 +447,31 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
     # No intnx/date_trunc/vintage_transform needed in SQL.
     effective_vintage = date_filter['vintage']
 
+    # No row-compare data yet but vintage requests bucketing — compute
+    # per-bucket (key, min, max) spans directly from from/to so the SAS macro
+    # emits one BETWEEN query per month/week/etc. against the raw date column
+    # (literals in the column's native format, no function on the LHS).
+    if (date_filter['filter_type'] == 'none'
+            and effective_vintage in ('day', 'week', 'month', 'quarter', 'year')
+            and tbl_cfg.get('_from_date') and tbl_cfg.get('_to_date')):
+        from ..date_utils import vintage_bucket_spans
+        try:
+            spans = vintage_bucket_spans(
+                tbl_cfg['_from_date'], tbl_cfg['_to_date'], effective_vintage,
+            )
+            if spans:
+                date_filter['filter_type'] = 'between'
+                date_filter['vintage_spans'] = spans
+                date_filter['min_date'] = spans[0][1]
+                date_filter['max_date'] = spans[-1][2]
+                date_filter['n_matching'] = len(spans)
+                has_filter = True
+                print(f"  [date filter] no row-compare data; synthesized "
+                      f"{len(spans)} {effective_vintage} buckets from "
+                      f"{spans[0][1]} to {spans[-1][2]}")
+        except ValueError:
+            pass
+
     # Build template values
     _ua = f", user=&{user_override}_usr, pwd=&{user_override}_pwd" if user_override else ""
     if is_sas:
@@ -504,17 +529,37 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
 
     vintage_calls = []
     if date_filter['filter_type'] == 'between':
-        # Data-driven vintage: build argument table, then loop with call execute
+        # Data-driven vintage: build argument table, then loop with call execute.
+        # Two flavors:
+        #   - vintage_spans (synthesized from from/to): contiguous bucket spans,
+        #     one bare BETWEEN per bucket — no LHS function, no NOT IN gaps.
+        #   - dates list (real row-compare data): may have gaps, use
+        #     build_date_range_with_gaps which adds AND NOT (col IN (...)).
         from ..date_utils import bucket_date
-        buckets = {}
-        for dt in date_filter['dates']:
-            buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
-        n = len(buckets)
+        bucket_specs = []  # list of (bucket_key, where_fragment)
+        if 'vintage_spans' in date_filter:
+            for bucket_key, bmin, bmax in date_filter['vintage_spans']:
+                from .base import build_date_between_clause
+                dw = build_date_between_clause(
+                    date_col, bmin, bmax, date_dtype,
+                    is_sas=is_sas, date_format=date_filter.get('date_format'),
+                )
+                bucket_specs.append((bucket_key, dw))
+        else:
+            buckets = {}
+            for dt in date_filter['dates']:
+                buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
+            for bucket_key, dates in sorted(buckets.items()):
+                dw = build_date_range_with_gaps(
+                    date_col, dates, date_dtype,
+                    is_sas=is_sas, date_format=date_filter.get('date_format'),
+                )
+                bucket_specs.append((bucket_key, dw))
+        n = len(bucket_specs)
 
         # Build _v_args_ dataset: v_idx, dt_label, date_where
         arg_rows = []
-        for v_idx, (bucket_key, dates) in enumerate(sorted(buckets.items()), 1):
-            dw = build_date_range_with_gaps(date_col, dates, date_dtype, is_sas=is_sas, date_format=date_filter.get('date_format'))
+        for v_idx, (bucket_key, dw) in enumerate(bucket_specs, 1):
             dw_escaped = dw.replace("'", "''")
             arg_rows.append(
                 f"        v_idx={v_idx}; dt_label='{bucket_key}'; "
@@ -646,6 +691,10 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
                 bounds.append(f"{date_col} <= {lit}")
             if bounds:
                 tbl['_date_bounds'] = " AND ".join(bounds)
+            # Stash the canonical from/to so col-stats can synthesize buckets
+            # when no row-compare matching_dates are available yet.
+            tbl['_from_date'] = from_date
+            tbl['_to_date'] = to_date
 
     oracle_tables = [t for t in all_tables if t.get('source', '').lower() in ('oracle', 'sas', 'hadoop')]
 

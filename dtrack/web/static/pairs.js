@@ -35,37 +35,6 @@ const DATE_COLUMN_TYPES = [
     {value: "string_us", label: "String (MM/DD/YYYY)"},
 ];
 
-const VINTAGE_PRESETS = {
-    "hadoop": {
-        "day": "{col}",
-        "week": "TRUNC({col}, 'IW')",
-        "month": "TRUNC({col}, 'MM')",
-        "quarter": "TRUNC({col}, 'Q')",
-        "year": "TRUNC({col}, 'YYYY')",
-    },
-    "oracle": {
-        "day": "{col}",
-        "week": "TRUNC({col}, 'IW')",
-        "month": "TRUNC({col}, 'MM')",
-        "quarter": "TRUNC({col}, 'Q')",
-        "year": "TRUNC({col}, 'YYYY')",
-    },
-    "aws": {
-        "day": "{col}",
-        "week": "DATE_TRUNC('week', {col})",
-        "month": "DATE_TRUNC('month', {col})",
-        "quarter": "DATE_TRUNC('quarter', {col})",
-        "year": "DATE_TRUNC('year', {col})",
-    },
-    "sas": {
-        "day": "{col}",
-        "week": "intnx('week.2', {col}, 0, 'b')",
-        "month": "intnx('month', {col}, 0, 'b')",
-        "quarter": "intnx('qtr', {col}, 0, 'b')",
-        "year": "intnx('year', {col}, 0, 'b')",
-    },
-};
-
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
     loadPairs();
@@ -164,35 +133,6 @@ function applyGlobalSettings() {
     renderPairs();
     closeSettingsModal();
     showSuccess('Global settings applied to all pairs');
-}
-
-function showVintageTips() {
-    const tips = `Vintage Function Examples:
-
-Oracle/SAS Oracle/SAS Hadoop:
-• Day: column_name
-• Week: TRUNC(column_name, 'IW')
-• Month: TRUNC(column_name, 'MM')
-• Quarter: TRUNC(column_name, 'Q')
-• Year: TRUNC(column_name, 'YYYY')
-
-AWS/Athena:
-• Day: column_name
-• Week: DATE_TRUNC('week', column_name)
-• Month: DATE_TRUNC('month', column_name)
-• Quarter: DATE_TRUNC('quarter', column_name)
-• Year: DATE_TRUNC('year', column_name)
-
-SAS Dataset:
-• Day: column_name
-• Week: intnx('week.2', column_name, 0, 'b')
-• Month: intnx('month', column_name, 0, 'b')
-• Quarter: intnx('qtr', column_name, 0, 'b')
-• Year: intnx('year', column_name, 0, 'b')
-
-Leave empty or use column name directly if no bucketing needed.`;
-
-    alert(tips);
 }
 
 function updateEffectiveRange() {
@@ -551,10 +491,6 @@ function renderPairs() {
                             <span class="pair-info-label">WHERE:</span>
                             <span class="pair-info-value">${pair.left.where}</span>
                         </div>` : ''}
-                        ${pair.left.vintage ? `<div class="pair-info-row">
-                            <span class="pair-info-label">Vintage:</span>
-                            <span class="pair-info-value">${pair.left.vintage}</span>
-                        </div>` : ''}
                     </div>
                     <div class="pair-side-info">
                         <div class="pair-side-title">Right</div>
@@ -577,10 +513,6 @@ function renderPairs() {
                         ${pair.right.where ? `<div class="pair-info-row">
                             <span class="pair-info-label">WHERE:</span>
                             <span class="pair-info-value">${pair.right.where}</span>
-                        </div>` : ''}
-                        ${pair.right.vintage ? `<div class="pair-info-row">
-                            <span class="pair-info-label">Vintage:</span>
-                            <span class="pair-info-value">${pair.right.vintage}</span>
                         </div>` : ''}
                     </div>
                 </div>
@@ -665,7 +597,6 @@ function editPair(index) {
     document.getElementById('left-date-col').value = pair.left.date_col;
     document.getElementById('left-date-type').value = pair.left.date_type || 'date';
     document.getElementById('left-where').value = pair.left.where || '';
-    document.getElementById('left-vintage').value = pair.left.vintage || '';
     document.getElementById('left-cte').value = pair.left.processed || '';
 
     // Right side
@@ -676,7 +607,6 @@ function editPair(index) {
     document.getElementById('right-date-col').value = pair.right.date_col;
     document.getElementById('right-date-type').value = pair.right.date_type || 'date';
     document.getElementById('right-where').value = pair.right.where || '';
-    document.getElementById('right-vintage').value = pair.right.vintage || '';
     document.getElementById('right-cte').value = pair.right.processed || '';
 
     // Mode and date range
@@ -705,7 +635,6 @@ function clearPairForm() {
         document.getElementById(`${side}-table`).value = '';
         document.getElementById(`${side}-date-col`).value = '';
         document.getElementById(`${side}-where`).value = '';
-        document.getElementById(`${side}-vintage`).value = '';
         document.getElementById(`${side}-cte`).value = '';
     });
 
@@ -725,7 +654,6 @@ async function savePair() {
             date_col: document.getElementById('left-date-col').value.trim(),
             date_type: document.getElementById('left-date-type').value,
             where: document.getElementById('left-where').value.trim(),
-            vintage: document.getElementById('left-vintage').value.trim(),
             processed: document.getElementById('left-cte').value.trim()
         },
         right: {
@@ -735,7 +663,6 @@ async function savePair() {
             date_col: document.getElementById('right-date-col').value.trim(),
             date_type: document.getElementById('right-date-type').value,
             where: document.getElementById('right-where').value.trim(),
-            vintage: document.getElementById('right-vintage').value.trim(),
             processed: document.getElementById('right-cte').value.trim()
         },
         mode: document.getElementById('pair-incremental').checked ? 'incremental' : 'full',
@@ -823,7 +750,6 @@ async function exportPair(index) {
             date_col: pair.left.date_col,
             date_type: pair.left.date_type || "date",
             where: pair.left.where || "",
-            vintage: pair.left.vintage || "",
             processed: pair.left.processed || ""
         },
         right: {
@@ -833,7 +759,6 @@ async function exportPair(index) {
             date_col: pair.right.date_col,
             date_type: pair.right.date_type || "date",
             where: pair.right.where || "",
-            vintage: pair.right.vintage || "",
             processed: pair.right.processed || ""
         },
         mode: pair.mode || "incremental",
@@ -849,21 +774,6 @@ async function exportPair(index) {
     } catch (err) {
         // Fallback: show in alert if clipboard API fails
         alert('Copy this JSON:\n\n' + jsonString);
-    }
-}
-
-function setVintage(side, type) {
-    const input = document.getElementById(`${side}-vintage`);
-    const source = document.getElementById(`${side}-source`).value;
-    const dateCol = document.getElementById(`${side}-date-col`).value || 'date_col';
-
-    const templates = VINTAGE_PRESETS[source] || VINTAGE_PRESETS['oracle'];
-    const template = templates[type];
-
-    if (template) {
-        input.value = template.replace(/\{col\}/g, dateCol);
-    } else {
-        input.value = dateCol;
     }
 }
 
@@ -892,7 +802,6 @@ async function toggleQueryPreview() {
             date_col: document.getElementById('left-date-col').value,
             date_type: document.getElementById('left-date-type').value,
             where: document.getElementById('left-where').value,
-            vintage: document.getElementById('left-vintage').value,
             processed: document.getElementById('left-cte').value,
         },
         right: {
@@ -903,7 +812,6 @@ async function toggleQueryPreview() {
             date_col: document.getElementById('right-date-col').value,
             date_type: document.getElementById('right-date-type').value,
             where: document.getElementById('right-where').value,
-            vintage: document.getElementById('right-vintage').value,
             processed: document.getElementById('right-cte').value,
         },
         fromDate,
