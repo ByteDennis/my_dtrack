@@ -97,9 +97,12 @@
         }
 
         // ── Rendering ─────────────────────────────────────────────────────
+        // DOM matches the existing .file-card / .file-card-header / .file-card-body
+        // styles in style_v2.css so all three pages look identical.
         function renderFileList() {
             const container = document.getElementById('file-list');
             if (!container) return;
+            const globalKey = `__csvLoader_${cfg.suffix}`;
 
             container.innerHTML = state.fileEntries.map((entry, idx) => {
                 const dateRange = entry.minDate && entry.maxDate
@@ -110,66 +113,71 @@
                 const targetLine = entry.matched
                     ? `<span class="file-target">&rarr; ${entry.tableName} <span class="file-side">(${entry.side})</span></span>`
                     : buildDropdown(idx, getAvailableTableOptions(idx));
+                const disabled = !entry.matched && !entry.tableName ? 'disabled' : '';
 
                 return `
-                <div class="file-match-row ${entry.selected ? 'selected' : ''}">
-                    <input type="checkbox" ${entry.selected ? 'checked' : ''}
-                        onchange="window.__csvLoader_${cfg.suffix}.toggleEntry(${idx}, this.checked)">
-                    <div class="file-info">
-                        <div class="file-name">
-                            <span class="file-icon">&#128196;</span>
-                            <span>${entry.name}</span>
-                            ${matchBadge}
-                        </div>
-                        <div class="file-details">
-                            ${targetLine}
-                            <span class="file-meta">${(entry.rows || 0).toLocaleString()} rows</span>
-                            <span class="file-meta">${dateRange}</span>
-                        </div>
+                <div class="file-card ${entry.matched ? '' : 'unmatched'}">
+                    <div class="file-card-header">
+                        <label class="file-checkbox">
+                            <input type="checkbox" ${entry.selected ? 'checked' : ''} ${disabled}
+                                onchange="window.${globalKey}.toggleEntry(${idx}, this.checked)">
+                        </label>
+                        <span class="file-name">${entry.name}</span>
+                        ${matchBadge}
+                        <button class="btn-text btn-remove" title="Remove"
+                            onclick="window.${globalKey}.removeEntry(${idx})">&times;</button>
                     </div>
-                    <button class="btn-text" onclick="window.__csvLoader_${cfg.suffix}.removeEntry(${idx})">&times;</button>
+                    <div class="file-card-body">
+                        ${targetLine}
+                        <span class="file-meta">${(entry.rows || 0).toLocaleString()} rows &middot; ${dateRange}</span>
+                    </div>
                 </div>`;
             }).join('');
 
-            const nSelected = state.fileEntries.filter(e => e.selected).length;
-            const btn = document.getElementById('load-btn');
-            if (btn) {
-                btn.disabled = nSelected === 0;
-                btn.textContent = `Load Selected (${nSelected})`;
-            }
+            updateLoadButton();
         }
 
         function buildDropdown(idx, options) {
-            if (!options.length) return '<span class="file-meta">no free tables</span>';
-            const opts = ['<option value="">-- pick target table --</option>']
+            const globalKey = `__csvLoader_${cfg.suffix}`;
+            const opts = ['<option value="">-- select table --</option>']
                 .concat(options.map(o => `<option value="${o.value}">${o.label}</option>`));
-            return `<select class="file-target-select"
-                onchange="window.__csvLoader_${cfg.suffix}.onTargetPicked(${idx}, this.value)">${opts.join('')}</select>`;
+            return `<select class="manual-match-select"
+                onchange="window.${globalKey}.onTargetPicked(${idx}, this.value)">${opts.join('')}</select>`;
         }
 
         function onTargetPicked(idx, value) {
-            if (!value) return;
-            const [tableName, side, pairName] = value.split('|');
             const entry = state.fileEntries[idx];
-            entry.tableName = tableName;
-            entry.side = side;
-            entry.pairName = pairName;
-            entry.matched = true;
-            entry.selected = true;
+            if (!value) {
+                entry.matched = false; entry.tableName = ''; entry.side = '';
+                entry.pairName = ''; entry.selected = false;
+            } else {
+                const [tableName, side, pairName] = value.split('|');
+                entry.matched = true; entry.tableName = tableName; entry.side = side;
+                entry.pairName = pairName; entry.selected = true;
+            }
             renderFileList();
         }
 
         function toggleEntry(idx, checked) {
             state.fileEntries[idx].selected = checked;
-            renderFileList();
+            updateLoadButton();
         }
 
         function removeEntry(idx) {
             state.fileEntries.splice(idx, 1);
-            renderFileList();
             if (!state.fileEntries.length) {
                 document.getElementById('match-section').style.display = 'none';
+            } else {
+                renderFileList();
             }
+        }
+
+        function updateLoadButton() {
+            const n = state.fileEntries.filter(e => e.selected && e.tableName).length;
+            const btn = document.getElementById('load-btn');
+            if (!btn) return;
+            btn.disabled = n === 0;
+            btn.textContent = `Load Selected (${n})`;
         }
 
         async function processFiles(files) {
@@ -189,15 +197,22 @@
 
         async function scanFolder() {
             const folder = document.getElementById('folder-path').value.trim();
-            if (!folder) return;
+            console.log(`[csv_loader:${cfg.suffix}] scan clicked, folder="${folder}"`);
+            if (!folder) { showToast('Folder path is empty', 'error'); return; }
             const btn = document.getElementById('scan-folder-btn');
             btn.disabled = true; btn.textContent = 'Scanning...';
             try {
                 const resp = await fetch(`/api/scan/folder?dir=${encodeURIComponent(folder)}`);
                 const data = await resp.json();
+                console.log(`[csv_loader:${cfg.suffix}] /api/scan/folder ->`, data);
                 if (!resp.ok) { showToast(data.error || 'Scan failed', 'error'); return; }
                 const files = (data.files || []).filter(f => SUFFIX_RE.test(f.name.replace(/\.csv$/i, '')));
-                if (!files.length) { showToast(`No *_${cfg.suffix}.csv in folder`, 'error'); return; }
+                if (!files.length) {
+                    const total = (data.files || []).length;
+                    showToast(`No *_${cfg.suffix}.csv in folder` +
+                              (total ? ` (${total} other CSV seen, suffix mismatch)` : ''), 'error');
+                    return;
+                }
                 for (const f of files) {
                     if (state.fileEntries.some(e => e.name === f.name)) continue;
                     const match = autoMatch(f.name);
@@ -212,6 +227,7 @@
                 document.getElementById('match-section').style.display = '';
                 showToast(`Found ${files.length} *_${cfg.suffix}.csv`);
             } catch (e) {
+                console.error(`[csv_loader:${cfg.suffix}] scan error:`, e);
                 showToast(e.message, 'error');
             } finally {
                 btn.disabled = false; btn.textContent = 'Scan';
@@ -220,10 +236,15 @@
 
         // ── Load (upload or path-based) ──────────────────────────────────
         async function loadSelected() {
-            const selected = state.fileEntries.filter(e => e.selected && e.matched);
+            const selected = state.fileEntries.filter(e => e.selected && e.tableName);
             if (!selected.length) return;
+
+            const btn = document.getElementById('load-btn');
+            if (btn) { btn.disabled = true; btn.textContent = 'Loading...'; }
             const logSection = document.getElementById('log-section');
+            const logEl = document.getElementById('run-log');
             if (logSection) logSection.style.display = '';
+            if (logEl) logEl.innerHTML = '';
             logEntry(`Loading ${selected.length} file(s)...`);
 
             let successCount = 0;
@@ -248,25 +269,44 @@
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify(body),
                         });
+                    } else {
+                        logEntry(`  SKIP ${entry.name}: no file or server path`, 'error');
+                        continue;
                     }
                     const data = await resp.json();
-                    if (!resp.ok) throw new Error(data.error || 'Upload failed');
-                    logEntry(`  OK: ${JSON.stringify(data).slice(0, 160)}`);
+                    if (!data.ok) {
+                        logEntry(`  FAIL ${entry.name}: ${data.error || 'unknown error'}`, 'error');
+                        continue;
+                    }
+                    const msg = cfg.formatLoadResult
+                        ? cfg.formatLoadResult(data, entry)
+                        : `${entry.tableName}: loaded`;
+                    logEntry(`  OK ${msg}`, 'success');
                     successCount++;
                 } catch (e) {
-                    logEntry(`  ERROR: ${e.message}`, 'error');
+                    logEntry(`  FAIL ${entry.name}: ${e.message}`, 'error');
                 }
             }
-            logEntry(`Done: ${successCount}/${selected.length} succeeded.`);
+            logEntry(`Done: ${successCount}/${selected.length} files loaded`,
+                     successCount === selected.length ? 'success' : 'error');
+
             if (cfg.afterLoad) await cfg.afterLoad();
+
+            // Clear the match list now that the run is done
+            state.fileEntries = [];
+            const matchSection = document.getElementById('match-section');
+            if (matchSection) matchSection.style.display = 'none';
+            if (btn) { btn.textContent = 'Load Selected (0)'; btn.disabled = true; }
         }
 
         function logEntry(msg, type) {
             const log = document.getElementById('run-log');
             if (!log) return;
+            const time = new Date().toLocaleTimeString();
+            const cls = type === 'success' ? 'log-success' : type === 'error' ? 'log-error' : '';
             const div = document.createElement('div');
-            div.className = 'log-entry' + (type === 'error' ? ' log-error' : '');
-            div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            div.className = 'log-entry';
+            div.innerHTML = `<span class="log-time">${time}</span> <span class="log-message ${cls}">${msg}</span>`;
             log.appendChild(div);
             log.scrollTop = log.scrollHeight;
         }
@@ -294,13 +334,18 @@
             const clearLog = document.getElementById('clear-log-btn');
 
             if (dropZone) {
-                dropZone.addEventListener('click', () => fileInput && fileInput.click());
-                dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
-                dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+                dropZone.addEventListener('click', e => {
+                    if (e.target === dropZone || (e.target.closest('.drop-zone-content') && e.target.tagName !== 'BUTTON')) {
+                        if (fileInput) fileInput.click();
+                    }
+                });
+                dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+                dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
                 dropZone.addEventListener('drop', e => {
                     e.preventDefault();
-                    dropZone.classList.remove('dragover');
-                    processFiles(Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.csv')));
+                    dropZone.classList.remove('drag-over');
+                    const csv = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.csv'));
+                    if (csv.length) processFiles(csv);
                 });
             }
             if (browseBtn && fileInput) {
@@ -327,5 +372,54 @@
         return api;
     }
 
+    // Shared helper — every page auto-matches against the same union of
+    // DB-registered and config-only pairs, so a pair that's in dtrack.json
+    // but not yet in _table_pairs still resolves.
+    async function loadKnownTables() {
+        const tables = [];
+        try {
+            const resp = await fetch('/api/status');
+            const data = await resp.json();
+            for (const p of (data.pairs || [])) {
+                tables.push({
+                    pair_name: p.pair_name,
+                    table_left: p.table_left,
+                    table_right: p.table_right,
+                    source_left: p.source_left || '',
+                    source_right: p.source_right || '',
+                });
+            }
+        } catch (e) { console.error('Failed to load /api/status:', e); }
+
+        try {
+            const cfgResp = await fetch('/api/pairs/list');
+            const cfgData = await cfgResp.json();
+            const existing = new Set(tables.map(t => t.pair_name));
+            for (const p of (cfgData.pairs || [])) {
+                if (existing.has(p.name)) continue;
+                const leftSource = p.left?.source || '';
+                const rightSource = p.right?.source || '';
+                // Match backend _derive_side_name: name from `table`, fallback to pair_name
+                const deriveName = (sideCfg) => {
+                    const t = (sideCfg?.table || '').trim();
+                    if (!t) return p.name;
+                    return t.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || p.name;
+                };
+                const leftName = deriveName(p.left);
+                const rightName = deriveName(p.right);
+                tables.push({
+                    pair_name: p.name,
+                    table_left: leftSource ? `${leftSource}_${leftName}` : leftName,
+                    table_right: rightSource ? `${rightSource}_${rightName}` : rightName,
+                    source_left: leftSource,
+                    source_right: rightSource,
+                });
+            }
+        } catch (e) { console.error('Failed to load /api/pairs/list:', e); }
+
+        return tables;
+    }
+
     global.createCsvLoader = createCsvLoader;
+    global.loadKnownTables = loadKnownTables;
 })(window);

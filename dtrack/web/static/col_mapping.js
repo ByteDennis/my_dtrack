@@ -26,28 +26,22 @@ let mappingCache = {};  // pair_name -> {mappings, rules, sources, left_columns,
 // ---------------------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', async () => {
     await loadPairs();
-    initColumnsLoader();
+    await initColumnsLoader();
 });
 
 // Wire up the shared drop-zone / scan / match / load UI in the
 // "LOAD COLUMNS CSV" section. Same component used by load_row and load_col.
-function initColumnsLoader() {
-    if (typeof createCsvLoader !== 'function') return;
+async function initColumnsLoader() {
+    if (typeof createCsvLoader !== 'function') {
+        console.error('[col_mapping] csv_loader.js did not load');
+        return;
+    }
     const knownTables = { current: [] };
-    const refreshKnownTables = async () => {
-        try {
-            const resp = await fetch('/api/status');
-            const data = await resp.json();
-            knownTables.current = (data.pairs || []).map(p => ({
-                pair_name: p.pair_name,
-                table_left: p.table_left,
-                table_right: p.table_right,
-                source_left: p.source_left || '',
-                source_right: p.source_right || '',
-            }));
-        } catch (e) { /* leave empty */ }
-    };
-    refreshKnownTables();
+    // Populate from both /api/status and /api/pairs/list so config-only
+    // pairs (not yet registered in _table_pairs) also auto-match.
+    knownTables.current = await loadKnownTables();
+    console.log('[col_mapping] auto-match known tables:',
+        knownTables.current.map(t => `${t.pair_name}: L=${t.table_left} R=${t.table_right}`));
 
     const extras = (entry, known) => {
         const pair = known.find(p =>
@@ -65,6 +59,8 @@ function initColumnsLoader() {
         extraFormFields: extras,
         extraBodyFields: extras,
         knownTables,
+        formatLoadResult: (data, entry) =>
+            `${entry.tableName}: ${data.loaded} columns loaded`,
         afterLoad: async () => {
             // Refresh every expanded pair's column lists so the mapped/
             // unmatched lists reflect the newly-loaded _column_meta rows.
@@ -72,6 +68,7 @@ function initColumnsLoader() {
             for (const p of pairsData) await loadColumns(p.pair_name);
         },
     }).init();
+    console.log('[col_mapping] loader initialized');
 }
 
 async function loadPairs() {

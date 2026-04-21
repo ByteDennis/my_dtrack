@@ -758,9 +758,14 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     with open(template_path, 'r') as f:
         template = f.read()
 
+    # Col extraction uses proc sql passthrough through whatever conn_macro
+    # a side declares (pb23, hdp, etc.), so oracle/sas/hadoop all go through
+    # _gen_sas_col_local. Row extraction still splits because it uses
+    # platform-specific templates (rows_oracle.sas vs rows_hadoop.sas).
+    all_col_tables = oracle_tables + hadoop_tables
     if db_path and "col" in types:
-        fill_columns_from_meta(oracle_tables, db_path)
-    for tbl in oracle_tables:
+        fill_columns_from_meta(all_col_tables, db_path)
+    for tbl in all_col_tables:
         if vintage:
             tbl['vintage'] = vintage
         elif not tbl.get('vintage'):
@@ -790,7 +795,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
             macro_parts.append(_gen_sas_row_hadoop(hadoop_tables, sas_lib, out_dir))
 
     if "col" in types:
-        for tbl in oracle_tables:
+        for tbl in all_col_tables:
             name = tbl['name']
             macro_parts.append(f"/* --- {name}: {tbl['table']} (col) --- */")
             macro_parts.append(_gen_sas_col_local(tbl, db_path, sas_lib, out_dir))
@@ -805,7 +810,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         runner_parts.append("")
 
     if "col" in types:
-        for tbl in oracle_tables:
+        for tbl in all_col_tables:
             name = tbl['name']
             sn = sas_safe_name(name)
             runner_parts.append(f"%start_timer();")
@@ -913,8 +918,13 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     with open(sas_path, 'w', encoding='utf-8') as f:
         f.write(sas_content)
 
+    # Break the count out by source so the log is honest about what went in.
+    n_oracle = sum(1 for t in oracle_tables if (t.get('source') or '').lower() == 'oracle')
+    n_sas = sum(1 for t in oracle_tables if (t.get('source') or '').lower() == 'sas')
+    n_hadoop = len(hadoop_tables)
+    total = n_oracle + n_sas + n_hadoop
     print(f"  Generated: {sas_path}")
-    print(f"  Tables: {len(oracle_tables)}")
+    print(f"  Tables: {total} (oracle={n_oracle}, sas={n_sas}, hadoop={n_hadoop})")
     print(f"  Types: {', '.join(types)}")
     if env_path:
         print(f"  Credentials: from {env_path}")
