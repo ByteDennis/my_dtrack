@@ -66,11 +66,12 @@ run;
             );
         %end;
         %else %do;
-            /* Categorical: per-value SUBSTR caps width to 200 so per-bucket
-               LISTAGG stays under Oracle's 4000-char cap (plus ON OVERFLOW
-               TRUNCATE as a belt-and-braces; Oracle 12.2+).  Freq table is
-               grouped by (dt, p_col); rank partitioned by dt; LISTAGG
-               grouped by dt -> one row per bucket. */
+            /* Categorical, two-stage: freq CTE groups (dt, value) once;
+               outer SELECT aggregates cnt per dt to produce the
+               frequency-distribution stats (mean/std/min/max of per-value
+               counts) plus the column-level counts (n_total, n_missing,
+               n_unique). No ranking, no LISTAGG, no join -- those were the
+               crash-prone steps. top_10 emitted as empty string. */
             create table _c_one as
             select * from connection to oracle (
                 WITH freq_raw_ AS (
@@ -79,38 +80,23 @@ run;
                            COUNT(*) AS value_freq
                     FROM &_from_table
                     WHERE &_where_clause
-                    GROUP BY &_vintage_expr, SUBSTR(TO_CHAR(&_col_name), 1, 200)
-                ), ranked_ AS (
-                    SELECT dt, p_col, value_freq,
-                           ROW_NUMBER() OVER (PARTITION BY dt
-                                              ORDER BY value_freq DESC, p_col ASC) AS rn
-                    FROM freq_raw_
-                ), stats_ AS (
-                    SELECT dt,
-                           SUM(value_freq) AS n_total,
-                           COALESCE(MAX(CASE WHEN p_col IS NULL
-                                             THEN value_freq END), 0) AS n_missing,
-                           SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique,
-                           TO_CHAR(AVG(value_freq)) AS mean,
-                           TO_CHAR(STDDEV_SAMP(value_freq)) AS std,
-                           TO_CHAR(MIN(value_freq)) AS min_val,
-                           TO_CHAR(MAX(value_freq)) AS max_val
-                    FROM freq_raw_ GROUP BY dt
-                ), top_ AS (
-                    SELECT dt,
-                           LISTAGG(p_col || '(' || value_freq || ')', '; '
-                                   ON OVERFLOW TRUNCATE '...' WITH COUNT)
-                             WITHIN GROUP (ORDER BY value_freq DESC, p_col ASC) AS top_10
-                    FROM ranked_ WHERE rn <= 10 AND p_col IS NOT NULL
-                    GROUP BY dt
+                    GROUP BY &_vintage_expr,
+                             SUBSTR(TO_CHAR(&_col_name), 1, 200)
                 )
-                SELECT s.dt,
+                SELECT dt,
                        &_col_name_lit AS column_name,
                        'categorical' AS col_type,
-                       s.n_total, s.n_missing, s.n_unique,
-                       s.mean, s.std, s.min_val, s.max_val,
-                       COALESCE(t.top_10, '') AS top_10
-                FROM stats_ s LEFT JOIN top_ t ON s.dt = t.dt
+                       SUM(value_freq) AS n_total,
+                       COALESCE(MAX(CASE WHEN p_col IS NULL
+                                         THEN value_freq END), 0) AS n_missing,
+                       SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique,
+                       TO_CHAR(AVG(value_freq)) AS mean,
+                       TO_CHAR(STDDEV_SAMP(value_freq)) AS std,
+                       TO_CHAR(MIN(value_freq)) AS min_val,
+                       TO_CHAR(MAX(value_freq)) AS max_val,
+                       CAST('' AS VARCHAR2(4000)) AS top_10
+                FROM freq_raw_
+                GROUP BY dt
             );
         %end;
         disconnect from oracle;

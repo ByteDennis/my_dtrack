@@ -167,6 +167,18 @@ async def api_date_types():
     return {"date_types": DATE_TYPE_FORMATS}
 
 
+@app.get("/api/constants")
+async def api_constants():
+    """Return UI constants defined once in dtrack/constants.py so the JS
+    side doesn't need to keep a parallel copy."""
+    from .. import constants as C
+    return {
+        "DATA_SOURCES": C.DATA_SOURCES,
+        "CONNECTION_MACROS": C.CONNECTION_MACROS,
+        "DATE_COLUMN_TYPES": C.DATE_COLUMN_TYPES,
+    }
+
+
 @app.post("/api/extract")
 async def api_extract(request: Request):
     """Run gen-sas or gen-aws extraction."""

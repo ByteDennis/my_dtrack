@@ -3,40 +3,32 @@
 let pairs = [];
 let editingPairIndex = -1;
 
-// Constants (should match constants.py)
-const DATA_SOURCES = [
-    {value: "oracle", label: "SAS/Oracle"},
-    {value: "hadoop", label: "SAS/Hadoop"},
-    {value: "sas", label: "SAS Dataset"},
-    {value: "aws", label: "AWS/Athena"},
-    {value: "csv", label: "CSV"},
-];
+// UI constants are served by GET /api/constants (source of truth:
+// dtrack/constants.py). Kept mutable so initConstants() can populate them
+// before initSourceDropdowns() reads them. When adding a new date format,
+// update dtrack/constants.py — NOT this file.
+let DATA_SOURCES = [];
+let CONNECTION_MACROS = {};
+let DATE_COLUMN_TYPES = [];
 
-const CONNECTION_MACROS = {
-    "oracle": ["pb23", "pb30"],
-    "hadoop": ["hdp", "hadoop_prod"],
-    "sas": ["work", "sasuser"],
-    "aws": ["analytics_db", "warehouse_db", "mydb"],
-    "csv": [],
-};
+async function initConstants() {
+    const resp = await fetch('/api/constants');
+    if (!resp.ok) throw new Error(`GET /api/constants failed: ${resp.status}`);
+    const data = await resp.json();
+    DATA_SOURCES = data.DATA_SOURCES || [];
+    CONNECTION_MACROS = data.CONNECTION_MACROS || {};
+    DATE_COLUMN_TYPES = data.DATE_COLUMN_TYPES || [];
+}
 
-// Step 3 of adding a new date format: add {value, label} here.
-// See base.py DATE_TYPE_FORMATS comment block for full instructions.
-const DATE_COLUMN_TYPES = [
-    {value: "date", label: "Date"},
-    {value: "timestamp", label: "Timestamp"},
-    {value: "datetime", label: "DateTime"},
-    {value: "num", label: "Number (YYYYMMDD)"},
-    {value: "num_yyyymm", label: "Number (YYYYMM)"},
-    {value: "string_dash", label: "String (YYYY-MM-DD)"},
-    {value: "string_compact", label: "String (YYYYMMDD)"},
-    {value: "string_mon", label: "String (DDMONYYYY)"},
-    {value: "string_mon_dash", label: "String (DD-MON-YYYY)"},
-    {value: "string_us", label: "String (MM/DD/YYYY)"},
-];
-
-// Initialize on page load
-document.addEventListener('DOMContentLoaded', () => {
+// Initialize on page load. initConstants must resolve before
+// initSourceDropdowns so the source/date-type <select> options render.
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        await initConstants();
+    } catch (e) {
+        console.error(e);
+        alert('Failed to load UI constants — dropdowns will be empty. See console.');
+    }
     loadPairs();
     loadGlobalSettings();
     initModalHandlers();

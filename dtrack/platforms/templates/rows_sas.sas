@@ -44,7 +44,7 @@ run;
     proc export data=cache.rc_&dsname outfile="&_outpath" dbms=csv replace; run;
     %log_time(table=&qname, step=row, outpath=&out_dir.);
 
-    /* Column metadata: proc contents on SAS dataset → _columns.csv */
+    /* Column metadata: proc contents on SAS dataset -> _columns.csv */
     %local _colpath;
     %let _colpath = &out_dir./&qname._columns.csv;
     %if %sysfunc(fileexist(&_colpath)) = 0 %then %do;

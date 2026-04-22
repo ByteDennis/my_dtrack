@@ -280,8 +280,11 @@ calls navigateToStep() which redirects to the corresponding route.
 3.9  constants.py
      ─────────────
      UI dropdown values: DATA_SOURCES, DATE_COLUMN_TYPES, DATE_LITERAL_FORMATS,
-     CONNECTION_MACROS, VINTAGE_PRESETS. These are duplicated in pairs.js for
-     the frontend (no build step to share them).
+     CONNECTION_MACROS, VINTAGE_PRESETS. pairs.js fetches DATA_SOURCES,
+     CONNECTION_MACROS, and DATE_COLUMN_TYPES at page load via GET
+     /api/constants so this file is the single source of truth for the
+     frontend dropdowns. DATE_LITERAL_FORMATS and VINTAGE_PRESETS are
+     server-side only.
 
 3.10 pipeline.py
      ────────────

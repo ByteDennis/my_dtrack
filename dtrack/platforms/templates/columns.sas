@@ -154,7 +154,7 @@
 /*{STACK_CACHES}*/
     proc datasets lib=work nolist; delete _col_map; quit;
 
-    /* Format dt as YYYY-MM-DD for CSV export (SAS date numbers → readable dates) */
+    /* Format dt as YYYY-MM-DD for CSV export (SAS date numbers -> readable dates) */
     data _colstats_/*{SN}*/;
         set _colstats_/*{SN}*/;
         length dt_fmt $10;

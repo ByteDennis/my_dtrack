@@ -59,14 +59,22 @@ run;
             );
         %end;
         %else %do;
-            /* Categorical, multi-bucket:
-                 freq    -- (dt, p_col, cnt) one row per (bucket, value)
-                 ranked  -- adds rn per dt via PARTITION BY
-                 stats   -- aggregate stats per dt
-                 top_10  -- for each dt: sort_array(collect_list(LPAD(rn)||':::'||entry))
-                            then regexp_replace strips the '###:::' prefix,
-                            reliably preserving rank order across Hive versions.
-               Final SELECT left-joins top_10 back to stats. */
+            /* Categorical, two-stage:
+                 freq   -- GROUP BY (dt, col) -> one row per (bucket, value)
+                           with its count. This IS the expensive step for
+                           high-cardinality columns, but it produces one row
+                           per distinct value so it doesn't OOM on its own;
+                           what crashed before was the windowed ranking +
+                           collect_list/sort_array chain layered on top of
+                           freq. Keeping freq, dropping everything above it.
+                 outer  -- aggregate cnt per dt to get stats of the
+                           frequency distribution (how skewed, how uniform,
+                           etc.). mean/std/min/max describe the distribution
+                           of per-value counts; n_total / n_missing /
+                           n_unique describe the column as a whole.
+               Top-10 is emitted as empty string -- ranking/top-N was the
+               part that kept blowing up (Tez reducer OOM, collect_list
+               finalization bugs, SMB plan errors). */
             create table _c_one as
             select * from connection to hadoop (
                 WITH freq AS (
@@ -75,44 +83,22 @@ run;
                            COUNT(*) AS cnt
                     FROM &_from_table
                     WHERE &_where_clause
-                    GROUP BY &_vintage_expr, SUBSTR(CAST(&_col_name AS STRING), 1, 200)
-                ), ranked AS (
-                    SELECT dt, p_col, cnt,
-                           ROW_NUMBER() OVER (PARTITION BY dt
-                                              ORDER BY cnt DESC, p_col ASC) AS rn
-                    FROM freq
-                ), stats AS (
-                    SELECT dt,
-                           SUM(cnt) AS n_total,
-                           COALESCE(SUM(CASE WHEN p_col IS NULL THEN cnt ELSE 0 END), 0) AS n_missing,
-                           SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique,
-                           CAST(AVG(CAST(cnt AS DOUBLE)) AS STRING) AS mean,
-                           CAST(STDDEV_SAMP(CAST(cnt AS DOUBLE)) AS STRING) AS std,
-                           CAST(MIN(cnt) AS STRING) AS min_val,
-                           CAST(MAX(cnt) AS STRING) AS max_val
-                    FROM freq GROUP BY dt
-                ), top_list AS (
-                    SELECT dt,
-                           regexp_replace(
-                               CONCAT_WS('; ',
-                                 sort_array(collect_list(
-                                   CONCAT(LPAD(CAST(rn AS STRING), 3, '0'), ':::',
-                                          CONCAT(COALESCE(p_col,'NULL'), '(',
-                                                 CAST(cnt AS STRING), ')'))
-                                 ))
-                               ),
-                               '[0-9]{3}:::', ''
-                           ) AS top_10
-                    FROM ranked WHERE rn <= 10 AND p_col IS NOT NULL
-                    GROUP BY dt
+                    GROUP BY &_vintage_expr,
+                             SUBSTR(CAST(&_col_name AS STRING), 1, 200)
                 )
-                SELECT s.dt,
+                SELECT dt,
                        &_col_name_lit AS column_name,
                        'categorical' AS col_type,
-                       s.n_total, s.n_missing, s.n_unique,
-                       s.mean, s.std, s.min_val, s.max_val,
-                       COALESCE(t.top_10, '') AS top_10
-                FROM stats s LEFT JOIN top_list t ON s.dt = t.dt
+                       SUM(cnt) AS n_total,
+                       COALESCE(SUM(CASE WHEN p_col IS NULL THEN cnt ELSE 0 END), 0) AS n_missing,
+                       SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique,
+                       CAST(AVG(CAST(cnt AS DOUBLE)) AS STRING) AS mean,
+                       CAST(STDDEV_SAMP(CAST(cnt AS DOUBLE)) AS STRING) AS std,
+                       CAST(MIN(cnt) AS STRING) AS min_val,
+                       CAST(MAX(cnt) AS STRING) AS max_val,
+                       CAST('' AS STRING) AS top_10
+                FROM freq
+                GROUP BY dt
             );
         %end;
         disconnect from hadoop;

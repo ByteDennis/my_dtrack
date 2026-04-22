@@ -130,7 +130,12 @@ def resolve_table(tbl_cfg, full_table=None):
         return table, ""
     if isinstance(processed, list):
         processed = "\n".join(processed)
-    alias = tbl_cfg['name']
+    # Prefix the CTE alias so it can't collide with the real table name.
+    # When `processed` references the base table (common pattern:
+    # `SELECT * FROM T WHERE eff_dt = (SELECT MAX(eff_dt) FROM T)`) and the
+    # CTE is named `T`, Oracle reads the inner `FROM T` as a self-reference
+    # and fails with ORA-32039 (recursive WITH requires column alias list).
+    alias = f"cte_{tbl_cfg['name']}"
     cte = f"WITH {alias} AS (\n{processed}\n)\n"
     return alias, cte
 

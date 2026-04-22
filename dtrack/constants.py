@@ -9,14 +9,20 @@ DATA_SOURCES = [
     {"value": "csv", "label": "CSV"},
 ]
 
-# Date column types
+# Date column types — dropdown options shown in the pairs UI. When adding a
+# new format, also add it to DATE_TYPE_FORMATS in platforms/base.py and to
+# reformat_date()'s fmt_map there.
 DATE_COLUMN_TYPES = [
     {"value": "date", "label": "Date"},
     {"value": "timestamp", "label": "Timestamp"},
     {"value": "datetime", "label": "DateTime"},
-    {"value": "num", "label": "Number (SAS date)"},
+    {"value": "num", "label": "Number (YYYYMMDD)"},
+    {"value": "num_yyyymm", "label": "Number (YYYYMM)"},
     {"value": "string_dash", "label": "String (YYYY-MM-DD)"},
     {"value": "string_compact", "label": "String (YYYYMMDD)"},
+    {"value": "string_mon", "label": "String (DDMONYYYY)"},
+    {"value": "string_mon_dash", "label": "String (DD-MON-YYYY)"},
+    {"value": "string_us", "label": "String (MM/DD/YYYY)"},
 ]
 
 # Date literal formatting by platform and date column type

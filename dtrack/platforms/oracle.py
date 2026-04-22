@@ -236,7 +236,10 @@ def _resolve_table_and_cte(tbl_cfg):
         processed = "\n".join(processed)
 
     if processed:
-        alias = tbl_cfg['name']
+        # Prefix so the CTE alias can't shadow the real table name inside
+        # `processed` (Oracle would then treat the inner FROM as a recursive
+        # self-reference and raise ORA-32039).
+        alias = f"cte_{tbl_cfg['name']}"
         return alias, f"WITH {alias} AS ({processed}) ", False
     return table, "", False
 
@@ -247,7 +250,7 @@ def _gen_sas_proc_contents(sas_tables, out_dir='.'):
         return ''
 
     tpl_path = os.path.join(os.path.dirname(__file__), 'templates', 'meta.sas')
-    with open(tpl_path) as f:
+    with open(tpl_path, encoding='utf-8') as f:
         template = f.read()
 
     blocks = ["/* Column metadata discovery for SAS datasets */"]
@@ -311,10 +314,16 @@ def _gen_sas_row_datadriven(oracle_tables, sas_lib='WORK', out_dir='.'):
                 where = f"({where}) AND {date_bounds}" if where else date_bounds
             date_expr = _oracle_date_transform(date_col, transform) if transform else date_col
             if processed:
-                table = name
+                # Reference the CTE alias, not the bare table name — the CTE
+                # is prefixed `cte_` below so it can't collide with the real
+                # table name inside `processed` (otherwise Oracle raises
+                # ORA-32039: recursive WITH clause must have column alias list).
+                table = f"cte_{name}"
             oracle_datalines.append(f"{table}|{safe_ds}|{qname}|{date_expr}|{conn_macro}|{idx}|{where}")
 
-    # CTE %let statements for Oracle processed tables (not SAS)
+    # CTE %let statements for Oracle processed tables (not SAS). Alias is
+    # prefixed `cte_` so `processed` can reference the raw table name without
+    # Oracle reading the inner FROM as self-recursive.
     cte_lines = []
     for idx, tbl_cfg in enumerate(oracle_tables, 1):
         if is_sas_table(tbl_cfg):
@@ -324,7 +333,7 @@ def _gen_sas_row_datadriven(oracle_tables, sas_lib='WORK', out_dir='.'):
             processed = " ".join(processed)
         if processed:
             name = tbl_cfg['name']
-            cte_lines.append(f"%let _cte{idx} = WITH {name} AS ({processed});")
+            cte_lines.append(f"%let _cte{idx} = WITH cte_{name} AS ({processed});")
 
     redo = str(int(os.environ.get('SAS_ROW_REDO', '0')))
     redo_line = f"%let _row_redo = {redo};"

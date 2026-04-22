@@ -1,0 +1,120 @@
+CONSOLIDATED OBJECTIVES (top 5 stand-outs)
+===========================================
+
+# | Objective | Description & Benefit | Mapping Explanation
+1 | Complete the AWS Migration | Move all source data, team-owned processes, and Partner-agnostic alternative-data views onto AWS. Benefits: retires legacy Hadoop/SAS compute costs; unblocks analytical users locked out of direct Partner data; gives downstream AI a single platform to target. | objective 1 [P1] - Migrate source data (PCDS/Hadoop/SAS) to AWS\nobjective 3 [P1] - Migrate team-owned processes to AWS\nobjective 4 [P1] - Publish Partner-agnostic views for analytical users
+2 | Establish Single Source of Truth with Clear Ownership and Full Compliance | One authoritative version per critical dataset, unambiguous owners across build/validate/monitor/fix, and 100% GDMS/CDE coverage. Benefits: ends "whose number is right?" debates; issue routing takes hours not weeks because owners are named; passes enterprise/regulator audits first look. | objective 5 [P2] - One authoritative version per critical dataset\nobjective 8 [P2] - Assign clear owners across data lifecycle stages\nobjective 10 [P3] - Full GDMS compliance for all CDEs
+3 | Deliver Self-Service, High-Quality Data for Analysts | Active metadata in EDP Marketplace, consistent definitions and shapes across datasets, and preventive (not just detective) data-quality controls. Benefits: analyst time-to-data drops from days to minutes; defects blocked upstream instead of surfacing in reports; fewer re-pulls per analytical ask. | objective 9 [P2] - Make AWS data easy to discover and use\nobjective 11 [P3] - Active metadata catalog in EDP Marketplace\nobjective 12 [P3] - Shift data quality from detection to prevention
+4 | Unify Analytics and Validation Inside Databricks | Run validation, dashboards, and exception handling end-to-end in Databricks with a structured feedback loop to the platform team. Benefits: eliminates SAS-server -> AWS-CLI -> local round-trips per validation cycle; platform evolves around actual USCB use cases; single pane of glass for results. | objective 13 [P4] - Reduce Databricks workflow friction for analysts\nobjective 14 [P4] - End-to-end validation inside Databricks with dashboards
+5 | Embed AI Across Data Operations and Team Workflows | AI inside the platform (metadata enrichment, completeness monitoring, self-healing pipelines, auto-documented processes) and in team tooling (curated Copilot prompts with security guardrails for onboarding, metrics, decks). Benefits: data-ops toil drops materially; team reclaims hours on recurring deliverables while staying inside approved info boundaries. | objective 2 [P1] - Enable AI use via AWS data governance\nobjective 15 [P4] - Reusable Copilot prompts for data-strategy work
+
+
+OPEN-CONVERSATION PROMPTS (one per objective, to sharpen with your team)
+========================================================================
+
+--- Objective 1: Complete the AWS Migration ---
+
+I've been framing this one as "Complete the AWS Migration" -- wrapping source-data
+migration, team-owned process migration, and Partner-agnostic alternative views
+into a single year-end outcome. But that's a utilitarian title. Would you phrase
+it as something broader and more aspirational -- "Modernize Our Data
+Infrastructure," "Become a Cloud-Native Data Team," "Retire Legacy Data
+Platforms" -- or does the plain migration framing fit better because it's
+concrete and measurable? Curious how you'd say it in your own words.
+
+On the benefits, my draft has: retiring legacy Hadoop/SAS compute costs,
+unblocking analytical users locked out of direct Partner data, and giving
+downstream AI a single platform to target. Which of those would actually make
+your leadership lean in, and what am I missing -- cost savings with a dollar
+figure, a deprecation deadline, a specific use case that's been stuck for
+quarters? If you imagine a three-minute year-end readout where you get to claim
+"we delivered on AWS migration," what's the one headline number or story you'd
+most want to be able to say?
+
+
+--- Objective 2: Establish Single Source of Truth with Clear Ownership and Full Compliance ---
+
+I've bundled three legacy objectives together here -- SSOT for critical
+datasets, named ownership across the lifecycle, and full GDMS/CDE compliance --
+because to me they all roll up to "data you can trust, with someone accountable
+for it." Does that bundling feel right to you, or are these really three
+different conversations with three different sponsors that I'm artificially
+merging? If you'd rather keep them separate or reshuffle, which splits make
+sense?
+
+Benefits I drafted: ending "whose number is right?" debates, issue routing in
+hours instead of weeks, and passing enterprise/regulator audits on first look.
+Which of those lands hardest for your audience -- the business-user pain, the
+internal efficiency win, or the regulatory story? And if you had to pick one
+dataset that would make this objective feel real in a readout ("this is our
+SSOT, here's who owns it, here's the GDMS evidence"), what would it be?
+
+
+--- Objective 3: Deliver Self-Service, High-Quality Data for Analysts ---
+
+I've been framing this as "analysts can find, understand, and trust data
+without asking us" -- pulling together Marketplace adoption, consistent
+definitions/shapes, and the move from detective to preventive DQ. Does that
+match how you think about the analyst pain point today, or would you lead with
+a sharper problem -- "analysts spend 80% of their time hunting data,"
+"downstream reports break twice a quarter because of upstream DQ," something
+like that?
+
+The benefits I drafted lean on improvements: time-to-data from days to minutes,
+defects blocked upstream, fewer re-pulls per ask. But those are only as
+compelling as the baseline. Do you already track any of these (Marketplace
+adoption, DQ ticket volume, analyst NPS/survey, re-pull rate) that we could
+anchor the objective to? And who is "the analyst" we're serving -- CFDM,
+business-unit analysts, risk teams -- because the benefit story changes a lot
+by persona. Whose experience would you most want to point to?
+
+
+--- Objective 4: Unify Analytics and Validation Inside Databricks ---
+
+My current framing is narrow on purpose: "run end-to-end validation inside
+Databricks, with a feedback loop to the platform team." The pain I'm capturing
+is that one validation cycle today requires SAS server + AWS CLI + local
+scripts stitched together. But I'm not sure I've aimed high enough -- do you
+want this scoped to validation only, or should it be broader ("Databricks as
+the single workbench for the team") and cover all analytics, not just
+validation? The wider scope is a bigger story but a longer commitment.
+
+Benefits I had: no more tool-hopping per cycle, platform evolves around actual
+USCB use cases, single pane of glass for results. Different audiences care
+about different pieces -- analysts want the tool-hopping to stop, leadership
+wants efficiency numbers, the Databricks platform team wants the feedback
+loop. If we only get to optimize this objective's benefit story for one
+audience, who is it, and what would they most want to hear?
+
+
+--- Objective 5: Embed AI Across Data Operations and Team Workflows ---
+
+This one mixes two distinct AI bets: AI inside the platform (self-healing
+pipelines, AI monitoring for completeness, auto-documented processes) and AI
+in team workflows (Copilot prompts for onboarding, metrics tracking, decks,
+etc.). I've been tying them together as "AI making the team more leveraged,"
+but they have different owners, different timelines, and different risk
+profiles. Do you see them as one story or two -- and if one, what's the thread
+that actually connects them for your audience?
+
+For benefits I have: less data-ops toil, hours reclaimed on recurring
+deliverables, and a strong "security guardrails" story. "AI embedded
+everywhere" is easy to say and hard to prove, so I'd rather anchor this to one
+concrete deliverable you'd be proud to show at year-end. What would that be --
+a self-healing pipeline running on a low-stakes dataset, three Copilot prompts
+in daily team use, a specific monitoring task fully automated, something else?
+If we pick one flagship, what is it?
+
+
+COVERAGE NOTES
+==============
+Mapped: 13 of 15 legacy objectives (#1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15).
+
+Intentionally dropped from the headline list:
+  - objective 6 [P2] - Standardize migration/curation/validation lifecycle across teams
+  - objective 7 [P2] - Align data across source/hydrated/curated layers
+
+Both are real work but read as "how we operate" rather than outcomes a
+leadership review would anchor on. They fit naturally as sub-workstreams
+under Objective 2 (Trusted Data) and Objective 4 (Databricks validation)
+if needed.
