@@ -149,6 +149,7 @@ def get_all_tables_from_unified(config):
         col_map = pair_config.get("col_map", {})
         pair_vintage = pair_config.get("vintage", "")
         col_filter = pair_config.get("col_filter") or {}
+        cf_has_patterns = bool(col_filter.get("include") or col_filter.get("exclude"))
 
         # Resolve the pair's effective (left, right) col pairs after applying
         # include/exclude patterns. Falls back to all of col_map if no filter.
@@ -178,6 +179,14 @@ def get_all_tables_from_unified(config):
                 else:
                     table_cfg["_col_map_columns"] = set(col_map.values())
                     table_cfg["_selected_cols"] = selected_right
+            elif cf_has_patterns:
+                # No col_map yet, but the user has saved a col_filter on the
+                # pair -- stash the include/exclude patterns so extraction
+                # can apply them against each table's full column list.
+                table_cfg["_col_filter_patterns"] = {
+                    "include": list(col_filter.get("include") or []),
+                    "exclude": list(col_filter.get("exclude") or []),
+                }
 
             source = table_cfg.get("source", "")
             name = table_cfg.get("name", "")
@@ -210,6 +219,20 @@ def get_all_tables_from_unified(config):
                         # table, prefer it (otherwise first-pair vintage wins).
                         if pair_vintage and not t.get("vintage"):
                             t["vintage"] = pair_vintage
+                        # Merge col_filter patterns across pairs sharing this
+                        # physical table (union of include, union of exclude).
+                        new_cf = table_cfg.get("_col_filter_patterns")
+                        if new_cf:
+                            cur_cf = t.get("_col_filter_patterns") or {
+                                "include": [], "exclude": [],
+                            }
+                            for bucket in ("include", "exclude"):
+                                seen_p = {p.lower() for p in cur_cf.get(bucket) or []}
+                                for p in new_cf.get(bucket) or []:
+                                    if p.lower() not in seen_p:
+                                        cur_cf.setdefault(bucket, []).append(p)
+                                        seen_p.add(p.lower())
+                            t["_col_filter_patterns"] = cur_cf
                         break
 
     return tables

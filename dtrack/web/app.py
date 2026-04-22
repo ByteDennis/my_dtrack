@@ -214,6 +214,7 @@ async def api_run_sql_file(request: Request):
     extract_type = body.get("type", "row")
     outdir = _resolve(body.get("outdir", "./csv/"))
     max_workers = body.get("max_workers")
+    resume = bool(body.get("resume", False))
 
     sql_path = os.path.join(outdir, f"extract_{extract_type}.sql")
     if not os.path.exists(sql_path):
@@ -234,6 +235,7 @@ async def api_run_sql_file(request: Request):
                 max_workers=int(max_workers) if max_workers else None,
                 db_path=_db_path,
                 on_progress=_on_progress,
+                resume=resume,
             )
             ok_count = sum(1 for r in results if r.get("ok"))
             fail_count = len(results) - ok_count
@@ -432,8 +434,15 @@ async def api_generate_files(request: Request):
                         bounds.append(f"{date_col} <= {_format_date_bound(eff_to, date_type, is_sas, is_upper=True)}")
                 if bounds:
                     extra = " AND ".join(bounds)
-                    existing = tbl.get('where', '').strip()
-                    tbl['where'] = f"({existing}) AND {extra}" if existing else extra
+                    if source == 'aws':
+                        # Stash separately so the AWS col path can skip them
+                        # when its BETWEEN/IN filter already covers the range
+                        # (prevents `col >= X AND col <= Y AND col BETWEEN X
+                        # AND Y` duplication, matching the oracle fix).
+                        tbl['_date_bounds'] = extra
+                    else:
+                        existing = tbl.get('where', '').strip()
+                        tbl['where'] = f"({existing}) AND {extra}" if existing else extra
                 # Stash the resolved from/to so col-stats can synthesize
                 # vintage buckets when no row-compare data is loaded yet.
                 tbl['_from_date'] = eff_from
@@ -933,8 +942,12 @@ async def api_update_pair(pair_name: str, request: Request):
 
         pair_cfg = config["pairs"][pair_name]
 
-        # Update only valid pair-config keys (not frontend-only fields like pair_name)
-        _PAIR_KEYS = {"left", "right", "col_map", "description", "mode",
+        # Update only valid pair-config keys (not frontend-only fields like pair_name).
+        # col_filter is dual-written: the canonical store is _table_pairs in the DB
+        # (see below), but we also persist a copy in dtrack.json so the config file
+        # reflects exactly what the UI sees -- otherwise users edit include/exclude
+        # in col_gen, save, and wonder why the json doesn't change.
+        _PAIR_KEYS = {"left", "right", "col_map", "col_filter", "description", "mode",
                        "vintage",
                        "fromDate", "toDate", "dateRangeMode", "overlap",
                        "skip", "ignore_rows", "ignore_columns",
@@ -942,7 +955,11 @@ async def api_update_pair(pair_name: str, request: Request):
                        "comment_map", "diff_map", "excludeDates"}
         for key in _PAIR_KEYS:
             if key in body:
-                pair_cfg[key] = body[key]
+                # Normalize an explicit null col_filter into absence (keeps json clean).
+                if key == "col_filter" and body[key] is None:
+                    pair_cfg.pop("col_filter", None)
+                else:
+                    pair_cfg[key] = body[key]
 
         for side in ("left", "right"):
             if side in pair_cfg:

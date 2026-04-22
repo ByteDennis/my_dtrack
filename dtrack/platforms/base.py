@@ -60,12 +60,26 @@ def resolve_date_format(date_filter, tbl_cfg):
             date_filter['date_format'] = DATE_TYPE_FORMATS[cfg_date_type]
 
 
+_NUMERIC_TYPE_SET = {t.upper() for t in ORACLE_NUMERIC_TYPES} | {
+    t.upper() for t in ATHENA_NUMERIC_TYPES
+}
+
+
 def is_numeric_type(data_type, is_oracle=True):
-    """Check if a data type string represents a numeric column."""
+    """Check if a data type string represents a numeric column.
+
+    Unions Oracle and Hive/Athena numeric type names so this works regardless
+    of which system produced the type label. Hadoop-source tables frequently
+    carry Oracle-style labels like 'NUMBER' (because SAS proc contents over
+    a Hive passthrough emits SAS type codes), and Oracle tables occasionally
+    show 'BIGINT' via third-party meta loaders -- the union handles both.
+    The is_oracle flag is kept for backwards compatibility and is no longer
+    needed for correctness.
+    """
+    if not data_type:
+        return False
     dt_upper = data_type.upper().split('(')[0].strip()
-    if is_oracle:
-        return dt_upper in ORACLE_NUMERIC_TYPES
-    return dt_upper.lower() in ATHENA_NUMERIC_TYPES
+    return dt_upper in _NUMERIC_TYPE_SET
 
 
 def qualified_name(tbl_cfg):
@@ -76,8 +90,26 @@ def qualified_name(tbl_cfg):
 
 
 def sas_safe_name(name, max_len=18):
-    """Truncate name for SAS identifiers."""
-    return name[:max_len]
+    """Make `name` safe for use as a SAS identifier (dataset / variable name).
+
+    SAS identifier rules:
+      - max 32 characters (callers may pass smaller max to leave room for a
+        prefix like 'cache._cs_');
+      - must start with a letter or underscore;
+      - body may contain letters, digits, underscores only.
+
+    Non-conforming characters are replaced with '_' and a leading digit
+    gets an underscore prefix. After sanitization the name is truncated.
+    Without this, SAS raises "invalid data set name" at runtime for any
+    qname that happened to contain '.', '-', or other special characters,
+    or for a qname that sits right at the length boundary.
+    """
+    if not name:
+        return '_'
+    safe = re.sub(r'[^A-Za-z0-9_]', '_', str(name))
+    if safe[0].isdigit():
+        safe = '_' + safe
+    return safe[:max_len]
 
 
 def resolve_table(tbl_cfg, full_table=None):
@@ -241,6 +273,49 @@ def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=F
         fmt_min = reformat_date(min_date, date_format)
         fmt_max = reformat_date(max_date, date_format)
         return f"{date_col} BETWEEN '{fmt_min}' AND '{fmt_max}'"
+
+
+def format_date_bounds_literals(min_date, max_date, date_dtype, is_sas=False,
+                                date_format=None, custom_date_types=None):
+    """Return (from_lit, to_lit): the platform-formatted date literals that
+    build_date_between_clause would splice into a BETWEEN. Exposed so driver
+    datasets can carry the raw literal strings for inspection (useful when
+    cross-checking Oracle/Hadoop/SAS date formatting before running).
+    """
+    dtype = (date_dtype or '').upper()
+    is_string = dtype.startswith(('CHAR', 'VARCHAR', 'STRING', 'TEXT'))
+
+    if custom_date_types and date_dtype and date_dtype.lower() in custom_date_types:
+        custom = custom_date_types[date_dtype.lower()]
+        cat = custom.get('category', 'string')
+        fmt = custom.get('format')
+        if cat == 'number':
+            return reformat_date(min_date, fmt), reformat_date(max_date, fmt)
+        if cat == 'date':
+            return f"DATE '{min_date}'", f"DATE '{max_date}'"
+        return f"'{reformat_date(min_date, fmt)}'", f"'{reformat_date(max_date, fmt)}'"
+
+    if dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
+        return str(min_date), str(max_date)
+    if is_string:
+        return (f"'{reformat_date(min_date, date_format)}'",
+                f"'{reformat_date(max_date, date_format)}'")
+    if 'TIMESTAMP' in dtype or 'DATE' in dtype or 'TIME' in dtype:
+        is_datetime = ('TIMESTAMP' in dtype or 'DATETIME' in dtype or dtype == 'TIME')
+        if is_sas:
+            from datetime import datetime as _dt
+            try:
+                d_min = _dt.strptime(str(min_date), "%Y-%m-%d")
+                d_max = _dt.strptime(str(max_date), "%Y-%m-%d")
+                return (f"'{d_min.strftime('%d%b%Y').upper()}'d",
+                        f"'{d_max.strftime('%d%b%Y').upper()}'d")
+            except ValueError:
+                return f"'{min_date}'", f"'{max_date}'"
+        if is_datetime:
+            return f"DATE '{min_date}'", f"DATE '{max_date}'"
+        return f"DATE '{min_date}'", f"DATE '{max_date}'"
+    return (f"'{reformat_date(min_date, date_format)}'",
+            f"'{reformat_date(max_date, date_format)}'")
 
 
 def build_date_range_with_gaps(date_col, matching_dates, date_dtype,

@@ -674,24 +674,35 @@ async function generateAll() {
     if (hasAws) {
         const btnDiv = document.createElement('div');
         btnDiv.style.cssText = 'margin:12px 0; display:flex; gap:12px; align-items:center;';
-        btnDiv.innerHTML = `<button class="btn-primary" id="run-aws-col-btn">Run AWS Extraction</button>`;
+        btnDiv.innerHTML = `
+            <button class="btn-primary" id="run-aws-col-btn">Run AWS Extraction</button>
+            <button class="btn-secondary" id="resume-aws-col-btn"
+                title="Skip columns that already have rows in {qname}_col.csv and only re-run the failed/missing ones.">Resume</button>`;
         log.appendChild(btnDiv);
 
-        document.getElementById('run-aws-col-btn').onclick = () => runAwsColExtraction();
+        document.getElementById('run-aws-col-btn').onclick = () => runAwsColExtraction(false);
+        document.getElementById('resume-aws-col-btn').onclick = () => runAwsColExtraction(true);
     }
 }
 
-async function runAwsColExtraction() {
-    const btn = document.getElementById('run-aws-col-btn');
+async function runAwsColExtraction(resume = false) {
+    const btn = document.getElementById(resume ? 'resume-aws-col-btn' : 'run-aws-col-btn');
+    const other = document.getElementById(resume ? 'run-aws-col-btn' : 'resume-aws-col-btn');
     btn.disabled = true;
-    btn.textContent = 'Running...';
+    if (other) other.disabled = true;
+    btn.textContent = resume ? 'Resuming...' : 'Running...';
 
-    logMessage('Running AWS col extraction from extract_col.sql...', 'info');
+    logMessage(
+        resume
+            ? 'Resuming AWS col extraction (skipping columns already in CSV)...'
+            : 'Running AWS col extraction from extract_col.sql...',
+        'info');
 
     try {
         const reqBody = {
             type: 'col',
             outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
+            resume,
         };
 
         const resp = await fetch('/api/extract/run-sql', {
@@ -730,30 +741,34 @@ async function runAwsColExtraction() {
                         ? `${msg.rows} rows, ${msg.elapsed}s`
                         : `FAIL: ${msg.error}`;
                     logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}${tblProg}`, msg.ok ? 'info' : 'error');
-                    btn.textContent = `Running ${msg.done}/${msg.total}...`;
+                    btn.textContent = `${resume ? 'Resuming' : 'Running'} ${msg.done}/${msg.total}...`;
                 } else if (eventType === 'done') {
                     if (msg.ok) {
                         logMessage(`AWS col extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
                         btn.textContent = 'Done';
                         btn.style.background = 'var(--jp-success-color1)';
+                        if (other) { other.disabled = false; }
                     } else if (msg.results) {
                         const failed = msg.results.filter(r => !r.ok);
                         failed.forEach(r => logMessage(`  FAILED: ${r.name} — ${r.error}`, 'error'));
                         logMessage(`${msg.succeeded}/${msg.total} succeeded, ${msg.failed} failed`, 'error');
-                        btn.textContent = 'Retry';
+                        btn.textContent = resume ? 'Resume' : 'Retry';
                         btn.disabled = false;
+                        if (other) { other.disabled = false; }
                     } else {
                         logMessage(`AWS error: ${msg.error}`, 'error');
-                        btn.textContent = 'Retry';
+                        btn.textContent = resume ? 'Resume' : 'Retry';
                         btn.disabled = false;
+                        if (other) { other.disabled = false; }
                     }
                 }
             }
         }
     } catch (err) {
         logMessage(`AWS request failed: ${err.message}`, 'error');
-        btn.textContent = 'Retry';
+        btn.textContent = resume ? 'Resume' : 'Retry';
         btn.disabled = false;
+        if (other) { other.disabled = false; }
     }
 }
 

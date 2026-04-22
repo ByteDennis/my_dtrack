@@ -58,3 +58,4 @@ thesis
 week_report*
 example/*
 !example/report/
+!example/nbs/

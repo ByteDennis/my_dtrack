@@ -1,0 +1,431 @@
+# Databricks Quickstart (Windows local dev)
+
+Workspace root convention: //Users/workspace  (note the leading //)
+
+================================================================
+1. INSTALL & AUTH
+================================================================
+# Install CLI (PowerShell)
+winget install Databricks.CLI
+# or: pip install databricks-cli  (legacy, avoid)
+# New CLI is a single binary `databricks` (v0.2xx+)
+
+# Browser-based OAuth login
+databricks auth login --host https://<workspace>.cloud.databricks.com
+# Creates profile in %USERPROFILE%\.databrickscfg
+# Verify
+databricks auth profiles
+databricks current-user me
+
+# Use a specific profile
+databricks --profile DEFAULT workspace list //Users/workspace
+
+================================================================
+2. LOCAL DEV ENV
+================================================================
+# Python env (match cluster DBR runtime, e.g. DBR 15.x -> Python 3.11)
+uv venv .venv --python 3.11
+.venv\Scripts\activate
+uv pip install databricks-connect==15.* databricks-sdk pyspark==3.5.* pytest ipykernel
+
+# databricks-connect: run Spark locally, execute on remote cluster
+# Requires a cluster w/ "Unity Catalog" + "Shared" or "Single User" access mode
+databricks configure --token            # optional fallback for connect
+# Or set env vars:
+#   DATABRICKS_HOST, DATABRICKS_TOKEN or DATABRICKS_CLIENT_ID/SECRET
+#   DATABRICKS_CLUSTER_ID
+
+# In Python:
+from databricks.connect import DatabricksSession
+spark = DatabricksSession.builder.getOrCreate()
+df = spark.sql("SELECT current_catalog(), current_user()")
+df.show()
+
+================================================================
+3. WORKSPACE FILE OPS (manage from CLI, not UI)
+================================================================
+# List
+databricks workspace list //Users/workspace
+databricks workspace list -l //Users/workspace            # long form
+
+# Import/export (single file)
+databricks workspace import   ./src/job.py   //Users/workspace/job.py --overwrite --format SOURCE
+databricks workspace export   //Users/workspace/job.py   ./out/job.py --format SOURCE
+
+# Recursive import/export of a folder
+databricks workspace import-dir  ./project   //Users/workspace/project  --overwrite
+databricks workspace export-dir  //Users/workspace/project  ./project
+
+# Rename / move (no native rename — export + import + delete, OR use SDK)
+databricks workspace mkdirs  //Users/workspace/newname
+databricks workspace export-dir //Users/workspace/oldname ./_tmp
+databricks workspace import-dir ./_tmp //Users/workspace/newname --overwrite
+databricks workspace delete //Users/workspace/oldname --recursive
+
+# Delete
+databricks workspace delete //Users/workspace/old.py
+databricks workspace delete //Users/workspace/folder --recursive
+
+================================================================
+4. VOLUMES (UC) — your S3-backed volume
+================================================================
+# Path form: /Volumes/<catalog>/<schema>/<volume>/...
+# List
+databricks fs ls dbfs:/Volumes/main/default/my_vol/
+# Copy local <-> volume (use for data, not code)
+databricks fs cp ./data.parquet dbfs:/Volumes/main/default/my_vol/data.parquet
+databricks fs cp -r ./localdir  dbfs:/Volumes/main/default/my_vol/dir
+databricks fs cp dbfs:/Volumes/main/default/my_vol/out.csv ./out.csv
+databricks fs rm -r dbfs:/Volumes/main/default/my_vol/tmp
+
+# In Spark: treat it as a regular path
+df = spark.read.parquet("/Volumes/main/default/my_vol/data.parquet")
+df.write.mode("overwrite").parquet("/Volumes/main/default/my_vol/out/")
+
+# SQL: volumes work in COPY INTO / CREATE TABLE LOCATION
+#   CREATE TABLE t USING DELTA LOCATION '/Volumes/main/default/my_vol/t'
+
+================================================================
+5. RUN CODE ON DATABRICKS
+================================================================
+# A) Notebook-style: just import .py into workspace, open in UI, attach cluster
+
+# B) One-shot run (submits, waits, prints output)
+databricks jobs submit --json '{
+  "run_name": "adhoc",
+  "tasks": [{
+    "task_key": "t1",
+    "existing_cluster_id": "<cluster-id>",
+    "spark_python_task": {"python_file": "//Users/workspace/job.py"}
+  }]
+}'
+
+# C) Databricks Asset Bundles (DAB) — RECOMMENDED for repeatable runs
+databricks bundle init default-python    # scaffolds project
+# edit databricks.yml (targets: dev, prod; resources: jobs, pipelines)
+databricks bundle validate
+databricks bundle deploy  --target dev   # uploads code + creates jobs
+databricks bundle run <job_name> --target dev
+databricks bundle destroy --target dev
+
+# D) Run a local .py *against* a remote cluster via Connect
+python job.py        # spark session points at cluster, data stays remote
+
+================================================================
+6. PYSPARK TIPS (coming from pandas/Python)
+================================================================
+- DataFrames are lazy — nothing runs until .show()/.collect()/.write
+- Avoid .toPandas() on large data; it pulls everything to the driver
+- Prefer column expressions over UDFs: F.col, F.when, F.regexp_extract
+- Use pyspark.pandas (import pyspark.pandas as ps) for pandas-like API
+- Partition-aware writes: .write.partitionBy("dt").mode("overwrite")
+- Delta merge:
+    from delta.tables import DeltaTable
+    DeltaTable.forName(spark, "main.default.t").alias("t")\
+      .merge(df.alias("s"), "t.id = s.id")\
+      .whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+- Debugging: df.explain(), df.printSchema(), spark.sparkContext.setLogLevel("WARN")
+
+================================================================
+7. LOCAL TESTING
+================================================================
+# Fast unit tests: local PySpark (no cluster)
+# conftest.py
+import pytest
+from pyspark.sql import SparkSession
+@pytest.fixture(scope="session")
+def spark():
+    return (SparkSession.builder
+            .master("local[2]").appName("tests")
+            .config("spark.sql.shuffle.partitions", "2")
+            .getOrCreate())
+
+# Integration tests: use databricks-connect fixture instead (hits cluster)
+# Gate with env var so CI can skip:
+#   if os.getenv("USE_DBCONNECT"): from databricks.connect import DatabricksSession ...
+
+# Delta locally: pip install delta-spark, configure builder with
+#   .config("spark.jars.packages","io.delta:delta-spark_2.12:3.2.0")
+#   .config("spark.sql.extensions","io.delta.sql.DeltaSparkSessionExtension")
+
+================================================================
+8. VS CODE / EDITOR
+================================================================
+# Install "Databricks" extension — gives you:
+#   - profile picker, cluster picker
+#   - "Run on Databricks" for current file (uses bundles under the hood)
+#   - sync local folder <-> workspace (watches file changes)
+
+================================================================
+9. GOTCHAS
+================================================================
+- Workspace paths use forward slashes, even on Windows: //Users/workspace/...
+- .databrickscfg token auth beats OAuth when both present — delete stale tokens
+- databricks-connect Python *minor* version must match cluster runtime
+- dbutils only exists on cluster; in Connect use: from databricks.sdk.runtime import dbutils
+- %run "./other_nb" works in notebooks, not in .py scripts — use imports
+- Volumes require UC-enabled cluster (shared/single-user access mode)
+- Jobs CLI legacy `databricks jobs run-now` -> new CLI is `databricks jobs run-now <id>`
+
+================================================================
+10. HANDY ONE-LINERS
+================================================================
+databricks clusters list --output json | jq '.[] | {name,cluster_id,state}'
+databricks jobs list --output json | jq '.[] | {name,job_id}'
+databricks jobs run-now <job_id> --python-params '["--date","2026-04-22"]'
+databricks secrets list-scopes
+databricks secrets put-secret <scope> <key>          # prompts for value
+databricks tokens create --lifetime-seconds 7776000  # 90-day PAT
+
+================================================================
+11. UI TOUR — what each left-nav item is for
+================================================================
+Workspace      code (notebooks, .py, .sql, queries, dashboards) — like a filesystem
+Catalog        Unity Catalog browser: catalogs > schemas > tables/views/volumes/models
+Compute        all-purpose clusters, job clusters, SQL warehouses, pools
+Workflows      Jobs + DLT pipelines + schedules + run history
+SQL Editor     ad-hoc queries against SQL warehouses (cheaper than clusters for SQL)
+Dashboards     AI/BI dashboards (new) — drag-drop viz on top of SQL
+Genie          natural-language Q&A over a curated set of tables ("Genie Space")
+Queries        saved SQL + alerts + scheduled refresh
+Alerts         threshold alerts on query results -> email/Slack/webhook
+Serving        model endpoints, feature serving, AI Gateway
+Experiments    MLflow tracking UI
+Features       Feature Store tables
+Marketplace    install datasets/notebooks/models shared via Delta Sharing
+
+================================================================
+12. COOL FEATURES WORTH KNOWING
+================================================================
+Genie (AI/BI Genie)
+  - Curate a "Genie Space" = pick tables + write instructions/examples + sample Qs
+  - Users ask in English, Genie generates SQL against your warehouse, shows result
+  - Add "trusted assets" (SQL snippets) so Genie reuses your joins/metrics
+  - Pin it to a dashboard for follow-up Q&A on a chart
+  - API: /api/2.0/genie/spaces/<id>/start-conversation  (embed in apps)
+
+AI/BI Dashboards (the new ones, not legacy)
+  - Built on SQL warehouses; each tile = a SQL query
+  - Parameters: :param_name in SQL -> dropdown/date picker up top
+  - Cross-filtering between tiles, publish w/ embedded credentials for viewers
+  - Export: download as PDF, schedule email snapshots
+  - Version: stored as .lvdash.json in workspace — put in git!
+
+Databricks Assistant (in-editor AI)
+  - Ctrl/Cmd+I in notebook or SQL editor: explain, fix, /doc, /test, /optimize
+  - Diagnose errors: click "Diagnose" on a failed cell
+  - Respects UC table schemas for better SQL suggestions
+
+Unity Catalog superpowers
+  - Lineage: click a table -> see upstream/downstream tables, notebooks, dashboards
+  - Tags + comments (AI-generated column comments via "Generate with AI")
+  - Row/column-level security via row filters + column masks
+  - System tables: system.access.audit, system.billing.usage, system.query.history
+
+Delta Live Tables (DLT) / Lakeflow Declarative Pipelines
+  - Declarative ETL: you write SELECT, DLT handles orchestration + retries + CDC
+  - @dlt.table decorator in Python, or CREATE STREAMING TABLE in SQL
+  - Expectations: @dlt.expect("valid_id", "id IS NOT NULL") — quarantines bad rows
+
+Liquid Clustering
+  - CLUSTER BY (col) on Delta tables — replaces partitioning, auto-reorganizes
+  - Great for high-cardinality keys where partitioning would explode file count
+
+Predictive Optimization
+  - Toggle on schema: DBX auto-runs OPTIMIZE/VACUUM based on query patterns
+
+Serverless
+  - Serverless SQL warehouses: sub-second startup, pay-per-query
+  - Serverless jobs: no cluster to size/wait for (use for short jobs)
+  - Serverless notebooks: attach to serverless compute, no cluster picker
+
+MLflow 3 + Model Serving
+  - mlflow.log_model(...) -> register in UC (`catalog.schema.model_name`)
+  - One-click "Serve this model" creates a REST endpoint w/ autoscaling
+  - AI Gateway: proxy OpenAI/Anthropic/etc. w/ rate limits + logging + PII scrubbing
+
+Vector Search
+  - Create index on a Delta table column -> managed embeddings + ANN search
+  - CREATE VECTOR INDEX ... or SDK: VectorSearchClient().create_delta_sync_index(...)
+
+Lakebase (preview)
+  - Managed Postgres synced w/ UC — OLTP next to your lakehouse
+
+Apps (Databricks Apps)
+  - Deploy Streamlit/Dash/Gradio/Flask apps natively, auth via workspace SSO
+  - `databricks apps deploy <name> --source-code-path //Users/workspace/myapp`
+
+================================================================
+13. LOCAL CLI DEV WORKFLOW (recommended daily loop)
+================================================================
+Project layout
+  myproj/
+    databricks.yml            # bundle config
+    src/                      # python modules
+    notebooks/                # .py w/ "# Databricks notebook source" header
+    sql/                      # .sql files
+    resources/jobs.yml        # job definitions
+    tests/
+    pyproject.toml
+
+Edit -> test -> run loop
+  1. Edit in VS Code (with Databricks extension) or any editor
+  2. Run unit tests locally:           pytest -q
+  3. Run one file against cluster:     python src/job.py        (via Connect)
+  4. Deploy bundle to dev target:      databricks bundle deploy -t dev
+  5. Trigger the job:                  databricks bundle run my_job -t dev
+  6. Tail logs live:                   databricks bundle run my_job -t dev --no-wait
+                                        then: databricks jobs get-run <run_id>
+
+Sync-on-save (no bundle, fastest feedback)
+  databricks sync ./src //Users/workspace/myproj/src --watch
+  # Now every save pushes to workspace. Open a notebook that imports src.* and re-run.
+
+Git integration
+  - Option A: clone repo into workspace "Repos" (now under Workspace > Users)
+      databricks repos create --url https://github.com/you/repo --provider gitHub
+  - Option B (preferred w/ bundles): keep git local, let `bundle deploy` push artifacts
+
+Environments via bundle targets
+  # databricks.yml
+  targets:
+    dev:  { mode: development, workspace: { host: https://dev...  } }
+    prod: { mode: production,  workspace: { host: https://prod... } }
+  # `mode: development` prefixes resources w/ your username so devs don't collide
+
+================================================================
+14. SUBMITTING A PYTHON SCRIPT
+================================================================
+# A) Quickest: one-off run, ephemeral job, waits for completion
+databricks jobs submit --no-wait=false --json '{
+  "run_name": "run-job-py",
+  "tasks": [{
+    "task_key": "main",
+    "existing_cluster_id": "<cluster-id>",
+    "spark_python_task": {
+      "python_file": "//Users/workspace/myproj/src/job.py",
+      "parameters": ["--date", "2026-04-22", "--env", "dev"]
+    },
+    "libraries": [{"pypi": {"package": "pandas==2.2.*"}}]
+  }]
+}'
+
+# B) From a local file directly (uploads to a temp location first)
+databricks jobs submit --json "{
+  \"run_name\":\"local-script\",
+  \"tasks\":[{
+    \"task_key\":\"main\",
+    \"existing_cluster_id\":\"<cluster-id>\",
+    \"spark_python_task\":{\"python_file\":\"./src/job.py\"}
+  }]
+}"
+# CLI uploads ./src/job.py to /tmp/... in workspace automatically.
+
+# C) On serverless (no cluster id needed)
+databricks jobs submit --json '{
+  "run_name":"serverless",
+  "tasks":[{
+    "task_key":"main",
+    "environment_key":"default",
+    "spark_python_task":{"python_file":"//Users/workspace/myproj/src/job.py"}
+  }],
+  "environments":[{"environment_key":"default","spec":{"client":"2"}}]
+}'
+
+# D) Wheel task (your packaged code)
+# build:  uv build   ->   dist/myproj-0.1.0-py3-none-any.whl
+databricks jobs submit --json '{
+  "run_name":"wheel",
+  "tasks":[{
+    "task_key":"main",
+    "existing_cluster_id":"<cluster-id>",
+    "python_wheel_task":{"package_name":"myproj","entry_point":"main",
+                         "named_parameters":{"date":"2026-04-22"}},
+    "libraries":[{"whl":"dbfs:/Volumes/main/default/my_vol/wheels/myproj-0.1.0-py3-none-any.whl"}]
+  }]
+}'
+
+# E) Via bundle (preferred for anything recurring)
+#   resources/jobs.yml
+#   resources:
+#     jobs:
+#       my_job:
+#         name: my_job-${bundle.target}
+#         tasks:
+#           - task_key: main
+#             spark_python_task:
+#               python_file: ../src/job.py
+#             job_cluster_key: main
+#         job_clusters:
+#           - job_cluster_key: main
+#             new_cluster: { spark_version: 15.4.x-scala2.12, node_type_id: i3.xlarge, num_workers: 2 }
+# Then:
+databricks bundle deploy -t dev
+databricks bundle run my_job -t dev
+
+================================================================
+15. SUBMITTING SQL
+================================================================
+# You need a SQL warehouse (not a cluster). Get its id:
+databricks warehouses list
+
+# A) Inline SQL via Statement Execution API (fast, no file needed)
+databricks api post /api/2.0/sql/statements --json '{
+  "warehouse_id": "<wh-id>",
+  "catalog": "main",
+  "schema": "default",
+  "statement": "SELECT count(*) FROM my_table WHERE dt = :dt",
+  "parameters": [{"name":"dt","value":"2026-04-22","type":"DATE"}],
+  "wait_timeout": "30s"
+}'
+# Returns JSON w/ result set inline (small) or a chunk URL (large).
+
+# B) Run a .sql file
+# Option 1: via statement API
+$sql = Get-Content ./sql/report.sql -Raw              # PowerShell
+databricks api post /api/2.0/sql/statements --json "{\"warehouse_id\":\"<wh-id>\",\"statement\":$($sql | ConvertTo-Json)}"
+
+# Option 2: as a job task (best for anything non-trivial)
+databricks jobs submit --json '{
+  "run_name":"sql-task",
+  "tasks":[{
+    "task_key":"q1",
+    "sql_task":{
+      "warehouse_id":"<wh-id>",
+      "file":{"path":"//Users/workspace/myproj/sql/report.sql"}
+    }
+  }]
+}'
+# sql_task variants: "query" (saved query id), "file", "dashboard", "alert"
+
+# C) From Python using databricks-sql-connector (local script, remote exec)
+# pip install databricks-sql-connector
+from databricks import sql
+with sql.connect(server_hostname="<wkspc>.cloud.databricks.com",
+                 http_path="/sql/1.0/warehouses/<wh-id>",
+                 auth_type="databricks-oauth") as conn:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM main.default.t WHERE dt = %(dt)s", {"dt":"2026-04-22"})
+        for row in cur.fetchall(): print(row)
+
+# D) From Spark (inside a notebook or Connect)
+spark.sql("SELECT count(*) FROM main.default.t").show()
+# or read a file:
+sql_text = open("sql/report.sql").read()
+for stmt in filter(None, (s.strip() for s in sql_text.split(";"))):
+    spark.sql(stmt)
+
+# E) dbsqlcli (community) for repl-style .sql runs
+pip install dbsqlcli
+dbsqlcli -e "SELECT 1"
+dbsqlcli -f ./sql/report.sql
+
+================================================================
+16. WHICH COMPUTE FOR WHAT
+================================================================
+SQL warehouse     SQL, dashboards, Genie, BI tools            (serverless = fastest start)
+All-purpose cluster   interactive notebooks, dev, databricks-connect
+Job cluster       scheduled jobs (ephemeral, cheaper)
+Serverless jobs   short Python/SQL tasks, no warmup tax
+DLT pipeline      declarative ETL (has its own compute config)
+Model serving     low-latency model inference endpoints

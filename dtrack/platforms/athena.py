@@ -571,12 +571,17 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                   f"= {_runs} runs")
 
             # Generate per-column SQL blocks
-            # Build base WHERE: table where + exclude dates
+            # Build base WHERE: table where + exclude dates. When there's no
+            # BETWEEN/IN from date_filter (sql_mode='all'), layer _date_bounds
+            # so --from/--to still bound the scan.
             wc_parts = []
             if where.strip():
                 wc_parts.append(where.strip())
             if exclude_clause:
                 wc_parts.append(exclude_clause)
+            date_bounds = tbl.get('_date_bounds', '')
+            if sql_mode == 'all' and date_bounds:
+                wc_parts.append(date_bounds)
             wc_base = " AND ".join(f"({p})" for p in wc_parts) if wc_parts else "1=1"
 
             # 'trunc' mode: ONE SQL per column, with DATE_TRUNC in SELECT/
@@ -734,8 +739,15 @@ SELECT
                     blocks.append(sql.strip())
                     blocks.append("")
         else:
-            # Row count query
-            where_clause = f"WHERE {where}" if where else ""
+            # Row count query: layer user where + --from/--to bounds.
+            date_bounds = tbl.get('_date_bounds', '')
+            wc_parts = []
+            if where.strip():
+                wc_parts.append(where.strip())
+            if date_bounds:
+                wc_parts.append(date_bounds)
+            full_where = " AND ".join(f"({p})" for p in wc_parts) if wc_parts else ""
+            where_clause = f"WHERE {full_where}" if full_where else ""
             sql = f"""{cte_prefix}SELECT {date_col} AS date_value, COUNT(*) AS row_count
 FROM {full_table}
 {where_clause}
@@ -805,9 +817,15 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
     except ImportError:
         tqdm = None
 
-    # Build WHERE clause and vintage parameters for _extract_col_athena
+    # Build WHERE clause and vintage parameters for _extract_col_athena.
+    # When date_filter emits a BETWEEN/IN clause (matching_dates present), it
+    # already covers the full from/to range, so _date_bounds must NOT be
+    # layered on top -- that produced `col >= X AND col <= Y AND col BETWEEN
+    # X AND Y` duplication. Only fall back to _date_bounds when no
+    # matching-date filter is active.
     extract_cfg = dict(tbl_cfg)
     orig_where = tbl_cfg.get('where', '')
+    date_bounds = tbl_cfg.get('_date_bounds', '')
     effective_vintage = date_filter.get('vintage', 'all')
     extract_date_dtype = date_filter.get('date_dtype')
     extract_date_format = date_filter.get('date_format')
@@ -829,6 +847,8 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
         extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
         effective_vintage = 'all'
         extract_date_dtype = None
+    elif date_bounds:
+        extract_cfg['where'] = f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds
 
     bucket_desc = 'sample' if date_filter['filter_type'] == 'in_list' else effective_vintage
     dt_label = 'sample' if date_filter['filter_type'] == 'in_list' else None
@@ -977,7 +997,10 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
             tbl['vintage'] = 'all'
     inject_where_from_config(aws_tables, config)
 
-    # Inject --from-date / --to-date bounds into WHERE clauses
+    # Stash --from-date / --to-date bounds separately so the col path can skip
+    # them when it already emits a BETWEEN/IN filter from matching_dates
+    # (otherwise we'd get `col >= X AND col <= Y AND col BETWEEN X AND Y`
+    # redundancy, matching the oracle/hadoop fix).
     if from_date or to_date:
         for tbl in aws_tables:
             date_col = tbl.get('date_col', '')
@@ -991,9 +1014,10 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
             if to_date:
                 lit = _format_athena_date_bound(to_date, date_type, is_upper=True)
                 bounds.append(f"{date_col} <= {lit}")
-            extra = " AND ".join(bounds)
-            existing = tbl.get('where', '').strip()
-            tbl['where'] = f"({existing}) AND {extra}" if existing else extra
+            if bounds:
+                tbl['_date_bounds'] = " AND ".join(bounds)
+            tbl['_from_date'] = from_date
+            tbl['_to_date'] = to_date
     # Mock mode: copy CSVs + write SQL files, then return
     if mock_dir:
         _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir)
@@ -1110,7 +1134,8 @@ def parse_sql_file(sql_path):
     return blocks
 
 
-def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=None):
+def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
+                 on_progress=None, resume=False):
     """Read extract_{type}.sql, parse into blocks, and execute each via Athena.
 
     Writes per-table CSVs:
@@ -1122,6 +1147,9 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
     Args:
         on_progress: Optional callback(result_dict) called after each query
                      completes. Useful for streaming progress to web/terminal.
+        resume: If True (col mode only), skip blocks whose output is already
+                present in the existing {qname}_col.csv. Preloaded rows are
+                merged with newly-extracted rows on flush.
 
     Returns list of result dicts with timing info.
     """
@@ -1150,15 +1178,6 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
         qname = block['name'].split('/')[0] if '/' in block['name'] else block['name']
         table_blocks.setdefault(qname, []).append(block)
 
-    n_tables = len(table_blocks)
-    msg = f"  Parsed {len(blocks)} queries ({n_tables} tables) from {sql_path}, workers={_max_workers}"
-    print(msg, file=sys.stderr)
-
-    results = []
-    _done_count = [0]  # mutable counter for threads
-    _table_done = {}  # qname -> {done: int, total: int}
-    _table_lock = threading.Lock()
-
     _COL_HEADERS = [
         'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
         'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
@@ -1167,6 +1186,90 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None, on_progress=N
     # For col mode, collect rows per table (blocks named "qname/col_name")
     _col_rows_lock = threading.Lock()
     _col_rows_by_table = {}  # qname -> list of row dicts
+
+    # Resume: preload existing rows from prior successful runs, filter blocks.
+    # A block "qname/col_name[/dt_label]" is skipped if the existing CSV has
+    # >=1 row for that (column_name[, dt]) pair. The dt=='_all' suffix is a
+    # trunc-mode placeholder (one query covers all buckets) — treat the block
+    # as done if ANY row exists for col_name, since partial trunc output
+    # cannot be distinguished from a clean run.
+    n_skipped = 0
+    if resume and is_col:
+        preload_rows = {}  # qname -> list of row lists
+        preload_seen = {}  # qname -> set of (col_name, dt)
+        for qname in table_blocks:
+            csv_path = os.path.join(outdir, f"{qname}_col.csv")
+            if not os.path.exists(csv_path):
+                continue
+            rows = []
+            seen = set()
+            try:
+                with open(csv_path, 'r', newline='') as f:
+                    reader = csv.reader(f)
+                    header = next(reader, None)
+                    if header != _COL_HEADERS:
+                        print(f"  [resume] skip preload for {qname}: header mismatch",
+                              file=sys.stderr)
+                        continue
+                    for row in reader:
+                        if len(row) < 2:
+                            continue
+                        rows.append(row)
+                        seen.add((row[1], row[0]))  # (column_name, dt)
+            except Exception as e:
+                print(f"  [resume] failed to read {csv_path}: {e}", file=sys.stderr)
+                continue
+            preload_rows[qname] = rows
+            preload_seen[qname] = seen
+
+        def _block_done(block):
+            parts = block['name'].split('/')
+            if len(parts) < 2:
+                return False
+            q, col_name = parts[0], parts[1]
+            dt_hint = parts[2] if len(parts) > 2 else None
+            seen = preload_seen.get(q, set())
+            if not seen:
+                return False
+            if dt_hint and dt_hint != '_all':
+                return (col_name, dt_hint) in seen
+            # '_all' (trunc) or single-bucket/'all'/'sample': treat col as
+            # done if any row for col_name exists.
+            return any(c == col_name for c, _ in seen)
+
+        filtered = {}
+        for qname, tbl_blocks in table_blocks.items():
+            kept = [b for b in tbl_blocks if not _block_done(b)]
+            skipped = len(tbl_blocks) - len(kept)
+            n_skipped += skipped
+            if kept:
+                filtered[qname] = kept
+            if skipped:
+                print(f"  [resume] {qname}: skipping {skipped}/{len(tbl_blocks)} "
+                      f"already-done queries", file=sys.stderr)
+        table_blocks = filtered
+        blocks = [b for tbl_blocks in table_blocks.values() for b in tbl_blocks]
+        # Seed the in-memory buffer with existing rows so the final CSV flush
+        # merges preloaded + newly-extracted rows.
+        for qname, rows in preload_rows.items():
+            _col_rows_by_table[qname] = list(rows)
+
+        if not blocks:
+            print(f"  [resume] nothing to re-run — all queries already completed",
+                  file=sys.stderr)
+            return []
+
+    n_tables = len(table_blocks)
+    msg = (f"  Parsed {len(blocks)} queries ({n_tables} tables) from {sql_path}, "
+           f"workers={_max_workers}")
+    if resume and n_skipped:
+        msg += f" | resume: skipped {n_skipped} done queries"
+    print(msg, file=sys.stderr)
+
+    results = []
+    _done_count = [0]  # mutable counter for threads
+    _table_done = {}  # qname -> {done: int, total: int}
+    _table_lock = threading.Lock()
 
     # Init per-table counters
     for qname, tbl_blocks in table_blocks.items():

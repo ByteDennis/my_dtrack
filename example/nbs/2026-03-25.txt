@@ -1,0 +1,325 @@
+"""
+Partition Accessibility Checker
+================================
+Check data accessibility across all partitions of a table.
+Supports both sequential and parallel execution.
+"""
+
+from pyspark.sql import SparkSession
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Optional
+import time
+from tqdm import tqdm
+
+
+def check_partition_accessibility(
+    table: str,
+    variable: str,
+    n_jobs: int = 1,
+    verbose: bool = True
+) -> List[Dict]:
+    """
+    Check accessibility of all partitions in a table.
+
+    Args:
+        table (str): Full table name in format 'catalog.database.tablename'
+        variable (str): Partition column name to iterate over
+        n_jobs (int): Number of parallel jobs
+                     - n_jobs=1: Sequential execution
+                     - n_jobs>1: Parallel execution with ThreadPoolExecutor
+        verbose (bool): Print progress messages
+
+    Returns:
+        List[Dict]: List of inaccessible partitions with error details
+                   Each dict contains: {'partition', 'error_type', 'error_msg'}
+
+    Example:
+        >>> inaccessible = check_partition_accessibility(
+        ...     table='prod.analytics.user_events',
+        ...     variable='dt',
+        ...     n_jobs=10
+        ... )
+        >>> print(f"Found {len(inaccessible)} inaccessible partitions")
+        >>> for p in inaccessible:
+        ...     print(f"  {p['partition']}: {p['error_type']}")
+    """
+    spark = SparkSession.builder.getOrCreate()
+
+    # ========================================
+    # Step 1: Get all distinct partition values
+    # ========================================
+    if verbose:
+        print(f"🔍 Fetching distinct values for '{variable}' from {table}...")
+
+    try:
+        partitions_df = spark.sql(f"""
+            SELECT DISTINCT {variable}
+            FROM {table}
+            WHERE {variable} IS NOT NULL
+            ORDER BY {variable}
+        """)
+        partitions = [row[0] for row in partitions_df.collect()]
+    except Exception as e:
+        print(f"❌ Failed to fetch partitions: {type(e).__name__}: {e}")
+        return []
+
+    if not partitions:
+        print("⚠️  No partitions found")
+        return []
+
+    if verbose:
+        print(f"📊 Found {len(partitions)} partitions to check")
+        print(f"⚙️  Mode: {'Sequential' if n_jobs == 1 else f'Parallel ({n_jobs} workers)'}")
+
+    # ========================================
+    # Step 2: Define partition check function
+    # ========================================
+    def check_single_partition(partition_value):
+        """Check if a single partition is accessible"""
+        try:
+            # Quote string partitions, leave numeric as-is
+            if isinstance(partition_value, str):
+                partition_filter = f"'{partition_value}'"
+            else:
+                partition_filter = str(partition_value)
+
+            # Query one row from the partition
+            query = f"""
+                SELECT * FROM {table}
+                WHERE {variable} = {partition_filter}
+                LIMIT 1
+            """
+            df = spark.sql(query)
+
+            # Force execution
+            df.first()
+
+            return (partition_value, None)  # Success
+
+        except Exception as e:
+            return (partition_value, {
+                'error_type': type(e).__name__,
+                'error_msg': str(e)[:500]  # Truncate long error messages
+            })
+
+    # ========================================
+    # Step 3: Execute checks (sequential or parallel)
+    # ========================================
+    start_time = time.time()
+    inaccessible_partitions = []
+
+    if n_jobs == 1:
+        # Sequential execution
+        if verbose:
+            print("🔄 Running sequential checks...\n")
+
+        # Use tqdm for progress bar
+        pbar = tqdm(partitions, desc="Checking partitions", unit="partition", disable=not verbose)
+
+        for partition_value in pbar:
+            partition_value, error = check_single_partition(partition_value)
+
+            if error:
+                inaccessible_partitions.append({
+                    'partition': partition_value,
+                    **error
+                })
+                # Update progress bar description with error
+                pbar.set_postfix_str(f"❌ {partition_value}: {error['error_type'][:30]}")
+            else:
+                pbar.set_postfix_str(f"✅ {partition_value}")
+
+    else:
+        # Parallel execution
+        if verbose:
+            print(f"🚀 Running parallel checks with {n_jobs} workers...\n")
+
+        # Use tqdm for progress bar
+        pbar = tqdm(total=len(partitions), desc="Checking partitions", unit="partition", disable=not verbose)
+
+        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+            # Submit all jobs
+            futures = {
+                executor.submit(check_single_partition, p): p
+                for p in partitions
+            }
+
+            # Process results as they complete
+            for future in as_completed(futures):
+                partition_value, error = future.result()
+
+                if error:
+                    inaccessible_partitions.append({
+                        'partition': partition_value,
+                        **error
+                    })
+                    # Update progress bar with error info
+                    pbar.set_postfix_str(f"❌ {partition_value}: {error['error_type'][:30]}")
+                else:
+                    pbar.set_postfix_str(f"✅ {partition_value}")
+
+                # Update progress
+                pbar.update(1)
+
+        pbar.close()
+
+    # ========================================
+    # Step 4: Summary
+    # ========================================
+    elapsed_time = time.time() - start_time
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"✅ Accessible partitions:   {len(partitions) - len(inaccessible_partitions)}")
+        print(f"❌ Inaccessible partitions: {len(inaccessible_partitions)}")
+        print(f"⏱️  Total time: {elapsed_time:.2f}s ({elapsed_time/len(partitions):.3f}s per partition)")
+        print(f"{'='*60}")
+
+        if inaccessible_partitions:
+            print(f"\n📋 Inaccessible partition list:")
+            for p in inaccessible_partitions:
+                print(f"  - {p['partition']}")
+
+    return inaccessible_partitions
+
+
+# ============================================
+# Usage Examples
+# ============================================
+
+if __name__ == "__main__":
+    # Example 1: Sequential check
+    print("Example 1: Sequential execution")
+    print("-" * 60)
+    inaccessible = check_partition_accessibility(
+        table='catalog.database.tablename',
+        variable='dt',
+        n_jobs=1,
+        verbose=True
+    )
+
+    # Example 2: Parallel check with 10 workers
+    print("\n\nExample 2: Parallel execution")
+    print("-" * 60)
+    inaccessible = check_partition_accessibility(
+        table='catalog.database.tablename',
+        variable='dt',
+        n_jobs=10,
+        verbose=True
+    )
+
+    # Example 3: Process results
+    print("\n\nExample 3: Error analysis")
+    print("-" * 60)
+    if inaccessible:
+        # Group by error type
+        from collections import Counter
+        error_types = Counter(p['error_type'] for p in inaccessible)
+
+        print("Error breakdown:")
+        for error_type, count in error_types.most_common():
+            print(f"  {error_type}: {count} partitions")
+
+        # Export to file
+        with open('/tmp/inaccessible_partitions.txt', 'w') as f:
+            for p in inaccessible:
+                f.write(f"{p['partition']}\t{p['error_type']}\t{p['error_msg']}\n")
+
+        print("\n✅ Exported details to /tmp/inaccessible_partitions.txt")
+    else:
+        print("✅ All partitions are accessible!")
+
+
+# ============================================
+# Advanced Usage: Auto-determine optimal n_jobs
+# ============================================
+
+def auto_check_partition_accessibility(
+    table: str,
+    variable: str,
+    max_workers: int = 20,
+    verbose: bool = True
+) -> List[Dict]:
+    """
+    Automatically determine optimal number of workers based on partition count.
+
+    Rule of thumb:
+    - < 20 partitions: Sequential (n_jobs=1)
+    - 20-100 partitions: 10 workers
+    - 100-500 partitions: 15 workers
+    - > 500 partitions: 20 workers (or max_workers)
+    """
+    # Get partition count first
+    spark = SparkSession.builder.getOrCreate()
+    count_df = spark.sql(f"SELECT COUNT(DISTINCT {variable}) as cnt FROM {table}")
+    partition_count = count_df.collect()[0]['cnt']
+
+    # Determine optimal workers
+    if partition_count < 20:
+        n_jobs = 1
+    elif partition_count < 100:
+        n_jobs = min(10, max_workers)
+    elif partition_count < 500:
+        n_jobs = min(15, max_workers)
+    else:
+        n_jobs = min(20, max_workers)
+
+    if verbose:
+        print(f"📊 Partition count: {partition_count}")
+        print(f"⚙️  Auto-selected n_jobs: {n_jobs}\n")
+
+    return check_partition_accessibility(
+        table=table,
+        variable=variable,
+        n_jobs=n_jobs,
+        verbose=verbose
+    )
+
+
+# ============================================
+# Utility: Compare sequential vs parallel
+# ============================================
+
+def benchmark_performance(
+    table: str,
+    variable: str,
+    workers_list: List[int] = [1, 5, 10, 15, 20]
+) -> None:
+    """
+    Benchmark different worker configurations.
+
+    WARNING: This will check partitions multiple times!
+    Only use on small tables or samples.
+    """
+    print("🏃 Running benchmark...")
+    print("=" * 60)
+
+    results = []
+    for n_jobs in workers_list:
+        print(f"\nTesting n_jobs={n_jobs}...")
+        start = time.time()
+
+        inaccessible = check_partition_accessibility(
+            table=table,
+            variable=variable,
+            n_jobs=n_jobs,
+            verbose=False
+        )
+
+        elapsed = time.time() - start
+        results.append((n_jobs, elapsed))
+        print(f"  Time: {elapsed:.2f}s")
+
+    # Print comparison
+    print("\n" + "=" * 60)
+    print("📊 Benchmark Results:")
+    print("-" * 60)
+    baseline = results[0][1]
+
+    for n_jobs, elapsed in results:
+        speedup = baseline / elapsed
+        print(f"n_jobs={n_jobs:2d}: {elapsed:6.2f}s  (speedup: {speedup:.2f}x)")
+
+    # Optimal configuration
+    best_n_jobs, best_time = min(results, key=lambda x: x[1])
+    print(f"\n🏆 Optimal: n_jobs={best_n_jobs} ({best_time:.2f}s)")

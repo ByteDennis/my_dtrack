@@ -1335,3 +1335,46 @@ QUESTION                                    LOOK HERE
 ================================================================================
  END OF MANUSCRIPT
 ================================================================================
+
+
+
+  template.sas shell
+    │
+    ├─ %let iamusr / prefix / email_to / out_dir / SAS cache libname
+    ├─ %macro <conn_macro>;  ... %mend;     — one per Oracle/Hadoop conn
+    ├─ %pull_data / %start_timer / %log_time / %send_email utilities
+    │
+    ├─ [macro_parts block = _gen_sas_col_driver output]
+    │     ├─ _SAS_COL_HELPERS:
+    │     │     %_col_numeric, %_col_categorical    (SAS-side aggregators)
+    │     │     %_pull_one_col                     (SAS-source bucket path)
+    │     │     %_export_col_stats                 (per-qname CSV writer)
+    │     │
+    │     ├─ if any SAS sources:
+    │     │     data _driver_col_sas_; ... output; output; ... run;
+    │     │     data _null_; set _driver_col_sas_;
+    │     │         cats(...) → call execute — one row at a time:
+    │     │           call symputx(_qname, _sas_table, _col, _coltype, _dt_label, …)
+    │     │           %_pull_one_col()
+    │     │                 ├─ proc sql on local SAS dataset
+    │     │                 ├─ %_col_numeric / %_col_categorical
+    │     │                 └─ proc append base=cache._cs_<dsname>
+    │     │     %_export_col_stats(qname=…, outdir=…)   ← once per qname
+    │     │
+    │     ├─ if any Oracle sources: column_oracle.sas block
+    │     │     data _ora_col_map; … output; … run;       ← compact rows
+    │     │     %macro _col_oracle();  ← SQL template (numeric OR categorical)
+    │     │         proc sql;
+    │     │             %&_conn_macro                     ← connect to oracle
+    │     │             create table _c_one as select * from connection to oracle (
+    │     │                 <stats SQL built from &_col_name, &_where_clause, …>
+    │     │             );
+    │     │         quit;
+    │     │         proc append base=cache._cs_<dsname> data=_c_one;
+    │     │     %mend;
+    │     │     data _null_; set _ora_col_map; cats(...) → call execute;
+    │     │     %_export_col_stats(qname=…, outdir=…)
+    │     │
+    │     └─ if any Hadoop sources: column_hadoop.sas (same shape, connect to hadoop)
+    │
+    └─ runner block: %start_timer / %log_time, optional %send_email
