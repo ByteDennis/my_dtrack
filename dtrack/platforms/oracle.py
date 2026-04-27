@@ -1047,11 +1047,12 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.'):
         # leaving 28 for dsname. (rows use 'rc_' prefix so they can afford 29.)
         dsname = sas_safe_name(qname, 28)
         conn_macro = tbl_cfg.get('conn_macro', 'pb23')
-        where = tbl_cfg.get('where', '')
-        date_bounds = tbl_cfg.get('_date_bounds', '')
-        base_where = where
-        if date_bounds:
-            base_where = f"({where}) AND {date_bounds}" if where.strip() else date_bounds
+        # base_where carries only the user's config WHERE. Date filtering
+        # lives on date_where (per bucket) -- mixing _date_bounds in here
+        # would emit `date_col BETWEEN X AND Y AND date_col >= X AND date_col <= Y`
+        # against the same column on every per-bucket pull. Same fix applied
+        # to the Oracle DB-aggregation path below.
+        base_where = tbl_cfg.get('where', '')
 
         bucket_specs, is_sas, _date_dtype, col_list = _compute_bucket_specs(
             tbl_cfg, db_path,

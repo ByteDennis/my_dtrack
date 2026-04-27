@@ -199,6 +199,7 @@ def init_database(db_path: str) -> None:
             overlap_end TEXT,
             matching_dates TEXT,
             excluded_dates TEXT,
+            non_matching_dates TEXT,
             created_at TEXT,
             query_time TEXT,
             where_left TEXT,
