@@ -233,8 +233,8 @@ function renderColTable(name, cols) {
         {label: 'N_Total',   keyL: 'n_total_left',   keyR: 'n_total_right',  isDiff: c => c.n_total_diff !== 0, fmt: 'int'},
         {label: 'N_Missing', keyL: 'n_missing_left',  keyR: 'n_missing_right', isDiff: c => c.n_missing_diff !== 0, fmt: 'int'},
         {label: 'N_Unique',  keyL: 'n_unique_left',   keyR: 'n_unique_right',  isDiff: c => c.n_unique_diff !== 0, fmt: 'int'},
-        {label: 'Mean',      keyL: 'mean_left',       keyR: 'mean_right',      isDiff: c => c.mean_diff != null && Math.abs(c.mean_diff) > 0.01, fmt: 'num'},
-        {label: 'Std',       keyL: 'std_left',        keyR: 'std_right',       isDiff: c => c.std_diff != null && Math.abs(c.std_diff) > 0.01, fmt: 'num'},
+        {label: 'Mean',      keyL: 'mean_left',       keyR: 'mean_right',      isDiff: c => c.mean_match === false, fmt: 'num'},
+        {label: 'Std',       keyL: 'std_left',        keyR: 'std_right',       isDiff: c => c.std_match === false, fmt: 'num'},
         {label: 'Min',       keyL: 'min_left',        keyR: 'min_right',       isDiff: () => false, fmt: 'text'},
         {label: 'Max',       keyL: 'max_left',        keyR: 'max_right',       isDiff: () => false, fmt: 'text'},
     ];

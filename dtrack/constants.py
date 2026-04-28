@@ -1,5 +1,10 @@
 """Constants for dtrack UI configuration."""
 
+# Decimal precision for mean/std match keys in column comparison.
+# Two values match iff `round(float(v), STAT_ROUND_DECIMALS)` is equal as a
+# string with an "m_"/"s_" prefix — bypasses float-equality drift.
+STAT_ROUND_DECIMALS = 4
+
 # Data source types
 DATA_SOURCES = [
     {"value": "oracle", "label": "SAS/Oracle"},

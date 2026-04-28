@@ -59,46 +59,22 @@ run;
             );
         %end;
         %else %do;
-            /* Categorical, two-stage:
-                 freq   -- GROUP BY (dt, col) -> one row per (bucket, value)
-                           with its count. This IS the expensive step for
-                           high-cardinality columns, but it produces one row
-                           per distinct value so it doesn't OOM on its own;
-                           what crashed before was the windowed ranking +
-                           collect_list/sort_array chain layered on top of
-                           freq. Keeping freq, dropping everything above it.
-                 outer  -- aggregate cnt per dt to get stats of the
-                           frequency distribution (how skewed, how uniform,
-                           etc.). mean/std/min/max describe the distribution
-                           of per-value counts; n_total / n_missing /
-                           n_unique describe the column as a whole.
-               Top-10 is emitted as empty string -- ranking/top-N was the
-               part that kept blowing up (Tez reducer OOM, collect_list
-               finalization bugs, SMB plan errors). */
-            create table _c_one as
+            /* Categorical: pull only the (dt, p_col, cnt) freq table from
+               Hive. This is the same SAFE shape that didn't crash before --
+               we keep that, and DROP the outer per-dt aggregation that
+               used to sit on top. Alpha-rank-weighted mean/std, alpha-bound
+               min/max, and top_10 are computed SAS-side (local data step,
+               unrelated to Hive's collect_list/sort_array reducer code
+               path). */
+            create table _hdp_freq_ as
             select * from connection to hadoop (
-                WITH freq AS (
-                    SELECT &_vintage_expr AS dt,
-                           SUBSTR(CAST(&_col_name AS STRING), 1, 200) AS p_col,
-                           COUNT(*) AS cnt
-                    FROM &_from_table
-                    WHERE &_where_clause
-                    GROUP BY &_vintage_expr,
-                             SUBSTR(CAST(&_col_name AS STRING), 1, 200)
-                )
-                SELECT dt,
-                       &_col_name_lit AS column_name,
-                       'categorical' AS col_type,
-                       SUM(cnt) AS n_total,
-                       COALESCE(SUM(CASE WHEN p_col IS NULL THEN cnt ELSE 0 END), 0) AS n_missing,
-                       SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique,
-                       CAST(AVG(CAST(cnt AS DOUBLE)) AS STRING) AS mean,
-                       CAST(STDDEV_SAMP(CAST(cnt AS DOUBLE)) AS STRING) AS std,
-                       CAST(MIN(cnt) AS STRING) AS min_val,
-                       CAST(MAX(cnt) AS STRING) AS max_val,
-                       CAST('' AS STRING) AS top_10
-                FROM freq
-                GROUP BY dt
+                SELECT &_vintage_expr AS dt,
+                       SUBSTR(CAST(&_col_name AS STRING), 1, 200) AS p_col,
+                       COUNT(*) AS cnt
+                FROM &_from_table
+                WHERE &_where_clause
+                GROUP BY &_vintage_expr,
+                         SUBSTR(CAST(&_col_name AS STRING), 1, 200)
             );
         %end;
         disconnect from hadoop;
@@ -109,6 +85,12 @@ run;
         %put WARNING: [&_qname/&_col_name/&_dt_label] stats SQL failed (SYSERR=&_rc) -- skipping;
         options obs=max nosyntaxcheck;
         %return;
+    %end;
+
+    /* Categorical: post-process freq -> final stats SAS-side. */
+    %if %upcase(&_col_type) NE NUMERIC %then %do;
+        %_col_categorical_freq(freq_ds=_hdp_freq_, col=&_col_name, out_ds=_c_one);
+        proc delete data=_hdp_freq_; run;
     %end;
 
     data _c_one;

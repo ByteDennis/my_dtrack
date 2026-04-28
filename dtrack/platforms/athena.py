@@ -57,6 +57,116 @@ _aws_creds_lock = threading.Lock()
 _sql_log_file = None
 _sql_log_lock = threading.Lock()
 
+# Athena query result cache. When _cache_db is set, _query_athena() and
+# _run_block() consult the SQLite file before submitting to Athena and
+# write results back on success. Cache key = SHA256(normalized SQL + db).
+# Disable via env var: DTRACK_ATHENA_CACHE=0. Invalidate by deleting the
+# .cache.db file (or the matching row, see clear_athena_cache()).
+_cache_db = None
+_cache_lock = threading.Lock()
+_cache_hits = 0
+_cache_misses = 0
+
+
+def set_athena_cache(path):
+    """Enable Athena query caching at the given .cache.db path.
+
+    Creates the SQLite schema if missing. Subsequent calls to
+    _query_athena() and run_sql_file's _run_block consult this cache
+    before hitting Athena. Pass None to disable.
+    """
+    global _cache_db, _cache_hits, _cache_misses
+    if os.environ.get('DTRACK_ATHENA_CACHE') == '0':
+        _cache_db = None
+        return
+    if path is None:
+        _cache_db = None
+        return
+    _cache_db = path
+    _cache_hits = 0
+    _cache_misses = 0
+    import sqlite3
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS athena_query_cache (
+                sql_hash TEXT PRIMARY KEY,
+                sql_text TEXT,
+                database  TEXT,
+                row_count INTEGER,
+                created_at TEXT,
+                payload BLOB
+            )
+        """)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def cache_stats():
+    """Return (hits, misses) since the most recent set_athena_cache call."""
+    return _cache_hits, _cache_misses
+
+
+def _cache_key(sql, database):
+    import hashlib
+    import re as _re
+    norm = _re.sub(r'\s+', ' ', sql.strip())
+    raw = f"{norm}::{database or ''}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _cache_get(sql, database):
+    """Return the cached payload (whatever was stored) or None."""
+    global _cache_hits, _cache_misses
+    if not _cache_db:
+        return None
+    import sqlite3
+    import pickle
+    key = _cache_key(sql, database)
+    conn = sqlite3.connect(_cache_db)
+    try:
+        row = conn.execute(
+            "SELECT payload FROM athena_query_cache WHERE sql_hash = ?",
+            (key,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        with _cache_lock:
+            _cache_misses += 1
+        return None
+    with _cache_lock:
+        _cache_hits += 1
+    try:
+        return pickle.loads(row[0])
+    except Exception:
+        return None
+
+
+def _cache_put(sql, database, value, row_count=None):
+    """Store value (pickled) under the SQL+database key."""
+    if not _cache_db:
+        return
+    import sqlite3
+    import pickle
+    from datetime import datetime as _dt
+    key = _cache_key(sql, database)
+    blob = pickle.dumps(value)
+    with _cache_lock:
+        conn = sqlite3.connect(_cache_db)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO athena_query_cache "
+                "(sql_hash, sql_text, database, row_count, created_at, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (key, sql, database or '', row_count, _dt.now().isoformat(), blob),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # AWS credential management
@@ -231,9 +341,17 @@ def _query_athena(sql, data_base=None):
 
     Renews credentials if needed, opens a new connection, runs the query,
     and returns a DataFrame with lowercase column names.
+
+    Consults the Athena cache (if enabled via set_athena_cache) before
+    submitting; a hit returns the cached DataFrame and skips the network
+    round-trip entirely.
     """
     import pandas.io.sql as psql
     import warnings
+
+    cached = _cache_get(sql, data_base)
+    if cached is not None:
+        return cached
 
     aws_creds_renew()
     conn = athena_connect(data_base=data_base)
@@ -242,9 +360,11 @@ def _query_athena(sql, data_base=None):
             warnings.simplefilter("ignore", category=UserWarning)
             df = psql.read_sql_query(sql, conn)
         df.columns = [c.lower() for c in df.columns]
-        return df
     finally:
         conn.close()
+
+    _cache_put(sql, data_base, df, row_count=len(df))
+    return df
 
 
 def _log_sql(col, sql):
@@ -637,34 +757,57 @@ GROUP BY {trunc_expr};"""
 ),
 ranked AS (
     SELECT dt, p_col, cnt,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(p_col), p_col) AS rnk_alpha,
+           COUNT(*) OVER (PARTITION BY dt) AS k_alpha,
            ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn
-    FROM freq
+    FROM freq WHERE p_col IS NOT NULL
 ),
 top_n AS (
     SELECT dt,
            ARRAY_JOIN(ARRAY_AGG(
-               COALESCE(p_col, 'NULL') || '(' || CAST(cnt AS VARCHAR) || ')'
+               p_col || '(' || CAST(cnt AS VARCHAR) || ')'
                ORDER BY cnt DESC
            ), '; ') AS top_10
-    FROM ranked WHERE rn <= 10 AND p_col IS NOT NULL
+    FROM ranked WHERE rn <= 10
     GROUP BY dt
 ),
-stats AS (
+totals AS (
     SELECT dt,
            SUM(cnt) AS n_total,
            COALESCE(SUM(CASE WHEN p_col IS NULL THEN cnt ELSE 0 END), 0) AS n_missing,
-           SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique,
-           CAST(AVG(CAST(cnt AS DOUBLE)) AS VARCHAR) AS mean,
-           CAST(STDDEV_SAMP(CAST(cnt AS DOUBLE)) AS VARCHAR) AS std,
-           CAST(MIN(cnt) AS VARCHAR) AS min_val,
-           CAST(MAX(cnt) AS VARCHAR) AS max_val
+           SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique
     FROM freq GROUP BY dt
+),
+agg AS (
+    SELECT dt,
+           SUM(CAST(cnt AS DOUBLE)) AS sum_cnt,
+           SUM(CAST(cnt AS DOUBLE) * rnk_alpha) AS sum_cnt_rnk,
+           SUM(CAST(cnt AS DOUBLE) * rnk_alpha * rnk_alpha) AS sum_cnt_rnk2
+    FROM ranked GROUP BY dt
+),
+sstats AS (
+    SELECT dt,
+           CAST(sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0) AS VARCHAR) AS mean,
+           CAST(SQRT(GREATEST(
+               sum_cnt_rnk2 * 1.0 / NULLIF(sum_cnt, 0)
+               - (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0))
+               * (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0)), 0)) AS VARCHAR) AS std
+    FROM agg
+),
+minmax AS (
+    SELECT dt,
+           MAX(CASE WHEN rnk_alpha = 1        THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
+           MAX(CASE WHEN rnk_alpha = k_alpha  THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS max_val
+    FROM ranked GROUP BY dt
 )
 SELECT s.dt, '{col_name}' AS column_name, 'categorical' AS col_type,
        s.n_total, s.n_missing, s.n_unique,
-       s.mean, s.std, s.min_val, s.max_val,
+       ss.mean, ss.std, mm.min_val, mm.max_val,
        COALESCE(t.top_10, '') AS top_10
-FROM stats s LEFT JOIN top_n t ON s.dt = t.dt
+FROM totals s
+LEFT JOIN sstats ss ON s.dt = ss.dt
+LEFT JOIN minmax mm ON s.dt = mm.dt
+LEFT JOIN top_n t ON s.dt = t.dt
 ORDER BY s.dt;"""
                     # Header name must be space-free so parse_sql_file picks
                     # it up as a block marker. `_all` suffix conveys that this
@@ -716,8 +859,10 @@ WHERE {wc};"""
 ),
 ranked AS (
     SELECT p_col, cnt,
+        ROW_NUMBER() OVER (ORDER BY UPPER(p_col), p_col) AS rnk_alpha,
+        COUNT(*) OVER () AS k_alpha,
         ROW_NUMBER() OVER (ORDER BY cnt DESC, p_col ASC) AS rn
-    FROM freq
+    FROM freq WHERE p_col IS NOT NULL
 )
 SELECT
     {dt_expr} AS dt,
@@ -726,12 +871,15 @@ SELECT
     (SELECT SUM(cnt) FROM freq) AS n_total,
     COALESCE((SELECT cnt FROM freq WHERE p_col IS NULL), 0) AS n_missing,
     (SELECT SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) FROM freq) AS n_unique,
-    CAST((SELECT AVG(CAST(cnt AS DOUBLE)) FROM freq) AS VARCHAR) AS mean,
-    CAST((SELECT STDDEV_SAMP(CAST(cnt AS DOUBLE)) FROM freq) AS VARCHAR) AS std,
-    CAST((SELECT MIN(cnt) FROM freq) AS VARCHAR) AS min_val,
-    CAST((SELECT MAX(cnt) FROM freq) AS VARCHAR) AS max_val,
+    CAST((SELECT SUM(CAST(cnt AS DOUBLE) * rnk_alpha) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0) FROM ranked) AS VARCHAR) AS mean,
+    CAST((SELECT SQRT(GREATEST(
+        SUM(CAST(cnt AS DOUBLE) * rnk_alpha * rnk_alpha) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0)
+        - POWER(SUM(CAST(cnt AS DOUBLE) * rnk_alpha) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0), 2),
+        0)) FROM ranked) AS VARCHAR) AS std,
+    (SELECT MAX(CASE WHEN rnk_alpha = 1       THEN p_col || '=' || CAST(cnt AS VARCHAR) END) FROM ranked) AS min_val,
+    (SELECT MAX(CASE WHEN rnk_alpha = k_alpha THEN p_col || '=' || CAST(cnt AS VARCHAR) END) FROM ranked) AS max_val,
     COALESCE((SELECT ARRAY_JOIN(ARRAY_AGG(
-        COALESCE(p_col, 'NULL') || '(' || CAST(cnt AS VARCHAR) || ')'
+        p_col || '(' || CAST(cnt AS VARCHAR) || ')'
         ORDER BY cnt DESC
     ), '; ') FROM ranked WHERE rn <= 10 AND p_col IS NOT NULL), '') AS top_10;"""
 
@@ -806,6 +954,10 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
     with open(log_path, 'w', encoding='utf-8') as f:
         f.write(f"-- SQL queries for {qname} col extraction\n-- {datetime.now().isoformat()}\n\n")
     _sql_log_file = log_path
+
+    # Enable per-outdir Athena query cache. Hits skip the network round-trip;
+    # misses store the result for future runs. Delete .cache.db to invalidate.
+    set_athena_cache(os.path.join(outdir, ".cache.db"))
 
     col_start_time = time.time()
     col_start_ts = datetime.now().isoformat()
@@ -898,6 +1050,11 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
                     print(f"  Warning: Failed to extract {col_name}: {e}")
 
     _sql_log_file = None
+    hits, misses = cache_stats()
+    if hits or misses:
+        print(f"  Athena cache: {hits} hit / {misses} miss "
+              f"({os.path.join(outdir, '.cache.db')})")
+    set_athena_cache(None)
     print(f"  SQL log: {log_path}")
     col_elapsed = time.time() - col_start_time
     col_end_ts = datetime.now().isoformat()
@@ -1163,6 +1320,11 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         print(f"No query blocks found in {sql_path}")
         return []
 
+    # Enable per-outdir Athena cache. Located alongside the .sql file so
+    # repeat runs of the same extract_*.sql replay locally instead of
+    # re-submitting expensive scans. Delete .cache.db to invalidate.
+    set_athena_cache(os.path.join(outdir, ".cache.db"))
+
     # Detect type from filename: extract_col.sql → col, else row
     basename = os.path.basename(sql_path)
     is_col = "extract_col" in basename
@@ -1296,14 +1458,19 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         start_ts = datetime.now().isoformat()
 
         try:
-            aws_creds_renew()
-            conn = athena_connect()
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            rows = cursor.fetchall()
-            col_names = [desc[0] for desc in cursor.description] if cursor.description else []
-            cursor.close()
-            conn.close()
+            cached = _cache_get(sql, None)
+            if cached is not None:
+                rows, col_names = cached
+            else:
+                aws_creds_renew()
+                conn = athena_connect()
+                cursor = conn.cursor()
+                cursor.execute(sql)
+                rows = cursor.fetchall()
+                col_names = [desc[0] for desc in cursor.description] if cursor.description else []
+                cursor.close()
+                conn.close()
+                _cache_put(sql, None, (rows, col_names), row_count=len(rows))
             elapsed = time.time() - start_time
 
             if is_col:
@@ -1424,6 +1591,12 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
     ok_count = sum(1 for r in results if r['ok'])
     fail_count = len(results) - ok_count
     print(f"Done: {ok_count} succeeded, {fail_count} failed")
+
+    hits, misses = cache_stats()
+    if hits or misses:
+        print(f"Athena cache: {hits} hit / {misses} miss "
+              f"({os.path.join(outdir, '.cache.db')})")
+    set_athena_cache(None)
 
     return results
 

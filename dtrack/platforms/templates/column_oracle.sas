@@ -66,37 +66,20 @@ run;
             );
         %end;
         %else %do;
-            /* Categorical, two-stage: freq CTE groups (dt, value) once;
-               outer SELECT aggregates cnt per dt to produce the
-               frequency-distribution stats (mean/std/min/max of per-value
-               counts) plus the column-level counts (n_total, n_missing,
-               n_unique). No ranking, no LISTAGG, no join -- those were the
-               crash-prone steps. top_10 emitted as empty string. */
-            create table _c_one as
+            /* Categorical: pull only the (dt, p_col, cnt) freq table.
+               Alpha-rank-weighted mean/std, alpha-bound min/max, and
+               top_10 are computed SAS-side via _col_categorical_freq.
+               Same algorithm as the Athena path -- numerical values
+               match across engines on identical data. */
+            create table _ora_freq_ as
             select * from connection to oracle (
-                WITH freq_raw_ AS (
-                    SELECT &_vintage_expr AS dt,
-                           SUBSTR(TO_CHAR(&_col_name), 1, 200) AS p_col,
-                           COUNT(*) AS value_freq
-                    FROM &_from_table
-                    WHERE &_where_clause
-                    GROUP BY &_vintage_expr,
-                             SUBSTR(TO_CHAR(&_col_name), 1, 200)
-                )
-                SELECT dt,
-                       &_col_name_lit AS column_name,
-                       'categorical' AS col_type,
-                       SUM(value_freq) AS n_total,
-                       COALESCE(MAX(CASE WHEN p_col IS NULL
-                                         THEN value_freq END), 0) AS n_missing,
-                       SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique,
-                       TO_CHAR(AVG(value_freq)) AS mean,
-                       TO_CHAR(STDDEV_SAMP(value_freq)) AS std,
-                       TO_CHAR(MIN(value_freq)) AS min_val,
-                       TO_CHAR(MAX(value_freq)) AS max_val,
-                       CAST('' AS VARCHAR2(4000)) AS top_10
-                FROM freq_raw_
-                GROUP BY dt
+                SELECT &_vintage_expr AS dt,
+                       SUBSTR(TO_CHAR(&_col_name), 1, 200) AS p_col,
+                       COUNT(*) AS cnt
+                FROM &_from_table
+                WHERE &_where_clause
+                GROUP BY &_vintage_expr,
+                         SUBSTR(TO_CHAR(&_col_name), 1, 200)
             );
         %end;
         disconnect from oracle;
@@ -107,6 +90,12 @@ run;
         %put WARNING: [&_qname/&_col_name/&_dt_label] stats SQL failed (SYSERR=&_rc) -- skipping;
         options obs=max nosyntaxcheck;
         %return;
+    %end;
+
+    /* Categorical: post-process freq -> final stats SAS-side. */
+    %if %upcase(&_col_type) NE NUMERIC %then %do;
+        %_col_categorical_freq(freq_ds=_ora_freq_, col=&_col_name, out_ds=_c_one);
+        proc delete data=_ora_freq_; run;
     %end;
 
     /* Normalize widths + ensure top_10 slot exists. */

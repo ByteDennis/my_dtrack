@@ -118,10 +118,10 @@ def compute_numeric_stats(values: List[str]) -> Dict:
     n_unique = len(set(non_missing))
 
     if non_missing:
-        mean_val = mean(non_missing)
+        mean_val = str(mean(non_missing))
         min_val = str(min(non_missing))
         max_val = str(max(non_missing))
-        std_val = stdev(non_missing) if len(non_missing) > 1 else 0.0
+        std_val = str(stdev(non_missing)) if len(non_missing) > 1 else "0.0"
     else:
         mean_val = None
         min_val = None
@@ -144,20 +144,20 @@ def compute_categorical_stats(values: List[str]) -> Dict:
     """
     Compute statistics for a categorical column with normalization.
 
-    Normalizes values to handle:
-    - Whitespace differences: "xxx" vs "xxx "
-    - Date format differences: "04MAR2026:00:00:00" vs "2026-03-04"
-    - Numeric format differences: "0.440" vs "0.44"
+    mean/std/min/max are computed in a *category-aware* way to defeat the
+    permutation pitfall: any reordering of counts across categories must
+    produce different stats.
 
-    Args:
-        values: List of string values
-
-    Returns:
-        Dictionary with statistics: n_total, n_missing, n_unique, min_val, max_val, top_10
+    For each (cat, count) pair, sort by UPPER(cat) and assign ranks 1..k.
+    Then with weights = counts:
+        mean = SUM(count_i * rank_i) / SUM(count_i)
+        std  = SQRT( SUM(count_i*(rank_i - mean)^2) / SUM(count_i) )
+        min  = "{cat_at_rank_1}={count_at_rank_1}"
+        max  = "{cat_at_rank_k}={count_at_rank_k}"
+    The UPPER ordering matches the SQL builders for cross-engine consistency.
     """
     n_total = len(values)
 
-    # Filter missing values and normalize
     non_missing_raw = [v for v in values if v and str(v).strip()]
     non_missing = [normalize_value(v) for v in non_missing_raw if normalize_value(v)]
 
@@ -165,17 +165,31 @@ def compute_categorical_stats(values: List[str]) -> Dict:
     n_unique = len(set(non_missing))
 
     if non_missing:
-        min_val = min(non_missing)
-        max_val = max(non_missing)
-
-        # Compute top 10 frequency on normalized values
         counter = Counter(non_missing)
-        top_10 = [
-            {"value": value, "count": count}
-            for value, count in counter.most_common(10)
-        ]
+        # Sort by UPPER for cross-engine consistency; raw value tie-breaks.
+        sorted_pairs = sorted(counter.items(), key=lambda kv: (kv[0].upper(), kv[0]))
+        counts = [c for _, c in sorted_pairs]
+        ranks = list(range(1, len(sorted_pairs) + 1))
+        total_w = sum(counts)
+        if total_w > 0:
+            wmean = sum(c * r for c, r in zip(counts, ranks)) / total_w
+            wvar = sum(c * (r - wmean) ** 2 for c, r in zip(counts, ranks)) / total_w
+            mean_val = str(wmean)
+            std_val = str(wvar ** 0.5)
+        else:
+            mean_val = None
+            std_val = None
+
+        first_cat, first_count = sorted_pairs[0]
+        last_cat, last_count = sorted_pairs[-1]
+        min_val = f"{first_cat}={first_count}"
+        max_val = f"{last_cat}={last_count}"
+
+        top_10 = [{"value": v, "count": c} for v, c in counter.most_common(10)]
         top_10_json = json.dumps(top_10)
     else:
+        mean_val = None
+        std_val = None
         min_val = None
         max_val = None
         top_10_json = None
@@ -184,8 +198,8 @@ def compute_categorical_stats(values: List[str]) -> Dict:
         "n_total": n_total,
         "n_missing": n_missing,
         "n_unique": n_unique,
-        "mean": None,
-        "std": None,
+        "mean": mean_val,
+        "std": std_val,
         "min_val": min_val,
         "max_val": max_val,
         "top_10": top_10_json,

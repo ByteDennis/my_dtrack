@@ -522,9 +522,30 @@ def _sample_matching_dates(db_path, tbl_cfg, matching_dates, n_sample=100):
     return new_samples
 
 
-def build_stats_sql(table, col, date_col, where="", col_type="numeric", dialect="oracle"):
+def _merge_cte_chain(cte_prefix, new_ctes):
+    """Splice extra CTEs onto an existing 'WITH ... ' prefix (or start one).
+
+    new_ctes is a list of (alias, body_sql) tuples. body_sql is the inner
+    select (no surrounding parens). Returns a 'WITH ... ' string that can
+    be prefixed directly to a SELECT.
+    """
+    new_clauses = [f"{name} AS (\n{body.strip()}\n)" for name, body in new_ctes]
+    if not cte_prefix.strip():
+        return "WITH " + ",\n".join(new_clauses) + "\n"
+    existing = cte_prefix.rstrip()
+    if existing.upper().lstrip().startswith("WITH "):
+        return existing + ",\n" + ",\n".join(new_clauses) + "\n"
+    return existing + "\nWITH " + ",\n".join(new_clauses) + "\n"
+
+
+def build_stats_sql(table, col, date_col, where="", col_type="numeric", dialect="oracle", cte_prefix=""):
     # NOTE: Uses explicit column references — never SELECT *
-    """Build column statistics SQL for Oracle or Athena."""
+    """Build column statistics SQL for Oracle or Athena.
+
+    For categorical, mean/std/min/max are *category-aware* (rank-weighted by
+    UPPER(cat) ordering) so any permutation of counts across categories
+    produces different stats. min_val/max_val are formatted "{cat}={count}".
+    """
     where_clause = f"AND {where}" if where else ""
     is_athena = dialect == "athena"
 
@@ -532,7 +553,7 @@ def build_stats_sql(table, col, date_col, where="", col_type="numeric", dialect=
         missing = f"COUNT(*) - COUNT({col})" if is_athena else f"SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END)"
         avg_expr = f"AVG(CAST({col} AS DOUBLE))" if is_athena else f"AVG({col})"
         std_expr = f"STDDEV(CAST({col} AS DOUBLE))" if is_athena else f"STDDEV({col})"
-        return f"""
+        return cte_prefix + f"""
 SELECT {date_col} AS dt, '{col}' AS column_name, 'numeric' AS col_type,
     COUNT(*) AS n_total, {missing} AS n_missing, COUNT(DISTINCT {col}) AS n_unique,
     {avg_expr} AS mean, {std_expr} AS std,
@@ -540,15 +561,62 @@ SELECT {date_col} AS dt, '{col}' AS column_name, 'numeric' AS col_type,
 FROM {table}
 WHERE 1=1 {where_clause}
 GROUP BY {date_col}""".strip()
-    else:
-        missing = f"SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END)"
-        return f"""
-SELECT {date_col} AS dt, '{col}' AS column_name, 'categorical' AS col_type,
-    COUNT(*) AS n_total, {missing} AS n_missing, COUNT(DISTINCT {col}) AS n_unique,
-    NULL AS mean, NULL AS std, MIN({col}) AS min_val, MAX({col}) AS max_val
-FROM {table}
-WHERE 1=1 {where_clause}
-GROUP BY {date_col}""".strip()
+
+    # Categorical branch: rank-weighted stats based on alpha (UPPER) ordering.
+    cast_expr = f"CAST({col} AS VARCHAR)" if is_athena else f"TO_CHAR({col})"
+    cnt_to_str = "CAST(cnt AS VARCHAR)" if is_athena else "cnt"
+    # Use DOUBLE on Athena to avoid BIGINT overflow on cnt*rnk*rnk.
+    cnt_num = "CAST(cnt AS DOUBLE)" if is_athena else "cnt"
+
+    new_ctes = [
+        ("_dt_freq", f"""
+    SELECT {date_col} AS dt, {cast_expr} AS p_col, COUNT(*) AS cnt
+    FROM {table}
+    WHERE {col} IS NOT NULL {where_clause}
+    GROUP BY {date_col}, {col}"""),
+        ("_dt_ranked", """
+    SELECT dt, p_col, cnt,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(p_col), p_col) AS rnk,
+           COUNT(*) OVER (PARTITION BY dt) AS k
+    FROM _dt_freq"""),
+        ("_dt_agg", f"""
+    SELECT dt,
+           SUM({cnt_num}) AS sum_cnt,
+           SUM({cnt_num} * rnk) AS sum_cnt_rnk,
+           SUM({cnt_num} * rnk * rnk) AS sum_cnt_rnk2
+    FROM _dt_ranked GROUP BY dt"""),
+        ("_dt_stats", """
+    SELECT dt,
+           sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0) AS mean_v,
+           CASE WHEN sum_cnt > 0 THEN
+               SQRT(GREATEST(sum_cnt_rnk2 * 1.0 / sum_cnt
+                             - (sum_cnt_rnk * 1.0 / sum_cnt)
+                             * (sum_cnt_rnk * 1.0 / sum_cnt), 0))
+           END AS std_v
+    FROM _dt_agg"""),
+        ("_dt_minmax", f"""
+    SELECT dt,
+           MAX(CASE WHEN rnk = 1 THEN p_col || '=' || {cnt_to_str} END) AS min_v,
+           MAX(CASE WHEN rnk = k THEN p_col || '=' || {cnt_to_str} END) AS max_v
+    FROM _dt_ranked GROUP BY dt"""),
+        ("_dt_totals", f"""
+    SELECT {date_col} AS dt, COUNT(*) AS n_total,
+           SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) AS n_missing,
+           COUNT(DISTINCT {col}) AS n_unique
+    FROM {table}
+    WHERE 1=1 {where_clause}
+    GROUP BY {date_col}"""),
+    ]
+
+    head = _merge_cte_chain(cte_prefix, new_ctes)
+    return head + f"""
+SELECT t.dt AS dt, '{col}' AS column_name, 'categorical' AS col_type,
+       t.n_total, t.n_missing, t.n_unique,
+       s.mean_v AS mean, s.std_v AS std,
+       m.min_v AS min_val, m.max_v AS max_val
+FROM _dt_totals t
+LEFT JOIN _dt_stats s ON s.dt = t.dt
+LEFT JOIN _dt_minmax m ON m.dt = t.dt""".rstrip()
 
 
 def build_top10_sql(table, col, date_col, where="", dialect="oracle"):

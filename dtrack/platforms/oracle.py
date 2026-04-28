@@ -590,6 +590,147 @@ _SAS_EXPORT_HELPER = r"""
     %_export_col_stats(dsname=&dsname, qname=&qname, outdir=&out_dir);
     %put NOTE: ## TABLE DONE : &qname;
 %mend _table_done_footer;
+
+/* _col_categorical_freq
+     freq_ds - input dataset with columns (dt, p_col, cnt). p_col may be
+               missing (for the NULL-category row).
+     col     - the original column name; baked into output as column_name.
+     out_ds  - output dataset with same shape as the count-only categorical
+               emit today (dt, column_name, col_type, n_total, n_missing,
+               n_unique, mean, std, min_val, max_val, top_10).
+
+   Mean/std are rank-weighted by the alphabetic (UPPER) ordering of cats
+   per dt -- so any permutation of counts across categories produces
+   different stats. min_val/max_val are formatted "{cat}={count}" at the
+   alpha-first / alpha-last positions. top_10 is built SAS-side from the
+   freq table (safe: the historical crashes were Hive collect_list/
+   sort_array reducers, not local SAS sorts).
+
+   Output mean/std/min_val/max_val are CHAR (matches today's emit, where
+   the SQL casts them to STRING/VARCHAR2). n_total/n_missing/n_unique are
+   numeric (matches today's emit). */
+%macro _col_categorical_freq(freq_ds=, col=, out_ds=);
+    /* Per-dt totals: n_total = SUM(cnt) including NULL p_col;
+       n_unique counts non-missing p_col rows. */
+    proc sql noprint;
+        create table _ccf_meta_ as
+        select dt,
+               sum(cnt) as n_total,
+               sum(case when p_col is not missing then 1 else 0 end) as n_unique
+        from &freq_ds group by dt;
+        create table _ccf_miss_ as
+        select dt, coalesce(sum(cnt), 0) as n_missing
+        from &freq_ds where p_col is missing group by dt;
+    quit;
+
+    /* Alpha-rank pass over non-missing categories. UPPER for cross-engine
+       consistency with the Athena/Oracle/Python paths. */
+    data _ccf_alpha_;
+        set &freq_ds(where=(p_col is not missing));
+        length _p_upper $400;
+        _p_upper = upcase(strip(vvalue(p_col)));
+    run;
+    proc sort data=_ccf_alpha_; by dt _p_upper p_col; run;
+    data _ccf_ranked_;
+        set _ccf_alpha_;
+        by dt;
+        retain rnk;
+        if first.dt then rnk = 0;
+        rnk + 1;
+    run;
+
+    /* Top-10 by frequency (SAS-side; reuses the same freq_ds). */
+    proc sort data=&freq_ds out=_ccf_freq_sorted_(where=(p_col is not missing));
+        by dt descending cnt p_col;
+    run;
+    data _ccf_top10_(keep=dt top_10);
+        length top_10 $4000 _entry $400;
+        set _ccf_freq_sorted_;
+        by dt;
+        retain top_10 _rn;
+        if first.dt then do; top_10 = ''; _rn = 0; end;
+        if _rn < 10 then do;
+            _rn + 1;
+            _entry = cats(strip(vvalue(p_col)), '(', strip(put(cnt, best.)), ')');
+            if top_10 = '' then top_10 = _entry;
+            else top_10 = catx('; ', top_10, _entry);
+        end;
+        if last.dt then output;
+    run;
+
+    /* Weighted mean = SUM(cnt*rnk)/SUM(cnt);
+       std = sqrt(SUM(cnt*rnk^2)/SUM(cnt) - mean^2). Output CHAR. */
+    proc sql noprint;
+        create table _ccf_stats_ as
+        select dt,
+               sum(cnt) as sum_cnt,
+               sum(cnt * rnk) as sum_cnt_rnk,
+               sum(cnt * rnk * rnk) as sum_cnt_rnk2
+        from _ccf_ranked_ group by dt;
+    quit;
+    data _ccf_stats2_(keep=dt mean std);
+        length mean std $32;
+        set _ccf_stats_;
+        if sum_cnt > 0 then do;
+            _m = sum_cnt_rnk / sum_cnt;
+            _s = sqrt(max(sum_cnt_rnk2 / sum_cnt - _m*_m, 0));
+            mean = strip(put(_m, best32.));
+            std  = strip(put(_s, best32.));
+        end;
+        else do;
+            mean = '';
+            std  = '';
+        end;
+    run;
+
+    /* Alpha-min (rank=1) and alpha-max (last rank) per dt, encoded "cat=cnt". */
+    proc sort data=_ccf_ranked_; by dt rnk; run;
+    data _ccf_mins_(keep=dt min_val) _ccf_maxs_(keep=dt max_val);
+        length min_val max_val $400;
+        set _ccf_ranked_; by dt;
+        if first.dt then do;
+            min_val = catx('=', strip(vvalue(p_col)), strip(put(cnt, best.)));
+            output _ccf_mins_;
+        end;
+        if last.dt then do;
+            max_val = catx('=', strip(vvalue(p_col)), strip(put(cnt, best.)));
+            output _ccf_maxs_;
+        end;
+    run;
+
+    /* Merge totals + stats + min/max + miss + top_10. */
+    proc sort data=_ccf_meta_;   by dt; run;
+    proc sort data=_ccf_miss_;   by dt; run;
+    proc sort data=_ccf_stats2_; by dt; run;
+    proc sort data=_ccf_mins_;   by dt; run;
+    proc sort data=_ccf_maxs_;   by dt; run;
+    proc sort data=_ccf_top10_;  by dt; run;
+    data &out_ds;
+        length column_name $32 col_type $12 top_10 $4000
+               mean $32 std $32 min_val $400 max_val $400;
+        merge _ccf_meta_(in=a)
+              _ccf_stats2_(in=b)
+              _ccf_mins_(in=c)
+              _ccf_maxs_(in=d)
+              _ccf_miss_(in=e)
+              _ccf_top10_(in=f);
+        by dt;
+        if a;
+        column_name = "&col";
+        col_type = 'categorical';
+        if not e then n_missing = 0;
+        if not c then min_val = '';
+        if not d then max_val = '';
+        if not b then do; mean = ''; std = ''; end;
+        if not f then top_10 = '';
+    run;
+
+    proc datasets lib=work nolist;
+        delete _ccf_meta_ _ccf_miss_ _ccf_alpha_ _ccf_ranked_
+               _ccf_stats_ _ccf_stats2_ _ccf_mins_ _ccf_maxs_
+               _ccf_freq_sorted_ _ccf_top10_;
+    quit;
+%mend _col_categorical_freq;
 """
 
 
@@ -620,12 +761,18 @@ _SAS_SOURCE_HELPERS = r"""
 %mend _col_numeric;
 
 %macro _col_categorical(raw_ds=, col=, out_ds=);
+    /* Build (dt, cat, count) freq table once. Categories sorted alphabetically
+       (case-insensitive) get rank 1..k per dt; mean/std/min/max use these
+       ranks so any permutation of counts across categories produces
+       different stats. min/max are formatted "{cat}={count}". */
     proc sql noprint;
         create table _freq_raw_ as
         select dt, &col as p_col, count(*) as value_freq
         from &raw_ds
         group by dt, &col;
     quit;
+
+    /* Top-10 by frequency (unchanged). */
     proc sort data=_freq_raw_ out=_freq_sorted_;
         by dt descending value_freq p_col;
     run;
@@ -643,36 +790,89 @@ _SAS_SOURCE_HELPERS = r"""
         end;
         if last.dt then output;
     run;
+
+    /* Alphabetic-rank pass: rank categories by upcase(cat) within each dt. */
+    data _alpha_;
+        set _freq_raw_;
+        where p_col is not missing;
+        length _p_upper $400;
+        _p_upper = upcase(strip(vvalue(p_col)));
+    run;
+    proc sort data=_alpha_; by dt _p_upper p_col; run;
+    data _ranked_;
+        set _alpha_;
+        by dt;
+        retain rnk;
+        if first.dt then rnk = 0;
+        rnk + 1;
+    run;
+
+    /* Weighted aggregates: mean = sum(cnt*rnk)/sum(cnt),
+                            std  = sqrt(sum(cnt*rnk^2)/sum(cnt) - mean^2). */
     proc sql noprint;
-        create table _agg_ as
+        create table _stats_ as
         select dt,
-            "&col" as column_name length=32,
-            'categorical' as col_type length=32,
-            sum(value_freq) as n_total,
-            sum(case when p_col is not missing then 1 else 0 end) as n_unique,
-            avg(value_freq) as mean,
-            std(value_freq) as std,
-            strip(put(min(value_freq), best32.)) as min_val length=200,
-            strip(put(max(value_freq), best32.)) as max_val length=200
-        from _freq_raw_ group by dt;
+               sum(value_freq) as sum_cnt,
+               sum(value_freq * rnk) as sum_cnt_rnk,
+               sum(value_freq * rnk * rnk) as sum_cnt_rnk2
+        from _ranked_ group by dt;
     quit;
+    data _stats2_(keep=dt mean std);
+        set _stats_;
+        if sum_cnt > 0 then do;
+            mean = sum_cnt_rnk / sum_cnt;
+            std = sqrt(max(sum_cnt_rnk2 / sum_cnt - mean*mean, 0));
+        end;
+        else do;
+            mean = .;
+            std = .;
+        end;
+    run;
+
+    /* Min: rank=1 row per dt. Max: last rank per dt. */
+    proc sort data=_ranked_ out=_ranked_sorted_; by dt rnk; run;
+    data _mins_(keep=dt min_val);
+        set _ranked_sorted_; by dt;
+        length min_val $400;
+        if first.dt then min_val = catx('=', strip(vvalue(p_col)), strip(put(value_freq, best.)));
+        if first.dt then output;
+    run;
+    data _maxs_(keep=dt max_val);
+        set _ranked_sorted_; by dt;
+        length max_val $400;
+        if last.dt then max_val = catx('=', strip(vvalue(p_col)), strip(put(value_freq, best.)));
+        if last.dt then output;
+    run;
+
+    /* n_total/n_unique from full freq (includes NULL p_col), n_missing
+       from rows where p_col is missing. */
     proc sql noprint;
+        create table _meta_ as
+        select dt,
+               sum(value_freq) as n_total,
+               sum(case when p_col is not missing then 1 else 0 end) as n_unique
+        from _freq_raw_ group by dt;
         create table _miss_ as
         select dt, coalesce(value_freq, 0) as n_missing
         from _freq_raw_ where p_col is missing;
     quit;
-    proc sort data=_agg_; by dt; run;
+
+    proc sort data=_meta_; by dt; run;
     proc sort data=_t10_; by dt; run;
     proc sort data=_miss_; by dt; run;
     data &out_ds;
-        merge _agg_(in=a) _t10_(in=b) _miss_(in=c);
+        length column_name $32 col_type $32;
+        merge _meta_(in=a) _stats2_(in=b) _mins_(in=c) _maxs_(in=d) _t10_(in=e) _miss_(in=f);
         by dt;
         if a;
-        if not b then top_10='';
-        if not c then n_missing=0;
+        column_name = "&col";
+        col_type = 'categorical';
+        if not e then top_10 = '';
+        if not f then n_missing = 0;
     run;
     proc datasets lib=work nolist;
-        delete _freq_raw_ _freq_sorted_ _t10_ _agg_ _miss_;
+        delete _freq_raw_ _freq_sorted_ _alpha_ _ranked_ _ranked_sorted_
+               _stats_ _stats2_ _mins_ _maxs_ _t10_ _meta_ _miss_;
     quit;
 %mend _col_categorical;
 
@@ -2027,7 +2227,7 @@ GROUP BY {date_expr}"""
             self.date_col,
             self.tbl_cfg.get('date_transform', ''),
         )
-        return cte + build_stats_sql(table, col, date_expr, where, "numeric", "oracle")
+        return build_stats_sql(table, col, date_expr, where, "numeric", "oracle", cte_prefix=cte)
 
     def build_categorical_sql(self, col, col_type, where, top_n=10):
         """Build categorical stats SQL for Oracle."""
@@ -2036,7 +2236,7 @@ GROUP BY {date_expr}"""
             self.date_col,
             self.tbl_cfg.get('date_transform', ''),
         )
-        return cte + build_stats_sql(table, col, date_expr, where, "categorical", "oracle")
+        return build_stats_sql(table, col, date_expr, where, "categorical", "oracle", cte_prefix=cte)
 
     def generate_extraction(self, outdir, extract_type, **kw):
         """Generate SAS extraction files.

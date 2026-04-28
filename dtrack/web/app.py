@@ -1733,10 +1733,10 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
                     "n_unique_diff": comp.get("n_unique_diff", 0),
                     "mean_left": comp.get("mean_left"),
                     "mean_right": comp.get("mean_right"),
-                    "mean_diff": comp.get("mean_diff"),
+                    "mean_match": comp.get("mean_match"),
                     "std_left": comp.get("std_left"),
                     "std_right": comp.get("std_right"),
-                    "std_diff": comp.get("std_diff"),
+                    "std_match": comp.get("std_match"),
                     "min_left": comp.get("min_left", ""),
                     "min_right": comp.get("min_right", ""),
                     "max_left": comp.get("max_left", ""),
@@ -2139,10 +2139,8 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
                     if comp.get("n_total_diff", 0) != 0: diff_cells.add((ci, 1))
                     if comp.get("n_missing_diff", 0) != 0: diff_cells.add((ci, 2))
                     if comp.get("n_unique_diff", 0) != 0: diff_cells.add((ci, 3))
-                    md = comp.get("mean_diff")
-                    if md is not None and abs(md) > 0.01: diff_cells.add((ci, 4))
-                    sd = comp.get("std_diff")
-                    if sd is not None and abs(sd) > 0.01: diff_cells.add((ci, 5))
+                    if comp.get("mean_match") is False: diff_cells.add((ci, 4))
+                    if comp.get("std_match") is False: diff_cells.add((ci, 5))
                 for ci, si in diff_cells:
                     problem_cols.add(ci)
 

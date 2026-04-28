@@ -470,10 +470,10 @@ def generate_column_stats_html(
                 if comp.get('n_unique_diff', 0) != 0:
                     col_diffs[col].append((vlabel, 'n_unique', comp['n_unique_left'], comp['n_unique_right'], comp['n_unique_diff']))
                 if comp['col_type'] == 'numeric':
-                    if comp.get('mean_diff') is not None and abs(comp.get('mean_diff', 0)) > 0.01:
-                        col_diffs[col].append((vlabel, 'mean', comp.get('mean_left'), comp.get('mean_right'), comp.get('mean_diff')))
-                    if comp.get('std_diff') is not None and abs(comp.get('std_diff', 0)) > 0.01:
-                        col_diffs[col].append((vlabel, 'std', comp.get('std_left'), comp.get('std_right'), comp.get('std_diff')))
+                    if comp.get('mean_match') is False:
+                        col_diffs[col].append((vlabel, 'mean', comp.get('mean_left'), comp.get('mean_right'), None))
+                    if comp.get('std_match') is False:
+                        col_diffs[col].append((vlabel, 'std', comp.get('std_left'), comp.get('std_right'), None))
 
         # Prepare column details for 3-column layout
         col_details_list = []
@@ -562,12 +562,16 @@ def _has_differences(comp: Dict) -> bool:
     if comp.get('n_unique_diff', 0) != 0:
         return True
 
-    # Check numeric differences
-    if comp['col_type'] == 'numeric':
-        if comp.get('mean_diff') is not None and abs(comp.get('mean_diff', 0)) > 0.01:
-            return True
-        if comp.get('std_diff') is not None and abs(comp.get('std_diff', 0)) > 0.01:
-            return True
+    # mean/std/min/max apply to both numeric and categorical (categorical
+    # uses rank-weighted stats so permutations differ).
+    if comp.get('mean_match') is False:
+        return True
+    if comp.get('std_match') is False:
+        return True
+    if (comp.get('min_left') or '') != (comp.get('min_right') or ''):
+        return True
+    if (comp.get('max_left') or '') != (comp.get('max_right') or ''):
+        return True
 
     return False
 
@@ -579,10 +583,8 @@ def _get_worst_stat(comp: Dict) -> str:
         return f'n_total {pct:.1f}%'
     if comp.get('n_missing_diff', 0) != 0:
         return 'n_missing'
-    if comp['col_type'] == 'numeric' and comp.get('mean_diff') is not None:
-        if abs(comp.get('mean_diff', 0)) > 0.01:
-            pct = abs(comp['mean_diff'] / comp['mean_left'] * 100) if comp.get('mean_left', 0) != 0 else 0
-            return f'mean {pct:.1f}%'
+    if comp['col_type'] == 'numeric' and comp.get('mean_match') is False:
+        return 'mean'
     if comp.get('n_unique_diff', 0) != 0:
         return 'n_unique'
 
@@ -591,45 +593,58 @@ def _get_worst_stat(comp: Dict) -> str:
 
 def _generate_numeric_detail_table(comp: Dict, source_left: str, source_right: str) -> str:
     """Generate detail table for numeric column"""
+    from .constants import STAT_ROUND_DECIMALS
+
+    def _is_mismatch(stat_name, lv, rv):
+        if stat_name == 'n_total':
+            return comp.get('n_total_diff', 0) != 0
+        if stat_name == 'n_missing':
+            return comp.get('n_missing_diff', 0) != 0
+        if stat_name == 'n_unique':
+            return comp.get('n_unique_diff', 0) != 0
+        if stat_name == 'mean':
+            return comp.get('mean_match') is False
+        if stat_name == 'std':
+            return comp.get('std_match') is False
+        return (lv or '') != (rv or '')
+
+    def _fmt(stat_name, val):
+        if val is None or val == '':
+            return '—'
+        if stat_name in ('n_total', 'n_missing', 'n_unique'):
+            try:
+                return f'{int(float(val)):,}'
+            except (ValueError, TypeError):
+                return str(val)
+        if stat_name in ('mean', 'std'):
+            try:
+                return f'{round(float(val), STAT_ROUND_DECIMALS)}'
+            except (ValueError, TypeError):
+                return str(val)
+        return str(val)
+
     stats = [
-        ('n_total', comp['n_total_left'], comp['n_total_right'], comp['n_total_diff']),
-        ('n_missing', comp['n_missing_left'], comp['n_missing_right'], comp['n_missing_diff']),
-        ('n_unique', comp['n_unique_left'], comp['n_unique_right'], comp['n_unique_diff']),
-        ('mean', comp.get('mean_left'), comp.get('mean_right'), comp.get('mean_diff')),
-        ('std', comp.get('std_left'), comp.get('std_right'), comp.get('std_diff')),
-        ('min', comp.get('min_left'), comp.get('min_right'), None),
-        ('max', comp.get('max_left'), comp.get('max_right'), None),
+        ('n_total', comp['n_total_left'], comp['n_total_right']),
+        ('n_missing', comp['n_missing_left'], comp['n_missing_right']),
+        ('n_unique', comp['n_unique_left'], comp['n_unique_right']),
+        ('mean', comp.get('mean_left'), comp.get('mean_right')),
+        ('std', comp.get('std_left'), comp.get('std_right')),
+        ('min', comp.get('min_left'), comp.get('min_right')),
+        ('max', comp.get('max_left'), comp.get('max_right')),
     ]
 
     html = '                        <table class="stat-table">\n'
     html += '                            <thead>\n'
-    html += f'                                <tr><th>stat</th><th>{source_left}</th><th>{source_right}</th><th>diff</th><th>% diff</th></tr>\n'
+    html += f'                                <tr><th>stat</th><th>{source_left}</th><th>{source_right}</th></tr>\n'
     html += '                            </thead>\n'
     html += '                            <tbody>\n'
 
     matching_stats = []
 
-    for stat_name, left_val, right_val, diff in stats:
-        if diff is not None and diff != 0:
-            # Calculate % difference
-            pct_diff = ''
-            if left_val is not None and left_val != 0 and diff is not None:
-                pct = (diff / left_val) * 100
-                sign = '+' if pct > 0 else ''
-                pct_diff = f'{sign}{pct:.1f}%'
-
-            # Format diff
-            if isinstance(diff, float):
-                diff_str = f'{diff:+.2f}'
-            else:
-                diff_str = f'{diff:+,}'
-
-            # Format values
-            left_str = f'{left_val:,.2f}' if isinstance(left_val, float) else f'{left_val:,}'
-            right_str = f'{right_val:,.2f}' if isinstance(right_val, float) else f'{right_val:,}'
-
-            html += f'                                <tr><td>{stat_name}</td><td>{left_str}</td><td>{right_str}</td><td class="status-red">{diff_str}</td><td>{pct_diff}</td></tr>\n'
-        elif left_val == right_val:
+    for stat_name, left_val, right_val in stats:
+        if _is_mismatch(stat_name, left_val, right_val):
+            html += f'                                <tr class="status-red"><td>{stat_name}</td><td>{_fmt(stat_name, left_val)}</td><td>{_fmt(stat_name, right_val)}</td></tr>\n'
+        else:
             matching_stats.append(stat_name)
 
     html += '                            </tbody>\n'

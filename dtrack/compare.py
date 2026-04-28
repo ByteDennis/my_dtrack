@@ -5,6 +5,7 @@ import re
 from fnmatch import fnmatch
 from .db import get_row_counts, get_col_stats, get_table_pair, list_table_pairs
 from .date_utils import parse_date
+from .constants import STAT_ROUND_DECIMALS
 
 
 def resolve_col_filter(col_map, include_patterns=None, exclude_patterns=None):
@@ -75,6 +76,21 @@ def _safe_float(val):
     if val is None or val == '':
         return None
     return float(str(val))
+
+
+def _stat_match_key(val, prefix, ndigits=STAT_ROUND_DECIMALS):
+    """Build a string match key for mean/std.
+
+    Returns f"{prefix}_{round(float(val), ndigits)}" so equality is a string
+    compare (no float drift). Returns None for missing values, or the raw
+    string with prefix if it doesn't parse as a float.
+    """
+    if val is None or val == '':
+        return None
+    try:
+        return f"{prefix}_{round(float(val), ndigits)}"
+    except (ValueError, TypeError):
+        return f"{prefix}_{val}"
 
 
 def _parse_top10(s):
@@ -303,18 +319,20 @@ def compare_column_stats(
                 "n_unique_diff": r_unique - l_unique,
             }
 
-            # Always include mean/std/min/max (for both numeric and categorical)
-            l_mean = _safe_float(left_stat["mean"])
-            r_mean = _safe_float(right_stat["mean"])
-            l_std = _safe_float(left_stat["std"])
-            r_std = _safe_float(right_stat["std"])
+            # Always include mean/std/min/max (for both numeric and categorical).
+            # Mean/std are compared via string match keys with "m_"/"s_" prefix
+            # so float drift never affects equality. Display values stay raw.
+            l_mean_key = _stat_match_key(left_stat["mean"], "m")
+            r_mean_key = _stat_match_key(right_stat["mean"], "m")
+            l_std_key = _stat_match_key(left_stat["std"], "s")
+            r_std_key = _stat_match_key(right_stat["std"], "s")
             comparison.update({
-                "mean_left": l_mean,
-                "mean_right": r_mean,
-                "mean_diff": (r_mean - l_mean if l_mean is not None and r_mean is not None else None),
-                "std_left": l_std,
-                "std_right": r_std,
-                "std_diff": (r_std - l_std if l_std is not None and r_std is not None else None),
+                "mean_left": left_stat["mean"],
+                "mean_right": right_stat["mean"],
+                "mean_match": (l_mean_key == r_mean_key) if (l_mean_key is not None and r_mean_key is not None) else None,
+                "std_left": left_stat["std"],
+                "std_right": right_stat["std"],
+                "std_match": (l_std_key == r_std_key) if (l_std_key is not None and r_std_key is not None) else None,
                 "min_left": left_stat["min_val"],
                 "min_right": right_stat["min_val"],
                 "max_left": left_stat["max_val"],
@@ -344,12 +362,18 @@ def _has_col_differences(comp):
     if comp.get('n_unique_diff', 0) != 0:
         return True
 
-    mean_diff = comp.get('mean_diff')
-    if mean_diff is not None and abs(mean_diff) > 0.01:
+    if comp.get('mean_match') is False:
         return True
 
-    std_diff = comp.get('std_diff')
-    if std_diff is not None and abs(std_diff) > 0.01:
+    if comp.get('std_match') is False:
+        return True
+
+    # min/max: string compare on stored values. For categorical they encode
+    # "{cat}={count}" so permutations like {male:30,female:20} vs {male:20,
+    # female:30} get caught even when weighted-std happens to coincide.
+    if (comp.get('min_left') or '') != (comp.get('min_right') or ''):
+        return True
+    if (comp.get('max_left') or '') != (comp.get('max_right') or ''):
         return True
 
     return False
