@@ -519,16 +519,43 @@ function togglePair(index) {
     renderPairs();
 }
 
+// Persist a {name: skip} mapping to the server. Pairs page is the global
+// switchboard -- once toggled here, /load_row, /row_compare, /load_col,
+// /col_compare, and /col_mapping all hide skipped pairs automatically.
+async function _persistPairSkip(updates) {
+    try {
+        const response = await fetch('/api/pairs/skip', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({pairs: updates}),
+        });
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            console.error('Failed to persist pair skip:', err);
+        }
+    } catch (e) {
+        console.error('Failed to persist pair skip:', e);
+    }
+}
+
 function togglePairSelection(index) {
     pairs[index].selected = !pairs[index].selected;
+    pairs[index].skip = !pairs[index].selected;
     syncSelectAllCheckbox();
     renderPairs();
+    _persistPairSkip({[pairs[index].name]: pairs[index].skip});
 }
 
 function selectAllPairs(selected) {
-    pairs.forEach(p => p.selected = selected);
+    const updates = {};
+    pairs.forEach(p => {
+        p.selected = selected;
+        p.skip = !selected;
+        updates[p.name] = p.skip;
+    });
     syncSelectAllCheckbox();
     renderPairs();
+    _persistPairSkip(updates);
 }
 
 function syncSelectAllCheckbox() {

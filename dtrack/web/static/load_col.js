@@ -26,7 +26,8 @@ async function loadKnownTables() {
     try {
         const resp = await fetch('/api/status');
         const data = await resp.json();
-        const tables = (data.pairs || []).map(p => ({
+        // Hide pairs toggled off on /pairs (skip=true).
+        const tables = (data.pairs || []).filter(p => !p.skip).map(p => ({
             pair_name: p.pair_name,
             table_left: p.table_left, table_right: p.table_right,
             source_left: p.source_left || '', source_right: p.source_right || '',
@@ -36,6 +37,7 @@ async function loadKnownTables() {
         const cfgData = await cfgResp.json();
         const existing = new Set(tables.map(t => t.pair_name));
         for (const p of (cfgData.pairs || [])) {
+            if (p.skip) continue;
             if (existing.has(p.name)) continue;
             const leftSource = p.left?.source || '';
             const rightSource = p.right?.source || '';
@@ -70,7 +72,7 @@ async function refreshDbStatus() {
     try {
         const resp = await fetch('/api/status');
         const data = await resp.json();
-        const pairs = data.pairs || [];
+        const pairs = (data.pairs || []).filter(p => !p.skip);
         if (!pairs.length) {
             el.innerHTML = '<div class="empty-message">No pairs configured</div>';
             return;

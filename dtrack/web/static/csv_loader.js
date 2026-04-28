@@ -381,6 +381,7 @@
             const resp = await fetch('/api/status');
             const data = await resp.json();
             for (const p of (data.pairs || [])) {
+                if (p.skip) continue;  // toggled off on /pairs
                 tables.push({
                     pair_name: p.pair_name,
                     table_left: p.table_left,
@@ -396,6 +397,7 @@
             const cfgData = await cfgResp.json();
             const existing = new Set(tables.map(t => t.pair_name));
             for (const p of (cfgData.pairs || [])) {
+                if (p.skip) continue;  // toggled off on /pairs
                 if (existing.has(p.name)) continue;
                 const leftSource = p.left?.source || '';
                 const rightSource = p.right?.source || '';

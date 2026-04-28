@@ -320,12 +320,20 @@ def compare_column_stats(
             }
 
             # Always include mean/std/min/max (for both numeric and categorical).
-            # Mean/std are compared via string match keys with "m_"/"s_" prefix
-            # so float drift never affects equality. Display values stay raw.
+            # Mean/std/min/max are compared via string match keys with prefixes
+            # ("m_"/"s_"/"mn_"/"mx_"). For numeric values, _stat_match_key
+            # rounds via float(); for categorical "{cat}={count}" strings, it
+            # falls through to literal comparison. This bypasses both float
+            # drift ("0.44" vs "0.4400") and integer-vs-double formatting
+            # ("0" vs "0.00").
             l_mean_key = _stat_match_key(left_stat["mean"], "m")
             r_mean_key = _stat_match_key(right_stat["mean"], "m")
             l_std_key = _stat_match_key(left_stat["std"], "s")
             r_std_key = _stat_match_key(right_stat["std"], "s")
+            l_min_key = _stat_match_key(left_stat["min_val"], "mn")
+            r_min_key = _stat_match_key(right_stat["min_val"], "mn")
+            l_max_key = _stat_match_key(left_stat["max_val"], "mx")
+            r_max_key = _stat_match_key(right_stat["max_val"], "mx")
             comparison.update({
                 "mean_left": left_stat["mean"],
                 "mean_right": right_stat["mean"],
@@ -335,8 +343,10 @@ def compare_column_stats(
                 "std_match": (l_std_key == r_std_key) if (l_std_key is not None and r_std_key is not None) else None,
                 "min_left": left_stat["min_val"],
                 "min_right": right_stat["min_val"],
+                "min_match": (l_min_key == r_min_key) if (l_min_key is not None and r_min_key is not None) else None,
                 "max_left": left_stat["max_val"],
                 "max_right": right_stat["max_val"],
+                "max_match": (l_max_key == r_max_key) if (l_max_key is not None and r_max_key is not None) else None,
             })
             # Categorical: add top_10
             if resolved_type != "numeric":
@@ -368,12 +378,12 @@ def _has_col_differences(comp):
     if comp.get('std_match') is False:
         return True
 
-    # min/max: string compare on stored values. For categorical they encode
-    # "{cat}={count}" so permutations like {male:30,female:20} vs {male:20,
-    # female:30} get caught even when weighted-std happens to coincide.
-    if (comp.get('min_left') or '') != (comp.get('min_right') or ''):
+    # min/max use match keys (same rounding/string-prefix logic as mean/std)
+    # so "0" vs "0.00" is a match for numeric columns, while "{cat}={count}"
+    # strings still compare exactly for categorical columns.
+    if comp.get('min_match') is False:
         return True
-    if (comp.get('max_left') or '') != (comp.get('max_right') or ''):
+    if comp.get('max_match') is False:
         return True
 
     return False

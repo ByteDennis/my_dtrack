@@ -29,7 +29,8 @@ async function loadPairs() {
     try {
         const res = await fetch('/api/status');
         const data = await res.json();
-        pairsData = data.pairs || [];
+        // Hide pairs the user toggled off on /pairs (skip=true).
+        pairsData = (data.pairs || []).filter(p => !p.skip);
         renderAccordion();
     } catch (e) {
         document.getElementById('pairs-accordion').innerHTML =
@@ -154,6 +155,7 @@ function renderPairBody(name, data) {
     const s = data.summary;
     const metaLeft = data.meta_left || {};
     const metaRight = data.meta_right || {};
+    const ann = data.annotations || {comment_left: '', comment_right: '', time_left: '', time_right: ''};
 
     body.innerHTML = `
         <div class="rc-stats-grid">
@@ -182,10 +184,55 @@ function renderPairBody(name, data) {
             <span class="rc-chip" style="background:var(--jp-layout-color2);">${s.n_vintages} vintage${s.n_vintages !== 1 ? 's' : ''}</span>
         </div>
 
+        <!-- Editable annotations: render in HTML/Excel exports as the
+             ⓘ tooltip on each side and the time-elapsed cell. Persisted
+             via PUT /api/pairs/${name}/annotations on edit (debounced). -->
+        <div class="rc-annotations">
+            <div class="rc-ann-row">
+                <label>Left comment:</label>
+                <input type="text" id="cc-comment-left-${name}" value="${esc(ann.comment_left || '')}" placeholder="optional note" oninput="ccDebouncedSync('${name}')">
+                <label>Time:</label>
+                <input type="text" id="cc-time-left-${name}" value="${esc(ann.time_left || '')}" placeholder="e.g. 42s" style="width:80px;" oninput="ccDebouncedSync('${name}')">
+            </div>
+            <div class="rc-ann-row">
+                <label>Right comment:</label>
+                <input type="text" id="cc-comment-right-${name}" value="${esc(ann.comment_right || '')}" placeholder="optional note" oninput="ccDebouncedSync('${name}')">
+                <label>Time:</label>
+                <input type="text" id="cc-time-right-${name}" value="${esc(ann.time_right || '')}" placeholder="e.g. 112s" style="width:80px;" oninput="ccDebouncedSync('${name}')">
+            </div>
+        </div>
+
         ${renderVintages(name, data)}
         ${renderOnlyCols(data.left_only, 'Left-Only Columns')}
         ${renderOnlyCols(data.right_only, 'Right-Only Columns')}
     `;
+}
+
+// Persist col-scope annotations into pair_cfg.time_map.col / comment_map.col
+// (debounced). Frontend IDs are prefixed cc-* to avoid collision with the
+// row_compare annotation inputs that share this page's URL space.
+const _ccSyncTimers = {};
+function ccDebouncedSync(name) {
+    clearTimeout(_ccSyncTimers[name]);
+    _ccSyncTimers[name] = setTimeout(() => ccSyncPair(name), 600);
+}
+async function ccSyncPair(name) {
+    const cl = document.getElementById(`cc-comment-left-${name}`)?.value || '';
+    const cr = document.getElementById(`cc-comment-right-${name}`)?.value || '';
+    const tl = document.getElementById(`cc-time-left-${name}`)?.value || '';
+    const tr = document.getElementById(`cc-time-right-${name}`)?.value || '';
+    try {
+        await fetch(`/api/pairs/${encodeURIComponent(name)}/annotations`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                time_map: {col: {left: tl, right: tr}},
+                comment_map: {col: {left: cl, right: cr}},
+            }),
+        });
+    } catch (e) {
+        console.error('annotation sync failed:', e);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,8 +282,8 @@ function renderColTable(name, cols) {
         {label: 'N_Unique',  keyL: 'n_unique_left',   keyR: 'n_unique_right',  isDiff: c => c.n_unique_diff !== 0, fmt: 'int'},
         {label: 'Mean',      keyL: 'mean_left',       keyR: 'mean_right',      isDiff: c => c.mean_match === false, fmt: 'num'},
         {label: 'Std',       keyL: 'std_left',        keyR: 'std_right',       isDiff: c => c.std_match === false, fmt: 'num'},
-        {label: 'Min',       keyL: 'min_left',        keyR: 'min_right',       isDiff: () => false, fmt: 'text'},
-        {label: 'Max',       keyL: 'max_left',        keyR: 'max_right',       isDiff: () => false, fmt: 'text'},
+        {label: 'Min',       keyL: 'min_left',        keyR: 'min_right',       isDiff: c => c.min_match === false, fmt: 'text'},
+        {label: 'Max',       keyL: 'max_left',        keyR: 'max_right',       isDiff: c => c.max_match === false, fmt: 'text'},
     ];
 
     function fmtCell(val, fmt) {
@@ -401,6 +448,20 @@ function notify(msg, type = 'success') {
 // ---------------------------------------------------------------------------
 async function downloadHTML() {
     try {
+        // Collect live annotations for every pair currently rendered, so
+        // unsaved edits flow into the downloaded HTML alongside the
+        // saved-config fallback.
+        const live_pairs = {};
+        for (const p of pairsData) {
+            const name = p.pair_name;
+            if (!document.getElementById(`cc-comment-left-${name}`)) continue;
+            live_pairs[name] = {
+                comment_left:  document.getElementById(`cc-comment-left-${name}`)?.value  || '',
+                comment_right: document.getElementById(`cc-comment-right-${name}`)?.value || '',
+                time_left:     document.getElementById(`cc-time-left-${name}`)?.value     || '',
+                time_right:    document.getElementById(`cc-time-right-${name}`)?.value    || '',
+            };
+        }
         const res = await fetch('/api/compare/col/export/html', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -409,6 +470,7 @@ async function downloadHTML() {
                 to_date: document.getElementById('global-to')?.value || '',
                 title: document.getElementById('global-title')?.value || '',
                 subtitle: document.getElementById('global-subtitle')?.value || '',
+                pairs: live_pairs,
             }),
         });
         if (!res.ok) {

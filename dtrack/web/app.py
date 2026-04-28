@@ -928,12 +928,55 @@ async def api_list_pairs():
                 "excludeDates": pair_cfg.get("excludeDates", []),
                 "overlap": pair_cfg.get("overlap", 7),
                 "lastLoaded": pair_cfg.get("lastLoaded", ""),
-                "selected": False,
+                "skip": bool(pair_cfg.get("skip", False)),
+                "selected": not bool(pair_cfg.get("skip", False)),
                 "expanded": False,
                 "validated": True,
             })
 
         return {"pairs": pairs_list}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/pairs/skip")
+async def api_set_pair_skip(request: Request):
+    """Toggle the persisted `skip` flag for one or more pairs.
+
+    Body shapes:
+      {"pair_name": "P1", "skip": true}            -- single pair
+      {"pairs": {"P1": false, "P2": true}}         -- bulk
+    A pair with skip=true is hidden from /load_row, /row_compare,
+    /load_col, /col_compare, /col_mapping. The pairs page is the only
+    place to toggle it back on.
+    """
+    body = await request.json()
+    try:
+        from ..config import load_unified_config, save_unified_config
+        config = load_unified_config(_config_path)
+        pairs_cfg = config.setdefault("pairs", {})
+
+        # Normalize input to a {name: bool} dict.
+        if "pairs" in body and isinstance(body["pairs"], dict):
+            updates = {k: bool(v) for k, v in body["pairs"].items()}
+        elif "pair_name" in body and "skip" in body:
+            updates = {body["pair_name"]: bool(body["skip"])}
+        else:
+            return JSONResponse(status_code=400, content={"error": "Expected {pair_name, skip} or {pairs: {...}}"})
+
+        unknown = [n for n in updates if n not in pairs_cfg]
+        if unknown:
+            return JSONResponse(status_code=404, content={"error": f"Unknown pairs: {unknown}"})
+
+        for name, skip in updates.items():
+            if skip:
+                pairs_cfg[name]["skip"] = True
+            else:
+                # Drop the key entirely when re-enabling, to keep dtrack.json clean.
+                pairs_cfg[name].pop("skip", None)
+
+        save_unified_config(_config_path, config)
+        return {"ok": True, "updated": list(updates.keys())}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -1780,6 +1823,12 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
         meta_left = get_metadata(_db_path, table_left) or {}
         meta_right = get_metadata(_db_path, table_right) or {}
 
+        # Annotations (col scope) — surfaced for the per-pair edit UI on
+        # /col_compare. Persisted via PUT /api/pairs/{name}/annotations.
+        pair_cfg = config.get("pairs", {}).get(pair_name, {})
+        col_comment_map = pair_cfg.get("comment_map", {}).get("col", {}) or {}
+        col_time_map = pair_cfg.get("time_map", {}).get("col", {}) or {}
+
         return {
             "pair_name": pair_name,
             "table_left": table_left,
@@ -1806,6 +1855,12 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
                 "vintage": meta_right.get("vintage"),
                 "date_var": meta_right.get("date_var"),
             },
+            "annotations": {
+                "comment_left": col_comment_map.get("left", ""),
+                "comment_right": col_comment_map.get("right", ""),
+                "time_left": col_time_map.get("left", ""),
+                "time_right": col_time_map.get("right", ""),
+            },
         }
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
@@ -1819,6 +1874,9 @@ async def api_compare_col_export_html(request: Request):
     to_date = body.get("to_date", "")
     title = body.get("title", "")
     subtitle = body.get("subtitle", "")
+    # Live UI state per pair: {pair_name: {comment_left, comment_right,
+    # time_left, time_right}}. Falls back to pair_cfg when absent.
+    live_pairs = body.get("pairs", {}) or {}
 
     try:
         from ..db import list_table_pairs, get_metadata, get_row_comparison
@@ -1848,17 +1906,17 @@ async def api_compare_col_export_html(request: Request):
                 auto = match_columns_from_dicts(left_cols, right_cols)
                 col_mappings = auto.get("matched", {})
 
-            # Get matching dates from row comparison
-            saved = get_row_comparison(_db_path, pname)
-            matched_dates = set(saved["matching_dates"]) if saved and saved.get("matching_dates") else None
-
+            # No matched_dates filter -- exports show every (col, dt) the col
+            # stats have, just like the col_compare page itself. Filtering by
+            # row-compare's matching_dates would silently empty the export
+            # when the date formats don't line up between row counts and col
+            # stats (vintage-bucketed col stats vs raw row dates, etc.).
             comparison = compare_column_stats(
                 _db_path, pair["table_left"], pair["table_right"],
                 columns=list(col_mappings.keys()) if col_mappings else None,
                 col_mappings=col_mappings,
                 from_date=from_date or None,
                 to_date=to_date or None,
-                matched_dates=matched_dates,
                 col_type_overrides=col_type_overrides,
             )
 
@@ -1866,8 +1924,22 @@ async def api_compare_col_export_html(request: Request):
             meta_right = get_metadata(_db_path, pair["table_right"]) or {}
             vintage = meta_left.get("vintage") or meta_right.get("vintage") or "day"
 
-            comment_map = pair_cfg.get("comment_map", {}).get("col", {})
-            time_map = pair_cfg.get("time_map", {}).get("col", {})
+            # Live UI state wins over saved config so edits show up in the
+            # downloaded HTML even before the user blurs the input. The
+            # frontend posts {pairs: {<pname>: {time_left, time_right,
+            # comment_left, comment_right}}} alongside from_date/to_date.
+            live = live_pairs.get(pname) or {}
+            saved_comment = pair_cfg.get("comment_map", {}).get("col", {}) or {}
+            saved_time = pair_cfg.get("time_map", {}).get("col", {}) or {}
+            comment_map = {
+                "left":  live.get("comment_left",  saved_comment.get("left", "")),
+                "right": live.get("comment_right", saved_comment.get("right", "")),
+            }
+            time_map = {
+                "left":  live.get("time_left",  saved_time.get("left", "")),
+                "right": live.get("time_right", saved_time.get("right", "")),
+            } if (live.get("time_left") or live.get("time_right")
+                  or saved_time.get("left") or saved_time.get("right")) else None
 
             rows_html = generate_column_stats_html(
                 pair_name=pname,
@@ -1940,16 +2012,12 @@ async def api_compare_col_export_log(request: Request):
                 auto = match_columns_from_dicts(left_cols, right_cols)
                 col_mappings = auto.get("matched", {})
 
-            saved = get_row_comparison(_db_path, pname)
-            matched_dates = set(saved["matching_dates"]) if saved and saved.get("matching_dates") else None
-
             comparison = compare_column_stats(
                 _db_path, pair["table_left"], pair["table_right"],
                 columns=list(col_mappings.keys()) if col_mappings else None,
                 col_mappings=col_mappings,
                 from_date=from_date or None,
                 to_date=to_date or None,
-                matched_dates=matched_dates,
                 col_type_overrides=col_type_overrides,
             )
 
@@ -1974,8 +2042,38 @@ async def api_compare_col_export_log(request: Request):
 
 
 def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mappings):
-    """Format compact comparison log with diffs and top_10."""
+    """Format compact comparison log with diffs and top_10.
+
+    First vintage emits a top_10 dump for every column (handy for spot-
+    checking categorical distributions); subsequent vintages only emit
+    top_10 inside DIFF blocks.
+    """
     from ..compare import _has_col_differences
+    from ..constants import STAT_ROUND_DECIMALS
+
+    def _fmt_round(v):
+        if v is None or v == "":
+            return "?"
+        try:
+            return f"{round(float(v), STAT_ROUND_DECIMALS)}"
+        except (ValueError, TypeError):
+            return str(v)
+
+    def _fmt_top10(t):
+        if not t:
+            return ""
+        s = str(t)
+        # JSON-style top_10 from compute_categorical_stats — unwrap to the
+        # human-readable "value(count); ..." shape used elsewhere.
+        if s.startswith('['):
+            try:
+                import json as _json
+                entries = _json.loads(s)
+                return "; ".join(f"{e.get('value','')}({e.get('count','')})" for e in entries)
+            except (ValueError, TypeError):
+                return s
+        return s
+
     lines = []
     lines.append(f"=== {pair_name} ({pair['table_left']} vs {pair['table_right']}) ===")
 
@@ -1995,15 +2093,24 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
                  f"{n_matched} matched cols, {n_diff_cols} diff")
     lines.append("")
 
-    for vl in sorted(vintages.keys()):
+    sorted_vls = sorted(vintages.keys())
+    first_vl = sorted_vls[0] if sorted_vls else None
+
+    for vl in sorted_vls:
         col_comps = vintages[vl]
         diffs = {col: c for col, c in col_comps.items() if _has_col_differences(c)}
+        is_first = (vl == first_vl)
 
-        if not diffs:
+        if not diffs and not is_first:
             lines.append(f"  MATCH: {vl} — all {len(col_comps)} columns match")
             continue
 
-        lines.append(f"  DIFF: {vl}")
+        if diffs:
+            lines.append(f"  DIFF: {vl}")
+        else:
+            lines.append(f"  MATCH: {vl} — all {len(col_comps)} columns match")
+
+        # Diff details
         for col, c in sorted(diffs.items()):
             parts = []
             for stat in ("n_total", "n_missing", "n_unique"):
@@ -2014,29 +2121,43 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
                     sign = "+" if d > 0 else ""
                     parts.append(f"{stat} {sign}{d} ({l}->{r})")
 
-            if c.get("col_type") == "numeric":
-                for stat in ("mean", "std"):
-                    d = c.get(f"{stat}_diff")
-                    if d is not None and abs(d) > 0.01:
-                        l = c.get(f"{stat}_left")
-                        r = c.get(f"{stat}_right")
-                        lf = f"{l:.4f}" if l is not None else "?"
-                        rf = f"{r:.4f}" if r is not None else "?"
-                        sign = "+" if d > 0 else ""
-                        parts.append(f"{stat} {sign}{d:.4f} ({lf}->{rf})")
+            if c.get("mean_match") is False:
+                parts.append(f"mean ({_fmt_round(c.get('mean_left'))}->{_fmt_round(c.get('mean_right'))})")
+            if c.get("std_match") is False:
+                parts.append(f"std ({_fmt_round(c.get('std_left'))}->{_fmt_round(c.get('std_right'))})")
+            if c.get("min_match") is False:
+                parts.append(f"min ({c.get('min_left','?')}->{c.get('min_right','?')})")
+            if c.get("max_match") is False:
+                parts.append(f"max ({c.get('max_left','?')}->{c.get('max_right','?')})")
 
             detail = "  ".join(parts) if parts else "values differ"
             lines.append(f"    {col:<20s} {detail}")
 
-            # Top 10 for categorical columns
-            t10_l = c.get("top_10_left", "")
-            t10_r = c.get("top_10_right", "")
+            # Diff-only top_10 dump
+            t10_l = _fmt_top10(c.get("top_10_left", ""))
+            t10_r = _fmt_top10(c.get("top_10_right", ""))
             if t10_l or t10_r:
                 if t10_l != t10_r:
-                    lines.append(f"      top_10 L: {t10_l[:120]}")
-                    lines.append(f"      top_10 R: {t10_r[:120]}")
+                    lines.append(f"      top_10 L: {t10_l[:200]}")
+                    lines.append(f"      top_10 R: {t10_r[:200]}")
                 else:
-                    lines.append(f"      top_10:   {t10_l[:120]}")
+                    lines.append(f"      top_10:   {t10_l[:200]}")
+
+        # First vintage: emit top_10 for EVERY column (matched and diff),
+        # so the user can eyeball the actual category distributions once.
+        if is_first:
+            lines.append(f"    --- top_10 dump ({vl}) ---")
+            for col in sorted(col_comps.keys()):
+                c = col_comps[col]
+                t10_l = _fmt_top10(c.get("top_10_left", ""))
+                t10_r = _fmt_top10(c.get("top_10_right", ""))
+                if not t10_l and not t10_r:
+                    continue
+                if t10_l == t10_r:
+                    lines.append(f"    {col:<20s} top_10:   {t10_l[:200]}")
+                else:
+                    lines.append(f"    {col:<20s} top_10 L: {t10_l[:200]}")
+                    lines.append(f"    {'':<20s} top_10 R: {t10_r[:200]}")
 
         lines.append("")
 
@@ -2093,15 +2214,11 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
                 auto = match_columns_from_dicts(left_cols, right_cols)
                 col_mappings = auto.get("matched", {})
 
-            saved = get_row_comparison(_db_path, pname)
-            matched_dates = set(saved["matching_dates"]) if saved and saved.get("matching_dates") else None
-
             comparison = compare_column_stats(
                 _db_path, pair["table_left"], pair["table_right"],
                 columns=list(col_mappings.keys()) if col_mappings else None,
                 col_mappings=col_mappings,
                 from_date=from_date or None, to_date=to_date or None,
-                matched_dates=matched_dates,
                 col_type_overrides=col_type_overrides,
             )
 
@@ -2141,6 +2258,8 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
                     if comp.get("n_unique_diff", 0) != 0: diff_cells.add((ci, 3))
                     if comp.get("mean_match") is False: diff_cells.add((ci, 4))
                     if comp.get("std_match") is False: diff_cells.add((ci, 5))
+                    if comp.get("min_match") is False: diff_cells.add((ci, 6))
+                    if comp.get("max_match") is False: diff_cells.add((ci, 7))
                 for ci, si in diff_cells:
                     problem_cols.add(ci)
 

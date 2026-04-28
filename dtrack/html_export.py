@@ -568,9 +568,9 @@ def _has_differences(comp: Dict) -> bool:
         return True
     if comp.get('std_match') is False:
         return True
-    if (comp.get('min_left') or '') != (comp.get('min_right') or ''):
+    if comp.get('min_match') is False:
         return True
-    if (comp.get('max_left') or '') != (comp.get('max_right') or ''):
+    if comp.get('max_match') is False:
         return True
 
     return False
@@ -606,6 +606,10 @@ def _generate_numeric_detail_table(comp: Dict, source_left: str, source_right: s
             return comp.get('mean_match') is False
         if stat_name == 'std':
             return comp.get('std_match') is False
+        if stat_name == 'min':
+            return comp.get('min_match') is False
+        if stat_name == 'max':
+            return comp.get('max_match') is False
         return (lv or '') != (rv or '')
 
     def _fmt(stat_name, val):

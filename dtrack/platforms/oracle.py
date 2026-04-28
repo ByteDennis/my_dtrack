@@ -1356,6 +1356,19 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.'):
     # SAS-source flat driver (bucket mode).
     if sas_driver_rows:
         parts.append("")
+        parts.append("/* Wipe stale per-table caches from prior runs. Each col step")
+        parts.append("   proc-appends to cache._cs_<dsname>; without this, reruns")
+        parts.append("   would double the rows in the exported CSV. */")
+        seen_ds = set()
+        for q, ds in qnames_sas:
+            if ds in seen_ds:
+                continue
+            seen_ds.add(ds)
+            parts.append(
+                f"%if %sysfunc(exist(cache._cs_{ds})) %then %do; "
+                f"proc delete data=cache._cs_{ds}; run; %end;"
+            )
+        parts.append("")
         parts.append("/* SAS-source flat driver: one row per (qname, bucket, col) */")
         parts.append("data _driver_col_sas_;")
         parts.append("    length qname $64 dsname $32 sas_table $128 conn_macro $16")

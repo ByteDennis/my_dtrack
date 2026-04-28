@@ -31,7 +31,7 @@ run;
     %let _cache = cache._cs_&_dsname;
     %let _t0 = %sysfunc(datetime());
 
-    %put NOTE: ---- [&_qname / &_col_name] (&_col_type) hadoop stats pull START ----;
+    %put NOTE: ---- [&_x_idx/&_n_total &_qname / &_col_name] (&_col_type) hadoop stats pull START ----;
     %put NOTE:      FROM    : &_from_table;
     %put NOTE:      DATE    : &_date_col IN [&_date_from , &_date_to];
     %put NOTE:      VINTAGE : &_vintage  (expr: &_vintage_expr);
@@ -101,7 +101,7 @@ run;
     proc delete data=_c_one; run;
 
     %let _elapsed = %sysevalf(%sysfunc(datetime()) - &_t0);
-    %put WARNING- ==== [&_qname / &_col_name] (&_col_type, vintage=&_vintage) DONE in %sysfunc(putn(&_elapsed, 8.2))s ====;
+    %put WARNING- ==== [&_x_idx/&_n_total &_qname / &_col_name] (&_col_type, vintage=&_vintage) DONE in %sysfunc(putn(&_elapsed, 8.2))s ====;
 %mend _col_hadoop;
 
 /* Per-(qname) helper -- banner in open code, per-col dispatch via
@@ -109,6 +109,22 @@ run;
    directly so there's no call-execute / symputx ordering risk. */
 %macro _run_one_hdp_table(qname=, dsname=);
     %_table_start_banner(qname=&qname, dsname=&dsname);
+
+    /* Wipe any stale cache from prior runs. cache._cs_<dsname> is a
+       permanent SAS dataset; each per-column step proc-appends to it.
+       Without this clear, rerunning the script would double up the rows
+       in the exported CSV. */
+    %if %sysfunc(exist(cache._cs_&dsname)) %then %do;
+        proc delete data=cache._cs_&dsname; run;
+    %end;
+
+    /* Total column count for this table -- drives x/n progress display in
+       the per-column start banner. */
+    %local _n_total;
+    proc sql noprint;
+        select count(*) into :_n_total trimmed
+        from _hdp_col_map where qname = "&qname";
+    quit;
 
     data _null_;
         set _hdp_col_map;
@@ -129,6 +145,8 @@ run;
             ' call symputx("_date_from", ',    quote(strip(date_from)),    ');',
             ' call symputx("_date_to", ',      quote(strip(date_to)),      ');',
             ' call symputx("_where_clause", ', quote(strip(where_clause)), ');',
+            ' call symputx("_x_idx", ',        quote(strip(put(_n_, best.))), ');',
+            ' call symputx("_n_total", "',     "&_n_total",                   '");',
             ' run; ',
             '%nrstr(%_col_hadoop)();'
         );

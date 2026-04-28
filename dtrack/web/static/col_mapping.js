@@ -75,7 +75,8 @@ async function loadPairs() {
     try {
         const res = await fetch('/api/status');
         const data = await res.json();
-        pairsData = data.pairs || [];
+        // Hide pairs toggled off on /pairs (skip=true).
+        pairsData = (data.pairs || []).filter(p => !p.skip);
         renderAccordion();
     } catch (e) {
         document.getElementById('pairs-accordion').innerHTML =

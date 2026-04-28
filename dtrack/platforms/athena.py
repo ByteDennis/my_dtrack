@@ -446,46 +446,86 @@ FROM {full_table} WHERE {wc}{group_by}"""
             })
         return results
 
-    # Categorical: full CTE query
-    if vintage == 'all':
-        freq_dt = ""
-        freq_group = ""
-        freq_partition = "ORDER BY value_freq DESC, p_col ASC"
-        agg_group = ""
-        agg_dt_select = "'all' AS dt"
+    # Categorical: single unified CTE query that emits everything in one
+    # roundtrip -- n_total/n_missing/n_unique, alpha-rank-weighted mean/std,
+    # alpha-bound "{cat}={count}" min/max, and top_10. Algorithm matches
+    # _col_categorical_freq (Hadoop SAS) so values agree across engines.
+    if dt_label is not None:
+        freq_dt_select = f"'{dt_label}'"
+        freq_dt_group = ""
+    elif vintage == 'all':
+        freq_dt_select = "'all'"
+        freq_dt_group = ""
     else:
         vintage_transform = tbl_cfg.get('vintage_transform', None)
         dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype, date_format=date_format)
-        freq_dt = f"CAST({dt_expr} AS VARCHAR) AS dt,"
-        freq_group = f", {dt_expr}"
-        freq_partition = "PARTITION BY dt ORDER BY value_freq DESC, p_col ASC"
-        agg_group = "\nGROUP BY dt"
-        agg_dt_select = "dt"
+        freq_dt_select = f"CAST({dt_expr} AS VARCHAR)"
+        freq_dt_group = f", {dt_expr}"
 
     sql = f"""{cte_prefix}
-WITH FreqTable_RAW AS (
-    SELECT
-        {freq_dt}
-        {col} AS p_col,
-        COUNT(*) AS value_freq
+WITH freq AS (
+    SELECT {freq_dt_select} AS dt,
+           CAST({col} AS VARCHAR) AS p_col,
+           COUNT(*) AS cnt
     FROM {full_table} WHERE {wc}
-    GROUP BY {col}{freq_group}
-), FreqTable AS (
-    SELECT
-        {'dt,' if vintage != 'all' else ''} p_col, value_freq,
-        ROW_NUMBER() OVER ({freq_partition}) AS rn
-    FROM FreqTable_RAW
+    GROUP BY {col}{freq_dt_group}
+),
+ranked AS (
+    SELECT dt, p_col, cnt,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(p_col), p_col) AS rnk_alpha,
+           COUNT(*)     OVER (PARTITION BY dt) AS k_alpha,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn_freq
+    FROM freq WHERE p_col IS NOT NULL AND TRIM(p_col) <> ''
+),
+totals AS (
+    SELECT dt,
+           SUM(cnt) AS n_total,
+           COALESCE(SUM(CASE WHEN p_col IS NULL OR TRIM(p_col) = '' THEN cnt ELSE 0 END), 0) AS n_missing,
+           SUM(CASE WHEN p_col IS NOT NULL AND TRIM(p_col) <> '' THEN 1 ELSE 0 END) AS n_unique
+    FROM freq GROUP BY dt
+),
+agg AS (
+    SELECT dt,
+           SUM(CAST(cnt AS DOUBLE)) AS sum_cnt,
+           SUM(CAST(cnt AS DOUBLE) * rnk_alpha) AS sum_cnt_rnk,
+           SUM(CAST(cnt AS DOUBLE) * rnk_alpha * rnk_alpha) AS sum_cnt_rnk2
+    FROM ranked GROUP BY dt
+),
+sstats AS (
+    SELECT dt,
+           sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0) AS mean,
+           SQRT(GREATEST(
+               sum_cnt_rnk2 * 1.0 / NULLIF(sum_cnt, 0)
+               - (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0))
+               * (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0)), 0)) AS std
+    FROM agg
+),
+minmax AS (
+    SELECT dt,
+           MAX(CASE WHEN rnk_alpha = 1       THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
+           MAX(CASE WHEN rnk_alpha = k_alpha THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS max_val
+    FROM ranked GROUP BY dt
+),
+top_n AS (
+    SELECT dt,
+           ARRAY_JOIN(ARRAY_AGG(
+               p_col || '(' || CAST(cnt AS VARCHAR) || ')'
+               ORDER BY cnt DESC
+           ), '; ') AS top_10
+    FROM ranked WHERE rn_freq <= 10
+    GROUP BY dt
 )
-SELECT
-    {agg_dt_select},
-    '{dtype}' AS col_type,
-    SUM(value_freq) AS n_total,
-    COUNT(value_freq) AS n_unique,
-    AVG(CAST(value_freq AS DOUBLE)) AS mean,
-    STDDEV_SAMP(CAST(value_freq AS DOUBLE)) AS std,
-    MIN(value_freq) AS min_val,
-    MAX(value_freq) AS max_val
-FROM FreqTable{agg_group}"""
+SELECT t.dt,
+       '{dtype}' AS col_type,
+       t.n_total, t.n_missing, t.n_unique,
+       ss.mean, ss.std,
+       mm.min_val, mm.max_val,
+       COALESCE(tn.top_10, '') AS top_10
+FROM totals t
+LEFT JOIN sstats ss ON t.dt = ss.dt
+LEFT JOIN minmax mm ON t.dt = mm.dt
+LEFT JOIN top_n  tn ON t.dt = tn.dt
+ORDER BY t.dt"""
 
     _log_sql(col, sql)
     df = _query_athena(sql, data_base=database)
@@ -493,46 +533,18 @@ FROM FreqTable{agg_group}"""
     results = []
     for _, rd in df.iterrows():
         rd = rd.to_dict()
-        dt_val = str(rd.get('dt', 'all'))
-        if vintage == 'all':
-            top10_sql = f"""{cte_prefix}
-SELECT ARRAY_JOIN(ARRAY_AGG(entry ORDER BY cnt DESC), '; ') AS col_freq FROM (
-    SELECT COALESCE(CAST({col} AS VARCHAR), '') || '(' || CAST(COUNT(*) AS VARCHAR) || ')' AS entry, COUNT(*) AS cnt
-    FROM {full_table} WHERE {wc} AND {col} IS NOT NULL
-    GROUP BY {col} ORDER BY COUNT(*) DESC LIMIT 10
-) t"""
-            missing_sql = f"""{cte_prefix}
-SELECT COUNT(*) AS col_missing FROM {full_table} WHERE {wc} AND {col} IS NULL"""
-        else:
-            dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype, date_format=date_format)
-            top10_sql = f"""{cte_prefix}
-SELECT ARRAY_JOIN(ARRAY_AGG(entry ORDER BY cnt DESC), '; ') AS col_freq FROM (
-    SELECT COALESCE(CAST({col} AS VARCHAR), '') || '(' || CAST(COUNT(*) AS VARCHAR) || ')' AS entry, COUNT(*) AS cnt
-    FROM {full_table} WHERE {wc} AND {col} IS NOT NULL AND CAST({dt_expr} AS VARCHAR) = '{dt_val}'
-    GROUP BY {col} ORDER BY COUNT(*) DESC LIMIT 10
-) t"""
-            missing_sql = f"""{cte_prefix}
-SELECT COUNT(*) AS col_missing FROM {full_table} WHERE {wc} AND {col} IS NULL AND CAST({dt_expr} AS VARCHAR) = '{dt_val}'"""
-
-        top10_df = _query_athena(top10_sql, data_base=database)
-        col_freq = str(top10_df.iloc[0]['col_freq'] or '') if len(top10_df) > 0 else ''
-        top_10 = col_freq if col_freq and col_freq != 'nan' else ''
-
-        missing_df = _query_athena(missing_sql, data_base=database)
-        col_missing = int(missing_df.iloc[0]['col_missing'] or 0) if len(missing_df) > 0 else 0
-
         results.append({
-            'dt': dt_val,
+            'dt': str(rd.get('dt', 'all')),
             'column_name': col,
             'col_type': 'categorical',
             'n_total': str(rd['n_total'] or 0),
-            'n_missing': str(col_missing),
+            'n_missing': str(rd['n_missing'] or 0),
             'n_unique': str(rd['n_unique'] or 0),
-            'mean': str(rd['mean']) if rd.get('mean') else '',
-            'std': str(rd['std']) if rd.get('std') else '',
+            'mean': str(rd['mean']) if rd.get('mean') is not None else '',
+            'std': str(rd['std']) if rd.get('std') is not None else '',
             'min_val': str(rd['min_val']) if rd.get('min_val') is not None else '',
             'max_val': str(rd['max_val']) if rd.get('max_val') is not None else '',
-            'top_10': top_10,
+            'top_10': str(rd.get('top_10') or ''),
         })
     return results
 
@@ -760,7 +772,7 @@ ranked AS (
            ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(p_col), p_col) AS rnk_alpha,
            COUNT(*) OVER (PARTITION BY dt) AS k_alpha,
            ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn
-    FROM freq WHERE p_col IS NOT NULL
+    FROM freq WHERE p_col IS NOT NULL AND TRIM(p_col) <> ''
 ),
 top_n AS (
     SELECT dt,
@@ -774,8 +786,8 @@ top_n AS (
 totals AS (
     SELECT dt,
            SUM(cnt) AS n_total,
-           COALESCE(SUM(CASE WHEN p_col IS NULL THEN cnt ELSE 0 END), 0) AS n_missing,
-           SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique
+           COALESCE(SUM(CASE WHEN p_col IS NULL OR TRIM(p_col) = '' THEN cnt ELSE 0 END), 0) AS n_missing,
+           SUM(CASE WHEN p_col IS NOT NULL AND TRIM(p_col) <> '' THEN 1 ELSE 0 END) AS n_unique
     FROM freq GROUP BY dt
 ),
 agg AS (
@@ -862,15 +874,15 @@ ranked AS (
         ROW_NUMBER() OVER (ORDER BY UPPER(p_col), p_col) AS rnk_alpha,
         COUNT(*) OVER () AS k_alpha,
         ROW_NUMBER() OVER (ORDER BY cnt DESC, p_col ASC) AS rn
-    FROM freq WHERE p_col IS NOT NULL
+    FROM freq WHERE p_col IS NOT NULL AND TRIM(p_col) <> ''
 )
 SELECT
     {dt_expr} AS dt,
     '{col_name}' AS column_name,
     'categorical' AS col_type,
     (SELECT SUM(cnt) FROM freq) AS n_total,
-    COALESCE((SELECT cnt FROM freq WHERE p_col IS NULL), 0) AS n_missing,
-    (SELECT SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) FROM freq) AS n_unique,
+    COALESCE((SELECT SUM(cnt) FROM freq WHERE p_col IS NULL OR TRIM(p_col) = ''), 0) AS n_missing,
+    (SELECT SUM(CASE WHEN p_col IS NOT NULL AND TRIM(p_col) <> '' THEN 1 ELSE 0 END) FROM freq) AS n_unique,
     CAST((SELECT SUM(CAST(cnt AS DOUBLE) * rnk_alpha) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0) FROM ranked) AS VARCHAR) AS mean,
     CAST((SELECT SQRT(GREATEST(
         SUM(CAST(cnt AS DOUBLE) * rnk_alpha * rnk_alpha) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0)
@@ -881,7 +893,7 @@ SELECT
     COALESCE((SELECT ARRAY_JOIN(ARRAY_AGG(
         p_col || '(' || CAST(cnt AS VARCHAR) || ')'
         ORDER BY cnt DESC
-    ), '; ') FROM ranked WHERE rn <= 10 AND p_col IS NOT NULL), '') AS top_10;"""
+    ), '; ') FROM ranked WHERE rn <= 10), '') AS top_10;"""
 
                     blocks.append(f"-- {qname}/{col_name}{block_suffix}")
                     blocks.append(sql.strip())

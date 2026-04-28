@@ -37,7 +37,9 @@ async function loadPairs() {
     try {
         const res = await fetch('/api/status');
         const data = await res.json();
-        pairsData = data.pairs || [];
+        // Hide pairs the user toggled off on /pairs (skip=true). Toggling
+        // happens only there; this page just reflects that selection.
+        pairsData = (data.pairs || []).filter(p => !p.skip);
         renderAccordion();
     } catch (e) {
         document.getElementById('pairs-accordion').innerHTML =

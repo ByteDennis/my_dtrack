@@ -567,18 +567,28 @@ GROUP BY {date_col}""".strip()
     cnt_to_str = "CAST(cnt AS VARCHAR)" if is_athena else "cnt"
     # Use DOUBLE on Athena to avoid BIGINT overflow on cnt*rnk*rnk.
     cnt_num = "CAST(cnt AS DOUBLE)" if is_athena else "cnt"
+    # Missing semantics: SAS "is missing" treats both NULL and blank-string
+    # as missing for character variables. Athena/Trino IS NULL only matches
+    # actual NULL, so we add a TRIM check to align. Oracle treats '' as
+    # NULL natively, so the extra check is unnecessary there.
+    if is_athena:
+        present_cond = "p_col IS NOT NULL AND TRIM(p_col) <> ''"
+        missing_cond = "p_col IS NULL OR TRIM(p_col) = ''"
+    else:
+        present_cond = "p_col IS NOT NULL"
+        missing_cond = "p_col IS NULL"
 
     new_ctes = [
         ("_dt_freq", f"""
     SELECT {date_col} AS dt, {cast_expr} AS p_col, COUNT(*) AS cnt
     FROM {table}
-    WHERE {col} IS NOT NULL {where_clause}
+    WHERE 1=1 {where_clause}
     GROUP BY {date_col}, {col}"""),
-        ("_dt_ranked", """
+        ("_dt_ranked", f"""
     SELECT dt, p_col, cnt,
            ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(p_col), p_col) AS rnk,
            COUNT(*) OVER (PARTITION BY dt) AS k
-    FROM _dt_freq"""),
+    FROM _dt_freq WHERE {present_cond}"""),
         ("_dt_agg", f"""
     SELECT dt,
            SUM({cnt_num}) AS sum_cnt,
@@ -600,12 +610,11 @@ GROUP BY {date_col}""".strip()
            MAX(CASE WHEN rnk = k THEN p_col || '=' || {cnt_to_str} END) AS max_v
     FROM _dt_ranked GROUP BY dt"""),
         ("_dt_totals", f"""
-    SELECT {date_col} AS dt, COUNT(*) AS n_total,
-           SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) AS n_missing,
-           COUNT(DISTINCT {col}) AS n_unique
-    FROM {table}
-    WHERE 1=1 {where_clause}
-    GROUP BY {date_col}"""),
+    SELECT dt,
+           SUM(cnt) AS n_total,
+           COALESCE(SUM(CASE WHEN {missing_cond} THEN cnt ELSE 0 END), 0) AS n_missing,
+           SUM(CASE WHEN {present_cond} THEN 1 ELSE 0 END) AS n_unique
+    FROM _dt_freq GROUP BY dt"""),
     ]
 
     head = _merge_cte_chain(cte_prefix, new_ctes)
