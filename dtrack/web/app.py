@@ -8,6 +8,7 @@ import sys
 from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 import glob
 
 from fastapi import FastAPI, Request, Query, UploadFile, File, Form
@@ -50,39 +51,47 @@ def _cfg():
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("pairs.html", {"request": request})
+    return templates.TemplateResponse(request, "pairs.html")
 
 @app.get("/pairs", response_class=HTMLResponse)
 async def pairs_page(request: Request):
-    return templates.TemplateResponse("pairs.html", {"request": request})
+    return templates.TemplateResponse(request, "pairs.html")
 
 @app.get("/load_row", response_class=HTMLResponse)
 async def load_row_page(request: Request):
-    return templates.TemplateResponse("load_row.html", {"request": request})
+    return templates.TemplateResponse(request, "load_row.html")
 
 @app.get("/row_compare", response_class=HTMLResponse)
 async def row_compare_page(request: Request):
-    return templates.TemplateResponse("row_compare.html", {"request": request})
+    return templates.TemplateResponse(request, "row_compare.html")
 
 @app.get("/col_mapping", response_class=HTMLResponse)
 async def col_mapping_page(request: Request):
-    return templates.TemplateResponse("col_mapping.html", {"request": request})
+    return templates.TemplateResponse(request, "col_mapping.html")
 
 @app.get("/col_gen", response_class=HTMLResponse)
 async def col_gen_page(request: Request):
-    return templates.TemplateResponse("col_gen.html", {"request": request})
+    return templates.TemplateResponse(request, "col_gen.html")
 
 @app.get("/load_col", response_class=HTMLResponse)
 async def load_col_page(request: Request):
-    return templates.TemplateResponse("load_col.html", {"request": request})
+    return templates.TemplateResponse(request, "load_col.html")
 
 @app.get("/col_compare", response_class=HTMLResponse)
 async def col_compare_page(request: Request):
-    return templates.TemplateResponse("col_compare.html", {"request": request})
+    return templates.TemplateResponse(request, "col_compare.html")
 
 @app.get("/benchmark", response_class=HTMLResponse)
 async def benchmark_page(request: Request):
-    return templates.TemplateResponse("benchmark.html", {"request": request})
+    return templates.TemplateResponse(request, "benchmark.html")
+
+@app.get("/playground", response_class=HTMLResponse)
+async def playground_page(request: Request):
+    return templates.TemplateResponse(request, "playground.html")
+
+@app.get("/csv_compare", response_class=HTMLResponse)
+async def csv_compare_page(request: Request):
+    return templates.TemplateResponse(request, "csv_compare.html")
 
 
 # ---------------------------------------------------------------------------
@@ -3935,6 +3944,259 @@ async def api_testing_toggle(request: Request):
         os.environ.pop("DTRACK_MOCK", None)
         _testing_mode = False
         return {"ok": True, "testing": False, "config_path": _config_path}
+
+
+# ---------------------------------------------------------------------------
+# Playground: ad-hoc SAS / Athena / Oracle queries with timing + history
+# ---------------------------------------------------------------------------
+
+def _row_to_strs(row, n_cols):
+    """Coerce a DB row into a list of n_cols string values."""
+    out = []
+    for i in range(n_cols):
+        v = row[i] if i < len(row) else None
+        out.append('' if v is None else str(v))
+    return out
+
+
+@app.post("/api/playground/run")
+async def api_playground_run(request: Request):
+    """Run an ad-hoc SQL query against Athena or Oracle and time it.
+
+    Body: {engine: 'athena'|'oracle', sql, conn?, row_cap?}
+    Returns the first `row_cap` rows; the full count is in n_rows_total.
+    Always inserts a row into _playground_history (status ok|error).
+    """
+    import time
+    from ..db import insert_playground_run
+
+    body = await request.json()
+    engine = (body.get("engine") or "").lower()
+    sql = (body.get("sql") or "").strip()
+    conn_id = body.get("conn") or ""
+    row_cap = int(body.get("row_cap") or 200)
+
+    if engine not in ("athena", "oracle"):
+        return JSONResponse(status_code=400, content={"error": f"Unsupported engine: {engine!r}"})
+    if not sql:
+        return JSONResponse(status_code=400, content={"error": "SQL is required"})
+
+    columns: list = []
+    rows: list = []
+    n_rows_total = 0
+    elapsed = 0.0
+    err: Optional[str] = None
+
+    t0 = time.perf_counter()
+    try:
+        if engine == "athena":
+            from ..platforms.athena import athena_connect
+            conn = athena_connect(conn_id or None)
+            cur = conn.cursor()
+            cur.execute(sql)
+            columns = [d[0] for d in (cur.description or [])]
+            fetched = cur.fetchall() or []
+            n_rows_total = len(fetched)
+            rows = [_row_to_strs(r, len(columns)) for r in fetched[:row_cap]]
+        else:
+            from ..db import oracle_connect
+            if not conn_id:
+                raise ValueError("Oracle requires a connection macro (conn).")
+            conn = oracle_connect(conn_id)
+            if conn is None:
+                raise RuntimeError("oracle_connect returned None (mock mode?)")
+            cur = conn.cursor()
+            cur.execute(sql)
+            columns = [d[0] for d in (cur.description or [])]
+            fetched = cur.fetchall() or []
+            n_rows_total = len(fetched)
+            rows = [_row_to_strs(r, len(columns)) for r in fetched[:row_cap]]
+            try:
+                cur.close()
+                conn.close()
+            except Exception:
+                pass
+    except Exception as e:
+        err = str(e)
+    elapsed = round(time.perf_counter() - t0, 4)
+
+    # Optional from typing is already imported at module top. We use it via Optional[str] above.
+    history_id = insert_playground_run(
+        _db_path,
+        engine=engine,
+        conn=conn_id,
+        sql=sql,
+        elapsed_sec=elapsed,
+        n_rows=n_rows_total if err is None else None,
+        status='ok' if err is None else 'error',
+        error_msg=err,
+    )
+
+    if err is not None:
+        return JSONResponse(status_code=500, content={
+            "ok": False, "error": err, "elapsed_sec": elapsed,
+            "history_id": history_id,
+        })
+
+    return {
+        "ok": True,
+        "columns": columns,
+        "rows": rows,
+        "n_rows_total": n_rows_total,
+        "n_rows_returned": len(rows),
+        "elapsed_sec": elapsed,
+        "history_id": history_id,
+    }
+
+
+@app.post("/api/playground/sas")
+async def api_playground_sas(request: Request):
+    """Generate SAS extraction script(s) from the current config.
+
+    Body: {type?: 'row'|'col'|'both', from_date?, to_date?, vintage?}
+    Returns: {filename, content} — the user downloads as <filename>.sas.
+    Also records a history row (engine='sas', elapsed=None).
+    """
+    import tempfile
+    from ..platforms.oracle import gen_sas
+    from ..db import insert_playground_run
+
+    body = await request.json()
+    extract_type = (body.get("type") or "both").lower()
+    from_date = body.get("from_date") or None
+    to_date = body.get("to_date") or None
+    vintage = body.get("vintage") or None
+
+    types = ["row", "col"] if extract_type == "both" else [extract_type]
+
+    err: Optional[str] = None
+    parts: list = []
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            buf = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(buf):
+                gen_sas(_config_path, td, types=types, db_path=_db_path,
+                        from_date=from_date, to_date=to_date, vintage=vintage)
+            for fname in sorted(os.listdir(td)):
+                fpath = os.path.join(td, fname)
+                if os.path.isfile(fpath) and fname.endswith('.sas'):
+                    with open(fpath, encoding='utf-8') as f:
+                        parts.append((fname, f.read()))
+    except Exception as e:
+        err = str(e)
+
+    history_id = insert_playground_run(
+        _db_path,
+        engine='sas',
+        conn=extract_type,
+        sql=f"gen_sas type={extract_type}",
+        elapsed_sec=None,
+        n_rows=None,
+        status='ok' if err is None else 'error',
+        error_msg=err,
+    )
+
+    if err:
+        return JSONResponse(status_code=500, content={
+            "ok": False, "error": err, "history_id": history_id,
+        })
+
+    if not parts:
+        return JSONResponse(status_code=500, content={
+            "ok": False, "error": "gen_sas produced no .sas files",
+            "history_id": history_id,
+        })
+
+    if len(parts) == 1:
+        filename, content = parts[0]
+    else:
+        filename = f"playground_{extract_type}.sas"
+        content = "\n\n/* ============================================ */\n\n".join(
+            f"/* === {n} === */\n{c}" for n, c in parts
+        )
+
+    return {"ok": True, "filename": filename, "content": content,
+            "history_id": history_id}
+
+
+@app.get("/api/playground/history")
+async def api_playground_history():
+    from ..db import list_playground_runs
+    return {"runs": list_playground_runs(_db_path, limit=200)}
+
+
+@app.put("/api/playground/history/{run_id}")
+async def api_playground_history_update(run_id: int, request: Request):
+    from ..db import update_playground_note
+    body = await request.json()
+    note = body.get("note", "")
+    ok = update_playground_note(_db_path, run_id, note)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": "run not found"})
+    return {"ok": True}
+
+
+@app.delete("/api/playground/history/{run_id}")
+async def api_playground_history_delete(run_id: int):
+    from ..db import delete_playground_run
+    ok = delete_playground_run(_db_path, run_id)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": "run not found"})
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# CSV Compare: string-exact diff between two uploaded CSVs by primary key
+# ---------------------------------------------------------------------------
+
+@app.post("/api/csv_compare/inspect")
+async def api_csv_compare_inspect(left: UploadFile = File(...),
+                                  right: UploadFile = File(...)):
+    """Read column lists + row counts from two uploaded CSVs."""
+    from ..csv_compare import read_csv_as_str
+
+    try:
+        left_df  = read_csv_as_str(io.BytesIO(await left.read()))
+        right_df = read_csv_as_str(io.BytesIO(await right.read()))
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": f"CSV parse failed: {e}"})
+
+    return {
+        "left":  {"filename": left.filename,  "columns": list(left_df.columns),  "n_rows": int(len(left_df))},
+        "right": {"filename": right.filename, "columns": list(right_df.columns), "n_rows": int(len(right_df))},
+    }
+
+
+@app.post("/api/csv_compare/run")
+async def api_csv_compare_run(
+    left: UploadFile = File(...),
+    right: UploadFile = File(...),
+    pk_cols: str = Form(...),
+    compare_cols: str = Form(...),
+    n_examples: int = Form(10),
+):
+    """Compare two uploaded CSVs by primary key, string-exact, return diffs."""
+    from ..csv_compare import read_csv_as_str, compare_csvs
+
+    pk_list = [c.strip() for c in pk_cols.split(',') if c.strip()]
+    compare_list = [c.strip() for c in compare_cols.split(',') if c.strip()]
+    if not pk_list:
+        return JSONResponse(status_code=400, content={"error": "pk_cols is required."})
+    if not compare_list:
+        return JSONResponse(status_code=400, content={"error": "compare_cols is required."})
+
+    try:
+        left_df  = read_csv_as_str(io.BytesIO(await left.read()))
+        right_df = read_csv_as_str(io.BytesIO(await right.read()))
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": f"CSV parse failed: {e}"})
+
+    try:
+        result = compare_csvs(left_df, right_df, pk_list, compare_list,
+                              n_examples=int(n_examples))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return result
 
 
 # ---------------------------------------------------------------------------

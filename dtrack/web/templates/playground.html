@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dtrack - Playground</title>
+    <link rel="stylesheet" href="/static/style_v2.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>dtrack</h1>
+        </div>
+        <div class="header-right">
+            <select id="step-selector" onchange="navigateToStep(this.value)">
+                <option value="pairs">Row Gen</option>
+                <option value="load_row">Load Row</option>
+                <option value="row_compare">Row Compare</option>
+                <option value="col_mapping">Col Mapping</option>
+                <option value="col_gen">Col Gen</option>
+                <option value="load_col">Load Col</option>
+                <option value="col_compare">Col Compare</option>
+                <option value="csv_compare">CSV Compare</option>
+                <option value="playground" selected>Playground</option>
+            </select>
+            <button class="btn-text" id="refresh-db-btn" onclick="refreshDB()" title="Refresh DB schema + metadata">Refresh DB</button>
+            <div class="db-status" id="db-status" title="Database connected"></div>
+        </div>
+    </header>
+
+    <main>
+        <section class="card">
+            <div class="section-header">
+                <h2>PLAYGROUND</h2>
+                <div class="actions" style="font-size:12px; color:var(--jp-ui-font-color2);">
+                    Run an ad-hoc query, measure elapsed time, edit notes per run.
+                </div>
+            </div>
+
+            <div class="rc-stats-grid" style="margin-bottom:12px;">
+                <div class="rc-stat-card">
+                    <div class="rc-stat-label">Engine</div>
+                    <div class="rc-stat-row" style="gap:18px;">
+                        <label><input type="radio" name="pg-engine" value="athena" checked onchange="pgEngineChanged()"> Athena</label>
+                        <label><input type="radio" name="pg-engine" value="oracle" onchange="pgEngineChanged()"> Oracle</label>
+                        <label><input type="radio" name="pg-engine" value="sas" onchange="pgEngineChanged()"> SAS (gen)</label>
+                    </div>
+                </div>
+                <div class="rc-stat-card">
+                    <div class="rc-stat-label" id="pg-conn-label">Athena database</div>
+                    <div class="rc-stat-row">
+                        <input type="text" id="pg-conn" placeholder="my_database" style="flex:1;">
+                        <label style="font-size:11px;">
+                            Row cap:
+                            <input type="number" id="pg-row-cap" value="200" min="1" max="100000" style="width:70px;">
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div id="pg-sas-controls" style="display:none; padding:8px 0; gap:12px; align-items:center; flex-wrap:wrap;">
+                <label style="font-size:12px;">Type:
+                    <select id="pg-sas-type">
+                        <option value="both" selected>both</option>
+                        <option value="row">row</option>
+                        <option value="col">col</option>
+                    </select>
+                </label>
+                <label style="font-size:12px;">From: <input type="date" id="pg-sas-from"></label>
+                <label style="font-size:12px;">To: <input type="date" id="pg-sas-to"></label>
+                <label style="font-size:12px;">Vintage:
+                    <select id="pg-sas-vintage">
+                        <option value="">(default)</option>
+                        <option value="day">day</option>
+                        <option value="week">week</option>
+                        <option value="month">month</option>
+                        <option value="quarter">quarter</option>
+                        <option value="year">year</option>
+                    </select>
+                </label>
+            </div>
+
+            <div id="pg-sql-wrap">
+                <textarea id="pg-sql" rows="8" spellcheck="false"
+                          placeholder="SELECT COUNT(*) FROM trades WHERE trade_date = DATE '2026-05-01'"
+                          style="width:100%; font-family:var(--jp-code-font-family,monospace); font-size:12px; padding:8px; box-sizing:border-box;"></textarea>
+            </div>
+
+            <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+                <button id="pg-run-btn" class="btn-primary" onclick="pgRun()">▶ Run</button>
+                <button id="pg-sas-btn" class="btn-secondary" style="display:none;" onclick="pgGenerateSAS()">Generate SAS</button>
+                <button class="btn-text" onclick="document.getElementById('pg-sql').value=''">Clear</button>
+                <span id="pg-status" style="font-size:12px; color:var(--jp-ui-font-color2); margin-left:auto;"></span>
+            </div>
+        </section>
+
+        <section class="card" id="pg-result-card" style="display:none;">
+            <div class="section-header">
+                <h2>RESULT</h2>
+                <div class="actions">
+                    <button class="btn-text" onclick="pgDownloadResultCSV()">Download CSV</button>
+                </div>
+            </div>
+            <div id="pg-result-meta" style="font-size:12px; color:var(--jp-ui-font-color2); margin-bottom:8px;"></div>
+            <div id="pg-result" style="overflow-x:auto;"></div>
+        </section>
+
+        <section class="card">
+            <div class="section-header">
+                <h2>HISTORY</h2>
+                <div class="actions">
+                    <button class="btn-text" onclick="pgLoadHistory()">Reload</button>
+                </div>
+            </div>
+            <div id="pg-history">
+                <div class="empty-message">Loading history…</div>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/common.js"></script>
+    <script src="/static/playground.js"></script>
+</body>
+</html>

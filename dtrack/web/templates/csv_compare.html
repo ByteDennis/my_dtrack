@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dtrack - CSV Compare</title>
+    <link rel="stylesheet" href="/static/style_v2.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>dtrack</h1>
+        </div>
+        <div class="header-right">
+            <select id="step-selector" onchange="navigateToStep(this.value)">
+                <option value="pairs">Row Gen</option>
+                <option value="load_row">Load Row</option>
+                <option value="row_compare">Row Compare</option>
+                <option value="col_mapping">Col Mapping</option>
+                <option value="col_gen">Col Gen</option>
+                <option value="load_col">Load Col</option>
+                <option value="col_compare">Col Compare</option>
+                <option value="csv_compare" selected>CSV Compare</option>
+                <option value="playground">Playground</option>
+            </select>
+            <button class="btn-text" id="refresh-db-btn" onclick="refreshDB()" title="Refresh DB schema + metadata">Refresh DB</button>
+            <div class="db-status" id="db-status" title="Database connected"></div>
+        </div>
+    </header>
+
+    <main>
+        <section class="card">
+            <div class="section-header">
+                <h2>CSV COMPARE</h2>
+                <div class="actions" style="font-size:12px; color:var(--jp-ui-font-color2);">
+                    String-exact diff by primary key. Empty cells stay as <code>""</code>; "10" ≠ "10.0".
+                </div>
+            </div>
+
+            <div class="rc-stats-grid">
+                <div class="rc-stat-card">
+                    <div class="rc-stat-label">Left CSV</div>
+                    <div class="rc-stat-row" style="gap:8px;">
+                        <input type="file" id="cv-left" accept=".csv,text/csv" onchange="cvInspect()">
+                        <span id="cv-left-info" style="font-size:11px; color:var(--jp-ui-font-color2);">no file</span>
+                    </div>
+                </div>
+                <div class="rc-stat-card">
+                    <div class="rc-stat-label">Right CSV</div>
+                    <div class="rc-stat-row" style="gap:8px;">
+                        <input type="file" id="cv-right" accept=".csv,text/csv" onchange="cvInspect()">
+                        <span id="cv-right-info" style="font-size:11px; color:var(--jp-ui-font-color2);">no file</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="card" id="cv-cols-card" style="display:none;">
+            <div class="section-header">
+                <h2>KEYS &amp; COLUMNS</h2>
+                <div class="actions" style="display:flex; gap:8px; align-items:center;">
+                    <label style="font-size:12px;">Examples per col:
+                        <input type="number" id="cv-n-examples" value="10" min="1" max="500" style="width:70px;">
+                    </label>
+                    <button class="btn-primary" onclick="cvRun()">Compare ▶</button>
+                </div>
+            </div>
+            <div style="display:flex; gap:24px; flex-wrap:wrap;">
+                <div style="flex:1; min-width:280px;">
+                    <div style="font-weight:600; margin-bottom:6px;">Primary key(s) — must exist on both sides</div>
+                    <div id="cv-pk-grid" style="display:flex; flex-wrap:wrap; gap:6px 16px;"></div>
+                </div>
+                <div style="flex:2; min-width:340px;">
+                    <div style="font-weight:600; margin-bottom:6px;">Columns to compare</div>
+                    <div id="cv-compare-grid" style="display:flex; flex-wrap:wrap; gap:6px 16px;"></div>
+                </div>
+            </div>
+            <div id="cv-status" style="font-size:12px; color:var(--jp-ui-font-color2); margin-top:8px;"></div>
+        </section>
+
+        <section class="card" id="cv-result-card" style="display:none;">
+            <div class="section-header">
+                <h2>RESULT</h2>
+                <div class="actions"></div>
+            </div>
+            <div id="cv-summary" style="margin-bottom:12px;"></div>
+            <div id="cv-only-side" style="margin-bottom:12px;"></div>
+            <div id="cv-per-col"></div>
+        </section>
+    </main>
+
+    <script src="/static/common.js"></script>
+    <script src="/static/csv_compare.js"></script>
+</body>
+</html>

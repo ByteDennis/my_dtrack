@@ -1,12 +1,6 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-packages = ["dtrack", "dtrack.platforms", "dtrack.web"]
-
-[tool.setuptools.package-data]
-"dtrack.web" = ["static/*", "templates/*"]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "dtrack"
@@ -18,27 +12,20 @@ dependencies = [
     "numpy>=1.20.0",
     "python-dotenv>=1.0.1",
     "oracledb>=3.0.0",
-    "openpyxl>=3.1.5"
-]
-
-[project.scripts]
-dtrack = "dtrack.cli:main"
-
-[project.optional-dependencies]
-aws = [
+    "openpyxl>=3.1.5",
     "pyathena>=2.0.0",
-]
-debug = [
-    "ipdb>=0.13.0",
-    "debugpy>=1.6.0",
-]
-web = [
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
     "jinja2>=3.0.0",
     "python-multipart>=0.0.22",
 ]
-dev = [
-    "pytest>=7.0.0",
-    "pytest-cov>=3.0.0",
-]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0", "pytest-cov>=3.0.0", "ruff"]
+debug = ["ipdb>=0.13.0", "debugpy>=1.6.0"]
+
+[project.scripts]
+dtrack = "dtrack.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dtrack"]

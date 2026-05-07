@@ -1,5 +1,6 @@
 """Database operations for dtrack"""
 
+import json
 import os
 import sqlite3
 from datetime import datetime
@@ -90,6 +91,18 @@ _SCHEMA = {
         ("table_name", "TEXT", "NOT NULL"),
         ("samples", "TEXT", ""),
         ("sampled_at", "TEXT", "DEFAULT CURRENT_TIMESTAMP"),
+    ],
+    "_playground_history": [
+        ("id", "INTEGER", "PRIMARY KEY AUTOINCREMENT"),
+        ("engine", "TEXT", "NOT NULL"),
+        ("conn", "TEXT", ""),
+        ("sql", "TEXT", "NOT NULL"),
+        ("elapsed_sec", "REAL", ""),
+        ("n_rows", "INTEGER", ""),
+        ("status", "TEXT", "NOT NULL"),
+        ("error_msg", "TEXT", ""),
+        ("note", "TEXT", "DEFAULT ''"),
+        ("ts_utc", "TEXT", "NOT NULL"),
     ],
 }
 
@@ -216,6 +229,21 @@ def init_database(db_path: str) -> None:
             diff_columns TEXT,
             comparison_details TEXT,
             created_at TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS _playground_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engine TEXT NOT NULL,
+            conn TEXT,
+            sql TEXT NOT NULL,
+            elapsed_sec REAL,
+            n_rows INTEGER,
+            status TEXT NOT NULL,
+            error_msg TEXT,
+            note TEXT DEFAULT '',
+            ts_utc TEXT NOT NULL
         )
     """)
 
@@ -1028,6 +1056,39 @@ MACRO2SVC = {
     "pb30": "pcbs_mkt_comnn_30",
 }
 
+
+def _load_macro_overrides() -> dict:
+    """Read additional Oracle macros from env without touching MACRO2SVC.
+
+    Two channels:
+      DTRACK_ORACLE_MACROS="pb40:svc_x,pb50:svc_y"
+      DTRACK_ORACLE_MACROS_FILE=/path/to/macros.json   ({"pb40": "svc_x", ...})
+    """
+    extra: dict = {}
+    blob = os.environ.get('DTRACK_ORACLE_MACROS', '').strip()
+    if blob:
+        for part in blob.split(','):
+            if ':' in part:
+                k, v = part.split(':', 1)
+                k = k.strip()
+                v = v.strip()
+                if k and v:
+                    extra[k] = v
+    cfg = os.environ.get('DTRACK_ORACLE_MACROS_FILE')
+    if cfg:
+        try:
+            from pathlib import Path as _P
+            if _P(cfg).exists():
+                extra.update(json.loads(_P(cfg).read_text()))
+        except Exception:
+            pass
+    return extra
+
+
+def resolve_oracle_macro(conn_macro: str) -> Optional[str]:
+    """Look up a service name for `conn_macro` from MACRO2SVC + overrides."""
+    return {**MACRO2SVC, **_load_macro_overrides()}.get(conn_macro)
+
 #>>> Solve LDAP DSN to get TNS connect string <<<#
 def solve_ldap(ldap_dsn: str):
     import re
@@ -1047,17 +1108,18 @@ def solve_ldap(ldap_dsn: str):
 
 
 
-def oracle_connect(conn_macro: str):
+def oracle_connect(conn_macro: str, *, user: Optional[str] = None,
+                   password: Optional[str] = None,
+                   service: Optional[str] = None,
+                   ldap_base: Optional[str] = None):
     """Connect to Oracle using a connection macro name.
 
-    Looks up the service name in MACRO2SVC, reads credentials from
-    environment variables (PCDS_USR and {conn_macro}_pwd), and
-    connects via oracledb.
+    All env-var inputs can be overridden by keyword. Lookup order for each:
+      1. explicit kwarg
+      2. environment variable
+      3. (service only) MACRO2SVC + DTRACK_ORACLE_MACROS overrides
 
-    If DTRACK_ORACLE_MOCK is set, returns None (discover_columns
-    will read from mock CSV files instead).
-
-    Returns an oracledb connection object, or None when mocking.
+    If DTRACK_ORACLE_MOCK is set, returns None.
     """
     if os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ORACLE_MOCK'):
         print(f"[mock] Skipping Oracle connection for '{conn_macro}'")
@@ -1065,29 +1127,30 @@ def oracle_connect(conn_macro: str):
 
     import oracledb
 
-    svc = MACRO2SVC.get(conn_macro)
+    svc = service or resolve_oracle_macro(conn_macro)
     if not svc:
+        merged = {**MACRO2SVC, **_load_macro_overrides()}
         raise ValueError(
             f"Unknown conn_macro '{conn_macro}'. "
-            f"Known: {', '.join(MACRO2SVC.keys())}"
+            f"Known: {', '.join(sorted(merged.keys())) or '<empty>'}. "
+            f"Set DTRACK_ORACLE_MACROS=name:service to add more."
         )
 
-    user = os.environ.get('PCDS_USR')
-    pwd = os.environ.get(f'{conn_macro}_pwd')
-
+    user = user or os.environ.get('PCDS_USR')
+    password = password or os.environ.get(f'{conn_macro}_pwd')
     if not user:
-        raise RuntimeError("PCDS_USR not set in environment")
-    if not pwd:
-        raise RuntimeError(f"{conn_macro}_pwd not set in environment")
+        raise RuntimeError("PCDS_USR not set (pass user= or set env var)")
+    if not password:
+        raise RuntimeError(f"{conn_macro}_pwd not set (pass password= or set env var)")
 
-    ldap_base = os.environ.get('LDAP_BASE', '')
-    if ldap_base:
-        ldap_dsn = f"{ldap_base}/cn={svc},cn=OracleContext"
+    base = ldap_base if ldap_base is not None else os.environ.get('LDAP_BASE', '')
+    if base:
+        ldap_dsn = f"{base}/cn={svc},cn=OracleContext"
         dsn = solve_ldap(ldap_dsn)
     else:
         dsn = svc
 
-    return oracledb.connect(user=user, password=pwd, dsn=dsn)
+    return oracledb.connect(user=user, password=password, dsn=dsn)
 
 
 def discover_columns(conn, table_name: str) -> Dict[str, str]:
@@ -1919,3 +1982,60 @@ def sync_db_to_config(db_path: str, config: Dict[str, Any]) -> None:
                 config["pairs"][pair_name]["metadata"] = {}
             if comp.get('query_time'):
                 config["pairs"][pair_name]["metadata"]["query_time"] = comp['query_time']
+
+
+# ---------------------------------------------------------------------------
+# Playground history
+# ---------------------------------------------------------------------------
+
+def insert_playground_run(db_path: str, *, engine: str, conn: Optional[str],
+                          sql: str, elapsed_sec: Optional[float],
+                          n_rows: Optional[int], status: str,
+                          error_msg: Optional[str] = None,
+                          note: str = '') -> int:
+    """Insert a playground history row. Returns the new row id."""
+    from datetime import timezone
+    ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    with sqlite3.connect(db_path) as c:
+        cur = c.execute(
+            """INSERT INTO _playground_history
+               (engine, conn, sql, elapsed_sec, n_rows, status, error_msg, note, ts_utc)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (engine, conn, sql, elapsed_sec, n_rows, status, error_msg, note, ts),
+        )
+        return cur.lastrowid
+
+
+def list_playground_runs(db_path: str, limit: int = 50) -> List[Dict]:
+    """Return up to `limit` most-recent playground runs (newest first)."""
+    with sqlite3.connect(db_path) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            """SELECT id, engine, conn, sql, elapsed_sec, n_rows, status,
+                      error_msg, note, ts_utc
+               FROM _playground_history
+               ORDER BY id DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_playground_note(db_path: str, run_id: int, note: str) -> bool:
+    """Update the note column on a single run. Returns True if a row changed."""
+    with sqlite3.connect(db_path) as c:
+        cur = c.execute(
+            "UPDATE _playground_history SET note = ? WHERE id = ?",
+            (note, run_id),
+        )
+        return cur.rowcount > 0
+
+
+def delete_playground_run(db_path: str, run_id: int) -> bool:
+    """Delete one run. Returns True if a row was removed."""
+    with sqlite3.connect(db_path) as c:
+        cur = c.execute(
+            "DELETE FROM _playground_history WHERE id = ?",
+            (run_id,),
+        )
+        return cur.rowcount > 0

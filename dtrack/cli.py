@@ -915,6 +915,41 @@ def cmd_query(args):
     conn.close()
 
 
+def cmd_doctor(args):
+    """Print where env was loaded from and which Oracle/AWS settings resolve."""
+    from .db import MACRO2SVC, _load_macro_overrides
+
+    env_loaded = os.environ.get('DTRACK_ENV_FILE_LOADED', '<none found>')
+    print(f"env file:  {env_loaded}")
+    print()
+
+    print("Oracle macros (MACRO2SVC + overrides):")
+    merged = {**MACRO2SVC, **_load_macro_overrides()}
+    if not merged:
+        print("  (none)")
+    for name, svc in sorted(merged.items()):
+        origin = "override" if name in _load_macro_overrides() else "builtin"
+        print(f"  {name:8s} -> {svc}  ({origin})")
+    print()
+
+    pcds = "set" if os.environ.get('PCDS_USR') else "MISSING"
+    print(f"Oracle creds: PCDS_USR={pcds}")
+    for name in sorted(merged):
+        pwd = "set" if os.environ.get(f'{name}_pwd') else "MISSING"
+        print(f"              {name}_pwd={pwd}")
+    print()
+
+    print("AWS / Athena env:")
+    for var in ('AWS_DEFAULT_REGION', 'AWS_S3_WORK_GROUP', 'AWS_S3_STAGING_DIR',
+                'AWS_TOKEN_URL', 'AWS_ARN_URL'):
+        val = os.environ.get(var)
+        print(f"  {var:24s} = {val if val else '<unset>'}")
+    print()
+
+    ldap = os.environ.get('LDAP_BASE')
+    print(f"LDAP_BASE: {ldap if ldap else '<unset, will connect via direct service name>'}")
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -1060,6 +1095,9 @@ def main():
     p.add_argument('sql')
     p.add_argument('--write', action='store_true')
 
+    # doctor
+    p = sub.add_parser('doctor', help='Show resolved env-file, Oracle macros, AWS env vars')
+
     args = parser.parse_args()
 
     if args.debug == 'ipdb':
@@ -1080,18 +1118,36 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    # Load env
-    env_file = getattr(args, 'env_file', None)
+    # Load env. Search order:
+    #   1. --env CLI flag
+    #   2. DTRACK_ENV_FILE env var
+    #   3. dtrack.conf / .env / dtrack.env walking up from cwd
+    #   4. ~/.dtrack/dtrack.conf, /etc/dtrack/dtrack.conf
+    env_file = getattr(args, 'env_file', None) or os.environ.get('DTRACK_ENV_FILE')
+    if not env_file:
+        from dotenv import find_dotenv
+        for fname in ('dtrack.conf', '.env', 'dtrack.env'):
+            found = find_dotenv(usecwd=True, filename=fname)
+            if found:
+                env_file = found
+                break
+        if not env_file:
+            from pathlib import Path as _P
+            for path in (_P.home() / '.dtrack' / 'dtrack.conf',
+                         _P('/etc/dtrack/dtrack.conf')):
+                if path.exists():
+                    env_file = str(path)
+                    break
+
     if env_file:
         from dotenv import dotenv_values
         env_dir = os.path.dirname(os.path.abspath(env_file))
         for key, val in dotenv_values(env_file).items():
-            os.environ[key] = val
+            if val is not None:
+                os.environ.setdefault(key, val)
+        os.environ.setdefault('DTRACK_ENV_FILE_LOADED', env_file)
     else:
-        from dotenv import load_dotenv, find_dotenv
-        found = find_dotenv(usecwd=True, filename='dtrack.conf')
-        env_dir = os.path.dirname(found) if found else os.getcwd()
-        load_dotenv(found)
+        env_dir = os.getcwd()
 
     for mock_var in ('DTRACK_MOCK', 'DTRACK_ORACLE_MOCK', 'DTRACK_ATHENA_MOCK'):
         mock_dir = os.environ.get(mock_var)
@@ -1113,6 +1169,7 @@ def main():
         'list-pairs': cmd_list_pairs,
         'serve': cmd_serve,
         'query': cmd_query,
+        'doctor': cmd_doctor,
     }
 
     handler = commands.get(args.command)

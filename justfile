@@ -1,4 +1,20 @@
-# dtrack justfile
+# dtrack — quick start
+#
+#   just pipx               editable install (RECOMMENDED on remote)
+#                            edits to .py take effect on next `just serve`
+#                            edits to static/*.js & templates/*.html
+#                            are picked up on browser refresh (no restart)
+#   just pipx-prod          non-editable install (frozen copy)
+#   just pipx-reinstall     rebuild venv (use when deps change)
+#   just serve              run web UI on :8080
+#   just serve-reload       uvicorn --reload (auto-restart on .py edits)
+#   just init               initialize SQLite db
+#   just doctor             show resolved env-file + macros + AWS vars
+#
+# Required env (dtrack.conf | .env | dtrack.env): PCDS_USR, <macro>_pwd for
+# Oracle; AWS_DEFAULT_REGION, AWS_S3_WORK_GROUP, AWS_S3_STAGING_DIR for Athena.
+# Override env-file path with --env=/path or DTRACK_ENV_FILE=/path.
+# Add Oracle macros not in MACRO2SVC via DTRACK_ORACLE_MACROS=pb40:svc_x,pb50:svc_y.
 
 db := "testing/project.db"
 config := "testing/config.json"
@@ -8,9 +24,23 @@ port := "8080"
 default:
     @just --list
 
-# install dtrack with all optional deps
+# editable pipx install — source stays in this repo, edits are live
+pipx:
+    pipx uninstall dtrack || true
+    pipx install -e .
+
+# frozen pipx install — copies source into the pipx venv
+pipx-prod:
+    pipx uninstall dtrack || true
+    pipx install .
+
+# force-reinstall (use when adding/removing dependencies)
+pipx-reinstall:
+    pipx install -e . --force
+
+# install for local dev (uv editable, all extras)
 install:
-    uv pip install -e ".[web,aws,dev,debug]"
+    uv pip install -e ".[dev,debug]"
 
 # install core only (no optional deps)
 install-core:
@@ -20,6 +50,10 @@ install-core:
 serve *args:
     dtrack serve {{db}} --config {{config}} --port {{port}} {{args}}
 
+# auto-reload web UI on .py edits
+serve-reload *args:
+    uvicorn dtrack.web.app:app --reload --host 0.0.0.0 --port {{port}} {{args}}
+
 # init or refresh database (just init / just init --force)
 init *args:
     dtrack init {{db}} {{args}}
@@ -27,6 +61,10 @@ init *args:
 # refresh database schema (add missing columns)
 refresh *args:
     dtrack refresh {{db}} {{args}}
+
+# diagnose env-file + Oracle macros + AWS vars resolution
+doctor *args:
+    dtrack doctor {{args}}
 
 # load pairs from config JSON
 load-map *args:

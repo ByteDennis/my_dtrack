@@ -232,19 +232,22 @@ def aws_creds_renew(ttl_minutes=50, retries=3, retry_delay=10):
 # Athena connection
 # ---------------------------------------------------------------------------
 
-def athena_connect(data_base=None):
-    """Connect to AWS Athena using environment variables.
+def athena_connect(data_base=None, *, region=None, work_group=None,
+                   staging_dir=None):
+    """Connect to AWS Athena.
 
-    Uses AWS_DEFAULT_REGION, AWS_S3_WORK_GROUP, and AWS_S3_STAGING_DIR
-    from the environment. None values are omitted so pyathena can fall
-    back to its own defaults.
+    Each connection param falls back to env when not passed:
+      region      <- AWS_DEFAULT_REGION
+      work_group  <- AWS_S3_WORK_GROUP
+      staging_dir <- AWS_S3_STAGING_DIR
+    None values are omitted so pyathena can fall back to its own defaults.
     """
     from pyathena import connect as athena_connect_raw
 
     kwargs = {
-        'region_name': os.environ.get('AWS_DEFAULT_REGION'),
-        'work_group': os.environ.get('AWS_S3_WORK_GROUP'),
-        's3_staging_dir': os.environ.get('AWS_S3_STAGING_DIR'),
+        'region_name':    region      or os.environ.get('AWS_DEFAULT_REGION'),
+        'work_group':     work_group  or os.environ.get('AWS_S3_WORK_GROUP'),
+        's3_staging_dir': staging_dir or os.environ.get('AWS_S3_STAGING_DIR'),
     }
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     return athena_connect_raw(schema_name=data_base, **kwargs)
