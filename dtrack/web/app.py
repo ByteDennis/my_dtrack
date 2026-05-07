@@ -3984,7 +3984,11 @@ async def api_playground_run(request: Request):
     columns: list = []
     rows: list = []
     n_rows_total = 0
-    elapsed = 0.0
+    wall_sec = 0.0
+    engine_sec: Optional[float] = None
+    total_sec: Optional[float] = None
+    data_scanned: Optional[int] = None
+    query_id: Optional[str] = None
     err: Optional[str] = None
 
     t0 = time.perf_counter()
@@ -3999,6 +4003,16 @@ async def api_playground_run(request: Request):
             fetched = cur.fetchall() or []
             n_rows_total = len(fetched)
             rows = [_row_to_strs(r, len(columns)) for r in fetched[:row_cap]]
+            # Athena execution metadata exposed by pyathena post-execute.
+            # engine_* is the actual query runtime; total_* includes queue.
+            ms = getattr(cur, 'engine_execution_time_in_millis', None)
+            if ms is not None:
+                engine_sec = round(ms / 1000.0, 4)
+            ms = getattr(cur, 'total_execution_time_in_millis', None)
+            if ms is not None:
+                total_sec = round(ms / 1000.0, 4)
+            data_scanned = getattr(cur, 'data_scanned_in_bytes', None)
+            query_id = getattr(cur, 'query_id', None)
         else:
             from ..db import oracle_connect
             if not conn_id:
@@ -4019,7 +4033,11 @@ async def api_playground_run(request: Request):
                 pass
     except Exception as e:
         err = str(e)
-    elapsed = round(time.perf_counter() - t0, 4)
+    wall_sec = round(time.perf_counter() - t0, 4)
+    # Prefer Athena's engine time when we have it — that's the "real" runtime
+    # the user sees in the AWS console, sans walltime overhead from
+    # connection setup, polling, and result download.
+    elapsed = engine_sec if engine_sec is not None else wall_sec
 
     # Optional from typing is already imported at module top. We use it via Optional[str] above.
     history_id = insert_playground_run(
@@ -4036,7 +4054,7 @@ async def api_playground_run(request: Request):
     if err is not None:
         return JSONResponse(status_code=500, content={
             "ok": False, "error": err, "elapsed_sec": elapsed,
-            "history_id": history_id,
+            "wall_sec": wall_sec, "history_id": history_id,
         })
 
     return {
@@ -4046,116 +4064,51 @@ async def api_playground_run(request: Request):
         "n_rows_total": n_rows_total,
         "n_rows_returned": len(rows),
         "elapsed_sec": elapsed,
+        "wall_sec": wall_sec,
+        "engine_sec": engine_sec,
+        "total_sec": total_sec,
+        "data_scanned_bytes": data_scanned,
+        "query_id": query_id,
         "history_id": history_id,
     }
 
 
 @app.post("/api/playground/sas")
 async def api_playground_sas(request: Request):
-    """Generate SAS extraction script(s) from the current config.
-
-    Body: {type?: 'row'|'col'|'both', from_date?, to_date?, vintage?}
-    Returns: {filename, content} — the user downloads as <filename>.sas.
-    Also records a history row (engine='sas', elapsed=None).
-    """
-    import tempfile
-    from ..platforms.oracle import gen_sas
-    from ..db import insert_playground_run
-
-    body = await request.json()
-    extract_type = (body.get("type") or "both").lower()
-    from_date = body.get("from_date") or None
-    to_date = body.get("to_date") or None
-    vintage = body.get("vintage") or None
-
-    types = ["row", "col"] if extract_type == "both" else [extract_type]
-
-    err: Optional[str] = None
-    parts: list = []
-    try:
-        with tempfile.TemporaryDirectory() as td:
-            buf = io.StringIO()
-            with redirect_stdout(buf), redirect_stderr(buf):
-                gen_sas(_config_path, td, types=types, db_path=_db_path,
-                        from_date=from_date, to_date=to_date, vintage=vintage)
-            for fname in sorted(os.listdir(td)):
-                fpath = os.path.join(td, fname)
-                if os.path.isfile(fpath) and fname.endswith('.sas'):
-                    with open(fpath, encoding='utf-8') as f:
-                        parts.append((fname, f.read()))
-    except Exception as e:
-        err = str(e)
-
-    history_id = insert_playground_run(
-        _db_path,
-        engine='sas',
-        conn=extract_type,
-        sql=f"gen_sas type={extract_type}",
-        elapsed_sec=None,
-        n_rows=None,
-        status='ok' if err is None else 'error',
-        error_msg=err,
-    )
-
-    if err:
-        return JSONResponse(status_code=500, content={
-            "ok": False, "error": err, "history_id": history_id,
-        })
-
-    if not parts:
-        return JSONResponse(status_code=500, content={
-            "ok": False, "error": "gen_sas produced no .sas files",
-            "history_id": history_id,
-        })
-
-    if len(parts) == 1:
-        filename, content = parts[0]
-    else:
-        filename = f"playground_{extract_type}.sas"
-        content = "\n\n/* ============================================ */\n\n".join(
-            f"/* === {n} === */\n{c}" for n, c in parts
-        )
-
-    return {"ok": True, "filename": filename, "content": content,
-            "history_id": history_id}
-
-
-@app.post("/api/playground/sas/test_connect")
-async def api_playground_sas_test_connect(request: Request):
-    """Generate a small SAS test-connect script (libname or PROC SQL CONNECT).
+    """Wrap a user-supplied SAS body with libname / PROC SQL CONNECT scaffold.
 
     Body: {kind: 'oracle'|'hadoop', method: 'libname'|'procsql',
-           table: str,
+           sql?: str,             # the editor body — wrapped between scaffold lines
            # oracle only:
            conn_macro?: str,
            # hadoop only:
            server?: str, host?: str, schema?: str, port?: int}
-    Returns: {filename, content}
+    Returns: {ok, filename, content, history_id}.
+    Also records a history row (engine='sas', sql=editor body, status='ok'/'error').
     """
-    from ..platforms.sas_test import gen_test_connect
-    from ..db import resolve_oracle_macro
+    from ..platforms.sas_test import gen_sas_script
+    from ..db import insert_playground_run, resolve_oracle_macro
 
     body = await request.json()
     kind = (body.get("kind") or "").lower()
     method = (body.get("method") or "").lower()
-    table = (body.get("table") or "").strip()
+    user_sql = body.get("sql") or ""
+    conn_macro = (body.get("conn_macro") or "").strip()
 
-    if not table:
-        return JSONResponse(status_code=400, content={"error": "`table` is required."})
-
+    err: Optional[str] = None
+    content: str = ""
     try:
         if kind == "oracle":
-            conn_macro = (body.get("conn_macro") or "").strip()
             svc = resolve_oracle_macro(conn_macro) if conn_macro else None
             if not svc:
-                return JSONResponse(status_code=400, content={
-                    "error": f"Unknown conn_macro {conn_macro!r}. "
-                             f"Set DTRACK_ORACLE_MACROS or use a builtin (pb23, pb30)."
-                })
-            content = gen_test_connect(kind, method, svc=svc, table=table)
+                raise ValueError(
+                    f"Unknown conn_macro {conn_macro!r}. "
+                    f"Set DTRACK_ORACLE_MACROS or use a builtin (pb23, pb30)."
+                )
+            content = gen_sas_script(kind, method, body=user_sql, svc=svc)
         elif kind == "hadoop":
-            content = gen_test_connect(
-                kind, method, table=table,
+            content = gen_sas_script(
+                kind, method, body=user_sql,
                 server=(body.get("server") or "").strip(),
                 host=(body.get("host") or "").strip(),
                 schema=(body.get("schema") or "").strip(),
@@ -4163,12 +4116,35 @@ async def api_playground_sas_test_connect(request: Request):
                 truststore=body.get("truststore") or None,
             )
         else:
-            return JSONResponse(status_code=400, content={"error": f"Unsupported kind: {kind!r}"})
+            raise ValueError(f"Unsupported kind: {kind!r}")
     except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        err = str(e)
 
-    filename = f"test_{kind}_{method}.sas"
-    return {"ok": True, "filename": filename, "content": content}
+    conn_label = (
+        conn_macro if kind == "oracle" else f"{body.get('server','')}/{body.get('schema','')}"
+    )
+    history_id = insert_playground_run(
+        _db_path,
+        engine='sas',
+        conn=f"{kind}/{method}/{conn_label}",
+        sql=user_sql or "(empty body)",
+        elapsed_sec=None,
+        n_rows=None,
+        status='ok' if err is None else 'error',
+        error_msg=err,
+    )
+
+    if err:
+        return JSONResponse(status_code=400, content={
+            "ok": False, "error": err, "history_id": history_id,
+        })
+
+    return {
+        "ok": True,
+        "filename": f"playground_{kind}_{method}.sas",
+        "content": content,
+        "history_id": history_id,
+    }
 
 
 @app.get("/api/playground/history")

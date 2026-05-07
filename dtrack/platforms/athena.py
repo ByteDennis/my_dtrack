@@ -5,6 +5,12 @@ import json
 import os
 import threading
 
+# `aws_creds_renew()` POSTs/GETs to the corporate auth endpoint with
+# verify=False (proxy + self-signed certs). Suppress the per-call warning
+# urllib3 emits in that case so it doesn't clutter the dtrack logs.
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 from .base import (
     PlatformBuilder,
     qualified_name,

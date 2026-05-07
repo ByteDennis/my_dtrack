@@ -23,59 +23,62 @@ function _pgEngine() {
 function pgEngineChanged() {
     const eng = _pgEngine();
     const isSAS = eng === 'sas';
-    document.getElementById('pg-sql-wrap').style.display = isSAS ? 'none' : '';
     document.getElementById('pg-sas-controls').style.display = isSAS ? 'flex' : 'none';
-    document.getElementById('pg-run-btn').style.display = isSAS ? 'none' : '';
-    document.getElementById('pg-sas-btn').style.display = isSAS ? '' : 'none';
+    document.getElementById('pg-download-btn').style.display = 'none';
 
-    const label = document.getElementById('pg-conn-label');
-    const conn = document.getElementById('pg-conn');
-    if (eng === 'athena') {
-        label.textContent = 'Athena database (optional)';
-        conn.placeholder = 'my_database';
-    } else if (eng === 'oracle') {
-        label.textContent = 'Oracle macro (e.g. pb23)';
-        conn.placeholder = 'pb23';
+    // Athena/Oracle still use the single conn input. SAS hides it because
+    // its connection details live in the SAS controls block below.
+    const connRow = document.getElementById('pg-conn').parentElement.parentElement;
+    connRow.style.display = isSAS ? 'none' : '';
+
+    const sqlBox = document.getElementById('pg-sql');
+    if (isSAS) {
+        sqlBox.placeholder = "SAS code body — wrapped between scaffold lines.\n" +
+            "  LIBNAME mode: write SAS code (libref `ora` or `hdp` is mounted).\n" +
+            "  PROC SQL CONNECT: write native passthrough SQL.";
+        pgSasKindChanged();
     } else {
-        label.textContent = 'SAS engine — uses dtrack config';
-        conn.placeholder = '(uses loaded config_path)';
+        const label = document.getElementById('pg-conn-label');
+        const conn = document.getElementById('pg-conn');
+        if (eng === 'athena') {
+            label.textContent = 'Athena database (optional)';
+            conn.placeholder = 'my_database';
+            sqlBox.placeholder = "SELECT COUNT(*) FROM trades WHERE trade_date = DATE '2026-05-01'";
+        } else {
+            label.textContent = 'Oracle macro (e.g. pb23)';
+            conn.placeholder = 'pb23';
+            sqlBox.placeholder = "SELECT COUNT(*) FROM owner.tbl WHERE trade_date >= DATE '2026-05-01'";
+        }
     }
-    if (isSAS) pgSasModeChanged();
 }
 
-function pgSasModeChanged() {
-    const mode = document.getElementById('pg-sas-mode').value;
-    const isTest = mode === 'test';
-    document.getElementById('pg-sas-extract').style.display = isTest ? 'none' : 'flex';
-    document.getElementById('pg-sas-test').style.display    = isTest ? 'flex' : 'none';
-    document.getElementById('pg-sas-btn').textContent = isTest ? 'Generate Test Script' : 'Generate SAS';
-    if (isTest) pgTestKindChanged();
-}
-
-function pgTestKindChanged() {
-    const kind = document.getElementById('pg-test-kind').value;
-    document.getElementById('pg-test-oracle').style.display = kind === 'oracle' ? 'flex' : 'none';
-    document.getElementById('pg-test-hadoop').style.display = kind === 'hadoop' ? 'flex' : 'none';
+function pgSasKindChanged() {
+    const kind = document.getElementById('pg-sas-kind').value;
+    document.getElementById('pg-sas-oracle').style.display = kind === 'oracle' ? 'flex' : 'none';
+    document.getElementById('pg-sas-hadoop').style.display = kind === 'hadoop' ? 'flex' : 'none';
 }
 
 async function pgRun() {
     const engine = _pgEngine();
-    const sql = document.getElementById('pg-sql').value.trim();
-    const conn = document.getElementById('pg-conn').value.trim();
-    const rowCap = parseInt(document.getElementById('pg-row-cap').value || '200', 10);
+    const sql = document.getElementById('pg-sql').value;
+    const btn = document.getElementById('pg-run-btn');
+    document.getElementById('pg-download-btn').style.display = 'none';
 
-    if (!sql) { _pgSetStatus('SQL is empty.', 'error'); return; }
+    if (engine === 'sas') return pgRunSAS();
+
+    if (!sql.trim()) { _pgSetStatus('SQL is empty.', 'error'); return; }
+    const conn = document.getElementById('pg-conn').value.trim();
     if (engine === 'oracle' && !conn) { _pgSetStatus('Oracle requires a connection macro.', 'error'); return; }
 
+    const rowCap = parseInt(document.getElementById('pg-row-cap').value || '200', 10);
     _pgSetStatus('Running…');
-    const btn = document.getElementById('pg-run-btn');
     btn.disabled = true;
 
     try {
         const res = await fetch('/api/playground/run', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({engine, sql, conn, row_cap: rowCap}),
+            body: JSON.stringify({engine, sql: sql.trim(), conn, row_cap: rowCap}),
         });
         const data = await res.json();
         if (!res.ok || !data.ok) {
@@ -95,83 +98,68 @@ async function pgRun() {
     }
 }
 
-async function pgGenerateSAS() {
-    const mode = document.getElementById('pg-sas-mode').value;
-    if (mode === 'test') return pgGenerateTestSAS();
+let _pgLastSAS = null;
 
-    const type = document.getElementById('pg-sas-type').value;
-    const from_date = document.getElementById('pg-sas-from').value;
-    const to_date   = document.getElementById('pg-sas-to').value;
-    const vintage   = document.getElementById('pg-sas-vintage').value;
+async function pgRunSAS() {
+    const kind   = document.getElementById('pg-sas-kind').value;
+    const method = document.getElementById('pg-sas-method').value;
+    const sql    = document.getElementById('pg-sql').value;
+
+    const reqBody = {kind, method, sql};
+    if (kind === 'oracle') {
+        reqBody.conn_macro = document.getElementById('pg-sas-conn').value.trim();
+        if (!reqBody.conn_macro) { _pgSetStatus('Oracle needs a macro (e.g. pb23).', 'error'); return; }
+    } else {
+        reqBody.server = document.getElementById('pg-sas-server').value.trim();
+        reqBody.host   = document.getElementById('pg-sas-host').value.trim();
+        reqBody.schema = document.getElementById('pg-sas-schema').value.trim();
+        reqBody.port   = parseInt(document.getElementById('pg-sas-port').value || '10000', 10);
+        for (const f of ['server', 'host', 'schema']) {
+            if (!reqBody[f]) { _pgSetStatus(`Hadoop needs \`${f}\`.`, 'error'); return; }
+        }
+    }
 
     _pgSetStatus('Generating SAS…');
-    const btn = document.getElementById('pg-sas-btn');
+    const btn = document.getElementById('pg-run-btn');
     btn.disabled = true;
 
     try {
         const res = await fetch('/api/playground/sas', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({type, from_date, to_date, vintage}),
+            body: JSON.stringify(reqBody),
         });
         const data = await res.json();
         if (!res.ok || !data.ok) {
-            _pgSetStatus(`SAS gen failed: ${data.error || res.status}`, 'error');
+            _pgSetStatus(`Error: ${data.error || res.status}`, 'error');
+            _pgRenderError(data.error || `HTTP ${res.status}`);
         } else {
-            _pgSetStatus(`✓ generated ${data.filename} (${data.content.length.toLocaleString()} chars)`, 'ok');
-            _pgDownloadBlob(data.content, data.filename, 'text/plain');
+            _pgLastSAS = data;
+            _pgSetStatus(`✓ ${data.filename} (${data.content.length.toLocaleString()} chars)`, 'ok');
+            _pgRenderSAS(data);
+            document.getElementById('pg-download-btn').style.display = '';
         }
     } catch (e) {
         _pgSetStatus(`Network error: ${e.message}`, 'error');
+        _pgRenderError(e.message);
     } finally {
         btn.disabled = false;
         pgLoadHistory();
     }
 }
 
-async function pgGenerateTestSAS() {
-    const kind   = document.getElementById('pg-test-kind').value;
-    const method = document.getElementById('pg-test-method').value;
-    const table  = document.getElementById('pg-test-table').value.trim();
+function pgDownloadSAS() {
+    if (!_pgLastSAS) return;
+    _pgDownloadBlob(_pgLastSAS.content, _pgLastSAS.filename, 'text/plain');
+}
 
-    if (!table) { _pgSetStatus('Test connect: `table` is required.', 'error'); return; }
-
-    const body = {kind, method, table};
-    if (kind === 'oracle') {
-        body.conn_macro = document.getElementById('pg-test-conn').value.trim();
-        if (!body.conn_macro) { _pgSetStatus('Oracle test needs a macro (e.g. pb23).', 'error'); return; }
-    } else {
-        body.server = document.getElementById('pg-test-server').value.trim();
-        body.host   = document.getElementById('pg-test-host').value.trim();
-        body.schema = document.getElementById('pg-test-schema').value.trim();
-        body.port   = parseInt(document.getElementById('pg-test-port').value || '10000', 10);
-        for (const f of ['server', 'host', 'schema']) {
-            if (!body[f]) { _pgSetStatus(`Hadoop test needs \`${f}\`.`, 'error'); return; }
-        }
-    }
-
-    _pgSetStatus('Generating test script…');
-    const btn = document.getElementById('pg-sas-btn');
-    btn.disabled = true;
-
-    try {
-        const res = await fetch('/api/playground/sas/test_connect', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(body),
-        });
-        const data = await res.json();
-        if (!res.ok || !data.ok) {
-            _pgSetStatus(`Test gen failed: ${data.error || res.status}`, 'error');
-        } else {
-            _pgSetStatus(`✓ ${data.filename} ready — fill in user/password macros and submit in SAS`, 'ok');
-            _pgDownloadBlob(data.content, data.filename, 'text/plain');
-        }
-    } catch (e) {
-        _pgSetStatus(`Network error: ${e.message}`, 'error');
-    } finally {
-        btn.disabled = false;
-    }
+function _pgRenderSAS(data) {
+    const card = document.getElementById('pg-result-card');
+    card.style.display = '';
+    document.getElementById('pg-result-meta').textContent =
+        `${data.filename} · ${data.content.length.toLocaleString()} chars · fill in %let oracle_usr / oracle_pwd, then submit in SAS`;
+    document.getElementById('pg-result').innerHTML =
+        `<pre style="font-family:var(--jp-code-font-family,monospace); font-size:12px; white-space:pre-wrap; margin:0;">${_pgEsc(data.content)}</pre>`;
 }
 
 function _pgSetStatus(text, kind) {
@@ -187,7 +175,28 @@ function _pgRenderResult(data) {
     const card = document.getElementById('pg-result-card');
     card.style.display = '';
     const meta = document.getElementById('pg-result-meta');
-    meta.textContent = `${data.n_rows_total} row${data.n_rows_total===1?'':'s'} · ${data.columns.length} col${data.columns.length===1?'':'s'} · elapsed ${data.elapsed_sec}s · showing first ${data.n_rows_returned}`;
+
+    const parts = [
+        `${data.n_rows_total} row${data.n_rows_total===1?'':'s'}`,
+        `${data.columns.length} col${data.columns.length===1?'':'s'}`,
+    ];
+    if (data.engine_sec != null) {
+        parts.push(`engine ${data.engine_sec}s`);
+        if (data.total_sec != null && data.total_sec !== data.engine_sec) {
+            parts.push(`total ${data.total_sec}s`);
+        }
+        parts.push(`wall ${data.wall_sec}s`);
+    } else {
+        parts.push(`wall ${data.wall_sec ?? data.elapsed_sec}s`);
+    }
+    if (data.data_scanned_bytes != null) {
+        parts.push(`scanned ${_pgFmtBytes(data.data_scanned_bytes)}`);
+    }
+    if (data.query_id) {
+        parts.push(`query_id <code>${_pgEsc(data.query_id)}</code>`);
+    }
+    parts.push(`showing first ${data.n_rows_returned}`);
+    meta.innerHTML = parts.join(' · ');
 
     const cols = data.columns || [];
     const rows = data.rows || [];
@@ -221,6 +230,14 @@ function pgDownloadResultCSV() {
     const lines = [cols.map(csvCell).join(',')];
     for (const r of rows) lines.push(r.map(csvCell).join(','));
     _pgDownloadBlob(lines.join('\n'), 'playground_result.csv', 'text/csv');
+}
+
+function _pgFmtBytes(n) {
+    if (n == null) return '—';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let v = Number(n), i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`;
 }
 
 function _pgDownloadBlob(content, filename, mime) {
