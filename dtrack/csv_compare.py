@@ -96,7 +96,8 @@ def compare_csvs(left_df: pd.DataFrame, right_df: pd.DataFrame,
                  pk_cols: List[str], compare_cols: List[str],
                  n_examples: int = 10, *,
                  pk_cols_right: List[str] = None,
-                 compare_cols_right: List[str] = None) -> Dict[str, Any]:
+                 compare_cols_right: List[str] = None,
+                 on_log=None) -> Dict[str, Any]:
     """Compare two DataFrames by primary key, return summary + per-column diffs.
 
     All values are coerced to str via .astype(str). PK column names may differ
@@ -119,6 +120,10 @@ def compare_csvs(left_df: pd.DataFrame, right_df: pd.DataFrame,
           ],
         }
     """
+    log = on_log or (lambda *_a, **_kw: None)
+    log(f"left:  {len(left_df):,} rows × {len(left_df.columns)} cols")
+    log(f"right: {len(right_df):,} rows × {len(right_df.columns)} cols")
+
     if not pk_cols:
         raise ValueError("At least one primary-key column is required.")
 
@@ -163,6 +168,7 @@ def compare_csvs(left_df: pd.DataFrame, right_df: pd.DataFrame,
             rename[r] = l
     if rename:
         right = right.rename(columns=rename)
+        log(f"renamed right-side columns: {rename}")
 
     # Auto-normalize PK columns whose values look like dates in different
     # formats (e.g. Oracle '2025-01-15' vs SAS '15JAN2025'). After this
@@ -175,7 +181,9 @@ def compare_csvs(left_df: pd.DataFrame, right_df: pd.DataFrame,
             left[col] = l_norm
             right[col] = r_norm
             pk_normalizations.append({"column": col, "applied": label})
+            log(f"normalized PK '{col}' — {label}")
 
+    log(f"sorting both sides by PK and merging on {pk_cols}…")
     left = left.sort_values(pk_cols).reset_index(drop=True)
     right = right.sort_values(pk_cols).reset_index(drop=True)
 
@@ -190,6 +198,8 @@ def compare_csvs(left_df: pd.DataFrame, right_df: pd.DataFrame,
     n_only_left  = int(only_left_mask.sum())
     n_only_right = int(only_right_mask.sum())
     n_matched    = int(both_mask.sum())
+    log(f"merge: {n_matched:,} matched, "
+        f"{n_only_left:,} only-left, {n_only_right:,} only-right")
 
     def _pk_dict(row) -> Dict[str, str]:
         return {c: str(row[c]) for c in pk_cols}
@@ -240,6 +250,9 @@ def compare_csvs(left_df: pd.DataFrame, right_df: pd.DataFrame,
         if n_unmatched:
             cols_with_mismatches += 1
             total_mismatches += n_unmatched
+            log(f"  {col!r}: {n_unmatched:,} unmatched")
+        else:
+            log(f"  {col!r}: all matched")
 
         examples = []
         for _, r in inner[diff].head(n_examples).iterrows():

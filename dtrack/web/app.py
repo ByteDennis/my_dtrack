@@ -4240,15 +4240,22 @@ async def api_csv_compare_run(
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": f"CSV parse failed: {e}"})
 
+    logs: list = []
+    def _log(msg):
+        logs.append(msg)
+        print(f"[csv_compare] {msg}")  # also visible in `dtrack serve` stdout
+
     try:
         result = compare_csvs(
             left_df, right_df, pk_list, compare_list,
             n_examples=int(n_examples),
             pk_cols_right=pk_right_list,
             compare_cols_right=compare_right_list,
+            on_log=_log,
         )
     except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return JSONResponse(status_code=400, content={"error": str(e), "logs": logs})
+    result["logs"] = logs
     return result
 
 

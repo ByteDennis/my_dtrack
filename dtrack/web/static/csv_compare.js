@@ -141,6 +141,23 @@ async function cvRun() {
 function _cvRenderResult(data, pkCols) {
     document.getElementById('cv-result-card').style.display = '';
 
+    // Run log: surface every backend step (parse, normalize, merge, per-col)
+    // so the user sees what happened instead of just "running…".
+    const logs = data.logs || [];
+    let logHtml = '';
+    if (logs.length) {
+        const body = logs.map(l => _cvEsc(l)).join('\n');
+        logHtml = `<details class="rc-details" open>
+            <summary class="rc-details-summary">
+                <span style="font-weight:600;">Run log</span>
+                <span class="rc-details-counts">${logs.length} entries</span>
+            </summary>
+            <div class="rc-details-body">
+                <pre style="font-family:var(--jp-code-font-family,monospace); font-size:11px; white-space:pre-wrap; margin:0;">${body}</pre>
+            </div>
+        </details>`;
+    }
+
     const s = data.summary;
     let normNote = '';
     if (Array.isArray(data.pk_normalizations) && data.pk_normalizations.length) {
@@ -159,6 +176,7 @@ function _cvRenderResult(data, pkCols) {
             <span class="rc-chip mismatch">${s.total_mismatches.toLocaleString()} mismatches across ${s.cols_with_mismatches} col${s.cols_with_mismatches===1?'':'s'}</span>
         </div>
         ${normNote}
+        ${logHtml}
     `;
 
     document.getElementById('cv-only-side').innerHTML =
