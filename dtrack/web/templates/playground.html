@@ -49,7 +49,8 @@
                 <div class="rc-stat-card">
                     <div class="rc-stat-label" id="pg-conn-label">Athena database</div>
                     <div class="rc-stat-row">
-                        <input type="text" id="pg-conn" placeholder="my_database" style="flex:1;">
+                        <input type="text" id="pg-conn" list="pg-conn-list" placeholder="my_database" style="flex:1;">
+                        <datalist id="pg-conn-list"></datalist>
                         <label style="font-size:11px;">
                             Row cap:
                             <input type="number" id="pg-row-cap" value="200" min="1" max="100000" style="width:70px;">

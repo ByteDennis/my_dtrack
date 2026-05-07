@@ -6,6 +6,7 @@ function navigateToStep(step) {
 
 let _pgLastResult = null;
 let _pgHadoopProfiles = {libname: {}, procsql: {}};
+let _pgConnMacros = {oracle: [], aws: [], hadoop: []};
 
 // Form fields we persist across page reloads / server restarts. Values are
 // stored under `dtrack-playground:<id>` in localStorage; saved on every
@@ -75,20 +76,33 @@ async function pgLoadConstants() {
         const data = await res.json();
         _pgHadoopProfiles.libname = data.HADOOP_LIBNAME_PROFILES || {};
         _pgHadoopProfiles.procsql = data.HADOOP_PROCSQL_PROFILES || {};
+        _pgConnMacros = data.CONNECTION_MACROS || {oracle: [], aws: [], hadoop: []};
         pgSasRepopulateProfiles();
 
-        // Populate Oracle macro dropdown from CONNECTION_MACROS.oracle.
-        const macros = (data.CONNECTION_MACROS || {}).oracle || [];
+        // SAS-side Oracle macro dropdown (kept as <select>; macros are fixed).
         const sel = document.getElementById('pg-sas-conn');
+        const ora = _pgConnMacros.oracle || [];
         if (sel) {
-            sel.innerHTML = macros
-                .map(m => `<option value="${m}">${m}</option>`)
-                .join('');
-            if (macros.length) sel.value = macros[0];
+            sel.innerHTML = ora.map(m => `<option value="${m}">${m}</option>`).join('');
+            if (ora.length) sel.value = ora[0];
         }
+        // Main conn datalist (editable with suggestions) — populated by
+        // pgEngineChanged based on whichever engine is currently selected.
+        pgRepopulateConnDatalist();
     } catch (e) {
         console.error('pgLoadConstants failed:', e);
     }
+}
+
+function pgRepopulateConnDatalist() {
+    const dl = document.getElementById('pg-conn-list');
+    if (!dl) return;
+    const eng = _pgEngine();
+    const key = eng === 'athena' ? 'aws'
+              : eng === 'oracle' ? 'oracle'
+              : null;
+    const macros = key ? (_pgConnMacros[key] || []) : [];
+    dl.innerHTML = macros.map(m => `<option value="${m}">`).join('');
 }
 
 function pgSasRepopulateProfiles() {
@@ -153,6 +167,8 @@ function pgEngineChanged() {
     } else {
         const label = document.getElementById('pg-conn-label');
         const conn = document.getElementById('pg-conn');
+        // Refill the conn datalist from CONNECTION_MACROS for the new engine.
+        pgRepopulateConnDatalist();
         if (eng === 'athena') {
             label.textContent = 'Athena database (optional)';
             conn.placeholder = 'my_database';
