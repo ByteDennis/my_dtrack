@@ -3990,7 +3990,8 @@ async def api_playground_run(request: Request):
     t0 = time.perf_counter()
     try:
         if engine == "athena":
-            from ..platforms.athena import athena_connect
+            from ..platforms.athena import athena_connect, aws_creds_renew
+            aws_creds_renew()
             conn = athena_connect(conn_id or None)
             cur = conn.cursor()
             cur.execute(sql)

@@ -249,6 +249,7 @@ async function pgLoadHistory() {
         const head = `<thead><tr>
             <th style="width:40px;">#</th>
             <th style="width:60px;">engine</th>
+            <th style="width:50px;">status</th>
             <th style="width:120px;">conn</th>
             <th style="width:160px;">when (UTC)</th>
             <th style="width:80px; text-align:right;">elapsed</th>
@@ -273,7 +274,8 @@ function _pgRenderHistoryRow(r) {
         : `<span class="status-badge warning" title="${_pgEsc(r.error_msg || '')}">err</span>`;
     return `<tr>
         <td>${r.id}</td>
-        <td>${_pgEsc(r.engine)} ${statusBadge}</td>
+        <td>${_pgEsc(r.engine)}</td>
+        <td>${statusBadge}</td>
         <td>${_pgEsc(r.conn || '')}</td>
         <td style="font-size:11px;">${_pgEsc(r.ts_utc)}</td>
         <td style="text-align:right;">${elapsed}</td>
