@@ -136,14 +136,63 @@ def _libname_body(body: Optional[str], lib: str) -> str:
         # `where dt = DATE '2026-05-04'` becomes `where dt = '04MAY2026'd`.
         # SAS proc sql against a libref doesn't understand the ANSI form.
         s = _convert_sql_date_literals_to_sas(s)
-        return _wrap_proc_sql(s)
+        # SAS doesn't grok `limit N` (Hive) or `rownum <= N` (Oracle).
+        # Pull them out of the query and put `outobs=N` on the proc sql.
+        s, outobs = _extract_row_limit(s)
+        return _wrap_proc_sql(s, outobs=outobs)
     return s
 
 
-def _wrap_proc_sql(sql: str) -> str:
+def _wrap_proc_sql(sql: str, outobs: Optional[int] = None) -> str:
     s = sql.rstrip().rstrip(";")
     indented = "\n    ".join(s.splitlines())
-    return f"proc sql;\n    {indented};\nquit;"
+    obs_attr = f" outobs={outobs}" if outobs else ""
+    return f"proc sql{obs_attr};\n    {indented};\nquit;"
+
+
+def _extract_row_limit(sql: str):
+    """Find a `limit N` or `rownum <= N` / `rownum < N` clause and pull it out.
+
+    SAS proc sql doesn't recognize either Hive-style `limit N` or Oracle's
+    `rownum`. The standard SAS equivalent is `proc sql outobs=N;`. This
+    function returns `(cleaned_sql, N)` after stripping the clause, or
+    `(sql, None)` if neither pattern is present.
+
+    Handles:
+        ... limit 5           → strip, outobs=5
+        ... where rownum <= 5 → strip the WHERE; outobs=5
+        ... where rownum < 6  → strip; outobs=5  (strictly-less subtracts 1)
+        ... where x=1 and rownum <= 5 → strip just the AND/rownum bit
+    """
+    import re
+
+    # `LIMIT N` — must be at end of the statement (ignoring trailing ; / ws).
+    m = re.search(r"\s+limit\s+(\d+)\s*;?\s*$", sql, re.IGNORECASE)
+    if m:
+        return sql[:m.start()], int(m.group(1))
+
+    # `ROWNUM <op> N` joined to a predicate by AND, or as the lone WHERE.
+    # We capture the full slice to remove (including the connector) so the
+    # surrounding query stays well-formed.
+    pat_and  = re.compile(r"\s+and\s+rownum\s*(<=|<)\s*(\d+)", re.IGNORECASE)
+    pat_only = re.compile(r"\s+where\s+rownum\s*(<=|<)\s*(\d+)", re.IGNORECASE)
+
+    m = pat_and.search(sql)
+    if m:
+        n = int(m.group(2))
+        if m.group(1) == "<":
+            n -= 1
+        return sql[:m.start()] + sql[m.end():], n
+
+    m = pat_only.search(sql)
+    if m:
+        n = int(m.group(2))
+        if m.group(1) == "<":
+            n -= 1
+        # Drop the entire `where rownum <op> N` clause.
+        return sql[:m.start()] + sql[m.end():], n
+
+    return sql, None
 
 
 def _procsql_body(body: Optional[str], alias: str) -> str:

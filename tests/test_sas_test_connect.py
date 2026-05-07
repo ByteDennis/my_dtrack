@@ -253,6 +253,55 @@ def test_libname_handles_multiple_date_literals():
     assert "DATE '" not in sas
 
 
+def test_libname_rewrites_oracle_rownum_to_outobs():
+    sas = oracle_libname_script(
+        "svc_a", conn_macro="pb23",
+        body="select * from MYTBL where rownum <= 5"
+    )
+    # Oracle's rownum predicate is gone; SAS proc sql gets outobs=5.
+    assert "rownum" not in sas.lower()
+    assert "proc sql outobs=5;" in sas
+
+
+def test_libname_rewrites_hive_limit_to_outobs():
+    sas = oracle_libname_script(
+        "svc_a", conn_macro="pb23",
+        body="select * from MYTBL limit 10"
+    )
+    assert " limit " not in sas.lower()
+    assert "proc sql outobs=10;" in sas
+
+
+def test_libname_rownum_with_other_predicate_keeps_predicate():
+    # `where x = 1 and rownum <= 5` → predicate stays, rownum bit drops.
+    sas = oracle_libname_script(
+        "svc_a", conn_macro="pb23",
+        body="select * from MYTBL where x = 1 and rownum <= 5"
+    )
+    assert "where x = 1" in sas
+    assert "rownum" not in sas.lower()
+    assert "proc sql outobs=5;" in sas
+
+
+def test_libname_rownum_strict_less_than_subtracts_one():
+    # `rownum < 10` is "first 9 rows" in Oracle.
+    sas = oracle_libname_script(
+        "svc_a", conn_macro="pb23",
+        body="select * from MYTBL where rownum < 10"
+    )
+    assert "proc sql outobs=9;" in sas
+
+
+def test_libname_no_limit_no_outobs():
+    sas = oracle_libname_script(
+        "svc_a", conn_macro="pb23",
+        body="select count(*) from MYTBL"
+    )
+    # Default proc sql; no outobs.
+    assert "proc sql;" in sas
+    assert "outobs=" not in sas
+
+
 def test_libname_skips_qualification_for_cte_with():
     # `with cte as (...) select * from cte` — the CTE alias must not get
     # prefixed. We give up on auto-qualifying when the body starts with WITH.
