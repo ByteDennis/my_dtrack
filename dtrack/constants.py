@@ -92,6 +92,32 @@ CONNECTION_MACROS = {
     "csv": [],
 }
 
+# Hadoop libname / PROC SQL CONNECT profiles. Each method gets its own dict
+# because the two statements take different params on this user's box. The
+# Playground SAS engine shows the appropriate dropdown depending on which
+# method is selected.
+#
+# Add or rename profiles here without touching JS/HTML — the UI fetches
+# both dicts via /api/constants on page load and switches based on method.
+HADOOP_LIBNAME_PROFILES = {
+    "default": {
+        "server": "hadoop.example.com",
+        "host":   "REALM.EXAMPLE.COM",
+        "schema": "default",
+        "port":   10000,
+        # "truststore": "/sas/bin/Software/Hadoop/OSH/PROD/truststore.jks",
+    },
+}
+
+HADOOP_PROCSQL_PROFILES = {
+    "default": {
+        "server": "hadoop.example.com",
+        "host":   "REALM.EXAMPLE.COM",
+        "schema": "default",
+        "port":   10000,
+    },
+}
+
 # Vintage presets for different platforms
 VINTAGE_PRESETS = {
     "hadoop": {

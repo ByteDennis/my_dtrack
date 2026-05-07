@@ -48,27 +48,55 @@ async function cvInspect() {
 }
 
 function _cvRenderColumnGrids(leftCols, rightCols) {
-    const both = leftCols.filter(c => rightCols.includes(c));
-    const all  = Array.from(new Set([...leftCols, ...rightCols]));
+    // Each row: [✓] left_col   →   [right_col ▾]
+    // The right dropdown defaults to the same name when it exists on the
+    // right side, otherwise to the first available right column. Lets the
+    // user pair columns whose names differ across the two CSVs.
+    const _opt = (cols, sel) => '<option value="">(skip)</option>' +
+        cols.map(c => `<option value="${_cvEsc(c)}"${c===sel?' selected':''}>${_cvEsc(c)}</option>`).join('');
+
+    const _pickRight = (leftName) => rightCols.includes(leftName) ? leftName : (rightCols[0] || '');
 
     const pkGrid = document.getElementById('cv-pk-grid');
-    pkGrid.innerHTML = both.length
-        ? both.map(c => `<label style="font-size:12px;"><input type="checkbox" name="cv-pk" value="${_cvEsc(c)}"> ${_cvEsc(c)}</label>`).join('')
-        : '<span class="empty-message">No common columns between the two files.</span>';
+    pkGrid.innerHTML = leftCols.map(c => {
+        const def = _pickRight(c);
+        return `<div style="display:flex; gap:8px; align-items:center; font-size:12px; padding:1px 0;">
+            <label style="display:flex; gap:4px; align-items:center; min-width:160px;">
+                <input type="checkbox" name="cv-pk" value="${_cvEsc(c)}" data-left="${_cvEsc(c)}">
+                ${_cvEsc(c)}
+            </label>
+            <span style="color:var(--jp-ui-font-color2);">→ right:</span>
+            <select name="cv-pk-right" data-left="${_cvEsc(c)}" style="min-width:140px;">${_opt(rightCols, def)}</select>
+        </div>`;
+    }).join('');
 
     const cmpGrid = document.getElementById('cv-compare-grid');
-    cmpGrid.innerHTML = all.map(c => {
-        const onLeft  = leftCols.includes(c);
-        const onRight = rightCols.includes(c);
-        const flag = (onLeft && onRight) ? ''
-                    : !onLeft  ? ' <span style="color:var(--jp-warn-color0); font-size:10px;">(R only)</span>'
-                                : ' <span style="color:var(--jp-warn-color0); font-size:10px;">(L only)</span>';
-        return `<label style="font-size:12px;"><input type="checkbox" name="cv-cmp" value="${_cvEsc(c)}"> ${_cvEsc(c)}${flag}</label>`;
+    cmpGrid.innerHTML = leftCols.map(c => {
+        const def = _pickRight(c);
+        return `<div style="display:flex; gap:8px; align-items:center; font-size:12px; padding:1px 0;">
+            <label style="display:flex; gap:4px; align-items:center; min-width:160px;">
+                <input type="checkbox" name="cv-cmp" value="${_cvEsc(c)}" data-left="${_cvEsc(c)}">
+                ${_cvEsc(c)}
+            </label>
+            <span style="color:var(--jp-ui-font-color2);">→ right:</span>
+            <select name="cv-cmp-right" data-left="${_cvEsc(c)}" style="min-width:140px;">${_opt(rightCols, def)}</select>
+        </div>`;
     }).join('');
 }
 
-function _cvCheckedValues(name) {
-    return Array.from(document.querySelectorAll(`input[name="${name}"]:checked`)).map(el => el.value);
+function _cvCheckedPairs(checkboxName, selectName) {
+    // Returns [{left, right}, ...] for every checked checkbox whose paired
+    // dropdown has a non-empty selection.
+    const out = [];
+    const checked = document.querySelectorAll(`input[name="${checkboxName}"]:checked`);
+    for (const cb of checked) {
+        const left = cb.dataset.left;
+        const sel = document.querySelector(`select[name="${selectName}"][data-left="${left.replace(/"/g, '\\"')}"]`);
+        const right = sel ? sel.value : left;
+        if (!right) continue;
+        out.push({left, right});
+    }
+    return out;
 }
 
 async function cvRun() {
@@ -76,20 +104,22 @@ async function cvRun() {
     const rf = document.getElementById('cv-right').files[0];
     if (!lf || !rf) return;
 
-    const pkCols  = _cvCheckedValues('cv-pk');
-    const cmpCols = _cvCheckedValues('cv-cmp');
+    const pkPairs  = _cvCheckedPairs('cv-pk',  'cv-pk-right');
+    const cmpPairs = _cvCheckedPairs('cv-cmp', 'cv-cmp-right');
     const nEx = parseInt(document.getElementById('cv-n-examples').value || '10', 10);
 
     const status = document.getElementById('cv-status');
-    if (!pkCols.length)  { status.textContent = 'Select at least one primary-key column.'; status.style.color='var(--jp-error-color0)'; return; }
-    if (!cmpCols.length) { status.textContent = 'Select at least one column to compare.'; status.style.color='var(--jp-error-color0)'; return; }
+    if (!pkPairs.length)  { status.textContent = 'Select at least one primary-key column.'; status.style.color='var(--jp-error-color0)'; return; }
+    if (!cmpPairs.length) { status.textContent = 'Select at least one column to compare.'; status.style.color='var(--jp-error-color0)'; return; }
     status.textContent = 'Running…'; status.style.color = 'var(--jp-ui-font-color2)';
 
     const fd = new FormData();
     fd.append('left', lf);
     fd.append('right', rf);
-    fd.append('pk_cols', pkCols.join(','));
-    fd.append('compare_cols', cmpCols.join(','));
+    fd.append('pk_cols',           pkPairs.map(p => p.left).join(','));
+    fd.append('pk_cols_right',     pkPairs.map(p => p.right).join(','));
+    fd.append('compare_cols',      cmpPairs.map(p => p.left).join(','));
+    fd.append('compare_cols_right', cmpPairs.map(p => p.right).join(','));
     fd.append('n_examples', String(nEx));
 
     try {
@@ -101,7 +131,7 @@ async function cvRun() {
             return;
         }
         status.textContent = '';
-        _cvRenderResult(data, pkCols);
+        _cvRenderResult(data, pkPairs.map(p => p.left));
     } catch (e) {
         status.textContent = `Network error: ${e.message}`;
         status.style.color = 'var(--jp-error-color0)';
@@ -112,6 +142,15 @@ function _cvRenderResult(data, pkCols) {
     document.getElementById('cv-result-card').style.display = '';
 
     const s = data.summary;
+    let normNote = '';
+    if (Array.isArray(data.pk_normalizations) && data.pk_normalizations.length) {
+        const items = data.pk_normalizations
+            .map(n => `<code>${_cvEsc(n.column)}</code> — ${_cvEsc(n.applied)}`)
+            .join('; ');
+        normNote = `<div style="font-size:11px; color:var(--jp-ui-font-color2); margin-top:6px;">
+            Auto-normalized PK: ${items}
+        </div>`;
+    }
     document.getElementById('cv-summary').innerHTML = `
         <div class="rc-summary-chips">
             <span class="rc-chip match">${s.matched.toLocaleString()} matched</span>
@@ -119,6 +158,7 @@ function _cvRenderResult(data, pkCols) {
             <span class="rc-chip right-only">${s.only_right.toLocaleString()} R-only</span>
             <span class="rc-chip mismatch">${s.total_mismatches.toLocaleString()} mismatches across ${s.cols_with_mismatches} col${s.cols_with_mismatches===1?'':'s'}</span>
         </div>
+        ${normNote}
     `;
 
     document.getElementById('cv-only-side').innerHTML =

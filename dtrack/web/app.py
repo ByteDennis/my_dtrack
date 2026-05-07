@@ -185,6 +185,8 @@ async def api_constants():
         "DATA_SOURCES": C.DATA_SOURCES,
         "CONNECTION_MACROS": C.CONNECTION_MACROS,
         "DATE_COLUMN_TYPES": C.DATE_COLUMN_TYPES,
+        "HADOOP_LIBNAME_PROFILES": getattr(C, "HADOOP_LIBNAME_PROFILES", {}),
+        "HADOOP_PROCSQL_PROFILES": getattr(C, "HADOOP_PROCSQL_PROFILES", {}),
     }
 
 
@@ -4105,7 +4107,12 @@ async def api_playground_sas(request: Request):
                     f"Unknown conn_macro {conn_macro!r}. "
                     f"Set DTRACK_ORACLE_MACROS or use a builtin (pb23, pb30)."
                 )
-            content = gen_sas_script(kind, method, body=user_sql, svc=svc)
+            # Same env vars oracle_connect uses, baked into the script so the
+            # user doesn't need to fill in YOUR_USER / YOUR_PASSWORD by hand.
+            ora_user = os.environ.get('PCDS_USR')
+            ora_pwd = os.environ.get(f'{conn_macro}_pwd')
+            content = gen_sas_script(kind, method, body=user_sql, svc=svc,
+                                     user=ora_user, password=ora_pwd)
         elif kind == "hadoop":
             content = gen_sas_script(
                 kind, method, body=user_sql,
@@ -4201,13 +4208,26 @@ async def api_csv_compare_run(
     right: UploadFile = File(...),
     pk_cols: str = Form(...),
     compare_cols: str = Form(...),
+    pk_cols_right: str = Form(""),
+    compare_cols_right: str = Form(""),
     n_examples: int = Form(10),
 ):
-    """Compare two uploaded CSVs by primary key, string-exact, return diffs."""
+    """Compare two uploaded CSVs by primary key, string-exact, return diffs.
+
+    PK and compare columns can have different names per side via the
+    `*_right` parallel lists; when omitted, same-name lookup is assumed.
+    PK values are auto-normalized when both sides look like dates in
+    different formats (e.g. Oracle date vs SAS string_mon).
+    """
     from ..csv_compare import read_csv_as_str, compare_csvs
 
-    pk_list = [c.strip() for c in pk_cols.split(',') if c.strip()]
-    compare_list = [c.strip() for c in compare_cols.split(',') if c.strip()]
+    def _parse(s):
+        return [c.strip() for c in s.split(',') if c.strip()]
+
+    pk_list = _parse(pk_cols)
+    compare_list = _parse(compare_cols)
+    pk_right_list = _parse(pk_cols_right) or None
+    compare_right_list = _parse(compare_cols_right) or None
     if not pk_list:
         return JSONResponse(status_code=400, content={"error": "pk_cols is required."})
     if not compare_list:
@@ -4220,8 +4240,12 @@ async def api_csv_compare_run(
         return JSONResponse(status_code=400, content={"error": f"CSV parse failed: {e}"})
 
     try:
-        result = compare_csvs(left_df, right_df, pk_list, compare_list,
-                              n_examples=int(n_examples))
+        result = compare_csvs(
+            left_df, right_df, pk_list, compare_list,
+            n_examples=int(n_examples),
+            pk_cols_right=pk_right_list,
+            compare_cols_right=compare_right_list,
+        )
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     return result

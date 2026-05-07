@@ -67,18 +67,25 @@
                         </select>
                     </label>
                     <label style="font-size:12px;">Method:
-                        <select id="pg-sas-method">
+                        <select id="pg-sas-method" onchange="pgSasRepopulateProfiles()">
                             <option value="libname" selected>LIBNAME</option>
                             <option value="procsql">PROC SQL CONNECT</option>
                         </select>
                     </label>
-                </div>
-                <div id="pg-sas-oracle" style="display:flex; gap:18px; align-items:center; flex-wrap:wrap;">
-                    <label style="font-size:12px;">Macro:
-                        <input type="text" id="pg-sas-conn" placeholder="pb23" style="width:120px;">
-                    </label>
-                    <span style="font-size:11px; color:var(--jp-ui-font-color2);">
-                        resolves via MACRO2SVC + DTRACK_ORACLE_MACROS
+                    <span id="pg-sas-oracle-inline" style="display:flex; gap:8px; align-items:center;">
+                        <label style="font-size:12px;">Macro:
+                            <input type="text" id="pg-sas-conn" placeholder="pb23" style="width:120px;">
+                        </label>
+                        <span style="font-size:11px; color:var(--jp-ui-font-color2);">
+                            resolves via MACRO2SVC + DTRACK_ORACLE_MACROS; user/pwd from .env
+                        </span>
+                    </span>
+                    <span id="pg-sas-hadoop-inline" style="display:none; gap:8px; align-items:center;">
+                        <label style="font-size:12px;">Profile:
+                            <select id="pg-sas-profile" onchange="pgSasProfileChanged()" style="min-width:140px;">
+                                <option value="">(custom)</option>
+                            </select>
+                        </label>
                     </span>
                 </div>
                 <div id="pg-sas-hadoop" style="display:none; gap:12px; flex-wrap:wrap; align-items:center;">

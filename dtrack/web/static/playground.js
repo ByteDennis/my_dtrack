@@ -5,11 +5,58 @@ function navigateToStep(step) {
 }
 
 let _pgLastResult = null;
+let _pgHadoopProfiles = {libname: {}, procsql: {}};
 
 document.addEventListener('DOMContentLoaded', () => {
     pgEngineChanged();
     pgLoadHistory();
+    pgLoadConstants();
 });
+
+async function pgLoadConstants() {
+    try {
+        const res = await fetch('/api/constants');
+        const data = await res.json();
+        _pgHadoopProfiles.libname = data.HADOOP_LIBNAME_PROFILES || {};
+        _pgHadoopProfiles.procsql = data.HADOOP_PROCSQL_PROFILES || {};
+        pgSasRepopulateProfiles();
+    } catch (e) {
+        console.error('pgLoadConstants failed:', e);
+    }
+}
+
+function pgSasRepopulateProfiles() {
+    // Refill the Hadoop profile dropdown with the set matching the current
+    // method (libname vs procsql have different profile catalogs because
+    // the two statements take different params on this user's box).
+    const sel = document.getElementById('pg-sas-profile');
+    if (!sel) return;
+    const method = document.getElementById('pg-sas-method').value;
+    const profiles = _pgHadoopProfiles[method] || {};
+    sel.innerHTML = '<option value="">(custom)</option>';
+    for (const name of Object.keys(profiles)) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+    }
+    const first = Object.keys(profiles)[0];
+    if (first) {
+        sel.value = first;
+        pgSasProfileChanged();
+    }
+}
+
+function pgSasProfileChanged() {
+    const method = document.getElementById('pg-sas-method').value;
+    const name = document.getElementById('pg-sas-profile').value;
+    const p = (_pgHadoopProfiles[method] || {})[name];
+    if (!p) return;
+    if (p.server != null) document.getElementById('pg-sas-server').value = p.server;
+    if (p.host   != null) document.getElementById('pg-sas-host').value   = p.host;
+    if (p.schema != null) document.getElementById('pg-sas-schema').value = p.schema;
+    if (p.port   != null) document.getElementById('pg-sas-port').value   = p.port;
+}
 
 function _pgEsc(s) {
     if (s == null) return '';
@@ -54,8 +101,9 @@ function pgEngineChanged() {
 
 function pgSasKindChanged() {
     const kind = document.getElementById('pg-sas-kind').value;
-    document.getElementById('pg-sas-oracle').style.display = kind === 'oracle' ? 'flex' : 'none';
-    document.getElementById('pg-sas-hadoop').style.display = kind === 'hadoop' ? 'flex' : 'none';
+    document.getElementById('pg-sas-oracle-inline').style.display = kind === 'oracle' ? 'flex' : 'none';
+    document.getElementById('pg-sas-hadoop-inline').style.display = kind === 'hadoop' ? 'flex' : 'none';
+    document.getElementById('pg-sas-hadoop').style.display        = kind === 'hadoop' ? 'flex' : 'none';
 }
 
 async function pgRun() {
