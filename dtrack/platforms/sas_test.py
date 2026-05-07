@@ -29,6 +29,45 @@ def _looks_like_sql_select(s: str) -> bool:
     return head.startswith("select") or head.startswith("with ")
 
 
+def _convert_sql_date_literals_to_sas(sql: str) -> str:
+    """Rewrite ANSI/Oracle DATE / TIMESTAMP literals to SAS literals.
+
+    Examples:
+        DATE '2026-05-04'              → '04MAY2026'd
+        DATE('2026-05-04')             → '04MAY2026'd
+        TIMESTAMP '2026-05-04 12:34:56' → '04MAY2026:12:34:56'dt
+        TIMESTAMP('2026-05-04 12:34:56') → '04MAY2026:12:34:56'dt
+
+    Plain ISO strings (e.g. '2026-05-04' without the DATE prefix) are left
+    alone — rewriting them blind would clobber non-date strings that happen
+    to match the pattern.
+    """
+    import re
+    from datetime import datetime as _dt
+
+    def _date_repl(m):
+        try:
+            d = _dt.strptime(m.group(1), "%Y-%m-%d")
+            return f"'{d.strftime('%d%b%Y').upper()}'d"
+        except ValueError:
+            return m.group(0)
+
+    def _ts_repl(m):
+        try:
+            d = _dt.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+            return f"'{d.strftime('%d%b%Y').upper()}:{d.strftime('%H:%M:%S')}'dt"
+        except ValueError:
+            return m.group(0)
+
+    s = sql
+    # TIMESTAMP first so DATE doesn't snag the date portion of a TIMESTAMP literal.
+    s = re.sub(r"TIMESTAMP\s*\(\s*'(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})'\s*\)", _ts_repl, s, flags=re.IGNORECASE)
+    s = re.sub(r"TIMESTAMP\s+'(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})'", _ts_repl, s, flags=re.IGNORECASE)
+    s = re.sub(r"DATE\s*\(\s*'(\d{4}-\d{2}-\d{2})'\s*\)", _date_repl, s, flags=re.IGNORECASE)
+    s = re.sub(r"DATE\s+'(\d{4}-\d{2}-\d{2})'", _date_repl, s, flags=re.IGNORECASE)
+    return s
+
+
 def _qualify_with_libref(sql: str, libref: str) -> str:
     """Prefix bare table refs after `from` / `join` with `<libref>.<name>`.
 
@@ -80,6 +119,10 @@ def _libname_body(body: Optional[str], lib: str) -> str:
         head = s.lstrip().lower()
         if not head.startswith("with "):
             s = _qualify_with_libref(s, lib)
+        # Rewrite ANSI/Oracle DATE / TIMESTAMP literals to SAS form so
+        # `where dt = DATE '2026-05-04'` becomes `where dt = '04MAY2026'd`.
+        # SAS proc sql against a libref doesn't understand the ANSI form.
+        s = _convert_sql_date_literals_to_sas(s)
         return _wrap_proc_sql(s)
     return s
 

@@ -176,6 +176,55 @@ def test_libname_skips_when_schema_alias_is_present():
     assert "pb23.PCDS" not in sas
 
 
+def test_libname_converts_ansi_date_literal_to_sas():
+    sas = oracle_libname_script(
+        "svc_a", conn_macro="pb23",
+        body="select * from MYTBL where dt = DATE '2026-05-04'"
+    )
+    # ANSI form gone, SAS literal in place.
+    assert "DATE '2026-05-04'" not in sas
+    assert "'04MAY2026'd" in sas
+
+
+def test_libname_converts_date_paren_form():
+    sas = oracle_libname_script(
+        "svc_a", conn_macro="pb23",
+        body="select * from MYTBL where dt = DATE('2026-05-04')"
+    )
+    assert "DATE(" not in sas
+    assert "'04MAY2026'd" in sas
+
+
+def test_libname_converts_timestamp_literal():
+    sas = oracle_libname_script(
+        "svc_a", conn_macro="pb23",
+        body="select * from MYTBL where ts >= TIMESTAMP '2026-05-04 12:34:56'"
+    )
+    assert "TIMESTAMP '" not in sas
+    assert "'04MAY2026:12:34:56'dt" in sas
+
+
+def test_libname_leaves_plain_iso_strings_alone():
+    # Without the DATE keyword, a plain ISO string could be a real
+    # non-date string. Don't rewrite it.
+    sas = oracle_libname_script(
+        "svc_a", conn_macro="pb23",
+        body="select * from MYTBL where label = '2026-05-04'"
+    )
+    assert "'2026-05-04'" in sas
+    assert "MAY2026" not in sas
+
+
+def test_libname_handles_multiple_date_literals():
+    sas = oracle_libname_script(
+        "svc_a", conn_macro="pb23",
+        body="select * from MYTBL where dt between DATE '2026-01-01' and DATE '2026-12-31'"
+    )
+    assert "'01JAN2026'd" in sas
+    assert "'31DEC2026'd" in sas
+    assert "DATE '" not in sas
+
+
 def test_libname_skips_qualification_for_cte_with():
     # `with cte as (...) select * from cte` — the CTE alias must not get
     # prefixed. We give up on auto-qualifying when the body starts with WITH.
