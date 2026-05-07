@@ -790,6 +790,70 @@ _SAS_EXPORT_HELPER = r"""
 """
 
 
+_SAS_LIBNAME_HELPERS = r"""
+/* =====================================================================
+ * Libname-mode bucket helper. Used when a table opts into
+ * connect_method=libname; the libref is mounted at the top of the
+ * script and `&_sas_table` is `<libref>.<remote_table>`. The SQL
+ * aggregates server-side via SAS/ACCESS implicit pass-through, so we
+ * don't pay the cost of streaming raw rows back to local SAS as the
+ * source=sas path does.
+ *
+ * Each driver row carries a literal `dt_label` (one bucket per row), so
+ * no `group by &_vintage_expr` is needed -- avoids the question of
+ * whether SAS/ACCESS will push intnx() / TRUNC() down. Categorical pulls
+ * a (dt-literal, p_col, cnt) freq; %_col_categorical_freq finishes
+ * top_10 / mean / std / min / max SAS-side, identical to the oracle and
+ * source=sas paths.
+ * ===================================================================== */
+
+%macro _col_libname();
+    %local _cstat _cache;
+    %let _cstat = _cstat_lib;
+    %let _cache = cache._cs_&_dsname;
+
+    %if %upcase(&_coltype) = NUMERIC %then %do;
+        proc sql noprint;
+            create table &_cstat as
+            select "&_dt_label" as dt length=32,
+                   "&_col"      as column_name length=32,
+                   'numeric'    as col_type length=32,
+                   count(*)                       as n_total,
+                   count(*) - count(&_col)        as n_missing,
+                   count(distinct &_col)          as n_unique,
+                   avg(&_col)                     as mean,
+                   std(&_col)                     as std,
+                   strip(put(min(&_col), best32.)) as min_val length=200,
+                   strip(put(max(&_col), best32.)) as max_val length=200,
+                   ''           as top_10 length=4000
+            from &_sas_table
+            where &_date_where
+            %if %length(%superq(_base_where)) > 0 %then AND (&_base_where) ;
+            ;
+        quit;
+    %end;
+    %else %do;
+        /* Pull (dt-literal, p_col, cnt) freq for categorical post-processing. */
+        proc sql noprint;
+            create table _lib_freq_ as
+            select "&_dt_label" as dt length=32,
+                   substr(strip(put(&_col, $200.)), 1, 200) as p_col length=200,
+                   count(*) as cnt
+            from &_sas_table
+            where &_date_where
+            %if %length(%superq(_base_where)) > 0 %then AND (&_base_where) ;
+            group by p_col;
+        quit;
+        %_col_categorical_freq(freq_ds=_lib_freq_, col=&_col, out_ds=&_cstat);
+        proc delete data=_lib_freq_; run;
+    %end;
+
+    proc append base=&_cache data=&_cstat force; run;
+    proc delete data=&_cstat; run;
+%mend _col_libname;
+"""
+
+
 _SAS_SOURCE_HELPERS = r"""
 /* =====================================================================
  * SAS-source bucket helpers (emitted only when a config has SAS-source
@@ -1026,6 +1090,13 @@ def _compute_bucket_specs(tbl_cfg, db_path):
     col_list = _apply_col_filter(col_list, tbl_cfg)
 
     is_sas = is_sas_table(tbl_cfg)
+    # Libname mode runs SAS proc sql against a libref-mounted Oracle/Hadoop
+    # table. WHERE/date literals must use SAS form (`'15JAN2025'd`) so the
+    # local SAS engine can plan the query — same plumbing the source=sas
+    # path already uses. Keep the narrow `is_sas` for the dispatch-bucket
+    # decision in `_gen_sas_col_driver` (libname tables get their own
+    # bucket and shouldn't be confused with source=sas).
+    is_sas_syntax = is_sas or _is_libname_table(tbl_cfg)
 
     date_filter = compute_date_filter(tbl_cfg, db_path, vintage)
     date_dtype = date_filter['date_dtype']
@@ -1050,10 +1121,10 @@ def _compute_bucket_specs(tbl_cfg, db_path):
             for bucket_key, bmin, bmax in date_filter['vintage_spans']:
                 dw = build_date_between_clause(
                     date_col, bmin, bmax, date_dtype,
-                    is_sas=is_sas, date_format=date_format,
+                    is_sas=is_sas_syntax, date_format=date_format,
                 )
                 fl, tl = format_date_bounds_literals(
-                    bmin, bmax, date_dtype, is_sas=is_sas, date_format=date_format,
+                    bmin, bmax, date_dtype, is_sas=is_sas_syntax, date_format=date_format,
                 )
                 bucket_specs.append((bucket_key, dw, fl, tl))
         else:
@@ -1064,21 +1135,21 @@ def _compute_bucket_specs(tbl_cfg, db_path):
             for bucket_key, dates in sorted(buckets.items()):
                 dw = build_date_range_with_gaps(
                     date_col, dates, date_dtype,
-                    is_sas=is_sas, date_format=date_format,
+                    is_sas=is_sas_syntax, date_format=date_format,
                 )
                 fl, tl = format_date_bounds_literals(
                     min(dates), max(dates), date_dtype,
-                    is_sas=is_sas, date_format=date_format,
+                    is_sas=is_sas_syntax, date_format=date_format,
                 )
                 bucket_specs.append((bucket_key, dw, fl, tl))
     elif date_filter['filter_type'] == 'in_list':
         dw = build_date_in_clause(
             date_col, date_filter['dates'], date_dtype,
-            is_sas=is_sas, date_format=date_format,
+            is_sas=is_sas_syntax, date_format=date_format,
         )
         fl, tl = format_date_bounds_literals(
             min(date_filter['dates']), max(date_filter['dates']),
-            date_dtype, is_sas=is_sas, date_format=date_format,
+            date_dtype, is_sas=is_sas_syntax, date_format=date_format,
         )
         bucket_specs.append(('sample', dw, fl, tl))
     else:
@@ -1291,9 +1362,11 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.'):
     %_export_col_stats (defined in _SAS_COL_HELPERS).
     """
     sas_driver_rows = []
+    lib_driver_rows = []  # libname-mode (any source); aggregates via libref
     ora_rows = []
     hdp_rows = []
     qnames_sas = []
+    qnames_lib = []
     qnames_ora = []
     qnames_hdp = []
 
@@ -1317,16 +1390,51 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.'):
             print(f"  {qname}: 0 cols (col_filter or empty) -- skipping")
             continue
 
+        is_libname = _is_libname_table(tbl_cfg)
         tbl_source = 'sas' if is_sas else (tbl_cfg.get('source') or 'oracle').lower()
         table_from, _ = _resolve_table_inline(tbl_cfg)
         # SAS path still needs the qualified conn.name reference only.
         if is_sas:
             sas_table_ref = table_from
+        elif is_libname:
+            # Libname mounts the remote schema as a libref; the table
+            # reference inside SAS proc sql is `<libref>.<remote_table>`.
+            sas_table_ref = f"{conn_macro}.{tbl_cfg['table']}"
         else:
             sas_table_ref = None  # unused on the DB path
 
         n_buckets = len(bucket_specs)
         n_cols = len(col_list)
+
+        if is_libname:
+            # connect_method=libname: aggregate server-side via SAS/ACCESS
+            # implicit pass-through. Same fan-out shape as sas_driver_rows
+            # (one row per qname × bucket × col), but %_col_libname does
+            # the aggregation in a single SQL against `&_sas_table` rather
+            # than pulling raw rows local first.
+            qnames_lib.append((qname, dsname))
+            # is_oracle drives is_numeric_type's type catalog; for hadoop
+            # libname use the hadoop catalog.
+            is_oracle_typed = (tbl_source != 'hadoop')
+            for bucket_key, date_where, _fl, _tl in bucket_specs:
+                for col_name, col_dtype in col_list:
+                    col_type = ('numeric'
+                                if is_numeric_type(col_dtype, is_oracle=is_oracle_typed)
+                                else 'categorical')
+                    lib_driver_rows.append({
+                        'qname': qname,
+                        'dsname': dsname,
+                        'sas_table': sas_table_ref,
+                        'conn_macro': conn_macro,
+                        'dt_label': bucket_key,
+                        'date_where': date_where,
+                        'base_where': base_where,
+                        'col_name': col_name,
+                        'col_type': col_type,
+                    })
+            print(f"[libname col] {qname}: {n_cols} cols x {n_buckets} buckets "
+                  f"= {n_cols * n_buckets} runs (libname source={tbl_source})")
+            continue
 
         if tbl_source == 'sas':
             # SAS-source: keep per-bucket flat-driver path (local pull +
@@ -1395,19 +1503,23 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.'):
               f"GROUP BY {spec['vintage_expr']!s:.60} vintage={spec['vintage']}) "
               f"= {n_cols} runs")
 
-    total = len(sas_driver_rows) + len(ora_rows) + len(hdp_rows)
+    total = len(sas_driver_rows) + len(lib_driver_rows) + len(ora_rows) + len(hdp_rows)
     if total == 0:
         return "\n/* No col extraction rows generated (col_filter zeroed everything out). */\n"
-    n_tbl = len(qnames_sas) + len(qnames_ora) + len(qnames_hdp)
+    n_tbl = (len(qnames_sas) + len(qnames_lib)
+             + len(qnames_ora) + len(qnames_hdp))
     print(f"[SAS col] TOTAL: {n_tbl} tables "
-          f"(sas={len(qnames_sas)}, oracle={len(qnames_ora)}, hadoop={len(qnames_hdp)}), "
+          f"(sas={len(qnames_sas)}, libname={len(qnames_lib)}, "
+          f"oracle={len(qnames_ora)}, hadoop={len(qnames_hdp)}), "
           f"{total} driver rows")
 
-    # _export_col_stats is needed by all paths; the SAS-source bucket helpers
-    # only make sense when we actually have SAS-source tables.
+    # _export_col_stats is needed by all paths; the per-path helper macros
+    # are only emitted when their bucket is non-empty.
     parts = [_SAS_EXPORT_HELPER]
     if sas_driver_rows:
         parts.append(_SAS_SOURCE_HELPERS)
+    if lib_driver_rows:
+        parts.append(_SAS_LIBNAME_HELPERS)
 
     # SAS-source flat driver (bucket mode).
     if sas_driver_rows:
@@ -1468,6 +1580,68 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.'):
         parts.append("")
         parts.append("/* Per-qname CSV export (sas source) */")
         for q, ds in qnames_sas:
+            parts.append(
+                f"%_export_col_stats(dsname={ds}, qname={q}, outdir=&out_dir);")
+
+    # Libname-mode flat driver: identical fan-out shape to sas-source but
+    # dispatches to %_col_libname (server-side aggregation through the
+    # libref) instead of %_pull_one_col (raw pull + local SAS aggregate).
+    if lib_driver_rows:
+        parts.append("")
+        parts.append("/* Wipe stale per-table caches from prior libname runs. */")
+        seen_ds = set()
+        for q, ds in qnames_lib:
+            if ds in seen_ds:
+                continue
+            seen_ds.add(ds)
+            parts.append(
+                f"%if %sysfunc(exist(cache._cs_{ds})) %then %do; "
+                f"proc delete data=cache._cs_{ds}; run; %end;"
+            )
+        parts.append("")
+        parts.append("/* Libname flat driver: one row per (qname, bucket, col) */")
+        parts.append("data _driver_col_lib_;")
+        parts.append("    length qname $64 dsname $32 sas_table $128 conn_macro $16")
+        parts.append("           col_name $32 col_type $12 dt_label $32")
+        parts.append("           date_where $4000 base_where $4000;")
+        for r in lib_driver_rows:
+            parts.append(
+                f"    qname='{_sas_escape(r['qname'])}'; "
+                f"dsname='{_sas_escape(r['dsname'])}'; "
+                f"sas_table='{_sas_escape(r['sas_table'])}'; "
+                f"conn_macro='{_sas_escape(r['conn_macro'])}'; "
+                f"col_name='{_sas_escape(r['col_name'])}'; "
+                f"col_type='{r['col_type']}'; "
+                f"dt_label='{_sas_escape(r['dt_label'])}'; "
+                f"date_where='{_sas_escape(r['date_where'])}'; "
+                f"base_where='{_sas_escape(r['base_where'])}'; "
+                f"output;"
+            )
+        parts.append("run;")
+        parts.append("")
+        parts.append("data _null_;")
+        parts.append("    set _driver_col_lib_;")
+        parts.append("    length _cmd $8000;")
+        parts.append("    _cmd = cats(")
+        parts.append("        'data _null_;',")
+        parts.append("        'call symputx(\"_qname\", ', quote(strip(qname)), ');',")
+        parts.append("        'call symputx(\"_dsname\", ', quote(strip(dsname)), ');',")
+        parts.append("        'call symputx(\"_sas_table\", ', quote(strip(sas_table)), ');',")
+        parts.append("        'call symputx(\"_conn_macro\", ', quote(strip(conn_macro)), ');',")
+        parts.append("        'call symputx(\"_col\", ', quote(strip(col_name)), ');',")
+        parts.append("        'call symputx(\"_coltype\", ', quote(strip(col_type)), ');',")
+        parts.append("        'call symputx(\"_dt_label\", ', quote(strip(dt_label)), ');',")
+        parts.append("        'call symputx(\"_date_where\", ', quote(strip(date_where)), ');',")
+        parts.append("        'call symputx(\"_base_where\", ', quote(strip(base_where)), ');',")
+        parts.append("        'run;',")
+        parts.append("        '%nrstr(%_col_libname)();'")
+        parts.append("    );")
+        parts.append("    call execute(_cmd);")
+        parts.append("run;")
+        parts.append("proc delete data=_driver_col_lib_; run;")
+        parts.append("")
+        parts.append("/* Per-qname CSV export (libname) */")
+        for q, ds in qnames_lib:
             parts.append(
                 f"%_export_col_stats(dsname={ds}, qname={q}, outdir=&out_dir);")
 
