@@ -101,20 +101,24 @@ CONNECTION_MACROS = {
 # both dicts via /api/constants on page load and switches based on method.
 HADOOP_LIBNAME_PROFILES = {
     "default": {
-        "server": "hadoop.example.com",
-        "host":   "REALM.EXAMPLE.COM",
-        "schema": "default",
-        "port":   10000,
+        "server":      "hadoop.example.com",
+        "host":        "REALM.EXAMPLE.COM",
+        "schema":      "default",
+        "port":        10000,
+        "jar_path":    "/sas/bin/Software/Hadoop/OSH/Jars",
+        "config_path": "/sas/bin/Software/Hadoop/OSH/PROD",
         # "truststore": "/sas/bin/Software/Hadoop/OSH/PROD/truststore.jks",
     },
 }
 
 HADOOP_PROCSQL_PROFILES = {
     "default": {
-        "server": "hadoop.example.com",
-        "host":   "REALM.EXAMPLE.COM",
-        "schema": "default",
-        "port":   10000,
+        "server":      "hadoop.example.com",
+        "host":        "REALM.EXAMPLE.COM",
+        "schema":      "default",
+        "port":        10000,
+        "jar_path":    "/sas/bin/Software/Hadoop/OSH/Jars",
+        "config_path": "/sas/bin/Software/Hadoop/OSH/PROD",
     },
 }
 

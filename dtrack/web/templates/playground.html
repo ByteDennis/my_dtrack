@@ -89,19 +89,29 @@
                         </label>
                     </span>
                 </div>
-                <div id="pg-sas-hadoop" style="display:none; gap:12px; flex-wrap:wrap; align-items:center;">
-                    <label style="font-size:12px;">Server:
-                        <input type="text" id="pg-sas-server" placeholder="hadoop.example.com" style="width:200px;">
-                    </label>
-                    <label style="font-size:12px;">Host:
-                        <input type="text" id="pg-sas-host" placeholder="REALM.EXAMPLE.COM" style="width:200px;">
-                    </label>
-                    <label style="font-size:12px;">Schema:
-                        <input type="text" id="pg-sas-schema" placeholder="my_schema" style="width:140px;">
-                    </label>
-                    <label style="font-size:12px;">Port:
-                        <input type="number" id="pg-sas-port" value="10000" style="width:70px;">
-                    </label>
+                <div id="pg-sas-hadoop" style="display:none; flex-direction:column; gap:6px;">
+                    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+                        <label style="font-size:12px;">Server:
+                            <input type="text" id="pg-sas-server" placeholder="hadoop.example.com" style="width:200px;">
+                        </label>
+                        <label style="font-size:12px;">Host:
+                            <input type="text" id="pg-sas-host" placeholder="REALM.EXAMPLE.COM" style="width:200px;">
+                        </label>
+                        <label style="font-size:12px;">Schema:
+                            <input type="text" id="pg-sas-schema" placeholder="my_schema" style="width:140px;">
+                        </label>
+                        <label style="font-size:12px;">Port:
+                            <input type="number" id="pg-sas-port" value="10000" style="width:70px;">
+                        </label>
+                    </div>
+                    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+                        <label style="font-size:12px;">JAR path:
+                            <input type="text" id="pg-sas-jar-path" placeholder="/sas/bin/Software/Hadoop/OSH/Jars" style="width:300px;">
+                        </label>
+                        <label style="font-size:12px;">Config path:
+                            <input type="text" id="pg-sas-config-path" placeholder="/sas/bin/Software/Hadoop/OSH/PROD" style="width:300px;">
+                        </label>
+                    </div>
                 </div>
             </div>
 

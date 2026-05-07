@@ -4122,6 +4122,8 @@ async def api_playground_sas(request: Request):
                 schema=(body.get("schema") or "").strip(),
                 port=int(body.get("port") or 10000),
                 truststore=body.get("truststore") or None,
+                jar_path=body.get("jar_path") or None,
+                config_path=body.get("config_path") or None,
             )
         else:
             raise ValueError(f"Unsupported kind: {kind!r}")

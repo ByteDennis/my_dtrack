@@ -17,6 +17,7 @@ const _PG_PERSIST_IDS = [
     'pg-sas-kind', 'pg-sas-method', 'pg-sas-conn',
     'pg-sas-profile',
     'pg-sas-server', 'pg-sas-host', 'pg-sas-schema', 'pg-sas-port',
+    'pg-sas-jar-path', 'pg-sas-config-path',
 ];
 const _PG_LS_PREFIX = 'dtrack-playground:';
 
@@ -132,10 +133,12 @@ function pgSasProfileChanged() {
     const name = document.getElementById('pg-sas-profile').value;
     const p = (_pgHadoopProfiles[method] || {})[name];
     if (!p) return;
-    if (p.server != null) document.getElementById('pg-sas-server').value = p.server;
-    if (p.host   != null) document.getElementById('pg-sas-host').value   = p.host;
-    if (p.schema != null) document.getElementById('pg-sas-schema').value = p.schema;
-    if (p.port   != null) document.getElementById('pg-sas-port').value   = p.port;
+    if (p.server      != null) document.getElementById('pg-sas-server').value      = p.server;
+    if (p.host        != null) document.getElementById('pg-sas-host').value        = p.host;
+    if (p.schema      != null) document.getElementById('pg-sas-schema').value      = p.schema;
+    if (p.port        != null) document.getElementById('pg-sas-port').value        = p.port;
+    if (p.jar_path    != null) document.getElementById('pg-sas-jar-path').value    = p.jar_path;
+    if (p.config_path != null) document.getElementById('pg-sas-config-path').value = p.config_path;
 }
 
 function _pgEsc(s) {
@@ -240,10 +243,12 @@ async function pgRunSAS() {
         reqBody.conn_macro = document.getElementById('pg-sas-conn').value.trim();
         if (!reqBody.conn_macro) { _pgSetStatus('Oracle needs a macro (e.g. pb23).', 'error'); return; }
     } else {
-        reqBody.server = document.getElementById('pg-sas-server').value.trim();
-        reqBody.host   = document.getElementById('pg-sas-host').value.trim();
-        reqBody.schema = document.getElementById('pg-sas-schema').value.trim();
-        reqBody.port   = parseInt(document.getElementById('pg-sas-port').value || '10000', 10);
+        reqBody.server      = document.getElementById('pg-sas-server').value.trim();
+        reqBody.host        = document.getElementById('pg-sas-host').value.trim();
+        reqBody.schema      = document.getElementById('pg-sas-schema').value.trim();
+        reqBody.port        = parseInt(document.getElementById('pg-sas-port').value || '10000', 10);
+        reqBody.jar_path    = document.getElementById('pg-sas-jar-path').value.trim() || undefined;
+        reqBody.config_path = document.getElementById('pg-sas-config-path').value.trim() || undefined;
         for (const f of ['server', 'host', 'schema']) {
             if (!reqBody[f]) { _pgSetStatus(`Hadoop needs \`${f}\`.`, 'error'); return; }
         }

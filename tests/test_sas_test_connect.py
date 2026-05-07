@@ -108,6 +108,34 @@ def test_custom_truststore_overrides_default():
     assert "/sas/bin/Software/Hadoop/OSH/PROD/truststore.jks" not in sas
 
 
+def test_hadoop_libname_default_jar_and_config_paths():
+    sas = hadoop_libname_script("hd", "R", "s", body="x")
+    assert 'options set=SAS_HADOOP_JAR_PATH    "/sas/bin/Software/Hadoop/OSH/Jars"' in sas
+    assert 'options set=SAS_HADOOP_CONFIG_PATH "/sas/bin/Software/Hadoop/OSH/PROD"' in sas
+
+
+def test_hadoop_libname_custom_jar_and_config_paths_override():
+    sas = hadoop_libname_script(
+        "hd", "R", "s", body="x",
+        jar_path="/opt/sas/jars",
+        config_path="/opt/sas/hadoop_config",
+    )
+    assert '/opt/sas/jars' in sas
+    assert '/opt/sas/hadoop_config' in sas
+    # Defaults gone.
+    assert "/sas/bin/Software/Hadoop/OSH/Jars" not in sas
+
+
+def test_hadoop_procsql_custom_jar_and_config_paths_override():
+    sas = hadoop_procsql_script(
+        "hd", "R", "s", body="select 1 from dual",
+        jar_path="/opt/sas/jars",
+        config_path="/opt/sas/hadoop_config",
+    )
+    assert '/opt/sas/jars' in sas
+    assert '/opt/sas/hadoop_config' in sas
+
+
 def test_empty_body_emits_proc_sql_probe_in_libname_mode():
     sas = oracle_libname_script("svc_a", conn_macro="pb23", body="")
     # libname empty → wrap a `select count(*) from <libref>.YOUR_TABLE` probe

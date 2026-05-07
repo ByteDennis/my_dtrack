@@ -11,11 +11,24 @@ macros at the top so secrets never live in the downloaded file.
 from typing import Optional
 
 
-_SAS_HADOOP_OPTIONS = (
-    'options set=SAS_HADOOP_JAR_PATH    "/sas/bin/Software/Hadoop/OSH/Jars";\n'
-    'options set=SAS_HADOOP_CONFIG_PATH "/sas/bin/Software/Hadoop/OSH/PROD";'
-)
-_SAS_HADOOP_TRUSTSTORE = "/sas/bin/Software/Hadoop/OSH/PROD/truststore.jks"
+_SAS_HADOOP_JAR_PATH    = "/sas/bin/Software/Hadoop/OSH/Jars"
+_SAS_HADOOP_CONFIG_PATH = "/sas/bin/Software/Hadoop/OSH/PROD"
+_SAS_HADOOP_TRUSTSTORE  = "/sas/bin/Software/Hadoop/OSH/PROD/truststore.jks"
+
+
+def _sas_hadoop_options(jar_path: Optional[str] = None,
+                       config_path: Optional[str] = None) -> str:
+    """Build the `options set=SAS_HADOOP_*_PATH` block for the script.
+
+    Both paths default to the values used in this user's environment;
+    profiles override per-machine via the `jar_path` / `config_path` fields.
+    """
+    j = jar_path    or _SAS_HADOOP_JAR_PATH
+    c = config_path or _SAS_HADOOP_CONFIG_PATH
+    return (
+        f'options set=SAS_HADOOP_JAR_PATH    "{j}";\n'
+        f'options set=SAS_HADOOP_CONFIG_PATH "{c}";'
+    )
 
 # Default body when the user leaves the editor empty — a sane "does the
 # connection work" check that exercises the libref/connect alias.
@@ -213,17 +226,20 @@ quit;
 def hadoop_libname_script(server: str, host: str, schema: str,
                           body: Optional[str] = None,
                           port: int = 10000,
-                          truststore: Optional[str] = None) -> str:
+                          truststore: Optional[str] = None,
+                          jar_path: Optional[str] = None,
+                          config_path: Optional[str] = None) -> str:
     """LIBNAME mount to Hadoop/Hive (Kerberos + SSL) + user body + clear.
 
     Matches the format used on this user's box — URI path is `/usrf;`,
     libname `hdp` is the libref. Profile values come from
-    `HADOOP_LIBNAME_PROFILES`.
+    `HADOOP_LIBNAME_PROFILES` (server, host, schema, port, truststore,
+    jar_path, config_path).
     """
     ts = truststore or _SAS_HADOOP_TRUSTSTORE
     return f"""\
 /* Hadoop/Hive connection (LIBNAME) */
-{_SAS_HADOOP_OPTIONS}
+{_sas_hadoop_options(jar_path, config_path)}
 
 libname hdp hadoop server="{server}"
     port={port} schema={schema} subprotocol=hive2 LOGIN_TIMEOUT=300
@@ -238,18 +254,22 @@ libname hdp clear;
 def hadoop_procsql_script(server: str, host: str, schema: str,
                           body: Optional[str] = None,
                           port: int = 10000,
-                          truststore: Optional[str] = None) -> str:
+                          truststore: Optional[str] = None,
+                          jar_path: Optional[str] = None,
+                          config_path: Optional[str] = None) -> str:
     """PROC SQL CONNECT to Hadoop (Kerberos + SSL) + user body + disconnect.
 
     Matches the format used on this user's box — uses %let macros to
     parameterize the connect string, URI path is `/default;` (different from
     libname's `/usrf`), and the connect call takes a single &-var arg.
     Profile values come from `HADOOP_PROCSQL_PROFILES` and may differ from
-    the libname profile (notably the server).
+    the libname profile (notably the server, jar_path, config_path).
     """
     ts = truststore or _SAS_HADOOP_TRUSTSTORE
     return f"""\
 /* Hadoop PROC SQL CONNECT (Kerberos + SSL) */
+{_sas_hadoop_options(jar_path, config_path)}
+
 %let hdp_server_osh = {server};
 %let hadoop_cro_ded = %str(server="&hdp_server_osh" port={port} schema={schema} subprotocol=hive2 LOGIN_TIMEOUT=300
     uri='jdbc:hive2://{server}:{port}/default;principal=hive/{server}@{host};ssl=true;sslTrustStore={ts};');
@@ -274,7 +294,9 @@ def gen_sas_script(kind: str, method: str, *,
                    host: Optional[str] = None,
                    schema: Optional[str] = None,
                    port: int = 10000,
-                   truststore: Optional[str] = None) -> str:
+                   truststore: Optional[str] = None,
+                   jar_path: Optional[str] = None,
+                   config_path: Optional[str] = None) -> str:
     """Dispatch on (kind, method) and return SAS source wrapping `body`.
 
     kind   in {"oracle", "hadoop"}
@@ -303,11 +325,17 @@ def gen_sas_script(kind: str, method: str, *,
             if not val:
                 raise ValueError(f"Hadoop script requires `{name}`.")
         if method == "libname":
-            return hadoop_libname_script(server, host, schema, body,
-                                          port=port, truststore=truststore)
+            return hadoop_libname_script(
+                server, host, schema, body,
+                port=port, truststore=truststore,
+                jar_path=jar_path, config_path=config_path,
+            )
         if method == "procsql":
-            return hadoop_procsql_script(server, host, schema, body,
-                                          port=port, truststore=truststore)
+            return hadoop_procsql_script(
+                server, host, schema, body,
+                port=port, truststore=truststore,
+                jar_path=jar_path, config_path=config_path,
+            )
     raise ValueError(f"Unsupported (kind={kind!r}, method={method!r}).")
 
 
