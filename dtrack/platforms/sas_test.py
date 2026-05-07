@@ -29,6 +29,29 @@ def _looks_like_sql_select(s: str) -> bool:
     return head.startswith("select") or head.startswith("with ")
 
 
+def _qualify_with_libref(sql: str, libref: str) -> str:
+    """Prefix bare table refs after `from` / `join` with `<libref>.<name>`.
+
+    SAS proc sql against a mounted libref needs `<libref>.<table>` to read
+    from the remote DB; a bare `from MYTBL` would look in WORK and fail.
+    This regex inserts the libref only when the next identifier doesn't
+    already contain a dot (i.e. isn't already qualified).
+
+    Limitations:
+      - CTE aliases (e.g. `with cte as (...) select * from cte`) get
+        wrongly prefixed. If the body starts with `with`, the caller
+        skips this rewrite — see `_libname_body`.
+      - Subqueries in parentheses are unaffected (regex requires an
+        identifier directly after `from`/`join`).
+    """
+    import re
+    pattern = re.compile(
+        r"(\b(?:from|join)\s+)([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\.)",
+        re.IGNORECASE,
+    )
+    return pattern.sub(rf"\1{libref}.\2", sql)
+
+
 def _looks_like_sas_block(s: str) -> bool:
     """True if `s` looks like SAS code that already wraps itself
     (proc sql / data step / proc print / etc) — pass through unchanged."""
@@ -39,9 +62,12 @@ def _looks_like_sas_block(s: str) -> bool:
 def _libname_body(body: Optional[str], lib: str) -> str:
     """Wrap a body for libname mode.
 
-    Bare SELECT  → wrap with `proc sql; <body>; quit;` so the libref gets used.
+    Bare SELECT  → auto-qualify table refs with `<lib>.` and wrap in
+                   `proc sql; ...; quit;` so the libref gets used.
+                   Skipped for `with` (CTE) bodies because alias names
+                   can't be safely distinguished from real tables.
     proc/data    → pass through unchanged (already a SAS block).
-    Empty editor → wrap a sane `select count(*) from <lib>.YOUR_TABLE` probe.
+    Empty editor → emit a `select count(*) from <lib>.YOUR_TABLE` probe.
     Anything else → pass through (treat as multi-statement SAS).
     """
     s = (body or "").strip()
@@ -51,6 +77,9 @@ def _libname_body(body: Optional[str], lib: str) -> str:
     if _looks_like_sas_block(s):
         return s
     if _looks_like_sql_select(s):
+        head = s.lstrip().lower()
+        if not head.startswith("with "):
+            s = _qualify_with_libref(s, lib)
         return _wrap_proc_sql(s)
     return s
 

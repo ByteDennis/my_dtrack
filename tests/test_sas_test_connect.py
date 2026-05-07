@@ -132,6 +132,60 @@ def test_libname_select_body_is_wrapped_in_proc_sql():
     assert "quit;" in sas
 
 
+def test_libname_auto_qualifies_bare_table_in_from():
+    sas = oracle_libname_script("svc_a", conn_macro="pb23",
+                                body="select * from MYTBL where rownum <= 5")
+    # Bare `from MYTBL` is rewritten to `from pb23.MYTBL` so the libref
+    # is actually used; otherwise SAS would look in WORK.
+    assert "from pb23.MYTBL" in sas
+    assert "from MYTBL where" not in sas
+
+
+def test_libname_auto_qualifies_join_too():
+    sas = oracle_libname_script("svc_a", conn_macro="pb23",
+                                body="select a.x from t1 a join t2 b on a.id = b.id")
+    assert "from pb23.t1 a" in sas
+    assert "join pb23.t2 b" in sas
+
+
+def test_libname_skips_already_qualified_table_refs():
+    # Already qualified — should NOT get a second prefix.
+    sas = oracle_libname_script("svc_a", conn_macro="pb23",
+                                body="select * from pb23.MYTBL")
+    assert sas.count("pb23.MYTBL") == 1
+    assert "pb23.pb23.MYTBL" not in sas
+
+
+def test_libname_mixed_qualified_and_bare_join():
+    # Bare `t1` gets qualified; pre-qualified `other.t2` stays as written.
+    sas = oracle_libname_script(
+        "svc_a", conn_macro="pb23",
+        body="select a.x from t1 a join other.t2 b on a.id = b.id"
+    )
+    assert "from pb23.t1 a" in sas
+    assert "join other.t2 b" in sas
+    # Crucially: no `pb23.other.t2` (no double-prefix on already-qualified).
+    assert "pb23.other.t2" not in sas
+
+
+def test_libname_skips_when_schema_alias_is_present():
+    # `from schema.table` — should be passed through verbatim.
+    sas = oracle_libname_script("svc_a", conn_macro="pb23",
+                                body="select * from PCDS.WORK_TBL")
+    assert "from PCDS.WORK_TBL" in sas
+    assert "pb23.PCDS" not in sas
+
+
+def test_libname_skips_qualification_for_cte_with():
+    # `with cte as (...) select * from cte` — the CTE alias must not get
+    # prefixed. We give up on auto-qualifying when the body starts with WITH.
+    body = "with t as (select * from pb23.SRC) select * from t"
+    sas = oracle_libname_script("svc_a", conn_macro="pb23", body=body)
+    assert "from t" in sas              # CTE alias preserved
+    assert "from pb23.t" not in sas     # not wrongly prefixed
+    assert "from pb23.SRC" in sas       # explicit qualification kept
+
+
 def test_libname_proc_print_body_passes_through():
     body = "proc print data=pb23.T(obs=10); run;"
     sas = oracle_libname_script("svc_a", conn_macro="pb23", body=body)
