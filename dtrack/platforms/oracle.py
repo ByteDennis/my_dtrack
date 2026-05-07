@@ -53,6 +53,52 @@ _VINTAGE_TRUNC = {
 }
 
 
+def _is_libname_table(tbl_cfg):
+    """True if this table's per-side config opts into SAS LIBNAME mode.
+
+    Per-pair-side `connect_method` field defaults to 'sql' (the existing
+    PROC SQL CONNECT path). Setting it to 'libname' routes the table
+    through the SAS-syntax pipeline: the libref `<conn_macro>` is mounted
+    at the top of the script, and queries reference `<conn_macro>.<table>`
+    using SAS SQL functions (datepart, intnx, count, ...) instead of
+    Oracle TRUNC / Hive date_format.
+    """
+    return (tbl_cfg.get('connect_method') or 'sql').lower() == 'libname'
+
+
+def _libname_mount_for(tbl_cfg):
+    """Return the SAS LIBNAME statement to mount this table's source.
+
+    Oracle: `libname <macro> oracle user="&iamusr" orapw="&<macro>_pwd" path="@<svc>";`
+            (matches extraction.sas connect macro format).
+    Hadoop: looks up Hadoop server/host/schema/port from HADOOP_LIBNAME_PROFILES
+            keyed by `conn_macro` (falls back to 'default' profile).
+    """
+    macro = tbl_cfg.get('conn_macro', '')
+    source = (tbl_cfg.get('source') or '').lower()
+
+    if source == 'hadoop':
+        from .. import constants as C
+        profiles = getattr(C, 'HADOOP_LIBNAME_PROFILES', {}) or {}
+        profile = profiles.get(macro) or profiles.get('default') or {}
+        server = profile.get('server', '')
+        host   = profile.get('host', '')
+        schema = profile.get('schema', macro)
+        port   = int(profile.get('port', 10000))
+        ts     = profile.get('truststore') or '/sas/bin/Software/Hadoop/OSH/PROD/truststore.jks'
+        return (
+            f'libname {macro} hadoop server="{server}"\n'
+            f'    port={port} schema={schema} subprotocol=hive2 LOGIN_TIMEOUT=300\n'
+            f"    uri='jdbc:hive2://{server}:{port}/usrf;"
+            f"principal=hive/{server}@{host};ssl=true;sslTrustStore={ts};';"
+        )
+
+    # Oracle (and anything else falling back to oracle libname syntax)
+    from ..db import resolve_oracle_macro
+    svc = resolve_oracle_macro(macro) or macro
+    return f'libname {macro} oracle user="&iamusr" orapw="&{macro}_pwd" path="@{svc}";'
+
+
 def _oracle_date_transform(date_col, transform):
     """Return Oracle SQL expression for date transformation (used inside passthrough)."""
     if transform and "{col}" in transform:
@@ -298,7 +344,10 @@ def _gen_sas_row_datadriven(oracle_tables, sas_lib='WORK', out_dir='.'):
 
         safe_ds = sas_safe_name(qname, 29)
 
-        if is_sas_table(tbl_cfg):
+        if is_sas_table(tbl_cfg) or _is_libname_table(tbl_cfg):
+            # SAS-syntax path: source=sas (local SAS dataset) OR libname-mode
+            # (mounted via libref at the top of the script). Both reference
+            # tables as <libref>.<name> and use SAS date/where syntax.
             sas_table = f"{conn_macro}.{table}"
             where = _oracle_where_to_sas(raw_where, quote=False)
             # Append date bounds (already in SAS literal format, no quoting needed)
@@ -363,10 +412,17 @@ def _gen_sas_row_datadriven(oracle_tables, sas_lib='WORK', out_dir='.'):
 
 
 def _gen_sas_row_hadoop(hadoop_tables, sas_lib='WORK', out_dir='.'):
-    """Generate data-driven SAS row extraction for Hadoop/Hive tables."""
+    """Generate data-driven SAS row extraction for Hadoop/Hive tables.
+
+    Skips tables with `connect_method=libname` — those flow through the
+    SAS-syntax pipeline alongside source=sas tables (see
+    `_gen_sas_row_datadriven`).
+    """
     hdp_datalines = []
 
     for idx, tbl_cfg in enumerate(hadoop_tables, 1):
+        if _is_libname_table(tbl_cfg):
+            continue  # routed via the SAS-syntax path
         table = tbl_cfg['table']
         date_col = tbl_cfg['date_col']
         qname = qualified_name(tbl_cfg)
@@ -1891,11 +1947,17 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         macro_parts.append(_gen_sas_proc_contents(sas_dataset_tables, out_dir))
 
     if "row" in types:
-        # Data-driven row extraction (single block for all tables)
+        # Data-driven row extraction. Libname-mode hadoop tables are merged
+        # into the oracle/sas-bucket call so they get rows_sas.sas treatment
+        # (their conn_macro is the libref, references are <libref>.<table>).
+        # `_gen_sas_row_hadoop` skips them internally so they aren't double-emitted.
+        libname_hadoop_tables = [t for t in hadoop_tables if _is_libname_table(t)]
         macro_parts.append("/* --- Row extraction (data-driven) --- */")
-        macro_parts.append(_gen_sas_row_datadriven(oracle_tables, sas_lib, out_dir))
+        macro_parts.append(
+            _gen_sas_row_datadriven(oracle_tables + libname_hadoop_tables, sas_lib, out_dir)
+        )
 
-        if hadoop_tables:
+        if hadoop_tables and any(not _is_libname_table(t) for t in hadoop_tables):
             macro_parts.append("/* --- Hadoop row extraction (data-driven) --- */")
             macro_parts.append(_gen_sas_row_hadoop(hadoop_tables, sas_lib, out_dir))
 
@@ -1906,6 +1968,22 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         # 32K SAS line-length issues, and col_filter is honored per-row.
         macro_parts.append("/* --- Col extraction (flat driver across all tables) --- */")
         macro_parts.append(_gen_sas_col_driver(all_col_tables, db_path, out_dir))
+
+    # Collect libname mount/clear lines BEFORE runner_parts so the runner
+    # can reference libname_clear_lines below. Each unique conn_macro that
+    # has at least one libname-mode table contributes one mount + one clear.
+    libname_macros_seen: set = set()
+    libname_mount_lines: list = []
+    libname_clear_lines: list = []
+    for t in oracle_tables + hadoop_tables:
+        if not _is_libname_table(t):
+            continue
+        macro = t.get('conn_macro', '')
+        if not macro or macro in libname_macros_seen:
+            continue
+        libname_macros_seen.add(macro)
+        libname_mount_lines.append(_libname_mount_for(t))
+        libname_clear_lines.append(f"libname {macro} clear;")
 
     # Generate runner section
     runner_parts = []
@@ -1939,6 +2017,12 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         f'Output: &out_dir.); */'
     )
     runner_parts.append("")
+
+    # Tear down libname mounts at the end so a re-run starts clean.
+    if libname_clear_lines:
+        runner_parts.append('')
+        runner_parts.append('/* Clear libname mounts */')
+        runner_parts.extend(libname_clear_lines)
 
     # Generate hash from runner content using SEED for reproducibility
     runner_content = '\n'.join(runner_parts)
@@ -1982,6 +2066,12 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
                 f'  uri="{hdp_uri}"\n'
                 f'%mend {macro};'
             )
+
+    # Inject libname mount lines into the conn_macros block (collected above).
+    if libname_mount_lines:
+        conn_macro_lines.append('')
+        conn_macro_lines.append('/* SAS LIBNAME mounts (connect_method=libname) */')
+        conn_macro_lines.extend(libname_mount_lines)
 
     # Build user credential %let statements for override accounts
     user_overrides = set(t.get('user', '') for t in oracle_tables if t.get('user'))

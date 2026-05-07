@@ -7,10 +7,66 @@ function navigateToStep(step) {
 let _pgLastResult = null;
 let _pgHadoopProfiles = {libname: {}, procsql: {}};
 
-document.addEventListener('DOMContentLoaded', () => {
-    pgEngineChanged();
+// Form fields we persist across page reloads / server restarts. Values are
+// stored under `dtrack-playground:<id>` in localStorage; saved on every
+// input/change event, restored on DOMContentLoaded after pgLoadConstants
+// has populated the dynamic dropdowns.
+const _PG_PERSIST_IDS = [
+    'pg-conn', 'pg-row-cap', 'pg-sql',
+    'pg-sas-kind', 'pg-sas-method', 'pg-sas-conn',
+    'pg-sas-profile',
+    'pg-sas-server', 'pg-sas-host', 'pg-sas-schema', 'pg-sas-port',
+];
+const _PG_LS_PREFIX = 'dtrack-playground:';
+
+function _pgSaveField(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    try { localStorage.setItem(_PG_LS_PREFIX + id, el.value); } catch (e) {}
+}
+
+function _pgRestoreField(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    let v;
+    try { v = localStorage.getItem(_PG_LS_PREFIX + id); } catch (e) { return; }
+    if (v === null) return;
+    // For <select>, only restore if the option exists (set by constants load).
+    if (el.tagName === 'SELECT' && !Array.from(el.options).some(o => o.value === v)) return;
+    el.value = v;
+}
+
+function _pgRestoreAll() {
+    for (const id of _PG_PERSIST_IDS) _pgRestoreField(id);
+    // Engine radio is per-radio, not single id.
+    let savedEngine;
+    try { savedEngine = localStorage.getItem(_PG_LS_PREFIX + 'pg-engine'); } catch (e) {}
+    if (savedEngine) {
+        const radio = document.querySelector(`input[name="pg-engine"][value="${savedEngine}"]`);
+        if (radio) radio.checked = true;
+    }
+}
+
+function _pgWirePersistence() {
+    for (const id of _PG_PERSIST_IDS) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        const evt = (el.tagName === 'SELECT' || el.type === 'number') ? 'change' : 'input';
+        el.addEventListener(evt, () => _pgSaveField(id));
+    }
+    document.querySelectorAll('input[name="pg-engine"]').forEach(r => {
+        r.addEventListener('change', () => {
+            try { localStorage.setItem(_PG_LS_PREFIX + 'pg-engine', _pgEngine()); } catch (e) {}
+        });
+    });
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
     pgLoadHistory();
-    pgLoadConstants();
+    await pgLoadConstants();   // populates Hadoop profile + Oracle macro selects
+    _pgRestoreAll();           // restore saved values (after dropdowns are populated)
+    pgEngineChanged();         // refresh visible blocks for restored engine
+    _pgWirePersistence();
 });
 
 async function pgLoadConstants() {
