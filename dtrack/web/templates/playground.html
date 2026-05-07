@@ -74,10 +74,10 @@
                     </label>
                     <span id="pg-sas-oracle-inline" style="display:flex; gap:8px; align-items:center;">
                         <label style="font-size:12px;">Macro:
-                            <input type="text" id="pg-sas-conn" placeholder="pb23" style="width:120px;">
+                            <select id="pg-sas-conn" style="min-width:120px;"></select>
                         </label>
                         <span style="font-size:11px; color:var(--jp-ui-font-color2);">
-                            resolves via MACRO2SVC + DTRACK_ORACLE_MACROS; user/pwd from .env
+                            from CONNECTION_MACROS; resolves via MACRO2SVC + DTRACK_ORACLE_MACROS; user/pwd from .env
                         </span>
                     </span>
                     <span id="pg-sas-hadoop-inline" style="display:none; gap:8px; align-items:center;">

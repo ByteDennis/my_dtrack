@@ -78,50 +78,62 @@ def _procsql_body(body: Optional[str], alias: str) -> str:
     return f"select * from connection to {alias} (\n        {indented}\n    );"
 
 
-def _oracle_cred_block(user: Optional[str], password: Optional[str]) -> str:
-    """Emit the %let credential macros, baking in env values when provided.
-
-    When both user/password are passed in (resolved server-side from .env),
-    the script is ready to submit. When either is None, falls back to
-    YOUR_USER / YOUR_PASSWORD placeholders the user fills in by hand.
+def _oracle_cred_block(conn_macro: str,
+                       user: Optional[str], password: Optional[str]) -> str:
+    """Emit `%let iamusr = ...;` and `%let <macro>_pwd = ...;` matching the
+    SAS macros the existing extraction templates already use. When env values
+    aren't supplied, falls back to YOUR_USER / YOUR_PASSWORD placeholders.
     """
     u = user or "YOUR_USER"
     p = password or "YOUR_PASSWORD"
     note = "" if (user and password) else "  /* edit and submit */"
-    return f"%let oracle_usr = {u};{note}\n%let oracle_pwd = {p};{note}"
+    return f"%let iamusr = {u};{note}\n%let {conn_macro}_pwd = {p};{note}"
 
 
 def oracle_libname_script(svc: str, body: Optional[str] = None, *,
+                          conn_macro: str = "pcdslib",
                           user: Optional[str] = None,
                           password: Optional[str] = None) -> str:
-    """LIBNAME mount to Oracle + user body + clear."""
+    """LIBNAME mount to Oracle + user body + clear.
+
+    The libref is `conn_macro` (e.g. `pb23` → `libname pb23 oracle ...`).
+    Connection params follow the format used by extraction.sas:
+    `user="&iamusr" orapw="&<macro>_pwd" path="@<svc>"`.
+    """
     return f"""\
 /* Oracle libname */
-{_oracle_cred_block(user, password)}
+{_oracle_cred_block(conn_macro, user, password)}
 
-libname ora oracle user=&oracle_usr password=&oracle_pwd path={svc};
+libname {conn_macro} oracle user="&iamusr" orapw="&{conn_macro}_pwd" path="@{svc}";
 
-{_libname_body(body, "ora")}
+{_libname_body(body, conn_macro)}
 
-libname ora clear;
+libname {conn_macro} clear;
 """
 
 
 def oracle_procsql_script(svc: str, body: Optional[str] = None, *,
+                          conn_macro: str = "pb23",
                           user: Optional[str] = None,
                           password: Optional[str] = None) -> str:
-    """PROC SQL CONNECT to Oracle + user body + disconnect."""
+    """PROC SQL CONNECT to Oracle + user body + disconnect.
+
+    Matches extraction.sas format: `connect to oracle(user="&iamusr"
+    orapw="&<macro>_pwd" path="@<svc>" buffsize=5000 preserve_comments)`.
+    No alias — the unaliased default means body wraps with `from connection
+    to oracle (...)`.
+    """
     return f"""\
 /* Oracle PROC SQL CONNECT */
-{_oracle_cred_block(user, password)}
+{_oracle_cred_block(conn_macro, user, password)}
 
 proc sql;
-    connect to oracle as ora
-        (user=&oracle_usr password=&oracle_pwd path={svc});
+    connect to oracle (user="&iamusr" orapw="&{conn_macro}_pwd" path="@{svc}"
+        buffsize=5000 preserve_comments);
 
-    {_procsql_body(body, "ora")}
+    {_procsql_body(body, "oracle")}
 
-    disconnect from ora;
+    disconnect from oracle;
 quit;
 """
 
@@ -183,6 +195,7 @@ quit;
 def gen_sas_script(kind: str, method: str, *,
                    body: Optional[str] = None,
                    svc: Optional[str] = None,
+                   conn_macro: str = "pb23",
                    user: Optional[str] = None,
                    password: Optional[str] = None,
                    server: Optional[str] = None,
@@ -195,9 +208,11 @@ def gen_sas_script(kind: str, method: str, *,
     kind   in {"oracle", "hadoop"}
     method in {"libname", "procsql"}
 
-    Oracle credentials (user, password) are baked into the %let macros at
-    the top when supplied — caller is expected to read them from the dtrack
-    process environment (e.g. PCDS_USR + <macro>_pwd).
+    For Oracle, `conn_macro` is the macro name (pb23, pb30, …) — used both
+    as the libref in libname mode AND as the `<macro>_pwd` SAS macro suffix
+    in both modes. Credentials (user, password) are baked into %let macros
+    at the top of the file when supplied; otherwise YOUR_USER / YOUR_PASSWORD
+    placeholders.
     """
     kind = (kind or "").lower()
     method = (method or "").lower()
@@ -206,9 +221,11 @@ def gen_sas_script(kind: str, method: str, *,
         if not svc:
             raise ValueError("Oracle script requires `svc` (service name).")
         if method == "libname":
-            return oracle_libname_script(svc, body, user=user, password=password)
+            return oracle_libname_script(svc, body, conn_macro=conn_macro,
+                                         user=user, password=password)
         if method == "procsql":
-            return oracle_procsql_script(svc, body, user=user, password=password)
+            return oracle_procsql_script(svc, body, conn_macro=conn_macro,
+                                         user=user, password=password)
     elif kind == "hadoop":
         for name, val in (("server", server), ("host", host), ("schema", schema)):
             if not val:

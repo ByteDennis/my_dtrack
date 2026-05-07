@@ -4112,6 +4112,7 @@ async def api_playground_sas(request: Request):
             ora_user = os.environ.get('PCDS_USR')
             ora_pwd = os.environ.get(f'{conn_macro}_pwd')
             content = gen_sas_script(kind, method, body=user_sql, svc=svc,
+                                     conn_macro=conn_macro,
                                      user=ora_user, password=ora_pwd)
         elif kind == "hadoop":
             content = gen_sas_script(

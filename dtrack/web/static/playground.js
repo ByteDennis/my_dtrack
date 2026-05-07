@@ -20,6 +20,16 @@ async function pgLoadConstants() {
         _pgHadoopProfiles.libname = data.HADOOP_LIBNAME_PROFILES || {};
         _pgHadoopProfiles.procsql = data.HADOOP_PROCSQL_PROFILES || {};
         pgSasRepopulateProfiles();
+
+        // Populate Oracle macro dropdown from CONNECTION_MACROS.oracle.
+        const macros = (data.CONNECTION_MACROS || {}).oracle || [];
+        const sel = document.getElementById('pg-sas-conn');
+        if (sel) {
+            sel.innerHTML = macros
+                .map(m => `<option value="${m}">${m}</option>`)
+                .join('');
+            if (macros.length) sel.value = macros[0];
+        }
     } catch (e) {
         console.error('pgLoadConstants failed:', e);
     }

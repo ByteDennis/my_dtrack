@@ -11,37 +11,48 @@ from dtrack.platforms.sas_test import (
 )
 
 
-def test_oracle_libname_default_body_has_macros_and_libref():
-    sas = oracle_libname_script("svc_a")
-    assert "%let oracle_usr" in sas
-    assert "%let oracle_pwd" in sas
-    assert "libname ora oracle" in sas
-    assert "path=svc_a" in sas
-    assert "libname ora clear" in sas
+def test_oracle_libname_uses_conn_macro_as_libref_with_iamusr_macros():
+    sas = oracle_libname_script("svc_a", conn_macro="pb23")
+    assert "%let iamusr" in sas
+    assert "%let pb23_pwd" in sas
+    # Libref is the conn_macro name, not a fixed `ora`.
+    assert "libname pb23 oracle" in sas
+    assert 'user="&iamusr" orapw="&pb23_pwd"' in sas
+    assert 'path="@svc_a"' in sas
+    assert "libname pb23 clear" in sas
 
 
 def test_oracle_libname_user_body_inserted_between_mount_and_clear():
-    body = "proc print data=ora.MYTBL(obs=5); run;"
-    sas = oracle_libname_script("svc_a", body=body)
-    mount_idx = sas.index("libname ora oracle")
+    body = "proc print data=pb23.MYTBL(obs=5); run;"
+    sas = oracle_libname_script("svc_a", body=body, conn_macro="pb23")
+    mount_idx = sas.index("libname pb23 oracle")
     body_idx = sas.index(body)
-    clear_idx = sas.index("libname ora clear")
+    clear_idx = sas.index("libname pb23 clear")
     assert mount_idx < body_idx < clear_idx
 
 
-def test_oracle_procsql_wraps_user_body_in_passthrough():
-    sas = oracle_procsql_script("svc_a", body="select 1 from dual")
-    assert "connect to oracle as ora" in sas
-    assert "select * from connection to ora" in sas
+def test_oracle_procsql_uses_orapw_path_at_buffsize_no_alias():
+    sas = oracle_procsql_script("svc_a", body="select 1 from dual",
+                                conn_macro="pb23")
+    # Matches extraction.sas — no `as ora` alias, orapw= keyword,
+    # @path, buffsize, preserve_comments.
+    assert "connect to oracle (" in sas
+    assert "as ora" not in sas
+    assert 'user="&iamusr"' in sas
+    assert 'orapw="&pb23_pwd"' in sas
+    assert 'path="@svc_a"' in sas
+    assert "buffsize=5000" in sas
+    assert "preserve_comments" in sas
+    assert "select * from connection to oracle" in sas
     assert "select 1 from dual" in sas
-    assert "disconnect from ora" in sas
+    assert "disconnect from oracle" in sas
 
 
 def test_oracle_procsql_does_not_double_wrap_if_user_already_wrote_passthrough():
-    body = "select * from connection to ora (select 1 from dual);"
-    sas = oracle_procsql_script("svc_a", body=body)
+    body = "select * from connection to oracle (select 1 from dual);"
+    sas = oracle_procsql_script("svc_a", body=body, conn_macro="pb23")
     # Should appear exactly once.
-    assert sas.count("from connection to ora") == 1
+    assert sas.count("from connection to oracle") == 1
 
 
 def test_hadoop_libname_has_jar_and_config_options_and_kerberos_uri():
@@ -98,46 +109,47 @@ def test_custom_truststore_overrides_default():
 
 
 def test_empty_body_emits_proc_sql_probe_in_libname_mode():
-    sas = oracle_libname_script("svc_a", body="")
-    # libname empty → wrap a sane `select count(*) from ora.YOUR_TABLE` probe
+    sas = oracle_libname_script("svc_a", conn_macro="pb23", body="")
+    # libname empty → wrap a `select count(*) from <libref>.YOUR_TABLE` probe
     # in proc sql so the libref actually gets exercised.
     assert "proc sql;" in sas
-    assert "select count(*) from ora.YOUR_TABLE" in sas
+    assert "select count(*) from pb23.YOUR_TABLE" in sas
     assert "quit;" in sas
 
 
 def test_empty_body_emits_passthrough_probe_in_procsql_mode():
     # procsql empty → wraps default 'select 1 from dual' as a sanity probe
-    sas = oracle_procsql_script("svc_a", body="   ")
-    assert "select * from connection to ora" in sas
+    sas = oracle_procsql_script("svc_a", conn_macro="pb23", body="   ")
+    assert "select * from connection to oracle" in sas
     assert "select 1 from dual" in sas
 
 
 def test_libname_select_body_is_wrapped_in_proc_sql():
-    sas = oracle_libname_script("svc_a", body="select * from ora.MY_TBL where x > 1")
+    sas = oracle_libname_script("svc_a", conn_macro="pb23",
+                                body="select * from pb23.MY_TBL where x > 1")
     assert "proc sql;" in sas
-    assert "select * from ora.MY_TBL where x > 1" in sas
+    assert "select * from pb23.MY_TBL where x > 1" in sas
     assert "quit;" in sas
 
 
 def test_libname_proc_print_body_passes_through():
-    body = "proc print data=ora.T(obs=10); run;"
-    sas = oracle_libname_script("svc_a", body=body)
+    body = "proc print data=pb23.T(obs=10); run;"
+    sas = oracle_libname_script("svc_a", conn_macro="pb23", body=body)
     # No outer proc sql wrapper around a body that is itself a proc statement.
     assert sas.count("proc sql;") == 0
     assert body in sas
 
 
 def test_oracle_creds_baked_when_provided():
-    sas = oracle_libname_script("svc_a", body="select 1",
+    sas = oracle_libname_script("svc_a", conn_macro="pb23", body="select 1",
                                 user="alice", password="secret")
-    assert "%let oracle_usr = alice" in sas
-    assert "%let oracle_pwd = secret" in sas
+    assert "%let iamusr = alice" in sas
+    assert "%let pb23_pwd = secret" in sas
     assert "YOUR_USER" not in sas
     assert "YOUR_PASSWORD" not in sas
 
 
 def test_oracle_creds_placeholder_when_missing():
-    sas = oracle_libname_script("svc_a", body="select 1")
+    sas = oracle_libname_script("svc_a", conn_macro="pb23", body="select 1")
     assert "YOUR_USER" in sas
     assert "YOUR_PASSWORD" in sas
