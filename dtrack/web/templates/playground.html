@@ -58,26 +58,79 @@
                 </div>
             </div>
 
-            <div id="pg-sas-controls" style="display:none; padding:8px 0; gap:12px; align-items:center; flex-wrap:wrap;">
-                <label style="font-size:12px;">Type:
-                    <select id="pg-sas-type">
-                        <option value="both" selected>both</option>
-                        <option value="row">row</option>
-                        <option value="col">col</option>
-                    </select>
-                </label>
-                <label style="font-size:12px;">From: <input type="date" id="pg-sas-from"></label>
-                <label style="font-size:12px;">To: <input type="date" id="pg-sas-to"></label>
-                <label style="font-size:12px;">Vintage:
-                    <select id="pg-sas-vintage">
-                        <option value="">(default)</option>
-                        <option value="day">day</option>
-                        <option value="week">week</option>
-                        <option value="month">month</option>
-                        <option value="quarter">quarter</option>
-                        <option value="year">year</option>
-                    </select>
-                </label>
+            <div id="pg-sas-controls" style="display:none; flex-direction:column; gap:8px; padding:8px 0;">
+                <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:center;">
+                    <label style="font-size:12px;">SAS mode:
+                        <select id="pg-sas-mode" onchange="pgSasModeChanged()">
+                            <option value="extract" selected>Extraction (config-driven)</option>
+                            <option value="test">Test connect (small script)</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div id="pg-sas-extract" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+                    <label style="font-size:12px;">Type:
+                        <select id="pg-sas-type">
+                            <option value="both" selected>both</option>
+                            <option value="row">row</option>
+                            <option value="col">col</option>
+                        </select>
+                    </label>
+                    <label style="font-size:12px;">From: <input type="date" id="pg-sas-from"></label>
+                    <label style="font-size:12px;">To: <input type="date" id="pg-sas-to"></label>
+                    <label style="font-size:12px;">Vintage:
+                        <select id="pg-sas-vintage">
+                            <option value="">(default)</option>
+                            <option value="day">day</option>
+                            <option value="week">week</option>
+                            <option value="month">month</option>
+                            <option value="quarter">quarter</option>
+                            <option value="year">year</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div id="pg-sas-test" style="display:none; flex-direction:column; gap:8px;">
+                    <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:center;">
+                        <label style="font-size:12px;">Kind:
+                            <select id="pg-test-kind" onchange="pgTestKindChanged()">
+                                <option value="oracle" selected>Oracle</option>
+                                <option value="hadoop">Hadoop / Hive</option>
+                            </select>
+                        </label>
+                        <label style="font-size:12px;">Method:
+                            <select id="pg-test-method">
+                                <option value="libname" selected>LIBNAME</option>
+                                <option value="procsql">PROC SQL CONNECT</option>
+                            </select>
+                        </label>
+                        <label style="font-size:12px;">Table:
+                            <input type="text" id="pg-test-table" placeholder="SCHEMA.TABLE" style="width:200px;">
+                        </label>
+                    </div>
+                    <div id="pg-test-oracle" style="display:flex; gap:18px; align-items:center; flex-wrap:wrap;">
+                        <label style="font-size:12px;">Macro:
+                            <input type="text" id="pg-test-conn" placeholder="pb23" style="width:120px;">
+                        </label>
+                        <span style="font-size:11px; color:var(--jp-ui-font-color2);">
+                            resolves via MACRO2SVC + DTRACK_ORACLE_MACROS
+                        </span>
+                    </div>
+                    <div id="pg-test-hadoop" style="display:none; gap:12px; flex-wrap:wrap; align-items:center;">
+                        <label style="font-size:12px;">Server:
+                            <input type="text" id="pg-test-server" placeholder="hadoop.example.com" style="width:200px;">
+                        </label>
+                        <label style="font-size:12px;">Host:
+                            <input type="text" id="pg-test-host" placeholder="REALM.EXAMPLE.COM" style="width:200px;">
+                        </label>
+                        <label style="font-size:12px;">Schema:
+                            <input type="text" id="pg-test-schema" placeholder="my_schema" style="width:140px;">
+                        </label>
+                        <label style="font-size:12px;">Port:
+                            <input type="number" id="pg-test-port" value="10000" style="width:70px;">
+                        </label>
+                    </div>
+                </div>
             </div>
 
             <div id="pg-sql-wrap">

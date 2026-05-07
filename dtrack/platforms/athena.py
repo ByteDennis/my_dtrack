@@ -173,14 +173,17 @@ def _cache_put(sql, database, value, row_count=None):
 # ---------------------------------------------------------------------------
 
 def aws_creds_renew(ttl_minutes=50, retries=3, retry_delay=10):
-    """Renew AWS credentials via token-based auth (Windows only).
+    """Renew AWS credentials via proxied token-based auth (Windows only).
 
-    On Windows, fetches a token from AWS_TOKEN_URL and uses it to obtain
-    temporary credentials from AWS_ARN_URL. On Linux/containers, credentials
-    come from IAM roles or environment variables, so this is a no-op.
+    Reads AWS_USR / AWS_PWD / AWS_HOST and routes traffic through
+    http://{usr}:{pwd}@{host}:8080. POSTs username+password to AWS_TOKEN_URL
+    to get a bearer token, then GETs AWS_ARN_URL for temporary credentials.
+    On success, sets AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+    AWS_SESSION_TOKEN and refreshes any open s3fs filesystem.
 
-    Thread-safe: uses a lock so only one thread renews at a time.
-    Skips renewal if credentials were refreshed less than ttl_minutes ago.
+    On Linux/containers credentials come from IAM roles or env vars, so this
+    is a no-op. Thread-safe via _aws_creds_lock; skips renewal if last
+    refresh was within ttl_minutes.
     """
     global _aws_creds_expires
 
@@ -191,6 +194,14 @@ def aws_creds_renew(ttl_minutes=50, retries=3, retry_delay=10):
     now = time.time()
     if _aws_creds_expires and now < _aws_creds_expires:
         return
+
+    usr = os.getenv('AWS_USR')
+    pwd = os.getenv('AWS_PWD')
+    host = os.getenv('AWS_HOST')
+    if not (usr and pwd and host):
+        print("Warning: AWS_USR / AWS_PWD / AWS_HOST not all set; skipping cred renewal")
+        return
+    os.environ['HTTPS_PROXY'] = f'http://{usr}:{pwd}@{host}:8080'
 
     with _aws_creds_lock:
         # Double-check after acquiring lock (another thread may have renewed)
@@ -207,17 +218,30 @@ def aws_creds_renew(ttl_minutes=50, retries=3, retry_delay=10):
 
         for attempt in range(1, retries + 1):
             try:
-                token_resp = requests.get(token_url)
-                token_resp.raise_for_status()
-                token = token_resp.text.strip()
+                token_resp = requests.post(
+                    token_url,
+                    headers={'Accept': '*/*'},
+                    json={'username': usr, 'password': pwd},
+                    verify=False,
+                ).json()
+                token = token_resp['token']
 
-                creds_resp = requests.get(arn_url, headers={'Authorization': f'Bearer {token}'})
-                creds_resp.raise_for_status()
-                creds = creds_resp.json()
+                creds = requests.get(
+                    arn_url,
+                    headers={'Authorization': f'Bearer {token}', 'Accept': '*/*'},
+                    verify=False,
+                ).json()['Credentials']
 
-                os.environ['AWS_ACCESS_KEY_ID'] = creds['AccessKeyId']
+                os.environ['AWS_ACCESS_KEY_ID']     = creds['AccessKeyId']
                 os.environ['AWS_SECRET_ACCESS_KEY'] = creds['SecretAccessKey']
-                os.environ['AWS_SESSION_TOKEN'] = creds['SessionToken']
+                os.environ['AWS_SESSION_TOKEN']     = creds['SessionToken']
+
+                try:
+                    import s3fs
+                    s3fs.S3FileSystem().connect(refresh=True)
+                except Exception as e:
+                    print(f"Warning: s3fs refresh failed: {e}")
+
                 _aws_creds_expires = now + ttl_minutes * 60
                 return
             except Exception as e:

@@ -73,7 +73,7 @@ def test_oracle_connect_kwargs_skip_env(monkeypatch):
     capture the args and confirm they came from kwargs, not env.
     """
     monkeypatch.delenv("PCDS_USR", raising=False)
-    monkeypatch.delenv("LDAP_BASE", raising=False)
+    monkeypatch.delenv("LDAP_DSN", raising=False)
     monkeypatch.delenv("DTRACK_MOCK", raising=False)
     monkeypatch.delenv("DTRACK_ORACLE_MOCK", raising=False)
 
@@ -89,6 +89,31 @@ def test_oracle_connect_kwargs_skip_env(monkeypatch):
 
     from dtrack.db import oracle_connect
     handle = oracle_connect("pb23", user="alice", password="secret",
-                            service="svc_override", ldap_base="")
+                            service="svc_override", ldap_dsn="")
     assert handle == "connection-handle"
     assert captured == {"user": "alice", "password": "secret", "dsn": "svc_override"}
+
+
+def test_oracle_connect_ldap_dsn_substitutes_service(monkeypatch):
+    """LDAP_DSN template should be .format(service=svc) before solve_ldap."""
+    monkeypatch.setenv("PCDS_USR", "u")
+    monkeypatch.setenv("pb23_pwd", "p")
+    monkeypatch.setenv("LDAP_DSN", "ldap://oid.example/{service},cn=OracleContext,dc=ex,dc=com")
+    monkeypatch.delenv("DTRACK_MOCK", raising=False)
+    monkeypatch.delenv("DTRACK_ORACLE_MOCK", raising=False)
+
+    captured = {}
+
+    class _FakeOracleDB:
+        def connect(self, **kwargs):
+            captured.update(kwargs)
+            return "h"
+
+    monkeypatch.setitem(__import__("sys").modules, "oracledb", _FakeOracleDB())
+
+    import dtrack.db as _db
+    monkeypatch.setattr(_db, "solve_ldap", lambda dsn: f"<resolved::{dsn}>")
+
+    handle = _db.oracle_connect("pb23")
+    assert handle == "h"
+    assert captured["dsn"] == "<resolved::ldap://oid.example/pcbs_mkt_comnn,cn=OracleContext,dc=ex,dc=com>"

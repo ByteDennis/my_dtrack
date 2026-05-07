@@ -126,6 +126,10 @@ def init_database(db_path: str) -> None:
     Args:
         db_path: Path to SQLite database file
     """
+    parent = os.path.dirname(os.path.abspath(db_path))
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
@@ -1111,13 +1115,17 @@ def solve_ldap(ldap_dsn: str):
 def oracle_connect(conn_macro: str, *, user: Optional[str] = None,
                    password: Optional[str] = None,
                    service: Optional[str] = None,
-                   ldap_base: Optional[str] = None):
+                   ldap_dsn: Optional[str] = None):
     """Connect to Oracle using a connection macro name.
 
     All env-var inputs can be overridden by keyword. Lookup order for each:
       1. explicit kwarg
       2. environment variable
       3. (service only) MACRO2SVC + DTRACK_ORACLE_MACROS overrides
+
+    `ldap_dsn` is a template string that may contain `{service}`; if set, it
+    is `.format(service=svc)`-substituted and resolved via `solve_ldap`.
+    Example: `LDAP_DSN='ldap://oid.example.com/{service},cn=OracleContext,dc=ex,dc=com'`.
 
     If DTRACK_ORACLE_MOCK is set, returns None.
     """
@@ -1143,10 +1151,9 @@ def oracle_connect(conn_macro: str, *, user: Optional[str] = None,
     if not password:
         raise RuntimeError(f"{conn_macro}_pwd not set (pass password= or set env var)")
 
-    base = ldap_base if ldap_base is not None else os.environ.get('LDAP_BASE', '')
-    if base:
-        ldap_dsn = f"{base}/cn={svc},cn=OracleContext"
-        dsn = solve_ldap(ldap_dsn)
+    tmpl = ldap_dsn if ldap_dsn is not None else os.environ.get('LDAP_DSN', '')
+    if tmpl:
+        dsn = solve_ldap(tmpl.format(service=svc))
     else:
         dsn = svc
 

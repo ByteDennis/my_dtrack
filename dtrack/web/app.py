@@ -4119,6 +4119,57 @@ async def api_playground_sas(request: Request):
             "history_id": history_id}
 
 
+@app.post("/api/playground/sas/test_connect")
+async def api_playground_sas_test_connect(request: Request):
+    """Generate a small SAS test-connect script (libname or PROC SQL CONNECT).
+
+    Body: {kind: 'oracle'|'hadoop', method: 'libname'|'procsql',
+           table: str,
+           # oracle only:
+           conn_macro?: str,
+           # hadoop only:
+           server?: str, host?: str, schema?: str, port?: int}
+    Returns: {filename, content}
+    """
+    from ..platforms.sas_test import gen_test_connect
+    from ..db import resolve_oracle_macro
+
+    body = await request.json()
+    kind = (body.get("kind") or "").lower()
+    method = (body.get("method") or "").lower()
+    table = (body.get("table") or "").strip()
+
+    if not table:
+        return JSONResponse(status_code=400, content={"error": "`table` is required."})
+
+    try:
+        if kind == "oracle":
+            conn_macro = (body.get("conn_macro") or "").strip()
+            svc = resolve_oracle_macro(conn_macro) if conn_macro else None
+            if not svc:
+                return JSONResponse(status_code=400, content={
+                    "error": f"Unknown conn_macro {conn_macro!r}. "
+                             f"Set DTRACK_ORACLE_MACROS or use a builtin (pb23, pb30)."
+                })
+            content = gen_test_connect(kind, method, svc=svc, table=table)
+        elif kind == "hadoop":
+            content = gen_test_connect(
+                kind, method, table=table,
+                server=(body.get("server") or "").strip(),
+                host=(body.get("host") or "").strip(),
+                schema=(body.get("schema") or "").strip(),
+                port=int(body.get("port") or 10000),
+                truststore=body.get("truststore") or None,
+            )
+        else:
+            return JSONResponse(status_code=400, content={"error": f"Unsupported kind: {kind!r}"})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    filename = f"test_{kind}_{method}.sas"
+    return {"ok": True, "filename": filename, "content": content}
+
+
 @app.get("/api/playground/history")
 async def api_playground_history():
     from ..db import list_playground_runs

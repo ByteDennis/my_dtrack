@@ -916,7 +916,7 @@ def cmd_query(args):
 
 
 def cmd_doctor(args):
-    """Print where env was loaded from and which Oracle/AWS settings resolve."""
+    """Print where env was loaded from and which Oracle/AWS/SAS settings resolve."""
     from .db import MACRO2SVC, _load_macro_overrides
 
     env_loaded = os.environ.get('DTRACK_ENV_FILE_LOADED', '<none found>')
@@ -924,11 +924,12 @@ def cmd_doctor(args):
     print()
 
     print("Oracle macros (MACRO2SVC + overrides):")
-    merged = {**MACRO2SVC, **_load_macro_overrides()}
+    overrides = _load_macro_overrides()
+    merged = {**MACRO2SVC, **overrides}
     if not merged:
         print("  (none)")
     for name, svc in sorted(merged.items()):
-        origin = "override" if name in _load_macro_overrides() else "builtin"
+        origin = "override" if name in overrides else "builtin"
         print(f"  {name:8s} -> {svc}  ({origin})")
     print()
 
@@ -939,15 +940,26 @@ def cmd_doctor(args):
         print(f"              {name}_pwd={pwd}")
     print()
 
-    print("AWS / Athena env:")
-    for var in ('AWS_DEFAULT_REGION', 'AWS_S3_WORK_GROUP', 'AWS_S3_STAGING_DIR',
-                'AWS_TOKEN_URL', 'AWS_ARN_URL'):
-        val = os.environ.get(var)
-        print(f"  {var:24s} = {val if val else '<unset>'}")
+    ldap = os.environ.get('LDAP_DSN')
+    print(f"LDAP_DSN: {ldap if ldap else '<unset, will connect via direct service name>'}")
+    if ldap and '{service}' not in ldap:
+        print("  WARNING: LDAP_DSN does not contain '{service}' placeholder")
     print()
 
-    ldap = os.environ.get('LDAP_BASE')
-    print(f"LDAP_BASE: {ldap if ldap else '<unset, will connect via direct service name>'}")
+    print("AWS / Athena env:")
+    for var in ('AWS_DEFAULT_REGION', 'AWS_S3_WORK_GROUP', 'AWS_S3_STAGING_DIR',
+                'AWS_TOKEN_URL', 'AWS_ARN_URL', 'AWS_USR', 'AWS_HOST'):
+        val = os.environ.get(var)
+        print(f"  {var:24s} = {val if val else '<unset>'}")
+    aws_pwd = "set" if os.environ.get('AWS_PWD') else 'MISSING'
+    print(f"  {'AWS_PWD':24s} = {aws_pwd}")
+    print()
+
+    print("SAS env:")
+    for var in ('SAS_LIB', 'OUT_DIR', 'EMAIL_TO',
+                'SAS_CACHE_DIR', 'SAS_ROW_REDO', 'SAS_COL_REDO'):
+        val = os.environ.get(var)
+        print(f"  {var:24s} = {val if val else '<unset>'}")
 
 
 # ============================================================================
