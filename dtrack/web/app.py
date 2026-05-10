@@ -1014,16 +1014,18 @@ async def api_update_pair(pair_name: str, request: Request):
         # reflects exactly what the UI sees -- otherwise users edit include/exclude
         # in col_gen, save, and wonder why the json doesn't change.
         _PAIR_KEYS = {"left", "right", "col_map", "col_filter", "description", "mode",
-                       "vintage",
+                       "vintage", "approx_distinct",
                        "fromDate", "toDate", "dateRangeMode", "overlap",
                        "skip", "ignore_rows", "ignore_columns",
                        "col_type_overrides", "where_map", "time_map",
                        "comment_map", "diff_map", "excludeDates"}
         for key in _PAIR_KEYS:
             if key in body:
-                # Normalize an explicit null col_filter into absence (keeps json clean).
-                if key == "col_filter" and body[key] is None:
-                    pair_cfg.pop("col_filter", None)
+                # Normalize null into absence (keeps json clean and lets
+                # `approx_distinct=null` mean "inherit global"). Same for
+                # col_filter — explicit null clears it.
+                if key in ("col_filter", "approx_distinct") and body[key] is None:
+                    pair_cfg.pop(key, None)
                 else:
                     pair_cfg[key] = body[key]
 
@@ -4413,6 +4415,38 @@ async def api_sync_push(request: Request):
         pairs[pair]["where_map"] = src or {}
     save_unified_config(config, _config_path)
     return {"ok": True, "pair": pair, "field": field, "direction": direction}
+
+
+@app.get("/api/global_settings")
+async def api_get_global_settings():
+    """Return the subset of dtrack.json `metadata` that the UI exposes as
+    global toggles. Currently just `approx_distinct` (default global for
+    n_unique computation across all pairs)."""
+    from ..config import load_unified_config
+    config = load_unified_config(_config_path)
+    meta = config.get("metadata") or {}
+    return {
+        "approx_distinct": meta.get("approx_distinct"),
+    }
+
+
+@app.post("/api/global_settings")
+async def api_set_global_settings(request: Request):
+    """Update dtrack.json `metadata` global toggles. Sending a key with
+    null clears it (so the UI's "use default" radio writes through cleanly).
+    """
+    from ..config import load_unified_config, save_unified_config
+    body = await request.json()
+    config = load_unified_config(_config_path)
+    meta = config.setdefault("metadata", {})
+    if "approx_distinct" in body:
+        v = body["approx_distinct"]
+        if v is None:
+            meta.pop("approx_distinct", None)
+        else:
+            meta["approx_distinct"] = bool(v)
+    save_unified_config(config, _config_path)
+    return {"ok": True, "approx_distinct": meta.get("approx_distinct")}
 
 
 @app.post("/api/sync/reload_json")

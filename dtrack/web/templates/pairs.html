@@ -211,6 +211,20 @@
                     </div>
                 </div>
 
+                <!-- Stats accuracy: how this pair computes n_unique. Inherit
+                     uses the global metadata.approx_distinct setting. -->
+                <div style="margin-top:8px; padding:8px 0; border-top:1px solid var(--jp-border-color1);">
+                    <label class="settings-label">Stats accuracy (n_unique)</label>
+                    <div class="radio-group" style="margin-top:4px;">
+                        <label><input type="radio" name="pair-approx" value="inherit" checked> Inherit global</label>
+                        <label><input type="radio" name="pair-approx" value="exact"> Exact (count distinct)</label>
+                        <label><input type="radio" name="pair-approx" value="approx"> Approximate (HLL, ~2% err)</label>
+                    </div>
+                    <div style="font-size:10px; color:var(--jp-ui-font-color2); margin-top:2px;">
+                        Approximate uses APPROX_COUNT_DISTINCT (Oracle), APPROX_DISTINCT (Hive) — typically 2-10× faster on high-cardinality columns. Exact for ≤256 unique values regardless.
+                    </div>
+                </div>
+
                 <!-- Query Preview (toggled by Preview Query button) -->
                 <div id="query-preview-panel" class="query-preview-panel" style="display:none;">
                     <div class="pair-sides" style="gap:12px;">
@@ -320,6 +334,19 @@
                         <label class="settings-label">AWS Workers</label>
                         <input type="number" id="global-njob-right" value="4" min="1" max="32" style="width:100%; margin-top:6px;">
                         <div style="font-size:10px; color:var(--jp-ui-font-color2); margin-top:2px;">ThreadPool max_workers</div>
+                    </div>
+                </div>
+
+                <!-- Row 5: Stats accuracy global default. Per-pair settings
+                     in the pair edit modal still override this. -->
+                <div style="margin-top:16px;">
+                    <label class="settings-label">Stats accuracy (n_unique) — global default</label>
+                    <div class="radio-group" style="margin-top:6px;">
+                        <label><input type="radio" name="global-approx" value="exact" checked> Exact (count distinct)</label>
+                        <label><input type="radio" name="global-approx" value="approx"> Approximate (HLL, ~2% err)</label>
+                    </div>
+                    <div style="font-size:10px; color:var(--jp-ui-font-color2); margin-top:2px;">
+                        Saved to dtrack.json <code>metadata.approx_distinct</code>; used by every pair set to "Inherit global". Falls back to <code>DTRACK_APPROX_DISTINCT</code> env var if neither is set.
                     </div>
                 </div>
             </div>

@@ -53,7 +53,17 @@ function navigateToStep(step) {
     }
 }
 
-function openSettingsModal() {
+async function openSettingsModal() {
+    // Load current global settings each time so the modal reflects what's
+    // actually persisted in dtrack.json.metadata.
+    try {
+        const resp = await fetch('/api/global_settings');
+        const data = await resp.json();
+        const v = data && data.approx_distinct;
+        const radio = v === true ? 'approx' : 'exact';  // null/false → exact
+        const el = document.querySelector(`input[name="global-approx"][value="${radio}"]`);
+        if (el) el.checked = true;
+    } catch (e) { /* leave defaults */ }
     document.getElementById('settings-modal').classList.add('active');
 }
 
@@ -109,7 +119,7 @@ function updateTestingStatus(testing, configPath) {
     }
 }
 
-function applyGlobalSettings() {
+async function applyGlobalSettings() {
     const mode = document.querySelector('input[name="global-mode"]:checked').value;
     const fromDate = document.getElementById('global-from-date').value;
     const toDate = document.getElementById('global-to-date').value;
@@ -122,6 +132,21 @@ function applyGlobalSettings() {
     });
 
     saveGlobalSettings();
+
+    // Persist global stats-accuracy to dtrack.json.metadata.approx_distinct
+    // independently of the per-pair fields above.
+    const approxSel = document.querySelector('input[name="global-approx"]:checked');
+    const approx = approxSel && approxSel.value === 'approx';
+    try {
+        await fetch('/api/global_settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({approx_distinct: approx}),
+        });
+    } catch (e) {
+        showError(`Saving global stats-accuracy failed: ${e.message}`);
+    }
+
     renderPairs();
     closeSettingsModal();
     showSuccess('Global settings applied to all pairs');
@@ -633,6 +658,14 @@ function editPair(index) {
     document.getElementById('pair-from-date').value = pair.fromDate || '';
     document.getElementById('pair-to-date').value = pair.toDate || '';
 
+    // Stats accuracy: missing field → inherit; true → approx; false → exact.
+    const approxRaw = pair.approx_distinct;
+    const approxRadio = approxRaw === true ? 'approx'
+                      : approxRaw === false ? 'exact'
+                      : 'inherit';
+    const approxEl = document.querySelector(`input[name="pair-approx"][value="${approxRadio}"]`);
+    if (approxEl) approxEl.checked = true;
+
     document.getElementById('query-preview-panel').style.display = 'none';
     document.getElementById('pair-modal').classList.add('active');
 
@@ -688,6 +721,13 @@ async function savePair() {
         fromDate: document.getElementById('pair-from-date').value,
         toDate: document.getElementById('pair-to-date').value,
     };
+
+    // Stats accuracy: 'inherit' → null on the wire (clears the per-pair key
+    // so the global setting takes over); 'exact' → false; 'approx' → true.
+    const approxSel = document.querySelector('input[name="pair-approx"]:checked');
+    const approxVal = approxSel ? approxSel.value : 'inherit';
+    pairData.approx_distinct = approxVal === 'inherit' ? null
+                             : approxVal === 'approx';
 
     // Validation
     if (!pairData.pair_name) {
