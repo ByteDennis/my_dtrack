@@ -4262,6 +4262,172 @@ async def api_csv_compare_run(
 
 
 # ---------------------------------------------------------------------------
+# Sync inspector: diff dtrack.json vs SQLite per pair for col_map /
+# col_filter / where_map, plus push-either-direction. Helps when the two
+# storage layers drift (UI saves vs hand-edits to the json).
+# ---------------------------------------------------------------------------
+
+# Fields that live in BOTH the json and the db. These are the only fields
+# the inspector compares — others (vintage, fromDate, structural shape,
+# extracted row/col stats) live in only one place and aren't comparable.
+_SYNC_FIELDS = ("col_map", "col_filter", "where_map")
+
+
+def _norm(v):
+    """Normalize for diff: dict ordering shouldn't matter; empty == None."""
+    if v is None or v == {} or v == []:
+        return None
+    if isinstance(v, dict):
+        return {k: _norm(vv) for k, vv in v.items()}
+    return v
+
+
+def _read_pair_field_from_json(pair_cfg, field):
+    """Pull `field` out of the in-memory config's pair dict."""
+    if field == "col_map":
+        return pair_cfg.get("col_map") or {}
+    if field == "col_filter":
+        cf = pair_cfg.get("col_filter") or {}
+        # Normalize: only `include` / `exclude` lists matter for the diff.
+        return {
+            "include": list(cf.get("include") or []),
+            "exclude": list(cf.get("exclude") or []),
+        }
+    if field == "where_map":
+        return pair_cfg.get("where_map") or {}
+    return None
+
+
+def _read_pair_field_from_db(db_path, pair_name, field):
+    """Pull `field` for a pair from SQLite via the existing helpers."""
+    from ..db import (get_pair_col_map_from_db, get_pair_col_filter,
+                      get_pair_where_map_from_db)
+    if field == "col_map":
+        return get_pair_col_map_from_db(db_path, pair_name) or {}
+    if field == "col_filter":
+        cf = get_pair_col_filter(db_path, pair_name) or {}
+        return {
+            "include": list(cf.get("include") or []),
+            "exclude": list(cf.get("exclude") or []),
+        }
+    if field == "where_map":
+        return get_pair_where_map_from_db(db_path, pair_name) or {}
+    return None
+
+
+@app.get("/sync", response_class=HTMLResponse)
+async def sync_page(request: Request):
+    return templates.TemplateResponse(request, "sync.html")
+
+
+@app.get("/api/sync/inspect")
+async def api_sync_inspect():
+    """Per-pair diff of `col_map`, `col_filter`, `where_map` between the
+    in-memory config (loaded from dtrack.json) and the SQLite DB.
+
+    Each field gets a status: `match` (values agree), `differ` (both have
+    something, but they don't match), `json_only`, `db_only`, or `empty`
+    (neither side has anything).
+    """
+    from ..config import load_unified_config
+
+    config = load_unified_config(_config_path)
+    pairs = config.get("pairs", {}) or {}
+
+    out = []
+    for pname, pcfg in pairs.items():
+        fields = []
+        for f in _SYNC_FIELDS:
+            j_raw = _read_pair_field_from_json(pcfg, f)
+            d_raw = _read_pair_field_from_db(_db_path, pname, f)
+            j_norm = _norm(j_raw)
+            d_norm = _norm(d_raw)
+            if j_norm is None and d_norm is None:
+                status = "empty"
+            elif j_norm is None:
+                status = "db_only"
+            elif d_norm is None:
+                status = "json_only"
+            elif j_norm == d_norm:
+                status = "match"
+            else:
+                status = "differ"
+            fields.append({
+                "name": f, "status": status,
+                "json": j_raw, "db": d_raw,
+            })
+        out.append({"pair_name": pname, "fields": fields})
+
+    return {"pairs": out, "config_path": _config_path, "db_path": _db_path}
+
+
+@app.post("/api/sync/push")
+async def api_sync_push(request: Request):
+    """Copy one direction for a single pair/field.
+
+    Body: {pair: str, field: str, direction: 'json_to_db' | 'db_to_json'}.
+    On success, writes through to whichever store is the destination
+    (dtrack.json on disk for `db_to_json`; SQLite via existing helpers for
+    `json_to_db`) and returns the new diff status.
+    """
+    from ..config import load_unified_config, save_unified_config
+    from ..db import (update_pair_col_map, update_pair_col_rules)
+
+    body = await request.json()
+    pair  = body.get("pair") or ""
+    field = body.get("field") or ""
+    direction = body.get("direction") or ""
+    if field not in _SYNC_FIELDS:
+        return JSONResponse(status_code=400, content={"error": f"unknown field: {field!r}"})
+    if direction not in ("json_to_db", "db_to_json"):
+        return JSONResponse(status_code=400, content={"error": f"unknown direction: {direction!r}"})
+
+    config = load_unified_config(_config_path)
+    pairs = config.setdefault("pairs", {})
+    if pair not in pairs:
+        return JSONResponse(status_code=404, content={"error": f"unknown pair: {pair!r}"})
+
+    if direction == "json_to_db":
+        src = _read_pair_field_from_json(pairs[pair], field)
+        if field == "col_map":
+            update_pair_col_map(_db_path, pair, src or {})
+        elif field == "col_filter":
+            # update_pair_col_rules expects a payload of {include, exclude} lists.
+            update_pair_col_rules(_db_path, pair, src or {"include": [], "exclude": []})
+        elif field == "where_map":
+            # No first-class db field; where_map is reconstructed at gen-time
+            # from _row_comparison. Block the push with a clear message.
+            return JSONResponse(status_code=400, content={
+                "error": "where_map is computed from _row_comparison at extract time; cannot push from json to db. "
+                         "Re-run compare-row to refresh, or push the other direction."
+            })
+        return {"ok": True, "pair": pair, "field": field, "direction": direction}
+
+    # db_to_json
+    src = _read_pair_field_from_db(_db_path, pair, field)
+    if field == "col_map":
+        pairs[pair]["col_map"] = src or {}
+    elif field == "col_filter":
+        pairs[pair]["col_filter"] = src or {"include": [], "exclude": []}
+    elif field == "where_map":
+        pairs[pair]["where_map"] = src or {}
+    save_unified_config(config, _config_path)
+    return {"ok": True, "pair": pair, "field": field, "direction": direction}
+
+
+@app.post("/api/sync/reload_json")
+async def api_sync_reload_json():
+    """Re-read dtrack.json from disk into the in-memory config so manual
+    edits to the file show up without a server restart. Idempotent."""
+    from ..config import load_unified_config
+    try:
+        load_unified_config(_config_path)  # validates parses
+        return {"ok": True, "config_path": _config_path}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
 # Server entry point
 # ---------------------------------------------------------------------------
 
