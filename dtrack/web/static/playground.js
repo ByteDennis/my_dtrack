@@ -206,6 +206,7 @@ async function pgRun() {
     const rowCap = parseInt(document.getElementById('pg-row-cap').value || '200', 10);
     _pgSetStatus('Running…');
     btn.disabled = true;
+    document.getElementById('pg-cancel-btn').style.display = '';
 
     try {
         const res = await fetch('/api/playground/run', {
@@ -214,7 +215,10 @@ async function pgRun() {
             body: JSON.stringify({engine, sql: sql.trim(), conn, row_cap: rowCap}),
         });
         const data = await res.json();
-        if (!res.ok || !data.ok) {
+        if (data && data.cancelled) {
+            _pgSetStatus(`✗ cancelled after ${data.wall_sec ?? '?'}s`, 'error');
+            _pgRenderError('Cancelled by user.');
+        } else if (!res.ok || !data.ok) {
             _pgSetStatus(`Error: ${data.error || res.status}`, 'error');
             _pgRenderError(data.error || `HTTP ${res.status}`);
         } else {
@@ -227,7 +231,24 @@ async function pgRun() {
         _pgRenderError(e.message);
     } finally {
         btn.disabled = false;
+        document.getElementById('pg-cancel-btn').style.display = 'none';
         pgLoadHistory();
+    }
+}
+
+async function pgCancel() {
+    _pgSetStatus('Cancelling…');
+    try {
+        const res = await fetch('/api/playground/cancel_running', {method: 'POST'});
+        const data = await res.json();
+        const ids = (data && data.cancelled_ids) || [];
+        if (ids.length) {
+            _pgSetStatus(`Cancel signalled for #${ids.join(', #')}`, 'error');
+        } else {
+            _pgSetStatus('Nothing was running.', 'error');
+        }
+    } catch (e) {
+        _pgSetStatus(`Cancel failed: ${e.message}`, 'error');
     }
 }
 

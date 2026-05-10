@@ -2028,6 +2028,27 @@ def list_playground_runs(db_path: str, limit: int = 50) -> List[Dict]:
         return [dict(r) for r in rows]
 
 
+def update_playground_run(db_path: str, run_id: int, **fields) -> bool:
+    """Update arbitrary columns on a playground history row.
+
+    Allowed fields: status, elapsed_sec, n_rows, error_msg.
+    Quietly drops unknown keys so the caller can pass a kwargs blob without
+    pre-filtering. Returns True if a row was changed.
+    """
+    allowed = {"status", "elapsed_sec", "n_rows", "error_msg"}
+    sets = {k: v for k, v in fields.items() if k in allowed}
+    if not sets:
+        return False
+    with sqlite3.connect(db_path) as c:
+        cur = c.execute(
+            "UPDATE _playground_history "
+            f"SET {', '.join(f'{k} = ?' for k in sets)} "
+            "WHERE id = ?",
+            (*sets.values(), run_id),
+        )
+        return cur.rowcount > 0
+
+
 def update_playground_note(db_path: str, run_id: int, note: str) -> bool:
     """Update the note column on a single run. Returns True if a row changed."""
     with sqlite3.connect(db_path) as c:

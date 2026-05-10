@@ -3963,16 +3963,29 @@ def _row_to_strs(row, n_cols):
     return out
 
 
+# Registry of currently-running playground queries: history_id → handle dict.
+# Populated when a query starts, popped when it ends (whether ok / error /
+# cancelled). The cancel endpoint looks up the handle and calls .cancel()
+# on the cursor / connection without blocking the running thread.
+_PLAYGROUND_RUNNING: dict = {}
+
+
 @app.post("/api/playground/run")
 async def api_playground_run(request: Request):
     """Run an ad-hoc SQL query against Athena or Oracle and time it.
 
     Body: {engine: 'athena'|'oracle', sql, conn?, row_cap?}
     Returns the first `row_cap` rows; the full count is in n_rows_total.
-    Always inserts a row into _playground_history (status ok|error).
+
+    The query runs in a worker thread (via asyncio.to_thread) so that
+    /api/playground/cancel/{id} from another request can call
+    cursor.cancel() / conn.cancel() while execute() is still blocking.
+    Start / done / error / cancel events also print to stdout so they
+    show up in the `dtrack serve` console.
     """
+    import asyncio
     import time
-    from ..db import insert_playground_run
+    from ..db import insert_playground_run, update_playground_run
 
     body = await request.json()
     engine = (body.get("engine") or "").lower()
@@ -3985,30 +3998,57 @@ async def api_playground_run(request: Request):
     if not sql:
         return JSONResponse(status_code=400, content={"error": "SQL is required"})
 
+    # Insert the history row up front in 'running' status so the cancel
+    # endpoint has an id to look up. We update with elapsed/status/n_rows
+    # at the end — no second insert.
+    history_id = insert_playground_run(
+        _db_path,
+        engine=engine,
+        conn=conn_id,
+        sql=sql,
+        elapsed_sec=None,
+        n_rows=None,
+        status='running',
+        error_msg=None,
+    )
+
+    sql_snip = sql.replace('\n', ' ')[:120]
+    print(f"[playground #{history_id}] start {engine}/{conn_id or '-'}: {sql_snip}",
+          flush=True)
+    print(f"[playground #{history_id}]   cancel: curl -X POST http://<host>/api/playground/cancel/{history_id}",
+          flush=True)
+
+    handle: dict = {"cursor": None, "conn": None, "cancelled": False}
+    _PLAYGROUND_RUNNING[history_id] = handle
+
     columns: list = []
     rows: list = []
     n_rows_total = 0
-    wall_sec = 0.0
     engine_sec: Optional[float] = None
     total_sec: Optional[float] = None
     data_scanned: Optional[int] = None
     query_id: Optional[str] = None
     err: Optional[str] = None
+    cancelled = False
 
-    t0 = time.perf_counter()
-    try:
+    def _execute():
+        """Runs in a worker thread. Stashes cur/conn into `handle` so the
+        cancel endpoint can interrupt us. Returns (cols, rows, stats)."""
+        nonlocal columns, rows, n_rows_total, engine_sec, total_sec
+        nonlocal data_scanned, query_id
+
         if engine == "athena":
             from ..platforms.athena import athena_connect, aws_creds_renew
             aws_creds_renew()
             conn = athena_connect(conn_id or None)
             cur = conn.cursor()
+            handle["cursor"] = cur
+            handle["conn"]   = conn
             cur.execute(sql)
             columns = [d[0] for d in (cur.description or [])]
             fetched = cur.fetchall() or []
             n_rows_total = len(fetched)
             rows = [_row_to_strs(r, len(columns)) for r in fetched[:row_cap]]
-            # Athena execution metadata exposed by pyathena post-execute.
-            # engine_* is the actual query runtime; total_* includes queue.
             ms = getattr(cur, 'engine_execution_time_in_millis', None)
             if ms is not None:
                 engine_sec = round(ms / 1000.0, 4)
@@ -4025,6 +4065,8 @@ async def api_playground_run(request: Request):
             if conn is None:
                 raise RuntimeError("oracle_connect returned None (mock mode?)")
             cur = conn.cursor()
+            handle["cursor"] = cur
+            handle["conn"]   = conn
             cur.execute(sql)
             columns = [d[0] for d in (cur.description or [])]
             fetched = cur.fetchall() or []
@@ -4035,26 +4077,44 @@ async def api_playground_run(request: Request):
                 conn.close()
             except Exception:
                 pass
+
+    t0 = time.perf_counter()
+    try:
+        await asyncio.to_thread(_execute)
     except Exception as e:
         err = str(e)
-    wall_sec = round(time.perf_counter() - t0, 4)
-    # Prefer Athena's engine time when we have it — that's the "real" runtime
-    # the user sees in the AWS console, sans walltime overhead from
-    # connection setup, polling, and result download.
-    elapsed = engine_sec if engine_sec is not None else wall_sec
+        if handle.get("cancelled"):
+            cancelled = True
+    finally:
+        _PLAYGROUND_RUNNING.pop(history_id, None)
 
-    # Optional from typing is already imported at module top. We use it via Optional[str] above.
-    history_id = insert_playground_run(
-        _db_path,
-        engine=engine,
-        conn=conn_id,
-        sql=sql,
+    wall_sec = round(time.perf_counter() - t0, 4)
+    elapsed = engine_sec if engine_sec is not None else wall_sec
+    status = ('cancelled' if cancelled
+              else 'error' if err is not None
+              else 'ok')
+
+    update_playground_run(
+        _db_path, history_id,
+        status=status,
         elapsed_sec=elapsed,
         n_rows=n_rows_total if err is None else None,
-        status='ok' if err is None else 'error',
         error_msg=err,
     )
 
+    if cancelled:
+        print(f"[playground #{history_id}] CANCELLED after {wall_sec}s", flush=True)
+    elif err:
+        print(f"[playground #{history_id}] FAILED after {wall_sec}s: {err}", flush=True)
+    else:
+        print(f"[playground #{history_id}] done in {elapsed}s, {n_rows_total} rows",
+              flush=True)
+
+    if cancelled:
+        return JSONResponse(status_code=499, content={
+            "ok": False, "error": "cancelled", "elapsed_sec": elapsed,
+            "wall_sec": wall_sec, "history_id": history_id, "cancelled": True,
+        })
     if err is not None:
         return JSONResponse(status_code=500, content={
             "ok": False, "error": err, "elapsed_sec": elapsed,
@@ -4075,6 +4135,70 @@ async def api_playground_run(request: Request):
         "query_id": query_id,
         "history_id": history_id,
     }
+
+
+@app.post("/api/playground/cancel_running")
+async def api_playground_cancel_running():
+    """Cancel every currently-running playground query. The Cancel button
+    in the UI calls this — easier than threading the history_id back to
+    the browser as soon as the query is registered. Returns the list of
+    ids that were signalled."""
+    ids = list(_PLAYGROUND_RUNNING.keys())
+    cancelled_ids = []
+    for run_id in ids:
+        handle = _PLAYGROUND_RUNNING.get(run_id)
+        if not handle:
+            continue
+        handle["cancelled"] = True
+        for key in ("cursor", "conn"):
+            obj = handle.get(key)
+            if obj is None:
+                continue
+            try:
+                obj.cancel()
+            except Exception as e:
+                print(f"[playground #{run_id}] {key}.cancel failed: {e}",
+                      flush=True)
+        cancelled_ids.append(run_id)
+        print(f"[playground #{run_id}] cancel requested (UI)", flush=True)
+    return {"ok": True, "cancelled_ids": cancelled_ids}
+
+
+@app.post("/api/playground/cancel/{run_id}")
+async def api_playground_cancel(run_id: int):
+    """Cancel a running playground query by history_id.
+
+    Looks up the cursor / connection from the in-memory registry and calls
+    the engine-specific cancel method (pyathena cursor.cancel(),
+    oracledb conn.cancel()). The waiting `await asyncio.to_thread(...)` in
+    /api/playground/run sees an exception and returns with status=cancelled.
+
+    Curl-friendly so you can kill from the same terminal as `dtrack serve`:
+        curl -X POST http://localhost:8080/api/playground/cancel/42
+    """
+    handle = _PLAYGROUND_RUNNING.get(run_id)
+    if not handle:
+        return JSONResponse(status_code=404, content={
+            "error": f"run #{run_id} is not currently running"
+        })
+    handle["cancelled"] = True
+    cur = handle.get("cursor")
+    conn = handle.get("conn")
+    msgs = []
+    if cur is not None:
+        try:
+            cur.cancel()
+            msgs.append("cursor.cancel()")
+        except Exception as e:
+            msgs.append(f"cursor.cancel failed: {e}")
+    if conn is not None:
+        try:
+            conn.cancel()
+            msgs.append("conn.cancel()")
+        except Exception as e:
+            msgs.append(f"conn.cancel failed: {e}")
+    print(f"[playground #{run_id}] cancel requested ({'; '.join(msgs)})", flush=True)
+    return {"ok": True, "run_id": run_id, "actions": msgs}
 
 
 @app.post("/api/playground/sas")
