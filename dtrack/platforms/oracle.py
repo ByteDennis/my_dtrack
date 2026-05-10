@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+from typing import Optional
 
 from .base import (
     PlatformBuilder,
@@ -53,17 +54,48 @@ _VINTAGE_TRUNC = {
 }
 
 
-def _approx_distinct_enabled() -> bool:
-    """True iff DTRACK_APPROX_DISTINCT is set to a truthy value.
+def _bool_from_value(v) -> Optional[bool]:
+    """Loose bool parse: True/False, 1/0, '1'/'0', 'true'/'false'/'yes'/'no'.
+    Returns None for None / empty / unrecognized strings (i.e. "not set")."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ('1', 'true', 'yes', 'on'):
+        return True
+    if s in ('0', 'false', 'no', 'off'):
+        return False
+    return None
 
-    When True, gen-col swaps `COUNT(DISTINCT col)` with each platform's
+
+def _approx_distinct_enabled(tbl_cfg=None, config=None) -> bool:
+    """Resolve approx_distinct preference with the documented fallback chain.
+
+    Order (first hit wins):
+      1. tbl_cfg['approx_distinct']        -- per-pair-side override
+      2. tbl_cfg['_pair_approx_distinct']  -- pair-level (set by gen_sas hydration)
+      3. config['metadata']['approx_distinct']  -- global default in dtrack.json
+      4. DTRACK_APPROX_DISTINCT env var
+      5. False
+
+    When True, gen-col swaps `COUNT(DISTINCT col)` for each platform's
     HyperLogLog-based approximate (`APPROX_COUNT_DISTINCT` on Oracle,
     `APPROX_DISTINCT` on Hive, `approx_distinct` on Trino/Athena).
     Off by default — exact counts are the safer choice for compliance-
-    style validation and HLL has noticeable error at very high cardinality
-    (~1-2% standard error; exact for ≤256 unique values).
+    style validation. HLL has ~1-2% standard error at high cardinality
+    and is exact for ≤256 unique values.
     """
-    return os.environ.get('DTRACK_APPROX_DISTINCT', '').strip().lower() in ('1', 'true', 'yes', 'on')
+    if tbl_cfg is not None:
+        for key in ('approx_distinct', '_pair_approx_distinct'):
+            v = _bool_from_value(tbl_cfg.get(key))
+            if v is not None:
+                return v
+    if config is not None:
+        v = _bool_from_value((config.get('metadata') or {}).get('approx_distinct'))
+        if v is not None:
+            return v
+    return _bool_from_value(os.environ.get('DTRACK_APPROX_DISTINCT')) or False
 
 
 def _approx_distinct_error() -> str:
@@ -76,15 +108,16 @@ def _approx_distinct_error() -> str:
     return os.environ.get('DTRACK_APPROX_DISTINCT_ERROR', '').strip()
 
 
-def _n_unique_expr(source: str, col: str) -> str:
-    """Per-platform SQL fragment for n_unique. Honors DTRACK_APPROX_DISTINCT.
+def _n_unique_expr(source: str, col: str, tbl_cfg=None, config=None) -> str:
+    """Per-platform SQL fragment for n_unique. Honors the resolution chain
+    in `_approx_distinct_enabled` (per-pair > global > env var > False).
 
     SAS-source and libname mode keep `COUNT(DISTINCT col)` regardless —
     SAS proc sql doesn't have an approx function, and SAS/ACCESS already
     pushes count-distinct down to the platform-native function over JDBC.
     """
     s = (source or '').lower()
-    if not _approx_distinct_enabled() or s in ('sas',):
+    if not _approx_distinct_enabled(tbl_cfg=tbl_cfg, config=config) or s in ('sas',):
         return f"COUNT(DISTINCT {col})"
     if s == 'oracle':
         return f"APPROX_COUNT_DISTINCT({col})"
@@ -1415,7 +1448,7 @@ def _render_col_template(tpl_name, rows, rows_placeholder,
     return tpl
 
 
-def _gen_sas_col_driver(tables, db_path=None, out_dir='.'):
+def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None):
     """Emit SAS code for column-stats extraction across all tables.
 
     Dispatch by source:
@@ -1565,10 +1598,10 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.'):
                 'date_from': spec['date_from'],
                 'date_to': spec['date_to'],
                 'where_clause': full_where,
-                # Per-platform n_unique expression. When DTRACK_APPROX_DISTINCT
-                # is on, this becomes APPROX_COUNT_DISTINCT (Oracle) or
-                # APPROX_DISTINCT (Hive). Otherwise COUNT(DISTINCT col).
-                'n_unique_expr': _n_unique_expr(tbl_source, col_name),
+                # Per-platform n_unique expression. Resolved via the
+                # approx_distinct fallback chain (pair → global → env → off).
+                'n_unique_expr': _n_unique_expr(tbl_source, col_name,
+                                                tbl_cfg=tbl_cfg, config=config),
             })
         print(f"[{tbl_source} col] {qname}: {n_cols} cols (db-side "
               f"GROUP BY {spec['vintage_expr']!s:.60} vintage={spec['vintage']}) "
@@ -2212,7 +2245,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         # get_colstats_SN macro soup -- smaller extract_col.sas file, no
         # 32K SAS line-length issues, and col_filter is honored per-row.
         macro_parts.append("/* --- Col extraction (flat driver across all tables) --- */")
-        macro_parts.append(_gen_sas_col_driver(all_col_tables, db_path, out_dir))
+        macro_parts.append(_gen_sas_col_driver(all_col_tables, db_path, out_dir, config=config))
 
     # Collect libname mount/clear lines BEFORE runner_parts so the runner
     # can reference libname_clear_lines below. Each unique conn_macro that

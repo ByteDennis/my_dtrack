@@ -330,6 +330,94 @@ def test_approx_distinct_on_hadoop(isolated_env, tmp_path, monkeypatch):
     assert "APPROX_DISTINCT(AMT)" in sas
 
 
+def test_approx_distinct_pair_level_overrides_env(isolated_env, tmp_path, monkeypatch):
+    """Pair-level `approx_distinct: false` beats DTRACK_APPROX_DISTINCT=1."""
+    monkeypatch.setenv("DTRACK_APPROX_DISTINCT", "1")
+    cfg = {
+        "pairs": {
+            "demo": {
+                "approx_distinct": False,
+                "left":  {"name": "src", "table": "MYTBL", "source": "oracle",
+                          "conn_macro": "pb23", "date_col": "DT", "date_type": "date",
+                          "columns": {"AMT": "NUMBER"}},
+                "right": {"name": "snk", "table": "snk_ds", "source": "sas",
+                          "conn_macro": "work", "date_col": "DT", "date_type": "date",
+                          "columns": {"AMT": "NUMBER"}},
+                "fromDate": "2025-01-01", "toDate": "2025-01-31",
+            }
+        },
+        "metadata": {},
+    }
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps(cfg))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    from dtrack.platforms.oracle import gen_sas
+    gen_sas(str(cfg_path), str(out_dir), types=["col"])
+    sas = sorted(out_dir.glob("*.sas"))[0].read_text()
+    # Pair set False → exact wins, even though env says approx.
+    assert "COUNT(DISTINCT AMT)" in sas
+    assert "APPROX_COUNT_DISTINCT" not in sas
+
+
+def test_approx_distinct_global_default_in_metadata(isolated_env, tmp_path, monkeypatch):
+    """metadata.approx_distinct=true (without env, without pair override)."""
+    monkeypatch.delenv("DTRACK_APPROX_DISTINCT", raising=False)
+    cfg = {
+        "pairs": {
+            "demo": {
+                "left":  {"name": "src", "table": "MYTBL", "source": "oracle",
+                          "conn_macro": "pb23", "date_col": "DT", "date_type": "date",
+                          "columns": {"AMT": "NUMBER"}},
+                "right": {"name": "snk", "table": "snk_ds", "source": "sas",
+                          "conn_macro": "work", "date_col": "DT", "date_type": "date",
+                          "columns": {"AMT": "NUMBER"}},
+                "fromDate": "2025-01-01", "toDate": "2025-01-31",
+            }
+        },
+        "metadata": {"approx_distinct": True},
+    }
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps(cfg))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    from dtrack.platforms.oracle import gen_sas
+    gen_sas(str(cfg_path), str(out_dir), types=["col"])
+    sas = sorted(out_dir.glob("*.sas"))[0].read_text()
+    assert "APPROX_COUNT_DISTINCT(AMT)" in sas
+
+
+def test_approx_distinct_pair_level_overrides_global(isolated_env, tmp_path, monkeypatch):
+    """Pair-level true beats global false."""
+    monkeypatch.delenv("DTRACK_APPROX_DISTINCT", raising=False)
+    cfg = {
+        "pairs": {
+            "demo": {
+                "approx_distinct": True,
+                "left":  {"name": "src", "table": "MYTBL", "source": "oracle",
+                          "conn_macro": "pb23", "date_col": "DT", "date_type": "date",
+                          "columns": {"AMT": "NUMBER"}},
+                "right": {"name": "snk", "table": "snk_ds", "source": "sas",
+                          "conn_macro": "work", "date_col": "DT", "date_type": "date",
+                          "columns": {"AMT": "NUMBER"}},
+                "fromDate": "2025-01-01", "toDate": "2025-01-31",
+            }
+        },
+        "metadata": {"approx_distinct": False},
+    }
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps(cfg))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    from dtrack.platforms.oracle import gen_sas
+    gen_sas(str(cfg_path), str(out_dir), types=["col"])
+    sas = sorted(out_dir.glob("*.sas"))[0].read_text()
+    assert "APPROX_COUNT_DISTINCT(AMT)" in sas
+
+
 def test_approx_distinct_does_not_affect_libname_path(isolated_env, tmp_path, monkeypatch):
     """libname mode keeps count(distinct); SAS proc sql doesn't have approx
     and SAS/ACCESS pushes count(distinct) down to native server-side anyway."""

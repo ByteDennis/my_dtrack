@@ -164,6 +164,11 @@ def get_all_tables_from_unified(config):
             selected_left  = [l for l, _ in resolved["pairs"]]
             selected_right = [r for _, r in resolved["pairs"]]
 
+        # Pair-level approx_distinct (true/false). Propagates to both sides
+        # under the internal `_pair_approx_distinct` key so per-side configs
+        # carrying their own `approx_distinct` still win.
+        pair_approx = pair_config.get("approx_distinct")
+
         for side in ["left", "right"]:
             table_cfg = pair_config[side].copy()
 
@@ -171,6 +176,9 @@ def get_all_tables_from_unified(config):
             # only if the per-side dict already specifies one (legacy configs).
             if pair_vintage and not table_cfg.get("vintage"):
                 table_cfg["vintage"] = pair_vintage
+
+            if pair_approx is not None and "_pair_approx_distinct" not in table_cfg:
+                table_cfg["_pair_approx_distinct"] = pair_approx
 
             if col_map:
                 if side == "left":
