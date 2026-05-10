@@ -452,17 +452,19 @@ def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database
         group_by = f"\nGROUP BY {dt_expr}"
 
     if numeric:
+        from .base import apply_null_sentinels
+        col_expr = apply_null_sentinels(col_q, "numeric", "athena")
         sql = f"""{cte_prefix}
 SELECT
     {dt_select},
     '{dtype}' AS col_type,
     COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col_q}) AS n_missing,
-    COUNT(DISTINCT {col_q}) AS n_unique,
-    AVG(CAST({col_q} AS DOUBLE)) AS mean,
-    STDDEV_SAMP(CAST({col_q} AS DOUBLE)) AS std,
-    MIN({col_q}) AS min_val,
-    MAX({col_q}) AS max_val
+    COUNT(*) - COUNT({col_expr}) AS n_missing,
+    COUNT(DISTINCT {col_expr}) AS n_unique,
+    AVG(CAST({col_expr} AS DOUBLE)) AS mean,
+    STDDEV_SAMP(CAST({col_expr} AS DOUBLE)) AS std,
+    MIN({col_expr}) AS min_val,
+    MAX({col_expr}) AS max_val
 FROM {full_table} WHERE {wc}{group_by}"""
 
         _log_sql(col, sql)
@@ -501,13 +503,15 @@ FROM {full_table} WHERE {wc}{group_by}"""
         freq_dt_select = f"CAST({dt_expr} AS VARCHAR)"
         freq_dt_group = f", {dt_expr}"
 
+    from .base import apply_null_sentinels
+    col_expr_cat = apply_null_sentinels(col_q, "categorical", "athena")
     sql = f"""{cte_prefix}
 WITH freq AS (
     SELECT {freq_dt_select} AS dt,
-           CAST({col_q} AS VARCHAR) AS p_col,
+           CAST({col_expr_cat} AS VARCHAR) AS p_col,
            COUNT(*) AS cnt
     FROM {full_table} WHERE {wc}
-    GROUP BY {col_q}{freq_dt_group}
+    GROUP BY {col_expr_cat}{freq_dt_group}
 ),
 ranked AS (
     SELECT dt, p_col, cnt,
@@ -774,9 +778,36 @@ WHERE {where_clause}"""
     return id_cols
 
 
+def _athena_portable_hash32(value_sql):
+    """Athena/Trino expression: 32-bit signed bigint MD5 hash of `value_sql`.
+
+    Strategy aligned with Hive and SAS-side hash recipes so the SUM across
+    rows AGREES on identical data cross-platform (the whole point of
+    using hash_sum as a drill-down signal on Hadoop ↔ AWS pairs):
+
+      1. TRIM the value so 'SF' and 'SF ' don't diverge from padding
+         (padding is a storage artifact, not data drift).
+      2. MD5 -> 16-byte VARBINARY -> TO_HEX -> 32-char hex string.
+      3. Take the FIRST 8 hex chars (32 bits) and from_base(.., 16) into
+         a bigint. 32 bits keeps the per-row value safely below 2^31
+         (~4.3 GB), so SUM over a multi-billion-row table can't overflow
+         the signed-bigint sum (Trino's SUM(bigint) returns bigint, max
+         ~9.2e18). Full 64 bits would overflow differently on Trino's
+         signed bigint vs. Hive's unsigned conv result and cause
+         cross-platform arithmetic drift unrelated to the data.
+      4. Categorical only -- on numerics, CAST(0 AS VARCHAR) yields '0'
+         on Hive but '0.0' on Athena DOUBLE, and the MD5s diverge purely
+         from formatting. Callers gate this expression on col_type.
+    """
+    return (
+        f"CAST(from_base(SUBSTR(LOWER(TO_HEX(MD5("
+        f"TO_UTF8(TRIM({value_sql}))))), 1, 8), 16) AS BIGINT)"
+    )
+
+
 def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
                       full_table, wc, cte_prefix):
-    """Coarse col-stats SQL — single-pass aggregates only, no GROUP BY p_col.
+    """Coarse col-stats SQL — cheap aggregates for Phase-1 rough drift detection.
 
     Emits the 14-column row schema (dt, column_name, col_type, n_total,
     n_missing, n_unique, mean, std, min_val, max_val, top_10, length_avg,
@@ -784,53 +815,138 @@ def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
     back empty in coarse mode; the loader's level="coarse" path preserves
     any prior fine values for those rather than overwriting with empty.
 
-    Drift signals captured cheaply per row:
-      - n_total / n_missing / n_unique (size, null-rate, cardinality)
-      - min_val / max_val (alpha) (value-range edges)
-      - length_avg / length_max (structural shape — free text vs IDs)
-      - hash_sum (multiset checksum via XXHASH64 → SUM)
+    Two branches:
 
-    n_unique uses APPROX_DISTINCT (HyperLogLog) so we avoid the
-    near-quadratic cost COUNT(DISTINCT) hits on high-cardinality columns.
-    The tiny accuracy loss (~2%) is acceptable for "is this column worth
-    drilling into" — a drift big enough to matter is well over 2%.
+    NUMERIC — single-pass aggregates, no GROUP BY p_col. min_val/max_val
+        are scalar MIN/MAX since "freq of a numeric value" isn't a useful
+        signal. length_avg / length_max are deliberately empty: on
+        numerics LENGTH(CAST(...)) is dominated by storage type (bigint
+        "0" is 1 char, double "0.0" is 3 chars) which adds presentation
+        noise to cross-platform compares.
 
-    Categorical min_val/max_val here are plain MIN/MAX(col) — alpha-first
-    and alpha-last values, no '=cnt' suffix (which requires the freq table
-    we're trying to avoid). Fine SQL re-emits min_val/max_val as 'val=cnt'.
+    CATEGORICAL — freq-table form. Mirrors the Oracle/Hadoop SAS path
+        (and the AWS fine path) so min/max come out as "val=cnt" and
+        length_avg / hash_sum are weighted by cnt. This costs one extra
+        GROUP BY col_expr scan vs the numeric branch, but for typical
+        categorical cardinalities (status codes, type flags, etc.) it's
+        cheap, and it makes Phase-1 rough cross-platform compares
+        directly comparable to the SAS side without any display fix-up.
+
+    n_unique uses precise COUNT(DISTINCT) on every code path so the
+    Athena side agrees exactly with the Oracle/Hadoop SAS side. An
+    earlier APPROX_DISTINCT (~2% HyperLogLog error) gave bogus Phase-1
+    mismatches on identical data and was dropped.
+
+    Sentinel translation: every reference to `col_q` is replaced by an
+    expression that maps configured sentinel values (-999, 'NA',
+    '9999-12-31', etc., per constants.NULL_SENTINELS["aws"]) to NULL
+    first. That keeps min/max/n_unique/n_missing/length_* aligned with
+    the Oracle / Hadoop side, which applies the same translation in its
+    SAS templates.
     """
-    lcol = f"LENGTH(CAST({col_q} AS VARCHAR))"
-    # Trino's XXHASH64 returns VARBINARY (8 bytes), not BIGINT, so a direct
-    # CAST(... AS DOUBLE) errors with "cannot cast varbinary to double".
-    # from_big_endian_64() interprets the 8-byte hash as a signed 64-bit
-    # integer; from there CAST AS DOUBLE accumulates safely.
-    # SUM as DOUBLE avoids BIGINT overflow on large tables; precision loss
-    # doesn't matter — both sides do the same arithmetic, equality is what
-    # counts. Cross-platform note: hash_sum only round-trips when left and
-    # right use the same hash function. Cross-platform compares (Oracle ↔
-    # AWS) ignore this field; n_total/n_missing/n_unique/min/max/length_*
-    # are the portable signals.
-    hash_expr = (
-        f"CAST(from_big_endian_64(xxhash64("
-        f"CAST(CAST({col_q} AS VARCHAR) AS VARBINARY))) AS DOUBLE)"
-    )
-    return f"""{cte_prefix}SELECT
+    from .base import apply_null_sentinels
+    col_expr = apply_null_sentinels(col_q, col_type, "athena")
+    is_categorical = (col_type or "").lower() == "categorical"
+
+    if not is_categorical:
+        # ---- NUMERIC branch: single-pass, no freq table. ----
+        # hash_sum left empty on numeric: CAST(0 AS VARCHAR) yields "0"
+        # on a Hive BIGINT but "0.0" on an Athena DOUBLE, so MD5 of the
+        # cast diverges purely from storage-type formatting and would
+        # flag every numeric column for spurious drift. Numeric Phase-1
+        # cross-platform compares stay carried by n_total / n_missing /
+        # n_unique / min / max -- all storage-form-independent.
+        return f"""{cte_prefix}SELECT
     {dt_select},
     '{col_name}' AS column_name,
     '{col_type}' AS col_type,
     COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col_q}) AS n_missing,
-    APPROX_DISTINCT({col_q}) AS n_unique,
+    COUNT(*) - COUNT({col_expr}) AS n_missing,
+    COUNT(DISTINCT {col_expr}) AS n_unique,
     '' AS mean,
     '' AS std,
-    CAST(MIN({col_q}) AS VARCHAR) AS min_val,
-    CAST(MAX({col_q}) AS VARCHAR) AS max_val,
+    CAST(MIN({col_expr}) AS VARCHAR) AS min_val,
+    CAST(MAX({col_expr}) AS VARCHAR) AS max_val,
     '' AS top_10,
-    CAST(AVG({lcol}) AS VARCHAR) AS length_avg,
-    CAST(MAX({lcol}) AS VARCHAR) AS length_max,
-    CAST(SUM({hash_expr}) AS VARCHAR) AS hash_sum
+    '' AS length_avg,
+    '' AS length_max,
+    '' AS hash_sum
 FROM {full_table}
 WHERE {wc}{group_by};"""
+
+    # ---- CATEGORICAL branch: freq-table form, val=cnt min/max. ----
+    # Pull the bare dt expression out of dt_select (callers always pass
+    # "<expr> AS dt") so we can use it both in the SELECT (constant or
+    # column) and to compose the GROUP BY for the freq CTE.
+    dt_select_clean = dt_select.strip()
+    if dt_select_clean.lower().endswith(" as dt"):
+        dt_expr_only = dt_select_clean[:-len(" AS dt")].strip()
+    else:
+        dt_expr_only = dt_select_clean
+    # When the caller asked for GROUP BY <dt_expr>, the freq CTE has to
+    # GROUP BY (dt_expr, col_expr). When dt is a constant literal the
+    # GROUP BY only needs col_expr (every row gets the same dt).
+    dt_group_expr = ""
+    if group_by.strip():
+        dt_group_expr = group_by.strip().replace("GROUP BY", "", 1).strip()
+    col_str_expr = f"CAST({col_expr} AS VARCHAR)"
+    if dt_group_expr:
+        freq_group_clause = f"GROUP BY {dt_group_expr}, {col_str_expr}"
+    else:
+        freq_group_clause = f"GROUP BY {col_str_expr}"
+
+    return f"""{cte_prefix}WITH _coarse_freq AS (
+    SELECT {dt_expr_only} AS dt,
+           {col_str_expr} AS p_col,
+           COUNT(*) AS cnt
+    FROM {full_table}
+    WHERE {wc}
+    {freq_group_clause}
+),
+_coarse_ranked AS (
+    SELECT dt, p_col, cnt,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(p_col), p_col) AS rnk_alpha,
+           COUNT(*)     OVER (PARTITION BY dt) AS k_alpha
+    FROM _coarse_freq WHERE p_col IS NOT NULL AND TRIM(p_col) <> ''
+),
+_coarse_totals AS (
+    SELECT dt,
+           SUM(cnt) AS n_total,
+           COALESCE(SUM(CASE WHEN p_col IS NULL OR TRIM(p_col) = '' THEN cnt ELSE 0 END), 0) AS n_missing,
+           SUM(CASE WHEN p_col IS NOT NULL AND TRIM(p_col) <> '' THEN 1 ELSE 0 END) AS n_unique
+    FROM _coarse_freq GROUP BY dt
+),
+_coarse_minmax AS (
+    SELECT dt,
+           MAX(CASE WHEN rnk_alpha = 1       THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
+           MAX(CASE WHEN rnk_alpha = k_alpha THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS max_val
+    FROM _coarse_ranked GROUP BY dt
+),
+_coarse_lenhash AS (
+    SELECT dt,
+           SUM(CAST(cnt AS DOUBLE) * LENGTH(p_col)) / NULLIF(SUM(cnt), 0) AS length_avg,
+           MAX(LENGTH(p_col)) AS length_max,
+           SUM(CAST(cnt AS DOUBLE) * CAST({_athena_portable_hash32("p_col")} AS DOUBLE)) AS hash_sum
+    FROM _coarse_ranked GROUP BY dt
+)
+SELECT t.dt,
+       '{col_name}' AS column_name,
+       '{col_type}' AS col_type,
+       t.n_total,
+       t.n_missing,
+       t.n_unique,
+       '' AS mean,
+       '' AS std,
+       mm.min_val,
+       mm.max_val,
+       '' AS top_10,
+       CAST(lh.length_avg AS VARCHAR) AS length_avg,
+       CAST(lh.length_max AS VARCHAR) AS length_max,
+       CAST(lh.hash_sum AS VARCHAR) AS hash_sum
+FROM _coarse_totals t
+LEFT JOIN _coarse_minmax  mm ON t.dt = mm.dt
+LEFT JOIN _coarse_lenhash lh ON t.dt = lh.dt
+ORDER BY t.dt;"""
 
 
 def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
@@ -1099,30 +1215,33 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                         blocks.append(sql.strip())
                         blocks.append("")
                         continue
+                    from .base import apply_null_sentinels
                     if is_num:
+                        col_expr = apply_null_sentinels(col_q, "numeric", "athena")
                         sql = f"""{cte_prefix}SELECT
     {trunc_expr} AS dt,
     '{col_name}' AS column_name,
     'numeric' AS col_type,
     COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col_q}) AS n_missing,
-    COUNT(DISTINCT {col_q}) AS n_unique,
-    CAST(AVG(CAST({col_q} AS DOUBLE)) AS VARCHAR) AS mean,
-    CAST(STDDEV_SAMP(CAST({col_q} AS DOUBLE)) AS VARCHAR) AS std,
-    CAST(MIN({col_q}) AS VARCHAR) AS min_val,
-    CAST(MAX({col_q}) AS VARCHAR) AS max_val,
+    COUNT(*) - COUNT({col_expr}) AS n_missing,
+    COUNT(DISTINCT {col_expr}) AS n_unique,
+    CAST(AVG(CAST({col_expr} AS DOUBLE)) AS VARCHAR) AS mean,
+    CAST(STDDEV_SAMP(CAST({col_expr} AS DOUBLE)) AS VARCHAR) AS std,
+    CAST(MIN({col_expr}) AS VARCHAR) AS min_val,
+    CAST(MAX({col_expr}) AS VARCHAR) AS max_val,
     '' AS top_10
 FROM {full_table}
 WHERE {wc_t_col}
 GROUP BY {trunc_expr};"""
                     else:
+                        col_expr = apply_null_sentinels(col_q, "categorical", "athena")
                         sql = f"""{cte_prefix}WITH freq AS (
     SELECT {trunc_expr} AS dt,
-           CAST({col_q} AS VARCHAR) AS p_col,
+           CAST({col_expr} AS VARCHAR) AS p_col,
            COUNT(*) AS cnt
     FROM {full_table}
     WHERE {wc_t_col}
-    GROUP BY {trunc_expr}, {col_q}
+    GROUP BY {trunc_expr}, {col_expr}
 ),
 ranked AS (
     SELECT dt, p_col, cnt,
@@ -1224,29 +1343,32 @@ ORDER BY s.dt;"""
                         blocks.append(sql.strip())
                         blocks.append("")
                         continue
+                    from .base import apply_null_sentinels
                     if is_num:
+                        col_expr = apply_null_sentinels(col_q, "numeric", "athena")
                         sql = f"""{cte_prefix}SELECT
     {dt_expr} AS dt,
     '{col_name}' AS column_name,
     'numeric' AS col_type,
     COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col_q}) AS n_missing,
-    COUNT(DISTINCT {col_q}) AS n_unique,
-    CAST(AVG(CAST({col_q} AS DOUBLE)) AS VARCHAR) AS mean,
-    CAST(STDDEV_SAMP(CAST({col_q} AS DOUBLE)) AS VARCHAR) AS std,
-    CAST(MIN({col_q}) AS VARCHAR) AS min_val,
-    CAST(MAX({col_q}) AS VARCHAR) AS max_val,
+    COUNT(*) - COUNT({col_expr}) AS n_missing,
+    COUNT(DISTINCT {col_expr}) AS n_unique,
+    CAST(AVG(CAST({col_expr} AS DOUBLE)) AS VARCHAR) AS mean,
+    CAST(STDDEV_SAMP(CAST({col_expr} AS DOUBLE)) AS VARCHAR) AS std,
+    CAST(MIN({col_expr}) AS VARCHAR) AS min_val,
+    CAST(MAX({col_expr}) AS VARCHAR) AS max_val,
     '' AS top_10
 FROM {full_table}
 WHERE {wc};"""
                     else:
+                        col_expr = apply_null_sentinels(col_q, "categorical", "athena")
                         sql = f"""{cte_prefix}WITH freq AS (
     SELECT
-        CAST({col_q} AS VARCHAR) AS p_col,
+        CAST({col_expr} AS VARCHAR) AS p_col,
         COUNT(*) AS cnt
     FROM {full_table}
     WHERE {wc}
-    GROUP BY {col_q}
+    GROUP BY {col_expr}
 ),
 ranked AS (
     SELECT p_col, cnt,

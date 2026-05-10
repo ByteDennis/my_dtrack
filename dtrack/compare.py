@@ -79,18 +79,27 @@ def _safe_float(val):
 
 
 def _stat_match_key(val, prefix, ndigits=STAT_ROUND_DECIMALS):
-    """Build a string match key for mean/std.
+    """Build a string match key for mean/std/min/max.
 
-    Returns f"{prefix}_{round(float(val), ndigits)}" so equality is a string
-    compare (no float drift). Returns None for missing values, or the raw
-    string with prefix if it doesn't parse as a float.
+    Equality is a string compare with float-drift handled via rounding to
+    STAT_ROUND_DECIMALS. Returns None for missing values.
+
+    For min/max specifically, two extra normalizations:
+      - strip the "cat=count" suffix (SAS fine path) so it agrees with the
+        plain "cat" form (Athena coarse path) when the alpha-first /
+        alpha-last value matches but the trailing count doesn't carry.
+      - numeric mins/maxes like "0" vs "0.00" round to the same key.
     """
     if val is None or val == '':
         return None
+    s = str(val).strip()
+    if prefix in ("mn", "mx") and "=" in s:
+        # Strip "=count" first; numeric round below sees just the value.
+        s = s.rsplit("=", 1)[0].strip()
     try:
-        return f"{prefix}_{round(float(val), ndigits)}"
+        return f"{prefix}_{round(float(s), ndigits)}"
     except (ValueError, TypeError):
-        return f"{prefix}_{val}"
+        return f"{prefix}_{s}"
 
 
 def _parse_top10(s):
@@ -341,39 +350,66 @@ def compare_column_stats(
                 "n_unique_diff": r_unique - l_unique,
             }
 
-            # min/max are coarse-safe: they're plain MIN/MAX(col) when the row
-            # came from coarse extraction, or "val=cnt" when from fine. The
-            # match key comparison handles both formats by string-equality.
+            # min/max are emitted as "val=cnt" on every coarse-and-fine path
+            # now (SAS Oracle/Hadoop categorical + Athena categorical), and
+            # as plain numeric scalars for numeric columns. The match key
+            # strips the "=cnt" suffix before comparing so older extractions
+            # (or any platform that drops the suffix) still compare equal on
+            # the value alone. For display we only strip whitespace — the
+            # trailing "=cnt" is useful information about which value
+            # actually anchors the alpha-min / alpha-max.
+            def _norm_min_max(v):
+                if v is None:
+                    return ""
+                return str(v).strip()
             l_min_key = _stat_match_key(left_stat["min_val"], "mn")
             r_min_key = _stat_match_key(right_stat["min_val"], "mn")
             l_max_key = _stat_match_key(left_stat["max_val"], "mx")
             r_max_key = _stat_match_key(right_stat["max_val"], "mx")
             comparison.update({
-                "min_left": left_stat["min_val"],
-                "min_right": right_stat["min_val"],
+                "min_left": _norm_min_max(left_stat["min_val"]),
+                "min_right": _norm_min_max(right_stat["min_val"]),
                 "min_match": (l_min_key == r_min_key) if (l_min_key is not None and r_min_key is not None) else None,
-                "max_left": left_stat["max_val"],
-                "max_right": right_stat["max_val"],
+                "max_left": _norm_min_max(left_stat["max_val"]),
+                "max_right": _norm_min_max(right_stat["max_val"]),
                 "max_match": (l_max_key == r_max_key) if (l_max_key is not None and r_max_key is not None) else None,
             })
 
-            # Coarse-only signals — present iff the row came from coarse (or
-            # newer fine) extraction. Cells where either side is empty get
-            # match=None ("unknown") so they don't trigger spurious diffs on
-            # legacy data that pre-dates these fields.
+            # Coarse-only signals. Four cases per field:
+            #   - both populated, agree            → match=True
+            #   - both populated, disagree         → match=False (diff)
+            #   - both empty                       → match=None
+            #   - one populated, the other empty   → see below
+            #
+            # length_avg / length_max are comparable across platforms (a
+            # string's length is universal), so asymmetric presence is a
+            # real diff worth flagging.
+            #
+            # hash_sum is NOT comparable across platforms — Oracle/Hive/
+            # Athena use different hash functions, so cross-platform hash
+            # comparison is intrinsically noise. Asymmetric presence on
+            # hash_sum stays match=None (don't paint every cross-platform
+            # column red just because the hashes don't share a function).
             for field in ("length_avg", "length_max", "hash_sum"):
-                lv = left_stat.get(field, "") or ""
-                rv = right_stat.get(field, "") or ""
+                raw_l = left_stat.get(field)
+                raw_r = right_stat.get(field)
+                lv = raw_l.strip() if isinstance(raw_l, str) else (raw_l or "")
+                rv = raw_r.strip() if isinstance(raw_r, str) else (raw_r or "")
                 if lv and rv:
                     if field == "hash_sum":
-                        # Hash sums round-trip as strings; equality only.
-                        match = (lv == rv)
+                        try:
+                            match = abs(float(lv) - float(rv)) < 1e-3
+                        except (ValueError, TypeError):
+                            match = (lv == rv)
                     else:
                         # length_* are numeric — round to handle "12.0" vs "12".
                         try:
-                            match = abs(float(lv) - float(rv)) < 1e-9
+                            match = abs(float(lv) - float(rv)) < 1e-4
                         except (ValueError, TypeError):
                             match = (lv == rv)
+                elif lv or rv:
+                    # Asymmetric presence.
+                    match = None if field == "hash_sum" else False
                 else:
                     match = None
                 comparison[f"{field}_left"] = lv

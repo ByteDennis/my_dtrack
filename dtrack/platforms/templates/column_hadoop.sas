@@ -19,7 +19,7 @@
    native DATE, etc.). */
 data _hdp_col_map;
     length qname $64 dsname $32 conn_macro $32
-           col_name $64 col_type $12
+           col_name $64 col_expr $2000 col_type $12
            date_col $64 vintage $12 vintage_expr $500
            date_from $64 date_to $64
            from_table $500 where_clause $2000
@@ -41,19 +41,41 @@ run;
     proc sql inobs=max;
         connect to hadoop (%&_conn_macro);
         %if %upcase(&_col_type) = NUMERIC %then %do;
+            /* &_col_expr is the sentinel-translated column expression
+               (CASE WHEN col IN (-999, ...) THEN NULL ELSE col END),
+               built in Python and passed through. Aggregates use it so
+               sentinel values collapse to NULL; the literal output column
+               name still uses &_col_name_lit. length_avg/length_max/
+               hash_sum mirror the Athena coarse path so Phase-1 rough
+               column comparison sees structural drift hints on both
+               sides. */
             create table _c_one as
             select * from connection to hadoop (
                 SELECT &_vintage_expr AS dt,
                        &_col_name_lit AS column_name,
                        'numeric' AS col_type,
                        COUNT(*) AS n_total,
-                       COUNT(*) - COUNT(&_col_name) AS n_missing,
+                       COUNT(*) - COUNT(&_col_expr) AS n_missing,
                        &_n_unique_expr AS n_unique,
-                       CAST(AVG(CAST(&_col_name AS DOUBLE)) AS STRING) AS mean,
-                       CAST(STDDEV_SAMP(CAST(&_col_name AS DOUBLE)) AS STRING) AS std,
-                       CAST(MIN(&_col_name) AS STRING) AS min_val,
-                       CAST(MAX(&_col_name) AS STRING) AS max_val,
-                       CAST('' AS STRING) AS top_10
+                       CAST(AVG(CAST(&_col_expr AS DOUBLE)) AS STRING) AS mean,
+                       CAST(STDDEV_SAMP(CAST(&_col_expr AS DOUBLE)) AS STRING) AS std,
+                       CAST(MIN(&_col_expr) AS STRING) AS min_val,
+                       CAST(MAX(&_col_expr) AS STRING) AS max_val,
+                       CAST('' AS STRING) AS top_10,
+                       /* length_avg / length_max left empty on numeric:
+                          LENGTH(CAST(num AS STRING)) is dominated by
+                          storage type (Hive BIGINT prints "0" but DOUBLE
+                          prints "0.0"), so cross-platform compares pick
+                          up presentation drift rather than data drift.
+                          Only emit length stats on categorical cols. */
+                       CAST('' AS STRING) AS length_avg,
+                       CAST('' AS STRING) AS length_max,
+                       /* hash_sum left empty: Hive HASH() and Athena
+                          xxhash64 sums never agree on identical data, so
+                          cross-platform Phase-1 compares would always
+                          flag hash mismatch. Comparison treats empty as
+                          match=None (unknown) instead of a false diff. */
+                       CAST('' AS STRING) AS hash_sum
                 FROM &_from_table
                 WHERE &_where_clause
                 GROUP BY &_vintage_expr
@@ -66,16 +88,21 @@ run;
                used to sit on top. Alpha-rank-weighted mean/std, alpha-bound
                min/max, and top_10 are computed SAS-side (local data step,
                unrelated to Hive's collect_list/sort_array reducer code
-               path). */
+               path).
+
+               &_col_expr feeds the freq aggregation so sentinel string
+               values (e.g. 'NA', '#N/A') map to NULL upstream and are
+               folded into the missing-row bucket instead of forming
+               their own categories. */
             create table _hdp_freq_ as
             select * from connection to hadoop (
                 SELECT &_vintage_expr AS dt,
-                       SUBSTR(CAST(&_col_name AS STRING), 1, 200) AS p_col,
+                       SUBSTR(CAST(&_col_expr AS STRING), 1, 200) AS p_col,
                        COUNT(*) AS cnt
                 FROM &_from_table
                 WHERE &_where_clause
                 GROUP BY &_vintage_expr,
-                         SUBSTR(CAST(&_col_name AS STRING), 1, 200)
+                         SUBSTR(CAST(&_col_expr AS STRING), 1, 200)
             );
         %end;
         disconnect from hadoop;
@@ -95,7 +122,8 @@ run;
     %end;
 
     data _c_one;
-        length dt $32 column_name $32 col_type $12 top_10 $4000;
+        length dt $32 column_name $32 col_type $12 top_10 $4000
+               length_avg $32 length_max $32 hash_sum $32;
         set _c_one;
     run;
     proc append base=&_cache data=_c_one force; run;
@@ -138,6 +166,7 @@ run;
             ' call symputx("_conn_macro", ',   quote(strip(conn_macro)),   ');',
             ' call symputx("_col_name", ',     quote(strip(col_name)),     ');',
             ' call symputx("_col_name_lit", ', quote(cats("'", strip(col_name), "'")), ');',
+            ' call symputx("_col_expr", ',     quote(strip(col_expr)),     ');',
             ' call symputx("_col_type", ',     quote(strip(col_type)),     ');',
             ' call symputx("_date_col", ',     quote(strip(date_col)),     ');',
             ' call symputx("_vintage", ',      quote(strip(vintage)),      ');',

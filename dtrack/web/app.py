@@ -1891,10 +1891,24 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
                     "std_match": comp.get("std_match"),
                     "min_left": comp.get("min_left", ""),
                     "min_right": comp.get("min_right", ""),
+                    "min_match": comp.get("min_match"),
                     "max_left": comp.get("max_left", ""),
                     "max_right": comp.get("max_right", ""),
+                    "max_match": comp.get("max_match"),
                     "top_10_left": comp.get("top_10_left", ""),
                     "top_10_right": comp.get("top_10_right", ""),
+                    # Coarse signals — emitted by every fine SQL too. Empty
+                    # cells (legacy rows pre-dating these fields) get
+                    # match=None so they don't paint as a diff.
+                    "length_avg_left": comp.get("length_avg_left", ""),
+                    "length_avg_right": comp.get("length_avg_right", ""),
+                    "length_avg_match": comp.get("length_avg_match"),
+                    "length_max_left": comp.get("length_max_left", ""),
+                    "length_max_right": comp.get("length_max_right", ""),
+                    "length_max_match": comp.get("length_max_match"),
+                    "hash_sum_left": comp.get("hash_sum_left", ""),
+                    "hash_sum_right": comp.get("hash_sum_right", ""),
+                    "hash_sum_match": comp.get("hash_sum_match"),
                     "has_diff": has_diff,
                 })
 

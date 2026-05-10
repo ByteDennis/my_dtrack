@@ -115,6 +115,10 @@ def _n_unique_expr(source: str, col: str, tbl_cfg=None, config=None) -> str:
     SAS-source and libname mode keep `COUNT(DISTINCT col)` regardless —
     SAS proc sql doesn't have an approx function, and SAS/ACCESS already
     pushes count-distinct down to the platform-native function over JDBC.
+
+    `col` is expected to already be the sentinel-wrapped column expression
+    (`apply_null_sentinels` output). Counting distinct on the wrapped form
+    is what makes sentinel and real-null rows collapse to the same bucket.
     """
     s = (source or '').lower()
     if not _approx_distinct_enabled(tbl_cfg=tbl_cfg, config=config) or s in ('sas',):
@@ -127,6 +131,24 @@ def _n_unique_expr(source: str, col: str, tbl_cfg=None, config=None) -> str:
         e = _approx_distinct_error()
         return f"approx_distinct({col}, {e})" if e else f"approx_distinct({col})"
     return f"COUNT(DISTINCT {col})"
+
+
+def _col_expr_for_source(source: str, col_name: str, col_type: str) -> str:
+    """Build the sentinel-translated column expression for an Oracle/Hadoop
+    passthrough SQL pulled from a SAS step.
+
+    `col_name` is the bare DB identifier (e.g. `EVENT_DATE`); the SAS
+    templates pre-quote nothing, so we hand back a raw `CASE WHEN ... END`.
+    `col_type` is the dtrack tag ('numeric' / 'categorical') -- the helper
+    picks the right sentinel list. Returns `col_name` unchanged when no
+    sentinels apply (oracle/hadoop sentinel lists empty for this kind).
+    """
+    from .base import apply_null_sentinels
+    # `source` maps to the dialect arg directly for oracle/hadoop.
+    dialect = (source or "oracle").lower()
+    if dialect not in ("oracle", "hadoop"):
+        dialect = "oracle"
+    return apply_null_sentinels(col_name, col_type, dialect)
 
 
 def _is_libname_table(tbl_cfg):
@@ -796,27 +818,59 @@ _SAS_EXPORT_HELPER = r"""
     run;
 
     /* Weighted mean = SUM(cnt*rnk)/SUM(cnt);
-       std = sqrt(SUM(cnt*rnk^2)/SUM(cnt) - mean^2). Output CHAR. */
+       std = sqrt(SUM(cnt*rnk^2)/SUM(cnt) - mean^2). Output CHAR.
+
+       We also compute length_avg / length_max here -- weighted average
+       of LENGTH(p_col) by cnt, and the max length seen. This is the
+       same step that produces mean/std, so adding two columns can't
+       desync row counts (which is what broke an earlier separate-table
+       attempt that caused proc append to lose rows). hash_sum stays
+       empty -- cross-platform SAS-vs-Athena hash compare is intrinsically
+       different-function and would always flag mismatch otherwise. */
+    /* p_col is always character here -- the freq table is created from
+       SUBSTR(TO_CHAR(&_col_expr), 1, 200) on the DB side, so we can use
+       it directly without vvalue() (which is data-step only and errors
+       in proc sql).
+
+       sum_hash is the cnt-weighted MD5-truncated hash, matching the
+       Athena coarse recipe (_athena_portable_hash32):
+         TRIM(p_col) -> MD5 -> first 8 hex chars (32 bits) -> bigint
+       So an unchanged categorical column produces the same hash_sum on
+       both engines -- and any value drift surfaces as a hash_sum diff,
+       which is the drill-down signal we want on Phase-1 cross-platform
+       compares. 32 bits keeps per-row values <= 2^31 so cnt-weighted
+       sums over typical bucket sizes don't overflow SAS's double
+       (~2^53 safe integer range). */
     proc sql noprint;
         create table _ccf_stats_ as
         select dt,
                sum(cnt) as sum_cnt,
                sum(cnt * rnk) as sum_cnt_rnk,
-               sum(cnt * rnk * rnk) as sum_cnt_rnk2
+               sum(cnt * rnk * rnk) as sum_cnt_rnk2,
+               sum(cnt * length(strip(p_col))) as sum_cnt_len,
+               max(length(strip(p_col))) as max_len,
+               sum(cnt * input(substr(put(md5(trim(p_col)), $hex32.), 1, 8), hex8.))
+                   as sum_hash
         from _ccf_ranked_ group by dt;
     quit;
-    data _ccf_stats2_(keep=dt mean std);
-        length mean std $32;
+    data _ccf_stats2_(keep=dt mean std length_avg length_max hash_sum);
+        length mean std $32 length_avg length_max $32 hash_sum $32;
         set _ccf_stats_;
         if sum_cnt > 0 then do;
             _m = sum_cnt_rnk / sum_cnt;
             _s = sqrt(max(sum_cnt_rnk2 / sum_cnt - _m*_m, 0));
             mean = strip(put(_m, best32.));
             std  = strip(put(_s, best32.));
+            length_avg = strip(put(sum_cnt_len / sum_cnt, best32.));
+            length_max = strip(put(max_len, best32.));
+            hash_sum   = strip(put(sum_hash, best32.));
         end;
         else do;
             mean = '';
             std  = '';
+            length_avg = '';
+            length_max = '';
+            hash_sum   = '';
         end;
     run;
 
@@ -836,16 +890,24 @@ _SAS_EXPORT_HELPER = r"""
         end;
     run;
 
-    /* Merge totals + stats + min/max + miss + top_10. */
-    proc sort data=_ccf_meta_;   by dt; run;
-    proc sort data=_ccf_miss_;   by dt; run;
-    proc sort data=_ccf_stats2_; by dt; run;
-    proc sort data=_ccf_mins_;   by dt; run;
-    proc sort data=_ccf_maxs_;   by dt; run;
-    proc sort data=_ccf_top10_;  by dt; run;
+    /* Merge totals + stats + min/max + miss + top_10. length_avg /
+       length_max / hash_sum are intentionally left empty on the SAS
+       categorical path: a previous attempt to compute them from the
+       freq table via _ccf_lenhash_ produced cases where the data step
+       did not emit rows, which broke the proc append in the caller --
+       leaving cache._cs_<dsname> with only the first row. The
+       comparison layer treats empty length/hash as match=None
+       ("unknown") so this is the safe default. */
+    proc sort data=_ccf_meta_;     by dt; run;
+    proc sort data=_ccf_miss_;     by dt; run;
+    proc sort data=_ccf_stats2_;   by dt; run;
+    proc sort data=_ccf_mins_;     by dt; run;
+    proc sort data=_ccf_maxs_;     by dt; run;
+    proc sort data=_ccf_top10_;    by dt; run;
     data &out_ds;
         length column_name $32 col_type $12 top_10 $4000
-               mean $32 std $32 min_val $400 max_val $400;
+               mean $32 std $32 min_val $400 max_val $400
+               length_avg $32 length_max $32 hash_sum $32;
         merge _ccf_meta_(in=a)
               _ccf_stats2_(in=b)
               _ccf_mins_(in=c)
@@ -856,10 +918,17 @@ _SAS_EXPORT_HELPER = r"""
         if a;
         column_name = "&col";
         col_type = 'categorical';
+        /* hash_sum / length_avg / length_max come from _ccf_stats2_ via
+           the portable MD5-truncated recipe -- agrees with the Athena
+           coarse SQL on identical data so cross-platform drift surfaces
+           as a real hash_sum diff. */
         if not e then n_missing = 0;
         if not c then min_val = '';
         if not d then max_val = '';
-        if not b then do; mean = ''; std = ''; end;
+        if not b then do;
+            mean = ''; std = '';
+            length_avg = ''; length_max = ''; hash_sum = '';
+        end;
         if not f then top_10 = '';
     run;
 
@@ -1473,11 +1542,16 @@ def _render_col_template(tpl_name, rows, rows_placeholder,
         # in _gen_sas_col_driver always sets it via _n_unique_expr().
         n_unique_expr = r.get('n_unique_expr',
                               f"COUNT(DISTINCT {r['col_name']})")
+        # col_expr is the sentinel-wrapped column expression. For legacy
+        # callers (and the existing back-compat default in n_unique_expr)
+        # fall back to the bare col_name when not provided.
+        col_expr = r.get('col_expr') or r['col_name']
         row_lines.append(
             f"    qname='{_sas_escape(r['qname'])}'; "
             f"dsname='{_sas_escape(r['dsname'])}'; "
             f"conn_macro='{_sas_escape(r['conn_macro'])}'; "
             f"col_name='{_sas_escape(r['col_name'])}'; "
+            f"col_expr='{_sas_escape(col_expr)}'; "
             f"col_type='{r['col_type']}'; "
             f"date_col='{_sas_escape(r['date_col'])}'; "
             f"vintage='{_sas_escape(r['vintage'])}'; "
@@ -1638,12 +1712,21 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None):
         full_where = _combine_where(spec['where_clause'], user_where)
         for col_name, col_dtype in spec['col_list']:
             col_type = 'numeric' if is_numeric_type(col_dtype, is_oracle=numeric_is_oracle) else 'categorical'
+            # Sentinel-wrapped column expression. Every aggregate in the
+            # SAS template (AVG/STDDEV/MIN/MAX/COUNT(DISTINCT)) sees this
+            # instead of the bare col so configured sentinel values
+            # (constants.NULL_SENTINELS[<source>]) collapse to NULL before
+            # the aggregate runs. The literal output `'col_name' AS
+            # column_name` still uses the bare name; col_expr only swaps
+            # in at aggregation sites.
+            col_expr = _col_expr_for_source(tbl_source, col_name, col_type)
             rows_bucket.append({
                 'qname': qname,
                 'dsname': dsname,
                 'conn_macro': conn_macro,
                 'col_name': col_name,
                 'col_type': col_type,
+                'col_expr': col_expr,
                 'date_col': spec['date_col'],
                 'vintage': spec['vintage'],
                 'vintage_expr': spec['vintage_expr'],
@@ -1651,9 +1734,9 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None):
                 'date_from': spec['date_from'],
                 'date_to': spec['date_to'],
                 'where_clause': full_where,
-                # Per-platform n_unique expression. Resolved via the
-                # approx_distinct fallback chain (pair → global → env → off).
-                'n_unique_expr': _n_unique_expr(tbl_source, col_name,
+                # Per-platform n_unique expression — uses col_expr so the
+                # distinct-count is taken over sentinel-translated values.
+                'n_unique_expr': _n_unique_expr(tbl_source, col_expr,
                                                 tbl_cfg=tbl_cfg, config=config),
             })
         print(f"[{tbl_source} col] {qname}: {n_cols} cols (db-side "

@@ -106,6 +106,117 @@ def quote_ident(name, dialect="oracle"):
     return f'"{name}"'
 
 
+def _sentinel_dialect_key(dialect):
+    """Map SQL dialect string to NULL_SENTINELS top-level key."""
+    d = (dialect or "").lower()
+    if d in ("athena", "trino", "aws"):
+        return "aws"
+    if d in ("hadoop", "hive"):
+        return "hadoop"
+    if d == "sas":
+        return "sas"
+    return "oracle"
+
+
+def _is_numeric_col_type(col_type):
+    """True if col_type label looks numeric (NUMBER/DOUBLE/INT/...).
+
+    Accepts both the high-level dtrack tag ('numeric' / 'categorical') and
+    raw DB type strings. Used by apply_null_sentinels() to pick the right
+    sentinel list.
+    """
+    if not col_type:
+        return False
+    t = str(col_type).strip().lower()
+    if t == "numeric":
+        return True
+    if t in ("categorical", "string", "char", "varchar", "text"):
+        return False
+    return is_numeric_type(t)
+
+
+def _is_date_col_type(col_type):
+    """True if col_type label looks like a date/timestamp."""
+    if not col_type:
+        return False
+    t = str(col_type).strip().lower()
+    return "date" in t or "time" in t
+
+
+def _format_sentinel_literal(val, kind, dialect):
+    """Render a sentinel value as a SQL literal for the given dialect.
+
+    - numeric: bare number (no quotes)
+    - string:  single-quoted, with embedded quotes doubled
+    - date:    DATE 'YYYY-MM-DD' on Oracle/Hadoop/Athena; SAS uses 'YYYY-MM-DD'd
+    """
+    if kind == "numeric":
+        return str(val)
+    if kind == "string":
+        esc = str(val).replace("'", "''")
+        return f"'{esc}'"
+    # date
+    s = str(val)
+    if dialect == "sas":
+        return f"'{s}'d"
+    return f"DATE '{s}'"
+
+
+def apply_null_sentinels(col_ref, col_type, dialect, sentinels=None,
+                         include_blank=True):
+    """Wrap a SQL column reference with sentinel-to-NULL translation.
+
+    Returns a SQL expression equivalent to:
+        CASE WHEN col IN (<sentinels>) [OR TRIM(col)='']
+             THEN NULL ELSE col END
+
+    The wrapped expression is what stats SQL should feed to MIN/MAX/AVG/
+    COUNT(DISTINCT)/LENGTH/etc. so sentinel rows (-999 for missing, 9999-12-31
+    for "infinity", etc.) collapse into NULL and don't skew the result.
+
+    Args:
+        col_ref: the dialect-quoted column reference, e.g. `"col_name"` or
+            `&_col_name` for SAS-templated SQL.
+        col_type: tag indicating numeric / categorical / date so we pick the
+            right sentinel list. Accepts dtrack tags ('numeric',
+            'categorical') or raw DB types ('NUMBER', 'VARCHAR2', 'DATE').
+        dialect: 'oracle', 'hadoop' (Hive), 'athena', 'sas'. Selects literal
+            formatting + sentinel set.
+        sentinels: optional explicit sentinel list; when None, falls back to
+            constants.NULL_SENTINELS for the dialect/type combo.
+        include_blank: also map empty / whitespace-only strings to NULL on
+            string columns. Aligned with SAS "is missing" semantics on
+            Athena/Hive where '' isn't equivalent to NULL.
+
+    No-ops (returns col_ref unchanged) when no sentinels apply.
+    """
+    from ..constants import NULL_SENTINELS
+
+    is_numeric = _is_numeric_col_type(col_type)
+    is_date = _is_date_col_type(col_type)
+    kind = "numeric" if is_numeric else ("date" if is_date else "string")
+
+    if sentinels is None:
+        key = _sentinel_dialect_key(dialect)
+        sentinels = NULL_SENTINELS.get(key, {}).get(kind, []) or []
+
+    literals = [_format_sentinel_literal(v, kind, dialect) for v in sentinels]
+
+    conds = []
+    if literals:
+        conds.append(f"{col_ref} IN ({', '.join(literals)})")
+    if include_blank and kind == "string" and dialect != "oracle":
+        # Oracle collapses '' to NULL natively, so the IS NULL check the
+        # caller emits already covers blank. Athena/Hive/SAS distinguish
+        # '' from NULL and need the TRIM check to align.
+        conds.append(f"TRIM({col_ref}) = ''")
+
+    if not conds:
+        return col_ref
+
+    return f"CASE WHEN {' OR '.join(conds)} THEN NULL ELSE {col_ref} END"
+
+
 def qualified_name(tbl_cfg):
     """Derive storage/file name: {source}_{name}."""
     source = tbl_cfg.get('source', '')
@@ -615,29 +726,38 @@ def build_stats_sql(table, col, date_col, where="", col_type="numeric", dialect=
     # stay as-is for the output-name literal in the SELECT.
     col_ref = quote_ident(col, dialect)
     date_col_ref = quote_ident(date_col, dialect)
+    # Wrap the column reference with the sentinel-to-NULL translation so
+    # missing-value sentinels (-999, '9999-12-31', 'NA', ...) collapse to
+    # NULL before any aggregate sees them. After this wrap n_missing /
+    # n_unique / min / max / mean / std all agree across platforms even
+    # when one side persists sentinels and the other uses real NULLs.
+    col_expr = apply_null_sentinels(col_ref, col_type, dialect)
 
     if col_type == "numeric":
-        missing = f"COUNT(*) - COUNT({col_ref})" if is_athena else f"SUM(CASE WHEN {col_ref} IS NULL THEN 1 ELSE 0 END)"
-        avg_expr = f"AVG(CAST({col_ref} AS DOUBLE))" if is_athena else f"AVG({col_ref})"
-        std_expr = f"STDDEV(CAST({col_ref} AS DOUBLE))" if is_athena else f"STDDEV({col_ref})"
+        # Numeric n_missing = total - non-null after sentinel translation.
+        missing = f"COUNT(*) - COUNT({col_expr})"
+        avg_expr = f"AVG(CAST({col_expr} AS DOUBLE))" if is_athena else f"AVG({col_expr})"
+        std_expr = f"STDDEV(CAST({col_expr} AS DOUBLE))" if is_athena else f"STDDEV({col_expr})"
         return cte_prefix + f"""
 SELECT {date_col_ref} AS dt, '{col}' AS column_name, 'numeric' AS col_type,
-    COUNT(*) AS n_total, {missing} AS n_missing, COUNT(DISTINCT {col_ref}) AS n_unique,
+    COUNT(*) AS n_total, {missing} AS n_missing, COUNT(DISTINCT {col_expr}) AS n_unique,
     {avg_expr} AS mean, {std_expr} AS std,
-    MIN({col_ref}) AS min_val, MAX({col_ref}) AS max_val
+    MIN({col_expr}) AS min_val, MAX({col_expr}) AS max_val
 FROM {table}
 WHERE 1=1 {where_clause}
 GROUP BY {date_col_ref}""".strip()
 
     # Categorical branch: rank-weighted stats based on alpha (UPPER) ordering.
-    cast_expr = f"CAST({col_ref} AS VARCHAR)" if is_athena else f"TO_CHAR({col_ref})"
+    # col_expr already wraps the column with sentinel-to-NULL translation,
+    # so 'NA' / '#N/A' / '.' etc. collapse before the freq table groups them.
+    cast_expr = f"CAST({col_expr} AS VARCHAR)" if is_athena else f"TO_CHAR({col_expr})"
     cnt_to_str = "CAST(cnt AS VARCHAR)" if is_athena else "cnt"
     # Use DOUBLE on Athena to avoid BIGINT overflow on cnt*rnk*rnk.
     cnt_num = "CAST(cnt AS DOUBLE)" if is_athena else "cnt"
-    # Missing semantics: SAS "is missing" treats both NULL and blank-string
-    # as missing for character variables. Athena/Trino IS NULL only matches
-    # actual NULL, so we add a TRIM check to align. Oracle treats '' as
-    # NULL natively, so the extra check is unnecessary there.
+    # Missing semantics, post-sentinel: count NULL on every platform. We
+    # also fold blank/whitespace strings into "missing" on engines that
+    # distinguish '' from NULL (Athena/Hive/SAS) — Oracle collapses '' to
+    # NULL natively so the extra TRIM check is a no-op there.
     if is_athena:
         present_cond = "p_col IS NOT NULL AND TRIM(p_col) <> ''"
         missing_cond = "p_col IS NULL OR TRIM(p_col) = ''"
@@ -708,13 +828,17 @@ def build_top10_sql(table, col, date_col, where="", dialect="oracle"):
     alias = " t" if dialect == "athena" else ""
     col_ref = quote_ident(col, dialect)
     date_col_ref = quote_ident(date_col, dialect)
+    # Sentinel-translated column reference — keeps sentinel rows out of
+    # the top-10. Type defaults to 'categorical' since top-10 only ever
+    # runs on categorical columns; the string sentinel set is correct.
+    col_expr = apply_null_sentinels(col_ref, "categorical", dialect)
     return f"""
 SELECT dt, val, cnt FROM (
-    SELECT {date_col_ref} AS dt, CAST({col_ref} AS VARCHAR(200)) AS val, COUNT(*) AS cnt,
+    SELECT {date_col_ref} AS dt, CAST({col_expr} AS VARCHAR(200)) AS val, COUNT(*) AS cnt,
            ROW_NUMBER() OVER (PARTITION BY {date_col_ref} ORDER BY COUNT(*) DESC) AS rn
     FROM {table}
-    WHERE {col_ref} IS NOT NULL {where_clause}
-    GROUP BY {date_col_ref}, {col_ref}
+    WHERE {col_expr} IS NOT NULL {where_clause}
+    GROUP BY {date_col_ref}, {col_expr}
 ){alias} WHERE rn <= 10""".strip()
 
 

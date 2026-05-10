@@ -263,7 +263,12 @@ def test_libname_col_emits_per_run_banner_in_sas_log(isolated_env, tmp_path):
 
 
 def test_approx_distinct_off_by_default_oracle(isolated_env, tmp_path):
-    """Without DTRACK_APPROX_DISTINCT, Oracle col gen emits COUNT(DISTINCT)."""
+    """Without DTRACK_APPROX_DISTINCT, Oracle col gen emits COUNT(DISTINCT).
+
+    The argument to COUNT(DISTINCT ...) is the sentinel-translated form
+    (CASE WHEN AMT IN (...) THEN NULL ELSE AMT END); we only assert that
+    COUNT(DISTINCT picks up AMT, not the exact wrapper text.
+    """
     cfg_path = tmp_path / "cfg.json"
     out_dir = tmp_path / "out"
     out_dir.mkdir()
@@ -274,7 +279,7 @@ def test_approx_distinct_off_by_default_oracle(isolated_env, tmp_path):
     gen_sas(str(cfg_path), str(out_dir), types=["col"])
 
     sas = sorted(out_dir.glob("*.sas"))[0].read_text()
-    assert "COUNT(DISTINCT AMT)" in sas
+    assert "COUNT(DISTINCT" in sas and "ELSE AMT END" in sas
     assert "APPROX_COUNT_DISTINCT" not in sas
 
 
@@ -291,8 +296,9 @@ def test_approx_distinct_on_oracle(isolated_env, tmp_path, monkeypatch):
     gen_sas(str(cfg_path), str(out_dir), types=["col"])
 
     sas = sorted(out_dir.glob("*.sas"))[0].read_text()
-    assert "APPROX_COUNT_DISTINCT(AMT)" in sas
-    assert "COUNT(DISTINCT AMT)" not in sas
+    # Approx mode wraps the sentinel-translated col expression, not bare AMT.
+    assert "APPROX_COUNT_DISTINCT(" in sas and "ELSE AMT END" in sas
+    assert "COUNT(DISTINCT" not in sas
 
 
 def test_approx_distinct_on_hadoop(isolated_env, tmp_path, monkeypatch):
@@ -327,7 +333,7 @@ def test_approx_distinct_on_hadoop(isolated_env, tmp_path, monkeypatch):
     gen_sas(str(cfg_path), str(out_dir), types=["col"])
 
     sas = sorted(out_dir.glob("*.sas"))[0].read_text()
-    assert "APPROX_DISTINCT(AMT)" in sas
+    assert "APPROX_DISTINCT(" in sas and "ELSE AMT END" in sas
 
 
 def test_approx_distinct_pair_level_overrides_env(isolated_env, tmp_path, monkeypatch):
@@ -357,7 +363,7 @@ def test_approx_distinct_pair_level_overrides_env(isolated_env, tmp_path, monkey
     gen_sas(str(cfg_path), str(out_dir), types=["col"])
     sas = sorted(out_dir.glob("*.sas"))[0].read_text()
     # Pair set False → exact wins, even though env says approx.
-    assert "COUNT(DISTINCT AMT)" in sas
+    assert "COUNT(DISTINCT" in sas and "ELSE AMT END" in sas
     assert "APPROX_COUNT_DISTINCT" not in sas
 
 
@@ -386,7 +392,7 @@ def test_approx_distinct_global_default_in_metadata(isolated_env, tmp_path, monk
     from dtrack.platforms.oracle import gen_sas
     gen_sas(str(cfg_path), str(out_dir), types=["col"])
     sas = sorted(out_dir.glob("*.sas"))[0].read_text()
-    assert "APPROX_COUNT_DISTINCT(AMT)" in sas
+    assert "APPROX_COUNT_DISTINCT(" in sas and "ELSE AMT END" in sas
 
 
 def test_approx_distinct_pair_level_overrides_global(isolated_env, tmp_path, monkeypatch):
@@ -415,7 +421,7 @@ def test_approx_distinct_pair_level_overrides_global(isolated_env, tmp_path, mon
     from dtrack.platforms.oracle import gen_sas
     gen_sas(str(cfg_path), str(out_dir), types=["col"])
     sas = sorted(out_dir.glob("*.sas"))[0].read_text()
-    assert "APPROX_COUNT_DISTINCT(AMT)" in sas
+    assert "APPROX_COUNT_DISTINCT(" in sas and "ELSE AMT END" in sas
 
 
 def test_approx_distinct_does_not_affect_libname_path(isolated_env, tmp_path, monkeypatch):
@@ -464,10 +470,10 @@ def test_build_stats_sql_athena_quotes_leading_digit_col():
     sql = build_stats_sql("trades", "123_col", "trade_date",
                           col_type="numeric", dialect="athena")
     # Reference positions are quoted; the literal output column-name string
-    # keeps the unquoted form (it's the value, not an identifier).
-    assert 'COUNT("123_col")' in sql
-    assert 'AVG(CAST("123_col" AS DOUBLE))' in sql
-    assert 'MIN("123_col") AS min_val' in sql
+    # keeps the unquoted form (it's the value, not an identifier). Every
+    # aggregate now wraps the quoted ref in a sentinel CASE expression.
+    assert '"123_col"' in sql
+    assert 'CASE WHEN "123_col" IN' in sql
     assert "'123_col' AS column_name" in sql  # output literal stays bare-quoted
 
 
@@ -475,7 +481,8 @@ def test_build_stats_sql_athena_does_not_overquote_normal_col():
     from dtrack.platforms.base import build_stats_sql
     sql = build_stats_sql("trades", "amount", "trade_date",
                           col_type="numeric", dialect="athena")
-    assert "COUNT(amount)" in sql
+    # Bare-valid name stays unquoted inside the sentinel CASE wrapper.
+    assert "ELSE amount END" in sql
     assert '"amount"' not in sql
 
 

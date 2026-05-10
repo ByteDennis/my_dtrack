@@ -20,7 +20,7 @@
    string_compact -> concat(substr(col,1,4),'-01-01'), etc.). */
 data _ora_col_map;
     length qname $64 dsname $32 conn_macro $32
-           col_name $64 col_type $12
+           col_name $64 col_expr $2000 col_type $12
            date_col $64 vintage $12 vintage_expr $500
            date_from $64 date_to $64
            from_table $500 where_clause $2000
@@ -48,19 +48,38 @@ run;
     proc sql;
         %&_conn_macro
         %if %upcase(&_col_type) = NUMERIC %then %do;
+            /* &_col_expr is the sentinel-translated column expression
+               (CASE WHEN col IN (-999, ...) THEN NULL ELSE col END), built
+               in Python via apply_null_sentinels and threaded through the
+               driver. Aggregates use it so sentinel values collapse to
+               NULL; the literal output name still uses &_col_name_lit. */
             create table _c_one as
             select * from connection to oracle (
                 SELECT &_vintage_expr AS dt,
                        &_col_name_lit AS column_name,
                        'numeric' AS col_type,
                        COUNT(*) AS n_total,
-                       COUNT(*) - COUNT(&_col_name) AS n_missing,
+                       COUNT(*) - COUNT(&_col_expr) AS n_missing,
                        &_n_unique_expr AS n_unique,
-                       TO_CHAR(AVG(&_col_name)) AS mean,
-                       TO_CHAR(STDDEV_SAMP(&_col_name)) AS std,
-                       TO_CHAR(MIN(&_col_name)) AS min_val,
-                       TO_CHAR(MAX(&_col_name)) AS max_val,
-                       CAST('' AS VARCHAR2(4000)) AS top_10
+                       TO_CHAR(AVG(&_col_expr)) AS mean,
+                       TO_CHAR(STDDEV_SAMP(&_col_expr)) AS std,
+                       TO_CHAR(MIN(&_col_expr)) AS min_val,
+                       TO_CHAR(MAX(&_col_expr)) AS max_val,
+                       CAST('' AS VARCHAR2(4000)) AS top_10,
+                       /* length_avg / length_max left empty on numeric:
+                          LENGTH(TO_CHAR(num)) is dominated by storage
+                          type (NUMBER displays differently than DOUBLE),
+                          so cross-platform compares pick up presentation
+                          drift rather than data drift. Only emit length
+                          stats on categorical columns. */
+                       CAST('' AS VARCHAR2(32)) AS length_avg,
+                       CAST('' AS VARCHAR2(32)) AS length_max,
+                       /* hash_sum left empty: Oracle ORA_HASH and Athena
+                          xxhash64 sums never agree on identical data, so
+                          cross-platform Phase-1 compares would always
+                          flag hash mismatch. Comparison treats empty as
+                          match=None (unknown) instead of a false diff. */
+                       CAST('' AS VARCHAR2(64)) AS hash_sum
                 FROM &_from_table
                 WHERE &_where_clause
                 GROUP BY &_vintage_expr
@@ -71,16 +90,21 @@ run;
                Alpha-rank-weighted mean/std, alpha-bound min/max, and
                top_10 are computed SAS-side via _col_categorical_freq.
                Same algorithm as the Athena path -- numerical values
-               match across engines on identical data. */
+               match across engines on identical data.
+
+               &_col_expr feeds the freq aggregation so sentinel string
+               values (e.g. 'NA', '#N/A') are mapped to NULL upstream and
+               folded into the missing-row bucket instead of forming
+               their own categories. */
             create table _ora_freq_ as
             select * from connection to oracle (
                 SELECT &_vintage_expr AS dt,
-                       SUBSTR(TO_CHAR(&_col_name), 1, 200) AS p_col,
+                       SUBSTR(TO_CHAR(&_col_expr), 1, 200) AS p_col,
                        COUNT(*) AS cnt
                 FROM &_from_table
                 WHERE &_where_clause
                 GROUP BY &_vintage_expr,
-                         SUBSTR(TO_CHAR(&_col_name), 1, 200)
+                         SUBSTR(TO_CHAR(&_col_expr), 1, 200)
             );
         %end;
         disconnect from oracle;
@@ -99,9 +123,10 @@ run;
         proc delete data=_ora_freq_; run;
     %end;
 
-    /* Normalize widths + ensure top_10 slot exists. */
+    /* Normalize widths + ensure top_10 / length / hash slots exist. */
     data _c_one;
-        length dt $32 column_name $32 col_type $12 top_10 $4000;
+        length dt $32 column_name $32 col_type $12 top_10 $4000
+               length_avg $32 length_max $32 hash_sum $32;
         set _c_one;
     run;
     proc append base=&_cache data=_c_one force; run;
@@ -147,6 +172,7 @@ run;
             ' call symputx("_conn_macro", ',   quote(strip(conn_macro)),   ');',
             ' call symputx("_col_name", ',     quote(strip(col_name)),     ');',
             ' call symputx("_col_name_lit", ', quote(cats("'", strip(col_name), "'")), ');',
+            ' call symputx("_col_expr", ',     quote(strip(col_expr)),     ');',
             ' call symputx("_col_type", ',     quote(strip(col_type)),     ');',
             ' call symputx("_date_col", ',     quote(strip(date_col)),     ');',
             ' call symputx("_vintage", ',      quote(strip(vintage)),      ');',

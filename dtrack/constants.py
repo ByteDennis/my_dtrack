@@ -5,6 +5,48 @@
 # string with an "m_"/"s_" prefix — bypasses float-equality drift.
 STAT_ROUND_DECIMALS = 4
 
+# Sentinel values that should be coerced to NULL before computing stats.
+# Phase-1 coarse comparison is meant to flag columns whose distribution
+# truly drifts between platforms; if one side stores -999 for missing and
+# the other stores NULL, min/max/mean/n_unique will diverge for reasons
+# that have nothing to do with the underlying data. Translating these
+# values to NULL up front collapses the difference and keeps the signal
+# focused on real drift.
+#
+# Per-platform so each engine can use its native types/literals.
+# Categories:
+#   numeric  — sentinel ints/floats (-999, -99999999, etc.)
+#   string   — sentinel strings ('NA', '#N/A', '.', etc.). Blank/empty
+#              are handled separately by the missing_cond rule.
+#   date     — sentinel date literals. "infinity" (e.g. 9999-12-31),
+#              "missing" (e.g. 0001-01-01), and the "today-placeholder"
+#              (a fixed far-future date some pipelines write when the
+#              row's date is unknown).
+#
+# Edit this dict to add or remove sentinels for your environment.
+NULL_SENTINELS = {
+    "oracle": {
+        "numeric": [-999, -9999, -99999999],
+        "string":  ["NA", "N/A", "#N/A", ".", "NULL", "null"],
+        "date":    ["9999-12-31", "4712-12-31", "0001-01-01", "1900-01-01"],
+    },
+    "hadoop": {
+        "numeric": [-999, -9999, -99999999],
+        "string":  ["NA", "N/A", "#N/A", ".", "NULL", "null"],
+        "date":    ["9999-12-31", "0001-01-01", "1900-01-01"],
+    },
+    "aws": {
+        "numeric": [-999, -9999, -99999999],
+        "string":  ["NA", "N/A", "#N/A", ".", "NULL", "null"],
+        "date":    ["9999-12-31", "0001-01-01", "1900-01-01"],
+    },
+    "sas": {
+        "numeric": [-999, -9999, -99999999],
+        "string":  ["NA", "N/A", "#N/A", ".", "NULL", "null"],
+        "date":    ["9999-12-31", "0001-01-01", "1900-01-01"],
+    },
+}
+
 # Data source types
 DATA_SOURCES = [
     {"value": "oracle", "label": "SAS/Oracle"},
