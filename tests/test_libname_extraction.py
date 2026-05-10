@@ -238,6 +238,30 @@ def test_libname_col_driver_uses_libref_qualified_table_ref(isolated_env, tmp_pa
     assert "sas_table='pb23.MYTBL'" in sas
 
 
+def test_libname_col_emits_per_run_banner_in_sas_log(isolated_env, tmp_path):
+    """Each (qname, col, bucket) prints FROM/BUCKET/WHERE/SQL via %put NOTE
+    so the SAS log shows what's running, mirroring column_oracle.sas."""
+    cfg_path = tmp_path / "cfg.json"
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _write_col_config(cfg_path, connect_method="libname",
+                      columns={"AMT": "NUMBER"})
+
+    from dtrack.platforms.oracle import gen_sas
+    gen_sas(str(cfg_path), str(out_dir), types=["col"])
+
+    sas = sorted(out_dir.glob("*.sas"))[0].read_text()
+    # START banner
+    assert "libname stats pull START" in sas
+    assert "FROM    : &_sas_table" in sas
+    assert "BUCKET  : &_dt_label" in sas
+    assert "WHERE   :" in sas
+    # SQL preview line (so user sees the actual query about to run)
+    assert "%put NOTE:      SQL     :" in sas
+    # DONE footer with elapsed time
+    assert "DONE in %sysfunc(putn(&_elapsed, 8.2))s" in sas
+
+
 def test_libname_col_categorical_uses_freq_post_processor(isolated_env, tmp_path):
     """Categorical column → emits the freq-pull SQL and routes to the
     shared %_col_categorical_freq post-processor."""

@@ -808,11 +808,25 @@ _SAS_LIBNAME_HELPERS = r"""
  * ===================================================================== */
 
 %macro _col_libname();
-    %local _cstat _cache;
+    %local _cstat _cache _t0 _elapsed _full_where;
     %let _cstat = _cstat_lib;
     %let _cache = cache._cs_&_dsname;
+    %let _t0 = %sysfunc(datetime());
+    %if %length(%superq(_base_where)) > 0 %then
+        %let _full_where = (&_date_where) AND (&_base_where);
+    %else
+        %let _full_where = &_date_where;
+
+    /* Per-(qname,col,bucket) banner so the SAS log shows exactly which
+       table / column / WHERE the upcoming proc sql is about to run --
+       same shape as column_oracle.sas / column_hadoop.sas's banners. */
+    %put NOTE: ---- [&_qname / &_col] (&_coltype, bucket=&_dt_label) libname stats pull START ----;
+    %put NOTE:      FROM    : &_sas_table;
+    %put NOTE:      BUCKET  : &_dt_label;
+    %put NOTE:      WHERE   : %superq(_full_where);
 
     %if %upcase(&_coltype) = NUMERIC %then %do;
+        %put NOTE:      SQL     : select "&_dt_label" as dt, count(*), count(distinct &_col), avg(&_col), std(&_col), min(&_col), max(&_col) from &_sas_table where %superq(_full_where);
         proc sql noprint;
             create table &_cstat as
             select "&_dt_label" as dt length=32,
@@ -834,6 +848,7 @@ _SAS_LIBNAME_HELPERS = r"""
     %end;
     %else %do;
         /* Pull (dt-literal, p_col, cnt) freq for categorical post-processing. */
+        %put NOTE:      SQL     : select "&_dt_label" as dt, substr(put(&_col,$200.),1,200) as p_col, count(*) as cnt from &_sas_table where %superq(_full_where) group by p_col;
         proc sql noprint;
             create table _lib_freq_ as
             select "&_dt_label" as dt length=32,
@@ -850,6 +865,9 @@ _SAS_LIBNAME_HELPERS = r"""
 
     proc append base=&_cache data=&_cstat force; run;
     proc delete data=&_cstat; run;
+
+    %let _elapsed = %sysevalf(%sysfunc(datetime()) - &_t0);
+    %put WARNING- ==== [&_qname / &_col] (&_coltype, bucket=&_dt_label) DONE in %sysfunc(putn(&_elapsed, 8.2))s ====;
 %mend _col_libname;
 """
 
