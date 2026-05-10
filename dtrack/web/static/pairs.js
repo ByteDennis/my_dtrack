@@ -37,22 +37,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     initTestingMode();
 });
 
-// Navigation
-function navigateToStep(step) {
-    const routes = {
-        'pairs': '/pairs',
-        'load_row': '/load_row',
-        'row_compare': '/row_compare',
-        'col_mapping': '/col_mapping',
-        'col_gen': '/col_gen',
-        'load_col': '/load_col',
-        'col_compare': '/col_compare'
-    };
-    if (routes[step]) {
-        window.location.href = routes[step];
-    }
-}
-
 async function openSettingsModal() {
     // Load current global settings each time so the modal reflects what's
     // actually persisted in dtrack.json.metadata.

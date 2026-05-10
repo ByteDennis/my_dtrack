@@ -10,15 +10,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     await refreshDbStatus();
 });
 
-function navigateToStep(step) {
-    const routes = {
-        pairs: '/pairs', load_row: '/load_row', row_compare: '/row_compare',
-        col_mapping: '/col_mapping', col_gen: '/col_gen',
-        load_col: '/load_col', col_compare: '/col_compare',
-    };
-    if (routes[step]) window.location.href = routes[step];
-}
-
 // ─────────────────────────────────────────────────────────────────────
 // Known tables (for the shared loader's auto-match)
 // ─────────────────────────────────────────────────────────────────────

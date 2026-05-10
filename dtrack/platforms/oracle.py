@@ -815,7 +815,8 @@ _SAS_EXPORT_HELPER = r"""
         end;
     run;
 
-    /* Alpha-min (rank=1) and alpha-max (last rank) per dt, encoded "cat=cnt". */
+    /* Alpha-min (rank=1) and alpha-max (last rank) per dt, encoded "cat=cnt".
+       Sorted by val (alphabetically); freq is just for display. */
     proc sort data=_ccf_ranked_; by dt rnk; run;
     data _ccf_mins_(keep=dt min_val) _ccf_maxs_(keep=dt max_val);
         length min_val max_val $400;
@@ -1043,7 +1044,8 @@ _SAS_SOURCE_HELPERS = r"""
         end;
     run;
 
-    /* Min: rank=1 row per dt. Max: last rank per dt. */
+    /* Min: rank=1 row per dt. Max: last rank per dt.
+       Sorted by val (alphabetically); freq is just for display. */
     proc sort data=_ranked_ out=_ranked_sorted_; by dt rnk; run;
     data _mins_(keep=dt min_val);
         set _ranked_sorted_; by dt;
@@ -1247,7 +1249,24 @@ def _compute_bucket_specs(tbl_cfg, db_path):
         )
         bucket_specs.append(('sample', dw, fl, tl))
     else:
-        bucket_specs.append(('all', '1=1', '', ''))
+        # No filter and no synthesis (typical: vintage='all' without
+        # matching_dates). If --from/--to are set, still emit a BETWEEN so the
+        # SAS-source / libname pull is bounded to the user's range. Mirrors
+        # the same fall-through in _compute_col_spec.
+        from_d = tbl_cfg.get('_from_date')
+        to_d = tbl_cfg.get('_to_date')
+        if from_d and to_d:
+            dw = build_date_between_clause(
+                date_col, from_d, to_d, date_dtype,
+                is_sas=is_sas_syntax, date_format=date_format,
+            )
+            fl, tl = format_date_bounds_literals(
+                from_d, to_d, date_dtype,
+                is_sas=is_sas_syntax, date_format=date_format,
+            )
+            bucket_specs.append(('all', dw, fl, tl))
+        else:
+            bucket_specs.append(('all', '1=1', '', ''))
 
     return bucket_specs, is_sas, date_dtype, col_list
 

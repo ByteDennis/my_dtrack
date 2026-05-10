@@ -26,6 +26,7 @@ from .base import (
     inject_where_from_config,
     build_stats_sql,
     build_top10_sql,
+    quote_ident,
 )
 
 
@@ -423,6 +424,11 @@ def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database
     When dt_label is set, uses it as a literal dt value (no GROUP BY).
     """
     date_col = tbl_cfg['date_col']
+    # Quote identifiers when bare form is invalid (digit-leading, hyphenated,
+    # etc.). Mirrors the file-gen path in _write_combined_sql so direct
+    # extraction works for the same columns the SQL files do.
+    col_q = quote_ident(col, "athena")
+    date_col_q = quote_ident(date_col, "athena")
     where = tbl_cfg.get('where', '')
     if not vintage:
         vintage = tbl_cfg.get('vintage', 'all') or 'all'
@@ -441,7 +447,7 @@ def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database
     else:
         # Legacy path: SQL-side vintage bucketing (kept for backward compat)
         vintage_transform = tbl_cfg.get('vintage_transform', None)
-        dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype, date_format=date_format)
+        dt_expr = _vintage_date_expr_athena(date_col_q, vintage, vintage_transform, date_dtype=date_dtype, date_format=date_format)
         dt_select = f"CAST({dt_expr} AS VARCHAR) AS dt"
         group_by = f"\nGROUP BY {dt_expr}"
 
@@ -451,12 +457,12 @@ SELECT
     {dt_select},
     '{dtype}' AS col_type,
     COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col}) AS n_missing,
-    COUNT(DISTINCT {col}) AS n_unique,
-    AVG(CAST({col} AS DOUBLE)) AS mean,
-    STDDEV_SAMP(CAST({col} AS DOUBLE)) AS std,
-    MIN({col}) AS min_val,
-    MAX({col}) AS max_val
+    COUNT(*) - COUNT({col_q}) AS n_missing,
+    COUNT(DISTINCT {col_q}) AS n_unique,
+    AVG(CAST({col_q} AS DOUBLE)) AS mean,
+    STDDEV_SAMP(CAST({col_q} AS DOUBLE)) AS std,
+    MIN({col_q}) AS min_val,
+    MAX({col_q}) AS max_val
 FROM {full_table} WHERE {wc}{group_by}"""
 
         _log_sql(col, sql)
@@ -491,17 +497,17 @@ FROM {full_table} WHERE {wc}{group_by}"""
         freq_dt_group = ""
     else:
         vintage_transform = tbl_cfg.get('vintage_transform', None)
-        dt_expr = _vintage_date_expr_athena(date_col, vintage, vintage_transform, date_dtype=date_dtype, date_format=date_format)
+        dt_expr = _vintage_date_expr_athena(date_col_q, vintage, vintage_transform, date_dtype=date_dtype, date_format=date_format)
         freq_dt_select = f"CAST({dt_expr} AS VARCHAR)"
         freq_dt_group = f", {dt_expr}"
 
     sql = f"""{cte_prefix}
 WITH freq AS (
     SELECT {freq_dt_select} AS dt,
-           CAST({col} AS VARCHAR) AS p_col,
+           CAST({col_q} AS VARCHAR) AS p_col,
            COUNT(*) AS cnt
     FROM {full_table} WHERE {wc}
-    GROUP BY {col}{freq_dt_group}
+    GROUP BY {col_q}{freq_dt_group}
 ),
 ranked AS (
     SELECT dt, p_col, cnt,
@@ -602,6 +608,107 @@ def _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir):
         _write_combined_sql(aws_tables, outdir, "row")
 
 
+def _probe_id_cols_athena(full_table, cte_prefix, where, col_list, threshold, database=None):
+    """One-shot Athena probe — classify which cols are "ID-like" (cardinality
+    ≥ threshold) so we can emit a lite SQL block (no GROUP BY p_col) for them
+    instead of the full freq aggregation.
+
+    Builds a single batch query over the table:
+
+        SELECT COUNT(*) AS n_total,
+               APPROX_DISTINCT(<col_0>) AS u_0,
+               APPROX_DISTINCT(<col_1>) AS u_1, ...
+        FROM <table> WHERE <where>
+
+    Athena's Parquet column-pruning means this scans only the probed columns
+    once — same column footprint the per-col extraction would scan one by one,
+    just folded into a single round-trip.
+
+    Returns: set of col names where APPROX_DISTINCT(col)/COUNT(*) ≥ threshold.
+    Empty set on any failure (no AWS creds, query error, empty table) so the
+    caller falls back to emitting full SQL for every column. Set
+    `DTRACK_ID_DETECTION=0` to skip probing entirely.
+    """
+    if not col_list:
+        return set()
+    if os.environ.get('DTRACK_ID_DETECTION', '1') == '0':
+        return set()
+
+    parts = ["COUNT(*) AS n_total"]
+    for i, (col, _) in enumerate(col_list):
+        col_q = quote_ident(col, "athena")
+        # Suffix _i (positional) instead of _<colname> to dodge identifier
+        # issues when col names contain hyphens, dots, or start with a digit.
+        parts.append(f"APPROX_DISTINCT({col_q}) AS u_{i}")
+    cols_part = ",\n    ".join(parts)
+    where_clause = where.strip() or "1=1"
+    sql = f"""{cte_prefix}SELECT
+    {cols_part}
+FROM {full_table}
+WHERE {where_clause}"""
+
+    try:
+        df = _query_athena(sql, data_base=database)
+    except Exception as e:
+        print(f"  [id-probe] failed, no auto-skip: {type(e).__name__}: {e}")
+        return set()
+    if df.empty:
+        return set()
+
+    row = df.iloc[0].to_dict()
+    try:
+        n_total = int(row.get('n_total') or 0)
+    except (ValueError, TypeError):
+        return set()
+    if n_total == 0:
+        return set()
+
+    id_cols = set()
+    for i, (col, _) in enumerate(col_list):
+        u_raw = row.get(f'u_{i}')
+        if u_raw is None:
+            continue
+        try:
+            u = int(u_raw)
+        except (ValueError, TypeError):
+            continue
+        if (u / n_total) >= threshold:
+            id_cols.add(col)
+
+    if id_cols:
+        print(f"  [id-probe] auto-skipping {len(id_cols)}/{len(col_list)} "
+              f"ID-like cols (threshold={threshold}): {sorted(id_cols)}")
+    return id_cols
+
+
+def _build_lite_id_sql(col_name, col_q, col_type, dt_select, group_by,
+                       full_table, wc, cte_prefix):
+    """Lite col-stats SQL for ID-like columns: single-pass aggregates only,
+    no GROUP BY p_col (which is the cost killer on near-unique columns).
+
+    Output schema matches the full SQL so the runner / loader can mix lite
+    and full rows freely. The heavy fields come back empty:
+      mean, std, min_val, max_val, top_10 = ''.
+    n_unique uses APPROX_DISTINCT so the value is ~the same one the probe
+    saw — exact COUNT(DISTINCT) on a column we just classified as ID-like
+    would defeat the optimization.
+    """
+    return f"""{cte_prefix}SELECT
+    {dt_select},
+    '{col_name}' AS column_name,
+    '{col_type}' AS col_type,
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col_q}) AS n_missing,
+    APPROX_DISTINCT({col_q}) AS n_unique,
+    '' AS mean,
+    '' AS std,
+    '' AS min_val,
+    '' AS max_val,
+    '' AS top_10
+FROM {full_table}
+WHERE {wc}{group_by};"""
+
+
 def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
     """Write a single combined .sql file with all AWS table queries."""
     from datetime import datetime
@@ -613,6 +720,10 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
         database = tbl.get('conn_macro', '')
         table = tbl.get('table', '')
         date_col = tbl.get('date_col', '')
+        # Athena identifier wrapping: only kicks in when the bare form is
+        # invalid (digit-leading, hyphens, dots, etc.). Valid names pass
+        # through unchanged so case-insensitive resolution still works.
+        date_col_q = quote_ident(date_col, "athena")
         raw_full = f"{database}.{table}"
         full_table, cte_prefix = resolve_table(tbl, raw_full)
         where = tbl.get('where', '')
@@ -661,7 +772,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                 date_dtype = date_filter.get('date_dtype')
                 date_format = date_filter.get('date_format')
                 in_clause = build_date_in_clause(
-                    date_col, exclude_dates, date_dtype,
+                    date_col_q, exclude_dates, date_dtype,
                     date_format=date_format,
                 )
                 # Negate: IN → NOT IN
@@ -685,7 +796,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                 vintage_specs = []
                 for bucket_key, dates in sorted(buckets.items()):
                     dw = build_date_range_with_gaps(
-                        date_col, dates,
+                        date_col_q, dates,
                         date_filter['date_dtype'],
                         date_format=date_filter.get('date_format'),
                     )
@@ -694,7 +805,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                 print(f"  {qname}: vintage={vintage}, {len(vintage_specs)} buckets")
             elif date_filter['filter_type'] == 'in_list':
                 dw = build_date_in_clause(
-                    date_col, date_filter['dates'],
+                    date_col_q, date_filter['dates'],
                     date_filter['date_dtype'],
                     date_format=date_filter.get('date_format'),
                 )
@@ -714,7 +825,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                 trunc_range_where = None
                 if tbl.get('_from_date') and tbl.get('_to_date'):
                     trunc_range_where = build_date_between_clause(
-                        date_col, tbl['_from_date'], tbl['_to_date'],
+                        date_col_q, tbl['_from_date'], tbl['_to_date'],
                         date_filter.get('date_dtype'),
                         date_format=date_filter.get('date_format'),
                     )
@@ -749,6 +860,27 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                 wc_parts.append(date_bounds)
             wc_base = " AND ".join(f"({p})" for p in wc_parts) if wc_parts else "1=1"
 
+            # Auto-detect ID-like columns (cardinality / row-count >= threshold)
+            # via one batched APPROX_DISTINCT probe over the table. ID-like
+            # cols get a lite SQL block (no GROUP BY p_col) — saves a heavy
+            # freq aggregation per col. Probe WHERE matches the broadest
+            # table-level filter so the cardinality classification reflects
+            # what the col SQL would actually scan.
+            probe_wc_parts = []
+            if where.strip():
+                probe_wc_parts.append(where.strip())
+            if exclude_clause:
+                probe_wc_parts.append(exclude_clause)
+            if date_bounds:
+                probe_wc_parts.append(date_bounds)
+            probe_wc = " AND ".join(f"({p})" for p in probe_wc_parts) if probe_wc_parts else "1=1"
+            id_threshold = float(os.environ.get('DTRACK_ID_THRESHOLD', '0.99'))
+            id_cols = _probe_id_cols_athena(
+                full_table, cte_prefix, probe_wc, col_list,
+                threshold=id_threshold,
+                database=tbl.get('conn_macro'),
+            )
+
             # 'trunc' mode: ONE SQL per column, with DATE_TRUNC in SELECT/
             # GROUP BY to produce all buckets in a single scan. WHERE stays
             # bare so partition pruning still kicks in. This is the fast
@@ -756,7 +888,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
             if sql_mode == 'trunc':
                 unit = _TRUNC_MAP[vintage]
                 trunc_col = _vintage_date_expr_athena(
-                    date_col, vintage,
+                    date_col_q, vintage,
                     date_dtype=date_filter.get('date_dtype'),
                     date_format=date_filter.get('date_format'),
                 )
@@ -775,18 +907,36 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
 
                 for col_name, col_dtype in col_list:
                     is_num = is_numeric_type(col_dtype, is_oracle=False)
+                    # Quote col_name as an identifier when bare form is invalid
+                    # (e.g. starts with a digit). The string-literal occurrence
+                    # `'{col_name}' AS column_name` keeps the raw name so the
+                    # downstream loader still maps results back by original name.
+                    col_q = quote_ident(col_name, "athena")
+                    if col_name in id_cols:
+                        # ID-like: lite SQL, single GROUP BY trunc_expr pass.
+                        sql = _build_lite_id_sql(
+                            col_name, col_q,
+                            'numeric' if is_num else 'categorical',
+                            dt_select=f"{trunc_expr} AS dt",
+                            group_by=f"\nGROUP BY {trunc_expr}",
+                            full_table=full_table, wc=wc_t, cte_prefix=cte_prefix,
+                        )
+                        blocks.append(f"-- {qname}/{col_name}/_all")
+                        blocks.append(sql.strip())
+                        blocks.append("")
+                        continue
                     if is_num:
                         sql = f"""{cte_prefix}SELECT
     {trunc_expr} AS dt,
     '{col_name}' AS column_name,
     'numeric' AS col_type,
     COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col_name}) AS n_missing,
-    COUNT(DISTINCT {col_name}) AS n_unique,
-    CAST(AVG(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS mean,
-    CAST(STDDEV_SAMP(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS std,
-    CAST(MIN({col_name}) AS VARCHAR) AS min_val,
-    CAST(MAX({col_name}) AS VARCHAR) AS max_val,
+    COUNT(*) - COUNT({col_q}) AS n_missing,
+    COUNT(DISTINCT {col_q}) AS n_unique,
+    CAST(AVG(CAST({col_q} AS DOUBLE)) AS VARCHAR) AS mean,
+    CAST(STDDEV_SAMP(CAST({col_q} AS DOUBLE)) AS VARCHAR) AS std,
+    CAST(MIN({col_q}) AS VARCHAR) AS min_val,
+    CAST(MAX({col_q}) AS VARCHAR) AS max_val,
     '' AS top_10
 FROM {full_table}
 WHERE {wc_t}
@@ -794,11 +944,11 @@ GROUP BY {trunc_expr};"""
                     else:
                         sql = f"""{cte_prefix}WITH freq AS (
     SELECT {trunc_expr} AS dt,
-           CAST({col_name} AS VARCHAR) AS p_col,
+           CAST({col_q} AS VARCHAR) AS p_col,
            COUNT(*) AS cnt
     FROM {full_table}
     WHERE {wc_t}
-    GROUP BY {trunc_expr}, {col_name}
+    GROUP BY {trunc_expr}, {col_q}
 ),
 ranked AS (
     SELECT dt, p_col, cnt,
@@ -841,8 +991,8 @@ sstats AS (
 ),
 minmax AS (
     SELECT dt,
-           MAX(CASE WHEN rnk_alpha = 1        THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
-           MAX(CASE WHEN rnk_alpha = k_alpha  THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS max_val
+           MAX(CASE WHEN rnk_alpha = 1       THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
+           MAX(CASE WHEN rnk_alpha = k_alpha THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS max_val
     FROM ranked GROUP BY dt
 )
 SELECT s.dt, '{col_name}' AS column_name, 'categorical' AS col_type,
@@ -864,13 +1014,18 @@ ORDER BY s.dt;"""
 
             # bucket / sample / all modes: one block per (column, vintage bucket).
             # dt_label is emitted as a SQL string literal; WHERE stays bare.
+            # wc_parts already covers user where + exclude_dates + (in 'all'
+            # mode) the --from/--to date_bounds; the per-bucket date_where (if
+            # any) layers a BETWEEN/IN on top.
             for col_name, col_dtype in col_list:
                 is_num = is_numeric_type(col_dtype, is_oracle=False)
+                # Same identifier-quoting rule as the trunc path above:
+                # col_q is the SQL-safe ref, '{col_name}' stays the raw label.
+                col_q = quote_ident(col_name, "athena")
+                is_id_like = col_name in id_cols
 
                 for dt_label, date_where in vintage_specs:
-                    parts = []
-                    if where.strip():
-                        parts.append(where.strip())
+                    parts = list(wc_parts)
                     if date_where:
                         parts.append(date_where)
                     wc = " AND ".join(f"({p})" for p in parts) if parts else "1=1"
@@ -878,29 +1033,41 @@ ORDER BY s.dt;"""
                     dt_expr = f"'{dt_label}'"
                     block_suffix = f"/{dt_label}" if len(vintage_specs) > 1 else ""
 
+                    if is_id_like:
+                        sql = _build_lite_id_sql(
+                            col_name, col_q,
+                            'numeric' if is_num else 'categorical',
+                            dt_select=f"{dt_expr} AS dt",
+                            group_by="",
+                            full_table=full_table, wc=wc, cte_prefix=cte_prefix,
+                        )
+                        blocks.append(f"-- {qname}/{col_name}{block_suffix}")
+                        blocks.append(sql.strip())
+                        blocks.append("")
+                        continue
                     if is_num:
                         sql = f"""{cte_prefix}SELECT
     {dt_expr} AS dt,
     '{col_name}' AS column_name,
     'numeric' AS col_type,
     COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col_name}) AS n_missing,
-    COUNT(DISTINCT {col_name}) AS n_unique,
-    CAST(AVG(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS mean,
-    CAST(STDDEV_SAMP(CAST({col_name} AS DOUBLE)) AS VARCHAR) AS std,
-    CAST(MIN({col_name}) AS VARCHAR) AS min_val,
-    CAST(MAX({col_name}) AS VARCHAR) AS max_val,
+    COUNT(*) - COUNT({col_q}) AS n_missing,
+    COUNT(DISTINCT {col_q}) AS n_unique,
+    CAST(AVG(CAST({col_q} AS DOUBLE)) AS VARCHAR) AS mean,
+    CAST(STDDEV_SAMP(CAST({col_q} AS DOUBLE)) AS VARCHAR) AS std,
+    CAST(MIN({col_q}) AS VARCHAR) AS min_val,
+    CAST(MAX({col_q}) AS VARCHAR) AS max_val,
     '' AS top_10
 FROM {full_table}
 WHERE {wc};"""
                     else:
                         sql = f"""{cte_prefix}WITH freq AS (
     SELECT
-        CAST({col_name} AS VARCHAR) AS p_col,
+        CAST({col_q} AS VARCHAR) AS p_col,
         COUNT(*) AS cnt
     FROM {full_table}
     WHERE {wc}
-    GROUP BY {col_name}
+    GROUP BY {col_q}
 ),
 ranked AS (
     SELECT p_col, cnt,
@@ -941,10 +1108,10 @@ SELECT
                 wc_parts.append(date_bounds)
             full_where = " AND ".join(f"({p})" for p in wc_parts) if wc_parts else ""
             where_clause = f"WHERE {full_where}" if full_where else ""
-            sql = f"""{cte_prefix}SELECT {date_col} AS date_value, COUNT(*) AS row_count
+            sql = f"""{cte_prefix}SELECT {date_col_q} AS date_value, COUNT(*) AS row_count
 FROM {full_table}
 {where_clause}
-GROUP BY {date_col};"""
+GROUP BY {date_col_q};"""
             blocks.append(f"-- {qname}")
             blocks.append(sql.strip())
             blocks.append("")
@@ -1208,14 +1375,15 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
             date_col = tbl.get('date_col', '')
             if not date_col:
                 continue
+            date_col_q = quote_ident(date_col, "athena")
             date_type = (tbl.get('date_type') or '').lower()
             bounds = []
             if from_date:
                 lit = _format_athena_date_bound(from_date, date_type, is_upper=False)
-                bounds.append(f"{date_col} >= {lit}")
+                bounds.append(f"{date_col_q} >= {lit}")
             if to_date:
                 lit = _format_athena_date_bound(to_date, date_type, is_upper=True)
-                bounds.append(f"{date_col} <= {lit}")
+                bounds.append(f"{date_col_q} <= {lit}")
             if bounds:
                 tbl['_date_bounds'] = " AND ".join(bounds)
             tbl['_from_date'] = from_date
@@ -1519,9 +1687,16 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
             elapsed = time.time() - start_time
 
             if is_col:
+                # Lowercase result-column names so per-row dict lookups match
+                # _COL_HEADERS regardless of how pyathena/Athena cases the
+                # SELECT-list alias in cursor.description. _query_athena does
+                # the same on the pandas path; this aligns the gen-and-run
+                # path with it. Without this, a single mismatched alias makes
+                # the loaded CSV have an empty column → 0 after _safe_int.
+                col_names_lc = [c.lower() for c in col_names]
                 parsed_rows = []
                 for row in rows:
-                    row_dict = dict(zip(col_names, row))
+                    row_dict = dict(zip(col_names_lc, row))
                     parsed_rows.append([row_dict.get(h, '') for h in _COL_HEADERS])
                 with _col_rows_lock:
                     _col_rows_by_table.setdefault(qname, []).extend(parsed_rows)

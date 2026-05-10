@@ -1,7 +1,28 @@
 /* playground.js — ad-hoc SQL runner with timing + history */
 
-function navigateToStep(step) {
-    window.location.href = '/' + step;
+// Cache of history SQL keyed by run id, populated on each pgLoadHistory.
+// Lets the per-row Copy button avoid stuffing multi-line SQL into HTML attrs
+// (which would need quote-safe escaping).
+const _pgHistorySqlById = {};
+
+async function pgCopyHistorySql(id, btn) {
+    const sql = _pgHistorySqlById[id] || '';
+    if (!sql) return;
+    try {
+        await navigator.clipboard.writeText(sql);
+    } catch (e) {
+        // Fallback for non-HTTPS / older browsers.
+        const ta = document.createElement('textarea');
+        ta.value = sql;
+        ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select(); document.execCommand('copy');
+        document.body.removeChild(ta);
+    }
+    if (!btn) return;
+    const orig = btn.textContent;
+    btn.textContent = '✓';
+    setTimeout(() => { btn.textContent = orig; }, 900);
 }
 
 let _pgLastResult = null;
@@ -433,8 +454,12 @@ async function pgLoadHistory() {
             <th style="width:80px; text-align:right;">rows</th>
             <th>note</th>
             <th>sql</th>
-            <th style="width:60px;"></th>
+            <th style="width:80px;"></th>
         </tr></thead>`;
+        // Refresh the per-row SQL cache so the Copy buttons can read full SQL
+        // without HTML-attribute escaping headaches.
+        for (const k of Object.keys(_pgHistorySqlById)) delete _pgHistorySqlById[k];
+        for (const r of runs) _pgHistorySqlById[r.id] = r.sql || '';
         const body = '<tbody>' + runs.map(r => _pgRenderHistoryRow(r)).join('') + '</tbody>';
         el.innerHTML = `<table class="data-table compact">${head}${body}</table>`;
     } catch (e) {
@@ -466,6 +491,7 @@ function _pgRenderHistoryRow(r) {
             <code style="font-size:11px;" title="${_pgEsc(r.sql || '')}">${_pgEsc(sqlSnip)}</code>
         </td>
         <td>
+            <button class="btn-text" onclick="pgCopyHistorySql(${r.id}, this)" title="Copy SQL to clipboard">⧉</button>
             <button class="btn-text" onclick="pgDeleteRun(${r.id})" title="Delete run">×</button>
         </td>
     </tr>`;

@@ -1,6 +1,29 @@
 // common.js — shared utilities across all dtrack pages
 
 // ---------------------------------------------------------------------------
+// Top-nav step dropdown — single source of truth for routes used by every
+// page's <select id="step-selector">. Adding a new page = one entry here.
+// ---------------------------------------------------------------------------
+const STEP_ROUTES = {
+    'pairs': '/pairs',
+    'load_row': '/load_row',
+    'row_compare': '/row_compare',
+    'col_mapping': '/col_mapping',
+    'col_gen': '/col_gen',
+    'load_col': '/load_col',
+    'col_compare': '/col_compare',
+    'csv_compare': '/csv_compare',
+    'playground': '/playground',
+    'sync': '/sync',
+    'benchmark': '/benchmark',
+};
+
+function navigateToStep(step) {
+    const url = STEP_ROUTES[step];
+    if (url) window.location.href = url;
+}
+
+// ---------------------------------------------------------------------------
 // Refresh DB
 // ---------------------------------------------------------------------------
 async function refreshDB() {

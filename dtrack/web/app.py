@@ -100,29 +100,39 @@ async def csv_compare_page(request: Request):
 
 @app.get("/api/status")
 async def api_status():
-    """Return pairs + metadata + date ranges."""
-    from ..db import list_table_pairs, get_metadata, get_column_meta
-    from ..config import load_unified_config, get_all_tables_from_unified
+    """Return pairs + metadata + date ranges.
 
-    pairs = list_table_pairs(_db_path)
+    Pair list is sourced from pairs.json (config). DB is consulted only
+    for derived metadata (loaded date range, row counts, column lists)
+    per side. A pair in pairs.json that hasn't been registered in the DB
+    yet still shows up — its metadata fields just come back empty.
+    """
+    from ..db import get_metadata, get_column_meta
+    from ..config import load_unified_config
+    from ..platforms.base import qualified_name
+
     config = load_unified_config(_config_path)
 
     result = []
-    for pair in pairs:
-        pname = pair["pair_name"]
-        meta_left = get_metadata(_db_path, pair["table_left"])
-        meta_right = get_metadata(_db_path, pair["table_right"])
-        cols_left = get_column_meta(_db_path, pair["table_left"])
-        cols_right = get_column_meta(_db_path, pair["table_right"])
+    for pname, pair_cfg in config.get("pairs", {}).items():
+        left = dict(pair_cfg.get("left", {}))
+        right = dict(pair_cfg.get("right", {}))
+        left.setdefault("name", pname)
+        right.setdefault("name", pname)
+        table_left = qualified_name(left) if left.get("source") else ""
+        table_right = qualified_name(right) if right.get("source") else ""
 
-        pair_cfg = config.get("pairs", {}).get(pname, {})
+        meta_left = get_metadata(_db_path, table_left) if table_left else None
+        meta_right = get_metadata(_db_path, table_right) if table_right else None
+        cols_left = get_column_meta(_db_path, table_left) if table_left else []
+        cols_right = get_column_meta(_db_path, table_right) if table_right else []
 
         result.append({
             "pair_name": pname,
-            "table_left": pair["table_left"],
-            "table_right": pair["table_right"],
-            "source_left": pair.get("source_left", ""),
-            "source_right": pair.get("source_right", ""),
+            "table_left": table_left,
+            "table_right": table_right,
+            "source_left": left.get("source", ""),
+            "source_right": right.get("source", ""),
             "skip": pair_cfg.get("skip", False),
             "left": {
                 "min_date": (meta_left or {}).get("min_date_loaded"),
@@ -138,7 +148,7 @@ async def api_status():
                 "row_count": (meta_right or {}).get("row_count_total"),
                 "col_count": len(cols_right),
             },
-            "col_mappings": len(pair.get("col_mappings", {}) or {}),
+            "col_mappings": len(pair_cfg.get("col_map") or {}),
         })
 
     return {"pairs": result, "db_path": _db_path, "config_path": _config_path}
@@ -444,10 +454,12 @@ async def api_generate_files(request: Request):
                 bounds = []
                 if source == 'aws':
                     from ..platforms.athena import _format_athena_date_bound
+                    from ..platforms.base import quote_ident
+                    date_col_q = quote_ident(date_col, "athena")
                     if eff_from:
-                        bounds.append(f"{date_col} >= {_format_athena_date_bound(eff_from, date_type, is_upper=False)}")
+                        bounds.append(f"{date_col_q} >= {_format_athena_date_bound(eff_from, date_type, is_upper=False)}")
                     if eff_to:
-                        bounds.append(f"{date_col} <= {_format_athena_date_bound(eff_to, date_type, is_upper=True)}")
+                        bounds.append(f"{date_col_q} <= {_format_athena_date_bound(eff_to, date_type, is_upper=True)}")
                 else:
                     from ..platforms.oracle import _format_date_bound, is_sas_table
                     is_sas = is_sas_table(tbl)

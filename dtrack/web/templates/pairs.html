@@ -1,44 +1,21 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>dtrack - Row Generation</title>
-    <link rel="stylesheet" href="/static/style_v2.css">
-</head>
-<body>
-    <header>
-        <div class="header-left">
-            <h1>dtrack</h1>
-        </div>
-        <div class="header-right">
-            <select id="step-selector" onchange="navigateToStep(this.value)">
-                <option value="pairs">Row Gen</option>
-                <option value="load_row">Load Row</option>
-                <option value="row_compare">Row Compare</option>
-                <option value="col_mapping">Col Mapping</option>
-                <option value="col_gen">Col Gen</option>
-                <option value="load_col">Load Col</option>
-                <option value="col_compare">Col Compare</option>
-                <option value="csv_compare">CSV Compare</option>
-                <option value="playground">Playground</option>
-                <option value="sync">Sync</option>
-            </select>
-            <a href="/benchmark" style="text-decoration:none;"><button type="button">Benchmark</button></a>
+{% extends "_layout.html" %}
+{% set current_page = "pairs" %}
+{% set page_title = "Row Generation" %}
+
+{% block nav_extras %}
             <button onclick="openSettingsModal()">Settings</button>
             <button onclick="showHelp()">Help</button>
-            <button class="btn-text" id="refresh-db-btn" onclick="refreshDB()" title="Refresh DB schema + metadata">Refresh DB</button>
-            <div class="db-status" id="db-status" title="Database connected"></div>
-        </div>
-    </header>
+{% endblock %}
 
+{% block io_bar %}
     <div class="io-bar">
         <span class="io-label">INPUT:</span> Database (project.db)
         <span class="io-separator">│</span>
         <span class="io-label">OUTPUT:</span> SAS/SQL files → <span id="output-dir">output/</span>
     </div>
+{% endblock %}
 
-    <main>
+{% block content %}
         <!-- PAIRS SECTION -->
         <section class="card">
             <div class="section-header">
@@ -77,8 +54,9 @@
                 <div class="log-empty">No files generated yet.</div>
             </div>
         </section>
-    </main>
+{% endblock %}
 
+{% block modals %}
     <!-- Pair Edit Modal -->
     <div id="pair-modal" class="modal">
         <div class="modal-content modal-large">
@@ -356,8 +334,8 @@
             </div>
         </div>
     </div>
+{% endblock %}
 
-    <script src="/static/common.js"></script>
+{% block scripts %}
     <script src="/static/pairs.js"></script>
-</body>
-</html>
+{% endblock %}

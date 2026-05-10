@@ -1,9 +1,5 @@
 /* csv_compare.js — string-exact diff between two uploaded CSVs */
 
-function navigateToStep(step) {
-    window.location.href = '/' + step;
-}
-
 let _cvLeftInfo  = null;
 let _cvRightInfo = null;
 

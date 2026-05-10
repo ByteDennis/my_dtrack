@@ -82,9 +82,6 @@ def validate_unified_config(config):
     if not isinstance(pairs, dict):
         raise ValueError("'pairs' must be a dictionary (not a list)")
 
-    if not pairs:
-        raise ValueError("'pairs' must contain at least one pair")
-
     for pair_name, pair_config in pairs.items():
         validate_unified_pair(pair_name, pair_config)
 

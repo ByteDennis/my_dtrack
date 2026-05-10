@@ -11,18 +11,6 @@ document.addEventListener('DOMContentLoaded', () => {
     initModalHandlers();
 });
 
-// ---------------------------------------------------------------------------
-// Navigation
-// ---------------------------------------------------------------------------
-function navigateToStep(step) {
-    const routes = {
-        pairs: '/pairs', load_row: '/load_row', row_compare: '/row_compare',
-        col_mapping: '/col_mapping', col_gen: '/col_gen',
-        load_col: '/load_col', col_compare: '/col_compare',
-    };
-    if (routes[step]) window.location.href = routes[step];
-}
-
 function showHelp() {
     alert('Col Gen generates SAS/SQL scripts for extracting column-level statistics.\n\nSelect pairs and click "Generate Col Scripts" to create extraction files.');
 }

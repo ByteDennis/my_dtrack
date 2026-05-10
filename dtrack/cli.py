@@ -108,6 +108,19 @@ def cmd_init(args):
     init_database(db_path)
     print(f"Initialized database: {db_path}")
 
+    # Also create a starter pairs.json next to the db (or wherever --config
+    # points). Defaults to pairs.json in the db's directory. Skipped if the
+    # file already exists, so reruns with --force don't blow away config.
+    config_path = args.config or os.path.join(os.path.dirname(os.path.abspath(db_path)) or '.', 'pairs.json')
+    if os.path.exists(config_path):
+        print(f"Config exists, leaving as-is: {config_path}")
+    else:
+        import json as _json
+        os.makedirs(os.path.dirname(os.path.abspath(config_path)) or '.', exist_ok=True)
+        with open(config_path, 'w') as f:
+            _json.dump({"pairs": {}, "metadata": {}}, f, indent=2)
+        print(f"Initialized config: {config_path}")
+
 
 def cmd_load_row(args):
     """Load row count data from CSV."""
@@ -978,8 +991,11 @@ def main():
     sub = parser.add_subparsers(dest='command', help='Available commands')
 
     # init
-    p = sub.add_parser('init', help='Initialize database')
+    p = sub.add_parser('init', help='Initialize database (and starter pairs.json)')
     p.add_argument('project_db')
+    p.add_argument('--config', default=None,
+                   help='Path for the starter config JSON (default: '
+                        'pairs.json next to the db). Skipped if file exists.')
     p.add_argument('--force', action='store_true')
     p.add_argument('--refresh', action='store_true',
                    help='Rebuild schema; rename-create-copy preserves data in '

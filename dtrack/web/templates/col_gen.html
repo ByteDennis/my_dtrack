@@ -1,43 +1,21 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>dtrack - Col Generation</title>
-    <link rel="stylesheet" href="/static/style_v2.css">
-</head>
-<body>
-    <header>
-        <div class="header-left">
-            <h1>dtrack</h1>
-        </div>
-        <div class="header-right">
-            <select id="step-selector" onchange="navigateToStep(this.value)">
-                <option value="pairs">Row Gen</option>
-                <option value="load_row">Load Row</option>
-                <option value="row_compare">Row Compare</option>
-                <option value="col_mapping">Col Mapping</option>
-                <option value="col_gen" selected>Col Gen</option>
-                <option value="load_col">Load Col</option>
-                <option value="col_compare">Col Compare</option>
-                <option value="csv_compare">CSV Compare</option>
-                <option value="playground">Playground</option>
-                <option value="sync">Sync</option>
-            </select>
+{% extends "_layout.html" %}
+{% set current_page = "col_gen" %}
+{% set page_title = "Col Generation" %}
+
+{% block nav_extras %}
             <button onclick="openSettingsModal()">Settings</button>
             <button onclick="showHelp()">Help</button>
-            <button class="btn-text" id="refresh-db-btn" onclick="refreshDB()" title="Refresh DB schema + metadata">Refresh DB</button>
-            <div class="db-status" id="db-status" title="Database connected"></div>
-        </div>
-    </header>
+{% endblock %}
 
+{% block io_bar %}
     <div class="io-bar">
         <span class="io-label">INPUT:</span> Database (project.db)
         <span class="io-separator">|</span>
         <span class="io-label">OUTPUT:</span> SAS/SQL files (col stats) &rarr; <span id="output-dir">output/</span>
     </div>
+{% endblock %}
 
-    <main>
+{% block content %}
         <!-- PAIRS SECTION -->
         <section class="card">
             <div class="section-header">
@@ -71,8 +49,9 @@
                 <div class="log-empty">No files generated yet.</div>
             </div>
         </section>
-    </main>
+{% endblock %}
 
+{% block modals %}
     <!-- Settings Modal -->
     <div id="settings-modal" class="modal">
         <div class="modal-content" style="max-width:520px;">
@@ -117,8 +96,8 @@
             </div>
         </div>
     </div>
+{% endblock %}
 
-    <script src="/static/common.js"></script>
+{% block scripts %}
     <script src="/static/col_gen.js"></script>
-</body>
-</html>
+{% endblock %}

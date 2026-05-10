@@ -1,9 +1,5 @@
 /* sync.js — diff dtrack.json vs SQLite per pair, push either direction */
 
-function navigateToStep(step) {
-    window.location.href = '/' + step;
-}
-
 function _syncEsc(s) {
     if (s == null) return '';
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');

@@ -1,35 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>dtrack - Playground</title>
-    <link rel="stylesheet" href="/static/style_v2.css">
-</head>
-<body>
-    <header>
-        <div class="header-left">
-            <h1>dtrack</h1>
-        </div>
-        <div class="header-right">
-            <select id="step-selector" onchange="navigateToStep(this.value)">
-                <option value="pairs">Row Gen</option>
-                <option value="load_row">Load Row</option>
-                <option value="row_compare">Row Compare</option>
-                <option value="col_mapping">Col Mapping</option>
-                <option value="col_gen">Col Gen</option>
-                <option value="load_col">Load Col</option>
-                <option value="col_compare">Col Compare</option>
-                <option value="csv_compare">CSV Compare</option>
-                <option value="playground" selected>Playground</option>
-                <option value="sync">Sync</option>
-            </select>
-            <button class="btn-text" id="refresh-db-btn" onclick="refreshDB()" title="Refresh DB schema + metadata">Refresh DB</button>
-            <div class="db-status" id="db-status" title="Database connected"></div>
-        </div>
-    </header>
+{% extends "_layout.html" %}
+{% set current_page = "playground" %}
+{% set page_title = "Playground" %}
 
-    <main>
+{% block content %}
         <section class="card">
             <div class="section-header">
                 <h2>PLAYGROUND</h2>
@@ -126,7 +99,6 @@
                 <button id="pg-run-btn" class="btn-primary" onclick="pgRun()">▶ Run</button>
                 <button id="pg-cancel-btn" class="btn-secondary" style="display:none;" onclick="pgCancel()">⏹ Cancel</button>
                 <button id="pg-download-btn" class="btn-text" style="display:none;" onclick="pgDownloadSAS()">Download .sas</button>
-                <button class="btn-text" onclick="document.getElementById('pg-sql').value=''">Clear</button>
                 <span id="pg-status" style="font-size:12px; color:var(--jp-ui-font-color2); margin-left:auto;"></span>
             </div>
         </section>
@@ -153,9 +125,8 @@
                 <div class="empty-message">Loading history…</div>
             </div>
         </section>
-    </main>
+{% endblock %}
 
-    <script src="/static/common.js"></script>
+{% block scripts %}
     <script src="/static/playground.js"></script>
-</body>
-</html>
+{% endblock %}

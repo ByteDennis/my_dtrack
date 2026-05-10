@@ -251,7 +251,19 @@ def compare_column_stats(
         organized = {}
         for stat in stats:
             col = stat['column_name']
-            dt = parse_date(stat['dt']) if stat['dt'] else stat['dt']
+            raw = stat['dt']
+            # Try to canonicalize to YYYY-MM-DD, but pass through sentinel
+            # labels ('all', 'sample') and vintage bucket keys (e.g. week /
+            # month tags) that parse_date doesn't recognize. Both sides agree
+            # on the same label per bucket, so equality-keyed grouping still
+            # works for the comparison join.
+            if raw:
+                try:
+                    dt = parse_date(raw)
+                except ValueError:
+                    dt = raw
+            else:
+                dt = raw
             if col not in organized:
                 organized[col] = {}
             organized[col][dt] = stat

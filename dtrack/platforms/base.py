@@ -637,6 +637,8 @@ GROUP BY {date_col_ref}""".strip()
                              * (sum_cnt_rnk * 1.0 / sum_cnt), 0))
            END AS std_v
     FROM _dt_agg"""),
+        # min_v = alpha-first p_col, max_v = alpha-last p_col, encoded as
+        # "p_col=cnt". Sorted by val (alphabetically); freq is just for display.
         ("_dt_minmax", f"""
     SELECT dt,
            MAX(CASE WHEN rnk = 1 THEN p_col || '=' || {cnt_to_str} END) AS min_v,
