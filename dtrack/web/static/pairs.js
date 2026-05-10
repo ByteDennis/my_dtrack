@@ -124,6 +124,7 @@ async function applyGlobalSettings() {
     const fromDate = document.getElementById('global-from-date').value;
     const toDate = document.getElementById('global-to-date').value;
 
+    // Update in-memory state first so the UI shows the change immediately.
     pairs.forEach(pair => {
         pair.mode = mode;
         pair.dateRangeMode = 'global';
@@ -134,7 +135,7 @@ async function applyGlobalSettings() {
     saveGlobalSettings();
 
     // Persist global stats-accuracy to dtrack.json.metadata.approx_distinct
-    // independently of the per-pair fields above.
+    // independently of the per-pair fields below.
     const approxSel = document.querySelector('input[name="global-approx"]:checked');
     const approx = approxSel && approxSel.value === 'approx';
     try {
@@ -147,9 +148,39 @@ async function applyGlobalSettings() {
         showError(`Saving global stats-accuracy failed: ${e.message}`);
     }
 
+    // Persist the per-pair changes to dtrack.json. Without this, the JS-side
+    // mutation above is invisible to /api/generate, which re-reads the file
+    // from disk and would emit SQL using the previous per-pair date range.
+    // Run all PUTs in parallel; if any fail we surface the first error.
+    let saveErr = null;
+    await Promise.all(pairs.map(async (pair) => {
+        try {
+            const resp = await fetch(`/api/pairs/${encodeURIComponent(pair.name)}`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    mode: pair.mode,
+                    dateRangeMode: pair.dateRangeMode,
+                    fromDate: pair.fromDate,
+                    toDate: pair.toDate,
+                }),
+            });
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                saveErr = saveErr || `${pair.name}: ${data.error || resp.status}`;
+            }
+        } catch (e) {
+            saveErr = saveErr || `${pair.name}: ${e.message}`;
+        }
+    }));
+
     renderPairs();
     closeSettingsModal();
-    showSuccess('Global settings applied to all pairs');
+    if (saveErr) {
+        showError(`Apply to all pairs partial fail: ${saveErr}`);
+    } else {
+        showSuccess(`Global settings applied to ${pairs.length} pair${pairs.length===1?'':'s'} (saved to dtrack.json)`);
+    }
 }
 
 function updateEffectiveRange() {
