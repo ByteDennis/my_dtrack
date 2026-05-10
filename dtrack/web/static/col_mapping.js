@@ -223,7 +223,11 @@ function renderPairBody(name) {
               <span style="color:var(--jp-ui-font-color3);">
                 L=${nLeftCols} cols, R=${nRightCols} cols
               </span></span>
-        <span style="display:flex; gap:8px;">
+        <span style="display:flex; gap:8px; align-items:center;">
+            <button class="btn-secondary" onclick="syncNow('${name}')" id="sync-btn-${name}"
+                    title="Persist current mappings (including auto-suggested rows) to pairs.json and the SQLite DB">
+                Sync to JSON &amp; DB
+            </button>
             <a href="/api/pairs/${name}/columns/excel" class="btn-text" download>Excel</a>
         </span>
     </div>`;
@@ -660,6 +664,48 @@ async function syncPair(name) {
     } catch (e) {
         console.error(`Sync failed for ${name}:`, e);
         notify(`Save failed: ${e.message}`, 'error');
+    }
+}
+
+// Immediate, user-triggered sync — bypasses the 600ms debounce so auto-
+// suggested rows that the page loaded but never edited get persisted on
+// click. Surfaces JSON-write failure (the endpoint returns json_synced:
+// false + json_error when load_unified_config / save_unified_config trip).
+async function syncNow(name) {
+    const cache = mappingCache[name];
+    if (!cache) {
+        notify(`No mappings cached for ${name}`, 'error');
+        return;
+    }
+    clearTimeout(_syncTimers[name]);  // cancel any in-flight debounce
+    const btn = document.getElementById(`sync-btn-${name}`);
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+    try {
+        const resp = await fetch(`/api/pairs/${name}/col-mappings`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                mappings: cache.mappings,
+                rules: {
+                    rules: cache.rules,
+                    sources: cache.sources,
+                },
+            }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            notify(`Sync failed: ${data.error || resp.status}`, 'error');
+        } else if (data.json_synced === false) {
+            // DB write succeeded but pairs.json write failed.
+            notify(`Saved to DB only (json failed: ${data.json_error || 'unknown'})`, 'error');
+        } else {
+            const nMap = data.mapped || Object.keys(cache.mappings).length;
+            notify(`Synced ${nMap} mappings to JSON + DB`, 'success');
+        }
+    } catch (e) {
+        notify(`Sync error: ${e.message}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Sync to JSON & DB'; }
     }
 }
 

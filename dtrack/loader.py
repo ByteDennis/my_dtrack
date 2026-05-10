@@ -344,6 +344,10 @@ _COL_STATS_ALIASES = {
     'min_val': ['min_val', 'col_min', 'min'],
     'max_val': ['max_val', 'col_max', 'max'],
     'top_10': ['top_10', 'col_freq', 'freq', 'top10'],
+    # Coarse signals
+    'length_avg': ['length_avg', 'len_avg', 'avg_len'],
+    'length_max': ['length_max', 'len_max', 'max_len'],
+    'hash_sum': ['hash_sum', 'hashsum'],
 }
 
 
@@ -364,6 +368,7 @@ def load_precomputed_col_stats(
     source: Optional[str] = None,
     db_name: Optional[str] = None,
     vintage: str = "day",
+    level: str = "fine",
 ) -> int:
     """
     Load pre-computed column statistics from CSV into _col_stats table.
@@ -371,15 +376,23 @@ def load_precomputed_col_stats(
     Expected CSV columns (with alias support):
         column_name, dt, col_type, n_total, n_missing, n_unique,
         mean/col_avg, std/col_std, min_val/col_min, max_val/col_max,
-        top_10/col_freq
+        top_10/col_freq, length_avg, length_max, hash_sum
 
     Args:
         db_path: Path to SQLite database
         csv_path: Path to CSV file with pre-computed stats
         table_name: Table name to associate stats with
-        mode: Load mode (upsert or replace)
+        mode: Load mode (upsert or replace). "replace" deletes all existing
+              rows for the table first; only valid for level="fine" (a coarse
+              re-load shouldn't wipe fine-extracted rows).
         source: Data source identifier
         db_name: Database name
+        level: "fine" (default) — full upsert of every column.
+               "coarse" — merge: writes only the cheap signals
+               (n_total/n_missing/n_unique/min_val/max_val/length_avg/
+               length_max/hash_sum), preserving any existing mean/std/top_10
+               from a prior fine extraction. mode="replace" is forced to
+               "upsert" in coarse to avoid dropping fine rows.
 
     Returns:
         Number of rows loaded
@@ -397,11 +410,16 @@ def load_precomputed_col_stats(
             if resolved:
                 col_map[field] = resolved
 
-        if mode == "replace":
+        if mode == "replace" and level == "fine":
             conn = sqlite3.connect(db_path)
             conn.execute("DELETE FROM _col_stats WHERE source_table = ?", (table_name,))
             conn.commit()
             conn.close()
+        elif mode == "replace" and level == "coarse":
+            # Coarse-replace would wipe fine rows produced by an earlier
+            # drill-down. Silently downgrade to upsert/coarse-merge.
+            print(f"  [load-col] level=coarse: ignoring mode='replace' to "
+                  f"preserve any existing fine rows for {table_name}")
 
         # Resolve effective vintage for labeling:
         # sample@N -> day, all -> skip labels, others -> as-is
@@ -451,10 +469,14 @@ def load_precomputed_col_stats(
                 "max_val": _get("max_val", ""),
                 "top_10": _get("top_10", ""),
                 "vintage_label": label,
+                "length_avg": _get("length_avg", ""),
+                "length_max": _get("length_max", ""),
+                "hash_sum": _get("hash_sum", ""),
             }
             stats.append(stat)
 
-    insert_col_stats(db_path, stats)
+    insert_col_stats(db_path, stats,
+                     mode="coarse_merge" if level == "coarse" else "fine")
 
     # Compute date range from loaded stats (already canonical YYYY-MM-DD)
     dt_values = [s["dt"] for s in stats if s.get("dt")]

@@ -239,8 +239,18 @@ def compare_column_stats(
     from_date=None, to_date=None,
     matched_dates=None,
     col_type_overrides=None,
+    level="fine",
 ):
     """Compare column statistics between two tables.
+
+    `level="coarse"` returns only the cheap-aggregate fields
+    (n_total/n_missing/n_unique/min/max/length_avg/length_max/hash_sum). Used
+    for the first-pass "this column might be worth more inspection" check
+    against coarse-extracted rows.
+
+    `level="fine"` (default) returns everything (rank-weighted mean/std,
+    top_10, etc.). Used for the drill-down view after the user picks
+    suspicious (col, dt) cells from the coarse view.
 
     Now resolves col_type disagreements using resolve_col_type().
     """
@@ -331,28 +341,14 @@ def compare_column_stats(
                 "n_unique_diff": r_unique - l_unique,
             }
 
-            # Always include mean/std/min/max (for both numeric and categorical).
-            # Mean/std/min/max are compared via string match keys with prefixes
-            # ("m_"/"s_"/"mn_"/"mx_"). For numeric values, _stat_match_key
-            # rounds via float(); for categorical "{cat}={count}" strings, it
-            # falls through to literal comparison. This bypasses both float
-            # drift ("0.44" vs "0.4400") and integer-vs-double formatting
-            # ("0" vs "0.00").
-            l_mean_key = _stat_match_key(left_stat["mean"], "m")
-            r_mean_key = _stat_match_key(right_stat["mean"], "m")
-            l_std_key = _stat_match_key(left_stat["std"], "s")
-            r_std_key = _stat_match_key(right_stat["std"], "s")
+            # min/max are coarse-safe: they're plain MIN/MAX(col) when the row
+            # came from coarse extraction, or "val=cnt" when from fine. The
+            # match key comparison handles both formats by string-equality.
             l_min_key = _stat_match_key(left_stat["min_val"], "mn")
             r_min_key = _stat_match_key(right_stat["min_val"], "mn")
             l_max_key = _stat_match_key(left_stat["max_val"], "mx")
             r_max_key = _stat_match_key(right_stat["max_val"], "mx")
             comparison.update({
-                "mean_left": left_stat["mean"],
-                "mean_right": right_stat["mean"],
-                "mean_match": (l_mean_key == r_mean_key) if (l_mean_key is not None and r_mean_key is not None) else None,
-                "std_left": left_stat["std"],
-                "std_right": right_stat["std"],
-                "std_match": (l_std_key == r_std_key) if (l_std_key is not None and r_std_key is not None) else None,
                 "min_left": left_stat["min_val"],
                 "min_right": right_stat["min_val"],
                 "min_match": (l_min_key == r_min_key) if (l_min_key is not None and r_min_key is not None) else None,
@@ -360,12 +356,51 @@ def compare_column_stats(
                 "max_right": right_stat["max_val"],
                 "max_match": (l_max_key == r_max_key) if (l_max_key is not None and r_max_key is not None) else None,
             })
-            # Categorical: add top_10
-            if resolved_type != "numeric":
+
+            # Coarse-only signals — present iff the row came from coarse (or
+            # newer fine) extraction. Cells where either side is empty get
+            # match=None ("unknown") so they don't trigger spurious diffs on
+            # legacy data that pre-dates these fields.
+            for field in ("length_avg", "length_max", "hash_sum"):
+                lv = left_stat.get(field, "") or ""
+                rv = right_stat.get(field, "") or ""
+                if lv and rv:
+                    if field == "hash_sum":
+                        # Hash sums round-trip as strings; equality only.
+                        match = (lv == rv)
+                    else:
+                        # length_* are numeric — round to handle "12.0" vs "12".
+                        try:
+                            match = abs(float(lv) - float(rv)) < 1e-9
+                        except (ValueError, TypeError):
+                            match = (lv == rv)
+                else:
+                    match = None
+                comparison[f"{field}_left"] = lv
+                comparison[f"{field}_right"] = rv
+                comparison[f"{field}_match"] = match
+
+            if level == "fine":
+                # Fine-only fields: rank-weighted mean/std for categorical,
+                # arithmetic mean/std for numeric, plus top_10. Same match-key
+                # logic as before so float-formatted values normalize cleanly.
+                l_mean_key = _stat_match_key(left_stat["mean"], "m")
+                r_mean_key = _stat_match_key(right_stat["mean"], "m")
+                l_std_key = _stat_match_key(left_stat["std"], "s")
+                r_std_key = _stat_match_key(right_stat["std"], "s")
                 comparison.update({
-                    "top_10_left": left_stat["top_10"],
-                    "top_10_right": right_stat["top_10"],
+                    "mean_left": left_stat["mean"],
+                    "mean_right": right_stat["mean"],
+                    "mean_match": (l_mean_key == r_mean_key) if (l_mean_key is not None and r_mean_key is not None) else None,
+                    "std_left": left_stat["std"],
+                    "std_right": right_stat["std"],
+                    "std_match": (l_std_key == r_std_key) if (l_std_key is not None and r_std_key is not None) else None,
                 })
+                if resolved_type != "numeric":
+                    comparison.update({
+                        "top_10_left": left_stat.get("top_10", ""),
+                        "top_10_right": right_stat.get("top_10", ""),
+                    })
 
             comparisons.append(comparison)
 
@@ -376,7 +411,15 @@ def compare_column_stats(
 
 
 def _has_col_differences(comp):
-    """Check if a column comparison has any statistical differences."""
+    """Check if a column comparison has any statistical differences.
+
+    Covers both coarse signals (n_total/n_missing/n_unique/min/max +
+    length_avg/length_max/hash_sum) and fine signals (mean/std). Fields
+    absent from the comparison (match=None) don't contribute — that lets
+    a coarse comparison work without triggering false diffs on
+    fine-only fields, and vice versa for legacy rows lacking length_*/
+    hash_sum.
+    """
     if comp.get('n_total_diff', 0) != 0:
         return True
     if comp.get('n_missing_diff', 0) != 0:
@@ -386,7 +429,6 @@ def _has_col_differences(comp):
 
     if comp.get('mean_match') is False:
         return True
-
     if comp.get('std_match') is False:
         return True
 
@@ -396,6 +438,15 @@ def _has_col_differences(comp):
     if comp.get('min_match') is False:
         return True
     if comp.get('max_match') is False:
+        return True
+
+    # Coarse-only signals: cheap structural & multiset-checksum hints.
+    # Treated as a diff only if both sides have a value and they disagree.
+    if comp.get('length_avg_match') is False:
+        return True
+    if comp.get('length_max_match') is False:
+        return True
+    if comp.get('hash_sum_match') is False:
         return True
 
     return False

@@ -10,12 +10,117 @@ const ICON = {
 let pairsData = [];
 let compareCache = {};
 
+function _currentLevel() {
+    return document.getElementById('level-select')?.value || 'coarse';
+}
+
+function onLevelChange() {
+    // Drop the cache so the new level fetches fresh comparisons that use the
+    // matching field set (coarse skips mean/std/top_10).
+    compareCache = {};
+    runAll();
+}
+
+// ---------------------------------------------------------------------------
+// Cell selection — for "drill into these (col, vintage) cells at fine level"
+// ---------------------------------------------------------------------------
+// Stored as Set of "<pair>|<col>|<vintage_label>" so cross-pair selections
+// survive table re-renders. Persisted to sessionStorage so an accidental
+// reload doesn't wipe the user's clicks.
+const _SEL_KEY = 'dtrack-col-fine-cells';
+let selectedCells = new Set();
+try {
+    const saved = sessionStorage.getItem(_SEL_KEY);
+    if (saved) selectedCells = new Set(JSON.parse(saved));
+} catch (e) { /* ignore */ }
+
+function _saveSelection() {
+    try { sessionStorage.setItem(_SEL_KEY, JSON.stringify([...selectedCells])); }
+    catch (e) {}
+}
+
+function toggleCellSelection(pair, col, vintage) {
+    const key = `${pair}|${col}|${vintage}`;
+    if (selectedCells.has(key)) selectedCells.delete(key);
+    else selectedCells.add(key);
+    _saveSelection();
+    _refreshSelectionBar();
+    _refreshCellMarkers();
+}
+
+function clearSelection() {
+    selectedCells.clear();
+    _saveSelection();
+    _refreshSelectionBar();
+    _refreshCellMarkers();
+}
+
+function _refreshCellMarkers() {
+    // Update visual state on existing rendered cells without a full re-render.
+    document.querySelectorAll('[data-cell-key]').forEach(el => {
+        const key = el.dataset.cellKey;
+        if (selectedCells.has(key)) el.classList.add('cell-selected');
+        else el.classList.remove('cell-selected');
+    });
+}
+
+function _refreshSelectionBar() {
+    const bar = document.getElementById('selection-bar');
+    if (!bar) return;
+    const n = selectedCells.size;
+    bar.style.display = n > 0 ? '' : 'none';
+    const countEl = document.getElementById('sel-count');
+    if (countEl) countEl.textContent = n;
+}
+
+async function generateFineForSelected() {
+    if (!selectedCells.size) return;
+    const cells = [...selectedCells].map(k => {
+        const [pair, col, vintage] = k.split('|');
+        return {pair, col, vintage};
+    });
+    const sas_outdir = prompt('SAS outdir (where to write fine extract_col.sas):', './sas/');
+    if (sas_outdir == null) return;
+    const aws_outdir = prompt('AWS outdir (where to write fine extract_col.sql):', './csv/');
+    if (aws_outdir == null) return;
+
+    const btn = document.getElementById('gen-fine-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+    try {
+        const resp = await fetch('/api/generate', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                type: 'col',
+                level: 'fine',
+                cells: cells,
+                sas_outdir, aws_outdir,
+            }),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.ok) {
+            alert(`Fine SQL/SAS generated for ${cells.length} cells.\n` +
+                  (data.sas_file ? `  SAS: ${data.sas_file}\n` : '') +
+                  (data.sql_file ? `  SQL: ${data.sql_file}\n` : '') +
+                  `\nRun the generated extract, then load-col with level=fine, ` +
+                  `then switch the page Level dropdown to Fine to see the drill-down.`);
+        } else {
+            alert(`Gen-fine failed: ${data.error || resp.status}\n\n${data.output || ''}`);
+        }
+    } catch (e) {
+        alert(`Gen-fine error: ${e.message}`);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = `Generate Fine for selected`; }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', async () => {
     await loadPairs();
     await runAll();
+    _refreshSelectionBar();
 });
 
 async function loadPairs() {
@@ -72,9 +177,11 @@ async function comparePair(name) {
 
     const from = document.getElementById('global-from')?.value || '';
     const to = document.getElementById('global-to')?.value || '';
+    const level = _currentLevel();
     const params = new URLSearchParams();
     if (from) params.set('from_date', from);
     if (to) params.set('to_date', to);
+    params.set('level', level);
 
     try {
         const res = await fetch(`/api/compare/col/${name}?${params}`);
@@ -251,15 +358,16 @@ function renderVintages(name, data) {
             </summary>
             <div class="rc-details-body">
                 <div class="rc-date-table-wrap">
-                    ${renderColTable(name, cols)}
+                    ${renderColTable(name, cols, v.label || v.dt || '')}
                 </div>
             </div>
         </details>`;
     }).join('');
 }
 
-function renderColTable(name, cols) {
+function renderColTable(name, cols, vintage) {
     if (!cols.length) return '<div class="empty-message">No matched columns</div>';
+    const vlabel = vintage || '';
 
     // Sort: diff columns first
     const sorted = [...cols].sort((a, b) => {
@@ -267,17 +375,28 @@ function renderColTable(name, cols) {
         return (a.left_col || '').localeCompare(b.left_col || '');
     });
 
-    // Stat rows to display
-    const statDefs = [
+    // Stat rows. Coarse rows show cheap signals; Mean/Std are fine-only and
+    // display only when the data has them. Length avg/max + Hash sum are the
+    // coarse-stage drift hints (structural shape + multiset checksum).
+    const level = _currentLevel();
+    const baseDefs = [
         {label: 'Type',      keyL: 'col_type',       keyR: 'col_type',       isDiff: () => false, fmt: 'text'},
         {label: 'N_Total',   keyL: 'n_total_left',   keyR: 'n_total_right',  isDiff: c => c.n_total_diff !== 0, fmt: 'int'},
         {label: 'N_Missing', keyL: 'n_missing_left',  keyR: 'n_missing_right', isDiff: c => c.n_missing_diff !== 0, fmt: 'int'},
         {label: 'N_Unique',  keyL: 'n_unique_left',   keyR: 'n_unique_right',  isDiff: c => c.n_unique_diff !== 0, fmt: 'int'},
+    ];
+    const fineDefs = (level === 'fine') ? [
         {label: 'Mean',      keyL: 'mean_left',       keyR: 'mean_right',      isDiff: c => c.mean_match === false, fmt: 'num'},
         {label: 'Std',       keyL: 'std_left',        keyR: 'std_right',       isDiff: c => c.std_match === false, fmt: 'num'},
+    ] : [];
+    const tailDefs = [
         {label: 'Min',       keyL: 'min_left',        keyR: 'min_right',       isDiff: c => c.min_match === false, fmt: 'text'},
         {label: 'Max',       keyL: 'max_left',        keyR: 'max_right',       isDiff: c => c.max_match === false, fmt: 'text'},
+        {label: 'Length avg',keyL: 'length_avg_left', keyR: 'length_avg_right', isDiff: c => c.length_avg_match === false, fmt: 'num'},
+        {label: 'Length max',keyL: 'length_max_left', keyR: 'length_max_right', isDiff: c => c.length_max_match === false, fmt: 'int'},
+        {label: 'Hash sum',  keyL: 'hash_sum_left',   keyR: 'hash_sum_right',   isDiff: c => c.hash_sum_match === false, fmt: 'text'},
     ];
+    const statDefs = [...baseDefs, ...fineDefs, ...tailDefs];
 
     function fmtCell(val, fmt) {
         if (val == null || val === '') return '&mdash;';
@@ -298,12 +417,25 @@ function renderColTable(name, cols) {
         });
     });
 
-    // Build header row (variable names) — per side
+    // Build header row (variable names) — per side. The left-side header is
+    // clickable for fine-drill selection; the right-side header just mirrors
+    // the column name without selection (selection is keyed off left col).
     function colHeadersForSide(side) {
         return sorted.map((c, ci) => {
-            const name = side === 'left' ? c.left_col : (c.right_col || c.left_col);
+            const dispName = side === 'left' ? c.left_col : (c.right_col || c.left_col);
             const icon = c.has_diff ? '<span style="color:var(--jp-warn-color0);">&#9888;</span> ' : '';
-            return `<th style="text-align:right; font-size:11px;">${icon}${esc(name)}</th>`;
+            if (side !== 'left') {
+                return `<th style="text-align:right; font-size:11px;">${icon}${esc(dispName)}</th>`;
+            }
+            const cellKey = `${name}|${c.left_col}|${vlabel}`;
+            const sel = selectedCells.has(cellKey) ? ' cell-selected' : '';
+            const colJs = JSON.stringify(c.left_col);
+            const vJs = JSON.stringify(vlabel);
+            return `<th class="cell-selectable${sel}" data-cell-key="${cellKey}" `
+                + `title="Click to select for fine drill-down" `
+                + `onclick="toggleCellSelection(${JSON.stringify(name)}, ${colJs}, ${vJs})" `
+                + `style="text-align:right; font-size:11px; cursor:pointer; user-select:none;">`
+                + `${icon}${esc(dispName)}</th>`;
         }).join('');
     }
 

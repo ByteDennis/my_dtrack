@@ -1141,8 +1141,18 @@ def _apply_col_filter(col_list, tbl_cfg):
                              their saved filter honored).
       3. no filter         - pass through unchanged.
     """
+    # `_selected_cols` semantics:
+    #   None  → no col_filter set: pass-through, every mapped col extracted.
+    #   []    → filter set, matched zero col_map entries: extract nothing
+    #            (the earlier `if selected:` falsy-check silently fell through
+    #             to all cols, which is why a non-matching col_filter was
+    #             ignored on /col_gen).
+    #   [...] → filter matched N entries: extract only those.
     selected = tbl_cfg.get('_selected_cols')
-    if selected:
+    if selected is not None:
+        if not selected:
+            print(f"  WARNING: {tbl_cfg.get('name')}: col_filter matched 0 "
+                  f"mapped cols; this table will emit no col blocks")
         wanted = {c.lower() for c in selected}
         return [(c, d) for c, d in col_list if c.lower() in wanted]
 
@@ -1158,7 +1168,26 @@ def _apply_col_filter(col_list, tbl_cfg):
         if excludes:
             out = [(c, d) for c, d in out
                    if not any(fnmatch(c.lower(), p) for p in excludes)]
-        return out
+        col_list = out
+
+    # Auto-skip ID-like cols (cardinality >= threshold from prior load-col).
+    # Populated by gen_sas via read_id_cols_from_col_stats. Cols are dropped
+    # from extraction entirely; their cached _col_stats rows from the prior
+    # run continue to satisfy compare.py downstream (use upsert mode on
+    # load-col so previous rows aren't wiped).
+    skip = tbl_cfg.get('_id_cols_to_skip')
+    if skip:
+        col_list = [(c, d) for c, d in col_list if c not in skip]
+
+    # Fine-cell selection: when /api/generate carries `cells`, gen_sas stashes
+    # `_fine_cells = {col_name: [vintage_labels]}` on the table. Drop cols
+    # the user didn't pick. (Per-vintage filtering in SAS macros is harder
+    # and we leave it for now — every selected col extracts every vintage
+    # the table has, which is over-extraction but correct.)
+    fine_cells = tbl_cfg.get('_fine_cells')
+    if fine_cells:
+        wanted = {c.lower() for c in fine_cells.keys()}
+        col_list = [(c, d) for c, d in col_list if c.lower() in wanted]
     return col_list
 
 
@@ -2063,7 +2092,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
 
 
 def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintage=None,
-            from_date=None, to_date=None):
+            from_date=None, to_date=None, cells_filter=None):
     """
     Generate a single combined SAS file for Oracle data extraction.
 
@@ -2111,6 +2140,36 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 
     all_tables = load_tables_from_config(config)
     inject_where_from_config(all_tables, config)
+
+    # Fine-cell selection plumbing: cells_filter is keyed by qname and lists
+    # which (col, [vintages]) the user picked from the coarse compare view.
+    # Stash on each table dict; _apply_col_filter drops anything else.
+    if cells_filter:
+        for tbl in all_tables:
+            qn = qualified_name(tbl)
+            sel = cells_filter.get(qn)
+            if sel:
+                tbl['_fine_cells'] = sel
+
+    # Auto-skip ID-like cols based on cached cardinality from prior load-col.
+    # Cache source: _col_stats. Freshness: _metadata.last_loaded vs TTL
+    # (DTRACK_ID_CACHE_TTL_DAYS, default 1.0). First-run on a never-loaded
+    # table = empty cache = no skip = full extraction (current behaviour).
+    # Subsequent runs within TTL skip ID cols (≥ DTRACK_ID_THRESHOLD ratio).
+    if db_path and os.environ.get('DTRACK_ID_DETECTION', '1') != '0':
+        from .base import read_id_cols_from_col_stats
+        id_threshold = float(os.environ.get('DTRACK_ID_THRESHOLD', '0.99'))
+        ttl_days = float(os.environ.get('DTRACK_ID_CACHE_TTL_DAYS', '1.0'))
+        for tbl in all_tables:
+            qn = qualified_name(tbl)
+            id_cols = read_id_cols_from_col_stats(
+                db_path, qn, threshold=id_threshold, ttl_days=ttl_days,
+            )
+            if id_cols:
+                tbl['_id_cols_to_skip'] = id_cols
+                print(f"  [id-cache] {qn}: skipping {len(id_cols)} ID-like "
+                      f"cols (threshold={id_threshold}, TTL={ttl_days}d): "
+                      f"{sorted(id_cols)}")
 
     # Build per-table date bounds. Resolution order per table:
     #   1. per-pair fromDate/toDate saved on the pair config (frontend col_gen

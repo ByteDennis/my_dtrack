@@ -377,6 +377,46 @@ async def api_generate_files(request: Request):
     sas_outdir = _resolve(body.get("sas_outdir", "./sas/"))
     aws_outdir = _resolve(body.get("aws_outdir", "./csv/"))
     pair_names = body.get("pair_names")  # None = all pairs
+    # level: "coarse" emits cheap-aggregate SQL for every column (no GROUP BY
+    # p_col, no freq table). "fine" (default) is the historical full path.
+    # Only meaningful for type=col.
+    level = (body.get("level") or "fine").lower()
+    if level not in ("fine", "coarse"):
+        return JSONResponse(status_code=400, content={
+            "error": f"Unknown level '{level}'; expected 'fine' or 'coarse'."
+        })
+    coarse = (extract_type == "col" and level == "coarse")
+
+    # cells: optional list of {pair, col, vintage} the col-compare UI sends
+    # when the user has selected specific (column, vintage_label) cells for
+    # fine drill-down. When present, the AWS / SAS generators emit SQL only
+    # for those (table_qname, mapped_col, vintage) combinations.
+    cells = body.get("cells")
+    cells_filter = None  # {qname: {col_name: set(vintage_labels)}}
+    if cells and extract_type == "col":
+        from ..db import get_table_pair, get_pair_col_map_from_db
+        cells_filter = {}
+        for cell in cells:
+            pair_name = cell.get("pair")
+            col_name = cell.get("col")
+            vintage = cell.get("vintage", "")
+            if not (pair_name and col_name):
+                continue
+            pair = get_table_pair(_db_path, pair_name)
+            if not pair:
+                continue
+            col_map = get_pair_col_map_from_db(_db_path, pair_name) or {}
+            # left_col is what the user clicked; right_col via col_map.
+            left_col = col_name
+            right_col = col_map.get(left_col, left_col)
+            for qname, side_col in (
+                (pair["table_left"], left_col),
+                (pair["table_right"], right_col),
+            ):
+                cells_filter.setdefault(qname, {}).setdefault(side_col, set()).add(vintage)
+        # Convert vintage sets to sorted lists for JSON / passing around.
+        cells_filter = {q: {c: sorted(vs) for c, vs in m.items()}
+                        for q, m in cells_filter.items()}
 
     buf = io.StringIO()
     results = {"sas_file": None, "sql_file": None}
@@ -497,12 +537,14 @@ async def api_generate_files(request: Request):
                         tmp_path = tmp.name
                     try:
                         gen_sas(tmp_path, sas_outdir, types=[extract_type],
-                                db_path=_db_path, from_date=from_date, to_date=to_date)
+                                db_path=_db_path, from_date=from_date, to_date=to_date,
+                                cells_filter=cells_filter)
                     finally:
                         os.unlink(tmp_path)
                 else:
                     gen_sas(_config_path, sas_outdir, types=[extract_type],
-                            db_path=_db_path, from_date=from_date, to_date=to_date)
+                            db_path=_db_path, from_date=from_date, to_date=to_date,
+                            cells_filter=cells_filter)
                 results["sas_file"] = os.path.join(sas_outdir, f"extract_{extract_type}.sas")
 
             # Generate SQL file
@@ -521,7 +563,17 @@ async def api_generate_files(request: Request):
                     from ..platforms.base import fill_columns_from_meta
                     fill_columns_from_meta(aws_tables, _db_path)
 
-                _write_combined_sql(aws_tables, aws_outdir, extract_type, db_path=_db_path)
+                if cells_filter and extract_type == "col":
+                    # Annotate tables with their per-pair fine-cell selection
+                    # so the SQL generator can drop unselected (col, vintage)
+                    # entries.
+                    for tbl in aws_tables:
+                        from ..platforms.base import qualified_name as _qn
+                        sel = cells_filter.get(_qn(tbl), {})
+                        if sel:
+                            tbl['_fine_cells'] = sel
+                _write_combined_sql(aws_tables, aws_outdir, extract_type,
+                                    db_path=_db_path, coarse=coarse)
                 results["sql_file"] = os.path.join(aws_outdir, f"extract_{extract_type}.sql")
 
             # Cross-side bucket equality check (col extraction only — per-pair
@@ -543,6 +595,14 @@ async def api_load(request: Request):
     body = await request.json()
     load_type = body.get("type", "row")  # "row" or "col"
     folder = _resolve(body.get("folder", "./csv/"))
+    # level: forwarded to load_precomputed_col_stats. "coarse" merges only
+    # the coarse signals (preserves any prior fine values); "fine" full
+    # upsert. Ignored for type=row.
+    level = (body.get("level") or "fine").lower()
+    if level not in ("fine", "coarse"):
+        return JSONResponse(status_code=400, content={
+            "error": f"Unknown level '{level}'; expected 'fine' or 'coarse'."
+        })
 
     buf = io.StringIO()
     try:
@@ -604,8 +664,9 @@ async def api_load(request: Request):
                         db_path=_db_path, csv_path=csv_path,
                         table_name=qname, mode="upsert",
                         source=tbl.get("source"), vintage=table_vintage,
+                        level=level,
                     )
-                    print(f"{qname}: {count} stat rows loaded")
+                    print(f"{qname}: {count} stat rows loaded ({level})")
 
         return {"ok": True, "output": buf.getvalue()}
     except Exception as e:
@@ -1705,8 +1766,22 @@ async def api_save_col_comparison(pair_name: str, request: Request):
 
 
 @app.get("/api/compare/col/{pair_name}")
-async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str = ""):
-    """Compare col stats for a single pair — returns per-vintage comparisons."""
+async def api_compare_col_pair(pair_name: str, from_date: str = "",
+                               to_date: str = "", level: str = "fine"):
+    """Compare col stats for a single pair — returns per-vintage comparisons.
+
+    `level=coarse` returns the cheap-aggregate signals only
+    (n_total/n_missing/n_unique/min/max/length_avg/length_max/hash_sum) — used
+    by the coarse compare page to flag suspicious (col, dt) cells without
+    having any rank-weighted/freq-table fields.
+
+    `level=fine` (default) returns the full row including mean/std/top_10 —
+    used by the drill-down page after the user picks cells.
+    """
+    if level not in ("coarse", "fine"):
+        return JSONResponse(status_code=400, content={
+            "error": f"Unknown level '{level}'; expected 'coarse' or 'fine'."
+        })
     try:
         from ..db import (
             get_table_pair, get_col_stats, get_pair_col_map_from_db,
@@ -1745,6 +1820,7 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "", to_date: str
             from_date=from_date or None,
             to_date=to_date or None,
             col_type_overrides=col_type_overrides,
+            level=level,
         )
 
         # Get all left/right column names for left-only/right-only
@@ -3816,13 +3892,20 @@ async def api_save_col_type_overrides(pair_name: str, request: Request):
 
 @app.put("/api/pairs/{pair_name}/col-mappings")
 async def api_save_col_mappings(pair_name: str, request: Request):
-    """Save flat mappings + rules + sources."""
+    """Save flat mappings + rules + sources.
+
+    Persists to *both* the SQLite `_table_pairs` table (used by the runtime
+    extraction path) and `pairs.json` under `pair.col_map` (so the JSON file
+    visibly reflects what the UI just saved, and CLI tooling that reads the
+    config picks it up). Mirrors the applyGlobalSettings fix.
+    """
     body = await request.json()
     try:
         from ..db import (
             get_table_pair, update_pair_col_map,
             update_pair_col_rules, ensure_col_rules_column,
         )
+        from ..config import load_unified_config, save_unified_config
 
         pair = get_table_pair(_db_path, pair_name)
         if not pair:
@@ -3836,7 +3919,27 @@ async def api_save_col_mappings(pair_name: str, request: Request):
         update_pair_col_map(_db_path, pair_name, mappings)
         update_pair_col_rules(_db_path, pair_name, rules_data)
 
-        return {"ok": True, "mapped": len(mappings)}
+        # Mirror to pairs.json so the file reflects the UI state and any
+        # downstream tooling (gen-sas, gen-aws CLI, etc.) reads the same
+        # mapping. Empty mapping clears the key entirely.
+        json_synced = False
+        try:
+            config = load_unified_config(_config_path)
+            pairs_cfg = config.setdefault("pairs", {})
+            if pair_name in pairs_cfg:
+                if mappings:
+                    pairs_cfg[pair_name]["col_map"] = mappings
+                else:
+                    pairs_cfg[pair_name].pop("col_map", None)
+                save_unified_config(_config_path, config)
+                json_synced = True
+        except Exception as e:
+            # JSON sync failure shouldn't fail the save — DB write already
+            # succeeded. Surface the error so the UI can flag it.
+            return {"ok": True, "mapped": len(mappings),
+                    "json_synced": False, "json_error": str(e)}
+
+        return {"ok": True, "mapped": len(mappings), "json_synced": json_synced}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 

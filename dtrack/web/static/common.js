@@ -179,6 +179,9 @@ window.fetch = async function(url, options = {}) {
                     if (data.matching !== undefined) summary += ` matching=${data.matching}`;
                     if (data.excluded !== undefined) summary += ` excluded=${data.excluded}`;
                     if (data.updated !== undefined) summary += ` updated=${data.updated}`;
+                    if (data.mapped !== undefined) summary += ` mapped=${data.mapped}`;
+                    if (data.json_synced !== undefined) summary += ` json=${data.json_synced ? 'yes' : 'NO'}`;
+                    if (data.json_error) summary += ` json_err: ${data.json_error}`;
                     if (data.action) summary += ` ${data.action}`;
                     if (data.error) summary += ` error: ${data.error}`;
                     if (!summary) summary = keys.slice(0, 4).join(',');

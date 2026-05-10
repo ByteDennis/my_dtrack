@@ -39,6 +39,15 @@ _SCHEMA = {
         ("max_val", "TEXT", ""),
         ("top_10", "TEXT", ""),
         ("vintage_label", "TEXT", ""),
+        # Coarse-stage signals (cheap, no GROUP BY p_col). Populated by
+        # both the coarse and fine extraction paths so a coarse-only row
+        # still gives a useful drift signal:
+        #   - length_avg / length_max: AVG/MAX(LENGTH(col)) — structural shape
+        #   - hash_sum: SUM(platform-native hash(col)) — order-independent
+        #     multiset checksum; matches iff multisets match.
+        ("length_avg", "TEXT", ""),
+        ("length_max", "TEXT", ""),
+        ("hash_sum", "TEXT", ""),
     ],
     "_column_meta": [
         ("source_table", "TEXT", "NOT NULL"),
@@ -492,7 +501,7 @@ def get_row_counts(
     return parsed
 
 
-def insert_col_stats(db_path: str, stats: List[Dict]) -> None:
+def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> None:
     """
     Insert column statistics into _col_stats table.
 
@@ -500,39 +509,102 @@ def insert_col_stats(db_path: str, stats: List[Dict]) -> None:
         db_path: Path to SQLite database file
         stats: List of stat dictionaries with keys:
             source_table, column_name, dt, col_type, n_total, n_missing,
-            n_unique, mean, std, min_val, max_val, top_10
+            n_unique, mean, std, min_val, max_val, top_10,
+            (optional) length_avg, length_max, hash_sum, vintage_label
+        mode:
+            "fine" (default) — full INSERT OR REPLACE; every column the
+                full-freq SQL emits is overwritten. Used by the fine
+                extraction path.
+            "coarse_merge" — only writes the cheap-aggregate columns
+                (n_total, n_missing, n_unique, min_val, max_val,
+                length_avg, length_max, hash_sum). On an existing row, the
+                fine fields (mean, std, top_10) are preserved. Used by the
+                coarse extraction path so re-running coarse doesn't wipe a
+                previous fine drill-down.
     """
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # Ensure vintage_label column exists (for DBs created before this feature)
+    # Lazy schema upgrade for legacy DBs.
     try:
         cursor.execute("ALTER TABLE _col_stats ADD COLUMN vintage_label TEXT")
     except sqlite3.OperationalError:
         pass
+    for col in ("length_avg", "length_max", "hash_sum"):
+        try:
+            cursor.execute(f"ALTER TABLE _col_stats ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass
 
-    for stat in stats:
-        cursor.execute("""
+    if mode == "coarse_merge":
+        # UPSERT: insert with coarse fields only on new rows; on conflict,
+        # update only the coarse columns. SQLite's ON CONFLICT requires the
+        # composite key to exist; insert NULL for fine columns so the
+        # initial INSERT path still satisfies NOT NULL on col_type.
+        sql = """
+            INSERT INTO _col_stats (
+                source_table, column_name, dt, col_type,
+                n_total, n_missing, n_unique,
+                min_val, max_val, vintage_label,
+                length_avg, length_max, hash_sum
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_table, column_name, dt) DO UPDATE SET
+                col_type     = excluded.col_type,
+                n_total      = excluded.n_total,
+                n_missing    = excluded.n_missing,
+                n_unique     = excluded.n_unique,
+                min_val      = excluded.min_val,
+                max_val      = excluded.max_val,
+                vintage_label= excluded.vintage_label,
+                length_avg   = excluded.length_avg,
+                length_max   = excluded.length_max,
+                hash_sum     = excluded.hash_sum
+        """
+        for stat in stats:
+            cursor.execute(sql, (
+                stat["source_table"],
+                stat["column_name"],
+                stat["dt"],
+                stat.get("col_type", "categorical"),
+                stat.get("n_total", ""),
+                stat.get("n_missing", ""),
+                stat.get("n_unique", ""),
+                stat.get("min_val", ""),
+                stat.get("max_val", ""),
+                stat.get("vintage_label"),
+                stat.get("length_avg", ""),
+                stat.get("length_max", ""),
+                stat.get("hash_sum", ""),
+            ))
+    else:
+        # Fine: full overwrite of all stat columns.
+        sql = """
             INSERT OR REPLACE INTO _col_stats (
                 source_table, column_name, dt, col_type,
                 n_total, n_missing, n_unique, mean, std,
-                min_val, max_val, top_10, vintage_label
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            stat["source_table"],
-            stat["column_name"],
-            stat["dt"],
-            stat["col_type"],
-            stat["n_total"],
-            stat["n_missing"],
-            stat["n_unique"],
-            stat["mean"],
-            stat["std"],
-            stat["min_val"],
-            stat["max_val"],
-            stat["top_10"],
-            stat.get("vintage_label"),
-        ))
+                min_val, max_val, top_10, vintage_label,
+                length_avg, length_max, hash_sum
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        for stat in stats:
+            cursor.execute(sql, (
+                stat["source_table"],
+                stat["column_name"],
+                stat["dt"],
+                stat["col_type"],
+                stat["n_total"],
+                stat["n_missing"],
+                stat["n_unique"],
+                stat["mean"],
+                stat["std"],
+                stat["min_val"],
+                stat["max_val"],
+                stat["top_10"],
+                stat.get("vintage_label"),
+                stat.get("length_avg", ""),
+                stat.get("length_max", ""),
+                stat.get("hash_sum", ""),
+            ))
 
     conn.commit()
     conn.close()
@@ -823,6 +895,7 @@ def register_table_pair(
     # Runs before we open our own connection to avoid write-lock contention.
     ensure_col_rules_column(db_path)
     ensure_col_filter_columns(db_path)
+    ensure_coarse_stat_columns(db_path)
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -1800,6 +1873,24 @@ def ensure_col_filter_columns(db_path: str) -> None:
     for col in ("col_include", "col_exclude"):
         try:
             conn.execute(f"ALTER TABLE _table_pairs ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
+    conn.close()
+
+
+def ensure_coarse_stat_columns(db_path: str) -> None:
+    """Add length_avg / length_max / hash_sum columns to _col_stats if missing.
+
+    These hold the cheap-aggregate signals emitted by the coarse extraction
+    path. Old rows show NULL in these fields; the coarse compare treats a
+    NULL hash_sum as "unknown" rather than a mismatch, so legacy data still
+    displays without flagging spurious diffs.
+    """
+    conn = sqlite3.connect(db_path)
+    for col in ("length_avg", "length_max", "hash_sum"):
+        try:
+            conn.execute(f"ALTER TABLE _col_stats ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
     conn.commit()

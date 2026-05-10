@@ -700,6 +700,80 @@ def parse_stats_row(row):
     }
 
 
+def read_id_cols_from_col_stats(db_path, table_name, threshold=0.99, ttl_days=1.0):
+    """Read cardinality from _col_stats and return the set of cols whose
+    mean(n_unique/n_total) across dts >= threshold.
+
+    Used by gen-sas to auto-skip ID-like columns on subsequent runs without
+    needing to query Oracle/Hadoop directly. Cache freshness is gated on
+    `_metadata.last_loaded` for the table — older than ttl_days → returns
+    empty set (treated as "no cache").
+
+    First-run behaviour: _col_stats is empty for a never-extracted table, so
+    this returns empty set and gen-sas emits the full per-col extraction
+    (current behaviour). After the first successful load-col, subsequent
+    gen-sas calls skip ID cols.
+
+    Returns set() (never None) so callers can `tbl.get('_id_cols_to_skip', set())`.
+    Set DTRACK_ID_DETECTION=0 to disable entirely.
+    """
+    import os as _os
+    if _os.environ.get('DTRACK_ID_DETECTION', '1') == '0':
+        return set()
+    if not db_path or not _os.path.exists(db_path):
+        return set()
+    import sqlite3
+    from datetime import datetime, timedelta
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        # TTL gate via _metadata.last_loaded — same column dtrack already
+        # stamps when load-col / load-row writes data. ttl_days=0 means
+        # "always treat as expired"; pass None to skip the gate entirely.
+        if ttl_days is not None:
+            try:
+                cur.execute(
+                    "SELECT last_loaded FROM _metadata WHERE table_name = ?",
+                    (table_name,),
+                )
+                mrow = cur.fetchone()
+                if mrow and mrow[0]:
+                    try:
+                        last = datetime.fromisoformat(mrow[0])
+                    except ValueError:
+                        last = None
+                    if last and (datetime.now() - last) > timedelta(days=ttl_days):
+                        conn.close()
+                        return set()
+            except sqlite3.OperationalError:
+                pass  # _metadata may lack last_loaded on older DBs
+        cur.execute(
+            "SELECT column_name, n_total, n_unique FROM _col_stats "
+            "WHERE source_table = ? "
+            "  AND n_total IS NOT NULL AND n_total <> '' "
+            "  AND n_unique IS NOT NULL AND n_unique <> ''",
+            (table_name,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+    except Exception:
+        return set()
+    if not rows:
+        return set()
+    by_col = {}
+    for col, n_total, n_unique in rows:
+        try:
+            t = float(n_total)
+            u = float(n_unique)
+        except (ValueError, TypeError):
+            continue
+        if t <= 0:
+            continue
+        by_col.setdefault(col, []).append(u / t)
+    return {col for col, rs in by_col.items()
+            if rs and (sum(rs) / len(rs)) >= threshold}
+
+
 def load_tables_from_config(config):
     """Load tables from config (unified format only)."""
     if "pairs" in config and isinstance(config["pairs"], dict):

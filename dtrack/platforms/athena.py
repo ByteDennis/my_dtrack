@@ -608,7 +608,80 @@ def _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir):
         _write_combined_sql(aws_tables, outdir, "row")
 
 
-def _probe_id_cols_athena(full_table, cte_prefix, where, col_list, threshold, database=None):
+def _id_card_cache_path(outdir):
+    """Same .cache.db Athena query-result caching uses; one artifact per outdir."""
+    return os.path.join(outdir, ".cache.db") if outdir else None
+
+
+def _read_id_card_cache(cache_db_path, qname, ttl_days):
+    """Cache hit returns (n_total, payload_dict) where payload is {col: approx_distinct}.
+    Miss / expired / corrupt → None. All-or-nothing per qname."""
+    if not cache_db_path or not os.path.exists(cache_db_path):
+        return None
+    import sqlite3, json
+    from datetime import datetime, timedelta
+    try:
+        conn = sqlite3.connect(cache_db_path)
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS _id_card ("
+            "qname TEXT PRIMARY KEY, scanned_at TEXT, n_total INTEGER, payload TEXT)"
+        )
+        cur.execute(
+            "SELECT scanned_at, n_total, payload FROM _id_card WHERE qname = ?",
+            (qname,),
+        )
+        row = cur.fetchone()
+        conn.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+    scanned_at_str, n_total, payload_json = row
+    try:
+        scanned_at = datetime.fromisoformat(scanned_at_str)
+    except (ValueError, TypeError):
+        return None
+    if datetime.now() - scanned_at > timedelta(days=ttl_days):
+        return None
+    try:
+        payload = json.loads(payload_json)
+    except Exception:
+        return None
+    if not isinstance(n_total, int) or n_total <= 0:
+        return None
+    return n_total, payload
+
+
+def _write_id_card_cache(cache_db_path, qname, n_total, payload):
+    """Upsert one row in _id_card. Best-effort; silent on failure (writes are
+    optional — a write failure just means the next run re-probes)."""
+    if not cache_db_path:
+        return
+    import sqlite3, json
+    from datetime import datetime
+    try:
+        os.makedirs(os.path.dirname(cache_db_path) or '.', exist_ok=True)
+        conn = sqlite3.connect(cache_db_path)
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS _id_card ("
+            "qname TEXT PRIMARY KEY, scanned_at TEXT, n_total INTEGER, payload TEXT)"
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO _id_card(qname, scanned_at, n_total, payload) "
+            "VALUES (?, ?, ?, ?)",
+            (qname, datetime.now().isoformat(), int(n_total), json.dumps(payload)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"  [id-cache] write failed for {qname}: {e}")
+
+
+def _probe_id_cols_athena(full_table, cte_prefix, where, col_list, threshold,
+                          database=None, qname=None, cache_db_path=None,
+                          ttl_days=1.0):
     """One-shot Athena probe — classify which cols are "ID-like" (cardinality
     ≥ threshold) so we can emit a lite SQL block (no GROUP BY p_col) for them
     instead of the full freq aggregation.
@@ -633,6 +706,20 @@ def _probe_id_cols_athena(full_table, cte_prefix, where, col_list, threshold, da
         return set()
     if os.environ.get('DTRACK_ID_DETECTION', '1') == '0':
         return set()
+
+    # Cache lookup: all-or-nothing per qname, TTL configurable
+    # (DTRACK_ID_CACHE_TTL_DAYS, default 1.0). Cached payload = {col: u}, so
+    # threshold can change without invalidating cache.
+    if cache_db_path and qname:
+        cached = _read_id_card_cache(cache_db_path, qname, ttl_days)
+        if cached is not None:
+            n_total_c, payload_c = cached
+            id_cols_c = {col for col, u in payload_c.items()
+                         if u is not None and (u / n_total_c) >= threshold}
+            print(f"  [id-cache] hit for {qname}: "
+                  f"{len(id_cols_c)}/{len(col_list)} ID-like "
+                  f"(TTL={ttl_days}d, threshold={threshold})")
+            return id_cols_c
 
     parts = ["COUNT(*) AS n_total"]
     for i, (col, _) in enumerate(col_list):
@@ -664,6 +751,7 @@ WHERE {where_clause}"""
         return set()
 
     id_cols = set()
+    payload = {}
     for i, (col, _) in enumerate(col_list):
         u_raw = row.get(f'u_{i}')
         if u_raw is None:
@@ -672,27 +760,54 @@ WHERE {where_clause}"""
             u = int(u_raw)
         except (ValueError, TypeError):
             continue
+        payload[col] = u
         if (u / n_total) >= threshold:
             id_cols.add(col)
 
+    # Persist to cache so the next gen within TTL skips the probe.
+    if cache_db_path and qname:
+        _write_id_card_cache(cache_db_path, qname, n_total, payload)
+
     if id_cols:
-        print(f"  [id-probe] auto-skipping {len(id_cols)}/{len(col_list)} "
-              f"ID-like cols (threshold={threshold}): {sorted(id_cols)}")
+        print(f"  [id-probe] {len(id_cols)}/{len(col_list)} ID-like cols "
+              f"(threshold={threshold}, cached for {ttl_days}d): {sorted(id_cols)}")
     return id_cols
 
 
-def _build_lite_id_sql(col_name, col_q, col_type, dt_select, group_by,
-                       full_table, wc, cte_prefix):
-    """Lite col-stats SQL for ID-like columns: single-pass aggregates only,
-    no GROUP BY p_col (which is the cost killer on near-unique columns).
+def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
+                      full_table, wc, cte_prefix):
+    """Coarse col-stats SQL — single-pass aggregates only, no GROUP BY p_col.
 
-    Output schema matches the full SQL so the runner / loader can mix lite
-    and full rows freely. The heavy fields come back empty:
-      mean, std, min_val, max_val, top_10 = ''.
-    n_unique uses APPROX_DISTINCT so the value is ~the same one the probe
-    saw — exact COUNT(DISTINCT) on a column we just classified as ID-like
-    would defeat the optimization.
+    Emits the 14-column row schema (dt, column_name, col_type, n_total,
+    n_missing, n_unique, mean, std, min_val, max_val, top_10, length_avg,
+    length_max, hash_sum). The "fine-only" fields (mean/std/top_10) come
+    back empty in coarse mode; the loader's level="coarse" path preserves
+    any prior fine values for those rather than overwriting with empty.
+
+    Drift signals captured cheaply per row:
+      - n_total / n_missing / n_unique (size, null-rate, cardinality)
+      - min_val / max_val (alpha) (value-range edges)
+      - length_avg / length_max (structural shape — free text vs IDs)
+      - hash_sum (multiset checksum via XXHASH64 → SUM)
+
+    n_unique uses APPROX_DISTINCT (HyperLogLog) so we avoid the
+    near-quadratic cost COUNT(DISTINCT) hits on high-cardinality columns.
+    The tiny accuracy loss (~2%) is acceptable for "is this column worth
+    drilling into" — a drift big enough to matter is well over 2%.
+
+    Categorical min_val/max_val here are plain MIN/MAX(col) — alpha-first
+    and alpha-last values, no '=cnt' suffix (which requires the freq table
+    we're trying to avoid). Fine SQL re-emits min_val/max_val as 'val=cnt'.
     """
+    lcol = f"LENGTH(CAST({col_q} AS VARCHAR))"
+    # XXHASH64 is Trino-native and deterministic per value. SUM as DOUBLE
+    # avoids BIGINT overflow on large tables; precision loss doesn't matter
+    # since both sides do the same arithmetic — equality is what counts.
+    # Cross-platform note: hash_sum only round-trips when left and right
+    # use the same hash function. Cross-platform compares (Oracle ↔ AWS)
+    # ignore this field; n_total/n_missing/n_unique/min_val/max_val/length_*
+    # are the portable signals.
+    hash_expr = f"CAST(XXHASH64(CAST(CAST({col_q} AS VARCHAR) AS VARBINARY)) AS DOUBLE)"
     return f"""{cte_prefix}SELECT
     {dt_select},
     '{col_name}' AS column_name,
@@ -702,17 +817,33 @@ def _build_lite_id_sql(col_name, col_q, col_type, dt_select, group_by,
     APPROX_DISTINCT({col_q}) AS n_unique,
     '' AS mean,
     '' AS std,
-    '' AS min_val,
-    '' AS max_val,
-    '' AS top_10
+    CAST(MIN({col_q}) AS VARCHAR) AS min_val,
+    CAST(MAX({col_q}) AS VARCHAR) AS max_val,
+    '' AS top_10,
+    CAST(AVG({lcol}) AS VARCHAR) AS length_avg,
+    CAST(MAX({lcol}) AS VARCHAR) AS length_max,
+    CAST(SUM({hash_expr}) AS VARCHAR) AS hash_sum
 FROM {full_table}
 WHERE {wc}{group_by};"""
 
 
-def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
-    """Write a single combined .sql file with all AWS table queries."""
+def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
+                        coarse=False):
+    """Write a single combined .sql file with all AWS table queries.
+
+    `coarse=True` emits the cheap-aggregate "coarse" SQL for every column —
+    no GROUP BY p_col, no freq table, no rank-weighted mean/std, no top_10.
+    Output schema is the same 14 columns; the fine-only fields come back
+    empty. The loader writes coarse rows with `level="coarse"`, which
+    preserves any prior fine values for those rows on the same (col, dt).
+
+    `coarse=False` (default) is the existing fine path: full freq aggregation,
+    with the ID-skip auto-emitting coarse blocks for columns the probe
+    flagged as near-unique.
+    """
     from datetime import datetime
-    blocks = [f"-- dtrack AWS {extract_type} extraction queries",
+    label = "coarse" if (coarse and extract_type == "col") else extract_type
+    blocks = [f"-- dtrack AWS {label} extraction queries",
               f"-- Generated: {datetime.now().isoformat()}", ""]
 
     for tbl in aws_tables:
@@ -739,12 +870,28 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
             col_list = [(c, d) for c, d in columns.items()
                         if c.lower() != date_col.lower()]
 
-            # Restrict to pair-level col_filter selection, if set. Empty/missing
-            # _selected_cols means "use all non-date cols" (legacy behavior).
+            # Restrict to pair-level col_filter selection, if set. Distinguish:
+            #   None  = no filter set         → keep all non-date cols.
+            #   []    = filter set, matched 0 → extract nothing.
+            #   [...] = filter set, matched N → extract only those.
+            # The earlier `if selected:` collapsed the second case into the
+            # first, so a col_filter that matched 0 of N cols silently fell
+            # through to "all cols".
             selected = tbl.get('_selected_cols')
-            if selected:
+            if selected is not None:
+                if not selected:
+                    print(f"  WARNING: {qname}: col_filter matched 0 mapped cols; "
+                          f"emitting no col blocks for this table")
                 wanted = {c.lower() for c in selected}
                 col_list = [(c, d) for c, d in col_list if c.lower() in wanted]
+
+            # Fine-cell filter: when the user asked to drill into specific
+            # (col, vintage) cells, drop everything else from this table's
+            # col_list. The vintage filter is applied per-bucket below.
+            fine_cells = tbl.get('_fine_cells')
+            if fine_cells:
+                wanted_cols = {c.lower() for c in fine_cells.keys()}
+                col_list = [(c, d) for c, d in col_list if c.lower() in wanted_cols]
 
             if not col_list:
                 blocks.append(f"-- {qname}")
@@ -866,20 +1013,30 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
             # freq aggregation per col. Probe WHERE matches the broadest
             # table-level filter so the cardinality classification reflects
             # what the col SQL would actually scan.
-            probe_wc_parts = []
-            if where.strip():
-                probe_wc_parts.append(where.strip())
-            if exclude_clause:
-                probe_wc_parts.append(exclude_clause)
-            if date_bounds:
-                probe_wc_parts.append(date_bounds)
-            probe_wc = " AND ".join(f"({p})" for p in probe_wc_parts) if probe_wc_parts else "1=1"
-            id_threshold = float(os.environ.get('DTRACK_ID_THRESHOLD', '0.99'))
-            id_cols = _probe_id_cols_athena(
-                full_table, cte_prefix, probe_wc, col_list,
-                threshold=id_threshold,
-                database=tbl.get('conn_macro'),
-            )
+            if coarse:
+                # In coarse mode, every column emits the cheap-aggregate
+                # SQL — no probe needed (id-skip is irrelevant when
+                # everything is "lite").
+                id_cols = set(c for c, _ in col_list)
+            else:
+                probe_wc_parts = []
+                if where.strip():
+                    probe_wc_parts.append(where.strip())
+                if exclude_clause:
+                    probe_wc_parts.append(exclude_clause)
+                if date_bounds:
+                    probe_wc_parts.append(date_bounds)
+                probe_wc = " AND ".join(f"({p})" for p in probe_wc_parts) if probe_wc_parts else "1=1"
+                id_threshold = float(os.environ.get('DTRACK_ID_THRESHOLD', '0.99'))
+                ttl_days = float(os.environ.get('DTRACK_ID_CACHE_TTL_DAYS', '1.0'))
+                id_cols = _probe_id_cols_athena(
+                    full_table, cte_prefix, probe_wc, col_list,
+                    threshold=id_threshold,
+                    database=tbl.get('conn_macro'),
+                    qname=qname,
+                    cache_db_path=_id_card_cache_path(outdir),
+                    ttl_days=ttl_days,
+                )
 
             # 'trunc' mode: ONE SQL per column, with DATE_TRUNC in SELECT/
             # GROUP BY to produce all buckets in a single scan. WHERE stays
@@ -912,14 +1069,25 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
                     # `'{col_name}' AS column_name` keeps the raw name so the
                     # downstream loader still maps results back by original name.
                     col_q = quote_ident(col_name, "athena")
+                    # Per-col fine-cell vintage filter: when the user picked
+                    # specific vintage labels for this col on /col_compare,
+                    # add an IN clause on trunc_expr so only those buckets
+                    # come back. NULL/missing → emit all buckets (default).
+                    fine_vintages = (fine_cells or {}).get(col_name) if fine_cells else None
+                    wc_t_col = wc_t
+                    if fine_vintages:
+                        in_list = ", ".join(
+                            "'" + str(v).replace("'", "''") + "'" for v in fine_vintages
+                        )
+                        wc_t_col = f"({wc_t}) AND ({trunc_expr} IN ({in_list}))"
                     if col_name in id_cols:
                         # ID-like: lite SQL, single GROUP BY trunc_expr pass.
-                        sql = _build_lite_id_sql(
+                        sql = _build_coarse_sql(
                             col_name, col_q,
                             'numeric' if is_num else 'categorical',
                             dt_select=f"{trunc_expr} AS dt",
                             group_by=f"\nGROUP BY {trunc_expr}",
-                            full_table=full_table, wc=wc_t, cte_prefix=cte_prefix,
+                            full_table=full_table, wc=wc_t_col, cte_prefix=cte_prefix,
                         )
                         blocks.append(f"-- {qname}/{col_name}/_all")
                         blocks.append(sql.strip())
@@ -939,7 +1107,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None):
     CAST(MAX({col_q}) AS VARCHAR) AS max_val,
     '' AS top_10
 FROM {full_table}
-WHERE {wc_t}
+WHERE {wc_t_col}
 GROUP BY {trunc_expr};"""
                     else:
                         sql = f"""{cte_prefix}WITH freq AS (
@@ -947,7 +1115,7 @@ GROUP BY {trunc_expr};"""
            CAST({col_q} AS VARCHAR) AS p_col,
            COUNT(*) AS cnt
     FROM {full_table}
-    WHERE {wc_t}
+    WHERE {wc_t_col}
     GROUP BY {trunc_expr}, {col_q}
 ),
 ranked AS (
@@ -1023,8 +1191,13 @@ ORDER BY s.dt;"""
                 # col_q is the SQL-safe ref, '{col_name}' stays the raw label.
                 col_q = quote_ident(col_name, "athena")
                 is_id_like = col_name in id_cols
+                fine_vintages = (fine_cells or {}).get(col_name) if fine_cells else None
 
                 for dt_label, date_where in vintage_specs:
+                    if fine_vintages and dt_label not in fine_vintages:
+                        # User selected specific vintages for this col;
+                        # skip non-selected buckets.
+                        continue
                     parts = list(wc_parts)
                     if date_where:
                         parts.append(date_where)
@@ -1034,7 +1207,7 @@ ORDER BY s.dt;"""
                     block_suffix = f"/{dt_label}" if len(vintage_specs) > 1 else ""
 
                     if is_id_like:
-                        sql = _build_lite_id_sql(
+                        sql = _build_coarse_sql(
                             col_name, col_q,
                             'numeric' if is_num else 'categorical',
                             dt_select=f"{dt_expr} AS dt",
@@ -1556,6 +1729,11 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
     _COL_HEADERS = [
         'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
         'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
+        # Coarse signals — emitted by both coarse and (planned) fine SQL,
+        # NULL-tolerant when read back. Fine rows from older runs that
+        # lacked these fields surface as empty strings and the compare
+        # treats absent hash_sum as "unknown" (no diff flag).
+        'length_avg', 'length_max', 'hash_sum',
     ]
 
     # For col mode, collect rows per table (blocks named "qname/col_name")

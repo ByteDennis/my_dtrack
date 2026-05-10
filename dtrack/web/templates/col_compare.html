@@ -7,7 +7,19 @@
         <section class="card">
             <div class="section-header">
                 <h2>COL COMPARE</h2>
-                <div class="actions" style="display:flex; align-items:center; gap:12px;">
+                <div class="actions" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                    <!-- Level toggle: coarse uses cheap aggregates only (n_total/
+                         n_missing/n_unique/min/max/length_*/hash_sum). Fine adds
+                         rank-weighted mean/std and top_10 — much more expensive
+                         to extract. Default coarse so the page loads fast and
+                         flags suspicious cols; user toggles fine for drill-down. -->
+                    <label style="font-size:12px; display:flex; align-items:center; gap:6px;">
+                        Level:
+                        <select id="level-select" onchange="onLevelChange()" style="font-size:12px;">
+                            <option value="coarse" selected>Coarse (cheap)</option>
+                            <option value="fine">Fine (full)</option>
+                        </select>
+                    </label>
                     <input type="text" id="global-title" placeholder="Report title" style="width:160px; font-size:12px;">
                     <input type="text" id="global-subtitle" placeholder="Subtitle" style="width:160px; font-size:12px;">
                     <label style="font-size:12px; display:flex; align-items:center; gap:4px;">
@@ -32,6 +44,29 @@
                 <button class="btn-secondary" onclick="downloadHTML()">Download HTML</button>
             </div>
         </section>
+
+        <!-- Floating selection bar — appears when ≥1 (col, vintage) cell is
+             selected. "Generate Fine for selected" produces a fine extract_col
+             SAS+SQL containing only the selected cells, so the user can re-run
+             extraction targeted at the suspicious bits flagged by coarse. -->
+        <div id="selection-bar" style="display:none; position:fixed; bottom:42px; left:0; right:0; z-index:50; background:var(--jp-layout-color2); border-top:2px solid var(--jp-brand-color1); padding:10px 16px; display:none; align-items:center; gap:14px;">
+            <strong><span id="sel-count">0</span> cells selected</strong>
+            <button class="btn-primary" id="gen-fine-btn" onclick="generateFineForSelected()">Generate Fine for selected</button>
+            <button class="btn-text" onclick="clearSelection()">Clear</button>
+            <span style="color:var(--jp-ui-font-color2); font-size:11px;">
+              Picks a (column, vintage) for re-extraction at fine resolution. Run the generated SQL/SAS, then load-col with level=fine.
+            </span>
+        </div>
+        <style>
+            th.cell-selectable.cell-selected {
+                outline: 2px solid var(--jp-brand-color1);
+                outline-offset: -2px;
+                background: var(--jp-brand-color3, #cfe2ff) !important;
+            }
+            th.cell-selectable:hover {
+                background: var(--jp-layout-color2);
+            }
+        </style>
 {% endblock %}
 
 {% block scripts %}
