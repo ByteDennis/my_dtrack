@@ -82,6 +82,30 @@ def is_numeric_type(data_type, is_oracle=True):
     return dt_upper in _NUMERIC_TYPE_SET
 
 
+_BARE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def quote_ident(name, dialect="oracle"):
+    """Wrap a SQL identifier in the dialect's quote char ONLY when the bare
+    form is invalid (starts with a digit, contains spaces / hyphens / dots).
+
+    - Athena / Trino / Oracle: ANSI double quotes  →  "123col"
+    - Hive / Hadoop:           backticks            →  `123col`
+    - SAS:                     no change            (caller handles via macro var)
+
+    Conservative: leaves valid bare names unchanged so existing extractions
+    keep their case-insensitive resolution against Oracle/Hive tables. Quoted
+    identifiers are case-sensitive in Oracle and case-preserving in Athena —
+    blindly quoting every column would break configs that store columns in
+    one case and reference them in another.
+    """
+    if not name or _BARE_IDENT_RE.match(name):
+        return name
+    if dialect == "hadoop":
+        return f"`{name}`"
+    return f'"{name}"'
+
+
 def qualified_name(tbl_cfg):
     """Derive storage/file name: {source}_{name}."""
     source = tbl_cfg.get('source', '')
@@ -545,25 +569,34 @@ def build_stats_sql(table, col, date_col, where="", col_type="numeric", dialect=
     For categorical, mean/std/min/max are *category-aware* (rank-weighted by
     UPPER(cat) ordering) so any permutation of counts across categories
     produces different stats. min_val/max_val are formatted "{cat}={count}".
+
+    Identifiers (col / date_col) are auto-quoted via `quote_ident` only when
+    the bare form is invalid SQL (e.g. starts with a digit). The literal
+    column-name string baked into the SELECT (`'{col}' AS column_name`)
+    keeps the unquoted name — it's the output value, not a reference.
     """
     where_clause = f"AND {where}" if where else ""
     is_athena = dialect == "athena"
+    # Reference forms (used in COUNT/AVG/etc.). Original `col` / `date_col`
+    # stay as-is for the output-name literal in the SELECT.
+    col_ref = quote_ident(col, dialect)
+    date_col_ref = quote_ident(date_col, dialect)
 
     if col_type == "numeric":
-        missing = f"COUNT(*) - COUNT({col})" if is_athena else f"SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END)"
-        avg_expr = f"AVG(CAST({col} AS DOUBLE))" if is_athena else f"AVG({col})"
-        std_expr = f"STDDEV(CAST({col} AS DOUBLE))" if is_athena else f"STDDEV({col})"
+        missing = f"COUNT(*) - COUNT({col_ref})" if is_athena else f"SUM(CASE WHEN {col_ref} IS NULL THEN 1 ELSE 0 END)"
+        avg_expr = f"AVG(CAST({col_ref} AS DOUBLE))" if is_athena else f"AVG({col_ref})"
+        std_expr = f"STDDEV(CAST({col_ref} AS DOUBLE))" if is_athena else f"STDDEV({col_ref})"
         return cte_prefix + f"""
-SELECT {date_col} AS dt, '{col}' AS column_name, 'numeric' AS col_type,
-    COUNT(*) AS n_total, {missing} AS n_missing, COUNT(DISTINCT {col}) AS n_unique,
+SELECT {date_col_ref} AS dt, '{col}' AS column_name, 'numeric' AS col_type,
+    COUNT(*) AS n_total, {missing} AS n_missing, COUNT(DISTINCT {col_ref}) AS n_unique,
     {avg_expr} AS mean, {std_expr} AS std,
-    MIN({col}) AS min_val, MAX({col}) AS max_val
+    MIN({col_ref}) AS min_val, MAX({col_ref}) AS max_val
 FROM {table}
 WHERE 1=1 {where_clause}
-GROUP BY {date_col}""".strip()
+GROUP BY {date_col_ref}""".strip()
 
     # Categorical branch: rank-weighted stats based on alpha (UPPER) ordering.
-    cast_expr = f"CAST({col} AS VARCHAR)" if is_athena else f"TO_CHAR({col})"
+    cast_expr = f"CAST({col_ref} AS VARCHAR)" if is_athena else f"TO_CHAR({col_ref})"
     cnt_to_str = "CAST(cnt AS VARCHAR)" if is_athena else "cnt"
     # Use DOUBLE on Athena to avoid BIGINT overflow on cnt*rnk*rnk.
     cnt_num = "CAST(cnt AS DOUBLE)" if is_athena else "cnt"
@@ -580,10 +613,10 @@ GROUP BY {date_col}""".strip()
 
     new_ctes = [
         ("_dt_freq", f"""
-    SELECT {date_col} AS dt, {cast_expr} AS p_col, COUNT(*) AS cnt
+    SELECT {date_col_ref} AS dt, {cast_expr} AS p_col, COUNT(*) AS cnt
     FROM {table}
     WHERE 1=1 {where_clause}
-    GROUP BY {date_col}, {col}"""),
+    GROUP BY {date_col_ref}, {col_ref}"""),
         ("_dt_ranked", f"""
     SELECT dt, p_col, cnt,
            ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(p_col), p_col) AS rnk,
@@ -630,16 +663,22 @@ LEFT JOIN _dt_minmax m ON m.dt = t.dt""".rstrip()
 
 def build_top10_sql(table, col, date_col, where="", dialect="oracle"):
     # NOTE: Uses explicit column references — never SELECT *
-    """Build top 10 frequency SQL for Oracle or Athena."""
+    """Build top 10 frequency SQL for Oracle or Athena.
+
+    Auto-quotes col / date_col when the bare name is invalid SQL (e.g. a
+    column starting with a digit). See `quote_ident` for the rules.
+    """
     where_clause = f"AND {where}" if where else ""
     alias = " t" if dialect == "athena" else ""
+    col_ref = quote_ident(col, dialect)
+    date_col_ref = quote_ident(date_col, dialect)
     return f"""
 SELECT dt, val, cnt FROM (
-    SELECT {date_col} AS dt, CAST({col} AS VARCHAR(200)) AS val, COUNT(*) AS cnt,
-           ROW_NUMBER() OVER (PARTITION BY {date_col} ORDER BY COUNT(*) DESC) AS rn
+    SELECT {date_col_ref} AS dt, CAST({col_ref} AS VARCHAR(200)) AS val, COUNT(*) AS cnt,
+           ROW_NUMBER() OVER (PARTITION BY {date_col_ref} ORDER BY COUNT(*) DESC) AS rn
     FROM {table}
-    WHERE {col} IS NOT NULL {where_clause}
-    GROUP BY {date_col}, {col}
+    WHERE {col_ref} IS NOT NULL {where_clause}
+    GROUP BY {date_col_ref}, {col_ref}
 ){alias} WHERE rn <= 10""".strip()
 
 

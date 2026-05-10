@@ -440,6 +440,45 @@ def test_approx_distinct_does_not_affect_libname_path(isolated_env, tmp_path, mo
     assert "APPROX_DISTINCT" not in sas
 
 
+def test_quote_ident_athena_oracle_double_quote_when_needed():
+    from dtrack.platforms.base import quote_ident
+    # Bare-valid identifiers stay unchanged (preserves case-insensitive lookup).
+    assert quote_ident("amount", "athena") == "amount"
+    assert quote_ident("SOME_COL", "oracle") == "SOME_COL"
+    # Leading-digit identifiers get double-quoted on Athena / Oracle.
+    assert quote_ident("123col", "athena") == '"123col"'
+    assert quote_ident("123col", "oracle") == '"123col"'
+    # Hyphens / dots / spaces also force quoting.
+    assert quote_ident("my-col", "athena") == '"my-col"'
+    assert quote_ident("a b", "oracle") == '"a b"'
+
+
+def test_quote_ident_hadoop_uses_backticks():
+    from dtrack.platforms.base import quote_ident
+    assert quote_ident("123col", "hadoop") == "`123col`"
+    assert quote_ident("amount", "hadoop") == "amount"
+
+
+def test_build_stats_sql_athena_quotes_leading_digit_col():
+    from dtrack.platforms.base import build_stats_sql
+    sql = build_stats_sql("trades", "123_col", "trade_date",
+                          col_type="numeric", dialect="athena")
+    # Reference positions are quoted; the literal output column-name string
+    # keeps the unquoted form (it's the value, not an identifier).
+    assert 'COUNT("123_col")' in sql
+    assert 'AVG(CAST("123_col" AS DOUBLE))' in sql
+    assert 'MIN("123_col") AS min_val' in sql
+    assert "'123_col' AS column_name" in sql  # output literal stays bare-quoted
+
+
+def test_build_stats_sql_athena_does_not_overquote_normal_col():
+    from dtrack.platforms.base import build_stats_sql
+    sql = build_stats_sql("trades", "amount", "trade_date",
+                          col_type="numeric", dialect="athena")
+    assert "COUNT(amount)" in sql
+    assert '"amount"' not in sql
+
+
 def test_libname_col_categorical_uses_freq_post_processor(isolated_env, tmp_path):
     """Categorical column → emits the freq-pull SQL and routes to the
     shared %_col_categorical_freq post-processor."""

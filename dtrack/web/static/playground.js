@@ -175,7 +175,11 @@ function pgEngineChanged() {
         if (eng === 'athena') {
             label.textContent = 'Athena database (optional)';
             conn.placeholder = 'my_database';
-            sqlBox.placeholder = "SELECT COUNT(*) FROM trades WHERE trade_date = DATE '2026-05-01'";
+            sqlBox.placeholder = 'SELECT COUNT(*) FROM trades WHERE trade_date = DATE \'2026-05-01\'\n' +
+                '\n' +
+                '-- Tip: for column names that start with a digit or contain\n' +
+                '-- special chars, use double quotes — e.g. SELECT "123_col" FROM t.\n' +
+                '-- Single quotes \'\' make the value a string literal, not an identifier.';
         } else {
             label.textContent = 'Oracle macro (e.g. pb23)';
             conn.placeholder = 'pb23';
