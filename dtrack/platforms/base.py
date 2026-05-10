@@ -241,7 +241,17 @@ def build_date_in_clause(date_col, dates, date_dtype, is_sas=False, date_format=
             formatted = [f"DATE '{d}'" for d in dates]
             col_expr = f"TRUNC({date_col})" if is_datetime else date_col
     else:
-        formatted = [f"'{reformat_date(d, date_format)}'" for d in dates]
+        # Unknown / empty dtype — happens when _column_meta hasn't been
+        # populated for this table yet. Bare-string literals here triggered
+        # ORA-01861 ("literal does not match format string") on Oracle when
+        # the session NLS_DATE_FORMAT differs from YYYY-MM-DD. Emit an ISO
+        # DATE literal for the non-SAS path (Oracle) so it parses regardless
+        # of session NLS; for SAS-source, fall back to plain strings since
+        # SAS evaluates the comparison locally against its own typed date.
+        if is_sas:
+            formatted = [f"'{reformat_date(d, date_format)}'" for d in dates]
+        else:
+            formatted = [f"DATE '{d}'" for d in dates]
         col_expr = date_col
 
     chunks = [formatted[i:i+999] for i in range(0, len(formatted), 999)]
@@ -299,9 +309,16 @@ def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=F
             col_expr = f"TRUNC({date_col})" if is_datetime else date_col
             return f"{col_expr} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
     else:
-        fmt_min = reformat_date(min_date, date_format)
-        fmt_max = reformat_date(max_date, date_format)
-        return f"{date_col} BETWEEN '{fmt_min}' AND '{fmt_max}'"
+        # Unknown / empty dtype — usually means _column_meta isn't loaded
+        # for this table. Bare-string literals here triggered ORA-01861
+        # ("literal does not match format string") on Oracle when the
+        # session NLS_DATE_FORMAT differs from YYYY-MM-DD. Emit ISO DATE
+        # literals for the non-SAS path so it parses regardless of NLS.
+        if is_sas:
+            fmt_min = reformat_date(min_date, date_format)
+            fmt_max = reformat_date(max_date, date_format)
+            return f"{date_col} BETWEEN '{fmt_min}' AND '{fmt_max}'"
+        return f"{date_col} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
 
 
 def format_date_bounds_literals(min_date, max_date, date_dtype, is_sas=False,
@@ -343,8 +360,12 @@ def format_date_bounds_literals(min_date, max_date, date_dtype, is_sas=False,
         if is_datetime:
             return f"DATE '{min_date}'", f"DATE '{max_date}'"
         return f"DATE '{min_date}'", f"DATE '{max_date}'"
-    return (f"'{reformat_date(min_date, date_format)}'",
-            f"'{reformat_date(max_date, date_format)}'")
+    # Unknown / empty dtype — emit ISO DATE literal for non-SAS so Oracle
+    # doesn't try to implicit-convert a bare string against NLS_DATE_FORMAT.
+    if is_sas:
+        return (f"'{reformat_date(min_date, date_format)}'",
+                f"'{reformat_date(max_date, date_format)}'")
+    return f"DATE '{min_date}'", f"DATE '{max_date}'"
 
 
 def build_date_range_with_gaps(date_col, matching_dates, date_dtype,
@@ -411,8 +432,34 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
         'date_format': None,
     }
 
+    # Always read the date column's dtype + format from the DB if we can —
+    # downstream WHERE-clause builders need it to emit the right literal
+    # form (DATE 'yyyy-mm-dd' vs '20260401' vs an integer). Previously this
+    # was skipped when vintage='all' (the early-return), which made
+    # build_date_between_clause fall through to the bare-string fallback
+    # and triggered ORA-01861 on Oracle when the session NLS_DATE_FORMAT
+    # didn't accept ISO. Only the matching-dates lookup needs to skip when
+    # vintage='all', since 'all' means "no per-bucket filter".
+    if db_path:
+        from ..db import get_column_meta, get_metadata
+        date_col = tbl_cfg.get('date_col', '')
+        try:
+            for cm in (get_column_meta(db_path, qname) or []):
+                if cm['column_name'].upper() == date_col.upper():
+                    result['date_dtype'] = (cm.get('data_type') or '').upper() or None
+                    break
+        except Exception:
+            pass  # _column_meta absent / read failed — leave date_dtype None
+        try:
+            meta = get_metadata(db_path, qname)
+            if meta:
+                result['date_format'] = meta.get('date_format')
+        except Exception:
+            pass  # _metadata absent — leave date_format None
+
     if vintage == 'all' or not db_path:
-        print(f"  [date filter] vintage: {vintage} | no date filter applied")
+        print(f"  [date filter] vintage: {vintage} | no date filter applied "
+              f"(date_dtype={result['date_dtype']!r})")
         return result
 
     is_sample, n_sample = _parse_sample_vintage(vintage)
@@ -420,19 +467,6 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
         result['vintage'] = 'sample'
 
     from ..db import list_table_pairs, get_row_comparison, get_column_meta, get_metadata
-
-    # Look up date column dtype
-    date_col = tbl_cfg.get('date_col', '')
-    col_meta = get_column_meta(db_path, qname)
-    date_dtype = None
-    for cm in (col_meta or []):
-        if cm['column_name'].upper() == date_col.upper():
-            date_dtype = (cm.get('data_type') or '').upper()
-            break
-    result['date_dtype'] = date_dtype
-
-    meta = get_metadata(db_path, qname)
-    result['date_format'] = meta.get('date_format') if meta else None
 
     # Look up matching dates
     pairs = list_table_pairs(db_path)

@@ -9,6 +9,7 @@ const STEP_ROUTES = {
     'load_row': '/load_row',
     'row_compare': '/row_compare',
     'col_mapping': '/col_mapping',
+    'col_gen_rough': '/col_gen_rough',
     'col_gen': '/col_gen',
     'load_col': '/load_col',
     'col_compare': '/col_compare',

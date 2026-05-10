@@ -1168,20 +1168,41 @@ def resolve_oracle_macro(conn_macro: str) -> Optional[str]:
 
 #>>> Solve LDAP DSN to get TNS connect string <<<#
 def solve_ldap(ldap_dsn: str):
+    """Resolve `ldap://<server>/<db>,cn=OracleContext...` to a TNS string.
+
+    Raises RuntimeError with a useful message when the LDAP search returns
+    zero entries — previously this site bare-indexed conn.entries[0] and
+    threw 'list index out of range', which surfaced verbatim in the
+    /api/playground/run response and was hard to diagnose.
+    """
     import re
     from ldap3 import Server, Connection, ALL
     pattern = r"^ldap:\/\/(.+)\/(.+)\,(cn=OracleContext.*)$"
     x = re.match(pattern, ldap_dsn)
     if not x:
         return None
-    else:
-        ldap_server, db, ora_context = x.groups()
+    ldap_server, db, ora_context = x.groups()
     server = Server(ldap_server, get_info=ALL)
     conn = Connection(server)
-    conn.bind()
+    if not conn.bind():
+        raise RuntimeError(
+            f"LDAP bind to {ldap_server} failed: {conn.result!r}"
+        )
     conn.search(ora_context, f"(cn={db})", attributes=['orclNetDescString'])
-    tns = conn.entries[0].orclNetDescString.value
-    return tns
+    if not conn.entries:
+        raise RuntimeError(
+            f"LDAP search found no entry for service '{db}' on {ldap_server} "
+            f"(context={ora_context!r}). Check DTRACK_ORACLE_MACROS / MACRO2SVC "
+            f"for the connection macro and that the service is registered in "
+            f"the Oracle context."
+        )
+    entry = conn.entries[0]
+    if not getattr(entry, 'orclNetDescString', None):
+        raise RuntimeError(
+            f"LDAP entry for '{db}' has no orclNetDescString attribute "
+            f"(found: {[a.key for a in entry] if hasattr(entry, '__iter__') else '?'})."
+        )
+    return entry.orclNetDescString.value
 
 
 

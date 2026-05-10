@@ -333,8 +333,13 @@ def _format_date_bound(date_str, date_type, is_sas_src=False, is_upper=False,
     if dtype == 'date':
         return f"DATE '{date_str}'"
 
-    # Fallback: string literal
-    return f"'{date_str}'"
+    # Fallback: emit an Oracle DATE literal in ISO format. A bare-string
+    # fallback like '2026-04-01' relied on the session's NLS_DATE_FORMAT
+    # accepting ISO, which most Oracle defaults (DD-MON-YY) do NOT — that
+    # raised ORA-01861 ("literal does not match format string") when the
+    # pair was missing/unrecognized date_type. DATE 'yyyy-mm-dd' is
+    # syntactically explicit so it works regardless of session NLS.
+    return f"DATE '{date_str}'"
 
 
 # ---------------------------------------------------------------------------
@@ -2442,6 +2447,22 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     sas_cache_base = os.environ.get('SAS_CACHE_DIR', sas_lib)
     sas_cache_dir = sas_cache_base.rstrip('/') + '/' + prefix
 
+    # Optional Oracle/Hadoop SQL traffic dump. Set DTRACK_SAS_TRACE=1 to
+    # have every SAS/ACCESS passthrough block log the literal SQL it sends
+    # plus any errors that come back. Useful for diagnosing things like
+    # ORA-01861 ("literal does not match format string") where the WHERE
+    # clause in the SAS NOTE doesn't tell you whether `DATE 'yyyy-mm-dd'`
+    # vs bare `'yyyy-mm-dd'` is what actually hit the DB. Off by default
+    # to keep logs quiet.
+    if os.environ.get('DTRACK_SAS_TRACE', '0') == '1':
+        sastrace_options = (
+            "/* DTRACK_SAS_TRACE=1: dump SAS/ACCESS SQL traffic to the log */\n"
+            "options sastrace=',,,d' sastraceloc=saslog nostsuffix;\n"
+            "options msglevel=i;"
+        )
+    else:
+        sastrace_options = ""
+
     # Build template vars
     template_vars = {
         'pcds_usr': env_vars['PCDS_USR'],
@@ -2454,6 +2475,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         'table_macros': '\n'.join(macro_parts),
         'runner': runner_content,
         'user_credentials': '\n'.join(cred_lines),
+        'sastrace_options': sastrace_options,
     }
 
     sas_content = template.format(**template_vars)

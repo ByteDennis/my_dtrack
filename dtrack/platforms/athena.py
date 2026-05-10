@@ -800,14 +800,20 @@ def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
     we're trying to avoid). Fine SQL re-emits min_val/max_val as 'val=cnt'.
     """
     lcol = f"LENGTH(CAST({col_q} AS VARCHAR))"
-    # XXHASH64 is Trino-native and deterministic per value. SUM as DOUBLE
-    # avoids BIGINT overflow on large tables; precision loss doesn't matter
-    # since both sides do the same arithmetic — equality is what counts.
-    # Cross-platform note: hash_sum only round-trips when left and right
-    # use the same hash function. Cross-platform compares (Oracle ↔ AWS)
-    # ignore this field; n_total/n_missing/n_unique/min_val/max_val/length_*
+    # Trino's XXHASH64 returns VARBINARY (8 bytes), not BIGINT, so a direct
+    # CAST(... AS DOUBLE) errors with "cannot cast varbinary to double".
+    # from_big_endian_64() interprets the 8-byte hash as a signed 64-bit
+    # integer; from there CAST AS DOUBLE accumulates safely.
+    # SUM as DOUBLE avoids BIGINT overflow on large tables; precision loss
+    # doesn't matter — both sides do the same arithmetic, equality is what
+    # counts. Cross-platform note: hash_sum only round-trips when left and
+    # right use the same hash function. Cross-platform compares (Oracle ↔
+    # AWS) ignore this field; n_total/n_missing/n_unique/min/max/length_*
     # are the portable signals.
-    hash_expr = f"CAST(XXHASH64(CAST(CAST({col_q} AS VARCHAR) AS VARBINARY)) AS DOUBLE)"
+    hash_expr = (
+        f"CAST(from_big_endian_64(xxhash64("
+        f"CAST(CAST({col_q} AS VARCHAR) AS VARBINARY))) AS DOUBLE)"
+    )
     return f"""{cte_prefix}SELECT
     {dt_select},
     '{col_name}' AS column_name,

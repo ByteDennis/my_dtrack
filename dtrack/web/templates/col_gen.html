@@ -1,6 +1,15 @@
 {% extends "_layout.html" %}
 {% set current_page = "col_gen" %}
-{% set page_title = "Col Generation" %}
+{% set page_title = "Col Gen — Stage 2 (fine)" %}
+
+{% block head_extra %}
+    <script>
+      // Stage 2: fine extraction — full freq aggregation, top_10, rank-weighted
+      // mean/std for categoricals. Use this AFTER Stage 1 has flagged
+      // suspicious (col, vintage) cells on /col_compare.
+      window.DTRACK_GEN_LEVEL = 'fine';
+    </script>
+{% endblock %}
 
 {% block nav_extras %}
             <button onclick="openSettingsModal()">Settings</button>

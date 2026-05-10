@@ -624,6 +624,11 @@ async function generateAll() {
             sas_outdir: document.getElementById('global-sas-outdir')?.value || './sas/',
             aws_outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
             pair_names: selected.map(p => p.name),
+            // Page-set window var picks coarse (Stage 1) vs fine (Stage 2).
+            // Defaults to 'fine' so the historical /col_gen page behaves the
+            // same as before; /col_gen_rough sets it to 'coarse' before
+            // loading this script.
+            level: window.DTRACK_GEN_LEVEL || 'fine',
         };
         if (effectiveFrom) genBody.from_date = effectiveFrom;
         if (effectiveTo) genBody.to_date = effectiveTo;

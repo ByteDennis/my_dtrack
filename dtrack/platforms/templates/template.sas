@@ -1,4 +1,5 @@
 options nomprint nomlogic nosymbolgen encoding=asciiany;
+{sastrace_options}
 
 /* Credentials (filled by Python from dtrack.conf) */
 %let iamusr = {pcds_usr};

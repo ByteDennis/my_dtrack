@@ -69,6 +69,14 @@ async def row_compare_page(request: Request):
 async def col_mapping_page(request: Request):
     return templates.TemplateResponse(request, "col_mapping.html")
 
+@app.get("/col_gen_rough", response_class=HTMLResponse)
+async def col_gen_rough_page(request: Request):
+    """Stage 1 — coarse col-stats gen. Same UI as /col_gen but the
+    'Generate' button hits /api/generate with level=coarse so the emitted
+    SAS/SQL uses cheap aggregates only (no GROUP BY p_col, no top_10).
+    """
+    return templates.TemplateResponse(request, "col_gen_rough.html")
+
 @app.get("/col_gen", response_class=HTMLResponse)
 async def col_gen_page(request: Request):
     return templates.TemplateResponse(request, "col_gen.html")
