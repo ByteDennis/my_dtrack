@@ -53,6 +53,49 @@ _VINTAGE_TRUNC = {
 }
 
 
+def _approx_distinct_enabled() -> bool:
+    """True iff DTRACK_APPROX_DISTINCT is set to a truthy value.
+
+    When True, gen-col swaps `COUNT(DISTINCT col)` with each platform's
+    HyperLogLog-based approximate (`APPROX_COUNT_DISTINCT` on Oracle,
+    `APPROX_DISTINCT` on Hive, `approx_distinct` on Trino/Athena).
+    Off by default — exact counts are the safer choice for compliance-
+    style validation and HLL has noticeable error at very high cardinality
+    (~1-2% standard error; exact for ≤256 unique values).
+    """
+    return os.environ.get('DTRACK_APPROX_DISTINCT', '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _approx_distinct_error() -> str:
+    """Optional precision arg for Trino/Athena's `approx_distinct(col, e)`.
+
+    Hive's `approx_distinct` doesn't accept this arg; Oracle's
+    `APPROX_COUNT_DISTINCT` doesn't either. Only used in the Athena SQL
+    builder. Default empty (use engine default ~2.3%).
+    """
+    return os.environ.get('DTRACK_APPROX_DISTINCT_ERROR', '').strip()
+
+
+def _n_unique_expr(source: str, col: str) -> str:
+    """Per-platform SQL fragment for n_unique. Honors DTRACK_APPROX_DISTINCT.
+
+    SAS-source and libname mode keep `COUNT(DISTINCT col)` regardless —
+    SAS proc sql doesn't have an approx function, and SAS/ACCESS already
+    pushes count-distinct down to the platform-native function over JDBC.
+    """
+    s = (source or '').lower()
+    if not _approx_distinct_enabled() or s in ('sas',):
+        return f"COUNT(DISTINCT {col})"
+    if s == 'oracle':
+        return f"APPROX_COUNT_DISTINCT({col})"
+    if s == 'hadoop':
+        return f"APPROX_DISTINCT({col})"
+    if s == 'aws':
+        e = _approx_distinct_error()
+        return f"approx_distinct({col}, {e})" if e else f"approx_distinct({col})"
+    return f"COUNT(DISTINCT {col})"
+
+
 def _is_libname_table(tbl_cfg):
     """True if this table's per-side config opts into SAS LIBNAME mode.
 
@@ -1339,6 +1382,11 @@ def _render_col_template(tpl_name, rows, rows_placeholder,
     row_lines = []
     seen = {}
     for r in rows:
+        # n_unique_expr defaults to COUNT(DISTINCT col) for back-compat with
+        # any caller that didn't populate the new field; the dispatch loop
+        # in _gen_sas_col_driver always sets it via _n_unique_expr().
+        n_unique_expr = r.get('n_unique_expr',
+                              f"COUNT(DISTINCT {r['col_name']})")
         row_lines.append(
             f"    qname='{_sas_escape(r['qname'])}'; "
             f"dsname='{_sas_escape(r['dsname'])}'; "
@@ -1351,7 +1399,8 @@ def _render_col_template(tpl_name, rows, rows_placeholder,
             f"from_table='{_sas_escape(r['from_table'])}'; "
             f"date_from='{_sas_escape(r['date_from'])}'; "
             f"date_to='{_sas_escape(r['date_to'])}'; "
-            f"where_clause='{_sas_escape(r['where_clause'])}'; output;"
+            f"where_clause='{_sas_escape(r['where_clause'])}'; "
+            f"n_unique_expr='{_sas_escape(n_unique_expr)}'; output;"
         )
         # Distinct (qname, dsname) pairs in first-seen order -- used to emit
         # one %_run_one_*_table(qname=..., dsname=...) invocation per qname.
@@ -1516,6 +1565,10 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.'):
                 'date_from': spec['date_from'],
                 'date_to': spec['date_to'],
                 'where_clause': full_where,
+                # Per-platform n_unique expression. When DTRACK_APPROX_DISTINCT
+                # is on, this becomes APPROX_COUNT_DISTINCT (Oracle) or
+                # APPROX_DISTINCT (Hive). Otherwise COUNT(DISTINCT col).
+                'n_unique_expr': _n_unique_expr(tbl_source, col_name),
             })
         print(f"[{tbl_source} col] {qname}: {n_cols} cols (db-side "
               f"GROUP BY {spec['vintage_expr']!s:.60} vintage={spec['vintage']}) "

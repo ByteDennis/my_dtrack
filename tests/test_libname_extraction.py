@@ -262,6 +262,96 @@ def test_libname_col_emits_per_run_banner_in_sas_log(isolated_env, tmp_path):
     assert "DONE in %sysfunc(putn(&_elapsed, 8.2))s" in sas
 
 
+def test_approx_distinct_off_by_default_oracle(isolated_env, tmp_path):
+    """Without DTRACK_APPROX_DISTINCT, Oracle col gen emits COUNT(DISTINCT)."""
+    cfg_path = tmp_path / "cfg.json"
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _write_col_config(cfg_path, connect_method="sql",
+                      columns={"AMT": "NUMBER"})
+
+    from dtrack.platforms.oracle import gen_sas
+    gen_sas(str(cfg_path), str(out_dir), types=["col"])
+
+    sas = sorted(out_dir.glob("*.sas"))[0].read_text()
+    assert "COUNT(DISTINCT AMT)" in sas
+    assert "APPROX_COUNT_DISTINCT" not in sas
+
+
+def test_approx_distinct_on_oracle(isolated_env, tmp_path, monkeypatch):
+    """DTRACK_APPROX_DISTINCT=1 + Oracle source → APPROX_COUNT_DISTINCT."""
+    monkeypatch.setenv("DTRACK_APPROX_DISTINCT", "1")
+    cfg_path = tmp_path / "cfg.json"
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _write_col_config(cfg_path, connect_method="sql",
+                      columns={"AMT": "NUMBER"})
+
+    from dtrack.platforms.oracle import gen_sas
+    gen_sas(str(cfg_path), str(out_dir), types=["col"])
+
+    sas = sorted(out_dir.glob("*.sas"))[0].read_text()
+    assert "APPROX_COUNT_DISTINCT(AMT)" in sas
+    assert "COUNT(DISTINCT AMT)" not in sas
+
+
+def test_approx_distinct_on_hadoop(isolated_env, tmp_path, monkeypatch):
+    """DTRACK_APPROX_DISTINCT=1 + Hadoop source → APPROX_DISTINCT."""
+    monkeypatch.setenv("DTRACK_APPROX_DISTINCT", "1")
+    monkeypatch.setenv("HDP_SERVER", "hadoop.example.com")
+    monkeypatch.setenv("HDP_URI", "jdbc:hive2://hadoop.example.com:10000/usrf")
+    cfg = {
+        "pairs": {
+            "demo": {
+                "left": {
+                    "name": "src", "table": "MYTBL", "source": "hadoop",
+                    "conn_macro": "hdp", "date_col": "DT", "date_type": "date",
+                    "columns": {"AMT": "DOUBLE"},
+                },
+                "right": {
+                    "name": "snk", "table": "snk_ds", "source": "sas",
+                    "conn_macro": "work", "date_col": "DT", "date_type": "date",
+                    "columns": {"AMT": "NUMBER"},
+                },
+                "fromDate": "2025-01-01", "toDate": "2025-01-31",
+            }
+        },
+        "metadata": {},
+    }
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps(cfg))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    from dtrack.platforms.oracle import gen_sas
+    gen_sas(str(cfg_path), str(out_dir), types=["col"])
+
+    sas = sorted(out_dir.glob("*.sas"))[0].read_text()
+    assert "APPROX_DISTINCT(AMT)" in sas
+
+
+def test_approx_distinct_does_not_affect_libname_path(isolated_env, tmp_path, monkeypatch):
+    """libname mode keeps count(distinct); SAS proc sql doesn't have approx
+    and SAS/ACCESS pushes count(distinct) down to native server-side anyway."""
+    monkeypatch.setenv("DTRACK_APPROX_DISTINCT", "1")
+    cfg_path = tmp_path / "cfg.json"
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _write_col_config(cfg_path, connect_method="libname",
+                      columns={"AMT": "NUMBER"})
+
+    from dtrack.platforms.oracle import gen_sas
+    gen_sas(str(cfg_path), str(out_dir), types=["col"])
+
+    sas = sorted(out_dir.glob("*.sas"))[0].read_text()
+    # The libname helper macro still uses count(distinct).
+    assert "count(distinct &_col)" in sas
+    # And the libname-mode driver does NOT inject APPROX_*; the libref
+    # path doesn't use n_unique_expr from the driver dataset.
+    assert "APPROX_COUNT_DISTINCT" not in sas
+    assert "APPROX_DISTINCT" not in sas
+
+
 def test_libname_col_categorical_uses_freq_post_processor(isolated_env, tmp_path):
     """Categorical column → emits the freq-pull SQL and routes to the
     shared %_col_categorical_freq post-processor."""

@@ -23,7 +23,8 @@ data _ora_col_map;
            col_name $64 col_type $12
            date_col $64 vintage $12 vintage_expr $500
            date_from $64 date_to $64
-           from_table $500 where_clause $2000;
+           from_table $500 where_clause $2000
+           n_unique_expr $500;
 /*{ORA_COL_ROWS}*/
 run;
 
@@ -54,7 +55,7 @@ run;
                        'numeric' AS col_type,
                        COUNT(*) AS n_total,
                        COUNT(*) - COUNT(&_col_name) AS n_missing,
-                       COUNT(DISTINCT &_col_name) AS n_unique,
+                       &_n_unique_expr AS n_unique,
                        TO_CHAR(AVG(&_col_name)) AS mean,
                        TO_CHAR(STDDEV_SAMP(&_col_name)) AS std,
                        TO_CHAR(MIN(&_col_name)) AS min_val,
@@ -154,6 +155,7 @@ run;
             ' call symputx("_date_from", ',    quote(strip(date_from)),    ');',
             ' call symputx("_date_to", ',      quote(strip(date_to)),      ');',
             ' call symputx("_where_clause", ', quote(strip(where_clause)), ');',
+            ' call symputx("_n_unique_expr", ', quote(strip(n_unique_expr)), ');',
             ' call symputx("_x_idx", ',        quote(strip(put(_n_, best.))), ');',
             ' call symputx("_n_total", "',     "&_n_total",                   '");',
             ' run; ',
