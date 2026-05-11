@@ -52,17 +52,38 @@ run;
                (CASE WHEN col IN (-999, ...) THEN NULL ELSE col END), built
                in Python via apply_null_sentinels and threaded through the
                driver. Aggregates use it so sentinel values collapse to
-               NULL; the literal output name still uses &_col_name_lit. */
+               NULL; the literal output name still uses &_col_name_lit.
+
+               In coarse mode (&_coarse_mode = 1) mean / std are blanked
+               in the SELECT so the output CSV matches Athena's coarse
+               SQL schema (top_10 / length_* / hash_sum are already
+               empty on numeric -- length depends on storage formatting,
+               hash on the function family). */
+            %local _mean_expr _std_expr;
+            %if &_coarse_mode = 1 %then %do;
+                %let _mean_expr = CAST('' AS VARCHAR2(32));
+                %let _std_expr  = CAST('' AS VARCHAR2(32));
+            %end;
+            %else %do;
+                %let _mean_expr = TO_CHAR(AVG(&_col_expr));
+                %let _std_expr  = TO_CHAR(STDDEV_SAMP(&_col_expr));
+            %end;
             create table _c_one as
             select * from connection to oracle (
                 SELECT &_vintage_expr AS dt,
-                       &_col_name_lit AS column_name,
+                       /* CAST(literal AS VARCHAR2(64)) so Oracle's metadata
+                          tells SAS the column is $64 -- without it, SAS
+                          infers length from the literal width (e.g. $17
+                          for 'PSTBU_MASDECI_TXT') and proc append freezes
+                          the base cache at that width, truncating later
+                          longer column names to fit. */
+                       CAST(&_col_name_lit AS VARCHAR2(64)) AS column_name,
                        'numeric' AS col_type,
                        COUNT(*) AS n_total,
                        COUNT(*) - COUNT(&_col_expr) AS n_missing,
                        &_n_unique_expr AS n_unique,
-                       TO_CHAR(AVG(&_col_expr)) AS mean,
-                       TO_CHAR(STDDEV_SAMP(&_col_expr)) AS std,
+                       &_mean_expr AS mean,
+                       &_std_expr AS std,
                        TO_CHAR(MIN(&_col_expr)) AS min_val,
                        TO_CHAR(MAX(&_col_expr)) AS max_val,
                        CAST('' AS VARCHAR2(4000)) AS top_10,
@@ -123,9 +144,12 @@ run;
         proc delete data=_ora_freq_; run;
     %end;
 
-    /* Normalize widths + ensure top_10 / length / hash slots exist. */
+    /* Normalize widths + ensure top_10 / length / hash slots exist.
+       column_name $64 (not $32) so long Oracle identifiers don't get
+       silently truncated when the base cache freezes its width on the
+       first proc append. */
     data _c_one;
-        length dt $32 column_name $32 col_type $12 top_10 $4000
+        length dt $32 column_name $64 col_type $12 top_10 $4000
                length_avg $32 length_max $32 hash_sum $32;
         set _c_one;
     run;
@@ -152,6 +176,22 @@ run;
     %if %sysfunc(exist(cache._cs_&dsname)) %then %do;
         proc delete data=cache._cs_&dsname; run;
     %end;
+
+    /* Pre-create the cache with explicit lengths so proc append cannot
+       freeze column_name (or any other field) to a short width inferred
+       from the first row. Without this, a short first column name like
+       'AMT' could cap column_name at $3 on the base dataset, and the
+       next pull's 'PSTBU_MASDECI_TXT' / 'PSTBU_MASDECI_SETID' would be
+       truncated to fit -- which is what shipped them both as
+       'PSTBU_MASDEC' in the export CSV. stop; leaves the cache empty
+       but schema-locked. */
+    data cache._cs_&dsname;
+        length dt $32 column_name $64 col_type $12 top_10 $4000
+               mean $32 std $32 min_val $400 max_val $400
+               length_avg $32 length_max $32 hash_sum $32
+               n_total 8 n_missing 8 n_unique 8;
+        stop;
+    run;
 
     /* Total column count for this table -- drives x/n progress display in
        the per-column start banner. */

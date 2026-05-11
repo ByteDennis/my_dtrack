@@ -397,12 +397,27 @@ def compare_column_stats(
                 rv = raw_r.strip() if isinstance(raw_r, str) else (raw_r or "")
                 if lv and rv:
                     if field == "hash_sum":
+                        # Relative tolerance: at the 1e12-1e17 magnitudes
+                        # hash_sum lives in, DOUBLE summation-order
+                        # differences between engines can be ~hundreds
+                        # in absolute terms but ~1e-15 relative. Real
+                        # drift moves the sum by orders of magnitude
+                        # (a single changed value shifts cnt × hash by
+                        # at least 1, often much more), well above the
+                        # 1e-9 floor. So abs(diff)/max(|l|, |r|) < 1e-9
+                        # passes on identical data even with FP noise
+                        # while still flagging real drift.
                         try:
-                            match = abs(float(lv) - float(rv)) < 1e-3
+                            lf, rf = float(lv), float(rv)
+                            denom = max(abs(lf), abs(rf), 1.0)
+                            match = abs(lf - rf) / denom < 1e-9
                         except (ValueError, TypeError):
                             match = (lv == rv)
                     else:
-                        # length_* are numeric — round to handle "12.0" vs "12".
+                        # length_* values are small (single/double digits
+                        # for typical strings), so absolute tolerance is
+                        # fine and avoids spurious matches on tiny
+                        # relative diffs that ARE real drift.
                         try:
                             match = abs(float(lv) - float(rv)) < 1e-4
                         except (ValueError, TypeError):

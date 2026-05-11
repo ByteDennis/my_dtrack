@@ -394,7 +394,7 @@ function renderColTable(name, cols, vintage) {
         {label: 'Max',       keyL: 'max_left',        keyR: 'max_right',       isDiff: c => c.max_match === false, fmt: 'text'},
         {label: 'Length avg',keyL: 'length_avg_left', keyR: 'length_avg_right', isDiff: c => c.length_avg_match === false, fmt: 'num'},
         {label: 'Length max',keyL: 'length_max_left', keyR: 'length_max_right', isDiff: c => c.length_max_match === false, fmt: 'int'},
-        {label: 'Hash sum',  keyL: 'hash_sum_left',   keyR: 'hash_sum_right',   isDiff: c => c.hash_sum_match === false, fmt: 'text'},
+        {label: 'Hash sum',  keyL: 'hash_sum_left',   keyR: 'hash_sum_right',   isDiff: c => c.hash_sum_match === false, fmt: 'sci'},
     ];
     const statDefs = [...baseDefs, ...fineDefs, ...tailDefs];
 
@@ -402,6 +402,7 @@ function renderColTable(name, cols, vintage) {
         if (val == null || val === '') return '&mdash;';
         if (fmt === 'int') return fmtVal(val);
         if (fmt === 'num') return fmtNum(val);
+        if (fmt === 'sci') return fmtSci(val);
         return esc(String(val));
     }
 
@@ -544,6 +545,21 @@ function fmtNum(n) {
     if (n == null || n === '') return '—';
     const num = Number(n);
     return isNaN(num) ? String(n) : num.toLocaleString(undefined, {maximumFractionDigits: 4});
+}
+
+// Scientific notation with fixed significant figures. Used for hash_sum
+// so a SAS-emitted integer like "100336545671234568" and an Athena-emitted
+// "1.00336545E17" render in the same form for visual comparison.
+// 11 sig figs (toExponential(10)) is inside DOUBLE's exact range (15-17),
+// so identical underlying values always render to the same string. With
+// the 16-bit MD5 hash, billion-row sums stay <= 2^53 (exact integer in
+// DOUBLE) so the display matches whenever the underlying data matches.
+function fmtSci(n) {
+    if (n == null || n === '') return '—';
+    const num = Number(n);
+    if (isNaN(num)) return String(n);
+    if (num === 0) return '0';
+    return num.toExponential(10);
 }
 
 function fmtDiff(n) {

@@ -546,13 +546,13 @@ async def api_generate_files(request: Request):
                     try:
                         gen_sas(tmp_path, sas_outdir, types=[extract_type],
                                 db_path=_db_path, from_date=from_date, to_date=to_date,
-                                cells_filter=cells_filter)
+                                cells_filter=cells_filter, coarse=coarse)
                     finally:
                         os.unlink(tmp_path)
                 else:
                     gen_sas(_config_path, sas_outdir, types=[extract_type],
                             db_path=_db_path, from_date=from_date, to_date=to_date,
-                            cells_filter=cells_filter)
+                            cells_filter=cells_filter, coarse=coarse)
                 results["sas_file"] = os.path.join(sas_outdir, f"extract_{extract_type}.sas")
 
             # Generate SQL file
@@ -1003,9 +1003,22 @@ async def api_list_pairs():
                 p = side_cfg.get("processed", "")
                 if isinstance(p, list):
                     side_cfg["processed"] = "\n".join(p)
-            # col_filter lives in _table_pairs (not config). Fetch per-pair.
+            # col_filter is dual-written: the canonical store is the DB
+            # (_table_pairs, written by /api/pairs/{name} PUT), but users
+            # can also edit dtrack.json directly. When the JSON has a
+            # col_filter entry, treat that as authoritative for this read
+            # -- otherwise an edit to dtrack.json would silently fail to
+            # surface in col_gen because we'd only see the (possibly
+            # stale or empty) DB row.
             from ..db import get_pair_col_filter
-            cf = get_pair_col_filter(_db_path, pair_name)
+            json_cf = pair_cfg.get("col_filter") or {}
+            if json_cf.get("include") or json_cf.get("exclude"):
+                cf = {
+                    "include": list(json_cf.get("include") or []),
+                    "exclude": list(json_cf.get("exclude") or []),
+                }
+            else:
+                cf = get_pair_col_filter(_db_path, pair_name)
             pairs_list.append({
                 "name": pair_name,
                 "description": pair_cfg.get("description", ""),
@@ -2252,6 +2265,15 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
                 parts.append(f"min ({c.get('min_left','?')}->{c.get('min_right','?')})")
             if c.get("max_match") is False:
                 parts.append(f"max ({c.get('max_left','?')}->{c.get('max_right','?')})")
+            # Coarse drift hints — keep the log in sync with the UI so
+            # downstream readers (PR notes, ticket dumps, etc.) see the
+            # same diff set the col_compare page flags.
+            if c.get("length_avg_match") is False:
+                parts.append(f"length_avg ({_fmt_round(c.get('length_avg_left'))}->{_fmt_round(c.get('length_avg_right'))})")
+            if c.get("length_max_match") is False:
+                parts.append(f"length_max ({_fmt_round(c.get('length_max_left'))}->{_fmt_round(c.get('length_max_right'))})")
+            if c.get("hash_sum_match") is False:
+                parts.append(f"hash_sum ({_fmt_round(c.get('hash_sum_left'))}->{_fmt_round(c.get('hash_sum_right'))})")
 
             detail = "  ".join(parts) if parts else "values differ"
             lines.append(f"    {col:<20s} {detail}")
@@ -2314,11 +2336,14 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
         wb = Workbook()
         wb.remove(wb.active)  # remove default sheet
 
-        stat_rows = ["Type", "N_Total", "N_Missing", "N_Unique", "Mean", "Std", "Min", "Max"]
+        stat_rows = ["Type", "N_Total", "N_Missing", "N_Unique", "Mean", "Std",
+                     "Min", "Max", "Length avg", "Length max", "Hash sum"]
         stat_keys_l = ["col_type", "n_total_left", "n_missing_left", "n_unique_left",
-                        "mean_left", "std_left", "min_left", "max_left"]
+                        "mean_left", "std_left", "min_left", "max_left",
+                        "length_avg_left", "length_max_left", "hash_sum_left"]
         stat_keys_r = ["col_type", "n_total_right", "n_missing_right", "n_unique_right",
-                        "mean_right", "std_right", "min_right", "max_right"]
+                        "mean_right", "std_right", "min_right", "max_right",
+                        "length_avg_right", "length_max_right", "hash_sum_right"]
 
         for pair in pairs:
             pname = pair["pair_name"]
@@ -2383,6 +2408,11 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
                     if comp.get("std_match") is False: diff_cells.add((ci, 5))
                     if comp.get("min_match") is False: diff_cells.add((ci, 6))
                     if comp.get("max_match") is False: diff_cells.add((ci, 7))
+                    # Coarse drift hints — mirror compare.py / col_compare.js
+                    # so the Excel output flags the same cells as the UI.
+                    if comp.get("length_avg_match") is False: diff_cells.add((ci, 8))
+                    if comp.get("length_max_match") is False: diff_cells.add((ci, 9))
+                    if comp.get("hash_sum_match")   is False: diff_cells.add((ci, 10))
                 for ci, si in diff_cells:
                     problem_cols.add(ci)
 

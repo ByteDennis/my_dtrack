@@ -453,7 +453,10 @@ def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database
 
     if numeric:
         from .base import apply_null_sentinels
-        col_expr = apply_null_sentinels(col_q, "numeric", "athena")
+        # Pass raw dtype so NUMBER / DECIMAL get numeric sentinels (matches
+        # the high-level 'numeric' tag here, but stays consistent if a
+        # caller ever passes a more specific type label).
+        col_expr = apply_null_sentinels(col_q, dtype or "numeric", "athena")
         sql = f"""{cte_prefix}
 SELECT
     {dt_select},
@@ -504,7 +507,12 @@ FROM {full_table} WHERE {wc}{group_by}"""
         freq_dt_group = f", {dt_expr}"
 
     from .base import apply_null_sentinels
-    col_expr_cat = apply_null_sentinels(col_q, "categorical", "athena")
+    # Pass the raw dtype (e.g. 'timestamp(3)') so DATE / TIMESTAMP columns
+    # get DATE sentinels instead of string sentinels. The high-level
+    # 'categorical' tag collapses DATE, VARCHAR, etc. into one bucket and
+    # would emit `IN ('NA', ...)` even for a timestamp column -- Athena
+    # then rejects the SQL at compile time with TYPE_MISMATCH.
+    col_expr_cat = apply_null_sentinels(col_q, dtype or "categorical", "athena")
     sql = f"""{cte_prefix}
 WITH freq AS (
     SELECT {freq_dt_select} AS dt,
@@ -778,35 +786,60 @@ WHERE {where_clause}"""
     return id_cols
 
 
-def _athena_portable_hash32(value_sql):
-    """Athena/Trino expression: 32-bit signed bigint MD5 hash of `value_sql`.
+def _athena_portable_hash16(value_sql):
+    """Athena/Trino expression: 16-bit unsigned bigint MD5 hash of `value_sql`.
 
-    Strategy aligned with Hive and SAS-side hash recipes so the SUM across
-    rows AGREES on identical data cross-platform (the whole point of
-    using hash_sum as a drill-down signal on Hadoop ↔ AWS pairs):
+    Recipe matches the SAS-side `input(substr(put(md5(...), $hex32.), 1, 4),
+    hex4.)` form so cross-platform SUM(cnt * hash) AGREES on identical data
+    -- which is the whole point of hash_sum as a drift-detection signal on
+    Hadoop ↔ AWS pairs.
 
       1. TRIM the value so 'SF' and 'SF ' don't diverge from padding
          (padding is a storage artifact, not data drift).
       2. MD5 -> 16-byte VARBINARY -> TO_HEX -> 32-char hex string.
-      3. Take the FIRST 8 hex chars (32 bits) and from_base(.., 16) into
-         a bigint. 32 bits keeps the per-row value safely below 2^31
-         (~4.3 GB), so SUM over a multi-billion-row table can't overflow
-         the signed-bigint sum (Trino's SUM(bigint) returns bigint, max
-         ~9.2e18). Full 64 bits would overflow differently on Trino's
-         signed bigint vs. Hive's unsigned conv result and cause
-         cross-platform arithmetic drift unrelated to the data.
-      4. Categorical only -- on numerics, CAST(0 AS VARCHAR) yields '0'
-         on Hive but '0.0' on Athena DOUBLE, and the MD5s diverge purely
-         from formatting. Callers gate this expression on col_type.
+      3. Take the FIRST 4 hex chars (16 bits) and from_base(.., 16) into
+         a bigint in [0, 65535].
+
+    Why 16 bits, not 32 or 64
+    -------------------------
+    Trino's SUM over a freq-table column is computed in DOUBLE. DOUBLE
+    has a 53-bit mantissa, so integer arithmetic is exact only up to
+    2^53 ≈ 9e15. The per-row term in this hash is cnt * hash, and the
+    final SUM is dominated by N_total * max(hash) where N_total is the
+    table row count.
+
+      hash bits | max(hash)  | N_total exact-safe in DOUBLE
+      ---------+------------+----------------------------------------
+        16     |   65,535   | ~1.4e11   (140 billion rows)
+        32     |   4.3e9    | ~2.1e6    (~2 million rows!)
+        64     |   9.2e18   | overflow at the first row
+
+    32-bit hashes silently lose precision past a few million rows --
+    cross-platform sums then disagree from summation-order differences
+    in DOUBLE, not from data drift. 16-bit stays exact at billion-row
+    scale on both engines.
+
+    Collision concern: K distinct categorical values have ~K^2/2^17
+    chance of birthday-paradox collisions. Collisions DO NOT silence
+    drift detection -- drift shifts the cnt distribution, which moves
+    the weighted sum regardless of which buckets the affected values
+    occupy. The only silent-drift case is value A replaced by value B
+    where hash16(A) == hash16(B) AND cnt is preserved -- ~1/65536 per
+    affected pair, well below other Phase-1 signal noise.
+
+    Numeric-column note: callers gate this expression on col_type;
+    numerics emit empty hash_sum because CAST(0 AS VARCHAR) yields '0'
+    on Hive but '0.0' on Athena DOUBLE, and the MD5 diverges purely
+    from formatting.
     """
     return (
         f"CAST(from_base(SUBSTR(LOWER(TO_HEX(MD5("
-        f"TO_UTF8(TRIM({value_sql}))))), 1, 8), 16) AS BIGINT)"
+        f"TO_UTF8(TRIM({value_sql}))))), 1, 4), 16) AS BIGINT)"
     )
 
 
 def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
-                      full_table, wc, cte_prefix):
+                      full_table, wc, cte_prefix, col_dtype=None):
     """Coarse col-stats SQL — cheap aggregates for Phase-1 rough drift detection.
 
     Emits the 14-column row schema (dt, column_name, col_type, n_total,
@@ -845,7 +878,14 @@ def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
     SAS templates.
     """
     from .base import apply_null_sentinels
-    col_expr = apply_null_sentinels(col_q, col_type, "athena")
+    # Prefer the raw DB dtype over the high-level tag so apply_null_sentinels
+    # can pick the right sentinel family: DATE sentinels (DATE '9999-12-31',
+    # ...) for DATE / TIMESTAMP columns instead of string sentinels ('NA',
+    # 'N/A', ...). Without this, Athena raises TYPE_MISMATCH on a categorical-
+    # tagged timestamp(3) column because `IN ('NA', ...)` can't coerce to
+    # timestamp; Oracle raises ORA-01858 trying to TO_DATE('NA').
+    effective_type = col_dtype or col_type
+    col_expr = apply_null_sentinels(col_q, effective_type, "athena")
     is_categorical = (col_type or "").lower() == "categorical"
 
     if not is_categorical:
@@ -926,7 +966,7 @@ _coarse_lenhash AS (
     SELECT dt,
            SUM(CAST(cnt AS DOUBLE) * LENGTH(p_col)) / NULLIF(SUM(cnt), 0) AS length_avg,
            MAX(LENGTH(p_col)) AS length_max,
-           SUM(CAST(cnt AS DOUBLE) * CAST({_athena_portable_hash32("p_col")} AS DOUBLE)) AS hash_sum
+           SUM(CAST(cnt AS DOUBLE) * CAST({_athena_portable_hash16("p_col")} AS DOUBLE)) AS hash_sum
     FROM _coarse_ranked GROUP BY dt
 )
 SELECT t.dt,
@@ -1063,11 +1103,13 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                 for dt in date_filter['dates']:
                     buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
                 vintage_specs = []
+                excluded_dates = date_filter.get('excluded_dates') or []
                 for bucket_key, dates in sorted(buckets.items()):
                     dw = build_date_range_with_gaps(
                         date_col_q, dates,
                         date_filter['date_dtype'],
                         date_format=date_filter.get('date_format'),
+                        excluded_dates=excluded_dates,
                     )
                     vintage_specs.append((bucket_key, dw))
                 sql_mode = 'bucket'
@@ -1210,6 +1252,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                             dt_select=f"{trunc_expr} AS dt",
                             group_by=f"\nGROUP BY {trunc_expr}",
                             full_table=full_table, wc=wc_t_col, cte_prefix=cte_prefix,
+                            col_dtype=col_dtype,
                         )
                         blocks.append(f"-- {qname}/{col_name}/_all")
                         blocks.append(sql.strip())
@@ -1217,7 +1260,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                         continue
                     from .base import apply_null_sentinels
                     if is_num:
-                        col_expr = apply_null_sentinels(col_q, "numeric", "athena")
+                        col_expr = apply_null_sentinels(col_q, col_dtype or "numeric", "athena")
                         sql = f"""{cte_prefix}SELECT
     {trunc_expr} AS dt,
     '{col_name}' AS column_name,
@@ -1234,7 +1277,7 @@ FROM {full_table}
 WHERE {wc_t_col}
 GROUP BY {trunc_expr};"""
                     else:
-                        col_expr = apply_null_sentinels(col_q, "categorical", "athena")
+                        col_expr = apply_null_sentinels(col_q, col_dtype or "categorical", "athena")
                         sql = f"""{cte_prefix}WITH freq AS (
     SELECT {trunc_expr} AS dt,
            CAST({col_expr} AS VARCHAR) AS p_col,
@@ -1338,6 +1381,7 @@ ORDER BY s.dt;"""
                             dt_select=f"{dt_expr} AS dt",
                             group_by="",
                             full_table=full_table, wc=wc, cte_prefix=cte_prefix,
+                            col_dtype=col_dtype,
                         )
                         blocks.append(f"-- {qname}/{col_name}{block_suffix}")
                         blocks.append(sql.strip())
@@ -1345,7 +1389,7 @@ ORDER BY s.dt;"""
                         continue
                     from .base import apply_null_sentinels
                     if is_num:
-                        col_expr = apply_null_sentinels(col_q, "numeric", "athena")
+                        col_expr = apply_null_sentinels(col_q, col_dtype or "numeric", "athena")
                         sql = f"""{cte_prefix}SELECT
     {dt_expr} AS dt,
     '{col_name}' AS column_name,
@@ -1361,7 +1405,7 @@ ORDER BY s.dt;"""
 FROM {full_table}
 WHERE {wc};"""
                     else:
-                        col_expr = apply_null_sentinels(col_q, "categorical", "athena")
+                        col_expr = apply_null_sentinels(col_q, col_dtype or "categorical", "athena")
                         sql = f"""{cte_prefix}WITH freq AS (
     SELECT
         CAST({col_expr} AS VARCHAR) AS p_col,
@@ -1502,7 +1546,8 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
             buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
         dw = build_date_range_with_gaps(
             date_col, date_filter['dates'],
-            extract_date_dtype, date_format=date_filter.get('date_format'))
+            extract_date_dtype, date_format=date_filter.get('date_format'),
+            excluded_dates=date_filter.get('excluded_dates') or [])
         extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
         print(f"  {len(buckets)} vintage buckets ({effective_vintage}) -- GROUP BY")
     elif date_filter['filter_type'] == 'in_list':

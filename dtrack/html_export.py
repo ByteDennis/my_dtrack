@@ -553,7 +553,13 @@ def generate_column_stats_html(
 
 
 def _has_differences(comp: Dict) -> bool:
-    """Check if comparison has any differences"""
+    """Check if comparison has any differences.
+
+    Mirrors compare._has_col_differences so the HTML/log exports count
+    the same diffs as the col_compare UI -- coarse drift hints
+    (length_avg / length_max / hash_sum) are now part of the diff
+    signal, not just mean/std/min/max.
+    """
     # Check count differences
     if comp.get('n_total_diff', 0) != 0:
         return True
@@ -571,6 +577,17 @@ def _has_differences(comp: Dict) -> bool:
     if comp.get('min_match') is False:
         return True
     if comp.get('max_match') is False:
+        return True
+
+    # Coarse drift hints. length_avg / length_max are storage-form-
+    # independent (length of a string is the same on every engine), and
+    # hash_sum uses the portable 16-bit MD5 recipe so it agrees on
+    # identical categorical data across Hadoop / Athena / Oracle.
+    if comp.get('length_avg_match') is False:
+        return True
+    if comp.get('length_max_match') is False:
+        return True
+    if comp.get('hash_sum_match') is False:
         return True
 
     return False

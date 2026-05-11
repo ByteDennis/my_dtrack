@@ -133,22 +133,35 @@ def _n_unique_expr(source: str, col: str, tbl_cfg=None, config=None) -> str:
     return f"COUNT(DISTINCT {col})"
 
 
-def _col_expr_for_source(source: str, col_name: str, col_type: str) -> str:
+def _col_expr_for_source(source: str, col_name: str, col_type: str,
+                         col_dtype: str = None) -> str:
     """Build the sentinel-translated column expression for an Oracle/Hadoop
     passthrough SQL pulled from a SAS step.
 
     `col_name` is the bare DB identifier (e.g. `EVENT_DATE`); the SAS
     templates pre-quote nothing, so we hand back a raw `CASE WHEN ... END`.
-    `col_type` is the dtrack tag ('numeric' / 'categorical') -- the helper
-    picks the right sentinel list. Returns `col_name` unchanged when no
-    sentinels apply (oracle/hadoop sentinel lists empty for this kind).
+    `col_type` is the dtrack tag ('numeric' / 'categorical').
+    `col_dtype` is the raw DB type ('DATE', 'TIMESTAMP', 'VARCHAR2',
+    'NUMBER', ...). When provided it takes precedence over col_type --
+    the dtrack tag collapses DATE / TIMESTAMP / VARCHAR all into
+    'categorical', but the sentinel family differs by underlying type:
+      DATE / TIMESTAMP -> compare with DATE 'YYYY-MM-DD' literals
+      VARCHAR / CHAR   -> compare with 'NA' / 'N/A' / '.' string literals
+      NUMBER / INT     -> compare with -999 / -9999 numeric literals
+    Without col_dtype, a DATE column tagged 'categorical' gets string
+    sentinels and Oracle raises ORA-01858 trying to convert 'NA' into
+    a date for the IN comparison (and Athena rejects with TYPE_MISMATCH
+    at SQL compile time).
     """
     from .base import apply_null_sentinels
     # `source` maps to the dialect arg directly for oracle/hadoop.
     dialect = (source or "oracle").lower()
     if dialect not in ("oracle", "hadoop"):
         dialect = "oracle"
-    return apply_null_sentinels(col_name, col_type, dialect)
+    # Raw dtype wins; fall back to high-level tag when load-columns
+    # hasn't been run and we don't have it.
+    effective_type = col_dtype or col_type
+    return apply_null_sentinels(col_name, effective_type, dialect)
 
 
 def _is_libname_table(tbl_cfg):
@@ -798,24 +811,37 @@ _SAS_EXPORT_HELPER = r"""
         rnk + 1;
     run;
 
-    /* Top-10 by frequency (SAS-side; reuses the same freq_ds). */
-    proc sort data=&freq_ds out=_ccf_freq_sorted_(where=(p_col is not missing));
-        by dt descending cnt p_col;
-    run;
-    data _ccf_top10_(keep=dt top_10);
-        length top_10 $4000 _entry $400;
-        set _ccf_freq_sorted_;
-        by dt;
-        retain top_10 _rn;
-        if first.dt then do; top_10 = ''; _rn = 0; end;
-        if _rn < 10 then do;
-            _rn + 1;
-            _entry = cats(strip(vvalue(p_col)), '(', strip(put(cnt, best.)), ')');
-            if top_10 = '' then top_10 = _entry;
-            else top_10 = catx('; ', top_10, _entry);
-        end;
-        if last.dt then output;
-    run;
+    /* Top-10 by frequency (SAS-side; reuses the same freq_ds). In
+       coarse mode we still need a dt-keyed _ccf_top10_ dataset so the
+       downstream merge stays joinable, but we leave top_10 empty so
+       the emitted CSV matches the Athena coarse SQL schema (mean / std /
+       top_10 are fine-only output fields). */
+    %if &_coarse_mode = 1 %then %do;
+        proc sql noprint;
+            create table _ccf_top10_ as
+            select distinct dt, '' as top_10 length=4000
+            from &freq_ds;
+        quit;
+    %end;
+    %else %do;
+        proc sort data=&freq_ds out=_ccf_freq_sorted_(where=(p_col is not missing));
+            by dt descending cnt p_col;
+        run;
+        data _ccf_top10_(keep=dt top_10);
+            length top_10 $4000 _entry $400;
+            set _ccf_freq_sorted_;
+            by dt;
+            retain top_10 _rn;
+            if first.dt then do; top_10 = ''; _rn = 0; end;
+            if _rn < 10 then do;
+                _rn + 1;
+                _entry = cats(strip(vvalue(p_col)), '(', strip(put(cnt, best.)), ')');
+                if top_10 = '' then top_10 = _entry;
+                else top_10 = catx('; ', top_10, _entry);
+            end;
+            if last.dt then output;
+        run;
+    %end;
 
     /* Weighted mean = SUM(cnt*rnk)/SUM(cnt);
        std = sqrt(SUM(cnt*rnk^2)/SUM(cnt) - mean^2). Output CHAR.
@@ -832,15 +858,22 @@ _SAS_EXPORT_HELPER = r"""
        it directly without vvalue() (which is data-step only and errors
        in proc sql).
 
-       sum_hash is the cnt-weighted MD5-truncated hash, matching the
-       Athena coarse recipe (_athena_portable_hash32):
-         TRIM(p_col) -> MD5 -> first 8 hex chars (32 bits) -> bigint
-       So an unchanged categorical column produces the same hash_sum on
-       both engines -- and any value drift surfaces as a hash_sum diff,
-       which is the drill-down signal we want on Phase-1 cross-platform
-       compares. 32 bits keeps per-row values <= 2^31 so cnt-weighted
-       sums over typical bucket sizes don't overflow SAS's double
-       (~2^53 safe integer range). */
+       sum_hash is the cnt-weighted 16-bit MD5-truncated hash, matching
+       the Athena coarse recipe (_athena_portable_hash16):
+         strip(p_col) -> MD5 -> first 4 hex chars (16 bits, max 65535)
+       Cross-platform SUM(cnt * hash16) stays inside SAS double's
+       2^53 exact-integer range up to ~140 billion rows; identical data
+       on Hadoop and AWS produces identical hash_sum values, and any
+       value drift surfaces as a hash_sum diff -- the drill-down signal
+       we want on Phase-1 cross-platform compares. 32-bit hashes were
+       tried earlier but caused silent precision loss in DOUBLE past
+       a few million rows, leading to spurious cross-platform mismatches
+       from summation-order differences rather than real data drift.
+
+       strip() (not trim()) so leading whitespace is also stripped,
+       matching Trino's TRIM() which removes both ends. trim() would
+       only strip trailing, so a value like '  CS' would hash differently
+       on the two sides. */
     proc sql noprint;
         create table _ccf_stats_ as
         select dt,
@@ -849,7 +882,7 @@ _SAS_EXPORT_HELPER = r"""
                sum(cnt * rnk * rnk) as sum_cnt_rnk2,
                sum(cnt * length(strip(p_col))) as sum_cnt_len,
                max(length(strip(p_col))) as max_len,
-               sum(cnt * input(substr(put(md5(trim(p_col)), $hex32.), 1, 8), hex8.))
+               sum(cnt * input(substr(put(md5(strip(p_col)), $hex32.), 1, 4), hex4.))
                    as sum_hash
         from _ccf_ranked_ group by dt;
     quit;
@@ -857,10 +890,22 @@ _SAS_EXPORT_HELPER = r"""
         length mean std $32 length_avg length_max $32 hash_sum $32;
         set _ccf_stats_;
         if sum_cnt > 0 then do;
-            _m = sum_cnt_rnk / sum_cnt;
-            _s = sqrt(max(sum_cnt_rnk2 / sum_cnt - _m*_m, 0));
-            mean = strip(put(_m, best32.));
-            std  = strip(put(_s, best32.));
+            /* mean / std are fine-only -- the Athena coarse SQL emits
+               empty for these; we mirror that on the SAS side so the
+               two CSV schemas line up. The freq table is still pulled
+               (needed for n_total / n_missing / n_unique / val=cnt
+               min/max / length / hash), so the saving is purely on
+               output, not compute. */
+            %if &_coarse_mode = 1 %then %do;
+                mean = '';
+                std  = '';
+            %end;
+            %else %do;
+                _m = sum_cnt_rnk / sum_cnt;
+                _s = sqrt(max(sum_cnt_rnk2 / sum_cnt - _m*_m, 0));
+                mean = strip(put(_m, best32.));
+                std  = strip(put(_s, best32.));
+            %end;
             length_avg = strip(put(sum_cnt_len / sum_cnt, best32.));
             length_max = strip(put(max_len, best32.));
             hash_sum   = strip(put(sum_hash, best32.));
@@ -905,7 +950,10 @@ _SAS_EXPORT_HELPER = r"""
     proc sort data=_ccf_maxs_;     by dt; run;
     proc sort data=_ccf_top10_;    by dt; run;
     data &out_ds;
-        length column_name $32 col_type $12 top_10 $4000
+        /* column_name $64 (not $32) so long DB identifiers like
+           PSTBU_MASDECI_SETID (19 chars) don't get silently truncated
+           if proc append later freezes a shorter base cache width. */
+        length column_name $64 col_type $12 top_10 $4000
                mean $32 std $32 min_val $400 max_val $400
                length_avg $32 length_max $32 hash_sum $32;
         merge _ccf_meta_(in=a)
@@ -932,11 +980,23 @@ _SAS_EXPORT_HELPER = r"""
         if not f then top_10 = '';
     run;
 
-    proc datasets lib=work nolist;
-        delete _ccf_meta_ _ccf_miss_ _ccf_alpha_ _ccf_ranked_
-               _ccf_stats_ _ccf_stats2_ _ccf_mins_ _ccf_maxs_
-               _ccf_freq_sorted_ _ccf_top10_;
-    quit;
+    /* _ccf_freq_sorted_ only exists in fine mode (top_10 build path).
+       proc datasets warns but doesn't fail when deleting a missing
+       table; still cleaner to gate the delete list. */
+    %if &_coarse_mode = 1 %then %do;
+        proc datasets lib=work nolist;
+            delete _ccf_meta_ _ccf_miss_ _ccf_alpha_ _ccf_ranked_
+                   _ccf_stats_ _ccf_stats2_ _ccf_mins_ _ccf_maxs_
+                   _ccf_top10_;
+        quit;
+    %end;
+    %else %do;
+        proc datasets lib=work nolist;
+            delete _ccf_meta_ _ccf_miss_ _ccf_alpha_ _ccf_ranked_
+                   _ccf_stats_ _ccf_stats2_ _ccf_mins_ _ccf_maxs_
+                   _ccf_freq_sorted_ _ccf_top10_;
+        quit;
+    %end;
 %mend _col_categorical_freq;
 """
 
@@ -1331,10 +1391,12 @@ def _compute_bucket_specs(tbl_cfg, db_path):
             buckets = {}
             for dt in date_filter['dates']:
                 buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
+            excluded_dates = date_filter.get('excluded_dates') or []
             for bucket_key, dates in sorted(buckets.items()):
                 dw = build_date_range_with_gaps(
                     date_col, dates, date_dtype,
                     is_sas=is_sas_syntax, date_format=date_format,
+                    excluded_dates=excluded_dates,
                 )
                 fl, tl = format_date_bounds_literals(
                     min(dates), max(dates), date_dtype,
@@ -1449,6 +1511,7 @@ def _compute_col_spec(tbl_cfg, db_path):
             where_clause = build_date_range_with_gaps(
                 date_col, date_filter['dates'], date_dtype,
                 is_sas=is_sas, date_format=date_format,
+                excluded_dates=date_filter.get('excluded_dates') or [],
             )
         date_from_lit, date_to_lit = format_date_bounds_literals(
             bmin, bmax, date_dtype, is_sas=is_sas, date_format=date_format,
@@ -1575,7 +1638,7 @@ def _render_col_template(tpl_name, rows, rows_placeholder,
     return tpl
 
 
-def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None):
+def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None, coarse=False):
     """Emit SAS code for column-stats extraction across all tables.
 
     Dispatch by source:
@@ -1718,8 +1781,12 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None):
             # (constants.NULL_SENTINELS[<source>]) collapse to NULL before
             # the aggregate runs. The literal output `'col_name' AS
             # column_name` still uses the bare name; col_expr only swaps
-            # in at aggregation sites.
-            col_expr = _col_expr_for_source(tbl_source, col_name, col_type)
+            # in at aggregation sites. Pass the raw col_dtype so DATE /
+            # TIMESTAMP columns get DATE sentinels (DATE '9999-12-31',
+            # ...) instead of string sentinels ('NA', 'N/A', ...) -- the
+            # latter triggers ORA-01858 when Oracle tries to convert 'NA'
+            # to a date for the IN comparison.
+            col_expr = _col_expr_for_source(tbl_source, col_name, col_type, col_dtype)
             rows_bucket.append({
                 'qname': qname,
                 'dsname': dsname,
@@ -1746,6 +1813,14 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None):
     total = len(sas_driver_rows) + len(lib_driver_rows) + len(ora_rows) + len(hdp_rows)
     if total == 0:
         return "\n/* No col extraction rows generated (col_filter zeroed everything out). */\n"
+    # _coarse_mode controls whether the fine-only output fields (mean,
+    # std, top_10) are populated in the per-column CSV. The freq table
+    # is still pulled for categorical so coarse signals (n_total /
+    # n_missing / n_unique / min / max with val=cnt / length_* /
+    # hash_sum) can be computed -- coarse only changes the OUTPUT
+    # schema, not the work done. Matches Athena's coarse SQL (Athena
+    # blanks mean/std/top_10 in _build_coarse_sql).
+    coarse_mode_let = f"%let _coarse_mode = {1 if coarse else 0};\n"
     n_tbl = (len(qnames_sas) + len(qnames_lib)
              + len(qnames_ora) + len(qnames_hdp))
     print(f"[SAS col] TOTAL: {n_tbl} tables "
@@ -1754,8 +1829,10 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None):
           f"{total} driver rows")
 
     # _export_col_stats is needed by all paths; the per-path helper macros
-    # are only emitted when their bucket is non-empty.
-    parts = [_SAS_EXPORT_HELPER]
+    # are only emitted when their bucket is non-empty. _coarse_mode is set
+    # FIRST so every downstream macro (_col_categorical_freq, the per-
+    # source templates) can read it via &_coarse_mode at run time.
+    parts = [coarse_mode_let, _SAS_EXPORT_HELPER]
     if sas_driver_rows:
         parts.append(_SAS_SOURCE_HELPERS)
     if lib_driver_rows:
@@ -2084,10 +2161,14 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
             buckets = {}
             for dt in date_filter['dates']:
                 buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
+            # row_comparison-derived real-diff excludes (mismatched +
+            # misload). Filtered per-bucket inside build_date_range_with_gaps.
+            excluded_dates = date_filter.get('excluded_dates') or []
             for bucket_key, dates in sorted(buckets.items()):
                 dw = build_date_range_with_gaps(
                     date_col, dates, date_dtype,
                     is_sas=is_sas, date_format=date_filter.get('date_format'),
+                    excluded_dates=excluded_dates,
                 )
                 bucket_specs.append((bucket_key, dw))
         n = len(bucket_specs)
@@ -2180,7 +2261,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
 
 
 def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintage=None,
-            from_date=None, to_date=None, cells_filter=None):
+            from_date=None, to_date=None, cells_filter=None, coarse=False):
     """
     Generate a single combined SAS file for Oracle data extraction.
 
@@ -2197,6 +2278,15 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         vintage: Date bucketing granularity (day, week, month, quarter, year)
         from_date: Start date for incremental extraction (YYYY-MM-DD)
         to_date: End date for incremental extraction (YYYY-MM-DD)
+        coarse: When True, suppress fine-only output fields (mean, std,
+            top_10) on the SAS side so the emitted CSV matches the
+            Athena coarse SQL output schema. Coarse signals
+            (n_total, n_missing, n_unique, min, max, length_avg,
+            length_max, hash_sum) are always emitted. The freq table
+            is still pulled for categorical columns because the
+            coarse signals are computed from it -- we only blank the
+            "fine-only" fields in the merged output, so the cost is
+            the same as fine mode.
     """
     if types is None:
         types = ["row", "col"]
@@ -2411,7 +2501,7 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         # get_colstats_SN macro soup -- smaller extract_col.sas file, no
         # 32K SAS line-length issues, and col_filter is honored per-row.
         macro_parts.append("/* --- Col extraction (flat driver across all tables) --- */")
-        macro_parts.append(_gen_sas_col_driver(all_col_tables, db_path, out_dir, config=config))
+        macro_parts.append(_gen_sas_col_driver(all_col_tables, db_path, out_dir, config=config, coarse=coarse))
 
     # Collect libname mount/clear lines BEFORE runner_parts so the runner
     # can reference libname_clear_lines below. Each unique conn_macro that

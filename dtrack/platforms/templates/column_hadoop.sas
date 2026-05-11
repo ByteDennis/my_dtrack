@@ -45,20 +45,36 @@ run;
                (CASE WHEN col IN (-999, ...) THEN NULL ELSE col END),
                built in Python and passed through. Aggregates use it so
                sentinel values collapse to NULL; the literal output column
-               name still uses &_col_name_lit. length_avg/length_max/
-               hash_sum mirror the Athena coarse path so Phase-1 rough
-               column comparison sees structural drift hints on both
-               sides. */
+               name still uses &_col_name_lit.
+
+               In coarse mode (&_coarse_mode = 1) mean / std are blanked
+               in the SELECT so the output CSV matches Athena's coarse
+               SQL schema. */
+            %local _mean_expr _std_expr;
+            %if &_coarse_mode = 1 %then %do;
+                %let _mean_expr = CAST('' AS STRING);
+                %let _std_expr  = CAST('' AS STRING);
+            %end;
+            %else %do;
+                %let _mean_expr = CAST(AVG(CAST(&_col_expr AS DOUBLE)) AS STRING);
+                %let _std_expr  = CAST(STDDEV_SAMP(CAST(&_col_expr AS DOUBLE)) AS STRING);
+            %end;
             create table _c_one as
             select * from connection to hadoop (
                 SELECT &_vintage_expr AS dt,
-                       &_col_name_lit AS column_name,
+                       /* CAST(literal AS VARCHAR(64)) so Hive's metadata
+                          tells SAS the column is $64 -- without it, SAS
+                          infers length from the literal width (e.g. $17
+                          for 'PSTBU_MASDECI_TXT') and proc append freezes
+                          the base cache at that width, truncating later
+                          longer column names to fit. */
+                       CAST(&_col_name_lit AS VARCHAR(64)) AS column_name,
                        'numeric' AS col_type,
                        COUNT(*) AS n_total,
                        COUNT(*) - COUNT(&_col_expr) AS n_missing,
                        &_n_unique_expr AS n_unique,
-                       CAST(AVG(CAST(&_col_expr AS DOUBLE)) AS STRING) AS mean,
-                       CAST(STDDEV_SAMP(CAST(&_col_expr AS DOUBLE)) AS STRING) AS std,
+                       &_mean_expr AS mean,
+                       &_std_expr AS std,
                        CAST(MIN(&_col_expr) AS STRING) AS min_val,
                        CAST(MAX(&_col_expr) AS STRING) AS max_val,
                        CAST('' AS STRING) AS top_10,
@@ -121,8 +137,12 @@ run;
         proc delete data=_hdp_freq_; run;
     %end;
 
+    /* Normalize widths + ensure top_10 / length / hash slots exist.
+       column_name $64 (not $32) so long Hive identifiers don't get
+       silently truncated when the base cache freezes its width on the
+       first proc append. */
     data _c_one;
-        length dt $32 column_name $32 col_type $12 top_10 $4000
+        length dt $32 column_name $64 col_type $12 top_10 $4000
                length_avg $32 length_max $32 hash_sum $32;
         set _c_one;
     run;
@@ -146,6 +166,22 @@ run;
     %if %sysfunc(exist(cache._cs_&dsname)) %then %do;
         proc delete data=cache._cs_&dsname; run;
     %end;
+
+    /* Pre-create the cache with explicit lengths so proc append cannot
+       freeze column_name (or any other field) to a short width inferred
+       from the first row. Without this, a short first column name like
+       'AMT' could cap column_name at $3 on the base dataset, and the
+       next pull's 'PSTBU_MASDECI_TXT' / 'PSTBU_MASDECI_SETID' would be
+       truncated to fit -- which is what shipped them both as
+       'PSTBU_MASDEC' in the export CSV. stop; leaves the cache empty
+       but schema-locked. */
+    data cache._cs_&dsname;
+        length dt $32 column_name $64 col_type $12 top_10 $4000
+               mean $32 std $32 min_val $400 max_val $400
+               length_avg $32 length_max $32 hash_sum $32
+               n_total 8 n_missing 8 n_unique 8;
+        stop;
+    run;
 
     /* Total column count for this table -- drives x/n progress display in
        the per-column start banner. */

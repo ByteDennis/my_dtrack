@@ -16,48 +16,32 @@ ATHENA_NUMERIC_TYPES = {
     'double', 'float', 'decimal', 'real',
 }
 
-# ==========================================================================
-# DATE TYPE REGISTRY (single source of truth)
-#
-# To add a new date format:
-#   1. Add an entry to DATE_TYPE_FORMATS below (date_type → format label)
-#   2. Add a strftime pattern to reformat_date()'s fmt_map in this file (~line 80)
-#   3. Add a dropdown entry in pairs.js DATE_COLUMN_TYPES (~line 23)
-#
-# All platforms (SAS, Oracle, Athena) automatically pick up the new format
-# via resolve_date_format() — no per-platform changes needed.
-# ==========================================================================
-DATE_TYPE_FORMATS = {
-    # String types
-    'string_compact': 'YYYYMMDD',    # '20260115'
-    'string_dash':    'YYYY-MM-DD',  # '2026-01-15'
-    'string':         'YYYY-MM-DD',  # '2026-01-15'
-    'string_mon':     'DDMONYYYY',   # '15JAN2026'
-    'string_mon_dash':'DD-MON-YYYY', # '15-JAN-2026'
-    'string_us':      'MM/DD/YYYY',  # '01/15/2026'
-    # Numeric types (no quotes in SQL)
-    'num':            'YYYYMMDD',    # 20260115
-    'integer':        'YYYYMMDD',    # 20260115
-    'int':            'YYYYMMDD',    # 20260115
-    'number':         'YYYYMMDD',    # 20260115
-    'num_yyyymm':     'YYYYMM',     # 202601
-    # Native date/timestamp
-    'date':           'YYYY-MM-DD',  # DATE '2026-01-15'
-    'timestamp':      'YYYY-MM-DD',  # TIMESTAMP '2026-01-15 ...'
-    'datetime':       'YYYY-MM-DD',  # TIMESTAMP '2026-01-15 ...'
-}
+# Date-type registry lives in constants.py (single source of truth for
+# date_type -> format and date_type -> canonical dtype). Imported here
+# so resolve_date_format() can apply both mappings to date_filter.
+from ..constants import DATE_TYPE_FORMATS, DATE_TYPE_TO_CANONICAL_DTYPE
 
 
 def resolve_date_format(date_filter, tbl_cfg):
-    """Ensure date_filter has date_format set.
+    """Ensure date_filter has date_format AND date_dtype set.
 
-    Falls back to DATE_TYPE_FORMATS using the config's date_type.
-    Call this after compute_date_filter() before building SQL clauses.
+    Two-step resolution, both honoring the user's tbl_cfg.date_type:
+      1. date_format: only filled when missing (a value already set by
+         load-columns wins). Falls back to DATE_TYPE_FORMATS[date_type].
+      2. date_dtype: when tbl_cfg.date_type is provided, ALWAYS overrides
+         the metadata-derived value. The user's explicit semantic config
+         is authoritative -- this prevents Oracle ORA-01858 ("non-numeric
+         character was found...") when the column is actually NUMBER /
+         VARCHAR2 / YYYYMMDD but the metadata happens to say DATE.
+
+    Call after compute_date_filter() and before building any SQL clause.
     """
+    cfg_date_type = (tbl_cfg.get('date_type') or '').lower()
     if not date_filter.get('date_format'):
-        cfg_date_type = (tbl_cfg.get('date_type') or '').lower()
         if cfg_date_type in DATE_TYPE_FORMATS:
             date_filter['date_format'] = DATE_TYPE_FORMATS[cfg_date_type]
+    if cfg_date_type in DATE_TYPE_TO_CANONICAL_DTYPE:
+        date_filter['date_dtype'] = DATE_TYPE_TO_CANONICAL_DTYPE[cfg_date_type]
 
 
 _NUMERIC_TYPE_SET = {t.upper() for t in ORACLE_NUMERIC_TYPES} | {
@@ -331,7 +315,12 @@ def build_date_in_clause(date_col, dates, date_dtype, is_sas=False, date_format=
             formatted = [f"'{reformat_date(d, fmt)}'" for d in dates]
         col_expr = date_col
     elif dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
-        formatted = [str(d) for d in dates]
+        # Reformat to the column's integer storage format (e.g. YYYYMMDD)
+        # so the IN list emits as `col IN (20260505, 20260506, ...)` not
+        # `col IN (2026-05-05, ...)` -- the bare-string fallback was
+        # silently invalid SQL on NUMBER columns.
+        formatted = [reformat_date(d, date_format) if date_format else str(d)
+                     for d in dates]
         col_expr = date_col
     elif is_string:
         formatted = [f"'{reformat_date(d, date_format)}'" for d in dates]
@@ -398,7 +387,15 @@ def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=F
             return f"{date_col} BETWEEN '{fmt_min}' AND '{fmt_max}'"
 
     if dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
-        return f"{date_col} BETWEEN {min_date} AND {max_date}"
+        # Reformat min/max from canonical YYYY-MM-DD to the column's
+        # stored integer format (e.g. YYYYMMDD -> 20260505, YYYYMM ->
+        # 202605). Without this, the bare string '2026-05-05' would be
+        # spliced as `col BETWEEN 2026-05-05 AND ...` -- invalid SQL
+        # (Oracle tries to parse it as numeric arithmetic and raises
+        # ORA-01858).
+        fmt_min = reformat_date(min_date, date_format) if date_format else str(min_date)
+        fmt_max = reformat_date(max_date, date_format) if date_format else str(max_date)
+        return f"{date_col} BETWEEN {fmt_min} AND {fmt_max}"
     elif is_string:
         fmt_min = reformat_date(min_date, date_format)
         fmt_max = reformat_date(max_date, date_format)
@@ -416,9 +413,38 @@ def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=F
                 return f"{col_expr} BETWEEN {sas_min} AND {sas_max}"
             except ValueError:
                 return f"{date_col} BETWEEN '{min_date}' AND '{max_date}'"
-        else:
-            col_expr = f"TRUNC({date_col})" if is_datetime else date_col
-            return f"{col_expr} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
+        # Non-SAS path. For datetime/timestamp columns we want to capture
+        # every row that falls on any day in [min, max], including rows
+        # with non-zero time parts on the upper day. Two ways to write
+        # that:
+        #   (a) TRUNC(col) BETWEEN DATE 'min' AND DATE 'max'
+        #   (b) col >= DATE 'min' AND col < DATE 'max+1day'
+        # We use (b). Reasons:
+        #   - (a) wraps the column in a function (TRUNC), which prevents
+        #     the optimizer from using an index on `col`. (b) keeps the
+        #     column bare on the LHS, transformation lives entirely on
+        #     the RHS literal.
+        #   - TRUNC() is Oracle-specific; Athena/Trino doesn't have it
+        #     (would need date_trunc('day', col)). (b) is portable.
+        #   - (a) at upper bound = DATE 'max' = max 00:00:00, so rows
+        #     after midnight on the upper day still pass via TRUNC --
+        #     but (b)'s `< max+1day` captures them too, including
+        #     anything in the last sub-second.
+        # For plain DATE columns (no time, e.g. Athena DATE), the
+        # half-open range still works identically.
+        if is_datetime:
+            from datetime import datetime as _dt, timedelta as _td
+            try:
+                d_max = _dt.strptime(str(max_date), "%Y-%m-%d") + _td(days=1)
+                max_next = d_max.strftime("%Y-%m-%d")
+                return (f"{date_col} >= DATE '{min_date}' "
+                        f"AND {date_col} < DATE '{max_next}'")
+            except ValueError:
+                # Fall back to inclusive BETWEEN if max_date isn't ISO --
+                # the date helper upstream should canonicalize, but stay
+                # defensive.
+                return f"{date_col} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
+        return f"{date_col} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
     else:
         # Unknown / empty dtype — usually means _column_meta isn't loaded
         # for this table. Bare-string literals here triggered ORA-01861
@@ -453,7 +479,9 @@ def format_date_bounds_literals(min_date, max_date, date_dtype, is_sas=False,
         return f"'{reformat_date(min_date, fmt)}'", f"'{reformat_date(max_date, fmt)}'"
 
     if dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
-        return str(min_date), str(max_date)
+        fmt_min = reformat_date(min_date, date_format) if date_format else str(min_date)
+        fmt_max = reformat_date(max_date, date_format) if date_format else str(max_date)
+        return fmt_min, fmt_max
     if is_string:
         return (f"'{reformat_date(min_date, date_format)}'",
                 f"'{reformat_date(max_date, date_format)}'")
@@ -480,44 +508,43 @@ def format_date_bounds_literals(min_date, max_date, date_dtype, is_sas=False,
 
 
 def build_date_range_with_gaps(date_col, matching_dates, date_dtype,
-                               is_sas=False, date_format=None, custom_date_types=None):
-    """Build BETWEEN clause with NOT IN for gap dates within the range.
+                               is_sas=False, date_format=None, custom_date_types=None,
+                               excluded_dates=None):
+    """Build a BETWEEN clause covering [min(matching_dates), max(matching_dates)],
+    optionally with `AND NOT (col IN (excluded_dates))` for real-diff days.
 
-    matching_dates: list of YYYY-MM-DD dates that should be included.
-    Any dates in the BETWEEN range that aren't in matching_dates get excluded.
+    `excluded_dates` is the row_comparison-derived list of days INSIDE the
+    overlap range that the user wants the extract to skip -- mismatched
+    counts and misloads (where one side has data and the other has zero).
+    It is NOT a generic gap list: days where BOTH sides are zero rows
+    are intentionally absent. Those produce empty extracts naturally
+    (nothing to scan), so listing them in NOT IN would only bloat the
+    SQL and prevent partition pruning.
 
-    Returns a WHERE fragment like:
-        date_col BETWEEN '2025-01-06' AND '2025-01-10'
-        AND NOT (date_col IN ('2025-01-09'))
+    User-typed excludes go through a separate `_exclude_dates` /
+    `exclude_clause` plumbed by the AWS/SAS drivers, not through here.
+
+    Note: an earlier version auto-computed gap_dates = (full range) -
+    matching_dates and shoved them into NOT IN. That lumped both-zero
+    days in with real diffs and produced huge NOT IN lists. Caller now
+    supplies the curated list explicitly.
     """
-    from datetime import datetime as _dt, timedelta as _td
-
     bmin, bmax = min(matching_dates), max(matching_dates)
     between = build_date_between_clause(
         date_col, bmin, bmax, date_dtype,
         is_sas=is_sas, date_format=date_format,
         custom_date_types=custom_date_types,
     )
-
-    # Find gap dates
-    matching_set = set(matching_dates)
-    try:
-        d = _dt.strptime(bmin, "%Y-%m-%d")
-        d_max = _dt.strptime(bmax, "%Y-%m-%d")
-        gaps = []
-        while d <= d_max:
-            ds = d.strftime("%Y-%m-%d")
-            if ds not in matching_set:
-                gaps.append(ds)
-            d += _td(days=1)
-    except ValueError:
-        gaps = []
-
-    if not gaps:
+    if not excluded_dates:
         return between
-
+    # Filter excludes to the bucket window. excluded_dates passed in from
+    # the caller may span the whole overlap range; only the ones inside
+    # the current bucket apply to this WHERE clause.
+    in_window = [d for d in excluded_dates if bmin <= d <= bmax]
+    if not in_window:
+        return between
     not_in = build_date_in_clause(
-        date_col, gaps, date_dtype,
+        date_col, in_window, date_dtype,
         is_sas=is_sas, date_format=date_format,
         custom_date_types=custom_date_types,
     )
@@ -589,8 +616,20 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
     matching_dates = []
     if pair_name:
         comp = get_row_comparison(db_path, pair_name)
-        if comp and comp.get('matching_dates'):
-            matching_dates = comp['matching_dates']
+        if comp:
+            if comp.get('matching_dates'):
+                matching_dates = comp['matching_dates']
+            # Pull the row_comparison-derived overlap window + real-diff
+            # excludes so downstream WHERE builders can emit
+            # `BETWEEN overlap_start AND overlap_end AND NOT (col IN
+            # (excluded_dates))`. excluded_dates contains the days inside
+            # the overlap range where left and right disagree on non-zero
+            # row counts (mismatched + misload). Days where both sides
+            # are zero stay OUT of this list -- they produce empty
+            # extracts naturally and don't deserve NOT IN bloat.
+            result['overlap_start'] = comp.get('overlap_start')
+            result['overlap_end']   = comp.get('overlap_end')
+            result['excluded_dates'] = list(comp.get('excluded_dates') or [])
 
     # Sample dates if sample@N vintage
     if is_sample and matching_dates:
