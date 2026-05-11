@@ -37,6 +37,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     initTestingMode();
 });
 
+// Cached retry settings per source -- shows the user's saved value when
+// they switch the dropdown without re-fetching. Reset every time the
+// modal opens so we don't show stale data from a prior modal session.
+let _retrySettings = {ora_count: 3, ora_sleep: 30, hdp_count: 3, hdp_sleep: 30};
+
 async function openSettingsModal() {
     // Load current global settings each time so the modal reflects what's
     // actually persisted in dtrack.json.metadata.
@@ -47,8 +52,38 @@ async function openSettingsModal() {
         const radio = v === true ? 'approx' : 'exact';  // null/false → exact
         const el = document.querySelector(`input[name="global-approx"][value="${radio}"]`);
         if (el) el.checked = true;
+
+        // Retry knobs -- null/missing => fall back to 3 attempts × 30s.
+        _retrySettings = {
+            ora_count: (data && data.ora_retry_count) ?? 3,
+            ora_sleep: (data && data.ora_retry_sleep) ?? 30,
+            hdp_count: (data && data.hdp_retry_count) ?? 3,
+            hdp_sleep: (data && data.hdp_retry_sleep) ?? 30,
+        };
+        // Default dropdown to Hadoop (more common transient-failure source).
+        const sel = document.getElementById('global-retry-source');
+        if (sel) sel.value = 'hdp';
+        onRetrySourceChanged();
     } catch (e) { /* leave defaults */ }
     document.getElementById('settings-modal').classList.add('active');
+}
+
+// Source dropdown changed -- save the currently-displayed values for
+// the previous source into the cache, then load the new source's values
+// into the inputs.
+let _retryCurrentSource = 'hdp';
+function onRetrySourceChanged() {
+    // Save the inputs for the previously-selected source first.
+    const countEl = document.getElementById('global-retry-count');
+    const sleepEl = document.getElementById('global-retry-sleep');
+    if (countEl && sleepEl && _retryCurrentSource) {
+        _retrySettings[`${_retryCurrentSource}_count`] = Number(countEl.value) || 3;
+        _retrySettings[`${_retryCurrentSource}_sleep`] = Number(sleepEl.value) || 30;
+    }
+    const newSource = document.getElementById('global-retry-source').value;
+    if (countEl) countEl.value = _retrySettings[`${newSource}_count`] ?? 3;
+    if (sleepEl) sleepEl.value = _retrySettings[`${newSource}_sleep`] ?? 30;
+    _retryCurrentSource = newSource;
 }
 
 function closeSettingsModal() {
@@ -122,14 +157,25 @@ async function applyGlobalSettings() {
     // independently of the per-pair fields below.
     const approxSel = document.querySelector('input[name="global-approx"]:checked');
     const approx = approxSel && approxSel.value === 'approx';
+
+    // Capture the currently-displayed retry values into the cache so the
+    // about-to-be-POSTed payload reflects the dropdown's current source.
+    onRetrySourceChanged();
+
     try {
         await fetch('/api/global_settings', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({approx_distinct: approx}),
+            body: JSON.stringify({
+                approx_distinct:  approx,
+                ora_retry_count:  _retrySettings.ora_count,
+                ora_retry_sleep:  _retrySettings.ora_sleep,
+                hdp_retry_count:  _retrySettings.hdp_count,
+                hdp_retry_sleep:  _retrySettings.hdp_sleep,
+            }),
         });
     } catch (e) {
-        showError(`Saving global stats-accuracy failed: ${e.message}`);
+        showError(`Saving global settings failed: ${e.message}`);
     }
 
     // Persist the per-pair changes to dtrack.json. Without this, the JS-side
@@ -802,12 +848,58 @@ async function deletePair(index) {
     }
 }
 
-function copyPair(index) {
-    const pair = pairs[index];
-    const newPair = JSON.parse(JSON.stringify(pair));
-    newPair.name = `${pair.name}_copy`;
-    pairs.push(newPair);
-    renderPairs();
+async function copyPair(index) {
+    const src = pairs[index];
+    // Pick a name that's unique on the server side. The naive
+    // `${name}_copy` collides if the user copies the same pair twice; add
+    // a numeric suffix until we find an unused slot.
+    let newName = `${src.name}_copy`;
+    const existing = new Set(pairs.map(p => p.name));
+    if (existing.has(newName)) {
+        let i = 2;
+        while (existing.has(`${src.name}_copy${i}`)) i++;
+        newName = `${src.name}_copy${i}`;
+    }
+
+    // POST the clone to /api/pairs immediately so it's persisted on the
+    // server. Without this, savePair() would later issue PUT on a name
+    // the server has never seen and return "pair not found". The body
+    // mirrors what savePair sends: pair_name + left/right + the common
+    // pair-level fields.
+    const body = {
+        pair_name:    newName,
+        description:  src.description || '',
+        left:         JSON.parse(JSON.stringify(src.left  || {})),
+        right:        JSON.parse(JSON.stringify(src.right || {})),
+        mode:         src.mode || 'incremental',
+        fromDate:     src.fromDate || '',
+        toDate:       src.toDate  || '',
+        vintage:      src.vintage || '',
+        col_map:      src.col_map || {},
+        col_filter:   src.col_filter || null,
+        approx_distinct: (typeof src.approx_distinct === 'boolean') ? src.approx_distinct : null,
+        excludeDates: src.excludeDates || [],
+        dateRangeMode: src.dateRangeMode || 'global',
+        overlap:      src.overlap ?? 7,
+    };
+
+    try {
+        const resp = await fetch('/api/pairs', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${resp.status}`);
+        }
+        // Reload from the server so the new pair has the canonical state
+        // (including any defaults the POST endpoint filled in).
+        await loadPairs();
+        showSuccess(`Copied "${src.name}" → "${newName}"`);
+    } catch (e) {
+        showError(`Copy failed: ${e.message}`);
+    }
 }
 
 async function exportPair(index) {

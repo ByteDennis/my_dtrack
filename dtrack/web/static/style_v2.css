@@ -1535,10 +1535,12 @@ input[type="checkbox"] {
     padding: var(--jp-space-md) var(--jp-space-lg);
 }
 
-/* Date table wrap */
+/* Date table wrap. Horizontal scroll only -- the stat table can be very
+   wide when a pair has many columns. Vertical scroll is delegated to the
+   page-level scrollbar so the user gets a single scrollbar context per
+   page instead of a nested one per pair card. */
 .rc-date-table-wrap {
-    max-height: 400px;
-    overflow-y: auto;
+    overflow-x: auto;
     border: 1px solid var(--jp-border-color0);
     border-radius: var(--jp-border-radius);
     margin-bottom: var(--jp-space-md);

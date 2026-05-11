@@ -1564,7 +1564,104 @@ def _compute_col_spec(tbl_cfg, db_path):
         'date_to': date_to_lit,
         'date_dtype': date_dtype,
         'is_sas': is_sas,
+        # Threaded through so the Oracle per-bucket helper can reuse the
+        # synthesized vintage_spans (when from/to was used to build buckets
+        # without matching_dates) without re-calling compute_date_filter --
+        # that second call would skip the synthesis since the vintage_spans
+        # synthesis happens here, not inside compute_date_filter.
+        'date_filter': date_filter,
+        'date_format': date_format,
     }
+
+
+def _compute_oracle_bucket_specs(spec, tbl_cfg, db_path):
+    """Per-bucket WHERE fragments for the Oracle col-extraction path.
+
+    Oracle hits ORA-01652 (TEMP tablespace exhausted) when the single-query
+    `GROUP BY vintage_expr` form materializes a large workarea across the
+    full date range -- a problem Hadoop's local-spill model doesn't have.
+    The fix is to emit one passthrough per (column × bucket) instead of
+    one passthrough per column with a DB-side GROUP BY: each query then
+    has a per-bucket WHERE narrowing the scan, no `GROUP BY vintage`, and
+    its TEMP workarea fits regardless of how many years the overlap range
+    spans.
+
+    Returns [(dt_label, bucket_where), ...]:
+      dt_label     - the bucket key (e.g. '2025-01-01' for year, '2025-04'
+                     for quarter, 'all' for single-bucket modes)
+      bucket_where - WHERE-body fragment that filters date_col to this
+                     bucket only. Format follows date_dtype (DATE 'X' AND
+                     DATE 'Y+1day' for date/timestamp, bare integers for
+                     YYYYMMDD-stored numerics, quoted strings for VARCHAR
+                     date columns).
+
+    For `vintage=all` or in-list / sample modes there's a single bucket;
+    bucket_specs has length 1 and behaves identically to the old
+    single-query shape.
+
+    Only called on the Oracle path. Hadoop keeps the original single-query
+    `GROUP BY &_vintage_expr` form because Hive's per-task spill scales
+    horizontally on HDFS and doesn't need the splitting.
+    """
+    from .base import (
+        build_date_between_clause, build_date_in_clause,
+        build_date_range_with_gaps,
+    )
+
+    date_col = spec['date_col']
+    date_dtype = spec['date_dtype']
+    vintage = spec['vintage']
+    # Reuse the date_filter that _compute_col_spec already built. It
+    # carries the synthesized vintage_spans for vintage=year/month/etc.
+    # when from/to is set without matching_dates -- a second
+    # compute_date_filter call here would miss that synthesis since it
+    # happens inside _compute_col_spec.
+    date_filter = spec.get('date_filter') or {}
+    date_format = spec.get('date_format') or date_filter.get('date_format')
+    effective_vintage = date_filter.get('vintage') or vintage
+
+    bucket_specs = []
+
+    if date_filter.get('filter_type') == 'between':
+        if 'vintage_spans' in date_filter:
+            # Contiguous bucket spans synthesized from from/to (typical when
+            # no row-compare has run yet but vintage bucketing was asked
+            # for). Each span is one bucket.
+            for bucket_key, bmin, bmax in date_filter['vintage_spans']:
+                dw = build_date_between_clause(
+                    date_col, bmin, bmax, date_dtype,
+                    is_sas=False, date_format=date_format,
+                )
+                bucket_specs.append((bucket_key, dw))
+        elif date_filter.get('dates'):
+            # Real row-compare matching_dates. Bucket them into vintage
+            # spans the same way the SAS-source / libname paths do.
+            from ..date_utils import bucket_date
+            buckets = {}
+            for dt in date_filter['dates']:
+                buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
+            excluded_dates = date_filter.get('excluded_dates') or []
+            for bucket_key, dates in sorted(buckets.items()):
+                dw = build_date_range_with_gaps(
+                    date_col, dates, date_dtype,
+                    is_sas=False, date_format=date_format,
+                    excluded_dates=excluded_dates,
+                )
+                bucket_specs.append((bucket_key, dw))
+    elif date_filter.get('filter_type') == 'in_list':
+        # Sample-mode: single bucket with all sampled dates.
+        dw = build_date_in_clause(
+            date_col, date_filter['dates'], date_dtype,
+            is_sas=False, date_format=date_format,
+        )
+        bucket_specs.append(('sample', dw))
+
+    # Fall back to a single 'all' bucket reusing spec's full-range WHERE.
+    # Covers vintage='all' and any path that didn't produce buckets.
+    if not bucket_specs:
+        bucket_specs.append((vintage or 'all', spec['where_clause']))
+
+    return bucket_specs
 
 
 def _combine_where(date_where, base_where):
@@ -1596,7 +1693,15 @@ def _render_col_template(tpl_name, rows, rows_placeholder,
     with open(tpl_path, 'r', encoding='utf-8') as f:
         tpl = f.read()
 
-    redo = str(int(os.environ.get('SAS_COL_REDO', '0')))
+    # _col_redo is always 0 by default in the generated SAS so resume
+    # works out of the box. To force a full re-extract, either:
+    #   - edit the generated extract_col.sas and change `%let _col_redo
+    #     = 0;` to `= 1;` at the top, OR
+    #   - `proc delete data=cache._cs_<dsname>; run;` before launching.
+    # The env-var-driven override (SAS_COL_REDO) was removed because it
+    # was easy to leave set from a previous shell and silently wipe
+    # caches the user expected to be preserved.
+    redo = '0'
     row_lines = []
     seen = {}
     for r in rows:
@@ -1609,6 +1714,13 @@ def _render_col_template(tpl_name, rows, rows_placeholder,
         # callers (and the existing back-compat default in n_unique_expr)
         # fall back to the bare col_name when not provided.
         col_expr = r.get('col_expr') or r['col_name']
+        # dt_label is the BARE bucket key (e.g. '2022-01-01' without
+        # surrounding SQL quotes). _col_oracle / _col_hadoop use it to
+        # query cache._cs_<dsname> for already-completed (column_name,
+        # dt) pairs and skip them, so an interrupted run can resume
+        # without redoing finished buckets. Empty string for Hadoop
+        # single-query mode (resume is per-column there, not per-bucket).
+        dt_label = r.get('dt_label', '') or ''
         row_lines.append(
             f"    qname='{_sas_escape(r['qname'])}'; "
             f"dsname='{_sas_escape(r['dsname'])}'; "
@@ -1619,6 +1731,7 @@ def _render_col_template(tpl_name, rows, rows_placeholder,
             f"date_col='{_sas_escape(r['date_col'])}'; "
             f"vintage='{_sas_escape(r['vintage'])}'; "
             f"vintage_expr='{_sas_escape(r['vintage_expr'])}'; "
+            f"dt_label='{_sas_escape(dt_label)}'; "
             f"from_table='{_sas_escape(r['from_table'])}'; "
             f"date_from='{_sas_escape(r['date_from'])}'; "
             f"date_to='{_sas_escape(r['date_to'])}'; "
@@ -1748,21 +1861,39 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None, coarse=F
                   f"= {n_cols * n_buckets} runs (sas source)")
             continue
 
-        # Oracle / Hadoop: DB-side vintage bucketing. One driver row per
-        # (qname, col); the macro's SQL does GROUP BY &_vintage_expr and
-        # returns one result row per bucket. vintage_expr sits in the
-        # driver so you can proc print _ora_col_map / _hdp_col_map and
-        # eyeball that the truncation expression matches each column's
-        # date type before the job runs.
+        # Oracle / Hadoop: DB-side aggregation. Two driver shapes:
+        #
+        #   Hadoop : one row per (qname, col); the macro's SQL does
+        #            GROUP BY &_vintage_expr DB-side and returns one
+        #            result row per bucket. Hive's per-task local-disk
+        #            spill scales horizontally, so a single full-range
+        #            GROUP BY scales fine -- no TEMP wall.
+        #
+        #   Oracle : one row per (qname, col, vintage_bucket). The SQL
+        #            emits each bucket as its own passthrough with the
+        #            bucket label as a SQL literal and the WHERE clause
+        #            narrowed to that bucket's date range. Avoids
+        #            ORA-01652 (TEMP tablespace exhausted) on multi-year
+        #            scans -- each per-bucket query's GROUP BY / COUNT
+        #            DISTINCT workarea is sized by one bucket only.
+        #            Trade-off: N_buckets more Oracle round trips per
+        #            column (parse + plan + fetch overhead) instead of
+        #            one wide query; in practice the overhead is much
+        #            cheaper than failing outright.
         spec = _compute_col_spec(tbl_cfg, db_path)
         if tbl_source == 'oracle':
             rows_bucket = ora_rows
             qnames_ora.append(qname)
             numeric_is_oracle = True
+            # Per-bucket WHERE fragments. For vintage='all' / sample /
+            # plain modes this is a single bucket -- behaves like the
+            # old single-query path.
+            oracle_bucket_specs = _compute_oracle_bucket_specs(spec, tbl_cfg, db_path)
         elif tbl_source == 'hadoop':
             rows_bucket = hdp_rows
             qnames_hdp.append(qname)
             numeric_is_oracle = False
+            oracle_bucket_specs = None
         else:
             print(f"  {qname}: unknown source '{tbl_source}' -- skipping")
             continue
@@ -1787,6 +1918,48 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None, coarse=F
             # latter triggers ORA-01858 when Oracle tries to convert 'NA'
             # to a date for the IN comparison.
             col_expr = _col_expr_for_source(tbl_source, col_name, col_type, col_dtype)
+            if oracle_bucket_specs is not None:
+                # Oracle per-bucket expansion: emit N driver rows, one
+                # per (col, bucket). vintage_expr becomes the bucket
+                # label as a SQL string literal (e.g. "'2022-01-01'");
+                # the SAS template's `SELECT &_vintage_expr AS dt` then
+                # produces "SELECT '2022-01-01' AS dt" and the
+                # accompanying GROUP BY collapses to a single constant
+                # group per query. where_clause carries the per-bucket
+                # BETWEEN narrowed to this bucket's range.
+                for dt_label, bucket_where in oracle_bucket_specs:
+                    bucket_full_where = _combine_where(bucket_where, user_where)
+                    rows_bucket.append({
+                        'qname': qname,
+                        'dsname': dsname,
+                        'conn_macro': conn_macro,
+                        'col_name': col_name,
+                        'col_type': col_type,
+                        'col_expr': col_expr,
+                        'date_col': spec['date_col'],
+                        'vintage': spec['vintage'],
+                        'vintage_expr': f"'{dt_label}'",
+                        # dt_label (bare bucket key, no SQL quoting) lets
+                        # the resume-on-restart check in _col_oracle look
+                        # up `cache._cs_<dsname>` by (column_name, dt) and
+                        # skip already-computed buckets. Stays a separate
+                        # field from vintage_expr (which wraps the same
+                        # value in SQL single quotes for the SELECT).
+                        'dt_label': dt_label,
+                        'from_table': table_from,
+                        'date_from': spec['date_from'],
+                        'date_to': spec['date_to'],
+                        'where_clause': bucket_full_where,
+                        'n_unique_expr': _n_unique_expr(
+                            tbl_source, col_expr,
+                            tbl_cfg=tbl_cfg, config=config),
+                    })
+                continue
+            # Hadoop path (and any future single-query backends): one
+            # row per (qname, col), DB-side GROUP BY vintage. The query
+            # produces N result rows (one per vintage) atomically -- if
+            # it returned at all, every vintage is present, so the
+            # resume check uses column_name alone (any row hit = done).
             rows_bucket.append({
                 'qname': qname,
                 'dsname': dsname,
@@ -1797,6 +1970,12 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None, coarse=F
                 'date_col': spec['date_col'],
                 'vintage': spec['vintage'],
                 'vintage_expr': spec['vintage_expr'],
+                # Hadoop's single-query path doesn't produce per-row dt
+                # labels (vintage_expr is a DB function evaluated DB-side);
+                # the resume check looks at column_name only, so the
+                # field is included as empty for schema consistency with
+                # the Oracle path.
+                'dt_label': '',
                 'from_table': table_from,
                 'date_from': spec['date_from'],
                 'date_to': spec['date_to'],
@@ -1806,9 +1985,15 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None, coarse=F
                 'n_unique_expr': _n_unique_expr(tbl_source, col_expr,
                                                 tbl_cfg=tbl_cfg, config=config),
             })
-        print(f"[{tbl_source} col] {qname}: {n_cols} cols (db-side "
-              f"GROUP BY {spec['vintage_expr']!s:.60} vintage={spec['vintage']}) "
-              f"= {n_cols} runs")
+        if oracle_bucket_specs is not None:
+            nb = len(oracle_bucket_specs)
+            print(f"[{tbl_source} col] {qname}: {n_cols} cols x {nb} buckets "
+                  f"(per-bucket queries, vintage={spec['vintage']}) "
+                  f"= {n_cols * nb} runs")
+        else:
+            print(f"[{tbl_source} col] {qname}: {n_cols} cols (db-side "
+                  f"GROUP BY {spec['vintage_expr']!s:.60} vintage={spec['vintage']}) "
+                  f"= {n_cols} runs")
 
     total = len(sas_driver_rows) + len(lib_driver_rows) + len(ora_rows) + len(hdp_rows)
     if total == 0:
@@ -1821,6 +2006,33 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None, coarse=F
     # schema, not the work done. Matches Athena's coarse SQL (Athena
     # blanks mean/std/top_10 in _build_coarse_sql).
     coarse_mode_let = f"%let _coarse_mode = {1 if coarse else 0};\n"
+    # Retry knobs for transient connection failures inside _col_oracle /
+    # _col_hadoop (Hive's "couldn't open client transport" hiccups during
+    # multi-hour extractions, Oracle network blips).
+    # Resolution order (first present wins):
+    #   1. dtrack.json metadata.{ora,hdp}_retry_{count,sleep}
+    #      (set via /api/global_settings, settings modal dropdown)
+    #   2. env var DTRACK_{ORA,HDP}_RETRY_{COUNT,SLEEP}
+    #   3. defaults: 3 attempts, 30s cooldown
+    _meta = (config or {}).get('metadata') or {}
+    def _retry_val(meta_key, env_key, default):
+        v = _meta.get(meta_key)
+        if v is not None and v != "":
+            try:
+                return int(v)
+            except (ValueError, TypeError):
+                pass
+        return int(os.environ.get(env_key, str(default)))
+    _ora_retry_count = _retry_val('ora_retry_count', 'DTRACK_ORA_RETRY_COUNT', 3)
+    _ora_retry_sleep = _retry_val('ora_retry_sleep', 'DTRACK_ORA_RETRY_SLEEP', 30)
+    _hdp_retry_count = _retry_val('hdp_retry_count', 'DTRACK_HDP_RETRY_COUNT', 3)
+    _hdp_retry_sleep = _retry_val('hdp_retry_sleep', 'DTRACK_HDP_RETRY_SLEEP', 30)
+    retry_lets = (
+        f"%let _ora_retry_count = {_ora_retry_count};\n"
+        f"%let _ora_retry_sleep = {_ora_retry_sleep};\n"
+        f"%let _hdp_retry_count = {_hdp_retry_count};\n"
+        f"%let _hdp_retry_sleep = {_hdp_retry_sleep};\n"
+    )
     n_tbl = (len(qnames_sas) + len(qnames_lib)
              + len(qnames_ora) + len(qnames_hdp))
     print(f"[SAS col] TOTAL: {n_tbl} tables "
@@ -1829,10 +2041,11 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None, coarse=F
           f"{total} driver rows")
 
     # _export_col_stats is needed by all paths; the per-path helper macros
-    # are only emitted when their bucket is non-empty. _coarse_mode is set
-    # FIRST so every downstream macro (_col_categorical_freq, the per-
-    # source templates) can read it via &_coarse_mode at run time.
-    parts = [coarse_mode_let, _SAS_EXPORT_HELPER]
+    # are only emitted when their bucket is non-empty. _coarse_mode + the
+    # retry knobs are set FIRST so every downstream macro
+    # (_col_categorical_freq, the per-source templates) can read them
+    # via &_coarse_mode / &_ora_retry_* / &_hdp_retry_* at run time.
+    parts = [coarse_mode_let, retry_lets, _SAS_EXPORT_HELPER]
     if sas_driver_rows:
         parts.append(_SAS_SOURCE_HELPERS)
     if lib_driver_rows:
@@ -1841,16 +2054,20 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None, coarse=F
     # SAS-source flat driver (bucket mode).
     if sas_driver_rows:
         parts.append("")
-        parts.append("/* Wipe stale per-table caches from prior runs. Each col step")
-        parts.append("   proc-appends to cache._cs_<dsname>; without this, reruns")
-        parts.append("   would double the rows in the exported CSV. */")
+        parts.append("/* Cache lifecycle (sas-source path). Each col step")
+        parts.append("   proc-appends to cache._cs_<dsname>. Wipe only when")
+        parts.append("   _col_redo=1 (SAS_COL_REDO=1 at gen time); otherwise")
+        parts.append("   leave the cache intact so an interrupted run can")
+        parts.append("   resume -- _pull_one_col / _col_libname check the")
+        parts.append("   cache for (col, dt) before each pull and skip")
+        parts.append("   already-completed work orders. */")
         seen_ds = set()
         for q, ds in qnames_sas:
             if ds in seen_ds:
                 continue
             seen_ds.add(ds)
             parts.append(
-                f"%if %sysfunc(exist(cache._cs_{ds})) %then %do; "
+                f"%if &_col_redo = 1 and %sysfunc(exist(cache._cs_{ds})) %then %do; "
                 f"proc delete data=cache._cs_{ds}; run; %end;"
             )
         parts.append("")
@@ -1905,14 +2122,16 @@ def _gen_sas_col_driver(tables, db_path=None, out_dir='.', config=None, coarse=F
     # libref) instead of %_pull_one_col (raw pull + local SAS aggregate).
     if lib_driver_rows:
         parts.append("")
-        parts.append("/* Wipe stale per-table caches from prior libname runs. */")
+        parts.append("/* Cache lifecycle (libname path). Same rule as the")
+        parts.append("   sas-source path: wipe only when _col_redo=1. Default")
+        parts.append("   keeps existing rows so resume can skip them. */")
         seen_ds = set()
         for q, ds in qnames_lib:
             if ds in seen_ds:
                 continue
             seen_ds.add(ds)
             parts.append(
-                f"%if %sysfunc(exist(cache._cs_{ds})) %then %do; "
+                f"%if &_col_redo = 1 and %sysfunc(exist(cache._cs_{ds})) %then %do; "
                 f"proc delete data=cache._cs_{ds}; run; %end;"
             )
         parts.append("")

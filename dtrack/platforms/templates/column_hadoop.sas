@@ -21,6 +21,7 @@ data _hdp_col_map;
     length qname $64 dsname $32 conn_macro $32
            col_name $64 col_expr $2000 col_type $12
            date_col $64 vintage $12 vintage_expr $500
+           dt_label $32
            date_from $64 date_to $64
            from_table $500 where_clause $2000
            n_unique_expr $500;
@@ -28,9 +29,23 @@ data _hdp_col_map;
 run;
 
 %macro _col_hadoop();
-    %local _cache _rc _t0 _elapsed;
+    %local _cache _rc _t0 _elapsed _attempt _max_attempts _sleep_secs;
     %let _cache = cache._cs_&_dsname;
     %let _t0 = %sysfunc(datetime());
+    /* Retry knobs for transient Hive/Hadoop connection failures (long
+       extractions sometimes hit "couldn't open client transport with JDBC
+       URI" when the server's connection pool is briefly saturated). The
+       retry loop wraps the PROC SQL CONNECT, sleeps, and tries again.
+       After _max_attempts it gives up with a WARNING and the macro
+       returns so the rest of the extraction continues. Caller can
+       override via _hdp_retry_count / _hdp_retry_sleep macro vars set
+       globally at the top of the SAS file (Python injects defaults). */
+    %if %symexist(_hdp_retry_count) %then %let _max_attempts = &_hdp_retry_count;
+    %else %let _max_attempts = 3;
+    %if %symexist(_hdp_retry_sleep) %then %let _sleep_secs = &_hdp_retry_sleep;
+    %else %let _sleep_secs = 30;
+    %let _attempt = 0;
+    %let _rc = 0;
 
     %put NOTE: ---- [&_x_idx/&_n_total &_qname / &_col_name] (&_col_type) hadoop stats pull START ----;
     %put NOTE:      FROM    : &_from_table;
@@ -38,6 +53,26 @@ run;
     %put NOTE:      VINTAGE : &_vintage  (expr: &_vintage_expr);
     %put NOTE:      WHERE   : &_where_clause;
 
+    /* Resume support: Hadoop emits ONE query per column with GROUP BY
+       vintage_expr, producing all-or-nothing results across buckets.
+       So column-level skip is sufficient -- if the cache already has
+       any row for this column_name, the previous run completed it. */
+    %local _already_done;
+    %let _already_done = 0;
+    %if &_col_redo = 0 and %sysfunc(exist(&_cache)) %then %do;
+        proc sql noprint;
+            select count(*) into :_already_done trimmed
+            from &_cache
+            where strip(column_name) = "&_col_name";
+        quit;
+    %end;
+    %if &_already_done > 0 %then %do;
+        %put NOTE: ---- [&_x_idx/&_n_total &_qname / &_col_name] already in cache (&_already_done rows) -- skipping (resume) ----;
+        %return;
+    %end;
+
+%_hdp_retry_loop:
+    %let _attempt = %eval(&_attempt + 1);
     proc sql inobs=max;
         connect to hadoop (%&_conn_macro);
         %if %upcase(&_col_type) = NUMERIC %then %do;
@@ -126,7 +161,16 @@ run;
 
     %let _rc = &SYSERR;
     %if &_rc > 4 %then %do;
-        %put WARNING: [&_qname/&_col_name/&_dt_label] stats SQL failed (SYSERR=&_rc) -- skipping;
+        %if &_attempt < &_max_attempts %then %do;
+            %put WARNING: [&_qname/&_col_name] hadoop pull attempt &_attempt of &_max_attempts failed (SYSERR=&_rc) -- sleeping &_sleep_secs.s before retry;
+            /* Clear the syntax-check flag so the next proc sql is actually
+               executed rather than silently parsed. Common SAS gotcha when
+               proc steps fail mid-script. */
+            options obs=max nosyntaxcheck;
+            data _null_; rc = sleep(&_sleep_secs, 1); run;
+            %goto _hdp_retry_loop;
+        %end;
+        %put WARNING: [&_qname/&_col_name/&_dt_label] stats SQL failed after &_max_attempts attempts (SYSERR=&_rc) -- skipping column;
         options obs=max nosyntaxcheck;
         %return;
     %end;
@@ -159,29 +203,32 @@ run;
 %macro _run_one_hdp_table(qname=, dsname=);
     %_table_start_banner(qname=&qname, dsname=&dsname);
 
-    /* Wipe any stale cache from prior runs. cache._cs_<dsname> is a
-       permanent SAS dataset; each per-column step proc-appends to it.
-       Without this clear, rerunning the script would double up the rows
-       in the exported CSV. */
-    %if %sysfunc(exist(cache._cs_&dsname)) %then %do;
-        proc delete data=cache._cs_&dsname; run;
+    /* Cache lifecycle:
+         _col_redo = 1 (env SAS_COL_REDO=1)  -> wipe and start fresh.
+         _col_redo = 0 (default)             -> keep existing cache so
+             an interrupted run can resume. _col_hadoop below checks
+             column_name against the cache before each pull and skips
+             columns that have already been processed. (Hadoop's single-
+             query path produces all vintages atomically, so per-column
+             resume is sufficient; no per-bucket check needed.) */
+    %if &_col_redo = 1 %then %do;
+        %if %sysfunc(exist(cache._cs_&dsname)) %then %do;
+            proc delete data=cache._cs_&dsname; run;
+        %end;
     %end;
 
-    /* Pre-create the cache with explicit lengths so proc append cannot
-       freeze column_name (or any other field) to a short width inferred
-       from the first row. Without this, a short first column name like
-       'AMT' could cap column_name at $3 on the base dataset, and the
-       next pull's 'PSTBU_MASDECI_TXT' / 'PSTBU_MASDECI_SETID' would be
-       truncated to fit -- which is what shipped them both as
-       'PSTBU_MASDEC' in the export CSV. stop; leaves the cache empty
-       but schema-locked. */
-    data cache._cs_&dsname;
-        length dt $32 column_name $64 col_type $12 top_10 $4000
-               mean $32 std $32 min_val $400 max_val $400
-               length_avg $32 length_max $32 hash_sum $32
-               n_total 8 n_missing 8 n_unique 8;
-        stop;
-    run;
+    /* Pre-create the cache with explicit lengths (only when missing --
+       resume keeps any existing rows). See the Oracle template comment
+       for the column_name truncation reason. */
+    %if not %sysfunc(exist(cache._cs_&dsname)) %then %do;
+        data cache._cs_&dsname;
+            length dt $32 column_name $64 col_type $12 top_10 $4000
+                   mean $32 std $32 min_val $400 max_val $400
+                   length_avg $32 length_max $32 hash_sum $32
+                   n_total 8 n_missing 8 n_unique 8;
+            stop;
+        run;
+    %end;
 
     /* Total column count for this table -- drives x/n progress display in
        the per-column start banner. */
@@ -203,6 +250,7 @@ run;
             ' call symputx("_col_name", ',     quote(strip(col_name)),     ');',
             ' call symputx("_col_name_lit", ', quote(cats("'", strip(col_name), "'")), ');',
             ' call symputx("_col_expr", ',     quote(strip(col_expr)),     ');',
+            ' call symputx("_dt_label", ',     quote(strip(dt_label)),     ');',
             ' call symputx("_col_type", ',     quote(strip(col_type)),     ');',
             ' call symputx("_date_col", ',     quote(strip(date_col)),     ');',
             ' call symputx("_vintage", ',      quote(strip(vintage)),      ');',

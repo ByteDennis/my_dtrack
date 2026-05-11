@@ -4711,20 +4711,30 @@ async def api_sync_push(request: Request):
 @app.get("/api/global_settings")
 async def api_get_global_settings():
     """Return the subset of dtrack.json `metadata` that the UI exposes as
-    global toggles. Currently just `approx_distinct` (default global for
-    n_unique computation across all pairs)."""
+    global toggles:
+      - approx_distinct: default global for n_unique computation
+      - ora_retry_count / ora_retry_sleep: Oracle col-pull connection
+        retry knobs (transient 'couldn't open client transport' or
+        network blips). count=3, sleep=30s defaults if absent.
+      - hdp_retry_count / hdp_retry_sleep: Hadoop/Hive equivalent.
+    """
     from ..config import load_unified_config
     config = load_unified_config(_config_path)
     meta = config.get("metadata") or {}
     return {
-        "approx_distinct": meta.get("approx_distinct"),
+        "approx_distinct":  meta.get("approx_distinct"),
+        "ora_retry_count":  meta.get("ora_retry_count"),
+        "ora_retry_sleep":  meta.get("ora_retry_sleep"),
+        "hdp_retry_count":  meta.get("hdp_retry_count"),
+        "hdp_retry_sleep":  meta.get("hdp_retry_sleep"),
     }
 
 
 @app.post("/api/global_settings")
 async def api_set_global_settings(request: Request):
     """Update dtrack.json `metadata` global toggles. Sending a key with
-    null clears it (so the UI's "use default" radio writes through cleanly).
+    null (or omitting it) clears the entry so the UI's "use default"
+    radio writes through cleanly.
     """
     from ..config import load_unified_config, save_unified_config
     body = await request.json()
@@ -4736,8 +4746,28 @@ async def api_set_global_settings(request: Request):
             meta.pop("approx_distinct", None)
         else:
             meta["approx_distinct"] = bool(v)
+    # Retry knobs -- numeric, clear on null. Coerce to int when present
+    # so dtrack.json holds a clean integer (not e.g. "3").
+    for k in ("ora_retry_count", "ora_retry_sleep",
+              "hdp_retry_count", "hdp_retry_sleep"):
+        if k in body:
+            v = body[k]
+            if v is None or v == "":
+                meta.pop(k, None)
+            else:
+                try:
+                    meta[k] = int(v)
+                except (ValueError, TypeError):
+                    pass  # ignore garbage, keep existing
     save_unified_config(config, _config_path)
-    return {"ok": True, "approx_distinct": meta.get("approx_distinct")}
+    return {
+        "ok": True,
+        "approx_distinct":  meta.get("approx_distinct"),
+        "ora_retry_count":  meta.get("ora_retry_count"),
+        "ora_retry_sleep":  meta.get("ora_retry_sleep"),
+        "hdp_retry_count":  meta.get("hdp_retry_count"),
+        "hdp_retry_sleep":  meta.get("hdp_retry_sleep"),
+    }
 
 
 @app.post("/api/sync/reload_json")

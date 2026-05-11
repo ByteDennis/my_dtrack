@@ -22,6 +22,7 @@ data _ora_col_map;
     length qname $64 dsname $32 conn_macro $32
            col_name $64 col_expr $2000 col_type $12
            date_col $64 vintage $12 vintage_expr $500
+           dt_label $32
            date_from $64 date_to $64
            from_table $500 where_clause $2000
            n_unique_expr $500;
@@ -35,16 +36,51 @@ run;
          _date_col, _vintage, _vintage_expr,
          _from_table, _date_from, _date_to, _where_clause
        One SQL returns every vintage bucket for this column. */
-    %local _cache _rc _t0 _elapsed;
+    %local _cache _rc _t0 _elapsed _attempt _max_attempts _sleep_secs;
     %let _cache = cache._cs_&_dsname;
     %let _t0 = %sysfunc(datetime());
+    /* Retry knobs for transient connection failures on Oracle (long
+       extractions sometimes hit "couldn't open client transport" /
+       network hiccups). After _max_attempts the macro gives up with a
+       WARNING and returns so the rest of the extraction continues.
+       Caller can override via _ora_retry_count / _ora_retry_sleep
+       macro vars set globally at the top of the SAS file (Python
+       injects defaults). */
+    %if %symexist(_ora_retry_count) %then %let _max_attempts = &_ora_retry_count;
+    %else %let _max_attempts = 3;
+    %if %symexist(_ora_retry_sleep) %then %let _sleep_secs = &_ora_retry_sleep;
+    %else %let _sleep_secs = 30;
+    %let _attempt = 0;
+    %let _rc = 0;
 
     %put NOTE: ---- [&_x_idx/&_n_total &_qname / &_col_name] (&_col_type) oracle stats pull START ----;
     %put NOTE:      FROM    : &_from_table;
     %put NOTE:      DATE    : &_date_col IN [&_date_from , &_date_to];
     %put NOTE:      VINTAGE : &_vintage  (expr: &_vintage_expr);
     %put NOTE:      WHERE   : &_where_clause;
+    %put NOTE:      BUCKET  : &_dt_label;
 
+    /* Resume support: if (column_name, dt) is already in the cache from
+       a previous run, skip this bucket. _col_redo=1 disables the skip
+       (set SAS_COL_REDO=1 in the env when regenerating the SAS to force
+       a full re-extract). */
+    %local _already_done;
+    %let _already_done = 0;
+    %if &_col_redo = 0 and %sysfunc(exist(&_cache)) %then %do;
+        proc sql noprint;
+            select count(*) into :_already_done trimmed
+            from &_cache
+            where strip(column_name) = "&_col_name"
+              and strip(dt)          = "&_dt_label";
+        quit;
+    %end;
+    %if &_already_done > 0 %then %do;
+        %put NOTE: ---- [&_x_idx/&_n_total &_qname / &_col_name / &_dt_label] already in cache -- skipping (resume) ----;
+        %return;
+    %end;
+
+%_ora_retry_loop:
+    %let _attempt = %eval(&_attempt + 1);
     proc sql;
         %&_conn_macro
         %if %upcase(&_col_type) = NUMERIC %then %do;
@@ -103,7 +139,11 @@ run;
                        CAST('' AS VARCHAR2(64)) AS hash_sum
                 FROM &_from_table
                 WHERE &_where_clause
-                GROUP BY &_vintage_expr
+                /* Per-bucket query: _vintage_expr is a SQL string literal
+                   (e.g. '2022-01-01'), not a DB function, so there's no
+                   per-row truncation expression to group by. The WHERE
+                   above already narrows to this bucket -- one row of
+                   aggregates comes back, no GROUP BY needed on Oracle. */
             );
         %end;
         %else %do;
@@ -116,7 +156,11 @@ run;
                &_col_expr feeds the freq aggregation so sentinel string
                values (e.g. 'NA', '#N/A') are mapped to NULL upstream and
                folded into the missing-row bucket instead of forming
-               their own categories. */
+               their own categories.
+
+               Per-bucket query: _vintage_expr is the bucket label as a
+               SQL string literal. WHERE narrows to one bucket, so the
+               GROUP BY drops the vintage and keeps only the freq key. */
             create table _ora_freq_ as
             select * from connection to oracle (
                 SELECT &_vintage_expr AS dt,
@@ -124,8 +168,7 @@ run;
                        COUNT(*) AS cnt
                 FROM &_from_table
                 WHERE &_where_clause
-                GROUP BY &_vintage_expr,
-                         SUBSTR(TO_CHAR(&_col_expr), 1, 200)
+                GROUP BY SUBSTR(TO_CHAR(&_col_expr), 1, 200)
             );
         %end;
         disconnect from oracle;
@@ -133,7 +176,13 @@ run;
 
     %let _rc = &SYSERR;
     %if &_rc > 4 %then %do;
-        %put WARNING: [&_qname/&_col_name/&_dt_label] stats SQL failed (SYSERR=&_rc) -- skipping;
+        %if &_attempt < &_max_attempts %then %do;
+            %put WARNING: [&_qname/&_col_name] oracle pull attempt &_attempt of &_max_attempts failed (SYSERR=&_rc) -- sleeping &_sleep_secs.s before retry;
+            options obs=max nosyntaxcheck;
+            data _null_; rc = sleep(&_sleep_secs, 1); run;
+            %goto _ora_retry_loop;
+        %end;
+        %put WARNING: [&_qname/&_col_name/&_dt_label] stats SQL failed after &_max_attempts attempts (SYSERR=&_rc) -- skipping column;
         options obs=max nosyntaxcheck;
         %return;
     %end;
@@ -169,12 +218,16 @@ run;
 %macro _run_one_ora_table(qname=, dsname=);
     %_table_start_banner(qname=&qname, dsname=&dsname);
 
-    /* Wipe any stale cache from prior runs. cache._cs_<dsname> is a
-       permanent SAS dataset; each per-column step proc-appends to it.
-       Without this clear, rerunning the script would double up the rows
-       in the exported CSV. */
-    %if %sysfunc(exist(cache._cs_&dsname)) %then %do;
-        proc delete data=cache._cs_&dsname; run;
+    /* Cache lifecycle:
+         _col_redo = 1 (env SAS_COL_REDO=1)  -> wipe and start fresh.
+         _col_redo = 0 (default)             -> keep existing cache so
+             an interrupted run can resume. _col_oracle below checks
+             (column_name, dt) against the cache before each pull and
+             skips already-completed (col, bucket) pairs. */
+    %if &_col_redo = 1 %then %do;
+        %if %sysfunc(exist(cache._cs_&dsname)) %then %do;
+            proc delete data=cache._cs_&dsname; run;
+        %end;
     %end;
 
     /* Pre-create the cache with explicit lengths so proc append cannot
@@ -182,16 +235,18 @@ run;
        from the first row. Without this, a short first column name like
        'AMT' could cap column_name at $3 on the base dataset, and the
        next pull's 'PSTBU_MASDECI_TXT' / 'PSTBU_MASDECI_SETID' would be
-       truncated to fit -- which is what shipped them both as
-       'PSTBU_MASDEC' in the export CSV. stop; leaves the cache empty
-       but schema-locked. */
-    data cache._cs_&dsname;
-        length dt $32 column_name $64 col_type $12 top_10 $4000
-               mean $32 std $32 min_val $400 max_val $400
-               length_avg $32 length_max $32 hash_sum $32
-               n_total 8 n_missing 8 n_unique 8;
-        stop;
-    run;
+       truncated to fit. Conditional so resume keeps any existing rows
+       intact; only creates a fresh schema-locked empty dataset when the
+       cache doesn't exist yet. */
+    %if not %sysfunc(exist(cache._cs_&dsname)) %then %do;
+        data cache._cs_&dsname;
+            length dt $32 column_name $64 col_type $12 top_10 $4000
+                   mean $32 std $32 min_val $400 max_val $400
+                   length_avg $32 length_max $32 hash_sum $32
+                   n_total 8 n_missing 8 n_unique 8;
+            stop;
+        run;
+    %end;
 
     /* Total column count for this table -- drives x/n progress display in
        the per-column start banner. */
@@ -213,6 +268,7 @@ run;
             ' call symputx("_col_name", ',     quote(strip(col_name)),     ');',
             ' call symputx("_col_name_lit", ', quote(cats("'", strip(col_name), "'")), ');',
             ' call symputx("_col_expr", ',     quote(strip(col_expr)),     ');',
+            ' call symputx("_dt_label", ',     quote(strip(dt_label)),     ');',
             ' call symputx("_col_type", ',     quote(strip(col_type)),     ');',
             ' call symputx("_date_col", ',     quote(strip(date_col)),     ');',
             ' call symputx("_vintage", ',      quote(strip(vintage)),      ');',

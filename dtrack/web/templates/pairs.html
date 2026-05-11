@@ -327,6 +327,35 @@
                         Saved to dtrack.json <code>metadata.approx_distinct</code>; used by every pair set to "Inherit global". Falls back to <code>DTRACK_APPROX_DISTINCT</code> env var if neither is set.
                     </div>
                 </div>
+
+                <!-- Row 6: Connection retry. Transient JDBC failures
+                     ("couldn't open client transport ...") on long
+                     multi-table extractions get retried up to N times
+                     with M-second cooldowns between attempts. Per-source
+                     so Oracle and Hadoop can be tuned independently. -->
+                <div style="margin-top:16px;">
+                    <label class="settings-label">Connection retry on transient failures</label>
+                    <div style="display:flex; gap:8px; align-items:flex-end; margin-top:6px;">
+                        <div style="flex:0 0 110px;">
+                            <div style="font-size:10px; color:var(--jp-ui-font-color2);">Source</div>
+                            <select id="global-retry-source" onchange="onRetrySourceChanged()" style="width:100%;">
+                                <option value="hdp">Hadoop</option>
+                                <option value="ora">Oracle</option>
+                            </select>
+                        </div>
+                        <div style="flex:0 0 110px;">
+                            <div style="font-size:10px; color:var(--jp-ui-font-color2);">Max attempts</div>
+                            <input type="number" id="global-retry-count" min="1" max="20" value="3" style="width:100%;">
+                        </div>
+                        <div style="flex:0 0 130px;">
+                            <div style="font-size:10px; color:var(--jp-ui-font-color2);">Cooldown (sec)</div>
+                            <input type="number" id="global-retry-sleep" min="0" max="600" value="30" style="width:100%;">
+                        </div>
+                    </div>
+                    <div style="font-size:10px; color:var(--jp-ui-font-color2); margin-top:4px;">
+                        Saved to dtrack.json <code>metadata.{ora,hdp}_retry_{count,sleep}</code>. Falls back to <code>DTRACK_{ORA,HDP}_RETRY_{COUNT,SLEEP}</code> env vars, then defaults (3 attempts × 30s).
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn-secondary" onclick="closeSettingsModal()">Cancel</button>

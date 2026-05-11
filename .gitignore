@@ -53,6 +53,7 @@ Thumbs.db
 
 # Documentation
 *.md
+!instruct.md
 .env
 thesis
 week_report*
