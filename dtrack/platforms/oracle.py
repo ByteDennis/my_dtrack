@@ -841,21 +841,23 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         # the collated {qname}_col.csv so downstream load-col can pick up
         # finished tables while others are still running.
         table_just_finished = False
+        table_csv_path = None
         with _table_lock:
             _table_done[qname]['done'] += 1
+            tbl_progress = dict(_table_done[qname])
             if is_col and _table_done[qname]['done'] == _table_done[qname]['total']:
                 table_just_finished = True
 
         if table_just_finished:
             with _col_rows_lock:
                 rows_for_qname = _col_rows_by_table.pop(qname, [])
-            csv_path = os.path.join(outdir, f"{qname}_col.csv")
-            with open(csv_path, 'w', newline='') as f:
+            table_csv_path = os.path.join(outdir, f"{qname}_col.csv")
+            with open(table_csv_path, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(_COL_HEADERS)
                 for r in rows_for_qname:
                     writer.writerow([r.get(h, '') for h in _COL_HEADERS])
-            print(f"  Wrote {len(rows_for_qname)} rows to {csv_path}",
+            print(f"  Wrote {len(rows_for_qname)} rows to {table_csv_path}",
                   file=sys.stderr)
 
         with _done_lock:
@@ -870,7 +872,11 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
             result["done"] = n
             result["total"] = total
             result["table"] = qname
+            result["table_done"] = tbl_progress["done"]
+            result["table_total"] = tbl_progress["total"]
             result["table_csv_written"] = table_just_finished
+            if table_csv_path:
+                result["table_csv_path"] = table_csv_path
             on_progress(result)
         return result
 

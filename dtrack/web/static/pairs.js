@@ -1224,7 +1224,8 @@ async function generateAll() {
                 });
             }
             if (result.sas_file) logMessage(`SAS file: ${result.sas_file}`, 'success');
-            if (result.sql_file) logMessage(`SQL file: ${result.sql_file}`, 'success');
+            if (result.sql_file) logMessage(`SQL file (AWS): ${result.sql_file}`, 'success');
+            if (result.oracle_sql_file) logMessage(`SQL file (Oracle): ${result.oracle_sql_file}`, 'success');
         } else {
             logMessage(`File generation error: ${result.error}`, 'error');
         }
@@ -1298,6 +1299,9 @@ async function generateAll() {
                                 ? `${msg.rows} dates, ${msg.elapsed}s`
                                 : `FAIL: ${msg.error}`;
                             logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
+                            if (msg.csv_path) {
+                                logMessage(`  -> CSV written: ${msg.csv_path}`, 'success');
+                            }
                         } else if (eventType === 'done') {
                             if (msg.ok) {
                                 logMessage(`${label} extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');

@@ -654,7 +654,8 @@ async function generateAll() {
                 });
             }
             if (result.sas_file) logMessage(`SAS file: ${result.sas_file}`, 'success');
-            if (result.sql_file) logMessage(`SQL file: ${result.sql_file}`, 'success');
+            if (result.sql_file) logMessage(`SQL file (AWS): ${result.sql_file}`, 'success');
+            if (result.oracle_sql_file) logMessage(`SQL file (Oracle): ${result.oracle_sql_file}`, 'success');
             logMessage('Col script generation complete.', 'success');
         } else {
             logMessage(`Generation error: ${result.error}`, 'error');
@@ -774,6 +775,9 @@ async function runColExtraction(platform, resume = false) {
                         ? `${msg.rows} rows, ${msg.elapsed}s`
                         : `FAIL: ${msg.error}`;
                     logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}${tblProg}`, msg.ok ? 'info' : 'error');
+                    if (msg.table_csv_written && msg.table_csv_path) {
+                        logMessage(`  -> CSV written: ${msg.table_csv_path}`, 'success');
+                    }
                 } else if (eventType === 'done') {
                     if (msg.ok) {
                         logMessage(`${label} col extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
