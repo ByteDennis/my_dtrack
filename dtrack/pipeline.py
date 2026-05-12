@@ -64,9 +64,11 @@ def run_pipeline(
     config = load_unified_config(config_path)
     tables = get_all_tables_from_unified(config)
 
-    # Classify tables by platform
+    # Classify tables by platform. Oracle now extracts via Python-direct
+    # (oracledb), separate from SAS/Hadoop which still go through gen_sas.
     sas_tables = []
     aws_tables = []
+    oracle_tables = []
     for tbl in tables:
         source = (tbl.get("source") or "").lower()
         processed = tbl.get("processed") or ""
@@ -74,6 +76,8 @@ def run_pipeline(
             sas_tables.append(tbl)
         elif source == "aws":
             aws_tables.append(tbl)
+        elif source == "oracle":
+            oracle_tables.append(tbl)
         else:
             sas_tables.append(tbl)
 
@@ -81,9 +85,16 @@ def run_pipeline(
     if not skip_extract:
         if sas_tables:
             print(f"\n--- Generating SAS extraction ({len(sas_tables)} tables) ---")
-            from .platforms.oracle import gen_sas
+            from .platforms.hadoop import gen_sas
             gen_sas(config_path, sas_outdir, types=types, db_path=project_db, vintage=vintage,
                     from_date=from_date, to_date=to_date)
+
+        if oracle_tables:
+            print(f"\n--- Extracting from Oracle ({len(oracle_tables)} tables) ---")
+            from .platforms.oracle import extract_oracle
+            extract_oracle(config_path, csv_outdir, types=types, max_workers=workers,
+                           db_path=project_db, vintage=vintage, force=force,
+                           from_date=from_date, to_date=to_date)
 
         if aws_tables:
             print(f"\n--- Extracting from Athena ({len(aws_tables)} tables) ---")
@@ -119,7 +130,7 @@ def _load_data(project_db, config, tables, csv_outdir, sas_outdir, types):
     for tbl in tables:
         qname = qualified_name(tbl)
         source = (tbl.get("source") or "").lower()
-        folder = csv_outdir if source == "aws" else sas_outdir
+        folder = csv_outdir if source in ("aws", "oracle") else sas_outdir
 
         if "row" in types:
             csv_path = os.path.join(folder, f"{qname}_row.csv")

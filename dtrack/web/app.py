@@ -228,7 +228,7 @@ async def api_extract(request: Request):
                             db_path=_db_path, from_date=from_date, to_date=to_date,
                             max_workers=int(max_workers) if max_workers else None)
             else:
-                from ..platforms.oracle import gen_sas
+                from ..platforms.hadoop import gen_sas
                 gen_sas(_config_path, outdir, types=[extract_type],
                         db_path=_db_path, from_date=from_date, to_date=to_date)
         return {"ok": True, "output": buf.getvalue()}
@@ -432,7 +432,7 @@ async def api_generate_files(request: Request):
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
             from ..config import load_unified_config
-            from ..platforms.oracle import load_tables_from_config, inject_where_from_config
+            from ..platforms.hadoop import load_tables_from_config, inject_where_from_config
 
             config = load_unified_config(_config_path)
 
@@ -509,7 +509,7 @@ async def api_generate_files(request: Request):
                     if eff_to:
                         bounds.append(f"{date_col_q} <= {_format_athena_date_bound(eff_to, date_type, is_upper=True)}")
                 else:
-                    from ..platforms.oracle import _format_date_bound, is_sas_table
+                    from ..platforms.hadoop import _format_date_bound, is_sas_table
                     is_sas = is_sas_table(tbl)
                     if eff_from:
                         bounds.append(f"{date_col} >= {_format_date_bound(eff_from, date_type, is_sas, is_upper=False)}")
@@ -537,7 +537,7 @@ async def api_generate_files(request: Request):
             oracle_tables = [t for t in all_tables
                              if t.get('source', '').lower() in ('oracle', 'sas', 'hadoop')]
             if oracle_tables:
-                from ..platforms.oracle import gen_sas
+                from ..platforms.hadoop import gen_sas
                 if pair_names:
                     import tempfile
                     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
@@ -563,7 +563,7 @@ async def api_generate_files(request: Request):
                 os.makedirs(aws_outdir, exist_ok=True)
 
                 # Discover columns for AWS tables (needed for col stats SQL)
-                from ..platforms.oracle import _discover_and_write_columns
+                from ..platforms.hadoop import _discover_and_write_columns
                 _discover_and_write_columns(aws_tables, aws_outdir, _db_path)
 
                 # Fill columns from _column_meta into table configs for col SQL gen
@@ -2336,14 +2336,38 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
         wb = Workbook()
         wb.remove(wb.active)  # remove default sheet
 
-        stat_rows = ["Type", "N_Total", "N_Missing", "N_Unique", "Mean", "Std",
+        stat_rows_all = ["Type", "N_Total", "N_Missing", "N_Unique", "Mean", "Std",
                      "Min", "Max", "Length avg", "Length max", "Hash sum"]
-        stat_keys_l = ["col_type", "n_total_left", "n_missing_left", "n_unique_left",
+        stat_keys_l_all = ["col_type", "n_total_left", "n_missing_left", "n_unique_left",
                         "mean_left", "std_left", "min_left", "max_left",
                         "length_avg_left", "length_max_left", "hash_sum_left"]
-        stat_keys_r = ["col_type", "n_total_right", "n_missing_right", "n_unique_right",
+        stat_keys_r_all = ["col_type", "n_total_right", "n_missing_right", "n_unique_right",
                         "mean_right", "std_right", "min_right", "max_right",
                         "length_avg_right", "length_max_right", "hash_sum_right"]
+
+        def _filter_active_stats(comps):
+            """Drop stat rows that are empty across all comps in this vintage.
+
+            Coarse extraction leaves mean/std (and on numeric columns,
+            length_*/hash_sum) blank. Dropping uniformly-empty rows keeps
+            the workbook tight for coarse exports without losing anything
+            in fine exports.
+            """
+            def _has_value(key):
+                for c in comps:
+                    v = c.get(key)
+                    if v is not None and v != "":
+                        return True
+                return False
+            active = []
+            for i in range(len(stat_rows_all)):
+                if _has_value(stat_keys_l_all[i]) or _has_value(stat_keys_r_all[i]):
+                    active.append(i)
+            return (
+                [stat_rows_all[i] for i in active],
+                [stat_keys_l_all[i] for i in active],
+                [stat_keys_r_all[i] for i in active],
+            )
 
         for pair in pairs:
             pname = pair["pair_name"]
@@ -2388,6 +2412,22 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
             ws = wb.create_sheet(title=pname[:31])
             row_num = 1
 
+            # Diff flag per stat row, keyed by Excel-label (so the filter
+            # below can map back to filtered positions). Coarse-mode rows that
+            # never get a match decision contribute nothing here.
+            DIFF_BY_LABEL = {
+                "N_Total":    lambda c: c.get("n_total_diff", 0) != 0,
+                "N_Missing":  lambda c: c.get("n_missing_diff", 0) != 0,
+                "N_Unique":   lambda c: c.get("n_unique_diff", 0) != 0,
+                "Mean":       lambda c: c.get("mean_match") is False,
+                "Std":        lambda c: c.get("std_match") is False,
+                "Min":        lambda c: c.get("min_match") is False,
+                "Max":        lambda c: c.get("max_match") is False,
+                "Length avg": lambda c: c.get("length_avg_match") is False,
+                "Length max": lambda c: c.get("length_max_match") is False,
+                "Hash sum":   lambda c: c.get("hash_sum_match") is False,
+            }
+
             for vl in sorted(vintages.keys()):
                 comps = vintages[vl]
                 has_diff = any(_has_col_differences(c) for c in comps)
@@ -2397,23 +2437,24 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
                 col_names_left = [c.get("left_col", "") for c in comps]
                 col_names_right = [c.get("right_col", "") or c.get("left_col", "") for c in comps]
 
-                # Track which (col_index, stat_index) have diffs for red highlighting
-                diff_cells = set()  # (col_idx, stat_idx)
-                problem_cols = set()  # col indices with at least one diff
+                # Drop stat rows that are empty across every comp in this
+                # vintage. In coarse mode this nukes Mean / Std (and any other
+                # uniformly-empty row) so the export shape matches what's
+                # actually computed -- the user can tell coarse-vs-fine
+                # outputs apart by which rows are present, not by which
+                # cells are blank.
+                stat_rows, stat_keys_l, stat_keys_r = _filter_active_stats(comps)
+
+                # Track which (col_index, stat_index) have diffs for red highlighting.
+                # stat_index is the position in the filtered stat_rows.
+                diff_cells = set()
+                problem_cols = set()
                 for ci, comp in enumerate(comps):
-                    if comp.get("n_total_diff", 0) != 0: diff_cells.add((ci, 1))
-                    if comp.get("n_missing_diff", 0) != 0: diff_cells.add((ci, 2))
-                    if comp.get("n_unique_diff", 0) != 0: diff_cells.add((ci, 3))
-                    if comp.get("mean_match") is False: diff_cells.add((ci, 4))
-                    if comp.get("std_match") is False: diff_cells.add((ci, 5))
-                    if comp.get("min_match") is False: diff_cells.add((ci, 6))
-                    if comp.get("max_match") is False: diff_cells.add((ci, 7))
-                    # Coarse drift hints — mirror compare.py / col_compare.js
-                    # so the Excel output flags the same cells as the UI.
-                    if comp.get("length_avg_match") is False: diff_cells.add((ci, 8))
-                    if comp.get("length_max_match") is False: diff_cells.add((ci, 9))
-                    if comp.get("hash_sum_match")   is False: diff_cells.add((ci, 10))
-                for ci, si in diff_cells:
+                    for si, label in enumerate(stat_rows):
+                        check = DIFF_BY_LABEL.get(label)
+                        if check is not None and check(comp):
+                            diff_cells.add((ci, si))
+                for ci, _si in diff_cells:
                     problem_cols.add(ci)
 
                 # Vintage header

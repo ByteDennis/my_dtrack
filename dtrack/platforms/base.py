@@ -2,7 +2,130 @@
 
 import os
 import re
+import threading
 from abc import ABC, abstractmethod
+
+
+# ---------------------------------------------------------------------------
+# Query result cache (shared across platforms).
+#
+# When _cache_db is set to a SQLite path, query runners on Athena/Oracle/...
+# consult the file before submitting to the backend and write results back on
+# success. Cache key = SHA256(normalized SQL + scope), where scope is the
+# Athena database or Oracle conn_macro -- whatever distinguishes the backend
+# the SQL was issued against.
+#
+# Disable via env var DTRACK_QUERY_CACHE=0 (or legacy DTRACK_ATHENA_CACHE=0).
+# Invalidate by deleting the .cache.db file in the outdir.
+# ---------------------------------------------------------------------------
+
+_cache_db = None
+_cache_lock = threading.Lock()
+_cache_hits = 0
+_cache_misses = 0
+
+
+def set_cache_db(path):
+    """Enable per-process query caching at the given .cache.db path.
+
+    Creates the SQLite schema if missing. Subsequent cache_get/cache_put
+    calls consult this file. Pass None to disable.
+    """
+    global _cache_db, _cache_hits, _cache_misses
+    if (os.environ.get('DTRACK_QUERY_CACHE') == '0'
+            or os.environ.get('DTRACK_ATHENA_CACHE') == '0'):
+        _cache_db = None
+        return
+    if path is None:
+        _cache_db = None
+        return
+    _cache_db = path
+    _cache_hits = 0
+    _cache_misses = 0
+    import sqlite3
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS query_cache (
+                sql_hash TEXT PRIMARY KEY,
+                sql_text TEXT,
+                scope     TEXT,
+                row_count INTEGER,
+                created_at TEXT,
+                payload BLOB
+            )
+        """)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def cache_stats():
+    """Return (hits, misses) since the most recent set_cache_db call."""
+    return _cache_hits, _cache_misses
+
+
+def _cache_key(sql, scope):
+    import hashlib
+    norm = re.sub(r'\s+', ' ', sql.strip())
+    raw = f"{norm}::{scope or ''}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def cache_get(sql, scope):
+    """Return the cached payload (whatever was stored) or None.
+
+    `scope` is the backend identifier (Athena database, Oracle conn_macro,
+    etc.) -- keeps entries from different backends from colliding.
+    """
+    global _cache_hits, _cache_misses
+    if not _cache_db:
+        return None
+    import sqlite3
+    import pickle
+    key = _cache_key(sql, scope)
+    conn = sqlite3.connect(_cache_db)
+    try:
+        row = conn.execute(
+            "SELECT payload FROM query_cache WHERE sql_hash = ?",
+            (key,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        with _cache_lock:
+            _cache_misses += 1
+        return None
+    with _cache_lock:
+        _cache_hits += 1
+    try:
+        return pickle.loads(row[0])
+    except Exception:
+        return None
+
+
+def cache_put(sql, scope, value, row_count=None):
+    """Store value (pickled) under the (SQL, scope) key."""
+    if not _cache_db:
+        return
+    import sqlite3
+    import pickle
+    from datetime import datetime as _dt
+    key = _cache_key(sql, scope)
+    blob = pickle.dumps(value)
+    with _cache_lock:
+        conn = sqlite3.connect(_cache_db)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO query_cache "
+                "(sql_hash, sql_text, scope, row_count, created_at, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (key, sql, scope or '', row_count, _dt.now().isoformat(), blob),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 # Oracle numeric types
 ORACLE_NUMERIC_TYPES = {
@@ -969,6 +1092,86 @@ def read_id_cols_from_col_stats(db_path, table_name, threshold=0.99, ttl_days=1.
         by_col.setdefault(col, []).append(u / t)
     return {col for col, rs in by_col.items()
             if rs and (sum(rs) / len(rs)) >= threshold}
+
+
+def get_mock_dir():
+    """Return mock directory from DTRACK_MOCK (preferred) or legacy env vars."""
+    return os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ORACLE_MOCK')
+
+
+def _extract_mock(config_path, outdir, types, db_path, mock_dir, source_filter):
+    """Extract from mock CSV files instead of real database.
+
+    Mock directory uses flat layout: {qname}_row.csv, {qname}_col.csv
+    where qname = {source}_{name} (from qualified_name()).
+
+    Args:
+        source_filter: Source type(s) to filter, e.g. ('oracle', 'sas') or ('aws',)
+    """
+    import json
+    import shutil
+
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    os.makedirs(outdir, exist_ok=True)
+    all_tables = load_tables_from_config(config)
+    tables = [t for t in all_tables if t.get('source', '').lower() in source_filter]
+    if not tables:
+        print(f"No {'/'.join(source_filter)} tables found in config")
+        return
+
+    for tbl_cfg in tables:
+        qname = qualified_name(tbl_cfg)
+        source = tbl_cfg.get('source', '')
+        table = tbl_cfg['table']
+        print(f"\n[mock] Extracting: {qname} ({source}/{table})")
+
+        for typ in ("row", "col"):
+            if typ not in types:
+                continue
+            src = os.path.join(mock_dir, f"{qname}_{typ}.csv")
+            dst = os.path.join(outdir, f"{qname}_{typ}.csv")
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+                with open(dst) as f:
+                    n_rows = sum(1 for _ in f) - 1
+                label_str = "Row counts" if typ == "row" else "Column stats"
+                unit = "dates" if typ == "row" else "rows"
+                print(f"  [mock] {label_str}: {dst} ({n_rows} {unit})")
+            else:
+                print(f"  [mock] File not found: {src}")
+
+    print(f"\n[mock] Extraction complete. Output in: {outdir}")
+
+
+def _extract_mock_tables(tables, outdir, types, mock_dir):
+    """Copy mock CSVs for a pre-built list of table configs."""
+    import shutil
+    os.makedirs(outdir, exist_ok=True)
+
+    for tbl_cfg in tables:
+        qname = qualified_name(tbl_cfg)
+        source = tbl_cfg.get('source', '')
+        table = tbl_cfg['table']
+        print(f"\n[mock] Extracting: {qname} ({source}/{table})")
+
+        for typ in ("row", "col"):
+            if typ not in types:
+                continue
+            src = os.path.join(mock_dir, f"{qname}_{typ}.csv")
+            dst = os.path.join(outdir, f"{qname}_{typ}.csv")
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+                with open(dst) as f:
+                    n_rows = sum(1 for _ in f) - 1
+                label_str = "Row counts" if typ == "row" else "Column stats"
+                unit = "dates" if typ == "row" else "rows"
+                print(f"  [mock] {label_str}: {dst} ({n_rows} {unit})")
+            else:
+                print(f"  [mock] File not found: {src}")
+
+    print(f"\n[mock] Extraction complete. Output in: {outdir}")
 
 
 def load_tables_from_config(config):

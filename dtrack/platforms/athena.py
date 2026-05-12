@@ -27,7 +27,18 @@ from .base import (
     build_stats_sql,
     build_top10_sql,
     quote_ident,
+    set_cache_db,
+    cache_stats,
+    cache_get,
+    cache_put,
 )
+
+
+# Back-compat aliases — external callers may have imported these from athena.
+# Cache helpers live in base.py now; keep the old names working.
+set_athena_cache = set_cache_db
+_cache_get = cache_get
+_cache_put = cache_put
 
 
 # ---------------------------------------------------------------------------
@@ -63,116 +74,6 @@ _aws_creds_lock = threading.Lock()
 
 _sql_log_file = None
 _sql_log_lock = threading.Lock()
-
-# Athena query result cache. When _cache_db is set, _query_athena() and
-# _run_block() consult the SQLite file before submitting to Athena and
-# write results back on success. Cache key = SHA256(normalized SQL + db).
-# Disable via env var: DTRACK_ATHENA_CACHE=0. Invalidate by deleting the
-# .cache.db file (or the matching row, see clear_athena_cache()).
-_cache_db = None
-_cache_lock = threading.Lock()
-_cache_hits = 0
-_cache_misses = 0
-
-
-def set_athena_cache(path):
-    """Enable Athena query caching at the given .cache.db path.
-
-    Creates the SQLite schema if missing. Subsequent calls to
-    _query_athena() and run_sql_file's _run_block consult this cache
-    before hitting Athena. Pass None to disable.
-    """
-    global _cache_db, _cache_hits, _cache_misses
-    if os.environ.get('DTRACK_ATHENA_CACHE') == '0':
-        _cache_db = None
-        return
-    if path is None:
-        _cache_db = None
-        return
-    _cache_db = path
-    _cache_hits = 0
-    _cache_misses = 0
-    import sqlite3
-    conn = sqlite3.connect(path)
-    try:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS athena_query_cache (
-                sql_hash TEXT PRIMARY KEY,
-                sql_text TEXT,
-                database  TEXT,
-                row_count INTEGER,
-                created_at TEXT,
-                payload BLOB
-            )
-        """)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def cache_stats():
-    """Return (hits, misses) since the most recent set_athena_cache call."""
-    return _cache_hits, _cache_misses
-
-
-def _cache_key(sql, database):
-    import hashlib
-    import re as _re
-    norm = _re.sub(r'\s+', ' ', sql.strip())
-    raw = f"{norm}::{database or ''}"
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-
-def _cache_get(sql, database):
-    """Return the cached payload (whatever was stored) or None."""
-    global _cache_hits, _cache_misses
-    if not _cache_db:
-        return None
-    import sqlite3
-    import pickle
-    key = _cache_key(sql, database)
-    conn = sqlite3.connect(_cache_db)
-    try:
-        row = conn.execute(
-            "SELECT payload FROM athena_query_cache WHERE sql_hash = ?",
-            (key,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if row is None:
-        with _cache_lock:
-            _cache_misses += 1
-        return None
-    with _cache_lock:
-        _cache_hits += 1
-    try:
-        return pickle.loads(row[0])
-    except Exception:
-        return None
-
-
-def _cache_put(sql, database, value, row_count=None):
-    """Store value (pickled) under the SQL+database key."""
-    if not _cache_db:
-        return
-    import sqlite3
-    import pickle
-    from datetime import datetime as _dt
-    key = _cache_key(sql, database)
-    blob = pickle.dumps(value)
-    with _cache_lock:
-        conn = sqlite3.connect(_cache_db)
-        try:
-            conn.execute(
-                "INSERT OR REPLACE INTO athena_query_cache "
-                "(sql_hash, sql_text, database, row_count, created_at, payload) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (key, sql, database or '', row_count, _dt.now().isoformat(), blob),
-            )
-            conn.commit()
-        finally:
-            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +424,7 @@ WITH freq AS (
 ),
 ranked AS (
     SELECT dt, p_col, cnt,
-           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(p_col), p_col) AS rnk_alpha,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(TRIM(p_col)), p_col) AS rnk_alpha,
            COUNT(*)     OVER (PARTITION BY dt) AS k_alpha,
            ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn_freq
     FROM freq WHERE p_col IS NOT NULL AND TRIM(p_col) <> ''
@@ -553,8 +454,8 @@ sstats AS (
 ),
 minmax AS (
     SELECT dt,
-           MAX(CASE WHEN rnk_alpha = 1       THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
-           MAX(CASE WHEN rnk_alpha = k_alpha THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS max_val
+           MAX(CASE WHEN rnk_alpha = 1       THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
+           MAX(CASE WHEN rnk_alpha = k_alpha THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) AS max_val
     FROM ranked GROUP BY dt
 ),
 top_n AS (
@@ -606,13 +507,13 @@ ORDER BY t.dt"""
 
 def _extract_aws_mock(config_path, outdir, types, db_path, mock_dir):
     """Legacy mock entry — called when WHERE hasn't been injected yet."""
-    from .oracle import _extract_mock
+    from .base import _extract_mock
     _extract_mock(config_path, outdir, types, db_path, mock_dir, ('aws',))
 
 
 def _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir):
     """Mock extraction with WHERE-injected tables — writes CSVs + combined .sql file."""
-    from .oracle import _extract_mock_tables
+    from .base import _extract_mock_tables
     _extract_mock_tables(aws_tables, outdir, types, mock_dir)
 
     # Write single combined .sql file for verification
@@ -945,7 +846,7 @@ WHERE {wc}{group_by};"""
 ),
 _coarse_ranked AS (
     SELECT dt, p_col, cnt,
-           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(p_col), p_col) AS rnk_alpha,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(TRIM(p_col)), p_col) AS rnk_alpha,
            COUNT(*)     OVER (PARTITION BY dt) AS k_alpha
     FROM _coarse_freq WHERE p_col IS NOT NULL AND TRIM(p_col) <> ''
 ),
@@ -958,8 +859,8 @@ _coarse_totals AS (
 ),
 _coarse_minmax AS (
     SELECT dt,
-           MAX(CASE WHEN rnk_alpha = 1       THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
-           MAX(CASE WHEN rnk_alpha = k_alpha THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS max_val
+           MAX(CASE WHEN rnk_alpha = 1       THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
+           MAX(CASE WHEN rnk_alpha = k_alpha THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) AS max_val
     FROM _coarse_ranked GROUP BY dt
 ),
 _coarse_lenhash AS (
@@ -1288,7 +1189,7 @@ GROUP BY {trunc_expr};"""
 ),
 ranked AS (
     SELECT dt, p_col, cnt,
-           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(p_col), p_col) AS rnk_alpha,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(TRIM(p_col)), p_col) AS rnk_alpha,
            COUNT(*) OVER (PARTITION BY dt) AS k_alpha,
            ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn
     FROM freq WHERE p_col IS NOT NULL AND TRIM(p_col) <> ''
@@ -1327,8 +1228,8 @@ sstats AS (
 ),
 minmax AS (
     SELECT dt,
-           MAX(CASE WHEN rnk_alpha = 1       THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
-           MAX(CASE WHEN rnk_alpha = k_alpha THEN p_col || '=' || CAST(cnt AS VARCHAR) END) AS max_val
+           MAX(CASE WHEN rnk_alpha = 1       THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
+           MAX(CASE WHEN rnk_alpha = k_alpha THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) AS max_val
     FROM ranked GROUP BY dt
 )
 SELECT s.dt, '{col_name}' AS column_name, 'categorical' AS col_type,
@@ -1416,7 +1317,7 @@ WHERE {wc};"""
 ),
 ranked AS (
     SELECT p_col, cnt,
-        ROW_NUMBER() OVER (ORDER BY UPPER(p_col), p_col) AS rnk_alpha,
+        ROW_NUMBER() OVER (ORDER BY UPPER(TRIM(p_col)), p_col) AS rnk_alpha,
         COUNT(*) OVER () AS k_alpha,
         ROW_NUMBER() OVER (ORDER BY cnt DESC, p_col ASC) AS rn
     FROM freq WHERE p_col IS NOT NULL AND TRIM(p_col) <> ''
@@ -1433,8 +1334,8 @@ SELECT
         SUM(CAST(cnt AS DOUBLE) * rnk_alpha * rnk_alpha) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0)
         - POWER(SUM(CAST(cnt AS DOUBLE) * rnk_alpha) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0), 2),
         0)) FROM ranked) AS VARCHAR) AS std,
-    (SELECT MAX(CASE WHEN rnk_alpha = 1       THEN p_col || '=' || CAST(cnt AS VARCHAR) END) FROM ranked) AS min_val,
-    (SELECT MAX(CASE WHEN rnk_alpha = k_alpha THEN p_col || '=' || CAST(cnt AS VARCHAR) END) FROM ranked) AS max_val,
+    (SELECT MAX(CASE WHEN rnk_alpha = 1       THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) FROM ranked) AS min_val,
+    (SELECT MAX(CASE WHEN rnk_alpha = k_alpha THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) FROM ranked) AS max_val,
     COALESCE((SELECT ARRAY_JOIN(ARRAY_AGG(
         p_col || '(' || CAST(cnt AS VARCHAR) || ')'
         ORDER BY cnt DESC

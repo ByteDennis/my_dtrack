@@ -653,6 +653,12 @@ def _generate_numeric_detail_table(comp: Dict, source_left: str, source_right: s
         ('min', comp.get('min_left'), comp.get('min_right')),
         ('max', comp.get('max_left'), comp.get('max_right')),
     ]
+    # Drop coarse-empty rows so mean/std (uncomputed in coarse extraction)
+    # don't show up as either red diffs or "matching" stats. Treating them
+    # as "matching" would falsely imply the values agree when neither side
+    # ever computed one.
+    stats = [(n, lv, rv) for n, lv, rv in stats
+             if (lv is not None and lv != '') or (rv is not None and rv != '')]
 
     html = '                        <table class="stat-table">\n'
     html += '                            <thead>\n'

@@ -1,13 +1,15 @@
-"""Platform strategy pattern for data extraction across SAS, Oracle, and Athena."""
+"""Platform strategy pattern for data extraction across SAS, Hadoop, Oracle, and Athena."""
 
 from .base import PlatformBuilder
 from .oracle import OracleBuilder
+from .hadoop import HadoopBuilder
 from .sas import SASBuilder
 from .athena import AthenaBuilder
 
 
 _REGISTRY = {
     'oracle': OracleBuilder,
+    'hadoop': HadoopBuilder,
     'sas': SASBuilder,
     'athena': AthenaBuilder,
     'aws': AthenaBuilder,
@@ -28,6 +30,8 @@ def detect_platform(tbl_cfg):
         return 'sas'
     if source == 'oracle':
         return 'oracle'
+    if source == 'hadoop':
+        return 'hadoop'
     if source == 'aws':
         return 'athena'
 
