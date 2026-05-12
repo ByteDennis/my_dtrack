@@ -249,22 +249,45 @@ async def api_extract(request: Request):
         })
 
 
+# Active-run registry. Each in-flight extraction is keyed by a uuid the
+# client gets via the first SSE event ({"_run_id": "..."}). POST to
+# /api/extract/cancel/{run_id} sets the corresponding event so workers
+# that haven't yet hit cursor.execute() exit without submitting. In-flight
+# queries can't be killed mid-execution (pyathena/oracledb don't expose a
+# cheap interrupt), but the queue stops draining immediately.
+import threading as _threading_mod
+_active_runs = {}            # run_id -> threading.Event
+_active_runs_lock = _threading_mod.Lock()
+
+
+@app.post("/api/extract/cancel/{run_id}")
+async def api_cancel_extract(run_id: str):
+    """Signal cancel for an in-flight /api/extract/run-sql call."""
+    with _active_runs_lock:
+        event = _active_runs.get(run_id)
+    if event is None:
+        return JSONResponse(status_code=404, content={
+            "ok": False, "error": f"run_id not found: {run_id}",
+        })
+    event.set()
+    return {"ok": True, "run_id": run_id}
+
+
 @app.post("/api/extract/run-sql")
 async def api_run_sql_file(request: Request):
     """Execute queries from extract_{row,col}.sql in parallel.
 
-    Streams progress as Server-Sent Events (SSE).  Each completed query
-    emits a 'progress' event; the final message is a 'done' event with
-    summary.  Progress also prints to the terminal (stderr).
+    Streams progress as Server-Sent Events (SSE). The FIRST event is
+    `{"_run_id": "<uuid>"}` so the client can hit
+    /api/extract/cancel/{run_id} to stop dispatching queued work. Each
+    completed query emits a 'progress' event; final message is a 'done'
+    event with summary.
 
     Body: {outdir, max_workers, type, platform, resume}
-      - platform: 'aws' (default) or 'oracle'. AWS reads extract_{type}.sql
-        and dispatches via athena.run_sql_file. Oracle reads
-        extract_{type}.oracle.sql and dispatches via oracle.run_oracle_sql_file
-        (each block routes to its own /* @conn_macro=... */).
     """
     import queue
     import threading
+    import uuid
 
     body = await request.json()
     extract_type = body.get("type", "row")
@@ -273,16 +296,19 @@ async def api_run_sql_file(request: Request):
     max_workers = body.get("max_workers")
     resume = bool(body.get("resume", False))
 
-    if platform == "oracle":
-        sql_path = os.path.join(outdir, f"extract_{extract_type}.oracle.sql")
-    else:
-        sql_path = os.path.join(outdir, f"extract_{extract_type}.sql")
+    sql_path = os.path.join(outdir, f"extract_{extract_type}.sql")
     if not os.path.exists(sql_path):
         return JSONResponse(status_code=404, content={
             "ok": False, "error": f"SQL file not found: {sql_path}"
         })
 
+    run_id = uuid.uuid4().hex
+    cancel_event = threading.Event()
+    with _active_runs_lock:
+        _active_runs[run_id] = cancel_event
+
     progress_q = queue.Queue()
+    progress_q.put({"_run_id": run_id})
 
     def _on_progress(result):
         progress_q.put(result)
@@ -297,6 +323,7 @@ async def api_run_sql_file(request: Request):
                     db_path=_db_path,
                     on_progress=_on_progress,
                     resume=resume,
+                    cancel_event=cancel_event,
                 )
             else:
                 from ..platforms.athena import run_sql_file
@@ -306,14 +333,19 @@ async def api_run_sql_file(request: Request):
                     db_path=_db_path,
                     on_progress=_on_progress,
                     resume=resume,
+                    cancel_event=cancel_event,
                 )
             ok_count = sum(1 for r in results if r.get("ok"))
             fail_count = len(results) - ok_count
             progress_q.put({"_done": True, "ok": fail_count == 0,
                             "results": results, "total": len(results),
-                            "succeeded": ok_count, "failed": fail_count})
+                            "succeeded": ok_count, "failed": fail_count,
+                            "cancelled": cancel_event.is_set()})
         except Exception as e:
             progress_q.put({"_done": True, "ok": False, "error": str(e)})
+        finally:
+            with _active_runs_lock:
+                _active_runs.pop(run_id, None)
 
     async def _stream():
         thread = threading.Thread(target=_run, daemon=True)
@@ -331,6 +363,17 @@ async def api_run_sql_file(request: Request):
                 msg.pop("_done")
                 yield f"event: done\ndata: {json.dumps(msg)}\n\n"
                 break
+            elif "_run_id" in msg:
+                # First event: tell the client what run_id to POST against
+                # /api/extract/cancel to stop dispatching.
+                yield f"event: run_id\ndata: {json.dumps({'run_id': msg['_run_id']})}\n\n"
+            elif msg.get("_event") == "start":
+                # Per-block start event so the UI can render "running=N"
+                # immediately when a worker picks up the next block (rather
+                # than only on completion, which makes parallelism look
+                # sequential when batches finish together).
+                msg.pop("_event")
+                yield f"event: start\ndata: {json.dumps(msg)}\n\n"
             else:
                 yield f"event: progress\ndata: {json.dumps(msg)}\n\n"
 
@@ -585,10 +628,12 @@ async def api_generate_files(request: Request):
                             cells_filter=cells_filter, coarse=coarse)
                 results["sas_file"] = os.path.join(sas_outdir, f"extract_{extract_type}.sas")
 
-            # Generate Oracle SQL file (Python-direct path, dispatched in
-            # parallel via /api/extract/run-sql with platform=oracle). Lives
-            # alongside the AWS SQL file in aws_outdir but with a distinct
-            # filename so they never clobber.
+            # Generate Oracle SQL file. Oracle writes to the LEFT output dir
+            # (the input historically labeled "SAS Output Dir"; relabeled
+            # "Left Output Dir" in the UI). Athena writes its `extract_*.sql`
+            # to the RIGHT output dir, so the same filename can be reused on
+            # both sides without collision. Pair convention: left side is
+            # SAS / Hadoop / Oracle; right side is AWS / Athena.
             oracle_tables = [t for t in all_tables
                              if t.get('source', '').lower() == 'oracle']
             if oracle_tables:
@@ -597,17 +642,25 @@ async def api_generate_files(request: Request):
                     _write_combined_col_sql_oracle,
                 )
                 from ..platforms.base import fill_columns_from_meta
-                os.makedirs(aws_outdir, exist_ok=True)
+                from ..platforms.hadoop import _discover_and_write_columns
+                os.makedirs(sas_outdir, exist_ok=True)
+
+                # Discover columns (writes {qname}_columns.csv and seeds
+                # _column_meta). Hadoop's helper now handles source=oracle
+                # via db.discover_columns; SAS/Hadoop continue to discover
+                # at SAS-extract time.
+                _discover_and_write_columns(oracle_tables, sas_outdir, _db_path)
+
                 if extract_type == "row":
                     oracle_sql_path = _write_combined_row_sql_oracle(
-                        oracle_tables, aws_outdir,
+                        oracle_tables, sas_outdir,
                         db_path=_db_path, vintage=None)
                 else:
                     # Col SQL needs columns hydrated from _column_meta so the
                     # per-(table, column) blocks can be emitted.
                     fill_columns_from_meta(oracle_tables, _db_path)
                     oracle_sql_path = _write_combined_col_sql_oracle(
-                        oracle_tables, aws_outdir,
+                        oracle_tables, sas_outdir,
                         db_path=_db_path, vintage=None)
                 results["oracle_sql_file"] = oracle_sql_path
 

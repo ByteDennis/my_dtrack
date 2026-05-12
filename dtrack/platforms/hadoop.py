@@ -2898,17 +2898,21 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
 # ---------------------------------------------------------------------------
 
 def _discover_and_write_columns(all_tables, outdir, db_path):
-    """Discover columns for AWS tables and write {qname}_columns.csv files.
+    """Discover columns and write {qname}_columns.csv files.
 
-    For AWS tables: uses _discover_columns_athena.
-    For Oracle/SAS/Hadoop: column discovery is done via the generated SAS file.
-    If _column_meta already exists in DB, writes CSV from that.
+    Per source:
+      - aws    -> queries Athena via _discover_columns_athena
+      - oracle -> queries Oracle via db.discover_columns (oracledb)
+      - sas / hadoop -> still flow through the SAS file at extraction time
+    Existing _column_meta rows win (no re-query); otherwise discover, insert,
+    and write the CSV alongside the SQL files.
     """
     import csv as csv_mod
     from ..db import insert_column_meta, get_column_meta
 
     os.makedirs(outdir, exist_ok=True)
     aws_cursors = {}
+    oracle_conns = {}
 
     for tbl in all_tables:
         source = (tbl.get('source') or '').lower()
@@ -2940,8 +2944,27 @@ def _discover_and_write_columns(all_tables, outdir, db_path):
                     print(f"  {qname}: no columns found in Athena")
             except Exception as e:
                 print(f"  {qname}: Athena column discovery failed ({e})")
+        elif source == 'oracle':
+            try:
+                if conn_macro not in oracle_conns:
+                    from ..db import oracle_connect
+                    print(f"  {qname}: connecting to Oracle ({conn_macro})...")
+                    oracle_conns[conn_macro] = oracle_connect(conn_macro)
+                conn = oracle_conns[conn_macro]
+                if conn is None:
+                    print(f"  {qname}: Oracle connection skipped (mock mode)")
+                else:
+                    from ..db import discover_columns
+                    columns = discover_columns(conn, raw_table)
+                    if columns:
+                        insert_column_meta(db_path, qname, columns, source=source)
+                        print(f"  {qname}: discovered {len(columns)} columns from Oracle")
+                    else:
+                        print(f"  {qname}: no columns found in Oracle")
+            except Exception as e:
+                print(f"  {qname}: Oracle column discovery failed ({e})")
         else:
-            # Oracle/SAS/Hadoop -- columns discovered via generated SAS file
+            # SAS / Hadoop -- columns discovered via generated SAS file
             print(f"  {qname}: columns will be discovered by SAS (source={source})")
             continue
 
@@ -2957,6 +2980,12 @@ def _discover_and_write_columns(all_tables, outdir, db_path):
     for cursor in aws_cursors.values():
         try:
             cursor.close()
+        except Exception:
+            pass
+    for conn in oracle_conns.values():
+        try:
+            if conn is not None:
+                conn.close()
         except Exception:
             pass
 

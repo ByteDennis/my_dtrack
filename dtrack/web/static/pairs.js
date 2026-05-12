@@ -1243,26 +1243,42 @@ async function generateAll() {
         const btn = document.getElementById(btnId);
         if (!btn) return;
         const label = platform === 'oracle' ? 'Oracle' : 'AWS';
-        const fname = platform === 'oracle' ? 'extract_row.oracle.sql' : 'extract_row.sql';
+        const outdirInput = platform === 'oracle' ? 'global-sas-outdir' : 'global-aws-outdir';
+        const defaultDir  = platform === 'oracle' ? './sas/' : './csv/';
+        const fname = 'extract_row.sql';
         const originalText = btn.textContent;
         const originalBg = btn.style.background;
+        const originalColor = btn.style.color;
         let controller = null;
+        let activeRunId = null;
         btn.onclick = async () => {
             if (controller) {
+                // Second click = cancel: tell the server to stop dispatching
+                // queued blocks, then abort the SSE stream client-side.
+                if (activeRunId) {
+                    try {
+                        await fetch(`/api/extract/cancel/${activeRunId}`, {method: 'POST'});
+                    } catch (e) { /* server may already be done */ }
+                }
                 controller.abort();
                 return;
             }
             controller = new AbortController();
             btn.textContent = `Cancel ${label}`;
-            btn.style.background = 'var(--jp-error-color1)';
-            logMessage(`Running ${label} extraction from ${fname}...`, 'info');
+            btn.style.background = '#dc3545';
+            btn.style.color = '#fff';
+            const outdir = document.getElementById(outdirInput)?.value || defaultDir;
+            // Oracle (left) reads its own worker count; AWS (right) reads
+            // global-njob-right. Mirrors the Left/Right outdir convention.
+            const njobInput = platform === 'oracle' ? 'global-njob-left' : 'global-njob-right';
+            logMessage(`Running ${label} extraction from ${outdir}${fname}...`, 'info');
             try {
                 const reqBody = {
                     type: 'row',
                     platform,
-                    outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
+                    outdir,
                 };
-                const nj = parseInt(document.getElementById('global-njob-right')?.value);
+                const nj = parseInt(document.getElementById(njobInput)?.value);
                 if (nj > 0) reqBody.max_workers = nj;
 
                 const resp = await fetch('/api/extract/run-sql', {
@@ -1294,11 +1310,20 @@ async function generateAll() {
                         if (!data) continue;
                         const msg = JSON.parse(data);
 
-                        if (eventType === 'progress') {
-                            const status = msg.ok
-                                ? `${msg.rows} dates, ${msg.elapsed}s`
-                                : `FAIL: ${msg.error}`;
-                            logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
+                        if (eventType === 'run_id') {
+                            activeRunId = msg.run_id;
+                        } else if (eventType === 'start') {
+                            const eta = _fmtEta(msg.eta_sec);
+                            const etaPart = eta ? ` | eta ${eta}` : '';
+                            logMessage(`[start | running=${msg.running}${etaPart}] ${msg.name}`, 'info');
+                        } else if (eventType === 'progress') {
+                            const status = msg.cancelled
+                                ? 'cancelled (not submitted)'
+                                : (msg.ok ? `${msg.rows} dates, ${msg.elapsed}s` : `FAIL: ${msg.error}`);
+                            const eta = _fmtEta(msg.eta_sec);
+                            const etaPart = eta ? ` | eta ${eta}` : '';
+                            const runningPart = msg.running != null ? ` | running=${msg.running}` : '';
+                            logMessage(`[${msg.done}/${msg.total}${runningPart}${etaPart}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
                             if (msg.csv_path) {
                                 logMessage(`  -> CSV written: ${msg.csv_path}`, 'success');
                             }
@@ -1317,14 +1342,16 @@ async function generateAll() {
                 }
             } catch (err) {
                 if (err.name === 'AbortError') {
-                    logMessage(`${label} extraction cancelled (server-side tasks may continue in the background)`, 'info');
+                    logMessage(`${label} extraction cancelled (queued blocks short-circuited; in-flight queries finish their query but no new ones are sent)`, 'info');
                 } else {
                     logMessage(`${label} request failed: ${err.message}`, 'error');
                 }
             } finally {
                 controller = null;
+                activeRunId = null;
                 btn.textContent = originalText;
                 btn.style.background = originalBg;
+                btn.style.color = originalColor;
             }
         };
     }
@@ -1341,6 +1368,19 @@ function clearLog() {
     const log = document.getElementById('generation-log');
     log.innerHTML = '<div class="log-empty">No files generated yet.</div>';
 }
+
+// Format an ETA in seconds as a short human-readable string.
+// null/undefined/0 -> '' so the caller can decide whether to append it.
+function _fmtEta(sec) {
+    if (sec == null || !isFinite(sec) || sec < 1) return '';
+    sec = Math.round(sec);
+    if (sec < 60)    return `${sec}s`;
+    if (sec < 3600)  return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    return `${h}h ${m}m`;
+}
+
 
 function logMessage(message, type = 'info') {
     const log = document.getElementById('generation-log');

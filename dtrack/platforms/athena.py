@@ -1752,7 +1752,7 @@ def parse_sql_file(sql_path):
 
 
 def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
-                 on_progress=None, resume=False):
+                 on_progress=None, resume=False, cancel_event=None):
     """Read extract_{type}.sql, parse into blocks, and execute each via Athena.
 
     Writes per-table CSVs:
@@ -1897,6 +1897,12 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
     _done_count = [0]  # mutable counter for threads
     _table_done = {}  # qname -> {done: int, total: int}
     _table_lock = threading.Lock()
+    # In-flight counter for start/progress events ("running=N" badge).
+    _running_count = [0]
+    _running_lock = threading.Lock()
+    # Wall-clock anchor for ETA. Set on the FIRST start event so the
+    # estimate reflects actual extraction time, not setup overhead.
+    _run_start = [None]
 
     # Init per-table counters
     for qname, tbl_blocks in table_blocks.items():
@@ -1921,6 +1927,35 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         sql = block['sql']
         start_time = time.time()
         start_ts = datetime.now().isoformat()
+
+        # Queue-time short-circuit on cancel.
+        if cancel_event is not None and cancel_event.is_set():
+            result = {"name": block_name, "ok": False, "error": "cancelled",
+                      "elapsed": 0.0, "start": start_ts, "cancelled": True}
+            _done_count[0] += 1
+            if on_progress:
+                result["done"] = _done_count[0]
+                result["total"] = len(blocks)
+                result["table"] = qname
+                on_progress(result)
+            return result
+
+        # Start event: announce this block is occupying a worker slot.
+        with _running_lock:
+            _running_count[0] += 1
+            running_now = _running_count[0]
+            if _run_start[0] is None:
+                _run_start[0] = time.time()
+        if on_progress:
+            done_so_far = _done_count[0]
+            total_blocks = len(blocks)
+            eta_sec = None
+            if done_so_far > 0 and _run_start[0]:
+                elapsed_wall = time.time() - _run_start[0]
+                eta_sec = elapsed_wall * (total_blocks - done_so_far) / done_so_far
+            on_progress({"_event": "start", "name": block_name,
+                         "table": qname, "running": running_now,
+                         "total": total_blocks, "eta_sec": eta_sec})
 
         try:
             cached = _cache_get(sql, None)
@@ -1968,6 +2003,10 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
             elapsed = time.time() - start_time
             result = {"name": block_name, "ok": False, "error": str(e),
                       "elapsed": round(elapsed, 1), "start": start_ts}
+        finally:
+            with _running_lock:
+                _running_count[0] -= 1
+                running_after = _running_count[0]
 
         # Update counters
         _done_count[0] += 1
@@ -1981,6 +2020,13 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
 
         n = _done_count[0]
         total = len(blocks)
+        # ETA from empirical rate. Whole-batch estimate (handles parallelism
+        # via observed throughput, no need to model worker count).
+        eta_sec = None
+        if _run_start[0]:
+            elapsed_wall = time.time() - _run_start[0]
+            if n > 0:
+                eta_sec = elapsed_wall * (total - n) / n
 
         # Flush this table's CSV as soon as its last query completes —
         # downstream Load Col can start picking up finished tables while
@@ -2003,13 +2049,16 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         elif not _tqdm_bars:
             # No tqdm — plain stderr
             status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
-            print(f"  [{n}/{total}] {block_name}: {status} ({elapsed:.1f}s)", file=sys.stderr)
+            print(f"  [{n}/{total} | running={running_after}] "
+                  f"{block_name}: {status} ({elapsed:.1f}s)", file=sys.stderr)
 
         # Web progress callback — include per-table progress
         if on_progress:
             result["done"] = n
             result["total"] = total
             result["table"] = qname
+            result["running"] = running_after
+            result["eta_sec"] = eta_sec
             result["table_done"] = tbl_progress["done"]
             result["table_total"] = tbl_progress["total"]
             result["table_csv_written"] = table_just_finished

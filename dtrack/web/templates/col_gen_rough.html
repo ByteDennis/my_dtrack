@@ -89,15 +89,31 @@
                     </div>
                 </div>
 
-                <!-- Output Directory -->
+                <!-- Output Directories (per-side, platform-agnostic) -->
                 <div style="display:flex; gap:24px;">
                     <div style="flex:1;">
-                        <label class="settings-label">SAS Output Dir</label>
+                        <label class="settings-label">Left Output Dir</label>
                         <input type="text" id="global-sas-outdir" value="./sas/" style="width:100%; margin-top:6px;">
+                        <div style="font-size:10px; color:var(--jp-ui-font-color2); margin-top:2px;">SAS / Hadoop / Oracle</div>
                     </div>
                     <div style="flex:1;">
-                        <label class="settings-label">AWS Output Dir</label>
+                        <label class="settings-label">Right Output Dir</label>
                         <input type="text" id="global-aws-outdir" value="./csv/" style="width:100%; margin-top:6px;">
+                        <div style="font-size:10px; color:var(--jp-ui-font-color2); margin-top:2px;">AWS / Athena</div>
+                    </div>
+                </div>
+
+                <!-- Parallelism (per-side, ThreadPool max_workers) -->
+                <div style="display:flex; gap:24px; margin-top:16px;">
+                    <div style="flex:1;">
+                        <label class="settings-label">Left Workers</label>
+                        <input type="number" id="global-njob-left" value="2" min="1" max="32" style="width:100%; margin-top:6px;">
+                        <div style="font-size:10px; color:var(--jp-ui-font-color2); margin-top:2px;">Oracle ThreadPool (ORACLE_MAX_WORKERS, default 2)</div>
+                    </div>
+                    <div style="flex:1;">
+                        <label class="settings-label">Right Workers</label>
+                        <input type="number" id="global-njob-right" value="4" min="1" max="32" style="width:100%; margin-top:6px;">
+                        <div style="font-size:10px; color:var(--jp-ui-font-color2); margin-top:2px;">AWS ThreadPool (MAX_WORKERS, default 4)</div>
                     </div>
                 </div>
             </div>

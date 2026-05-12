@@ -79,9 +79,9 @@ async function generateFineForSelected() {
         const [pair, col, vintage] = k.split('|');
         return {pair, col, vintage};
     });
-    const sas_outdir = prompt('SAS outdir (where to write fine extract_col.sas):', './sas/');
+    const sas_outdir = prompt('Left outdir (SAS / Hadoop / Oracle; extract_col.{sas,sql}):', './sas/');
     if (sas_outdir == null) return;
-    const aws_outdir = prompt('AWS outdir (where to write fine extract_col.sql):', './csv/');
+    const aws_outdir = prompt('Right outdir (AWS / Athena; extract_col.sql):', './csv/');
     if (aws_outdir == null) return;
 
     const btn = document.getElementById('gen-fine-btn');

@@ -349,15 +349,22 @@ def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
 
 
 def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None, vintage=None):
-    """Emit extract_col.oracle.sql with one block per (table, column).
+    """Emit extract_col.sql with one block per (table, column, bucket).
 
-    Mirrors _write_combined_row_sql_oracle's format: each block is
-    `-- {qname}/{col_name}` + `/* @conn_macro=<macro> */` + the per-column
-    stats SQL produced by _build_col_sql_oracle. run_oracle_sql_file picks
-    up the conn_macro per block, so multiple Oracle services can co-exist
-    in one file. Each block's SQL covers ALL date buckets for that column
-    via GROUP BY, so block name is just `{qname}/{col_name}` (no dt label).
+    Mirrors Athena's `_write_combined_sql` shape: when the table has a
+    'between' date filter (matching_dates loaded from row-compare and
+    bucketed by vintage), this emits one query per (qname, col, bucket)
+    rather than one per (qname, col) with a server-side GROUP BY. The
+    finer granularity makes parallelism visible in the runner log, makes
+    cancel granular (a queued bucket short-circuits cheaply), and matches
+    Athena so cross-platform compare runs have the same shape on both
+    sides. For 5 cols × 12 vintages the file has 60 blocks, not 5.
+
+    For 'in_list' (sample@N) and 'all' / no-filter modes there's still
+    only one block per (qname, col) since the data isn't bucketed.
     """
+    from ..date_utils import bucket_date
+
     os.makedirs(outdir, exist_ok=True)
     blocks = [
         "-- dtrack Oracle col extraction queries",
@@ -386,55 +393,69 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None, vintage=
             blocks.append("")
             continue
 
-        # Resolve date filter + WHERE clause once per table, then reuse for
-        # every column. Matches _extract_cols_for_table_oracle's resolution.
+        # Resolve date filter once per table.
         table_vintage = tbl.get('vintage', vintage)
         date_filter = compute_date_filter(tbl, db_path, table_vintage)
         resolve_date_format(date_filter, tbl)
         effective_vintage = date_filter.get('vintage', 'all')
         date_dtype = date_filter.get('date_dtype')
         date_format = date_filter.get('date_format')
-        dt_label = None
-
-        extract_cfg = dict(tbl)
         orig_where = tbl.get('where', '')
         date_bounds = tbl.get('_date_bounds', '')
+
+        # work_units: list of (bucket_label, where_for_this_bucket, dt_label)
+        # bucket_label drives the block name suffix; dt_label is the literal
+        # the SQL emits as the dt column.
+        work_units = []
         if date_filter['filter_type'] == 'between':
-            dw = build_date_range_with_gaps(
-                date_col, date_filter['dates'], date_dtype,
-                date_format=date_format,
-                excluded_dates=date_filter.get('excluded_dates') or [])
-            extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
+            buckets = {}
+            for dt in date_filter['dates']:
+                buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
+            excluded_dates = date_filter.get('excluded_dates') or []
+            for bucket_key in sorted(buckets.keys()):
+                bucket_dates = buckets[bucket_key]
+                dw = build_date_range_with_gaps(
+                    date_col, bucket_dates, date_dtype,
+                    date_format=date_format, excluded_dates=excluded_dates)
+                bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
+                work_units.append((bucket_key, bucket_where, bucket_key))
         elif date_filter['filter_type'] == 'in_list':
             dw = build_date_in_clause(
                 date_col, date_filter['dates'], date_dtype,
                 date_format=date_format)
-            extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
-            effective_vintage = 'all'
-            date_dtype = None
-            dt_label = 'sample'
+            bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
+            work_units.append(('sample', bucket_where, 'sample'))
         elif date_bounds:
-            extract_cfg['where'] = (
-                f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds)
+            bw = f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds
+            work_units.append(('all', bw, 'all'))
+        else:
+            work_units.append(('all', orig_where, 'all'))
 
         for col, dtype in non_date_cols:
-            try:
-                sql, _ = _build_col_sql_oracle(
-                    extract_cfg, col, dtype, full_table, cte_prefix,
-                    vintage=effective_vintage,
-                    date_dtype=date_dtype, date_format=date_format,
-                    dt_label=dt_label,
-                )
-            except Exception as e:
-                blocks.append(f"-- {qname}/{col}")
-                blocks.append(f"-- SKIP: SQL build failed: {e}")
+            for bucket_label, bucket_where, dt_label in work_units:
+                extract_cfg = dict(tbl)
+                extract_cfg['where'] = bucket_where
+                try:
+                    # Per-bucket block: dt becomes the literal bucket label,
+                    # no GROUP BY inside the SQL. WHERE narrows to this
+                    # bucket's date set. Matches the Athena bucket-mode
+                    # pattern exactly.
+                    sql, _ = _build_col_sql_oracle(
+                        extract_cfg, col, dtype, full_table, cte_prefix,
+                        vintage='all',
+                        date_dtype=None, date_format=None,
+                        dt_label=dt_label,
+                    )
+                except Exception as e:
+                    blocks.append(f"-- {qname}/{col}/{bucket_label}")
+                    blocks.append(f"-- SKIP: SQL build failed: {e}")
+                    blocks.append("")
+                    continue
+                blocks.append(f"-- {qname}/{col}/{bucket_label}")
+                blocks.append(f"/* @conn_macro={conn_macro} */")
+                blocks.append(sql.strip())
+                blocks.append(";")
                 blocks.append("")
-                continue
-            blocks.append(f"-- {qname}/{col}")
-            blocks.append(f"/* @conn_macro={conn_macro} */")
-            blocks.append(sql.strip())
-            blocks.append(";")
-            blocks.append("")
 
     sql_path = os.path.join(outdir, oracle_sql_filename("col"))
     with open(sql_path, 'w', encoding='utf-8') as f:
@@ -646,13 +667,13 @@ ORDER BY {dt_expr}""".strip()
 
 
 def oracle_sql_filename(extract_type):
-    """Convention: `extract_{row,col}.oracle.sql`.
+    """Convention: `extract_{row,col}.sql`.
 
-    Distinguishes Oracle output from Athena's `extract_{row,col}.sql` so both
-    can co-exist in the same outdir (matters in projects where AWS and Oracle
-    tables share `csv_outdir`).
+    Same filename Athena uses — Oracle and Athena live in *different* outdirs
+    (left vs right output dir on the UI), so no collision. CLI callers
+    targeting a single dir for Oracle alone also get the canonical name.
     """
-    return f"extract_{extract_type}.oracle.sql"
+    return f"extract_{extract_type}.sql"
 
 
 def _write_combined_row_sql_oracle(oracle_tables, outdir, db_path=None, vintage=None):
@@ -742,7 +763,7 @@ def parse_oracle_sql_file(sql_path):
 
 
 def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
-                       on_progress=None, resume=False):
+                       on_progress=None, resume=False, cancel_event=None):
     """Parse extract_row.sql (or extract_col.sql) and dispatch in parallel.
 
     Mirrors Athena's run_sql_file: ThreadPoolExecutor capped at
@@ -755,6 +776,11 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
     Args:
         on_progress: optional callback(result_dict) per block (used by web UI).
         resume: not implemented for Oracle yet (kept for API parity).
+        cancel_event: optional threading.Event. When set, queued workers
+            fast-exit before issuing their SQL. Workers already inside
+            cursor.execute() finish their query (oracledb has no clean
+            mid-execution interrupt), but no new SQL is sent to Oracle
+            after the event fires.
     """
     import sys
     import time
@@ -803,6 +829,15 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
     _table_done = {q: {'done': 0, 'total': len(bs)}
                    for q, bs in table_blocks.items()}
     _table_lock = threading.Lock()
+    # In-flight counter -- incremented just before _query_oracle, decremented
+    # in finally. Reported on both start and finish events so the UI can
+    # render "[start | running=4]" / "[N/total | running=3]" lines and the
+    # user can see parallelism level at a glance.
+    _running_count = [0]
+    _running_lock = threading.Lock()
+    # Wall-clock anchor for ETA. Set on the FIRST start event so the
+    # estimate reflects actual extraction time, not connect / setup overhead.
+    _run_start = [None]
 
     def _run_block(block):
         block_name = block['name']
@@ -811,6 +846,41 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         conn_macro = block.get('conn_macro')
         start_time = time.time()
         start_ts = datetime.now().isoformat()
+
+        # Queue-time short-circuit: when the user cancelled, workers that
+        # haven't started their query yet exit immediately instead of
+        # opening a new Oracle session for work the user no longer wants.
+        if cancel_event is not None and cancel_event.is_set():
+            result = {"name": block_name, "ok": False, "error": "cancelled",
+                      "elapsed": 0.0, "start": start_ts, "cancelled": True}
+            with _done_lock:
+                _done_count[0] += 1
+                n = _done_count[0]
+            total = len(blocks)
+            if on_progress:
+                result["done"] = n
+                result["total"] = total
+                result["table"] = qname
+                on_progress(result)
+            return result
+
+        # Start event: announce this block is now occupying a worker slot.
+        # Reported running count INCLUDES this block.
+        with _running_lock:
+            _running_count[0] += 1
+            running_now = _running_count[0]
+            if _run_start[0] is None:
+                _run_start[0] = time.time()
+        if on_progress:
+            done_so_far = _done_count[0]
+            total_blocks = len(blocks)
+            eta_sec = None
+            if done_so_far > 0 and _run_start[0]:
+                elapsed_wall = time.time() - _run_start[0]
+                eta_sec = elapsed_wall * (total_blocks - done_so_far) / done_so_far
+            on_progress({"_event": "start", "name": block_name,
+                         "table": qname, "running": running_now,
+                         "total": total_blocks, "eta_sec": eta_sec})
 
         try:
             rows = _query_oracle(sql, conn_macro)
@@ -836,6 +906,10 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
             elapsed = time.time() - start_time
             result = {"name": block_name, "ok": False, "error": str(e),
                       "elapsed": round(elapsed, 1), "start": start_ts}
+        finally:
+            with _running_lock:
+                _running_count[0] -= 1
+                running_after = _running_count[0]
 
         # Per-table CSV flush: when this table's last column finishes, write
         # the collated {qname}_col.csv so downstream load-col can pick up
@@ -864,14 +938,20 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
             _done_count[0] += 1
             n = _done_count[0]
         total = len(blocks)
+        eta_sec = None
+        if _run_start[0] and n > 0:
+            elapsed_wall = time.time() - _run_start[0]
+            eta_sec = elapsed_wall * (total - n) / n
         status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
-        print(f"  [{n}/{total}] {block_name}: {status} ({elapsed:.1f}s)",
-              file=sys.stderr)
+        print(f"  [{n}/{total} | running={running_after}] {block_name}: "
+              f"{status} ({elapsed:.1f}s)", file=sys.stderr)
 
         if on_progress:
             result["done"] = n
             result["total"] = total
             result["table"] = qname
+            result["running"] = running_after
+            result["eta_sec"] = eta_sec
             result["table_done"] = tbl_progress["done"]
             result["table_total"] = tbl_progress["total"]
             result["table_csv_written"] = table_just_finished

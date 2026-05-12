@@ -695,48 +695,64 @@ async function generateAll() {
     }
 }
 
-// Per-button AbortControllers so Run / Resume on either platform can be
-// cancelled independently. Reset to null on completion so the next click
-// starts a new run.
-const _colRunControllers = {};
+// Per-button state for run / cancel coordination.
+// Each entry: {controller: AbortController, runId: string | null}
+const _colRunState = {};
 
 async function runColExtraction(platform, resume = false) {
-    const runId = `run-${platform}-col-btn`;
-    const resumeId = `resume-${platform}-col-btn`;
-    const btn = document.getElementById(resume ? resumeId : runId);
-    const other = document.getElementById(resume ? runId : resumeId);
+    const runBtnId = `run-${platform}-col-btn`;
+    const resumeBtnId = `resume-${platform}-col-btn`;
+    const btn = document.getElementById(resume ? resumeBtnId : runBtnId);
+    const other = document.getElementById(resume ? runBtnId : resumeBtnId);
     const ctrlKey = `${platform}:${resume ? 'resume' : 'run'}`;
-    if (_colRunControllers[ctrlKey]) {
-        // Already running on this button — second click cancels.
-        _colRunControllers[ctrlKey].abort();
+    if (_colRunState[ctrlKey]) {
+        // Second click = cancel.
+        const st = _colRunState[ctrlKey];
+        if (st.runId) {
+            try {
+                await fetch(`/api/extract/cancel/${st.runId}`, {method: 'POST'});
+            } catch (e) { /* server may already be done */ }
+        }
+        st.controller.abort();
         return;
     }
     const controller = new AbortController();
-    _colRunControllers[ctrlKey] = controller;
+    const state = {controller, runId: null};
+    _colRunState[ctrlKey] = state;
 
     const label = platform === 'oracle' ? 'Oracle' : 'AWS';
-    const fname = platform === 'oracle' ? 'extract_col.oracle.sql' : 'extract_col.sql';
+    const outdirInput = platform === 'oracle' ? 'global-sas-outdir' : 'global-aws-outdir';
+    const defaultDir  = platform === 'oracle' ? './sas/' : './csv/';
+    const fname = 'extract_col.sql';
     const originalText = btn.textContent;
     const originalBg = btn.style.background;
+    const originalColor = btn.style.color;
     const otherOriginalDisabled = other ? other.disabled : false;
 
     btn.textContent = `Cancel ${label}${resume ? ' Resume' : ''}`;
-    btn.style.background = 'var(--jp-error-color1)';
+    btn.style.background = '#dc3545';
+    btn.style.color = '#fff';
     if (other) other.disabled = true;
 
+    const outdir = document.getElementById(outdirInput)?.value || defaultDir;
     logMessage(
         resume
-            ? `Resuming ${label} col extraction (skipping columns already in CSV)...`
-            : `Running ${label} col extraction from ${fname}...`,
+            ? `Resuming ${label} col extraction from ${outdir}${fname} (skipping columns already in CSV)...`
+            : `Running ${label} col extraction from ${outdir}${fname}...`,
         'info');
+
+    // Oracle (left) reads global-njob-left; AWS (right) reads global-njob-right.
+    const njobInput = platform === 'oracle' ? 'global-njob-left' : 'global-njob-right';
 
     try {
         const reqBody = {
             type: 'col',
             platform,
-            outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
+            outdir,
             resume,
         };
+        const nj = parseInt(document.getElementById(njobInput)?.value);
+        if (nj > 0) reqBody.max_workers = nj;
 
         const resp = await fetch('/api/extract/run-sql', {
             method: 'POST',
@@ -767,14 +783,23 @@ async function runColExtraction(platform, resume = false) {
                 if (!data) continue;
                 const msg = JSON.parse(data);
 
-                if (eventType === 'progress') {
+                if (eventType === 'run_id') {
+                    state.runId = msg.run_id;
+                } else if (eventType === 'start') {
+                    const eta = _fmtEta(msg.eta_sec);
+                    const etaPart = eta ? ` | eta ${eta}` : '';
+                    logMessage(`[start | running=${msg.running}${etaPart}] ${msg.name}`, 'info');
+                } else if (eventType === 'progress') {
                     const tblProg = msg.table_total
                         ? ` (${msg.table} ${msg.table_done}/${msg.table_total})`
                         : '';
-                    const status = msg.ok
-                        ? `${msg.rows} rows, ${msg.elapsed}s`
-                        : `FAIL: ${msg.error}`;
-                    logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}${tblProg}`, msg.ok ? 'info' : 'error');
+                    const status = msg.cancelled
+                        ? 'cancelled (not submitted)'
+                        : (msg.ok ? `${msg.rows} rows, ${msg.elapsed}s` : `FAIL: ${msg.error}`);
+                    const eta = _fmtEta(msg.eta_sec);
+                    const etaPart = eta ? ` | eta ${eta}` : '';
+                    const runningPart = msg.running != null ? ` | running=${msg.running}` : '';
+                    logMessage(`[${msg.done}/${msg.total}${runningPart}${etaPart}] ${msg.name}: ${status}${tblProg}`, msg.ok ? 'info' : 'error');
                     if (msg.table_csv_written && msg.table_csv_path) {
                         logMessage(`  -> CSV written: ${msg.table_csv_path}`, 'success');
                     }
@@ -793,14 +818,15 @@ async function runColExtraction(platform, resume = false) {
         }
     } catch (err) {
         if (err.name === 'AbortError') {
-            logMessage(`${label} col extraction cancelled (server-side tasks may continue in the background)`, 'info');
+            logMessage(`${label} col extraction cancelled (queued blocks short-circuited; in-flight queries finish their query but no new ones are sent)`, 'info');
         } else {
             logMessage(`${label} request failed: ${err.message}`, 'error');
         }
     } finally {
-        delete _colRunControllers[ctrlKey];
+        delete _colRunState[ctrlKey];
         btn.textContent = originalText;
         btn.style.background = originalBg;
+        btn.style.color = originalColor;
         if (other) other.disabled = otherOriginalDisabled;
     }
 }
@@ -812,6 +838,19 @@ function clearLog() {
     const log = document.getElementById('generation-log');
     log.innerHTML = '<div class="log-empty">No files generated yet.</div>';
 }
+
+// Format an ETA in seconds as a short human-readable string.
+// null/undefined/0 -> '' so the caller can decide whether to append it.
+function _fmtEta(sec) {
+    if (sec == null || !isFinite(sec) || sec < 1) return '';
+    sec = Math.round(sec);
+    if (sec < 60)    return `${sec}s`;
+    if (sec < 3600)  return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    return `${h}h ${m}m`;
+}
+
 
 function logMessage(message, type = 'info') {
     const log = document.getElementById('generation-log');
