@@ -607,9 +607,11 @@ async function generateAll() {
         logMessage(`  ${p.name}: ${from || '...'} → ${to || '...'} | vintage: ${v} | mode: ${p.mode}`, 'info');
     }
 
-    // Detect if any selected pair has AWS source
+    // Detect platforms
     const awsSources = new Set(['aws', 'csv']);
+    const oracleSources = new Set(['oracle']);
     const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
+    const hasOracle = selected.some(p => oracleSources.has(p.left?.source) || oracleSources.has(p.right?.source));
 
     // The backend resolves per-pair fromDate/toDate from the config (set by
     // each card's From/To inputs via savePairSettings above). We only pass
@@ -663,37 +665,58 @@ async function generateAll() {
         return;
     }
 
-    // Show Run AWS button if AWS tables exist
-    if (hasAws) {
+    // Show Run buttons for platforms that have selected pairs.
+    if (hasAws || hasOracle) {
         const btnDiv = document.createElement('div');
-        btnDiv.style.cssText = 'margin:12px 0; display:flex; gap:12px; align-items:center;';
-        btnDiv.innerHTML = `
-            <button class="btn-primary" id="run-aws-col-btn">Run AWS Extraction</button>
-            <button class="btn-secondary" id="resume-aws-col-btn"
-                title="Skip columns that already have rows in {qname}_col.csv and only re-run the failed/missing ones.">Resume</button>`;
+        btnDiv.style.cssText = 'margin:12px 0; display:flex; gap:12px; align-items:center; flex-wrap:wrap;';
+        const parts = [];
+        if (hasAws) {
+            parts.push(`<button class="btn-primary" id="run-aws-col-btn">Run AWS Extraction</button>`);
+            parts.push(`<button class="btn-secondary" id="resume-aws-col-btn"
+                title="Skip columns that already have rows in {qname}_col.csv and only re-run the failed/missing ones.">Resume AWS</button>`);
+        }
+        if (hasOracle) {
+            parts.push(`<button class="btn-primary" id="run-oracle-col-btn">Run Oracle Extraction</button>`);
+            parts.push(`<button class="btn-secondary" id="resume-oracle-col-btn"
+                title="Re-run only blocks not already cached.">Resume Oracle</button>`);
+        }
+        btnDiv.innerHTML = parts.join('\n');
         log.appendChild(btnDiv);
 
-        document.getElementById('run-aws-col-btn').onclick = () => runAwsColExtraction(false);
-        document.getElementById('resume-aws-col-btn').onclick = () => runAwsColExtraction(true);
+        if (hasAws) {
+            document.getElementById('run-aws-col-btn').onclick = () => runColExtraction('aws', false);
+            document.getElementById('resume-aws-col-btn').onclick = () => runColExtraction('aws', true);
+        }
+        if (hasOracle) {
+            document.getElementById('run-oracle-col-btn').onclick = () => runColExtraction('oracle', false);
+            document.getElementById('resume-oracle-col-btn').onclick = () => runColExtraction('oracle', true);
+        }
     }
 }
 
-async function runAwsColExtraction(resume = false) {
-    const btn = document.getElementById(resume ? 'resume-aws-col-btn' : 'run-aws-col-btn');
-    const other = document.getElementById(resume ? 'run-aws-col-btn' : 'resume-aws-col-btn');
+async function runColExtraction(platform, resume = false) {
+    // Button IDs are platform-prefixed so the AWS and Oracle handlers can
+    // coexist on the same page without clobbering each other.
+    const runId = `run-${platform}-col-btn`;
+    const resumeId = `resume-${platform}-col-btn`;
+    const btn = document.getElementById(resume ? resumeId : runId);
+    const other = document.getElementById(resume ? runId : resumeId);
     btn.disabled = true;
     if (other) other.disabled = true;
     btn.textContent = resume ? 'Resuming...' : 'Running...';
 
+    const label = platform === 'oracle' ? 'Oracle' : 'AWS';
+    const fname = platform === 'oracle' ? 'extract_col.oracle.sql' : 'extract_col.sql';
     logMessage(
         resume
-            ? 'Resuming AWS col extraction (skipping columns already in CSV)...'
-            : 'Running AWS col extraction from extract_col.sql...',
+            ? `Resuming ${label} col extraction (skipping columns already in CSV)...`
+            : `Running ${label} col extraction from ${fname}...`,
         'info');
 
     try {
         const reqBody = {
             type: 'col',
+            platform,
             outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
             resume,
         };
@@ -737,7 +760,7 @@ async function runAwsColExtraction(resume = false) {
                     btn.textContent = `${resume ? 'Resuming' : 'Running'} ${msg.done}/${msg.total}...`;
                 } else if (eventType === 'done') {
                     if (msg.ok) {
-                        logMessage(`AWS col extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
+                        logMessage(`${label} col extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
                         btn.textContent = 'Done';
                         btn.style.background = 'var(--jp-success-color1)';
                         if (other) { other.disabled = false; }
@@ -749,7 +772,7 @@ async function runAwsColExtraction(resume = false) {
                         btn.disabled = false;
                         if (other) { other.disabled = false; }
                     } else {
-                        logMessage(`AWS error: ${msg.error}`, 'error');
+                        logMessage(`${label} error: ${msg.error}`, 'error');
                         btn.textContent = resume ? 'Resume' : 'Retry';
                         btn.disabled = false;
                         if (other) { other.disabled = false; }
@@ -758,7 +781,7 @@ async function runAwsColExtraction(resume = false) {
             }
         }
     } catch (err) {
-        logMessage(`AWS request failed: ${err.message}`, 'error');
+        logMessage(`${label} request failed: ${err.message}`, 'error');
         btn.textContent = resume ? 'Resume' : 'Retry';
         btn.disabled = false;
         if (other) { other.disabled = false; }

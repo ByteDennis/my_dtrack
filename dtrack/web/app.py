@@ -210,13 +210,19 @@ async def api_constants():
 
 @app.post("/api/extract")
 async def api_extract(request: Request):
-    """Run gen-sas or gen-aws extraction."""
+    """Run gen-sas / gen-aws / gen-oracle extraction.
+
+    platform:
+      - 'aws'    -> athena.extract_aws (pyathena)
+      - 'oracle' -> oracle.extract_oracle (oracledb, gen-first row + direct-cursor col)
+      - 'sas'    -> hadoop.gen_sas (SAS + Hadoop)
+    """
     body = await request.json()
-    platform = body.get("platform", "aws")  # "sas" or "aws"
-    extract_type = body.get("type", "row")  # "row" or "col"
+    platform = body.get("platform", "aws")
+    extract_type = body.get("type", "row")
     from_date = body.get("from_date")
     to_date = body.get("to_date")
-    outdir = _resolve(body.get("outdir", "./csv/" if platform == "aws" else "./sas/"))
+    outdir = _resolve(body.get("outdir", "./csv/" if platform in ("aws", "oracle") else "./sas/"))
     max_workers = body.get("max_workers")
 
     buf = io.StringIO()
@@ -227,6 +233,11 @@ async def api_extract(request: Request):
                 extract_aws(_config_path, outdir, types=[extract_type],
                             db_path=_db_path, from_date=from_date, to_date=to_date,
                             max_workers=int(max_workers) if max_workers else None)
+            elif platform == "oracle":
+                from ..platforms.oracle import extract_oracle
+                extract_oracle(_config_path, outdir, types=[extract_type],
+                               db_path=_db_path, from_date=from_date, to_date=to_date,
+                               max_workers=int(max_workers) if max_workers else None)
             else:
                 from ..platforms.hadoop import gen_sas
                 gen_sas(_config_path, outdir, types=[extract_type],
@@ -240,24 +251,32 @@ async def api_extract(request: Request):
 
 @app.post("/api/extract/run-sql")
 async def api_run_sql_file(request: Request):
-    """Execute queries from extract_row.sql via Athena.
+    """Execute queries from extract_{row,col}.sql in parallel.
 
     Streams progress as Server-Sent Events (SSE).  Each completed query
     emits a 'progress' event; the final message is a 'done' event with
     summary.  Progress also prints to the terminal (stderr).
 
-    Body: {outdir, max_workers, type}
+    Body: {outdir, max_workers, type, platform, resume}
+      - platform: 'aws' (default) or 'oracle'. AWS reads extract_{type}.sql
+        and dispatches via athena.run_sql_file. Oracle reads
+        extract_{type}.oracle.sql and dispatches via oracle.run_oracle_sql_file
+        (each block routes to its own /* @conn_macro=... */).
     """
     import queue
     import threading
 
     body = await request.json()
     extract_type = body.get("type", "row")
+    platform = (body.get("platform") or "aws").lower()
     outdir = _resolve(body.get("outdir", "./csv/"))
     max_workers = body.get("max_workers")
     resume = bool(body.get("resume", False))
 
-    sql_path = os.path.join(outdir, f"extract_{extract_type}.sql")
+    if platform == "oracle":
+        sql_path = os.path.join(outdir, f"extract_{extract_type}.oracle.sql")
+    else:
+        sql_path = os.path.join(outdir, f"extract_{extract_type}.sql")
     if not os.path.exists(sql_path):
         return JSONResponse(status_code=404, content={
             "ok": False, "error": f"SQL file not found: {sql_path}"
@@ -270,14 +289,24 @@ async def api_run_sql_file(request: Request):
 
     def _run():
         try:
-            from ..platforms.athena import run_sql_file
-            results = run_sql_file(
-                sql_path, outdir,
-                max_workers=int(max_workers) if max_workers else None,
-                db_path=_db_path,
-                on_progress=_on_progress,
-                resume=resume,
-            )
+            if platform == "oracle":
+                from ..platforms.oracle import run_oracle_sql_file
+                results = run_oracle_sql_file(
+                    sql_path, outdir,
+                    max_workers=int(max_workers) if max_workers else None,
+                    db_path=_db_path,
+                    on_progress=_on_progress,
+                    resume=resume,
+                )
+            else:
+                from ..platforms.athena import run_sql_file
+                results = run_sql_file(
+                    sql_path, outdir,
+                    max_workers=int(max_workers) if max_workers else None,
+                    db_path=_db_path,
+                    on_progress=_on_progress,
+                    resume=resume,
+                )
             ok_count = sum(1 for r in results if r.get("ok"))
             fail_count = len(results) - ok_count
             progress_q.put({"_done": True, "ok": fail_count == 0,
@@ -533,10 +562,11 @@ async def api_generate_files(request: Request):
                 print(f"[date bounds] {tbl['name']}: from={eff_from} to={eff_to} "
                       f"(source: {'pair' if (pair_from or pair_to) else 'global'})")
 
-            # Generate SAS file — use filtered config if pairs selected
-            oracle_tables = [t for t in all_tables
-                             if t.get('source', '').lower() in ('oracle', 'sas', 'hadoop')]
-            if oracle_tables:
+            # Generate SAS file (SAS-local + Hadoop only — Oracle now has its
+            # own Python-direct path). Use filtered config if pairs selected.
+            sas_hadoop_tables = [t for t in all_tables
+                                 if t.get('source', '').lower() in ('sas', 'hadoop')]
+            if sas_hadoop_tables:
                 from ..platforms.hadoop import gen_sas
                 if pair_names:
                     import tempfile
@@ -554,6 +584,32 @@ async def api_generate_files(request: Request):
                             db_path=_db_path, from_date=from_date, to_date=to_date,
                             cells_filter=cells_filter, coarse=coarse)
                 results["sas_file"] = os.path.join(sas_outdir, f"extract_{extract_type}.sas")
+
+            # Generate Oracle SQL file (Python-direct path, dispatched in
+            # parallel via /api/extract/run-sql with platform=oracle). Lives
+            # alongside the AWS SQL file in aws_outdir but with a distinct
+            # filename so they never clobber.
+            oracle_tables = [t for t in all_tables
+                             if t.get('source', '').lower() == 'oracle']
+            if oracle_tables:
+                from ..platforms.oracle import (
+                    _write_combined_row_sql_oracle,
+                    _write_combined_col_sql_oracle,
+                )
+                from ..platforms.base import fill_columns_from_meta
+                os.makedirs(aws_outdir, exist_ok=True)
+                if extract_type == "row":
+                    oracle_sql_path = _write_combined_row_sql_oracle(
+                        oracle_tables, aws_outdir,
+                        db_path=_db_path, vintage=None)
+                else:
+                    # Col SQL needs columns hydrated from _column_meta so the
+                    # per-(table, column) blocks can be emitted.
+                    fill_columns_from_meta(oracle_tables, _db_path)
+                    oracle_sql_path = _write_combined_col_sql_oracle(
+                        oracle_tables, aws_outdir,
+                        db_path=_db_path, vintage=None)
+                results["oracle_sql_file"] = oracle_sql_path
 
             # Generate SQL file
             aws_tables = [t for t in all_tables

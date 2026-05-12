@@ -1141,20 +1141,33 @@ async function generateAll() {
 
     // --- Step 2: Detect platforms ---
     const awsSources = new Set(['aws', 'csv']);
-    const hasSas = selected.some(p => !awsSources.has(p.left?.source) || !awsSources.has(p.right?.source));
+    const oracleSources = new Set(['oracle']);
     const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
+    const hasOracle = selected.some(p => oracleSources.has(p.left?.source) || oracleSources.has(p.right?.source));
+    // "SAS" header now covers SAS-local + Hadoop only (Oracle moved to direct extraction).
+    const hasSas = selected.some(p => {
+        const ls = p.left?.source, rs = p.right?.source;
+        return (ls && !awsSources.has(ls) && !oracleSources.has(ls)) ||
+               (rs && !awsSources.has(rs) && !oracleSources.has(rs));
+    });
 
-    // --- Step 3: Render two-column review (SAS/Oracle | AWS/Athena) ---
+    // --- Step 3: Render two-column review (SAS/Hadoop | AWS/Athena/Oracle) ---
+    // Oracle shares the AWS column visually because both are Python-direct
+    // gen-then-run flows; the button label switches based on which platform's
+    // file was actually generated.
     const reviewDiv = document.createElement('div');
     reviewDiv.id = 'generate-review';
     reviewDiv.innerHTML = `
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
             <div style="font-weight:600; font-size:13px; color:var(--jp-ui-font-color1); border-bottom:1px solid var(--jp-border-color0); padding-bottom:6px;">
-                SAS / Oracle
+                SAS / Hadoop
             </div>
             <div style="display:flex; justify-content:space-between; align-items:center; font-weight:600; font-size:13px; color:var(--jp-ui-font-color1); border-bottom:1px solid var(--jp-border-color0); padding-bottom:6px;">
-                <span>AWS / Athena</span>
-                ${hasAws ? `<button class="btn-primary" id="run-aws-btn" style="font-size:11px; padding:3px 10px;">Run AWS Extraction</button>` : ''}
+                <span>AWS / Oracle</span>
+                <span style="display:flex; gap:6px;">
+                    ${hasAws ? `<button class="btn-primary" id="run-aws-btn" style="font-size:11px; padding:3px 10px;">Run AWS Extraction</button>` : ''}
+                    ${hasOracle ? `<button class="btn-primary" id="run-oracle-btn" style="font-size:11px; padding:3px 10px;">Run Oracle Extraction</button>` : ''}
+                </span>
             </div>
         </div>
     `;
@@ -1219,17 +1232,20 @@ async function generateAll() {
         logMessage(`File generation failed: ${err.message}`, 'error');
     }
 
-    // --- Step 5: Wire up Run AWS button (reads extract_row.sql, streams progress) ---
-    if (hasAws) {
-        const btn = document.getElementById('run-aws-btn');
+    // --- Step 5: Wire up Run buttons (read extract_row.sql / extract_row.oracle.sql, stream progress) ---
+    async function _runExtraction(platform, btnId) {
+        const btn = document.getElementById(btnId);
+        if (!btn) return;
+        const label = platform === 'oracle' ? 'Oracle' : 'AWS';
+        const fname = platform === 'oracle' ? 'extract_row.oracle.sql' : 'extract_row.sql';
         btn.onclick = async () => {
             btn.disabled = true;
             btn.textContent = 'Running...';
-
-            logMessage('Running AWS extraction from extract_row.sql...', 'info');
+            logMessage(`Running ${label} extraction from ${fname}...`, 'info');
             try {
                 const reqBody = {
                     type: 'row',
+                    platform,
                     outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
                 };
                 const nj = parseInt(document.getElementById('global-njob-right')?.value);
@@ -1250,9 +1266,8 @@ async function generateAll() {
                     if (done) break;
                     buffer += decoder.decode(value, {stream: true});
 
-                    // Parse SSE events from buffer
                     const parts = buffer.split('\n\n');
-                    buffer = parts.pop(); // keep incomplete chunk
+                    buffer = parts.pop();
 
                     for (const part of parts) {
                         let eventType = 'message';
@@ -1272,7 +1287,7 @@ async function generateAll() {
                             btn.textContent = `Running ${msg.done}/${msg.total}...`;
                         } else if (eventType === 'done') {
                             if (msg.ok) {
-                                logMessage(`AWS extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
+                                logMessage(`${label} extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
                                 btn.textContent = 'Done';
                                 btn.style.background = 'var(--jp-success-color1)';
                             } else if (msg.results) {
@@ -1282,7 +1297,7 @@ async function generateAll() {
                                 btn.textContent = 'Retry';
                                 btn.disabled = false;
                             } else {
-                                logMessage(`AWS error: ${msg.error}`, 'error');
+                                logMessage(`${label} error: ${msg.error}`, 'error');
                                 btn.textContent = 'Retry';
                                 btn.disabled = false;
                             }
@@ -1290,12 +1305,14 @@ async function generateAll() {
                     }
                 }
             } catch (err) {
-                logMessage(`AWS request failed: ${err.message}`, 'error');
+                logMessage(`${label} request failed: ${err.message}`, 'error');
                 btn.textContent = 'Retry';
                 btn.disabled = false;
             }
         };
     }
+    if (hasAws)    _runExtraction('aws',    'run-aws-btn');
+    if (hasOracle) _runExtraction('oracle', 'run-oracle-btn');
 }
 
 function _configBasename() {

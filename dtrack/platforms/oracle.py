@@ -148,16 +148,14 @@ def _query_oracle(sql, conn_macro, conn=None):
     return result
 
 
-def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
-                       conn_macro=None, vintage=None,
-                       date_dtype=None, date_format=None, dt_label=None):
-    """Extract stats for a single column from Oracle.
+def _build_col_sql_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
+                          vintage=None, date_dtype=None, date_format=None,
+                          dt_label=None):
+    """Build per-column stats SQL for Oracle, no execution.
 
-    Mirrors _extract_col_athena's structure and output (11-field CSV row
-    dicts) so the comparison engine treats Oracle/Athena outputs uniformly.
-    Numeric branch: single aggregation, no top_10. Categorical branch:
-    unified CTE producing n_total/n_missing/n_unique, alpha-rank weighted
-    mean/std, alpha-bound "{cat}={count}" min/max, and LISTAGG top_10.
+    Returns (sql, is_numeric). Used both by _extract_col_oracle (direct-cursor
+    path) and _write_combined_col_sql_oracle (gen-first file path), so the
+    two paths emit byte-identical SQL for the same inputs.
     """
     date_col = tbl_cfg['date_col']
     col_q = quote_ident(col, "oracle")
@@ -171,13 +169,19 @@ def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
     if dt_label is not None:
         dt_select = f"'{dt_label}' AS dt"
         group_by = ""
+        freq_dt_select = f"'{dt_label}'"
+        freq_dt_group = ""
     elif vintage == 'all':
         dt_select = "'all' AS dt"
         group_by = ""
+        freq_dt_select = "'all'"
+        freq_dt_group = ""
     else:
         dt_expr = _vintage_date_expr_oracle(date_col_q, vintage, date_dtype, date_format)
         dt_select = f"TO_CHAR({dt_expr}, 'YYYY-MM-DD') AS dt"
         group_by = f"\nGROUP BY {dt_expr}"
+        freq_dt_select = f"TO_CHAR({dt_expr}, 'YYYY-MM-DD')"
+        freq_dt_group = f", {dt_expr}"
 
     if numeric:
         col_expr = apply_null_sentinels(col_q, dtype or "numeric", "oracle")
@@ -185,50 +189,20 @@ def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
 SELECT
     {dt_select},
     '{dtype}' AS col_type,
+    '{col}' AS column_name,
     COUNT(*) AS n_total,
     COUNT(*) - COUNT({col_expr}) AS n_missing,
     COUNT(DISTINCT {col_expr}) AS n_unique,
     AVG({col_expr}) AS mean,
     STDDEV_SAMP({col_expr}) AS std,
     TO_CHAR(MIN({col_expr})) AS min_val,
-    TO_CHAR(MAX({col_expr})) AS max_val
+    TO_CHAR(MAX({col_expr})) AS max_val,
+    '' AS top_10,
+    '' AS length_avg,
+    '' AS length_max,
+    '' AS hash_sum
 FROM {full_table} WHERE {wc}{group_by}"""
-        _log_sql(col, sql)
-        rows = _query_oracle(sql, conn_macro)
-        results = []
-        for rd in rows:
-            # length_avg/length_max/hash_sum left empty for numeric -- matches
-            # the Hadoop/Athena convention (storage formatting of numbers
-            # diverges across engines and would generate false drift hits).
-            results.append({
-                'dt': str(rd.get('dt', 'all')),
-                'column_name': col,
-                'col_type': 'numeric',
-                'n_total': str(rd['n_total'] or 0),
-                'n_missing': str(rd['n_missing'] or 0),
-                'n_unique': str(rd['n_unique'] or 0),
-                'mean': str(rd['mean']) if rd['mean'] is not None else '',
-                'std': str(rd['std']) if rd['std'] is not None else '',
-                'min_val': str(rd['min_val']) if rd['min_val'] is not None else '',
-                'max_val': str(rd['max_val']) if rd['max_val'] is not None else '',
-                'top_10': '',
-                'length_avg': '',
-                'length_max': '',
-                'hash_sum': '',
-            })
-        return results
-
-    # Categorical: unified CTE matches the Athena categorical SQL.
-    if dt_label is not None:
-        freq_dt_select = f"'{dt_label}'"
-        freq_dt_group = ""
-    elif vintage == 'all':
-        freq_dt_select = "'all'"
-        freq_dt_group = ""
-    else:
-        dt_expr = _vintage_date_expr_oracle(date_col_q, vintage, date_dtype, date_format)
-        freq_dt_select = f"TO_CHAR({dt_expr}, 'YYYY-MM-DD')"
-        freq_dt_group = f", {dt_expr}"
+        return sql, True
 
     col_expr_cat = apply_null_sentinels(col_q, dtype or "categorical", "oracle")
     sql = f"""{cte_prefix}
@@ -290,6 +264,7 @@ lenhash AS (
     FROM ranked GROUP BY dt
 )
 SELECT t.dt,
+       '{col}' AS column_name,
        '{dtype}' AS col_type,
        t.n_total, t.n_missing, t.n_unique,
        ss.mean_v AS mean, ss.std_v AS std,
@@ -304,6 +279,52 @@ LEFT JOIN minmax  mm ON t.dt = mm.dt
 LEFT JOIN top_n   tn ON t.dt = tn.dt
 LEFT JOIN lenhash lh ON t.dt = lh.dt
 ORDER BY t.dt"""
+    return sql, False
+
+
+def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
+                       conn_macro=None, vintage=None,
+                       date_dtype=None, date_format=None, dt_label=None):
+    """Run per-column stats SQL on Oracle, return list of result dicts.
+
+    Mirrors _extract_col_athena's structure and output (14-field CSV row
+    dicts including length_avg/length_max/hash_sum) so the comparison engine
+    treats Oracle/Athena/Hadoop outputs uniformly. SQL is built by
+    _build_col_sql_oracle so the gen-first file path produces identical SQL.
+    """
+    sql, numeric = _build_col_sql_oracle(
+        tbl_cfg, col, dtype, full_table, cte_prefix,
+        vintage=vintage, date_dtype=date_dtype,
+        date_format=date_format, dt_label=dt_label,
+    )
+
+    if numeric:
+        _log_sql(col, sql)
+        rows = _query_oracle(sql, conn_macro)
+        results = []
+        for rd in rows:
+            # length_avg/length_max/hash_sum left empty for numeric -- matches
+            # the Hadoop/Athena convention (storage formatting of numbers
+            # diverges across engines and would generate false drift hits).
+            results.append({
+                'dt': str(rd.get('dt', 'all')),
+                'column_name': col,
+                'col_type': 'numeric',
+                'n_total': str(rd['n_total'] or 0),
+                'n_missing': str(rd['n_missing'] or 0),
+                'n_unique': str(rd['n_unique'] or 0),
+                'mean': str(rd['mean']) if rd['mean'] is not None else '',
+                'std': str(rd['std']) if rd['std'] is not None else '',
+                'min_val': str(rd['min_val']) if rd['min_val'] is not None else '',
+                'max_val': str(rd['max_val']) if rd['max_val'] is not None else '',
+                'top_10': '',
+                'length_avg': '',
+                'length_max': '',
+                'hash_sum': '',
+            })
+        return results
+
+    # Categorical: run the SQL _build_col_sql_oracle already built.
     _log_sql(col, sql)
     rows = _query_oracle(sql, conn_macro)
     results = []
@@ -325,6 +346,100 @@ ORDER BY t.dt"""
             'hash_sum':   str(rd['hash_sum'])   if rd.get('hash_sum')   is not None else '',
         })
     return results
+
+
+def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None, vintage=None):
+    """Emit extract_col.oracle.sql with one block per (table, column).
+
+    Mirrors _write_combined_row_sql_oracle's format: each block is
+    `-- {qname}/{col_name}` + `/* @conn_macro=<macro> */` + the per-column
+    stats SQL produced by _build_col_sql_oracle. run_oracle_sql_file picks
+    up the conn_macro per block, so multiple Oracle services can co-exist
+    in one file. Each block's SQL covers ALL date buckets for that column
+    via GROUP BY, so block name is just `{qname}/{col_name}` (no dt label).
+    """
+    os.makedirs(outdir, exist_ok=True)
+    blocks = [
+        "-- dtrack Oracle col extraction queries",
+        f"-- Generated: {datetime.now().isoformat()}",
+        "",
+    ]
+    for tbl in oracle_tables:
+        qname = qualified_name(tbl)
+        conn_macro = tbl.get('conn_macro', '') or ''
+        table = tbl['table']
+        date_col = tbl.get('date_col', '')
+        full_table, cte_prefix = resolve_table(tbl, table)
+
+        columns = tbl.get('columns', {})
+        if not columns:
+            blocks.append(f"-- {qname}")
+            blocks.append(f"-- SKIP: no columns defined")
+            blocks.append("")
+            continue
+
+        non_date_cols = [(c, d) for c, d in columns.items()
+                         if c.lower() != date_col.lower()]
+        if not non_date_cols:
+            blocks.append(f"-- {qname}")
+            blocks.append(f"-- SKIP: no non-date columns")
+            blocks.append("")
+            continue
+
+        # Resolve date filter + WHERE clause once per table, then reuse for
+        # every column. Matches _extract_cols_for_table_oracle's resolution.
+        table_vintage = tbl.get('vintage', vintage)
+        date_filter = compute_date_filter(tbl, db_path, table_vintage)
+        resolve_date_format(date_filter, tbl)
+        effective_vintage = date_filter.get('vintage', 'all')
+        date_dtype = date_filter.get('date_dtype')
+        date_format = date_filter.get('date_format')
+        dt_label = None
+
+        extract_cfg = dict(tbl)
+        orig_where = tbl.get('where', '')
+        date_bounds = tbl.get('_date_bounds', '')
+        if date_filter['filter_type'] == 'between':
+            dw = build_date_range_with_gaps(
+                date_col, date_filter['dates'], date_dtype,
+                date_format=date_format,
+                excluded_dates=date_filter.get('excluded_dates') or [])
+            extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
+        elif date_filter['filter_type'] == 'in_list':
+            dw = build_date_in_clause(
+                date_col, date_filter['dates'], date_dtype,
+                date_format=date_format)
+            extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
+            effective_vintage = 'all'
+            date_dtype = None
+            dt_label = 'sample'
+        elif date_bounds:
+            extract_cfg['where'] = (
+                f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds)
+
+        for col, dtype in non_date_cols:
+            try:
+                sql, _ = _build_col_sql_oracle(
+                    extract_cfg, col, dtype, full_table, cte_prefix,
+                    vintage=effective_vintage,
+                    date_dtype=date_dtype, date_format=date_format,
+                    dt_label=dt_label,
+                )
+            except Exception as e:
+                blocks.append(f"-- {qname}/{col}")
+                blocks.append(f"-- SKIP: SQL build failed: {e}")
+                blocks.append("")
+                continue
+            blocks.append(f"-- {qname}/{col}")
+            blocks.append(f"/* @conn_macro={conn_macro} */")
+            blocks.append(sql.strip())
+            blocks.append(";")
+            blocks.append("")
+
+    sql_path = os.path.join(outdir, oracle_sql_filename("col"))
+    with open(sql_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(blocks))
+    return sql_path
 
 
 def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
@@ -530,8 +645,18 @@ GROUP BY {dt_expr}
 ORDER BY {dt_expr}""".strip()
 
 
+def oracle_sql_filename(extract_type):
+    """Convention: `extract_{row,col}.oracle.sql`.
+
+    Distinguishes Oracle output from Athena's `extract_{row,col}.sql` so both
+    can co-exist in the same outdir (matters in projects where AWS and Oracle
+    tables share `csv_outdir`).
+    """
+    return f"extract_{extract_type}.oracle.sql"
+
+
 def _write_combined_row_sql_oracle(oracle_tables, outdir, db_path=None, vintage=None):
-    """Emit a single extract_row.sql with one block per table.
+    """Emit a single extract_row.oracle.sql with one block per table.
 
     Block format mirrors Athena's _write_combined_sql:
         -- {qname}
@@ -565,7 +690,7 @@ def _write_combined_row_sql_oracle(oracle_tables, outdir, db_path=None, vintage=
         blocks.append(";")
         blocks.append("")
 
-    sql_path = os.path.join(outdir, "extract_row.sql")
+    sql_path = os.path.join(outdir, oracle_sql_filename("row"))
     with open(sql_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(blocks))
     return sql_path
@@ -643,6 +768,8 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
     set_cache_db(os.path.join(outdir, ".cache.db"))
 
     basename = os.path.basename(sql_path)
+    # Filename convention: extract_{row,col}.oracle.sql (or legacy
+    # extract_{row,col}.sql). "extract_col" in basename catches both.
     is_col = "extract_col" in basename
     file_suffix = "_col.csv" if is_col else "_row.csv"
 
@@ -652,15 +779,34 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         int(env_workers) if env_workers else 2)
     _max_workers = max(1, min(_max_workers, len(blocks)))
 
-    print(f"  Parsed {len(blocks)} blocks from {sql_path}, "
-          f"workers={_max_workers}", file=sys.stderr)
+    # For col mode, block names are "qname/col_name". Group blocks by qname
+    # so we can write one CSV per table after all that table's columns
+    # finish (mirrors Athena's _col_rows_by_table pattern).
+    _COL_HEADERS = [
+        'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
+        'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
+        'length_avg', 'length_max', 'hash_sum',
+    ]
+    table_blocks = {}
+    for block in blocks:
+        qname = block['name'].split('/')[0] if '/' in block['name'] else block['name']
+        table_blocks.setdefault(qname, []).append(block)
+    _col_rows_lock = threading.Lock()
+    _col_rows_by_table = {}
+
+    print(f"  Parsed {len(blocks)} blocks ({len(table_blocks)} tables) "
+          f"from {sql_path}, workers={_max_workers}", file=sys.stderr)
 
     results = []
     _done_count = [0]
     _done_lock = threading.Lock()
+    _table_done = {q: {'done': 0, 'total': len(bs)}
+                   for q, bs in table_blocks.items()}
+    _table_lock = threading.Lock()
 
     def _run_block(block):
         block_name = block['name']
+        qname = block_name.split('/')[0] if '/' in block_name else block_name
         sql = block['sql']
         conn_macro = block.get('conn_macro')
         start_time = time.time()
@@ -670,30 +816,47 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
             rows = _query_oracle(sql, conn_macro)
             elapsed = time.time() - start_time
 
-            csv_path = os.path.join(outdir, f"{block_name}{file_suffix}")
-            with open(csv_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                if is_col:
-                    headers = [
-                        'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
-                        'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
-                        'length_avg', 'length_max', 'hash_sum',
-                    ]
-                    writer.writerow(headers)
-                    for r in rows:
-                        writer.writerow([r.get(h, '') for h in headers])
-                else:
+            if is_col:
+                with _col_rows_lock:
+                    _col_rows_by_table.setdefault(qname, []).extend(
+                        [r for r in rows])
+            else:
+                csv_path = os.path.join(outdir, f"{qname}{file_suffix}")
+                with open(csv_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
                     writer.writerow(['dt', 'row_count'])
                     for r in rows:
                         writer.writerow([str(r.get('dt', '')), r.get('row_count', 0)])
 
             result = {"name": block_name, "ok": True, "rows": len(rows),
-                      "elapsed": round(elapsed, 1), "start": start_ts,
-                      "csv_path": csv_path}
+                      "elapsed": round(elapsed, 1), "start": start_ts}
+            if not is_col:
+                result["csv_path"] = os.path.join(outdir, f"{qname}{file_suffix}")
         except Exception as e:
             elapsed = time.time() - start_time
             result = {"name": block_name, "ok": False, "error": str(e),
                       "elapsed": round(elapsed, 1), "start": start_ts}
+
+        # Per-table CSV flush: when this table's last column finishes, write
+        # the collated {qname}_col.csv so downstream load-col can pick up
+        # finished tables while others are still running.
+        table_just_finished = False
+        with _table_lock:
+            _table_done[qname]['done'] += 1
+            if is_col and _table_done[qname]['done'] == _table_done[qname]['total']:
+                table_just_finished = True
+
+        if table_just_finished:
+            with _col_rows_lock:
+                rows_for_qname = _col_rows_by_table.pop(qname, [])
+            csv_path = os.path.join(outdir, f"{qname}_col.csv")
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(_COL_HEADERS)
+                for r in rows_for_qname:
+                    writer.writerow([r.get(h, '') for h in _COL_HEADERS])
+            print(f"  Wrote {len(rows_for_qname)} rows to {csv_path}",
+                  file=sys.stderr)
 
         with _done_lock:
             _done_count[0] += 1
@@ -706,6 +869,8 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         if on_progress:
             result["done"] = n
             result["total"] = total
+            result["table"] = qname
+            result["table_csv_written"] = table_just_finished
             on_progress(result)
         return result
 
@@ -717,6 +882,20 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
             futures = {pool.submit(_run_block, b): b for b in blocks}
             for fut in as_completed(futures):
                 results.append(fut.result())
+
+    # Partial-failure flush: any table that didn't reach 'all columns done'
+    # (because some block failed) gets whatever rows did come back, so the
+    # user isn't left with an empty CSV.
+    if is_col and _col_rows_by_table:
+        for qname, row_data in _col_rows_by_table.items():
+            csv_path = os.path.join(outdir, f"{qname}_col.csv")
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(_COL_HEADERS)
+                for r in row_data:
+                    writer.writerow([r.get(h, '') for h in _COL_HEADERS])
+            print(f"  Wrote {len(row_data)} rows to {csv_path} "
+                  f"(partial -- table had failures)", file=sys.stderr)
 
     set_cache_db(None)
     return results
