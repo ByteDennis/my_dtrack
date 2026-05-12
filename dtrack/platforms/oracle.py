@@ -64,6 +64,22 @@ def _log_sql(col, sql):
                 f.write(f"-- [{col}]\n{sql.strip()}\n;\n\n")
 
 
+def _oracle_portable_hash16(value_sql):
+    """Oracle SQL expression: 16-bit unsigned BIGINT from MD5 of TRIM(value).
+
+    Mirrors _athena_portable_hash16's recipe (TRIM -> MD5 -> first 4 hex chars
+    -> integer) so SUM(cnt * hash16) agrees cross-platform on identical
+    categorical data. Without this match, hash_sum would diverge purely from
+    hashing-function differences and falsely flag drift on Hadoop/AWS/Oracle
+    comparisons. STANDARD_HASH is available on Oracle 11g+ without extra
+    privileges; result is a RAW that to-string yields uppercase hex, which
+    TO_NUMBER('XXXX') consumes directly.
+    """
+    return (
+        f"TO_NUMBER(SUBSTR(STANDARD_HASH(TRIM({value_sql}), 'MD5'), 1, 4), 'XXXX')"
+    )
+
+
 def _vintage_date_expr_oracle(date_col_q, vintage, date_dtype=None, date_format=None):
     """Build Oracle SQL expression that buckets date_col to the vintage label.
 
@@ -181,6 +197,9 @@ FROM {full_table} WHERE {wc}{group_by}"""
         rows = _query_oracle(sql, conn_macro)
         results = []
         for rd in rows:
+            # length_avg/length_max/hash_sum left empty for numeric -- matches
+            # the Hadoop/Athena convention (storage formatting of numbers
+            # diverges across engines and would generate false drift hits).
             results.append({
                 'dt': str(rd.get('dt', 'all')),
                 'column_name': col,
@@ -193,6 +212,9 @@ FROM {full_table} WHERE {wc}{group_by}"""
                 'min_val': str(rd['min_val']) if rd['min_val'] is not None else '',
                 'max_val': str(rd['max_val']) if rd['max_val'] is not None else '',
                 'top_10': '',
+                'length_avg': '',
+                'length_max': '',
+                'hash_sum': '',
             })
         return results
 
@@ -259,17 +281,28 @@ top_n AS (
                WITHIN GROUP (ORDER BY cnt DESC, p_col ASC) AS top_10
     FROM ranked WHERE rn_freq <= 10
     GROUP BY dt
+),
+lenhash AS (
+    SELECT dt,
+           SUM(cnt * LENGTH(TRIM(p_col))) / NULLIF(SUM(cnt), 0) AS length_avg,
+           MAX(LENGTH(TRIM(p_col))) AS length_max,
+           SUM(cnt * {_oracle_portable_hash16("p_col")}) AS hash_sum
+    FROM ranked GROUP BY dt
 )
 SELECT t.dt,
        '{dtype}' AS col_type,
        t.n_total, t.n_missing, t.n_unique,
        ss.mean_v AS mean, ss.std_v AS std,
        mm.min_val, mm.max_val,
-       NVL(tn.top_10, '') AS top_10
+       NVL(tn.top_10, '') AS top_10,
+       TO_CHAR(lh.length_avg) AS length_avg,
+       TO_CHAR(lh.length_max) AS length_max,
+       TO_CHAR(lh.hash_sum)   AS hash_sum
 FROM totals t
-LEFT JOIN sstats ss ON t.dt = ss.dt
-LEFT JOIN minmax mm ON t.dt = mm.dt
-LEFT JOIN top_n  tn ON t.dt = tn.dt
+LEFT JOIN sstats  ss ON t.dt = ss.dt
+LEFT JOIN minmax  mm ON t.dt = mm.dt
+LEFT JOIN top_n   tn ON t.dt = tn.dt
+LEFT JOIN lenhash lh ON t.dt = lh.dt
 ORDER BY t.dt"""
     _log_sql(col, sql)
     rows = _query_oracle(sql, conn_macro)
@@ -287,6 +320,9 @@ ORDER BY t.dt"""
             'min_val': str(rd['min_val']) if rd.get('min_val') is not None else '',
             'max_val': str(rd['max_val']) if rd.get('max_val') is not None else '',
             'top_10': str(rd.get('top_10') or ''),
+            'length_avg': str(rd['length_avg']) if rd.get('length_avg') is not None else '',
+            'length_max': str(rd['length_max']) if rd.get('length_max') is not None else '',
+            'hash_sum':   str(rd['hash_sum'])   if rd.get('hash_sum')   is not None else '',
         })
     return results
 
@@ -437,6 +473,10 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
     fieldnames = [
         'column_name', 'dt', 'col_type', 'n_total', 'n_missing',
         'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
+        # Coarse signals — required for cross-engine compare with Hadoop/Athena.
+        # Numeric rows leave these empty (format divergence across engines
+        # would generate false drift hits on numbers).
+        'length_avg', 'length_max', 'hash_sum',
     ]
     with open(csv_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -461,17 +501,15 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
     }
 
 
-def _extract_row_for_table_oracle(tbl_cfg, outdir, db_path=None, vintage=None):
-    """Extract per-day row counts -> {qname}_row.csv."""
-    import time
+def _build_row_sql_oracle(tbl_cfg, db_path=None, vintage=None):
+    """Build the Oracle row-count SQL for one table, no execution.
 
-    name = tbl_cfg['name']
-    conn_macro = tbl_cfg.get('conn_macro')
+    Used by _write_combined_row_sql_oracle to emit extract_row.sql blocks
+    and by anyone who wants to inspect what would run.
+    """
     table = tbl_cfg['table']
     date_col = tbl_cfg['date_col']
     full_table, cte_prefix = resolve_table(tbl_cfg, table)
-
-    print(f"\nExtracting row counts: {name} ({table})")
 
     table_vintage = tbl_cfg.get('vintage', vintage)
     date_filter = compute_date_filter(tbl_cfg, db_path, table_vintage)
@@ -484,47 +522,204 @@ def _extract_row_for_table_oracle(tbl_cfg, outdir, db_path=None, vintage=None):
     date_format = date_filter.get('date_format')
 
     dt_expr = _vintage_date_expr_oracle(date_col_q, 'day', date_dtype, date_format)
-    sql = f"""{cte_prefix}
+    return f"""{cte_prefix}
 SELECT TO_CHAR({dt_expr}, 'YYYY-MM-DD') AS dt,
        COUNT(*) AS row_count
 FROM {full_table} WHERE {wc}
 GROUP BY {dt_expr}
-ORDER BY {dt_expr}"""
+ORDER BY {dt_expr}""".strip()
+
+
+def _write_combined_row_sql_oracle(oracle_tables, outdir, db_path=None, vintage=None):
+    """Emit a single extract_row.sql with one block per table.
+
+    Block format mirrors Athena's _write_combined_sql:
+        -- {qname}
+        /* @conn_macro=<macro> */
+        <SQL>
+        ;
+
+    The conn_macro marker is a SQL comment Oracle ignores; the parser reads
+    it back out so each block routes to the right Oracle service when
+    dispatched in parallel.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    blocks = [
+        "-- dtrack Oracle row extraction queries",
+        f"-- Generated: {datetime.now().isoformat()}",
+        "",
+    ]
+    for tbl in oracle_tables:
+        qname = qualified_name(tbl)
+        conn_macro = tbl.get('conn_macro', '') or ''
+        try:
+            sql = _build_row_sql_oracle(tbl, db_path=db_path, vintage=vintage)
+        except Exception as e:
+            blocks.append(f"-- {qname}")
+            blocks.append(f"-- SKIP: SQL build failed: {e}")
+            blocks.append("")
+            continue
+        blocks.append(f"-- {qname}")
+        blocks.append(f"/* @conn_macro={conn_macro} */")
+        blocks.append(sql)
+        blocks.append(";")
+        blocks.append("")
+
+    sql_path = os.path.join(outdir, "extract_row.sql")
+    with open(sql_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(blocks))
+    return sql_path
+
+
+def parse_oracle_sql_file(sql_path):
+    """Parse a combined Oracle SQL file into named query blocks.
+
+    Block markers are `-- {qname}` lines (single-token after `-- `); each
+    block's conn_macro is read from a `/* @conn_macro=NAME */` comment
+    inside the SQL body. Returns list of dicts:
+        [{"name": qname, "sql": "...", "conn_macro": "pb23"}, ...]
+    Skips header lines starting with `-- dtrack` / `-- Generated`.
+    """
+    import re
+
+    with open(sql_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+
+    blocks = []
+    current_name = None
+    current_lines = []
+
+    def _flush():
+        if current_name is None:
+            return
+        sql = '\n'.join(current_lines).strip().rstrip(';').strip()
+        if not sql:
+            return
+        m = re.search(r"/\*\s*@conn_macro=(\S+?)\s*\*/", sql)
+        conn_macro = m.group(1) if m else None
+        blocks.append({"name": current_name, "sql": sql, "conn_macro": conn_macro})
+
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('-- dtrack') or stripped.startswith('-- Generated'):
+            continue
+        if stripped.startswith('-- ') and not stripped.startswith('-- ['):
+            marker = stripped[3:].strip()
+            if marker and ' ' not in marker:
+                _flush()
+                current_name = marker
+                current_lines = []
+                continue
+        current_lines.append(line)
+    _flush()
+
+    return blocks
+
+
+def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
+                       on_progress=None, resume=False):
+    """Parse extract_row.sql (or extract_col.sql) and dispatch in parallel.
+
+    Mirrors Athena's run_sql_file: ThreadPoolExecutor capped at
+    ORACLE_MAX_WORKERS (default 2). Each block carries its own conn_macro
+    in `/* @conn_macro=... */`, so a single SQL file can mix multiple
+    Oracle services. Results land in `{outdir}/{qname}_row.csv` (row) or
+    `{outdir}/{qname}_col.csv` (col). The shared .cache.db lets repeated
+    runs of the same file skip already-executed blocks.
+
+    Args:
+        on_progress: optional callback(result_dict) per block (used by web UI).
+        resume: not implemented for Oracle yet (kept for API parity).
+    """
+    import sys
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    blocks = parse_oracle_sql_file(sql_path)
+    if not blocks:
+        print(f"No query blocks found in {sql_path}")
+        return []
 
     set_cache_db(os.path.join(outdir, ".cache.db"))
-    row_start_time = time.time()
-    row_start_ts = datetime.now().isoformat()
 
-    try:
-        rows = _query_oracle(sql, conn_macro)
-    except Exception as e:
-        print(f"  ERROR: row extraction failed: {e}")
-        set_cache_db(None)
-        return None
+    basename = os.path.basename(sql_path)
+    is_col = "extract_col" in basename
+    file_suffix = "_col.csv" if is_col else "_row.csv"
+
+    os.makedirs(outdir, exist_ok=True)
+    env_workers = os.environ.get('ORACLE_MAX_WORKERS')
+    _max_workers = max_workers if max_workers else (
+        int(env_workers) if env_workers else 2)
+    _max_workers = max(1, min(_max_workers, len(blocks)))
+
+    print(f"  Parsed {len(blocks)} blocks from {sql_path}, "
+          f"workers={_max_workers}", file=sys.stderr)
+
+    results = []
+    _done_count = [0]
+    _done_lock = threading.Lock()
+
+    def _run_block(block):
+        block_name = block['name']
+        sql = block['sql']
+        conn_macro = block.get('conn_macro')
+        start_time = time.time()
+        start_ts = datetime.now().isoformat()
+
+        try:
+            rows = _query_oracle(sql, conn_macro)
+            elapsed = time.time() - start_time
+
+            csv_path = os.path.join(outdir, f"{block_name}{file_suffix}")
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                if is_col:
+                    headers = [
+                        'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
+                        'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
+                        'length_avg', 'length_max', 'hash_sum',
+                    ]
+                    writer.writerow(headers)
+                    for r in rows:
+                        writer.writerow([r.get(h, '') for h in headers])
+                else:
+                    writer.writerow(['dt', 'row_count'])
+                    for r in rows:
+                        writer.writerow([str(r.get('dt', '')), r.get('row_count', 0)])
+
+            result = {"name": block_name, "ok": True, "rows": len(rows),
+                      "elapsed": round(elapsed, 1), "start": start_ts,
+                      "csv_path": csv_path}
+        except Exception as e:
+            elapsed = time.time() - start_time
+            result = {"name": block_name, "ok": False, "error": str(e),
+                      "elapsed": round(elapsed, 1), "start": start_ts}
+
+        with _done_lock:
+            _done_count[0] += 1
+            n = _done_count[0]
+        total = len(blocks)
+        status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
+        print(f"  [{n}/{total}] {block_name}: {status} ({elapsed:.1f}s)",
+              file=sys.stderr)
+
+        if on_progress:
+            result["done"] = n
+            result["total"] = total
+            on_progress(result)
+        return result
+
+    if _max_workers <= 1:
+        for block in blocks:
+            results.append(_run_block(block))
+    else:
+        with ThreadPoolExecutor(max_workers=_max_workers) as pool:
+            futures = {pool.submit(_run_block, b): b for b in blocks}
+            for fut in as_completed(futures):
+                results.append(fut.result())
 
     set_cache_db(None)
-    row_elapsed = time.time() - row_start_time
-    row_end_ts = datetime.now().isoformat()
-
-    qname = qualified_name(tbl_cfg)
-    csv_path = os.path.join(outdir, f"{qname}_row.csv")
-    with open(csv_path, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['dt', 'row_count'])
-        for r in rows:
-            writer.writerow([str(r.get('dt', '')), r.get('row_count', 0)])
-
-    sql_path = os.path.join(outdir, f"{qname}_row.sql")
-    with open(sql_path, 'w', encoding='utf-8') as f:
-        f.write(f"-- Row counts for {qname}\n"
-                f"-- {datetime.now().isoformat()}\n\n{sql.strip()}\n;\n")
-
-    print(f"  Row counts: {csv_path} ({len(rows)} dates, {row_elapsed:.1f}s)")
-    return {
-        'table': name, 'step': 'row',
-        'start': row_start_ts, 'end': row_end_ts,
-        'elapsed_sec': row_elapsed,
-    }
+    return results
 
 
 def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=None,
@@ -605,20 +800,29 @@ def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=No
 
     timing_records = []
 
-    for tbl_cfg in oracle_tables:
-        if "row" in types:
-            try:
-                result = _extract_row_for_table_oracle(
-                    tbl_cfg, outdir, db_path=db_path, vintage=vintage)
-                if result:
-                    timing_records.append(result)
-            except Exception as e:
-                print(f"  ERROR row extraction for {tbl_cfg['name']}: {e}")
+    # --- Row extraction: write extract_row.sql then run it in parallel ---
+    # Mirrors Athena's row pattern (gen-first, then run_sql_file). One block
+    # per table, each carrying /* @conn_macro=... */ so the dispatcher
+    # routes to the right Oracle service. Multiple Oracle services in one
+    # file is supported via per-block conn_macro.
+    if "row" in types:
+        try:
+            sql_path = _write_combined_row_sql_oracle(
+                oracle_tables, outdir, db_path=db_path, vintage=vintage)
+            print(f"\n--- Oracle row extraction from {sql_path} ---")
+            row_results = run_oracle_sql_file(
+                sql_path, outdir, max_workers=max_workers, db_path=db_path)
+            for r in row_results:
                 timing_records.append({
-                    'table': tbl_cfg['name'], 'step': 'row',
-                    'start': '', 'end': '', 'elapsed_sec': 0, 'status': str(e),
+                    'table': r['name'], 'step': 'row',
+                    'start': r.get('start', ''), 'end': '',
+                    'elapsed_sec': r.get('elapsed', 0),
+                    'status': '' if r.get('ok') else r.get('error', ''),
                 })
+        except Exception as e:
+            print(f"  ERROR row extraction: {e}")
 
+    for tbl_cfg in oracle_tables:
         if "col" in types:
             try:
                 result = _extract_cols_for_table_oracle(
