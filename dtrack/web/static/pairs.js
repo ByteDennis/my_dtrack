@@ -1232,15 +1232,28 @@ async function generateAll() {
         logMessage(`File generation failed: ${err.message}`, 'error');
     }
 
-    // --- Step 5: Wire up Run buttons (read extract_row.sql / extract_row.oracle.sql, stream progress) ---
+    // --- Step 5: Wire up Run buttons.
+    // While a run is in flight the button toggles to "Cancel X" with a red
+    // background and stays clickable; clicking again aborts the fetch (the
+    // server-side ThreadPool keeps draining whatever's already submitted,
+    // but no more progress is reported). On completion the button resets
+    // to its original "Run X Extraction" label so it can be triggered again.
     async function _runExtraction(platform, btnId) {
         const btn = document.getElementById(btnId);
         if (!btn) return;
         const label = platform === 'oracle' ? 'Oracle' : 'AWS';
         const fname = platform === 'oracle' ? 'extract_row.oracle.sql' : 'extract_row.sql';
+        const originalText = btn.textContent;
+        const originalBg = btn.style.background;
+        let controller = null;
         btn.onclick = async () => {
-            btn.disabled = true;
-            btn.textContent = 'Running...';
+            if (controller) {
+                controller.abort();
+                return;
+            }
+            controller = new AbortController();
+            btn.textContent = `Cancel ${label}`;
+            btn.style.background = 'var(--jp-error-color1)';
             logMessage(`Running ${label} extraction from ${fname}...`, 'info');
             try {
                 const reqBody = {
@@ -1253,6 +1266,7 @@ async function generateAll() {
 
                 const resp = await fetch('/api/extract/run-sql', {
                     method: 'POST',
+                    signal: controller.signal,
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(reqBody),
                 });
@@ -1284,30 +1298,29 @@ async function generateAll() {
                                 ? `${msg.rows} dates, ${msg.elapsed}s`
                                 : `FAIL: ${msg.error}`;
                             logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
-                            btn.textContent = `Running ${msg.done}/${msg.total}...`;
                         } else if (eventType === 'done') {
                             if (msg.ok) {
                                 logMessage(`${label} extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
-                                btn.textContent = 'Done';
-                                btn.style.background = 'var(--jp-success-color1)';
                             } else if (msg.results) {
                                 const failed = msg.results.filter(r => !r.ok);
                                 failed.forEach(r => logMessage(`  FAILED: ${r.name} — ${r.error}`, 'error'));
                                 logMessage(`${msg.succeeded}/${msg.total} succeeded, ${msg.failed} failed`, 'error');
-                                btn.textContent = 'Retry';
-                                btn.disabled = false;
                             } else {
                                 logMessage(`${label} error: ${msg.error}`, 'error');
-                                btn.textContent = 'Retry';
-                                btn.disabled = false;
                             }
                         }
                     }
                 }
             } catch (err) {
-                logMessage(`${label} request failed: ${err.message}`, 'error');
-                btn.textContent = 'Retry';
-                btn.disabled = false;
+                if (err.name === 'AbortError') {
+                    logMessage(`${label} extraction cancelled (server-side tasks may continue in the background)`, 'info');
+                } else {
+                    logMessage(`${label} request failed: ${err.message}`, 'error');
+                }
+            } finally {
+                controller = null;
+                btn.textContent = originalText;
+                btn.style.background = originalBg;
             }
         };
     }

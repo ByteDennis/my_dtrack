@@ -694,19 +694,35 @@ async function generateAll() {
     }
 }
 
+// Per-button AbortControllers so Run / Resume on either platform can be
+// cancelled independently. Reset to null on completion so the next click
+// starts a new run.
+const _colRunControllers = {};
+
 async function runColExtraction(platform, resume = false) {
-    // Button IDs are platform-prefixed so the AWS and Oracle handlers can
-    // coexist on the same page without clobbering each other.
     const runId = `run-${platform}-col-btn`;
     const resumeId = `resume-${platform}-col-btn`;
     const btn = document.getElementById(resume ? resumeId : runId);
     const other = document.getElementById(resume ? runId : resumeId);
-    btn.disabled = true;
-    if (other) other.disabled = true;
-    btn.textContent = resume ? 'Resuming...' : 'Running...';
+    const ctrlKey = `${platform}:${resume ? 'resume' : 'run'}`;
+    if (_colRunControllers[ctrlKey]) {
+        // Already running on this button — second click cancels.
+        _colRunControllers[ctrlKey].abort();
+        return;
+    }
+    const controller = new AbortController();
+    _colRunControllers[ctrlKey] = controller;
 
     const label = platform === 'oracle' ? 'Oracle' : 'AWS';
     const fname = platform === 'oracle' ? 'extract_col.oracle.sql' : 'extract_col.sql';
+    const originalText = btn.textContent;
+    const originalBg = btn.style.background;
+    const otherOriginalDisabled = other ? other.disabled : false;
+
+    btn.textContent = `Cancel ${label}${resume ? ' Resume' : ''}`;
+    btn.style.background = 'var(--jp-error-color1)';
+    if (other) other.disabled = true;
+
     logMessage(
         resume
             ? `Resuming ${label} col extraction (skipping columns already in CSV)...`
@@ -723,6 +739,7 @@ async function runColExtraction(platform, resume = false) {
 
         const resp = await fetch('/api/extract/run-sql', {
             method: 'POST',
+            signal: controller.signal,
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(reqBody),
         });
@@ -757,34 +774,30 @@ async function runColExtraction(platform, resume = false) {
                         ? `${msg.rows} rows, ${msg.elapsed}s`
                         : `FAIL: ${msg.error}`;
                     logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}${tblProg}`, msg.ok ? 'info' : 'error');
-                    btn.textContent = `${resume ? 'Resuming' : 'Running'} ${msg.done}/${msg.total}...`;
                 } else if (eventType === 'done') {
                     if (msg.ok) {
                         logMessage(`${label} col extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
-                        btn.textContent = 'Done';
-                        btn.style.background = 'var(--jp-success-color1)';
-                        if (other) { other.disabled = false; }
                     } else if (msg.results) {
                         const failed = msg.results.filter(r => !r.ok);
                         failed.forEach(r => logMessage(`  FAILED: ${r.name} — ${r.error}`, 'error'));
                         logMessage(`${msg.succeeded}/${msg.total} succeeded, ${msg.failed} failed`, 'error');
-                        btn.textContent = resume ? 'Resume' : 'Retry';
-                        btn.disabled = false;
-                        if (other) { other.disabled = false; }
                     } else {
                         logMessage(`${label} error: ${msg.error}`, 'error');
-                        btn.textContent = resume ? 'Resume' : 'Retry';
-                        btn.disabled = false;
-                        if (other) { other.disabled = false; }
                     }
                 }
             }
         }
     } catch (err) {
-        logMessage(`${label} request failed: ${err.message}`, 'error');
-        btn.textContent = resume ? 'Resume' : 'Retry';
-        btn.disabled = false;
-        if (other) { other.disabled = false; }
+        if (err.name === 'AbortError') {
+            logMessage(`${label} col extraction cancelled (server-side tasks may continue in the background)`, 'info');
+        } else {
+            logMessage(`${label} request failed: ${err.message}`, 'error');
+        }
+    } finally {
+        delete _colRunControllers[ctrlKey];
+        btn.textContent = originalText;
+        btn.style.background = originalBg;
+        if (other) other.disabled = otherOriginalDisabled;
     }
 }
 
