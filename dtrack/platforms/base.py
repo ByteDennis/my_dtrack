@@ -631,47 +631,21 @@ def format_date_bounds_literals(min_date, max_date, date_dtype, is_sas=False,
 
 
 def build_date_range_with_gaps(date_col, matching_dates, date_dtype,
-                               is_sas=False, date_format=None, custom_date_types=None,
-                               excluded_dates=None):
-    """Build a BETWEEN clause covering [min(matching_dates), max(matching_dates)],
-    optionally with `AND NOT (col IN (excluded_dates))` for real-diff days.
-
-    `excluded_dates` is the row_comparison-derived list of days INSIDE the
-    overlap range that the user wants the extract to skip -- mismatched
-    counts and misloads (where one side has data and the other has zero).
-    It is NOT a generic gap list: days where BOTH sides are zero rows
-    are intentionally absent. Those produce empty extracts naturally
-    (nothing to scan), so listing them in NOT IN would only bloat the
-    SQL and prevent partition pruning.
+                               is_sas=False, date_format=None, custom_date_types=None):
+    """Build a BETWEEN clause covering [min(matching_dates), max(matching_dates)].
 
     User-typed excludes go through a separate `_exclude_dates` /
-    `exclude_clause` plumbed by the AWS/SAS drivers, not through here.
-
-    Note: an earlier version auto-computed gap_dates = (full range) -
-    matching_dates and shoved them into NOT IN. That lumped both-zero
-    days in with real diffs and produced huge NOT IN lists. Caller now
-    supplies the curated list explicitly.
+    `exclude_clause` plumbed by the per-platform col-gen drivers, not through
+    here. Row_comparison-derived auto-excludes were removed: they conflated
+    both-zero days with real diffs and bloated NOT IN lists; the user-typed
+    field is now the only source of NOT IN exclusions.
     """
     bmin, bmax = min(matching_dates), max(matching_dates)
-    between = build_date_between_clause(
+    return build_date_between_clause(
         date_col, bmin, bmax, date_dtype,
         is_sas=is_sas, date_format=date_format,
         custom_date_types=custom_date_types,
     )
-    if not excluded_dates:
-        return between
-    # Filter excludes to the bucket window. excluded_dates passed in from
-    # the caller may span the whole overlap range; only the ones inside
-    # the current bucket apply to this WHERE clause.
-    in_window = [d for d in excluded_dates if bmin <= d <= bmax]
-    if not in_window:
-        return between
-    not_in = build_date_in_clause(
-        date_col, in_window, date_dtype,
-        is_sas=is_sas, date_format=date_format,
-        custom_date_types=custom_date_types,
-    )
-    return f"{between} AND NOT ({not_in})"
 
 
 def compute_date_filter(tbl_cfg, db_path, vintage):
@@ -742,17 +716,13 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
         if comp:
             if comp.get('matching_dates'):
                 matching_dates = comp['matching_dates']
-            # Pull the row_comparison-derived overlap window + real-diff
-            # excludes so downstream WHERE builders can emit
-            # `BETWEEN overlap_start AND overlap_end AND NOT (col IN
-            # (excluded_dates))`. excluded_dates contains the days inside
-            # the overlap range where left and right disagree on non-zero
-            # row counts (mismatched + misload). Days where both sides
-            # are zero stay OUT of this list -- they produce empty
-            # extracts naturally and don't deserve NOT IN bloat.
+            # Carry the row_comparison overlap window for callers that want
+            # it for display/diagnostics. The row-compare-derived
+            # `excluded_dates` is intentionally NOT propagated here -- the
+            # only NOT IN source is the user-typed `_exclude_dates` from
+            # the pair card, plumbed by each platform's col-gen driver.
             result['overlap_start'] = comp.get('overlap_start')
             result['overlap_end']   = comp.get('overlap_end')
-            result['excluded_dates'] = list(comp.get('excluded_dates') or [])
 
     # Sample dates if sample@N vintage
     if is_sample and matching_dates:
@@ -1092,6 +1062,113 @@ def read_id_cols_from_col_stats(db_path, table_name, threshold=0.99, ttl_days=1.
         by_col.setdefault(col, []).append(u / t)
     return {col for col, rs in by_col.items()
             if rs and (sum(rs) / len(rs)) >= threshold}
+
+
+# ---------------------------------------------------------------------------
+# Cross-engine categorical hash / length helpers
+#
+# These are the Python reference implementations of the categorical-coarse
+# signals (length_avg, length_max, hash_sum). The Oracle and Athena SQL
+# builders emit expressions that reproduce these formulas on each engine.
+# Tests assert that the SQL strings call the right primitives so the two
+# engines produce identical output on identical data.
+#
+# Recipe (must match across engines):
+#   trim    = strip ASCII space only (the SQL TRIM default; non-ASCII
+#             whitespace stays in the value on both engines)
+#   utf8    = encode as UTF-8 bytes
+#   md5     = MD5 of the UTF-8 bytes (32 hex chars)
+#   hash16  = int(md5[:4], 16)   in [0, 65535]
+#   length  = number of Unicode characters in the trimmed value
+#             (NOT bytes -- both engines must count characters)
+# ---------------------------------------------------------------------------
+
+# Max-length cap applied by ALL engines to the freq table's p_col before
+# computing length_avg / length_max / hash_sum / min_val / max_val. Picked
+# to match Hadoop's `column_hadoop.sas` which truncates via
+# `SUBSTR(CAST(col AS STRING), 1, 200)` -- the value SAS already produces
+# in shipped data. Oracle (`SUBSTR(TO_CHAR(col), 1, 200)`) and Athena
+# (`SUBSTR(CAST(col AS VARCHAR), 1, 200)`) apply the same cap so all three
+# engines hash/measure the same truncated bytes.
+#
+# Why 200: keeps cross-engine compares meaningful on long-text columns
+# while matching the existing Hadoop output. p_col is just the key for
+# freq bucketing -- 200 chars is plenty to distinguish categorical values
+# in practice; pathological >200-char values land in a single
+# truncation-collision bucket on every engine.
+P_COL_MAX_LEN = 200
+
+
+def categorical_truncate(value):
+    """Apply the shared p_col truncation (matches SUBSTR(..., 1, 4000))."""
+    if value is None:
+        return None
+    s = str(value)
+    return s[:P_COL_MAX_LEN]
+
+
+def categorical_trim(value):
+    """ASCII-space TRIM matching SQL TRIM(value) default.
+
+    NB: both Oracle TRIM and Trino/Athena TRIM default to ASCII space only.
+    Non-ASCII whitespace (NBSP \\u00a0, tab, etc.) is intentionally left in
+    place by both engines, so this helper does the same.
+    """
+    if value is None:
+        return None
+    return str(value).strip(' ')
+
+
+def categorical_length(value):
+    """Character length of the trimmed value, or None if value is None.
+
+    Counts Unicode code points -- matches Trino LENGTH() and Oracle
+    LENGTH() on a UTF-8 database (NLS_CHARACTERSET=AL32UTF8). Both
+    engines therefore report the same number for 'café' (= 4), '🎉' (= 1),
+    etc., regardless of underlying byte width.
+    """
+    if value is None:
+        return None
+    return len(categorical_trim(value))
+
+
+def categorical_hash16(value):
+    """16-bit categorical hash matching the cross-engine SQL recipe.
+
+    Engine SQL emits the equivalent of int(md5(utf8(trim(v)))[:4], 16) so
+    SUM(cnt * hash16) is comparable across Oracle / Athena / Hadoop on the
+    same data. Returns None for NULL input.
+    """
+    import hashlib
+    if value is None:
+        return None
+    raw = categorical_trim(value).encode('utf-8')
+    return int(hashlib.md5(raw).hexdigest()[:4], 16)
+
+
+def categorical_aggregates(freq_rows):
+    """Compute length_avg / length_max / hash_sum for a list of (p_col, cnt).
+
+    The reference implementation the SQL builders are tested against.
+    Mirrors the SQL behavior of the categorical CTE chain:
+      - SUBSTR(..., 1, P_COL_MAX_LEN) truncation before measurement / hashing
+      - NULL p_col rows excluded from length and hash (they only count
+        toward n_missing)
+      - SUM(cnt * X) with cnt-weighting
+    """
+    truncated = [(categorical_truncate(p), c) for p, c in freq_rows]
+    non_null = [(p, c) for p, c in truncated if p is not None]
+    if not non_null:
+        return {'length_avg': None, 'length_max': None, 'hash_sum': 0}
+    sum_cnt = sum(c for _, c in non_null)
+    sum_cnt_len = sum(c * categorical_length(p) for p, c in non_null)
+    max_len = max(categorical_length(p) for p, _ in non_null)
+    sum_hash = sum(c * categorical_hash16(p) for p, c in non_null)
+    return {
+        'length_avg': sum_cnt_len / sum_cnt if sum_cnt > 0 else None,
+        'length_max': max_len,
+        'hash_sum': sum_hash,
+    }
 
 
 def get_mock_dir():

@@ -48,6 +48,12 @@ _SCHEMA = {
         ("length_avg", "TEXT", ""),
         ("length_max", "TEXT", ""),
         ("hash_sum", "TEXT", ""),
+        # Set to 'oracle_degraded' / 'athena_degraded' when the SQL-file
+        # runner retried a column with the lifeboat SQL after a resource
+        # exhaustion error (ORA-01652 / Athena EXCEEDED_MEMORY_LIMIT etc.).
+        # On those rows n_unique / hash_sum are NULL by design and the
+        # comparator treats them as "skipped, not a mismatch".
+        ("partial", "TEXT", ""),
     ],
     "_column_meta": [
         ("source_table", "TEXT", "NOT NULL"),
@@ -530,7 +536,7 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
         cursor.execute("ALTER TABLE _col_stats ADD COLUMN vintage_label TEXT")
     except sqlite3.OperationalError:
         pass
-    for col in ("length_avg", "length_max", "hash_sum"):
+    for col in ("length_avg", "length_max", "hash_sum", "partial"):
         try:
             cursor.execute(f"ALTER TABLE _col_stats ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -546,8 +552,8 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 source_table, column_name, dt, col_type,
                 n_total, n_missing, n_unique,
                 min_val, max_val, vintage_label,
-                length_avg, length_max, hash_sum
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                length_avg, length_max, hash_sum, partial
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_table, column_name, dt) DO UPDATE SET
                 col_type     = excluded.col_type,
                 n_total      = excluded.n_total,
@@ -558,7 +564,8 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 vintage_label= excluded.vintage_label,
                 length_avg   = excluded.length_avg,
                 length_max   = excluded.length_max,
-                hash_sum     = excluded.hash_sum
+                hash_sum     = excluded.hash_sum,
+                partial      = excluded.partial
         """
         for stat in stats:
             cursor.execute(sql, (
@@ -575,6 +582,7 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 stat.get("length_avg", ""),
                 stat.get("length_max", ""),
                 stat.get("hash_sum", ""),
+                stat.get("partial", ""),
             ))
     else:
         # Fine: full overwrite of all stat columns.
@@ -583,8 +591,8 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 source_table, column_name, dt, col_type,
                 n_total, n_missing, n_unique, mean, std,
                 min_val, max_val, top_10, vintage_label,
-                length_avg, length_max, hash_sum
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                length_avg, length_max, hash_sum, partial
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         for stat in stats:
             cursor.execute(sql, (
@@ -604,6 +612,7 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 stat.get("length_avg", ""),
                 stat.get("length_max", ""),
                 stat.get("hash_sum", ""),
+                stat.get("partial", ""),
             ))
 
     conn.commit()
@@ -1238,12 +1247,21 @@ def oracle_connect(conn_macro: str, *, user: Optional[str] = None,
             f"Set DTRACK_ORACLE_MACROS=name:service to add more."
         )
 
-    user = user or os.environ.get('PCDS_USR')
-    password = password or os.environ.get(f'{conn_macro}_pwd')
+    # Per-macro overrides ({macro}_USR / {macro}_PWD) win over the shared
+    # PCDS_USR + lowercase {macro}_pwd fallback so a single process can talk
+    # to multiple Oracle services with distinct credentials.
+    user = (user
+            or os.environ.get(f'{conn_macro}_USR')
+            or os.environ.get('PCDS_USR'))
+    password = (password
+                or os.environ.get(f'{conn_macro}_PWD')
+                or os.environ.get(f'{conn_macro}_pwd'))
     if not user:
-        raise RuntimeError("PCDS_USR not set (pass user= or set env var)")
+        raise RuntimeError(
+            f"No Oracle user for '{conn_macro}': set {conn_macro}_USR or PCDS_USR")
     if not password:
-        raise RuntimeError(f"{conn_macro}_pwd not set (pass password= or set env var)")
+        raise RuntimeError(
+            f"No Oracle password for '{conn_macro}': set {conn_macro}_PWD or {conn_macro}_pwd")
 
     tmpl = ldap_dsn if ldap_dsn is not None else os.environ.get('LDAP_DSN', '')
     if tmpl:
@@ -1909,7 +1927,7 @@ def ensure_coarse_stat_columns(db_path: str) -> None:
     displays without flagging spurious diffs.
     """
     conn = sqlite3.connect(db_path)
-    for col in ("length_avg", "length_max", "hash_sum"):
+    for col in ("length_avg", "length_max", "hash_sum", "partial"):
         try:
             conn.execute(f"ALTER TABLE _col_stats ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:

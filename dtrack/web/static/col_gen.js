@@ -610,8 +610,10 @@ async function generateAll() {
     // Detect platforms
     const awsSources = new Set(['aws', 'csv']);
     const oracleSources = new Set(['oracle']);
+    const hadoopSources = new Set(['hadoop']);
     const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
     const hasOracle = selected.some(p => oracleSources.has(p.left?.source) || oracleSources.has(p.right?.source));
+    const hasHadoop = selected.some(p => hadoopSources.has(p.left?.source) || hadoopSources.has(p.right?.source));
 
     // The backend resolves per-pair fromDate/toDate from the config (set by
     // each card's From/To inputs via savePairSettings above). We only pass
@@ -656,6 +658,7 @@ async function generateAll() {
             if (result.sas_file) logMessage(`SAS file: ${result.sas_file}`, 'success');
             if (result.sql_file) logMessage(`SQL file (AWS): ${result.sql_file}`, 'success');
             if (result.oracle_sql_file) logMessage(`SQL file (Oracle): ${result.oracle_sql_file}`, 'success');
+            if (result.hadoop_sql_file) logMessage(`SQL file (Hadoop): ${result.hadoop_sql_file}`, 'success');
             logMessage('Col script generation complete.', 'success');
         } else {
             logMessage(`Generation error: ${result.error}`, 'error');
@@ -667,7 +670,7 @@ async function generateAll() {
     }
 
     // Show Run buttons for platforms that have selected pairs.
-    if (hasAws || hasOracle) {
+    if (hasAws || hasOracle || hasHadoop) {
         const btnDiv = document.createElement('div');
         btnDiv.style.cssText = 'margin:12px 0; display:flex; gap:12px; align-items:center; flex-wrap:wrap;';
         const parts = [];
@@ -681,6 +684,11 @@ async function generateAll() {
             parts.push(`<button class="btn-secondary" id="resume-oracle-col-btn"
                 title="Re-run only blocks not already cached.">Resume Oracle</button>`);
         }
+        if (hasHadoop) {
+            parts.push(`<button class="btn-primary" id="run-hadoop-col-btn">Run Hadoop Extraction</button>`);
+            parts.push(`<button class="btn-secondary" id="resume-hadoop-col-btn"
+                title="Re-run only blocks not already cached.">Resume Hadoop</button>`);
+        }
         btnDiv.innerHTML = parts.join('\n');
         log.appendChild(btnDiv);
 
@@ -691,6 +699,10 @@ async function generateAll() {
         if (hasOracle) {
             document.getElementById('run-oracle-col-btn').onclick = () => runColExtraction('oracle', false);
             document.getElementById('resume-oracle-col-btn').onclick = () => runColExtraction('oracle', true);
+        }
+        if (hasHadoop) {
+            document.getElementById('run-hadoop-col-btn').onclick = () => runColExtraction('hadoop', false);
+            document.getElementById('resume-hadoop-col-btn').onclick = () => runColExtraction('hadoop', true);
         }
     }
 }
@@ -720,9 +732,12 @@ async function runColExtraction(platform, resume = false) {
     const state = {controller, runId: null};
     _colRunState[ctrlKey] = state;
 
-    const label = platform === 'oracle' ? 'Oracle' : 'AWS';
-    const outdirInput = platform === 'oracle' ? 'global-sas-outdir' : 'global-aws-outdir';
-    const defaultDir  = platform === 'oracle' ? './sas/' : './csv/';
+    const _LABELS = {oracle: 'Oracle', hadoop: 'Hadoop', aws: 'AWS'};
+    const label = _LABELS[platform] || 'AWS';
+    // Oracle and Hadoop both write to LEFT outdir (sas/); AWS to RIGHT (csv/).
+    const writesLeft = (platform === 'oracle' || platform === 'hadoop');
+    const outdirInput = writesLeft ? 'global-sas-outdir' : 'global-aws-outdir';
+    const defaultDir  = writesLeft ? './sas/' : './csv/';
     const fname = 'extract_col.sql';
     const originalText = btn.textContent;
     const originalBg = btn.style.background;
@@ -741,8 +756,8 @@ async function runColExtraction(platform, resume = false) {
             : `Running ${label} col extraction from ${outdir}${fname}...`,
         'info');
 
-    // Oracle (left) reads global-njob-left; AWS (right) reads global-njob-right.
-    const njobInput = platform === 'oracle' ? 'global-njob-left' : 'global-njob-right';
+    // Oracle/Hadoop (left) read global-njob-left; AWS (right) reads global-njob-right.
+    const njobInput = writesLeft ? 'global-njob-left' : 'global-njob-right';
 
     try {
         const reqBody = {

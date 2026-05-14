@@ -325,6 +325,16 @@ async def api_run_sql_file(request: Request):
                     resume=resume,
                     cancel_event=cancel_event,
                 )
+            elif platform == "hadoop":
+                from ..platforms.hadoop import run_hadoop_sql_file
+                results = run_hadoop_sql_file(
+                    sql_path, outdir,
+                    max_workers=int(max_workers) if max_workers else None,
+                    db_path=_db_path,
+                    on_progress=_on_progress,
+                    resume=resume,
+                    cancel_event=cancel_event,
+                )
             else:
                 from ..platforms.athena import run_sql_file
                 results = run_sql_file(
@@ -663,6 +673,30 @@ async def api_generate_files(request: Request):
                         oracle_tables, sas_outdir,
                         db_path=_db_path, vintage=None)
                 results["oracle_sql_file"] = oracle_sql_path
+
+            # Generate Hadoop SQL file (gen-first plain Hive SQL, parallels
+            # Oracle). Hadoop tables also write to the left outdir.
+            hadoop_tables = [t for t in all_tables
+                             if t.get('source', '').lower() == 'hadoop']
+            if hadoop_tables:
+                from ..platforms.hadoop import (
+                    _write_combined_row_sql_hadoop,
+                    _write_combined_col_sql_hadoop,
+                    _discover_and_write_columns,
+                )
+                from ..platforms.base import fill_columns_from_meta
+                os.makedirs(sas_outdir, exist_ok=True)
+                _discover_and_write_columns(hadoop_tables, sas_outdir, _db_path)
+                if extract_type == "row":
+                    hadoop_sql_path = _write_combined_row_sql_hadoop(
+                        hadoop_tables, sas_outdir,
+                        db_path=_db_path, vintage=None)
+                else:
+                    fill_columns_from_meta(hadoop_tables, _db_path)
+                    hadoop_sql_path = _write_combined_col_sql_hadoop(
+                        hadoop_tables, sas_outdir,
+                        db_path=_db_path, vintage=None)
+                results["hadoop_sql_file"] = hadoop_sql_path
 
             # Generate SQL file
             aws_tables = [t for t in all_tables
@@ -4310,7 +4344,7 @@ async def api_playground_run(request: Request):
     conn_id = body.get("conn") or ""
     row_cap = int(body.get("row_cap") or 200)
 
-    if engine not in ("athena", "oracle"):
+    if engine not in ("athena", "oracle", "hadoop"):
         return JSONResponse(status_code=400, content={"error": f"Unsupported engine: {engine!r}"})
     if not sql:
         return JSONResponse(status_code=400, content={"error": "SQL is required"})
@@ -4374,13 +4408,34 @@ async def api_playground_run(request: Request):
                 total_sec = round(ms / 1000.0, 4)
             data_scanned = getattr(cur, 'data_scanned_in_bytes', None)
             query_id = getattr(cur, 'query_id', None)
-        else:
+        elif engine == "oracle":
             from ..db import oracle_connect
             if not conn_id:
                 raise ValueError("Oracle requires a connection macro (conn).")
             conn = oracle_connect(conn_id)
             if conn is None:
                 raise RuntimeError("oracle_connect returned None (mock mode?)")
+            cur = conn.cursor()
+            handle["cursor"] = cur
+            handle["conn"]   = conn
+            cur.execute(sql)
+            columns = [d[0] for d in (cur.description or [])]
+            fetched = cur.fetchall() or []
+            n_rows_total = len(fetched)
+            rows = [_row_to_strs(r, len(columns)) for r in fetched[:row_cap]]
+            try:
+                cur.close()
+                conn.close()
+            except Exception:
+                pass
+        else:
+            from ..platforms.hadoop import hadoop_connect
+            # Empty conn → hadoop_connect picks HADOOP_DSN env or
+            # 'Hive_Prod'. SSL_CERT_FILE and DSN-not-found diagnostics
+            # are owned by hadoop_connect so all callers benefit.
+            conn = hadoop_connect(conn_id or None)
+            if conn is None:
+                raise RuntimeError("hadoop_connect returned None (mock mode?)")
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn

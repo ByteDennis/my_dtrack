@@ -122,6 +122,7 @@ function pgRepopulateConnDatalist() {
     const eng = _pgEngine();
     const key = eng === 'athena' ? 'aws'
               : eng === 'oracle' ? 'oracle'
+              : eng === 'hadoop' ? 'hadoop'
               : null;
     const macros = key ? (_pgConnMacros[key] || []) : [];
     dl.innerHTML = macros.map(m => `<option value="${m}">`).join('');
@@ -201,6 +202,12 @@ function pgEngineChanged() {
                 '-- Tip: for column names that start with a digit or contain\n' +
                 '-- special chars, use double quotes — e.g. SELECT "123_col" FROM t.\n' +
                 '-- Single quotes \'\' make the value a string literal, not an identifier.';
+        } else if (eng === 'hadoop') {
+            label.textContent = 'Hive ODBC DSN (default Hive_Prod)';
+            conn.placeholder = 'Hive_Prod';
+            sqlBox.placeholder = "SELECT COUNT(*) FROM schema.tbl WHERE trade_date >= '2026-05-01'\n" +
+                "\n-- Connects via pyodbc.connect('DSN=<name>', autocommit=True).\n" +
+                "-- SSL_CERT_FILE is temporarily unset around the connect call.";
         } else {
             label.textContent = 'Oracle macro (e.g. pb23)';
             conn.placeholder = 'pb23';

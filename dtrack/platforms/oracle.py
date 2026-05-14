@@ -67,16 +67,24 @@ def _log_sql(col, sql):
 def _oracle_portable_hash16(value_sql):
     """Oracle SQL expression: 16-bit unsigned BIGINT from MD5 of TRIM(value).
 
-    Mirrors _athena_portable_hash16's recipe (TRIM -> MD5 -> first 4 hex chars
-    -> integer) so SUM(cnt * hash16) agrees cross-platform on identical
-    categorical data. Without this match, hash_sum would diverge purely from
-    hashing-function differences and falsely flag drift on Hadoop/AWS/Oracle
-    comparisons. STANDARD_HASH is available on Oracle 11g+ without extra
-    privileges; result is a RAW that to-string yields uppercase hex, which
-    TO_NUMBER('XXXX') consumes directly.
+    Mirrors Athena's `_athena_portable_hash16` (TRIM -> UTF-8 bytes -> MD5
+    -> first 4 hex chars -> int) so SUM(cnt * hash16) agrees cross-engine
+    on identical categorical data.
+
+    UTL_I18N.STRING_TO_RAW(..., 'AL32UTF8') forces UTF-8 byte encoding
+    BEFORE hashing, so the MD5 input is independent of the database's
+    NLS_CHARACTERSET. Without this, an Oracle install configured for
+    WE8ISO8859P1 or US7ASCII would hash different bytes than
+    Athena/Trino's TO_UTF8(...) and `hash_sum` would falsely flag drift
+    against an Athena counterpart that holds identical data.
+
+    Result is a RAW that to-string yields uppercase hex; TO_NUMBER('XXXX')
+    consumes the first 4 hex chars directly into [0, 65535].
     """
     return (
-        f"TO_NUMBER(SUBSTR(STANDARD_HASH(TRIM({value_sql}), 'MD5'), 1, 4), 'XXXX')"
+        f"TO_NUMBER(SUBSTR(STANDARD_HASH("
+        f"UTL_I18N.STRING_TO_RAW(TRIM({value_sql}), 'AL32UTF8'), 'MD5'), "
+        f"1, 4), 'XXXX')"
     )
 
 
@@ -208,10 +216,10 @@ FROM {full_table} WHERE {wc}{group_by}"""
     sql = f"""{cte_prefix}
 WITH freq AS (
     SELECT {freq_dt_select} AS dt,
-           SUBSTR(TO_CHAR({col_expr_cat}), 1, 4000) AS p_col,
+           SUBSTR(TO_CHAR({col_expr_cat}), 1, 200) AS p_col,
            COUNT(*) AS cnt
     FROM {full_table} WHERE {wc}
-    GROUP BY SUBSTR(TO_CHAR({col_expr_cat}), 1, 4000){freq_dt_group}
+    GROUP BY SUBSTR(TO_CHAR({col_expr_cat}), 1, 200){freq_dt_group}
 ),
 ranked AS (
     SELECT dt, p_col, cnt,
@@ -280,6 +288,66 @@ LEFT JOIN top_n   tn ON t.dt = tn.dt
 LEFT JOIN lenhash lh ON t.dt = lh.dt
 ORDER BY t.dt"""
     return sql, False
+
+
+def _build_lifeboat_col_sql_oracle(tbl_cfg, col, dtype, full_table,
+                                   cte_prefix="", vintage=None,
+                                   date_dtype=None, date_format=None,
+                                   dt_label=None):
+    """Resource-exhaustion fallback SQL: same row schema as the full per-column
+    query, but only computes streaming aggregates that never spill TEMP.
+
+    Drops COUNT(DISTINCT) (n_unique → NULL), the freq-table-derived
+    rank-weighted mean/std (NULL), min/max (NULL), top_10 (''), and the
+    length_avg/length_max/hash_sum signals that depend on the freq table.
+    What survives: n_total (COUNT(*)) and n_missing (COUNT(*) - COUNT(col)),
+    both single-pass. Matches the column list of the normal builder so the
+    CSV header stays stable across degrade and non-degrade rows.
+
+    Called by `_write_combined_col_sql_oracle` to embed a `/* @degrade_sql */`
+    block alongside every full column SQL — the gen-first runner swaps to
+    this when it catches ORA-01652 (temp tablespace) or ORA-04030 (PGA).
+    """
+    date_col = tbl_cfg['date_col']
+    col_q = quote_ident(col, "oracle")
+    date_col_q = quote_ident(date_col, "oracle")
+    where = tbl_cfg.get('where', '')
+    if not vintage:
+        vintage = tbl_cfg.get('vintage', 'all') or 'all'
+    numeric = is_numeric_type(dtype, is_oracle=True)
+    wc = where.strip() if where else "(1=1)"
+
+    if dt_label is not None:
+        dt_select = f"'{dt_label}' AS dt"
+        group_by = ""
+    elif vintage == 'all':
+        dt_select = "'all' AS dt"
+        group_by = ""
+    else:
+        dt_expr = _vintage_date_expr_oracle(date_col_q, vintage, date_dtype, date_format)
+        dt_select = f"TO_CHAR({dt_expr}, 'YYYY-MM-DD') AS dt"
+        group_by = f"\nGROUP BY {dt_expr}"
+
+    col_expr = apply_null_sentinels(
+        col_q, dtype or ("numeric" if numeric else "categorical"), "oracle")
+    col_type_label = 'numeric' if numeric else 'categorical'
+    return f"""{cte_prefix}
+SELECT
+    {dt_select},
+    '{col_type_label}' AS col_type,
+    '{col}' AS column_name,
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col_expr}) AS n_missing,
+    CAST(NULL AS NUMBER) AS n_unique,
+    CAST(NULL AS NUMBER) AS mean,
+    CAST(NULL AS NUMBER) AS std,
+    CAST(NULL AS VARCHAR2(1)) AS min_val,
+    CAST(NULL AS VARCHAR2(1)) AS max_val,
+    '' AS top_10,
+    '' AS length_avg,
+    '' AS length_max,
+    '' AS hash_sum
+FROM {full_table} WHERE {wc}{group_by}"""
 
 
 def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
@@ -403,6 +471,26 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None, vintage=
         orig_where = tbl.get('where', '')
         date_bounds = tbl.get('_date_bounds', '')
 
+        # User-typed per-pair excludeDates (from the col_gen_rough card).
+        # Mirrors Athena's `_exclude_dates` -> NOT IN plumbing so the WHERE
+        # picks up manual excludes regardless of vintage / sql_mode.
+        exclude_dates = tbl.get('_exclude_dates', []) or []
+        exclude_clause = ""
+        if exclude_dates:
+            in_clause = build_date_in_clause(
+                date_col, exclude_dates, date_dtype,
+                date_format=date_format,
+            )
+            exclude_clause = f"NOT ({in_clause})"
+            print(f"  {qname}: excluding {len(exclude_dates)} dates")
+
+        def _and_exclude(wc):
+            if not exclude_clause:
+                return wc
+            if not wc or not wc.strip():
+                return exclude_clause
+            return f"{wc} AND {exclude_clause}"
+
         # work_units: list of (bucket_label, where_for_this_bucket, dt_label)
         # bucket_label drives the block name suffix; dt_label is the literal
         # the SQL emits as the dt column.
@@ -411,25 +499,24 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None, vintage=
             buckets = {}
             for dt in date_filter['dates']:
                 buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
-            excluded_dates = date_filter.get('excluded_dates') or []
             for bucket_key in sorted(buckets.keys()):
                 bucket_dates = buckets[bucket_key]
                 dw = build_date_range_with_gaps(
                     date_col, bucket_dates, date_dtype,
-                    date_format=date_format, excluded_dates=excluded_dates)
+                    date_format=date_format)
                 bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
-                work_units.append((bucket_key, bucket_where, bucket_key))
+                work_units.append((bucket_key, _and_exclude(bucket_where), bucket_key))
         elif date_filter['filter_type'] == 'in_list':
             dw = build_date_in_clause(
                 date_col, date_filter['dates'], date_dtype,
                 date_format=date_format)
             bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
-            work_units.append(('sample', bucket_where, 'sample'))
+            work_units.append(('sample', _and_exclude(bucket_where), 'sample'))
         elif date_bounds:
             bw = f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds
-            work_units.append(('all', bw, 'all'))
+            work_units.append(('all', _and_exclude(bw), 'all'))
         else:
-            work_units.append(('all', orig_where, 'all'))
+            work_units.append(('all', _and_exclude(orig_where), 'all'))
 
         for col, dtype in non_date_cols:
             for bucket_label, bucket_where, dt_label in work_units:
@@ -446,6 +533,12 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None, vintage=
                         date_dtype=None, date_format=None,
                         dt_label=dt_label,
                     )
+                    lifeboat_sql = _build_lifeboat_col_sql_oracle(
+                        extract_cfg, col, dtype, full_table, cte_prefix,
+                        vintage='all',
+                        date_dtype=None, date_format=None,
+                        dt_label=dt_label,
+                    )
                 except Exception as e:
                     blocks.append(f"-- {qname}/{col}/{bucket_label}")
                     blocks.append(f"-- SKIP: SQL build failed: {e}")
@@ -455,6 +548,9 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None, vintage=
                 blocks.append(f"/* @conn_macro={conn_macro} */")
                 blocks.append(sql.strip())
                 blocks.append(";")
+                blocks.append("/* @degrade_sql")
+                blocks.append(lifeboat_sql.strip())
+                blocks.append("@end_degrade */")
                 blocks.append("")
 
     sql_path = os.path.join(outdir, oracle_sql_filename("col"))
@@ -522,6 +618,15 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
     extract_date_dtype = date_filter.get('date_dtype')
     extract_date_format = date_filter.get('date_format')
 
+    exclude_dates = tbl_cfg.get('_exclude_dates', []) or []
+    exclude_clause = ""
+    if exclude_dates:
+        in_clause = build_date_in_clause(
+            date_col, exclude_dates, extract_date_dtype,
+            date_format=extract_date_format,
+        )
+        exclude_clause = f"NOT ({in_clause})"
+
     if date_filter['filter_type'] == 'between':
         from ..date_utils import bucket_date
         buckets = {}
@@ -529,8 +634,7 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
             buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
         dw = build_date_range_with_gaps(
             date_col, date_filter['dates'],
-            extract_date_dtype, date_format=date_filter.get('date_format'),
-            excluded_dates=date_filter.get('excluded_dates') or [])
+            extract_date_dtype, date_format=date_filter.get('date_format'))
         extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
         print(f"  {len(buckets)} vintage buckets ({effective_vintage}) -- GROUP BY")
     elif date_filter['filter_type'] == 'in_list':
@@ -543,6 +647,10 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
     elif date_bounds:
         extract_cfg['where'] = (
             f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds)
+
+    if exclude_clause:
+        wc = extract_cfg.get('where', '') or ''
+        extract_cfg['where'] = f"{wc} AND {exclude_clause}" if wc.strip() else exclude_clause
 
     bucket_desc = 'sample' if date_filter['filter_type'] == 'in_list' else effective_vintage
     dt_label = 'sample' if date_filter['filter_type'] == 'in_list' else None
@@ -613,6 +721,9 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
         # Numeric rows leave these empty (format divergence across engines
         # would generate false drift hits on numbers).
         'length_avg', 'length_max', 'hash_sum',
+        # Lifeboat retry marker (always '' on the direct path — only the
+        # gen-first runner can trigger the degrade fallback).
+        'partial',
     ]
     with open(csv_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -658,12 +769,18 @@ def _build_row_sql_oracle(tbl_cfg, db_path=None, vintage=None):
     date_format = date_filter.get('date_format')
 
     dt_expr = _vintage_date_expr_oracle(date_col_q, 'day', date_dtype, date_format)
+    # No ORDER BY: a global sort over a wide date range funnels every
+    # group through one coordinator node (SINGLE[] in EXPLAIN). For
+    # high-cardinality date columns this is the dominant cost and the
+    # usual cause of "Query exhausted resources at this scale factor"
+    # on Athena and ORA-01652 on Oracle. We sort client-side after
+    # loading the CSV — the row count is small and ordering there is
+    # free.
     return f"""{cte_prefix}
 SELECT TO_CHAR({dt_expr}, 'YYYY-MM-DD') AS dt,
        COUNT(*) AS row_count
 FROM {full_table} WHERE {wc}
-GROUP BY {dt_expr}
-ORDER BY {dt_expr}""".strip()
+GROUP BY {dt_expr}""".strip()
 
 
 def oracle_sql_filename(extract_type):
@@ -738,12 +855,26 @@ def parse_oracle_sql_file(sql_path):
     def _flush():
         if current_name is None:
             return
-        sql = '\n'.join(current_lines).strip().rstrip(';').strip()
+        raw = '\n'.join(current_lines).strip()
+        # Strip the embedded `/* @degrade_sql ... @end_degrade */` lifeboat
+        # comment off the main SQL before passing to the executor. The
+        # lifeboat is captured separately so the runner can re-execute it
+        # on resource exhaustion (ORA-01652 / ORA-04030).
+        dm = re.search(
+            r"/\*\s*@degrade_sql\s*(.*?)\s*@end_degrade\s*\*/",
+            raw, flags=re.DOTALL)
+        degrade_sql = None
+        if dm:
+            degrade_sql = dm.group(1).strip().rstrip(';').strip()
+            raw = (raw[:dm.start()] + raw[dm.end():]).strip()
+        sql = raw.strip().rstrip(';').strip()
         if not sql:
             return
         m = re.search(r"/\*\s*@conn_macro=(\S+?)\s*\*/", sql)
         conn_macro = m.group(1) if m else None
-        blocks.append({"name": current_name, "sql": sql, "conn_macro": conn_macro})
+        blocks.append({"name": current_name, "sql": sql,
+                       "conn_macro": conn_macro,
+                       "degrade_sql": degrade_sql})
 
     for line in text.split('\n'):
         stripped = line.strip()
@@ -812,6 +943,9 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
         'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
         'length_avg', 'length_max', 'hash_sum',
+        # Lifeboat marker: 'oracle_degraded' on rows produced by the
+        # @degrade_sql retry after ORA-01652/ORA-04030; empty otherwise.
+        'partial',
     ]
     table_blocks = {}
     for block in blocks:
@@ -882,24 +1016,52 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                          "table": qname, "running": running_now,
                          "total": total_blocks, "eta_sec": eta_sec})
 
+        degraded = False
         try:
-            rows = _query_oracle(sql, conn_macro)
+            try:
+                rows = _query_oracle(sql, conn_macro)
+            except Exception as exc:
+                # ORA-01652 (temp tablespace exhausted) / ORA-04030 (PGA
+                # limit) on a high-cardinality COUNT(DISTINCT) get one
+                # retry with the embedded lifeboat SQL, which drops the
+                # spilling aggregates. Any other error bubbles up
+                # unchanged so legitimate failures still surface.
+                lifeboat = block.get('degrade_sql')
+                err_str = str(exc)
+                is_resource_err = ('ORA-01652' in err_str
+                                   or 'ORA-04030' in err_str)
+                if is_col and lifeboat and is_resource_err:
+                    print(f"  [degrade] {block_name}: {err_str.splitlines()[0]}"
+                          f" — retrying without n_unique/hash_sum", file=sys.stderr)
+                    rows = _query_oracle(lifeboat, conn_macro)
+                    degraded = True
+                else:
+                    raise
             elapsed = time.time() - start_time
 
             if is_col:
+                if degraded:
+                    for r in rows:
+                        r['partial'] = 'oracle_degraded'
                 with _col_rows_lock:
                     _col_rows_by_table.setdefault(qname, []).extend(
                         [r for r in rows])
             else:
                 csv_path = os.path.join(outdir, f"{qname}{file_suffix}")
+                # Server-side ORDER BY was dropped from the row SQL (it
+                # forces a single-coordinator funnel that blows up at
+                # scale). Sort here on the way out so the CSV still reads
+                # in date order for human inspection.
+                sorted_rows = sorted(rows, key=lambda r: str(r.get('dt', '')))
                 with open(csv_path, 'w', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow(['dt', 'row_count'])
-                    for r in rows:
+                    for r in sorted_rows:
                         writer.writerow([str(r.get('dt', '')), r.get('row_count', 0)])
 
             result = {"name": block_name, "ok": True, "rows": len(rows),
-                      "elapsed": round(elapsed, 1), "start": start_ts}
+                      "elapsed": round(elapsed, 1), "start": start_ts,
+                      "degraded": degraded}
             if not is_col:
                 result["csv_path"] = os.path.join(outdir, f"{qname}{file_suffix}")
         except Exception as e:

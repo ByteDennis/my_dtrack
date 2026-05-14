@@ -348,6 +348,10 @@ _COL_STATS_ALIASES = {
     'length_avg': ['length_avg', 'len_avg', 'avg_len'],
     'length_max': ['length_max', 'len_max', 'max_len'],
     'hash_sum': ['hash_sum', 'hashsum'],
+    # Lifeboat retry marker: 'oracle_degraded' / 'athena_degraded' on rows
+    # where the SQL-file runner fell back to a NULL-n_unique fallback query
+    # after a resource exhaustion error. Empty/absent for normal rows.
+    'partial': ['partial', 'degraded'],
 }
 
 
@@ -472,6 +476,7 @@ def load_precomputed_col_stats(
                 "length_avg": _get("length_avg", ""),
                 "length_max": _get("length_max", ""),
                 "hash_sum": _get("hash_sum", ""),
+                "partial": _get("partial", ""),
             }
             stats.append(stat)
 

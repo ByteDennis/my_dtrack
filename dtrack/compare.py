@@ -331,6 +331,16 @@ def compare_column_stats(
             l_unique = _safe_int(left_stat["n_unique"])
             r_unique = _safe_int(right_stat["n_unique"])
 
+            # Lifeboat-retry marker: when either side's row came from the
+            # `@degrade_sql` fallback path (engine ran out of TEMP / memory
+            # on the COUNT(DISTINCT) and the runner re-executed a minimal
+            # n_total/n_missing-only query), n_unique and hash_sum are NULL
+            # by design. Carry the marker through so _has_col_differences
+            # can treat those two cells as "skipped, not a mismatch".
+            l_partial = (left_stat.get("partial") or "").strip()
+            r_partial = (right_stat.get("partial") or "").strip()
+            unique_skipped = bool(l_partial) or bool(r_partial)
+
             comparison = {
                 "dt": dt,
                 "vintage_label": left_stat.get("vintage_label") or dt,
@@ -348,6 +358,9 @@ def compare_column_stats(
                 "n_unique_left": l_unique,
                 "n_unique_right": r_unique,
                 "n_unique_diff": r_unique - l_unique,
+                "partial_left": l_partial,
+                "partial_right": r_partial,
+                "n_unique_skipped": unique_skipped,
             }
 
             # min/max are emitted as "val=cnt" on every coarse-and-fine path
@@ -395,6 +408,14 @@ def compare_column_stats(
                 raw_r = right_stat.get(field)
                 lv = raw_l.strip() if isinstance(raw_l, str) else (raw_l or "")
                 rv = raw_r.strip() if isinstance(raw_r, str) else (raw_r or "")
+                # Hash_sum from a lifeboat row is intentionally absent;
+                # treat as "skipped" so degraded rows don't paint the cell
+                # red just because one side dropped the aggregate.
+                if field == "hash_sum" and unique_skipped:
+                    comparison[f"{field}_left"] = lv
+                    comparison[f"{field}_right"] = rv
+                    comparison[f"{field}_match"] = None
+                    continue
                 if lv and rv:
                     if field == "hash_sum":
                         # Relative tolerance: at the 1e12-1e17 magnitudes
@@ -475,7 +496,10 @@ def _has_col_differences(comp):
         return True
     if comp.get('n_missing_diff', 0) != 0:
         return True
-    if comp.get('n_unique_diff', 0) != 0:
+    # When either side ran the lifeboat retry (resource exhaustion on
+    # COUNT(DISTINCT)), n_unique is NULL by design — a 0-vs-N "diff" here
+    # is noise, not drift. Suppress.
+    if comp.get('n_unique_diff', 0) != 0 and not comp.get('n_unique_skipped'):
         return True
 
     if comp.get('mean_match') is False:

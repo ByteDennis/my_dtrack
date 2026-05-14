@@ -1142,13 +1142,15 @@ async function generateAll() {
     // --- Step 2: Detect platforms ---
     const awsSources = new Set(['aws', 'csv']);
     const oracleSources = new Set(['oracle']);
+    const hadoopSources = new Set(['hadoop']);
     const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
     const hasOracle = selected.some(p => oracleSources.has(p.left?.source) || oracleSources.has(p.right?.source));
-    // "SAS" header now covers SAS-local + Hadoop only (Oracle moved to direct extraction).
+    const hasHadoop = selected.some(p => hadoopSources.has(p.left?.source) || hadoopSources.has(p.right?.source));
+    // "SAS" header now covers SAS-local only (Oracle and Hadoop both moved to gen-first plain SQL extraction).
     const hasSas = selected.some(p => {
         const ls = p.left?.source, rs = p.right?.source;
-        return (ls && !awsSources.has(ls) && !oracleSources.has(ls)) ||
-               (rs && !awsSources.has(rs) && !oracleSources.has(rs));
+        return (ls && !awsSources.has(ls) && !oracleSources.has(ls) && !hadoopSources.has(ls)) ||
+               (rs && !awsSources.has(rs) && !oracleSources.has(rs) && !hadoopSources.has(rs));
     });
 
     // --- Step 3: Render two-column review (SAS/Hadoop | AWS/Athena/Oracle) ---
@@ -1167,6 +1169,7 @@ async function generateAll() {
                 <span style="display:flex; gap:6px;">
                     ${hasAws ? `<button class="btn-primary" id="run-aws-btn" style="font-size:11px; padding:3px 10px;">Run AWS Extraction</button>` : ''}
                     ${hasOracle ? `<button class="btn-primary" id="run-oracle-btn" style="font-size:11px; padding:3px 10px;">Run Oracle Extraction</button>` : ''}
+                    ${hasHadoop ? `<button class="btn-primary" id="run-hadoop-btn" style="font-size:11px; padding:3px 10px;">Run Hadoop Extraction</button>` : ''}
                 </span>
             </div>
         </div>
@@ -1226,6 +1229,7 @@ async function generateAll() {
             if (result.sas_file) logMessage(`SAS file: ${result.sas_file}`, 'success');
             if (result.sql_file) logMessage(`SQL file (AWS): ${result.sql_file}`, 'success');
             if (result.oracle_sql_file) logMessage(`SQL file (Oracle): ${result.oracle_sql_file}`, 'success');
+            if (result.hadoop_sql_file) logMessage(`SQL file (Hadoop): ${result.hadoop_sql_file}`, 'success');
         } else {
             logMessage(`File generation error: ${result.error}`, 'error');
         }
@@ -1242,9 +1246,13 @@ async function generateAll() {
     async function _runExtraction(platform, btnId) {
         const btn = document.getElementById(btnId);
         if (!btn) return;
-        const label = platform === 'oracle' ? 'Oracle' : 'AWS';
-        const outdirInput = platform === 'oracle' ? 'global-sas-outdir' : 'global-aws-outdir';
-        const defaultDir  = platform === 'oracle' ? './sas/' : './csv/';
+        const _LABELS = {oracle: 'Oracle', hadoop: 'Hadoop', aws: 'AWS'};
+        const label = _LABELS[platform] || 'AWS';
+        // Oracle and Hadoop both write to the LEFT outdir (sas/) since both are
+        // gen-first plain SQL flows; AWS keeps the RIGHT outdir.
+        const writesLeft = (platform === 'oracle' || platform === 'hadoop');
+        const outdirInput = writesLeft ? 'global-sas-outdir' : 'global-aws-outdir';
+        const defaultDir  = writesLeft ? './sas/' : './csv/';
         const fname = 'extract_row.sql';
         const originalText = btn.textContent;
         const originalBg = btn.style.background;
@@ -1270,7 +1278,7 @@ async function generateAll() {
             const outdir = document.getElementById(outdirInput)?.value || defaultDir;
             // Oracle (left) reads its own worker count; AWS (right) reads
             // global-njob-right. Mirrors the Left/Right outdir convention.
-            const njobInput = platform === 'oracle' ? 'global-njob-left' : 'global-njob-right';
+            const njobInput = writesLeft ? 'global-njob-left' : 'global-njob-right';
             logMessage(`Running ${label} extraction from ${outdir}${fname}...`, 'info');
             try {
                 const reqBody = {
@@ -1357,6 +1365,7 @@ async function generateAll() {
     }
     if (hasAws)    _runExtraction('aws',    'run-aws-btn');
     if (hasOracle) _runExtraction('oracle', 'run-oracle-btn');
+    if (hasHadoop) _runExtraction('hadoop', 'run-hadoop-btn');
 }
 
 function _configBasename() {

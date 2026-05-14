@@ -3,7 +3,97 @@
 import hashlib
 import json
 import os
+import threading
 from typing import Optional
+
+
+# Module-level lock around the SSL_CERT_FILE env mutation in hadoop_connect.
+# Two threads calling hadoop_connect concurrently would otherwise race on
+# the env pop/restore; the lock serializes the pop+connect+restore so a
+# late thread can't restore the value before an earlier thread's connect
+# is finished. Athena (boto) calls running in parallel can still observe
+# the env briefly absent — that's the trade-off the recipe accepts.
+_HADOOP_CONNECT_LOCK = threading.Lock()
+
+
+def hadoop_connect(dsn: Optional[str] = None, *,
+                   autocommit: bool = True):
+    """Connect to Hadoop / Hive via pyodbc.
+
+    DSN lookup order:
+      1. explicit `dsn` kwarg
+      2. `HADOOP_DSN` environment variable
+      3. literal default `'Hive_Prod'`
+
+    SSL_CERT_FILE is temporarily popped around the pyodbc.connect call
+    because Cloudera/Hortonworks Hive ODBC drivers read the CA bundle
+    from the DSN config; leaving SSL_CERT_FILE set (as boto3 expects)
+    makes the driver pick the wrong cert and the TLS handshake fails
+    with "SSL_connect: certificate verify failed". The original value
+    is restored in `finally` so concurrent Athena work isn't disturbed
+    once the handshake completes.
+
+    Mock mode: when `DTRACK_MOCK` or `DTRACK_HADOOP_MOCK` is set, returns
+    None so unit / integration tests don't need a live Hive cluster.
+    Mirrors the `oracle_connect` mock contract.
+
+    Raises pyodbc.InterfaceError with a richer message when the DSN
+    isn't registered (the bare ODBC error "Data source name not found
+    and no default driver specified" is opaque about WHERE the driver
+    manager looked for the DSN).
+    """
+    if os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_HADOOP_MOCK'):
+        print(f"[mock] Skipping Hadoop connection for DSN '{dsn or '?'}'")
+        return None
+
+    import pyodbc
+
+    dsn = dsn or os.environ.get('HADOOP_DSN') or 'Hive_Prod'
+
+    with _HADOOP_CONNECT_LOCK:
+        saved = os.environ.pop('SSL_CERT_FILE', None)
+        try:
+            try:
+                return pyodbc.connect(f"DSN={dsn}", autocommit=autocommit)
+            except pyodbc.InterfaceError as exc:
+                msg = str(exc)
+                if 'IM002' in msg or 'Data source name not found' in msg:
+                    # Surface what THIS Python actually sees so the user
+                    # can compare against `python -c "import pyodbc; ...
+                    # pyodbc.dataSources()"` from their shell. The bare
+                    # ODBC text just says the DSN is missing and gives
+                    # no hint that two Pythons might disagree.
+                    import struct
+                    import sys
+                    try:
+                        seen = sorted(pyodbc.dataSources().keys())
+                    except Exception:
+                        seen = []
+                    bits = struct.calcsize('P') * 8
+                    odbcini = os.environ.get('ODBCINI', '(unset)')
+                    odbcsysini = os.environ.get('ODBCSYSINI', '(unset)')
+                    hint = (
+                        f"\nDSN '{dsn}' not found by this Python's pyodbc.\n"
+                        f"  sys.executable: {sys.executable}\n"
+                        f"  bitness: {bits}-bit\n"
+                        f"  pyodbc.dataSources(): {seen or '<empty>'}\n"
+                        f"  ODBCINI={odbcini}  ODBCSYSINI={odbcsysini}\n"
+                        f"Diagnose:\n"
+                        f"  - Compare sys.executable above with the Python\n"
+                        f"    that DOES see the DSN ('which python' vs venv).\n"
+                        f"  - Windows: Get-OdbcDsn -Name {dsn} "
+                        f"| ft Name,Platform,DsnType\n"
+                        f"    A 32-bit DSN won't be visible to a 64-bit Python.\n"
+                        f"  - User DSNs are per-user; service / scheduled task\n"
+                        f"    accounts won't see another user's DSNs.\n"
+                        f"  - Linux/unixODBC: odbcinst -j ; odbcinst -q -s\n"
+                        f"  - Override DSN via HADOOP_DSN env var."
+                    )
+                    raise pyodbc.InterfaceError(msg + hint) from exc
+                raise
+        finally:
+            if saved is not None:
+                os.environ['SSL_CERT_FILE'] = saved
 
 from .base import (
     PlatformBuilder,
@@ -12,6 +102,8 @@ from .base import (
     is_numeric_type,
     is_sas_table,
     resolve_table,
+    quote_ident,
+    apply_null_sentinels,
     build_date_between_clause,
     build_date_in_clause,
     build_date_range_with_gaps,
@@ -26,6 +118,7 @@ from .base import (
     _extract_mock,
     _extract_mock_tables,
 )
+from datetime import datetime
 
 
 # ---------------------------------------------------------------------------
@@ -1394,12 +1487,10 @@ def _compute_bucket_specs(tbl_cfg, db_path):
             buckets = {}
             for dt in date_filter['dates']:
                 buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
-            excluded_dates = date_filter.get('excluded_dates') or []
             for bucket_key, dates in sorted(buckets.items()):
                 dw = build_date_range_with_gaps(
                     date_col, dates, date_dtype,
                     is_sas=is_sas_syntax, date_format=date_format,
-                    excluded_dates=excluded_dates,
                 )
                 fl, tl = format_date_bounds_literals(
                     min(dates), max(dates), date_dtype,
@@ -1514,7 +1605,6 @@ def _compute_col_spec(tbl_cfg, db_path):
             where_clause = build_date_range_with_gaps(
                 date_col, date_filter['dates'], date_dtype,
                 is_sas=is_sas, date_format=date_format,
-                excluded_dates=date_filter.get('excluded_dates') or [],
             )
         date_from_lit, date_to_lit = format_date_bounds_literals(
             bmin, bmax, date_dtype, is_sas=is_sas, date_format=date_format,
@@ -1643,12 +1733,10 @@ def _compute_oracle_bucket_specs(spec, tbl_cfg, db_path):
             buckets = {}
             for dt in date_filter['dates']:
                 buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
-            excluded_dates = date_filter.get('excluded_dates') or []
             for bucket_key, dates in sorted(buckets.items()):
                 dw = build_date_range_with_gaps(
                     date_col, dates, date_dtype,
                     is_sas=False, date_format=date_format,
-                    excluded_dates=excluded_dates,
                 )
                 bucket_specs.append((bucket_key, dw))
     elif date_filter.get('filter_type') == 'in_list':
@@ -2372,14 +2460,10 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
             buckets = {}
             for dt in date_filter['dates']:
                 buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
-            # row_comparison-derived real-diff excludes (mismatched +
-            # misload). Filtered per-bucket inside build_date_range_with_gaps.
-            excluded_dates = date_filter.get('excluded_dates') or []
             for bucket_key, dates in sorted(buckets.items()):
                 dw = build_date_range_with_gaps(
                     date_col, dates, date_dtype,
                     is_sas=is_sas, date_format=date_filter.get('date_format'),
-                    excluded_dates=excluded_dates,
                 )
                 bucket_specs.append((bucket_key, dw))
         n = len(bucket_specs)
@@ -3075,3 +3159,659 @@ GROUP BY {date_expr}"""
         type_suffix = '_' + '_'.join(sorted(types)) if types != ['row', 'col'] else ''
         sas_path = os.path.join(outdir, f'extract{type_suffix}.sas')
         return [sas_path]
+
+
+# ---------------------------------------------------------------------------
+# Plain-Hive gen-first path (mirrors Oracle's _write_combined_*_sql_oracle).
+# Emits extract_{row,col}.sql with /* @conn_macro=DSN */ markers; runner
+# parses the file and dispatches via hadoop_connect.
+# ---------------------------------------------------------------------------
+
+def hadoop_sql_filename(extract_type):
+    return f"extract_{extract_type}.sql"
+
+
+def _hadoop_vintage_expr(tbl_cfg, date_col, vintage):
+    """Hive expression that buckets `date_col` to the configured vintage
+    and returns 'YYYY-MM-DD'. Falls back to the literal date_col when no
+    truncation is needed."""
+    src = (tbl_cfg.get('source') or 'hadoop').lower()
+    date_type = tbl_cfg.get('date_type', 'string_dash')
+    expr = _date_trunc_expr(src if src in ('hadoop', 'oracle') else 'hadoop',
+                             date_col, date_type, vintage)
+    return expr or date_col
+
+
+def _build_col_sql_hadoop(tbl_cfg, col, dtype, full_table, cte_prefix="",
+                           vintage=None, dt_label=None):
+    """Build per-column stats SQL for Hive/Hadoop. Mirrors _build_col_sql_oracle
+    in shape and output schema (14 fields) so downstream loaders see identical
+    columns regardless of platform.
+    """
+    date_col = tbl_cfg['date_col']
+    col_q = quote_ident(col, "hadoop")
+    where = tbl_cfg.get('where', '')
+    if not vintage:
+        vintage = tbl_cfg.get('vintage', 'all') or 'all'
+    numeric = is_numeric_type(dtype, is_oracle=False)
+    wc = where.strip() if where else "1=1"
+
+    if dt_label is not None:
+        dt_select = f"'{dt_label}' AS dt"
+        group_by = ""
+        freq_dt_select = f"'{dt_label}'"
+        freq_dt_group = ""
+    elif vintage == 'all':
+        dt_select = "'all' AS dt"
+        group_by = ""
+        freq_dt_select = "'all'"
+        freq_dt_group = ""
+    else:
+        dt_expr = _hadoop_vintage_expr(tbl_cfg, date_col, vintage)
+        dt_select = f"{dt_expr} AS dt"
+        group_by = f"\nGROUP BY {dt_expr}"
+        freq_dt_select = dt_expr
+        freq_dt_group = f", {dt_expr}"
+
+    if numeric:
+        col_expr = apply_null_sentinels(col_q, dtype or "numeric", "hadoop")
+        sql = f"""{cte_prefix}
+SELECT
+    {dt_select},
+    '{dtype}' AS col_type,
+    '{col}' AS column_name,
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col_expr}) AS n_missing,
+    COUNT(DISTINCT {col_expr}) AS n_unique,
+    CAST(AVG(CAST({col_expr} AS DOUBLE)) AS STRING) AS mean,
+    CAST(STDDEV_SAMP(CAST({col_expr} AS DOUBLE)) AS STRING) AS std,
+    CAST(MIN({col_expr}) AS STRING) AS min_val,
+    CAST(MAX({col_expr}) AS STRING) AS max_val,
+    '' AS top_10,
+    '' AS length_avg,
+    '' AS length_max,
+    '' AS hash_sum
+FROM {full_table} WHERE {wc}{group_by}"""
+        return sql, True
+
+    # Categorical: WITH-chain mirroring Oracle's _build_col_sql_oracle, with
+    # Hive-flavored functions: concat() instead of `||`, cast(... AS STRING)
+    # instead of TO_CHAR(), concat_ws+collect_list for top_10 (best-effort
+    # ordering -- Hive's collect_list isn't strictly ordered but sort_array
+    # over a struct keeps cnt-DESC reasonably close to Oracle's LISTAGG).
+    col_expr_cat = apply_null_sentinels(col_q, dtype or "categorical", "hadoop")
+    sql = f"""{cte_prefix}
+WITH freq AS (
+    SELECT {freq_dt_select} AS dt,
+           SUBSTR(CAST({col_expr_cat} AS STRING), 1, 200) AS p_col,
+           COUNT(*) AS cnt
+    FROM {full_table} WHERE {wc}
+    GROUP BY SUBSTR(CAST({col_expr_cat} AS STRING), 1, 200){freq_dt_group}
+),
+ranked AS (
+    SELECT dt, p_col, cnt,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(TRIM(p_col)), p_col) AS rnk_alpha,
+           COUNT(*)     OVER (PARTITION BY dt) AS k_alpha,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn_freq
+    FROM freq WHERE p_col IS NOT NULL AND TRIM(p_col) <> ''
+),
+totals AS (
+    SELECT dt,
+           SUM(cnt) AS n_total,
+           COALESCE(SUM(CASE WHEN p_col IS NULL OR TRIM(p_col) = '' THEN cnt ELSE 0 END), 0) AS n_missing,
+           SUM(CASE WHEN p_col IS NOT NULL AND TRIM(p_col) <> '' THEN 1 ELSE 0 END) AS n_unique
+    FROM freq GROUP BY dt
+),
+agg AS (
+    SELECT dt,
+           SUM(cnt) AS sum_cnt,
+           SUM(cnt * rnk_alpha) AS sum_cnt_rnk,
+           SUM(cnt * rnk_alpha * rnk_alpha) AS sum_cnt_rnk2
+    FROM ranked GROUP BY dt
+),
+sstats AS (
+    SELECT dt,
+           sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0) AS mean_v,
+           SQRT(GREATEST(
+               sum_cnt_rnk2 * 1.0 / NULLIF(sum_cnt, 0)
+               - (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0))
+               * (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0)), 0)) AS std_v
+    FROM agg
+),
+minmax AS (
+    SELECT dt,
+           MAX(CASE WHEN rnk_alpha = 1       THEN concat(TRIM(p_col), '=', CAST(cnt AS STRING)) END) AS min_val,
+           MAX(CASE WHEN rnk_alpha = k_alpha THEN concat(TRIM(p_col), '=', CAST(cnt AS STRING)) END) AS max_val
+    FROM ranked GROUP BY dt
+),
+top_n AS (
+    SELECT dt,
+           concat_ws('; ', collect_list(concat(p_col, '(', CAST(cnt AS STRING), ')'))) AS top_10
+    FROM ranked WHERE rn_freq <= 10
+    GROUP BY dt
+),
+lenhash AS (
+    SELECT dt,
+           SUM(cnt * LENGTH(TRIM(p_col))) / NULLIF(SUM(cnt), 0) AS length_avg,
+           MAX(LENGTH(TRIM(p_col))) AS length_max,
+           CAST('' AS STRING) AS hash_sum
+    FROM ranked GROUP BY dt
+)
+SELECT t.dt,
+       '{col}' AS column_name,
+       '{dtype}' AS col_type,
+       t.n_total, t.n_missing, t.n_unique,
+       CAST(ss.mean_v AS STRING) AS mean,
+       CAST(ss.std_v AS STRING) AS std,
+       mm.min_val, mm.max_val,
+       COALESCE(tn.top_10, '') AS top_10,
+       CAST(lh.length_avg AS STRING) AS length_avg,
+       CAST(lh.length_max AS STRING) AS length_max,
+       CAST(lh.hash_sum AS STRING) AS hash_sum
+FROM totals t
+LEFT JOIN sstats  ss ON t.dt = ss.dt
+LEFT JOIN minmax  mm ON t.dt = mm.dt
+LEFT JOIN top_n   tn ON t.dt = tn.dt
+LEFT JOIN lenhash lh ON t.dt = lh.dt"""
+    return sql, False
+
+
+def _build_lifeboat_col_sql_hadoop(tbl_cfg, col, dtype, full_table,
+                                    cte_prefix="", vintage=None, dt_label=None):
+    """Streaming-aggregate fallback. Mirrors Oracle's lifeboat: keeps
+    n_total / n_missing (single-pass), nulls everything that needs the
+    freq table. Used by the runner if the full SQL fails with an OOM /
+    memory-limit error from Hive."""
+    date_col = tbl_cfg['date_col']
+    col_q = quote_ident(col, "hadoop")
+    where = tbl_cfg.get('where', '')
+    if not vintage:
+        vintage = tbl_cfg.get('vintage', 'all') or 'all'
+    numeric = is_numeric_type(dtype, is_oracle=False)
+    wc = where.strip() if where else "1=1"
+
+    if dt_label is not None:
+        dt_select = f"'{dt_label}' AS dt"
+        group_by = ""
+    elif vintage == 'all':
+        dt_select = "'all' AS dt"
+        group_by = ""
+    else:
+        dt_expr = _hadoop_vintage_expr(tbl_cfg, date_col, vintage)
+        dt_select = f"{dt_expr} AS dt"
+        group_by = f"\nGROUP BY {dt_expr}"
+
+    col_expr = apply_null_sentinels(
+        col_q, dtype or ("numeric" if numeric else "categorical"), "hadoop")
+    col_type_label = 'numeric' if numeric else 'categorical'
+    return f"""{cte_prefix}
+SELECT
+    {dt_select},
+    '{col_type_label}' AS col_type,
+    '{col}' AS column_name,
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col_expr}) AS n_missing,
+    CAST(NULL AS BIGINT) AS n_unique,
+    CAST(NULL AS STRING) AS mean,
+    CAST(NULL AS STRING) AS std,
+    CAST(NULL AS STRING) AS min_val,
+    CAST(NULL AS STRING) AS max_val,
+    '' AS top_10,
+    '' AS length_avg,
+    '' AS length_max,
+    '' AS hash_sum
+FROM {full_table} WHERE {wc}{group_by}"""
+
+
+def _build_row_sql_hadoop(tbl_cfg, db_path=None, vintage=None):
+    """Plain Hive row-count SQL for one table.
+
+    Mirrors the old SAS template (`rows_hadoop.sas`) and Athena: emit the
+    bare `date_col AS dt` with no normalization. Whatever native format
+    Hive returns (string YYYYMMDD, string YYYY-MM-DD, native DATE, etc.)
+    flows through to the row CSV; the row-compare side runs `parse_date`
+    on each value to canonicalize. Optional `date_transform` from config
+    wraps the column expression (matching the old SAS path's behavior).
+
+    `conn_macro` is the Hive schema/database (Athena pattern) — used in
+    the FROM clause, NOT as the ODBC DSN.
+    """
+    database = tbl_cfg.get('conn_macro', '') or ''
+    table = tbl_cfg['table']
+    date_col = tbl_cfg['date_col']
+    transform = tbl_cfg.get('date_transform', '')
+    raw_full = f"{database}.{table}" if database else table
+    full_table, cte_prefix = resolve_table(tbl_cfg, raw_full)
+    where = tbl_cfg.get('where', '')
+    wc = where.strip() if where else "1=1"
+    dt_expr = _oracle_date_transform(date_col, transform) if transform else date_col
+    return (f"{cte_prefix}\n"
+            f"SELECT {dt_expr} AS dt, COUNT(*) AS row_count\n"
+            f"FROM {full_table} WHERE {wc}\n"
+            f"GROUP BY {dt_expr}").strip()
+
+
+def _write_combined_row_sql_hadoop(hadoop_tables, outdir, db_path=None, vintage=None):
+    """extract_row.sql, one block per Hadoop table. Block format mirrors
+    Oracle: `-- {qname}` / `/* @conn_macro=DSN */` / SQL / `;`."""
+    os.makedirs(outdir, exist_ok=True)
+    blocks = [
+        "-- dtrack Hadoop row extraction queries",
+        f"-- Generated: {datetime.now().isoformat()}",
+        "",
+    ]
+    for tbl in hadoop_tables:
+        qname = qualified_name(tbl)
+        conn_macro = tbl.get('conn_macro', '') or ''
+        try:
+            sql = _build_row_sql_hadoop(tbl, db_path=db_path, vintage=vintage)
+        except Exception as e:
+            blocks.append(f"-- {qname}")
+            blocks.append(f"-- SKIP: SQL build failed: {e}")
+            blocks.append("")
+            continue
+        blocks.append(f"-- {qname}")
+        blocks.append(f"/* @conn_macro={conn_macro} */")
+        blocks.append(sql)
+        blocks.append(";")
+        blocks.append("")
+    sql_path = os.path.join(outdir, hadoop_sql_filename("row"))
+    with open(sql_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(blocks))
+    return sql_path
+
+
+def _write_combined_col_sql_hadoop(hadoop_tables, outdir, db_path=None, vintage=None):
+    """extract_col.sql for Hadoop, one block per (table, column, bucket).
+    Mirrors `_write_combined_col_sql_oracle`. User-typed `_exclude_dates`
+    from the pair card is honored here via NOT IN appended to each WHERE."""
+    from ..date_utils import bucket_date
+
+    os.makedirs(outdir, exist_ok=True)
+    blocks = [
+        "-- dtrack Hadoop col extraction queries",
+        f"-- Generated: {datetime.now().isoformat()}",
+        "",
+    ]
+    for tbl in hadoop_tables:
+        qname = qualified_name(tbl)
+        # `conn_macro` is the Hive schema/database (Athena pattern), not the
+        # ODBC DSN. The DSN is resolved from HADOOP_DSN env / 'Hive_Prod'
+        # default inside hadoop_connect() at run time.
+        conn_macro = tbl.get('conn_macro', '') or ''
+        table = tbl['table']
+        date_col = tbl.get('date_col', '')
+        raw_full = f"{conn_macro}.{table}" if conn_macro else table
+        full_table, cte_prefix = resolve_table(tbl, raw_full)
+
+        columns = tbl.get('columns', {})
+        if not columns:
+            blocks.append(f"-- {qname}")
+            blocks.append("-- SKIP: no columns defined")
+            blocks.append("")
+            continue
+        non_date_cols = [(c, d) for c, d in columns.items()
+                         if c.lower() != date_col.lower()]
+        if not non_date_cols:
+            blocks.append(f"-- {qname}")
+            blocks.append("-- SKIP: no non-date columns")
+            blocks.append("")
+            continue
+
+        table_vintage = tbl.get('vintage', vintage)
+        date_filter = compute_date_filter(tbl, db_path, table_vintage)
+        resolve_date_format(date_filter, tbl)
+        effective_vintage = date_filter.get('vintage', 'all')
+        date_dtype = date_filter.get('date_dtype')
+        date_format = date_filter.get('date_format')
+        orig_where = tbl.get('where', '')
+        date_bounds = tbl.get('_date_bounds', '')
+
+        exclude_dates = tbl.get('_exclude_dates', []) or []
+        exclude_clause = ""
+        if exclude_dates:
+            in_clause = build_date_in_clause(
+                date_col, exclude_dates, date_dtype,
+                date_format=date_format,
+            )
+            exclude_clause = f"NOT ({in_clause})"
+            print(f"  {qname}: excluding {len(exclude_dates)} dates")
+
+        def _and_exclude(wc):
+            if not exclude_clause:
+                return wc
+            if not wc or not wc.strip():
+                return exclude_clause
+            return f"{wc} AND {exclude_clause}"
+
+        work_units = []
+        if date_filter['filter_type'] == 'between':
+            buckets = {}
+            for dt in date_filter['dates']:
+                buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
+            for bucket_key in sorted(buckets.keys()):
+                bucket_dates = buckets[bucket_key]
+                dw = build_date_range_with_gaps(
+                    date_col, bucket_dates, date_dtype,
+                    date_format=date_format)
+                bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
+                work_units.append((bucket_key, _and_exclude(bucket_where), bucket_key))
+        elif date_filter['filter_type'] == 'in_list':
+            dw = build_date_in_clause(
+                date_col, date_filter['dates'], date_dtype,
+                date_format=date_format)
+            bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
+            work_units.append(('sample', _and_exclude(bucket_where), 'sample'))
+        elif date_bounds:
+            bw = f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds
+            work_units.append(('all', _and_exclude(bw), 'all'))
+        else:
+            work_units.append(('all', _and_exclude(orig_where), 'all'))
+
+        for col, dtype in non_date_cols:
+            for bucket_label, bucket_where, dt_label in work_units:
+                extract_cfg = dict(tbl)
+                extract_cfg['where'] = bucket_where
+                try:
+                    sql, _ = _build_col_sql_hadoop(
+                        extract_cfg, col, dtype, full_table, cte_prefix,
+                        vintage='all', dt_label=dt_label)
+                    lifeboat_sql = _build_lifeboat_col_sql_hadoop(
+                        extract_cfg, col, dtype, full_table, cte_prefix,
+                        vintage='all', dt_label=dt_label)
+                except Exception as e:
+                    blocks.append(f"-- {qname}/{col}/{bucket_label}")
+                    blocks.append(f"-- SKIP: SQL build failed: {e}")
+                    blocks.append("")
+                    continue
+                blocks.append(f"-- {qname}/{col}/{bucket_label}")
+                blocks.append(f"/* @conn_macro={conn_macro} */")
+                blocks.append(sql.strip())
+                blocks.append(";")
+                blocks.append("/* @degrade_sql")
+                blocks.append(lifeboat_sql.strip())
+                blocks.append("@end_degrade */")
+                blocks.append("")
+
+    sql_path = os.path.join(outdir, hadoop_sql_filename("col"))
+    with open(sql_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(blocks))
+    return sql_path
+
+
+# ---------------------------------------------------------------------------
+# Hadoop runner: parse extract_{row,col}.sql and execute via hadoop_connect.
+# Mirrors oracle.run_oracle_sql_file (block format, lifeboat retry, per-table
+# CSV flush).
+# ---------------------------------------------------------------------------
+
+def parse_hadoop_sql_file(sql_path):
+    """Same block format as Oracle: -- {name} / /* @conn_macro=DSN */ / SQL / ;
+    plus optional /* @degrade_sql ... @end_degrade */ for col."""
+    import re
+    blocks = []
+    text = open(sql_path).read()
+    current_name = None
+    current_lines = []
+
+    def _flush():
+        if current_name is None:
+            return
+        raw = '\n'.join(current_lines).strip()
+        dm = re.search(
+            r"/\*\s*@degrade_sql\s*(.*?)\s*@end_degrade\s*\*/",
+            raw, flags=re.DOTALL)
+        degrade_sql = None
+        if dm:
+            degrade_sql = dm.group(1).strip().rstrip(';').strip()
+            raw = (raw[:dm.start()] + raw[dm.end():]).strip()
+        sql = raw.strip().rstrip(';').strip()
+        if not sql:
+            return
+        m = re.search(r"/\*\s*@conn_macro=(\S*?)\s*\*/", sql)
+        conn_macro = m.group(1) if m else None
+        blocks.append({"name": current_name, "sql": sql,
+                       "conn_macro": conn_macro,
+                       "degrade_sql": degrade_sql})
+
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('-- dtrack') or stripped.startswith('-- Generated'):
+            continue
+        if stripped.startswith('-- ') and not stripped.startswith('-- ['):
+            marker = stripped[3:].strip()
+            if marker and ' ' not in marker:
+                _flush()
+                current_name = marker
+                current_lines = []
+                continue
+        current_lines.append(line)
+    _flush()
+    return blocks
+
+
+def _query_hadoop(sql, conn_macro):
+    """Execute SQL against Hive via hadoop_connect; return list[dict]
+    (lowercased col names). Returns [] when DTRACK_MOCK is set.
+
+    `conn_macro` is the Hive schema/database (Athena pattern) — already
+    baked into the FROM clause when the SQL was generated, so it is NOT
+    used to look up an ODBC DSN here. The DSN comes from HADOOP_DSN env
+    or the 'Hive_Prod' default inside hadoop_connect(), which also
+    pops/restores SSL_CERT_FILE around pyodbc.connect (it's set by boto3
+    for Athena and would otherwise make the Hive ODBC driver fail with
+    'Data source name not found' / 'IM002' because the driver re-reads
+    the wrong CA bundle and aborts the TLS handshake before DSN lookup).
+    """
+    conn = hadoop_connect()
+    if conn is None:
+        return []
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+            col_names = [d[0].lower().split('.')[-1] for d in cur.description]
+            rows = cur.fetchall()
+            return [dict(zip(col_names, r)) for r in rows]
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
+def run_hadoop_sql_file(sql_path, outdir, max_workers=None, db_path=None,
+                        on_progress=None, resume=False, cancel_event=None):
+    """Parse extract_{row,col}.sql and dispatch in parallel via
+    ThreadPoolExecutor capped at HADOOP_MAX_WORKERS (default 4). Mirrors
+    Oracle's run_oracle_sql_file: per-block conn_macro routing, lifeboat
+    retry on errors, per-qname CSV flush when a table's last block finishes."""
+    import csv
+    import re
+    import sys
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    blocks = parse_hadoop_sql_file(sql_path)
+    if not blocks:
+        print(f"No query blocks found in {sql_path}")
+        return []
+
+    basename = os.path.basename(sql_path)
+    is_col = "extract_col" in basename
+    file_suffix = "_col.csv" if is_col else "_row.csv"
+
+    os.makedirs(outdir, exist_ok=True)
+    env_workers = os.environ.get('HADOOP_MAX_WORKERS')
+    _max_workers = max_workers if max_workers else (
+        int(env_workers) if env_workers else 4)
+    _max_workers = max(1, min(_max_workers, len(blocks)))
+
+    _COL_HEADERS = [
+        'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
+        'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
+        'length_avg', 'length_max', 'hash_sum', 'partial',
+    ]
+    table_blocks = {}
+    for block in blocks:
+        qname = block['name'].split('/')[0] if '/' in block['name'] else block['name']
+        table_blocks.setdefault(qname, []).append(block)
+    _col_rows_lock = threading.Lock()
+    _col_rows_by_table = {}
+
+    print(f"  Parsed {len(blocks)} blocks ({len(table_blocks)} tables) "
+          f"from {sql_path}, workers={_max_workers}", file=sys.stderr)
+
+    results = []
+    _done_count = [0]
+    _done_lock = threading.Lock()
+    _table_done = {q: {'done': 0, 'total': len(bs)}
+                   for q, bs in table_blocks.items()}
+    _table_lock = threading.Lock()
+    _running_count = [0]
+    _running_lock = threading.Lock()
+    _run_start = [None]
+
+    def _run_block(block):
+        block_name = block['name']
+        qname = block_name.split('/')[0] if '/' in block_name else block_name
+        sql = block['sql']
+        conn_macro = block.get('conn_macro')
+        start_time = time.time()
+        start_ts = datetime.now().isoformat()
+
+        if cancel_event is not None and cancel_event.is_set():
+            result = {"name": block_name, "ok": False, "error": "cancelled",
+                      "elapsed": 0.0, "start": start_ts, "cancelled": True}
+            with _done_lock:
+                _done_count[0] += 1
+                n = _done_count[0]
+            if on_progress:
+                result["done"] = n
+                result["total"] = len(blocks)
+                result["table"] = qname
+                on_progress(result)
+            return result
+
+        with _running_lock:
+            _running_count[0] += 1
+            running_now = _running_count[0]
+            if _run_start[0] is None:
+                _run_start[0] = time.time()
+        if on_progress:
+            on_progress({"_event": "start", "name": block_name,
+                         "table": qname, "running": running_now,
+                         "total": len(blocks)})
+
+        degraded = False
+        try:
+            try:
+                rows = _query_hadoop(sql, conn_macro)
+            except Exception as exc:
+                lifeboat = block.get('degrade_sql')
+                err_str = str(exc)
+                # Hive memory / OOM patterns; widen as we observe more.
+                is_resource_err = ('OutOfMemoryError' in err_str
+                                   or 'memory limit' in err_str.lower()
+                                   or 'GC overhead' in err_str)
+                if is_col and lifeboat and is_resource_err:
+                    print(f"  [degrade] {block_name}: {err_str.splitlines()[0]}"
+                          f" — retrying without n_unique", file=sys.stderr)
+                    rows = _query_hadoop(lifeboat, conn_macro)
+                    degraded = True
+                else:
+                    raise
+            elapsed = time.time() - start_time
+
+            if is_col:
+                if degraded:
+                    for r in rows:
+                        r['partial'] = 'hadoop_degraded'
+                with _col_rows_lock:
+                    _col_rows_by_table.setdefault(qname, []).extend(rows)
+            else:
+                csv_path = os.path.join(outdir, f"{qname}{file_suffix}")
+                sorted_rows = sorted(rows, key=lambda r: str(r.get('dt', '')))
+                with open(csv_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['dt', 'row_count'])
+                    for r in sorted_rows:
+                        writer.writerow([str(r.get('dt', '')), r.get('row_count', 0)])
+
+            result = {"name": block_name, "ok": True, "rows": len(rows),
+                      "elapsed": round(elapsed, 1), "start": start_ts,
+                      "degraded": degraded}
+            if not is_col:
+                result["csv_path"] = os.path.join(outdir, f"{qname}{file_suffix}")
+        except Exception as e:
+            elapsed = time.time() - start_time
+            result = {"name": block_name, "ok": False, "error": str(e),
+                      "elapsed": round(elapsed, 1), "start": start_ts}
+        finally:
+            with _running_lock:
+                _running_count[0] -= 1
+                running_after = _running_count[0]
+
+        table_just_finished = False
+        table_csv_path = None
+        with _table_lock:
+            _table_done[qname]['done'] += 1
+            tbl_progress = dict(_table_done[qname])
+            if is_col and _table_done[qname]['done'] == _table_done[qname]['total']:
+                table_just_finished = True
+        if table_just_finished:
+            with _col_rows_lock:
+                rows_for_qname = _col_rows_by_table.pop(qname, [])
+            table_csv_path = os.path.join(outdir, f"{qname}_col.csv")
+            with open(table_csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(_COL_HEADERS)
+                for r in rows_for_qname:
+                    writer.writerow([r.get(h, '') for h in _COL_HEADERS])
+            print(f"  Wrote {len(rows_for_qname)} rows to {table_csv_path}",
+                  file=sys.stderr)
+
+        with _done_lock:
+            _done_count[0] += 1
+            n = _done_count[0]
+        total = len(blocks)
+        status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
+        print(f"  [{n}/{total} | running={running_after}] {block_name}: "
+              f"{status} ({elapsed:.1f}s)", file=sys.stderr)
+
+        if on_progress:
+            result["done"] = n
+            result["total"] = total
+            result["table"] = qname
+            result["running"] = running_after
+            result["table_done"] = tbl_progress["done"]
+            result["table_total"] = tbl_progress["total"]
+            result["table_csv_written"] = table_just_finished
+            if table_csv_path:
+                result["table_csv_path"] = table_csv_path
+            on_progress(result)
+        return result
+
+    if _max_workers <= 1:
+        for block in blocks:
+            results.append(_run_block(block))
+    else:
+        with ThreadPoolExecutor(max_workers=_max_workers) as pool:
+            futures = {pool.submit(_run_block, b): b for b in blocks}
+            for fut in as_completed(futures):
+                results.append(fut.result())
+
+    # Partial-failure flush for col mode (mirror Oracle).
+    if is_col and _col_rows_by_table:
+        import csv as _csv
+        for qname, row_data in _col_rows_by_table.items():
+            csv_path = os.path.join(outdir, f"{qname}_col.csv")
+            with open(csv_path, 'w', newline='') as f:
+                writer = _csv.writer(f)
+                writer.writerow(_COL_HEADERS)
+                for r in row_data:
+                    writer.writerow([r.get(h, '') for h in _COL_HEADERS])
+            print(f"  Wrote {len(row_data)} rows to {csv_path} "
+                  f"(partial -- table had failures)", file=sys.stderr)
+
+    return results
