@@ -599,13 +599,24 @@ async def api_generate_files(request: Request):
                         bounds.append(f"{date_col} <= {_format_date_bound(eff_to, date_type, is_sas, is_upper=True)}")
                 if bounds:
                     extra = " AND ".join(bounds)
-                    if source == 'aws':
-                        # Stash separately so the AWS col path can skip them
-                        # when its BETWEEN/IN filter already covers the range
-                        # (prevents `col >= X AND col <= Y AND col BETWEEN X
-                        # AND Y` duplication, matching the oracle fix).
+                    if source in ('aws', 'oracle', 'hadoop'):
+                        # Gen-first platforms (AWS / Oracle / Hadoop) all run
+                        # through builders that compose their own per-bucket
+                        # BETWEEN from the row_comparison's matching_dates.
+                        # Stashing the from/to bound separately as
+                        # `_date_bounds` lets the col gen skip merging it
+                        # into the WHERE when a bucket BETWEEN already
+                        # covers (or is tighter than) the range -- prevents
+                        # `col >= X AND col <= Y AND col BETWEEN A AND B`
+                        # producing an empty result set when the global
+                        # from/to and the saved row_comparison's matching
+                        # dates don't overlap (e.g. user changes from/to
+                        # without re-running row-compare).
                         tbl['_date_bounds'] = extra
                     else:
+                        # SAS / libname paths still want the bound merged
+                        # into WHERE because the SAS template's
+                        # &_where_clause is the only filter knob it sees.
                         existing = tbl.get('where', '').strip()
                         tbl['where'] = f"({existing}) AND {extra}" if existing else extra
                 # Stash the resolved from/to so col-stats can synthesize
@@ -671,7 +682,7 @@ async def api_generate_files(request: Request):
                     fill_columns_from_meta(oracle_tables, _db_path)
                     oracle_sql_path = _write_combined_col_sql_oracle(
                         oracle_tables, sas_outdir,
-                        db_path=_db_path, vintage=None)
+                        db_path=_db_path, vintage=None, coarse=coarse)
                 results["oracle_sql_file"] = oracle_sql_path
 
             # Generate Hadoop SQL file (gen-first plain Hive SQL, parallels
@@ -695,7 +706,7 @@ async def api_generate_files(request: Request):
                     fill_columns_from_meta(hadoop_tables, _db_path)
                     hadoop_sql_path = _write_combined_col_sql_hadoop(
                         hadoop_tables, sas_outdir,
-                        db_path=_db_path, vintage=None)
+                        db_path=_db_path, vintage=None, coarse=coarse)
                 results["hadoop_sql_file"] = hadoop_sql_path
 
             # Generate SQL file

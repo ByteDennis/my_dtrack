@@ -724,6 +724,28 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
             result['overlap_start'] = comp.get('overlap_start')
             result['overlap_end']   = comp.get('overlap_end')
 
+    # Intersect matching_dates with the user's from/to window. The web
+    # layer stashes the resolved per-pair (or global fallback) from/to as
+    # `_from_date` / `_to_date`. Without this clip, the bucket emission
+    # covers every historical matching_date saved in `_row_comparison`
+    # (which can span years) instead of the requested window. Symptom:
+    # user sets from=2026-05-01 to=2026-05-09 expecting ~2 weekly buckets
+    # but the col gen produces 181 (every week from 2022 to 2026 because
+    # row-compare was last run over the full overlap range).
+    from_date = tbl_cfg.get('_from_date')
+    to_date   = tbl_cfg.get('_to_date')
+    if matching_dates and (from_date or to_date):
+        before_n = len(matching_dates)
+        clipped = [
+            d for d in matching_dates
+            if (not from_date or d >= from_date)
+            and (not to_date or d <= to_date)
+        ]
+        if len(clipped) != before_n:
+            print(f"  [date filter] clipping {before_n} matching_dates to "
+                  f"[{from_date or 'min'}..{to_date or 'max'}] -> {len(clipped)} dates")
+        matching_dates = clipped
+
     # Sample dates if sample@N vintage
     if is_sample and matching_dates:
         matching_dates = _sample_matching_dates(db_path, tbl_cfg, matching_dates, n_sample)
@@ -1337,6 +1359,742 @@ def match_columns_from_dicts(left_cols, right_cols, left_label="left", right_lab
         print(f"\nWritten to: {outfile}")
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Shared extract-SQL utilities. The block-file format and the manual-exclude
+# AND'ing pattern are identical across Oracle / Hadoop / (and the gen-first
+# Athena path), so the parser and the helper live here once.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Dialect-parameterized column-stats SQL builders. The categorical CTE chain
+# (freq → ranked → totals → agg → sstats → minmax → top_n → lenhash) is
+# structurally identical across dialects; only a small set of fragments
+# differ (string concat operator, cast-to-string syntax, listagg-equivalent,
+# NVL/COALESCE, hash function, NULL cast literals). Each dialect supplies
+# those fragments via _col_sql_dialect_ops; the rest of the SQL is composed
+# in build_col_sql / build_lifeboat_col_sql.
+#
+# The two Oracle and Hadoop per-platform builders that used to live in
+# their respective modules are now thin wrappers calling these helpers.
+# ---------------------------------------------------------------------------
+
+def _col_sql_dialect_ops(dialect):
+    """Returns a dict of dialect-specific SQL fragments used by build_col_sql.
+
+    To add a new dialect: provide all the same keys. Helpers that take or
+    return SQL fragments are callables so the caller can compose them.
+    """
+    if dialect == 'oracle':
+        # Imports inside the branch so base.py doesn't depend on oracle.py
+        # at import time (oracle.py imports from base.py).
+        from .oracle import _vintage_date_expr_oracle, _oracle_portable_hash16
+        return {
+            'wc_empty':           '(1=1)',
+            'is_oracle_typed':    True,
+            'cast_str':           lambda x: f'TO_CHAR({x})',
+            'concat':             lambda *parts: ' || '.join(parts),
+            'top10_coalesce':     lambda x, d: f'NVL({x}, {d})',
+            'mean_inner':         lambda x: f'AVG({x})',
+            'std_inner':          lambda x: f'STDDEV_SAMP({x})',
+            'mean_outer':         lambda x: x,
+            'std_outer':          lambda x: x,
+            'minmax_strcast':     lambda x: f'TO_CHAR({x})',
+            # Lifeboat NULL casts. Oracle: NUMBER for n_unique/mean/std,
+            # VARCHAR2(1) for min/max. Hadoop has different per-field types
+            # (see hadoop branch). Three keys map cleanly.
+            'lifeboat_null_count':    'CAST(NULL AS NUMBER)',
+            'lifeboat_null_meanstd':  'CAST(NULL AS NUMBER)',
+            'lifeboat_null_minmax':   'CAST(NULL AS VARCHAR2(1))',
+            'top10_listagg':      lambda item: (
+                f"LISTAGG({item}, '; ')\n"
+                f"               WITHIN GROUP (ORDER BY cnt DESC, p_col ASC)"
+            ),
+            'hash_sum_expr':      lambda p_col: f'SUM(cnt * {_oracle_portable_hash16(p_col)})',
+            'cat_present':        'p_col IS NOT NULL',
+            'cat_missing':        'p_col IS NULL',
+            'final_order_by':     '\nORDER BY t.dt',
+            'vintage_expr':       lambda tbl_cfg, date_col_q, vintage, date_dtype, date_format: (
+                _vintage_date_expr_oracle(date_col_q, vintage, date_dtype, date_format)
+            ),
+            'dt_select_wrap':     lambda dt_expr: f"TO_CHAR({dt_expr}, 'YYYY-MM-DD')",
+        }
+    if dialect == 'hadoop':
+        from .hadoop import _hadoop_vintage_expr
+        return {
+            'wc_empty':           '1=1',
+            'is_oracle_typed':    False,
+            'cast_str':           lambda x: f'CAST({x} AS STRING)',
+            'concat':             lambda *parts: f'concat({", ".join(parts)})',
+            'top10_coalesce':     lambda x, d: f'COALESCE({x}, {d})',
+            'mean_inner':         lambda x: f'AVG(CAST({x} AS DOUBLE))',
+            'std_inner':          lambda x: f'STDDEV_SAMP(CAST({x} AS DOUBLE))',
+            'mean_outer':         lambda x: f'CAST({x} AS STRING)',
+            'std_outer':          lambda x: f'CAST({x} AS STRING)',
+            'minmax_strcast':     lambda x: f'CAST({x} AS STRING)',
+            # Hadoop: BIGINT for n_unique only; mean/std/min/max all STRING.
+            'lifeboat_null_count':    'CAST(NULL AS BIGINT)',
+            'lifeboat_null_meanstd':  'CAST(NULL AS STRING)',
+            'lifeboat_null_minmax':   'CAST(NULL AS STRING)',
+            'top10_listagg':      lambda item: (
+                f"concat_ws('; ', collect_list({item}))"
+            ),
+            # Hadoop hash_sum intentionally blank: Hive HASH() and Athena
+            # xxhash64 never agree on identical data, so cross-platform
+            # hash_sum compares would always paint mismatches. Comparison
+            # treats empty as match=None (unknown), not as a false diff.
+            'hash_sum_expr':      lambda p_col: "CAST('' AS STRING)",
+            'cat_present':        "p_col IS NOT NULL AND TRIM(p_col) <> ''",
+            'cat_missing':        "p_col IS NULL OR TRIM(p_col) = ''",
+            'final_order_by':     '',
+            'vintage_expr':       lambda tbl_cfg, date_col_q, vintage, date_dtype, date_format: (
+                # Hadoop's vintage helper takes tbl_cfg + raw date_col, not
+                # the quoted form, and ignores date_dtype / date_format
+                # (it inspects tbl_cfg.date_type instead).
+                _hadoop_vintage_expr(tbl_cfg, tbl_cfg['date_col'], vintage)
+            ),
+            # Hadoop's vintage_expr already returns a string-shaped
+            # expression (concat/substr or date_format), so no outer wrap.
+            'dt_select_wrap':     lambda dt_expr: dt_expr,
+        }
+    raise ValueError(f"unknown dialect {dialect!r} for col SQL builder")
+
+
+def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
+                   vintage=None, date_dtype=None, date_format=None,
+                   dt_label=None, coarse=False):
+    """Build per-column stats SQL for any supported dialect.
+
+    Returns (sql, is_numeric). The output schema is the canonical 14-field
+    col CSV row (dt, column_name, col_type, n_total, n_missing, n_unique,
+    mean, std, min_val, max_val, top_10, length_avg, length_max, hash_sum)
+    for both numeric and categorical branches, so the downstream loader
+    sees the same shape regardless of platform.
+
+    `coarse=True` emits the cheap-aggregate Phase-1 SQL: drops the freq-
+    table-derived rank-weighted mean/std (set to ''), drops top_10 (''),
+    and drops the freq-table-derived length_avg/length_max/hash_sum
+    (numeric branch always had these blank; categorical branch keeps
+    length stats but skips the agg/sstats/top_n CTEs entirely). Mirrors
+    Athena's _build_coarse_sql shape so col_gen_rough output is
+    cross-platform comparable. Numeric coarse is a flat SELECT (no WITH
+    chain); categorical coarse is a 4-CTE chain (freq → ranked →
+    totals → minmax + lenhash) instead of the 8-CTE fine chain. Used by
+    the col_gen_rough page; the col_gen page passes coarse=False.
+
+    See _col_sql_dialect_ops for what each dialect supplies.
+    """
+    ops = _col_sql_dialect_ops(dialect)
+    date_col = tbl_cfg['date_col']
+    col_q = quote_ident(col, dialect)
+    date_col_q = quote_ident(date_col, dialect)
+    where = tbl_cfg.get('where', '')
+    if not vintage:
+        vintage = tbl_cfg.get('vintage', 'all') or 'all'
+    numeric = is_numeric_type(dtype, is_oracle=ops['is_oracle_typed'])
+    wc = where.strip() if where else ops['wc_empty']
+
+    if dt_label is not None:
+        dt_select = f"'{dt_label}' AS dt"
+        group_by = ""
+        freq_dt_select = f"'{dt_label}'"
+        freq_dt_group = ""
+    elif vintage == 'all':
+        dt_select = "'all' AS dt"
+        group_by = ""
+        freq_dt_select = "'all'"
+        freq_dt_group = ""
+    else:
+        dt_expr = ops['vintage_expr'](tbl_cfg, date_col_q, vintage, date_dtype, date_format)
+        wrapped = ops['dt_select_wrap'](dt_expr)
+        dt_select = f"{wrapped} AS dt"
+        group_by = f"\nGROUP BY {dt_expr}"
+        freq_dt_select = wrapped
+        freq_dt_group = f", {dt_expr}"
+
+    if numeric:
+        col_expr = apply_null_sentinels(col_q, dtype or "numeric", dialect)
+        if coarse:
+            # Coarse numeric: flat aggregates only. No mean / std / length /
+            # hash / top_10. min/max are scalar MIN/MAX (no `val=cnt`
+            # display because numerics don't carry a frequency display).
+            min_sql = ops['minmax_strcast'](f'MIN({col_expr})')
+            max_sql = ops['minmax_strcast'](f'MAX({col_expr})')
+            sql = f"""{cte_prefix}
+SELECT
+    {dt_select},
+    '{dtype}' AS col_type,
+    '{col}' AS column_name,
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col_expr}) AS n_missing,
+    COUNT(DISTINCT {col_expr}) AS n_unique,
+    '' AS mean,
+    '' AS std,
+    {min_sql} AS min_val,
+    {max_sql} AS max_val,
+    '' AS top_10,
+    '' AS length_avg,
+    '' AS length_max,
+    '' AS hash_sum
+FROM {full_table} WHERE {wc}{group_by}"""
+            return sql, True
+        mean_sql = ops['mean_outer'](ops['mean_inner'](col_expr))
+        std_sql  = ops['std_outer'](ops['std_inner'](col_expr))
+        min_sql  = ops['minmax_strcast'](f'MIN({col_expr})')
+        max_sql  = ops['minmax_strcast'](f'MAX({col_expr})')
+        sql = f"""{cte_prefix}
+SELECT
+    {dt_select},
+    '{dtype}' AS col_type,
+    '{col}' AS column_name,
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col_expr}) AS n_missing,
+    COUNT(DISTINCT {col_expr}) AS n_unique,
+    {mean_sql} AS mean,
+    {std_sql} AS std,
+    {min_sql} AS min_val,
+    {max_sql} AS max_val,
+    '' AS top_10,
+    '' AS length_avg,
+    '' AS length_max,
+    '' AS hash_sum
+FROM {full_table} WHERE {wc}{group_by}"""
+        return sql, True
+
+    # Categorical: WITH-chain. Per-dialect deltas:
+    #   - SUBSTR(<cast_str>(col_expr_cat), 1, 200) for the freq grouping key
+    #   - present/missing CASE conditions (Hive treats '' as distinct from NULL)
+    #   - minmax concat: `||` (Oracle) vs concat() (Hive)
+    #   - top_n listagg: LISTAGG WITHIN GROUP (Oracle) vs concat_ws+collect_list (Hive)
+    #   - hash_sum: real portable hash (Oracle) vs '' placeholder (Hive)
+    #   - outer NVL/COALESCE for top_10
+    #   - outer cast for mean_v/std_v/length_avg/length_max/hash_sum
+    #   - trailing ORDER BY t.dt (Oracle only)
+    col_expr_cat = apply_null_sentinels(col_q, dtype or "categorical", dialect)
+    p_col_substr = f"SUBSTR({ops['cast_str'](col_expr_cat)}, 1, 200)"
+    minmax_concat_min = ops['concat']("TRIM(p_col)", "'='", ops['cast_str']("cnt"))
+    minmax_concat_max = minmax_concat_min  # same shape; rnk_alpha decides which row
+
+    if coarse:
+        # Coarse categorical: drop agg/sstats (no rank-weighted mean/std),
+        # drop top_n (no top_10). Keep freq/ranked/totals/minmax/lenhash so
+        # min/max + length/hash signals stay populated for cross-platform
+        # Phase-1 drift detection. Mirrors Athena's _build_coarse_sql shape.
+        sql = f"""{cte_prefix}
+WITH freq AS (
+    SELECT {freq_dt_select} AS dt,
+           {p_col_substr} AS p_col,
+           COUNT(*) AS cnt
+    FROM {full_table} WHERE {wc}
+    GROUP BY {p_col_substr}{freq_dt_group}
+),
+ranked AS (
+    SELECT dt, p_col, cnt,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(TRIM(p_col)), p_col) AS rnk_alpha,
+           COUNT(*)     OVER (PARTITION BY dt) AS k_alpha
+    FROM freq WHERE {ops['cat_present']}
+),
+totals AS (
+    SELECT dt,
+           SUM(cnt) AS n_total,
+           COALESCE(SUM(CASE WHEN {ops['cat_missing']} THEN cnt ELSE 0 END), 0) AS n_missing,
+           SUM(CASE WHEN {ops['cat_present']} THEN 1 ELSE 0 END) AS n_unique
+    FROM freq GROUP BY dt
+),
+minmax AS (
+    SELECT dt,
+           MAX(CASE WHEN rnk_alpha = 1       THEN {minmax_concat_min} END) AS min_val,
+           MAX(CASE WHEN rnk_alpha = k_alpha THEN {minmax_concat_max} END) AS max_val
+    FROM ranked GROUP BY dt
+),
+lenhash AS (
+    SELECT dt,
+           SUM(cnt * LENGTH(TRIM(p_col))) / NULLIF(SUM(cnt), 0) AS length_avg,
+           MAX(LENGTH(TRIM(p_col))) AS length_max,
+           {ops['hash_sum_expr']("p_col")} AS hash_sum
+    FROM ranked GROUP BY dt
+)
+SELECT t.dt,
+       '{col}' AS column_name,
+       '{dtype}' AS col_type,
+       t.n_total, t.n_missing, t.n_unique,
+       '' AS mean, '' AS std,
+       mm.min_val, mm.max_val,
+       '' AS top_10,
+       {ops['cast_str']('lh.length_avg')} AS length_avg,
+       {ops['cast_str']('lh.length_max')} AS length_max,
+       {ops['cast_str']('lh.hash_sum')}   AS hash_sum
+FROM totals t
+LEFT JOIN minmax  mm ON t.dt = mm.dt
+LEFT JOIN lenhash lh ON t.dt = lh.dt{ops['final_order_by']}"""
+        return sql, False
+
+    top10_item = ops['concat']("p_col", "'('", ops['cast_str']("cnt"), "')'")
+    top10_expr = ops['top10_listagg'](top10_item)
+    hash_sum_expr = ops['hash_sum_expr']("p_col")
+
+    sql = f"""{cte_prefix}
+WITH freq AS (
+    SELECT {freq_dt_select} AS dt,
+           {p_col_substr} AS p_col,
+           COUNT(*) AS cnt
+    FROM {full_table} WHERE {wc}
+    GROUP BY {p_col_substr}{freq_dt_group}
+),
+ranked AS (
+    SELECT dt, p_col, cnt,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(TRIM(p_col)), p_col) AS rnk_alpha,
+           COUNT(*)     OVER (PARTITION BY dt) AS k_alpha,
+           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn_freq
+    FROM freq WHERE {ops['cat_present']}
+),
+totals AS (
+    SELECT dt,
+           SUM(cnt) AS n_total,
+           COALESCE(SUM(CASE WHEN {ops['cat_missing']} THEN cnt ELSE 0 END), 0) AS n_missing,
+           SUM(CASE WHEN {ops['cat_present']} THEN 1 ELSE 0 END) AS n_unique
+    FROM freq GROUP BY dt
+),
+agg AS (
+    SELECT dt,
+           SUM(cnt) AS sum_cnt,
+           SUM(cnt * rnk_alpha) AS sum_cnt_rnk,
+           SUM(cnt * rnk_alpha * rnk_alpha) AS sum_cnt_rnk2
+    FROM ranked GROUP BY dt
+),
+sstats AS (
+    SELECT dt,
+           sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0) AS mean_v,
+           SQRT(GREATEST(
+               sum_cnt_rnk2 * 1.0 / NULLIF(sum_cnt, 0)
+               - (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0))
+               * (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0)), 0)) AS std_v
+    FROM agg
+),
+minmax AS (
+    SELECT dt,
+           MAX(CASE WHEN rnk_alpha = 1       THEN {minmax_concat_min} END) AS min_val,
+           MAX(CASE WHEN rnk_alpha = k_alpha THEN {minmax_concat_max} END) AS max_val
+    FROM ranked GROUP BY dt
+),
+top_n AS (
+    SELECT dt,
+           {top10_expr} AS top_10
+    FROM ranked WHERE rn_freq <= 10
+    GROUP BY dt
+),
+lenhash AS (
+    SELECT dt,
+           SUM(cnt * LENGTH(TRIM(p_col))) / NULLIF(SUM(cnt), 0) AS length_avg,
+           MAX(LENGTH(TRIM(p_col))) AS length_max,
+           {hash_sum_expr} AS hash_sum
+    FROM ranked GROUP BY dt
+)
+SELECT t.dt,
+       '{col}' AS column_name,
+       '{dtype}' AS col_type,
+       t.n_total, t.n_missing, t.n_unique,
+       {ops['mean_outer']('ss.mean_v')} AS mean, {ops['std_outer']('ss.std_v')} AS std,
+       mm.min_val, mm.max_val,
+       {ops['top10_coalesce']('tn.top_10', "''")} AS top_10,
+       {ops['cast_str']('lh.length_avg')} AS length_avg,
+       {ops['cast_str']('lh.length_max')} AS length_max,
+       {ops['cast_str']('lh.hash_sum')}   AS hash_sum
+FROM totals t
+LEFT JOIN sstats  ss ON t.dt = ss.dt
+LEFT JOIN minmax  mm ON t.dt = mm.dt
+LEFT JOIN top_n   tn ON t.dt = tn.dt
+LEFT JOIN lenhash lh ON t.dt = lh.dt{ops['final_order_by']}"""
+    return sql, False
+
+
+def build_lifeboat_col_sql(dialect, tbl_cfg, col, dtype, full_table,
+                            cte_prefix="", vintage=None,
+                            date_dtype=None, date_format=None, dt_label=None):
+    """Streaming-aggregate fallback. Same row schema as the full per-column
+    query, but only computes single-pass aggregates (n_total, n_missing).
+    Everything that needs the freq table (n_unique, mean/std, min/max,
+    top_10, length, hash) is NULL/empty. Used by the runner when the full
+    SQL hits a resource exhaustion error (Oracle ORA-01652/ORA-04030,
+    Hive OOM)."""
+    ops = _col_sql_dialect_ops(dialect)
+    date_col = tbl_cfg['date_col']
+    col_q = quote_ident(col, dialect)
+    date_col_q = quote_ident(date_col, dialect)
+    where = tbl_cfg.get('where', '')
+    if not vintage:
+        vintage = tbl_cfg.get('vintage', 'all') or 'all'
+    numeric = is_numeric_type(dtype, is_oracle=ops['is_oracle_typed'])
+    wc = where.strip() if where else ops['wc_empty']
+
+    if dt_label is not None:
+        dt_select = f"'{dt_label}' AS dt"
+        group_by = ""
+    elif vintage == 'all':
+        dt_select = "'all' AS dt"
+        group_by = ""
+    else:
+        dt_expr = ops['vintage_expr'](tbl_cfg, date_col_q, vintage, date_dtype, date_format)
+        wrapped = ops['dt_select_wrap'](dt_expr)
+        dt_select = f"{wrapped} AS dt"
+        group_by = f"\nGROUP BY {dt_expr}"
+
+    col_expr = apply_null_sentinels(
+        col_q, dtype or ("numeric" if numeric else "categorical"), dialect)
+    col_type_label = 'numeric' if numeric else 'categorical'
+    return f"""{cte_prefix}
+SELECT
+    {dt_select},
+    '{col_type_label}' AS col_type,
+    '{col}' AS column_name,
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col_expr}) AS n_missing,
+    {ops['lifeboat_null_count']} AS n_unique,
+    {ops['lifeboat_null_meanstd']} AS mean,
+    {ops['lifeboat_null_meanstd']} AS std,
+    {ops['lifeboat_null_minmax']} AS min_val,
+    {ops['lifeboat_null_minmax']} AS max_val,
+    '' AS top_10,
+    '' AS length_avg,
+    '' AS length_max,
+    '' AS hash_sum
+FROM {full_table} WHERE {wc}{group_by}"""
+
+
+def parse_extract_sql_file(sql_path):
+    """Parse an extract_{row,col}.sql block file written by any platform's
+    gen-first writer. Returns list[dict] with keys:
+        name        — block name (e.g. "qname" for row, "qname/col/bucket" for col)
+        sql         — the SQL body, conn_macro marker preserved inline
+        conn_macro  — the value extracted from /* @conn_macro=X */, or None
+        degrade_sql — the body inside /* @degrade_sql ... @end_degrade */, or None
+
+    Block format:
+        -- {block_name}
+        /* @conn_macro=X */
+        <SQL>
+        ;
+        /* @degrade_sql
+        <fallback SQL>
+        @end_degrade */
+
+    The leading "-- dtrack ..." / "-- Generated: ..." header lines and any
+    "-- [foo]" status comments are skipped; only "-- name" (a bare token,
+    no spaces) starts a new block.
+    """
+    import re
+    from ..constants import (SQL_MARKER_CONN_MACRO, SQL_MARKER_DEGRADE_SQL,
+                              SQL_MARKER_END_DEGRADE)
+
+    blocks = []
+    text = open(sql_path).read()
+    current_name = None
+    current_lines = []
+
+    degrade_re = re.compile(
+        rf"/\*\s*{re.escape(SQL_MARKER_DEGRADE_SQL)}\s*(.*?)"
+        rf"\s*{re.escape(SQL_MARKER_END_DEGRADE)}\s*\*/",
+        flags=re.DOTALL)
+    conn_re = re.compile(
+        rf"/\*\s*{re.escape(SQL_MARKER_CONN_MACRO)}=(\S*?)\s*\*/")
+
+    def _flush():
+        if current_name is None:
+            return
+        raw = '\n'.join(current_lines).strip()
+        dm = degrade_re.search(raw)
+        degrade_sql = None
+        if dm:
+            degrade_sql = dm.group(1).strip().rstrip(';').strip()
+            raw = (raw[:dm.start()] + raw[dm.end():]).strip()
+        sql = raw.strip().rstrip(';').strip()
+        if not sql:
+            return
+        m = conn_re.search(sql)
+        conn_macro = m.group(1) if m else None
+        blocks.append({"name": current_name, "sql": sql,
+                       "conn_macro": conn_macro,
+                       "degrade_sql": degrade_sql})
+
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('-- dtrack') or stripped.startswith('-- Generated'):
+            continue
+        if stripped.startswith('-- ') and not stripped.startswith('-- ['):
+            marker = stripped[3:].strip()
+            if marker and ' ' not in marker:
+                _flush()
+                current_name = marker
+                current_lines = []
+                continue
+        current_lines.append(line)
+    _flush()
+    return blocks
+
+
+def and_clauses(*parts):
+    """AND-combine WHERE fragments, dropping empty / 1=1 placeholders.
+
+    Used by every platform's col-gen writer to layer optional bucket
+    BETWEEN, manual-exclude NOT IN, base table WHERE, etc. without
+    emitting `... AND 1=1` or stray leading/trailing AND.
+
+    Returns '1=1' if all parts are empty -- the universal pass-through
+    so callers don't need to special-case "no filter".
+    """
+    cleaned = []
+    for p in parts:
+        if not p:
+            continue
+        s = str(p).strip()
+        if not s or s == '1=1':
+            continue
+        cleaned.append(s)
+    if not cleaned:
+        return '1=1'
+    return ' AND '.join(cleaned)
+
+
+def run_extract_sql_file(sql_path, outdir, *,
+                          query_fn,
+                          platform,
+                          max_workers=None,
+                          on_progress=None,
+                          cancel_event=None,
+                          row_csv_writer=None):
+    """Generic runner for extract_{row,col}.sql block files.
+
+    Parses the file via parse_extract_sql_file, dispatches blocks across a
+    ThreadPoolExecutor capped by `<platform>_MAX_WORKERS` env var (or the
+    PLATFORM_RUNNER default), and writes per-qname _row.csv / _col.csv.
+    Block format and bookkeeping are platform-agnostic; the only deltas
+    are wired through:
+
+        query_fn(sql, conn_macro) -> list[dict]
+            Executes one block and returns rows as list[dict] with
+            lowercased column names. Raises on engine error.
+        platform: 'oracle' | 'hadoop' | 'athena' (key into PLATFORM_RUNNER
+            for worker_env, worker_default, degraded_label, lifeboat_errors).
+        row_csv_writer: optional callable(rows, csv_path) for row-mode CSV
+            output. Defaults to a sorted dt-then-row_count writer matching
+            both Oracle and Hadoop's existing behavior.
+
+    Returns list[result_dict] -- one per block. Each result has at minimum
+    {name, ok, elapsed, start}; ok-rows also carry rows count and (for row
+    mode) csv_path; failed rows carry error.
+
+    Mirrors the threading / cancel / per-table CSV-flush semantics of the
+    original Oracle and Hadoop runners byte-for-byte.
+    """
+    import csv
+    import sys
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from datetime import datetime
+    from ..constants import COL_CSV_HEADERS, ROW_CSV_HEADERS, PLATFORM_RUNNER
+
+    cfg = PLATFORM_RUNNER[platform]
+    label = platform.capitalize()
+
+    blocks = parse_extract_sql_file(sql_path)
+    if not blocks:
+        print(f"No query blocks found in {sql_path}")
+        return []
+
+    basename = os.path.basename(sql_path)
+    is_col = "extract_col" in basename
+    file_suffix = "_col.csv" if is_col else "_row.csv"
+
+    os.makedirs(outdir, exist_ok=True)
+    env_workers = os.environ.get(cfg['worker_env'])
+    _max_workers = max_workers if max_workers else (
+        int(env_workers) if env_workers else cfg['worker_default'])
+    _max_workers = max(1, min(_max_workers, len(blocks)))
+
+    # Block names are "qname/col_name[/bucket]" for col mode, "qname" for row.
+    table_blocks = {}
+    for block in blocks:
+        qname = block['name'].split('/')[0] if '/' in block['name'] else block['name']
+        table_blocks.setdefault(qname, []).append(block)
+    _col_rows_lock = threading.Lock()
+    _col_rows_by_table = {}
+
+    print(f"  Parsed {len(blocks)} blocks ({len(table_blocks)} tables) "
+          f"from {sql_path}, workers={_max_workers}", file=sys.stderr)
+
+    def _default_row_writer(rows, csv_path):
+        # Server-side ORDER BY was dropped from the row SQL (forces a
+        # single-coordinator funnel). Sort here so the CSV reads in date
+        # order for human inspection.
+        sorted_rows = sorted(rows, key=lambda r: str(r.get('dt', '')))
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(ROW_CSV_HEADERS)
+            for r in sorted_rows:
+                writer.writerow([str(r.get('dt', '')), r.get('row_count', 0)])
+    if row_csv_writer is None:
+        row_csv_writer = _default_row_writer
+
+    results = []
+    _done_count = [0]
+    _done_lock = threading.Lock()
+    _table_done = {q: {'done': 0, 'total': len(bs)}
+                   for q, bs in table_blocks.items()}
+    _table_lock = threading.Lock()
+    _running_count = [0]
+    _running_lock = threading.Lock()
+    _run_start = [None]
+
+    def _run_block(block):
+        block_name = block['name']
+        qname = block_name.split('/')[0] if '/' in block_name else block_name
+        sql = block['sql']
+        conn_macro = block.get('conn_macro')
+        start_time = time.time()
+        start_ts = datetime.now().isoformat()
+
+        if cancel_event is not None and cancel_event.is_set():
+            result = {"name": block_name, "ok": False, "error": "cancelled",
+                      "elapsed": 0.0, "start": start_ts, "cancelled": True}
+            with _done_lock:
+                _done_count[0] += 1
+                n = _done_count[0]
+            if on_progress:
+                result["done"] = n
+                result["total"] = len(blocks)
+                result["table"] = qname
+                on_progress(result)
+            return result
+
+        with _running_lock:
+            _running_count[0] += 1
+            running_now = _running_count[0]
+            if _run_start[0] is None:
+                _run_start[0] = time.time()
+        if on_progress:
+            done_so_far = _done_count[0]
+            total_blocks = len(blocks)
+            eta_sec = None
+            if done_so_far > 0 and _run_start[0]:
+                elapsed_wall = time.time() - _run_start[0]
+                eta_sec = elapsed_wall * (total_blocks - done_so_far) / done_so_far
+            on_progress({"_event": "start", "name": block_name,
+                         "table": qname, "running": running_now,
+                         "total": total_blocks, "eta_sec": eta_sec})
+
+        degraded = False
+        try:
+            try:
+                rows = query_fn(sql, conn_macro)
+            except Exception as exc:
+                lifeboat = block.get('degrade_sql')
+                err_str = str(exc)
+                is_resource_err = any(p in err_str for p in cfg['lifeboat_errors'])
+                if is_col and lifeboat and is_resource_err:
+                    print(f"  [degrade] {block_name}: {err_str.splitlines()[0]}"
+                          f" — retrying without n_unique/hash_sum", file=sys.stderr)
+                    rows = query_fn(lifeboat, conn_macro)
+                    degraded = True
+                else:
+                    raise
+            elapsed = time.time() - start_time
+
+            if is_col:
+                if degraded:
+                    for r in rows:
+                        r['partial'] = cfg['degraded_label']
+                with _col_rows_lock:
+                    _col_rows_by_table.setdefault(qname, []).extend(rows)
+            else:
+                csv_path = os.path.join(outdir, f"{qname}{file_suffix}")
+                row_csv_writer(rows, csv_path)
+
+            result = {"name": block_name, "ok": True, "rows": len(rows),
+                      "elapsed": round(elapsed, 1), "start": start_ts,
+                      "degraded": degraded}
+            if not is_col:
+                result["csv_path"] = os.path.join(outdir, f"{qname}{file_suffix}")
+        except Exception as e:
+            elapsed = time.time() - start_time
+            result = {"name": block_name, "ok": False, "error": str(e),
+                      "elapsed": round(elapsed, 1), "start": start_ts}
+        finally:
+            with _running_lock:
+                _running_count[0] -= 1
+                running_after = _running_count[0]
+
+        # Per-table CSV flush when the last block of this qname finishes.
+        table_just_finished = False
+        table_csv_path = None
+        with _table_lock:
+            _table_done[qname]['done'] += 1
+            tbl_progress = dict(_table_done[qname])
+            if is_col and _table_done[qname]['done'] == _table_done[qname]['total']:
+                table_just_finished = True
+        if table_just_finished:
+            with _col_rows_lock:
+                rows_for_qname = _col_rows_by_table.pop(qname, [])
+            table_csv_path = os.path.join(outdir, f"{qname}_col.csv")
+            with open(table_csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(COL_CSV_HEADERS)
+                for r in rows_for_qname:
+                    writer.writerow([r.get(h, '') for h in COL_CSV_HEADERS])
+            print(f"  Wrote {len(rows_for_qname)} rows to {table_csv_path}",
+                  file=sys.stderr)
+
+        with _done_lock:
+            _done_count[0] += 1
+            n = _done_count[0]
+        total = len(blocks)
+        eta_sec = None
+        if _run_start[0] and n > 0:
+            elapsed_wall = time.time() - _run_start[0]
+            eta_sec = elapsed_wall * (total - n) / n
+        status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
+        print(f"  [{n}/{total} | running={running_after}] {block_name}: "
+              f"{status} ({elapsed:.1f}s)", file=sys.stderr)
+
+        if on_progress:
+            result["done"] = n
+            result["total"] = total
+            result["table"] = qname
+            result["running"] = running_after
+            result["eta_sec"] = eta_sec
+            result["table_done"] = tbl_progress["done"]
+            result["table_total"] = tbl_progress["total"]
+            result["table_csv_written"] = table_just_finished
+            if table_csv_path:
+                result["table_csv_path"] = table_csv_path
+            on_progress(result)
+        return result
+
+    if _max_workers <= 1:
+        for block in blocks:
+            results.append(_run_block(block))
+    else:
+        with ThreadPoolExecutor(max_workers=_max_workers) as pool:
+            futures = {pool.submit(_run_block, b): b for b in blocks}
+            for fut in as_completed(futures):
+                results.append(fut.result())
+
+    # Partial-failure flush for col mode: any qname that didn't reach
+    # 'all blocks done' still gets whatever rows came back, so the user
+    # isn't left with an empty CSV.
+    if is_col and _col_rows_by_table:
+        for qname, row_data in _col_rows_by_table.items():
+            csv_path = os.path.join(outdir, f"{qname}_col.csv")
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(COL_CSV_HEADERS)
+                for r in row_data:
+                    writer.writerow([r.get(h, '') for h in COL_CSV_HEADERS])
+            print(f"  Wrote {len(row_data)} rows to {csv_path} "
+                  f"(partial -- table had failures)", file=sys.stderr)
+
+    return results
 
 
 class PlatformBuilder(ABC):

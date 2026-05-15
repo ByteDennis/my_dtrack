@@ -1,5 +1,76 @@
 """Constants for dtrack UI configuration."""
 
+# ==========================================================================
+# Extract CSV / SQL-block format. Shared across all platforms (Oracle,
+# Hadoop, Athena) so the gen-first runners and the load-row / load-col
+# downstream parsers see the same shape regardless of source.
+# ==========================================================================
+
+# Header row written at the top of every {qname}_col.csv. The runners
+# write rows in this exact column order; load-col reads by name so order
+# is purely cosmetic, but keeping it canonical helps cross-platform diffs.
+COL_CSV_HEADERS = [
+    'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
+    'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
+    'length_avg', 'length_max', 'hash_sum',
+    # Lifeboat marker: '<platform>_degraded' on rows produced by the
+    # @degrade_sql retry after a resource-exhaustion error; empty otherwise.
+    'partial',
+]
+
+ROW_CSV_HEADERS = ['dt', 'row_count']
+
+# Marker comments embedded in extract_{row,col}.sql blocks. The runners
+# strip these out before sending SQL to the engine; they only carry
+# metadata for the dispatcher.
+SQL_MARKER_CONN_MACRO  = '@conn_macro'
+SQL_MARKER_DEGRADE_SQL = '@degrade_sql'
+SQL_MARKER_END_DEGRADE = '@end_degrade'
+
+# Per-platform runner config. Drives the generic run_extract_sql_file
+# helper: which env var caps worker count, what label to write into the
+# 'partial' CSV column for lifeboat-fallback rows, and which error
+# substrings should trigger the @degrade_sql retry instead of failing
+# the block. Add a new platform by appending a row here -- no runner
+# code changes needed.
+PLATFORM_RUNNER = {
+    'oracle': {
+        'worker_env':       'ORACLE_MAX_WORKERS',
+        'worker_default':   2,
+        'degraded_label':   'oracle_degraded',
+        'lifeboat_errors':  ['ORA-01652', 'ORA-04030'],
+    },
+    'hadoop': {
+        'worker_env':       'HADOOP_MAX_WORKERS',
+        'worker_default':   4,
+        'degraded_label':   'hadoop_degraded',
+        # Trigger the @degrade_sql lifeboat for Hive memory / executor /
+        # container exhaustion patterns. Broad on purpose: Hive surfaces
+        # the same root cause (mapper/reducer ran out of resources) under
+        # several different driver / Tez / MR error strings, and an over-
+        # narrow list silently fails the block instead of falling back to
+        # the streaming aggregate. Watch for false positives though --
+        # genuine SQL errors (column not found, syntax) shouldn't match
+        # any of these substrings.
+        'lifeboat_errors':  [
+            'OutOfMemoryError',
+            'memory limit',
+            'GC overhead',
+            'Container killed',
+            'beyond physical memory',
+            'beyond virtual memory',
+            'Java heap space',
+            'spill failed',
+        ],
+    },
+    'athena': {
+        'worker_env':       'ATHENA_MAX_WORKERS',
+        'worker_default':   8,
+        'degraded_label':   'athena_degraded',
+        'lifeboat_errors':  ['Query exhausted resources'],
+    },
+}
+
 # Decimal precision for mean/std match keys in column comparison.
 # Two values match iff `round(float(v), STAT_ROUND_DECIMALS)` is equal as a
 # string with an "m_"/"s_" prefix — bypasses float-equality drift.

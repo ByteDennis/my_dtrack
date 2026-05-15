@@ -158,196 +158,41 @@ def _query_oracle(sql, conn_macro, conn=None):
 
 def _build_col_sql_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
                           vintage=None, date_dtype=None, date_format=None,
-                          dt_label=None):
-    """Build per-column stats SQL for Oracle, no execution.
+                          dt_label=None, coarse=False):
+    """Build per-column stats SQL for Oracle. Thin wrapper over the
+    dialect-parameterized base.build_col_sql; both Oracle and Hadoop now
+    share the same template, with per-dialect fragments supplied by
+    base._col_sql_dialect_ops('oracle').
 
-    Returns (sql, is_numeric). Used both by _extract_col_oracle (direct-cursor
-    path) and _write_combined_col_sql_oracle (gen-first file path), so the
-    two paths emit byte-identical SQL for the same inputs.
+    coarse=True emits Phase-1 cheap-aggregate SQL (flat numeric, slim
+    categorical chain) for the col_gen_rough page.
     """
-    date_col = tbl_cfg['date_col']
-    col_q = quote_ident(col, "oracle")
-    date_col_q = quote_ident(date_col, "oracle")
-    where = tbl_cfg.get('where', '')
-    if not vintage:
-        vintage = tbl_cfg.get('vintage', 'all') or 'all'
-    numeric = is_numeric_type(dtype, is_oracle=True)
-    wc = where.strip() if where else "(1=1)"
-
-    if dt_label is not None:
-        dt_select = f"'{dt_label}' AS dt"
-        group_by = ""
-        freq_dt_select = f"'{dt_label}'"
-        freq_dt_group = ""
-    elif vintage == 'all':
-        dt_select = "'all' AS dt"
-        group_by = ""
-        freq_dt_select = "'all'"
-        freq_dt_group = ""
-    else:
-        dt_expr = _vintage_date_expr_oracle(date_col_q, vintage, date_dtype, date_format)
-        dt_select = f"TO_CHAR({dt_expr}, 'YYYY-MM-DD') AS dt"
-        group_by = f"\nGROUP BY {dt_expr}"
-        freq_dt_select = f"TO_CHAR({dt_expr}, 'YYYY-MM-DD')"
-        freq_dt_group = f", {dt_expr}"
-
-    if numeric:
-        col_expr = apply_null_sentinels(col_q, dtype or "numeric", "oracle")
-        sql = f"""{cte_prefix}
-SELECT
-    {dt_select},
-    '{dtype}' AS col_type,
-    '{col}' AS column_name,
-    COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col_expr}) AS n_missing,
-    COUNT(DISTINCT {col_expr}) AS n_unique,
-    AVG({col_expr}) AS mean,
-    STDDEV_SAMP({col_expr}) AS std,
-    TO_CHAR(MIN({col_expr})) AS min_val,
-    TO_CHAR(MAX({col_expr})) AS max_val,
-    '' AS top_10,
-    '' AS length_avg,
-    '' AS length_max,
-    '' AS hash_sum
-FROM {full_table} WHERE {wc}{group_by}"""
-        return sql, True
-
-    col_expr_cat = apply_null_sentinels(col_q, dtype or "categorical", "oracle")
-    sql = f"""{cte_prefix}
-WITH freq AS (
-    SELECT {freq_dt_select} AS dt,
-           SUBSTR(TO_CHAR({col_expr_cat}), 1, 200) AS p_col,
-           COUNT(*) AS cnt
-    FROM {full_table} WHERE {wc}
-    GROUP BY SUBSTR(TO_CHAR({col_expr_cat}), 1, 200){freq_dt_group}
-),
-ranked AS (
-    SELECT dt, p_col, cnt,
-           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(TRIM(p_col)), p_col) AS rnk_alpha,
-           COUNT(*)     OVER (PARTITION BY dt) AS k_alpha,
-           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn_freq
-    FROM freq WHERE p_col IS NOT NULL
-),
-totals AS (
-    SELECT dt,
-           SUM(cnt) AS n_total,
-           COALESCE(SUM(CASE WHEN p_col IS NULL THEN cnt ELSE 0 END), 0) AS n_missing,
-           SUM(CASE WHEN p_col IS NOT NULL THEN 1 ELSE 0 END) AS n_unique
-    FROM freq GROUP BY dt
-),
-agg AS (
-    SELECT dt,
-           SUM(cnt) AS sum_cnt,
-           SUM(cnt * rnk_alpha) AS sum_cnt_rnk,
-           SUM(cnt * rnk_alpha * rnk_alpha) AS sum_cnt_rnk2
-    FROM ranked GROUP BY dt
-),
-sstats AS (
-    SELECT dt,
-           sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0) AS mean_v,
-           SQRT(GREATEST(
-               sum_cnt_rnk2 * 1.0 / NULLIF(sum_cnt, 0)
-               - (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0))
-               * (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0)), 0)) AS std_v
-    FROM agg
-),
-minmax AS (
-    SELECT dt,
-           MAX(CASE WHEN rnk_alpha = 1       THEN TRIM(p_col) || '=' || TO_CHAR(cnt) END) AS min_val,
-           MAX(CASE WHEN rnk_alpha = k_alpha THEN TRIM(p_col) || '=' || TO_CHAR(cnt) END) AS max_val
-    FROM ranked GROUP BY dt
-),
-top_n AS (
-    SELECT dt,
-           LISTAGG(p_col || '(' || TO_CHAR(cnt) || ')', '; ')
-               WITHIN GROUP (ORDER BY cnt DESC, p_col ASC) AS top_10
-    FROM ranked WHERE rn_freq <= 10
-    GROUP BY dt
-),
-lenhash AS (
-    SELECT dt,
-           SUM(cnt * LENGTH(TRIM(p_col))) / NULLIF(SUM(cnt), 0) AS length_avg,
-           MAX(LENGTH(TRIM(p_col))) AS length_max,
-           SUM(cnt * {_oracle_portable_hash16("p_col")}) AS hash_sum
-    FROM ranked GROUP BY dt
-)
-SELECT t.dt,
-       '{col}' AS column_name,
-       '{dtype}' AS col_type,
-       t.n_total, t.n_missing, t.n_unique,
-       ss.mean_v AS mean, ss.std_v AS std,
-       mm.min_val, mm.max_val,
-       NVL(tn.top_10, '') AS top_10,
-       TO_CHAR(lh.length_avg) AS length_avg,
-       TO_CHAR(lh.length_max) AS length_max,
-       TO_CHAR(lh.hash_sum)   AS hash_sum
-FROM totals t
-LEFT JOIN sstats  ss ON t.dt = ss.dt
-LEFT JOIN minmax  mm ON t.dt = mm.dt
-LEFT JOIN top_n   tn ON t.dt = tn.dt
-LEFT JOIN lenhash lh ON t.dt = lh.dt
-ORDER BY t.dt"""
-    return sql, False
+    from .base import build_col_sql
+    return build_col_sql('oracle', tbl_cfg, col, dtype, full_table,
+                          cte_prefix=cte_prefix, vintage=vintage,
+                          date_dtype=date_dtype, date_format=date_format,
+                          dt_label=dt_label, coarse=coarse)
 
 
 def _build_lifeboat_col_sql_oracle(tbl_cfg, col, dtype, full_table,
                                    cte_prefix="", vintage=None,
                                    date_dtype=None, date_format=None,
                                    dt_label=None):
-    """Resource-exhaustion fallback SQL: same row schema as the full per-column
-    query, but only computes streaming aggregates that never spill TEMP.
+    """Resource-exhaustion fallback SQL — Oracle wrapper over
+    base.build_lifeboat_col_sql('oracle', ...).
 
     Drops COUNT(DISTINCT) (n_unique → NULL), the freq-table-derived
     rank-weighted mean/std (NULL), min/max (NULL), top_10 (''), and the
     length_avg/length_max/hash_sum signals that depend on the freq table.
     What survives: n_total (COUNT(*)) and n_missing (COUNT(*) - COUNT(col)),
-    both single-pass. Matches the column list of the normal builder so the
-    CSV header stays stable across degrade and non-degrade rows.
-
-    Called by `_write_combined_col_sql_oracle` to embed a `/* @degrade_sql */`
-    block alongside every full column SQL — the gen-first runner swaps to
-    this when it catches ORA-01652 (temp tablespace) or ORA-04030 (PGA).
+    both single-pass. Embedded as `/* @degrade_sql */` alongside every
+    full column SQL — the runner swaps to this on ORA-01652 / ORA-04030.
     """
-    date_col = tbl_cfg['date_col']
-    col_q = quote_ident(col, "oracle")
-    date_col_q = quote_ident(date_col, "oracle")
-    where = tbl_cfg.get('where', '')
-    if not vintage:
-        vintage = tbl_cfg.get('vintage', 'all') or 'all'
-    numeric = is_numeric_type(dtype, is_oracle=True)
-    wc = where.strip() if where else "(1=1)"
-
-    if dt_label is not None:
-        dt_select = f"'{dt_label}' AS dt"
-        group_by = ""
-    elif vintage == 'all':
-        dt_select = "'all' AS dt"
-        group_by = ""
-    else:
-        dt_expr = _vintage_date_expr_oracle(date_col_q, vintage, date_dtype, date_format)
-        dt_select = f"TO_CHAR({dt_expr}, 'YYYY-MM-DD') AS dt"
-        group_by = f"\nGROUP BY {dt_expr}"
-
-    col_expr = apply_null_sentinels(
-        col_q, dtype or ("numeric" if numeric else "categorical"), "oracle")
-    col_type_label = 'numeric' if numeric else 'categorical'
-    return f"""{cte_prefix}
-SELECT
-    {dt_select},
-    '{col_type_label}' AS col_type,
-    '{col}' AS column_name,
-    COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col_expr}) AS n_missing,
-    CAST(NULL AS NUMBER) AS n_unique,
-    CAST(NULL AS NUMBER) AS mean,
-    CAST(NULL AS NUMBER) AS std,
-    CAST(NULL AS VARCHAR2(1)) AS min_val,
-    CAST(NULL AS VARCHAR2(1)) AS max_val,
-    '' AS top_10,
-    '' AS length_avg,
-    '' AS length_max,
-    '' AS hash_sum
-FROM {full_table} WHERE {wc}{group_by}"""
+    from .base import build_lifeboat_col_sql
+    return build_lifeboat_col_sql('oracle', tbl_cfg, col, dtype, full_table,
+                                    cte_prefix=cte_prefix, vintage=vintage,
+                                    date_dtype=date_dtype, date_format=date_format,
+                                    dt_label=dt_label)
 
 
 def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
@@ -416,7 +261,8 @@ def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
     return results
 
 
-def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None, vintage=None):
+def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None,
+                                     vintage=None, coarse=False):
     """Emit extract_col.sql with one block per (table, column, bucket).
 
     Mirrors Athena's `_write_combined_sql` shape: when the table has a
@@ -430,12 +276,17 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None, vintage=
 
     For 'in_list' (sample@N) and 'all' / no-filter modes there's still
     only one block per (qname, col) since the data isn't bucketed.
+
+    coarse=True (col_gen_rough) emits the cheap-aggregate form (flat
+    numeric, slim categorical chain — no rank-weighted mean/std, no
+    top_10).
     """
     from ..date_utils import bucket_date
 
     os.makedirs(outdir, exist_ok=True)
+    label = "coarse col" if coarse else "col"
     blocks = [
-        "-- dtrack Oracle col extraction queries",
+        f"-- dtrack Oracle {label} extraction queries",
         f"-- Generated: {datetime.now().isoformat()}",
         "",
     ]
@@ -455,9 +306,20 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None, vintage=
 
         non_date_cols = [(c, d) for c, d in columns.items()
                          if c.lower() != date_col.lower()]
+        # Honor the per-pair col_filter selection (set by the col_gen UI
+        # via web/app.py hydration). Without this, the writer emits a
+        # block per (table × column × bucket) for ALL mapped columns
+        # even when the user only ticked a subset on the card -- the
+        # AWS path already filters this way; the Oracle/Hadoop gen-first
+        # paths were missing it. Use the same _apply_col_filter helper
+        # the SAS path uses, imported lazily to keep oracle.py independent
+        # of hadoop.py's load order.
+        from .hadoop import _apply_col_filter
+        non_date_cols = _apply_col_filter(non_date_cols, tbl)
         if not non_date_cols:
             blocks.append(f"-- {qname}")
-            blocks.append(f"-- SKIP: no non-date columns")
+            blocks.append(f"-- SKIP: no non-date columns "
+                          f"(col_filter may have left zero cols)")
             blocks.append("")
             continue
 
@@ -532,6 +394,7 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None, vintage=
                         vintage='all',
                         date_dtype=None, date_format=None,
                         dt_label=dt_label,
+                        coarse=coarse,
                     )
                     lifeboat_sql = _build_lifeboat_col_sql_oracle(
                         extract_cfg, col, dtype, full_table, cte_prefix,
@@ -753,31 +616,55 @@ def _build_row_sql_oracle(tbl_cfg, db_path=None, vintage=None):
 
     Used by _write_combined_row_sql_oracle to emit extract_row.sql blocks
     and by anyone who wants to inspect what would run.
+
+    Mirrors the Hadoop and Athena row-gen pattern: emit the bare date
+    column (or the user's explicit `date_transform` if configured) with
+    no server-side normalization. Whatever native form Oracle returns
+    (a DATE -> Python datetime via oracledb) flows through to the row
+    CSV; row-compare canonicalizes via parse_date(). No TRUNC, no
+    TO_CHAR(..., 'YYYY-MM-DD') wrapping — those add cost on
+    high-cardinality date columns (TRUNC defeats partition pruning on
+    range-partitioned tables) and are unnecessary for downstream parity.
+
+    No ORDER BY: a global sort over a wide date range funnels every
+    group through one coordinator node and is the usual cause of
+    ORA-01652. The row count is small; sort client-side in the runner.
     """
     table = tbl_cfg['table']
     date_col = tbl_cfg['date_col']
+    transform = tbl_cfg.get('date_transform', '')
     full_table, cte_prefix = resolve_table(tbl_cfg, table)
-
-    table_vintage = tbl_cfg.get('vintage', vintage)
-    date_filter = compute_date_filter(tbl_cfg, db_path, table_vintage)
-    resolve_date_format(date_filter, tbl_cfg)
-
-    where = tbl_cfg.get('where', '')
-    wc = where.strip() if where else "(1=1)"
     date_col_q = quote_ident(date_col, "oracle")
-    date_dtype = date_filter.get('date_dtype')
-    date_format = date_filter.get('date_format')
 
-    dt_expr = _vintage_date_expr_oracle(date_col_q, 'day', date_dtype, date_format)
-    # No ORDER BY: a global sort over a wide date range funnels every
-    # group through one coordinator node (SINGLE[] in EXPLAIN). For
-    # high-cardinality date columns this is the dominant cost and the
-    # usual cause of "Query exhausted resources at this scale factor"
-    # on Athena and ORA-01652 on Oracle. We sort client-side after
-    # loading the CSV — the row count is small and ordering there is
-    # free.
+    # Layer the user's config WHERE with the global from/to bounds. The
+    # web layer stashes from/to as `_date_bounds` (separate from `where`)
+    # so the col gen can ignore them when the bucket BETWEEN already
+    # constrains the scan. Row gen has no other date filter, so the
+    # bounds need to be ANDed in here -- otherwise the row count covers
+    # the whole table instead of the requested window.
+    parts = []
+    base_where = tbl_cfg.get('where', '').strip()
+    date_bounds = tbl_cfg.get('_date_bounds', '').strip()
+    if base_where:
+        parts.append(base_where)
+    if date_bounds:
+        parts.append(date_bounds)
+    wc = " AND ".join(f"({p})" for p in parts) if parts else "(1=1)"
+
+    # Optional date_transform from config: matches the legacy SAS path's
+    # behavior (TRUNC for 'datetime_to_date', TO_CHAR for 'to_char',
+    # or a literal `{col}` template). Empty/missing -> bare column.
+    if transform and "{col}" in transform:
+        dt_expr = transform.replace("{col}", date_col_q)
+    elif transform == "datetime_to_date":
+        dt_expr = f"TRUNC({date_col_q})"
+    elif transform == "to_char":
+        dt_expr = f"TO_CHAR({date_col_q}, 'YYYY-MM-DD')"
+    else:
+        dt_expr = date_col_q
+
     return f"""{cte_prefix}
-SELECT TO_CHAR({dt_expr}, 'YYYY-MM-DD') AS dt,
+SELECT {dt_expr} AS dt,
        COUNT(*) AS row_count
 FROM {full_table} WHERE {wc}
 GROUP BY {dt_expr}""".strip()
@@ -835,318 +722,34 @@ def _write_combined_row_sql_oracle(oracle_tables, outdir, db_path=None, vintage=
 
 
 def parse_oracle_sql_file(sql_path):
-    """Parse a combined Oracle SQL file into named query blocks.
-
-    Block markers are `-- {qname}` lines (single-token after `-- `); each
-    block's conn_macro is read from a `/* @conn_macro=NAME */` comment
-    inside the SQL body. Returns list of dicts:
-        [{"name": qname, "sql": "...", "conn_macro": "pb23"}, ...]
-    Skips header lines starting with `-- dtrack` / `-- Generated`.
-    """
-    import re
-
-    with open(sql_path, 'r', encoding='utf-8') as f:
-        text = f.read()
-
-    blocks = []
-    current_name = None
-    current_lines = []
-
-    def _flush():
-        if current_name is None:
-            return
-        raw = '\n'.join(current_lines).strip()
-        # Strip the embedded `/* @degrade_sql ... @end_degrade */` lifeboat
-        # comment off the main SQL before passing to the executor. The
-        # lifeboat is captured separately so the runner can re-execute it
-        # on resource exhaustion (ORA-01652 / ORA-04030).
-        dm = re.search(
-            r"/\*\s*@degrade_sql\s*(.*?)\s*@end_degrade\s*\*/",
-            raw, flags=re.DOTALL)
-        degrade_sql = None
-        if dm:
-            degrade_sql = dm.group(1).strip().rstrip(';').strip()
-            raw = (raw[:dm.start()] + raw[dm.end():]).strip()
-        sql = raw.strip().rstrip(';').strip()
-        if not sql:
-            return
-        m = re.search(r"/\*\s*@conn_macro=(\S+?)\s*\*/", sql)
-        conn_macro = m.group(1) if m else None
-        blocks.append({"name": current_name, "sql": sql,
-                       "conn_macro": conn_macro,
-                       "degrade_sql": degrade_sql})
-
-    for line in text.split('\n'):
-        stripped = line.strip()
-        if stripped.startswith('-- dtrack') or stripped.startswith('-- Generated'):
-            continue
-        if stripped.startswith('-- ') and not stripped.startswith('-- ['):
-            marker = stripped[3:].strip()
-            if marker and ' ' not in marker:
-                _flush()
-                current_name = marker
-                current_lines = []
-                continue
-        current_lines.append(line)
-    _flush()
-
-    return blocks
+    """Thin wrapper over base.parse_extract_sql_file kept for back-compat.
+    The block format is identical across Oracle / Hadoop, so the parser
+    lives in base.py and any caller can import either name."""
+    from .base import parse_extract_sql_file
+    return parse_extract_sql_file(sql_path)
 
 
 def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                        on_progress=None, resume=False, cancel_event=None):
-    """Parse extract_row.sql (or extract_col.sql) and dispatch in parallel.
-
-    Mirrors Athena's run_sql_file: ThreadPoolExecutor capped at
-    ORACLE_MAX_WORKERS (default 2). Each block carries its own conn_macro
-    in `/* @conn_macro=... */`, so a single SQL file can mix multiple
-    Oracle services. Results land in `{outdir}/{qname}_row.csv` (row) or
-    `{outdir}/{qname}_col.csv` (col). The shared .cache.db lets repeated
-    runs of the same file skip already-executed blocks.
-
-    Args:
-        on_progress: optional callback(result_dict) per block (used by web UI).
-        resume: not implemented for Oracle yet (kept for API parity).
-        cancel_event: optional threading.Event. When set, queued workers
-            fast-exit before issuing their SQL. Workers already inside
-            cursor.execute() finish their query (oracledb has no clean
-            mid-execution interrupt), but no new SQL is sent to Oracle
-            after the event fires.
+    """Thin wrapper over base.run_extract_sql_file with platform='oracle'.
+    Wraps the call with the SQL-result cache lifecycle (set_cache_db
+    on/off) so repeated runs of the same file skip blocks already in
+    .cache.db. The dispatch / lifeboat / per-qname CSV-flush logic is
+    shared with Hadoop and lives in base.py.
     """
-    import sys
-    import time
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    blocks = parse_oracle_sql_file(sql_path)
-    if not blocks:
-        print(f"No query blocks found in {sql_path}")
-        return []
-
+    from .base import run_extract_sql_file
     set_cache_db(os.path.join(outdir, ".cache.db"))
-
-    basename = os.path.basename(sql_path)
-    # Filename convention: extract_{row,col}.oracle.sql (or legacy
-    # extract_{row,col}.sql). "extract_col" in basename catches both.
-    is_col = "extract_col" in basename
-    file_suffix = "_col.csv" if is_col else "_row.csv"
-
-    os.makedirs(outdir, exist_ok=True)
-    env_workers = os.environ.get('ORACLE_MAX_WORKERS')
-    _max_workers = max_workers if max_workers else (
-        int(env_workers) if env_workers else 2)
-    _max_workers = max(1, min(_max_workers, len(blocks)))
-
-    # For col mode, block names are "qname/col_name". Group blocks by qname
-    # so we can write one CSV per table after all that table's columns
-    # finish (mirrors Athena's _col_rows_by_table pattern).
-    _COL_HEADERS = [
-        'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
-        'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
-        'length_avg', 'length_max', 'hash_sum',
-        # Lifeboat marker: 'oracle_degraded' on rows produced by the
-        # @degrade_sql retry after ORA-01652/ORA-04030; empty otherwise.
-        'partial',
-    ]
-    table_blocks = {}
-    for block in blocks:
-        qname = block['name'].split('/')[0] if '/' in block['name'] else block['name']
-        table_blocks.setdefault(qname, []).append(block)
-    _col_rows_lock = threading.Lock()
-    _col_rows_by_table = {}
-
-    print(f"  Parsed {len(blocks)} blocks ({len(table_blocks)} tables) "
-          f"from {sql_path}, workers={_max_workers}", file=sys.stderr)
-
-    results = []
-    _done_count = [0]
-    _done_lock = threading.Lock()
-    _table_done = {q: {'done': 0, 'total': len(bs)}
-                   for q, bs in table_blocks.items()}
-    _table_lock = threading.Lock()
-    # In-flight counter -- incremented just before _query_oracle, decremented
-    # in finally. Reported on both start and finish events so the UI can
-    # render "[start | running=4]" / "[N/total | running=3]" lines and the
-    # user can see parallelism level at a glance.
-    _running_count = [0]
-    _running_lock = threading.Lock()
-    # Wall-clock anchor for ETA. Set on the FIRST start event so the
-    # estimate reflects actual extraction time, not connect / setup overhead.
-    _run_start = [None]
-
-    def _run_block(block):
-        block_name = block['name']
-        qname = block_name.split('/')[0] if '/' in block_name else block_name
-        sql = block['sql']
-        conn_macro = block.get('conn_macro')
-        start_time = time.time()
-        start_ts = datetime.now().isoformat()
-
-        # Queue-time short-circuit: when the user cancelled, workers that
-        # haven't started their query yet exit immediately instead of
-        # opening a new Oracle session for work the user no longer wants.
-        if cancel_event is not None and cancel_event.is_set():
-            result = {"name": block_name, "ok": False, "error": "cancelled",
-                      "elapsed": 0.0, "start": start_ts, "cancelled": True}
-            with _done_lock:
-                _done_count[0] += 1
-                n = _done_count[0]
-            total = len(blocks)
-            if on_progress:
-                result["done"] = n
-                result["total"] = total
-                result["table"] = qname
-                on_progress(result)
-            return result
-
-        # Start event: announce this block is now occupying a worker slot.
-        # Reported running count INCLUDES this block.
-        with _running_lock:
-            _running_count[0] += 1
-            running_now = _running_count[0]
-            if _run_start[0] is None:
-                _run_start[0] = time.time()
-        if on_progress:
-            done_so_far = _done_count[0]
-            total_blocks = len(blocks)
-            eta_sec = None
-            if done_so_far > 0 and _run_start[0]:
-                elapsed_wall = time.time() - _run_start[0]
-                eta_sec = elapsed_wall * (total_blocks - done_so_far) / done_so_far
-            on_progress({"_event": "start", "name": block_name,
-                         "table": qname, "running": running_now,
-                         "total": total_blocks, "eta_sec": eta_sec})
-
-        degraded = False
-        try:
-            try:
-                rows = _query_oracle(sql, conn_macro)
-            except Exception as exc:
-                # ORA-01652 (temp tablespace exhausted) / ORA-04030 (PGA
-                # limit) on a high-cardinality COUNT(DISTINCT) get one
-                # retry with the embedded lifeboat SQL, which drops the
-                # spilling aggregates. Any other error bubbles up
-                # unchanged so legitimate failures still surface.
-                lifeboat = block.get('degrade_sql')
-                err_str = str(exc)
-                is_resource_err = ('ORA-01652' in err_str
-                                   or 'ORA-04030' in err_str)
-                if is_col and lifeboat and is_resource_err:
-                    print(f"  [degrade] {block_name}: {err_str.splitlines()[0]}"
-                          f" — retrying without n_unique/hash_sum", file=sys.stderr)
-                    rows = _query_oracle(lifeboat, conn_macro)
-                    degraded = True
-                else:
-                    raise
-            elapsed = time.time() - start_time
-
-            if is_col:
-                if degraded:
-                    for r in rows:
-                        r['partial'] = 'oracle_degraded'
-                with _col_rows_lock:
-                    _col_rows_by_table.setdefault(qname, []).extend(
-                        [r for r in rows])
-            else:
-                csv_path = os.path.join(outdir, f"{qname}{file_suffix}")
-                # Server-side ORDER BY was dropped from the row SQL (it
-                # forces a single-coordinator funnel that blows up at
-                # scale). Sort here on the way out so the CSV still reads
-                # in date order for human inspection.
-                sorted_rows = sorted(rows, key=lambda r: str(r.get('dt', '')))
-                with open(csv_path, 'w', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(['dt', 'row_count'])
-                    for r in sorted_rows:
-                        writer.writerow([str(r.get('dt', '')), r.get('row_count', 0)])
-
-            result = {"name": block_name, "ok": True, "rows": len(rows),
-                      "elapsed": round(elapsed, 1), "start": start_ts,
-                      "degraded": degraded}
-            if not is_col:
-                result["csv_path"] = os.path.join(outdir, f"{qname}{file_suffix}")
-        except Exception as e:
-            elapsed = time.time() - start_time
-            result = {"name": block_name, "ok": False, "error": str(e),
-                      "elapsed": round(elapsed, 1), "start": start_ts}
-        finally:
-            with _running_lock:
-                _running_count[0] -= 1
-                running_after = _running_count[0]
-
-        # Per-table CSV flush: when this table's last column finishes, write
-        # the collated {qname}_col.csv so downstream load-col can pick up
-        # finished tables while others are still running.
-        table_just_finished = False
-        table_csv_path = None
-        with _table_lock:
-            _table_done[qname]['done'] += 1
-            tbl_progress = dict(_table_done[qname])
-            if is_col and _table_done[qname]['done'] == _table_done[qname]['total']:
-                table_just_finished = True
-
-        if table_just_finished:
-            with _col_rows_lock:
-                rows_for_qname = _col_rows_by_table.pop(qname, [])
-            table_csv_path = os.path.join(outdir, f"{qname}_col.csv")
-            with open(table_csv_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(_COL_HEADERS)
-                for r in rows_for_qname:
-                    writer.writerow([r.get(h, '') for h in _COL_HEADERS])
-            print(f"  Wrote {len(rows_for_qname)} rows to {table_csv_path}",
-                  file=sys.stderr)
-
-        with _done_lock:
-            _done_count[0] += 1
-            n = _done_count[0]
-        total = len(blocks)
-        eta_sec = None
-        if _run_start[0] and n > 0:
-            elapsed_wall = time.time() - _run_start[0]
-            eta_sec = elapsed_wall * (total - n) / n
-        status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
-        print(f"  [{n}/{total} | running={running_after}] {block_name}: "
-              f"{status} ({elapsed:.1f}s)", file=sys.stderr)
-
-        if on_progress:
-            result["done"] = n
-            result["total"] = total
-            result["table"] = qname
-            result["running"] = running_after
-            result["eta_sec"] = eta_sec
-            result["table_done"] = tbl_progress["done"]
-            result["table_total"] = tbl_progress["total"]
-            result["table_csv_written"] = table_just_finished
-            if table_csv_path:
-                result["table_csv_path"] = table_csv_path
-            on_progress(result)
-        return result
-
-    if _max_workers <= 1:
-        for block in blocks:
-            results.append(_run_block(block))
-    else:
-        with ThreadPoolExecutor(max_workers=_max_workers) as pool:
-            futures = {pool.submit(_run_block, b): b for b in blocks}
-            for fut in as_completed(futures):
-                results.append(fut.result())
-
-    # Partial-failure flush: any table that didn't reach 'all columns done'
-    # (because some block failed) gets whatever rows did come back, so the
-    # user isn't left with an empty CSV.
-    if is_col and _col_rows_by_table:
-        for qname, row_data in _col_rows_by_table.items():
-            csv_path = os.path.join(outdir, f"{qname}_col.csv")
-            with open(csv_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(_COL_HEADERS)
-                for r in row_data:
-                    writer.writerow([r.get(h, '') for h in _COL_HEADERS])
-            print(f"  Wrote {len(row_data)} rows to {csv_path} "
-                  f"(partial -- table had failures)", file=sys.stderr)
-
-    set_cache_db(None)
-    return results
+    try:
+        return run_extract_sql_file(
+            sql_path, outdir,
+            query_fn=_query_oracle,
+            platform='oracle',
+            max_workers=max_workers,
+            on_progress=on_progress,
+            cancel_event=cancel_event,
+        )
+    finally:
+        set_cache_db(None)
 
 
 def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=None,
