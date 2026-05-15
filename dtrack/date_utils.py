@@ -19,9 +19,13 @@ _DATE_FORMATS = [
     ("%d%b%Y:%H:%M:%S", True, "DDMONYYYY:HH:MM:SS"),
     ("%d%b%Y", True, "DDMONYYYY"),
     ("%d%b%y", True, "DDMONYY"),
-    # Oracle
+    # Oracle (long year)
+    ("%d-%b-%Y %H:%M:%S.%f", True, "DD-MON-YYYY HH24:MI:SS.ffffff"),
     ("%d-%b-%Y %H:%M:%S", True, "DD-MON-YYYY HH24:MI:SS"),
     ("%d-%b-%Y", True, "DD-MON-YYYY"),
+    # Oracle (short year — Oracle's default NLS_DATE_FORMAT uses RR/YY)
+    ("%d-%b-%y %H:%M:%S.%f", True, "DD-MON-YY HH24:MI:SS.ffffff"),
+    ("%d-%b-%y %H:%M:%S", True, "DD-MON-YY HH24:MI:SS"),
     ("%d-%b-%y", True, "DD-MON-YY"),
     # Slash variants
     ("%Y/%m/%d %H:%M:%S", False, "YYYY/MM/DD HH:MM:SS"),
@@ -93,6 +97,21 @@ def parse_date(value: str) -> str:
         r'^(.+\d{2}:\d{2}:\d{2}):(\d{3,6})$', value)
     if _colon_ms:
         value = f"{_colon_ms.group(1)}.{_colon_ms.group(2)}"
+
+    # Normalize Oracle TIMESTAMP "HH.MI.SS" dot-separated time to colon form.
+    # Oracle's default NLS_TIMESTAMP_FORMAT is "DD-MON-RR HH.MI.SSXFF AM" --
+    # the time uses dots between HH/MI/SS (e.g. "01-MAR-26 07.04.04.000000")
+    # rather than the colons every other engine uses. Without this rewrite,
+    # the strptime loop below misses Oracle TIMESTAMP outputs entirely and
+    # compare.py falls back to raw-string equality, so the same instant
+    # printed by Oracle vs Athena vs Hadoop never matches.
+    # Anchored on " <1-2 digit HH>" to avoid eating European DD.MM.YYYY
+    # date-only formats (which have dots but no leading space-HH).
+    _oracle_ts = re.match(
+        r'^(.+ \d{1,2})\.(\d{2})\.(\d{2})(\.\d+)?(.*)$', value)
+    if _oracle_ts:
+        head, mm, ss, frac, tail = _oracle_ts.groups()
+        value = f"{head}:{mm}:{ss}{frac or ''}{tail or ''}"
 
     for fmt, upper, _label in _DATE_FORMATS:
         try:

@@ -45,6 +45,38 @@ def _cfg():
     return load_unified_config(_config_path)
 
 
+# Platforms that conventionally extract into the LEFT side's output dir.
+# AWS/Athena is the only RIGHT-side platform today; CSV-source tables live
+# on whichever side the pair config places them, so callers must pass
+# `outdir` explicitly for csv (the col_gen / pairs JS already does).
+_LEFT_PLATFORMS = {"oracle", "hadoop", "sas"}
+_RIGHT_PLATFORMS = {"aws", "athena"}
+
+
+def _side_outdir(platform: str) -> str:
+    """Resolve the saved global outdir for `platform`'s side.
+
+    Reads `settings.sas_outdir` (left) or `settings.aws_outdir` (right)
+    from dtrack.json so the cache (.cache.db) and extract_*.sql files
+    land in the directory the user picked on the global settings panel.
+    Falls back to './sas/' or './csv/' if the setting was never saved.
+
+    Returns an absolute path resolved against the DB dir (matches
+    `_resolve` semantics so the body-supplied outdir and this fallback
+    are interchangeable).
+    """
+    try:
+        settings = (_cfg().get("settings") or {})
+    except Exception:
+        settings = {}
+    plat = (platform or "").lower()
+    if plat in _RIGHT_PLATFORMS:
+        rel = settings.get("aws_outdir") or "./csv/"
+    else:
+        rel = settings.get("sas_outdir") or "./sas/"
+    return _resolve(rel)
+
+
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
@@ -69,13 +101,16 @@ async def row_compare_page(request: Request):
 async def col_mapping_page(request: Request):
     return templates.TemplateResponse(request, "col_mapping.html")
 
-@app.get("/col_gen_rough", response_class=HTMLResponse)
-async def col_gen_rough_page(request: Request):
-    """Stage 1 — coarse col-stats gen. Same UI as /col_gen but the
-    'Generate' button hits /api/generate with level=coarse so the emitted
-    SAS/SQL uses cheap aggregates only (no GROUP BY p_col, no top_10).
+@app.get("/col_gen_rough")
+async def col_gen_rough_page():
+    """Legacy /col_gen_rough -> redirect to /col_gen?preset=quick.
+    The two pages were merged: one /col_gen template now hosts a preset
+    radio (Quick / Standard / Detailed / Custom) and the right defaults
+    depending on the ?preset= query param. Older bookmarks land on the
+    Quick preset, matching the old Stage 1 behavior.
     """
-    return templates.TemplateResponse(request, "col_gen_rough.html")
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/col_gen?preset=quick", status_code=302)
 
 @app.get("/col_gen", response_class=HTMLResponse)
 async def col_gen_page(request: Request):
@@ -88,10 +123,6 @@ async def load_col_page(request: Request):
 @app.get("/col_compare", response_class=HTMLResponse)
 async def col_compare_page(request: Request):
     return templates.TemplateResponse(request, "col_compare.html")
-
-@app.get("/benchmark", response_class=HTMLResponse)
-async def benchmark_page(request: Request):
-    return templates.TemplateResponse(request, "benchmark.html")
 
 @app.get("/playground", response_class=HTMLResponse)
 async def playground_page(request: Request):
@@ -222,7 +253,11 @@ async def api_extract(request: Request):
     extract_type = body.get("type", "row")
     from_date = body.get("from_date")
     to_date = body.get("to_date")
-    outdir = _resolve(body.get("outdir", "./csv/" if platform in ("aws", "oracle") else "./sas/"))
+    # When the body specifies outdir, honor it. Otherwise resolve from
+    # saved global settings keyed by platform side so Oracle/Hadoop
+    # cache lands in sas_outdir/.cache.db, not aws_outdir/.cache.db.
+    body_outdir = body.get("outdir")
+    outdir = _resolve(body_outdir) if body_outdir else _side_outdir(platform)
     max_workers = body.get("max_workers")
 
     buf = io.StringIO()
@@ -292,7 +327,12 @@ async def api_run_sql_file(request: Request):
     body = await request.json()
     extract_type = body.get("type", "row")
     platform = (body.get("platform") or "aws").lower()
-    outdir = _resolve(body.get("outdir", "./csv/"))
+    # Body-supplied outdir wins (col_gen/pairs JS always passes the
+    # right-side-aware value). Bare callers fall back to the saved
+    # global setting for the platform's side, so Oracle/Hadoop never
+    # silently write .cache.db into the AWS folder.
+    body_outdir = body.get("outdir")
+    outdir = _resolve(body_outdir) if body_outdir else _side_outdir(platform)
     max_workers = body.get("max_workers")
     resume = bool(body.get("resume", False))
 
@@ -328,6 +368,16 @@ async def api_run_sql_file(request: Request):
             elif platform == "hadoop":
                 from ..platforms.hadoop import run_hadoop_sql_file
                 results = run_hadoop_sql_file(
+                    sql_path, outdir,
+                    max_workers=int(max_workers) if max_workers else None,
+                    db_path=_db_path,
+                    on_progress=_on_progress,
+                    resume=resume,
+                    cancel_event=cancel_event,
+                )
+            elif platform == "csv":
+                from ..platforms.csv_duckdb import run_csv_sql_file
+                results = run_csv_sql_file(
                     sql_path, outdir,
                     max_workers=int(max_workers) if max_workers else None,
                     db_path=_db_path,
@@ -467,15 +517,26 @@ async def api_generate_files(request: Request):
     sas_outdir = _resolve(body.get("sas_outdir", "./sas/"))
     aws_outdir = _resolve(body.get("aws_outdir", "./csv/"))
     pair_names = body.get("pair_names")  # None = all pairs
-    # level: "coarse" emits cheap-aggregate SQL for every column (no GROUP BY
-    # p_col, no freq table). "fine" (default) is the historical full path.
-    # Only meaningful for type=col.
+    # Preset selection (constants.STATS_PRESETS keys) — chooses which
+    # stats the col SQL builder emits. Default 'quick' for col extracts,
+    # ignored for type=row. Legacy `level=coarse|fine` aliases to
+    # quick|detailed for back-compat with older /api/generate callers.
+    preset = body.get("preset", "") or ""
     level = (body.get("level") or "fine").lower()
     if level not in ("fine", "coarse"):
         return JSONResponse(status_code=400, content={
             "error": f"Unknown level '{level}'; expected 'fine' or 'coarse'."
         })
-    coarse = (extract_type == "col" and level == "coarse")
+    if preset and preset not in ("quick", "standard", "detailed"):
+        return JSONResponse(status_code=400, content={
+            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
+        })
+    # Resolve effective preset: explicit body.preset wins; else derive
+    # from level (legacy callers); col_gen page already sends preset=
+    # directly.
+    if not preset:
+        preset = 'quick' if level == 'coarse' else 'detailed'
+    coarse = (extract_type == "col" and preset == 'quick')
 
     # cells: optional list of {pair, col, vintage} the col-compare UI sends
     # when the user has selected specific (column, vintage_label) cells for
@@ -682,7 +743,8 @@ async def api_generate_files(request: Request):
                     fill_columns_from_meta(oracle_tables, _db_path)
                     oracle_sql_path = _write_combined_col_sql_oracle(
                         oracle_tables, sas_outdir,
-                        db_path=_db_path, vintage=None, coarse=coarse)
+                        db_path=_db_path, vintage=None,
+                        coarse=coarse, preset=preset)
                 results["oracle_sql_file"] = oracle_sql_path
 
             # Generate Hadoop SQL file (gen-first plain Hive SQL, parallels
@@ -706,8 +768,50 @@ async def api_generate_files(request: Request):
                     fill_columns_from_meta(hadoop_tables, _db_path)
                     hadoop_sql_path = _write_combined_col_sql_hadoop(
                         hadoop_tables, sas_outdir,
-                        db_path=_db_path, vintage=None, coarse=coarse)
+                        db_path=_db_path, vintage=None,
+                        coarse=coarse, preset=preset)
                 results["hadoop_sql_file"] = hadoop_sql_path
+
+            # Generate CSV SQL files. Each csv-source table writes to
+            # the outdir matching its pair side: left-side csv -> sas_outdir,
+            # right-side csv -> aws_outdir. This preserves the "left/right
+            # outdir" mental model when pairs mix engines (e.g. Oracle on
+            # left + CSV on right) and lets the runner button decide
+            # which outdir's extract_*.sql to execute.
+            csv_tables_left = [t for t in all_tables
+                               if t.get('source', '').lower() == 'csv'
+                               and t.get('_side', 'left') == 'left']
+            csv_tables_right = [t for t in all_tables
+                                if t.get('source', '').lower() == 'csv'
+                                and t.get('_side') == 'right']
+            if csv_tables_left or csv_tables_right:
+                from ..platforms.csv_duckdb import (
+                    _write_combined_row_sql_csv,
+                    _write_combined_col_sql_csv,
+                    _discover_and_write_csv_columns,
+                )
+                from ..platforms.base import fill_columns_from_meta
+                csv_paths = {}
+                for side_label, side_tables, side_outdir in (
+                    ('left', csv_tables_left, sas_outdir),
+                    ('right', csv_tables_right, aws_outdir),
+                ):
+                    if not side_tables:
+                        continue
+                    os.makedirs(side_outdir, exist_ok=True)
+                    _discover_and_write_csv_columns(side_tables, side_outdir, _db_path)
+                    if extract_type == "row":
+                        p = _write_combined_row_sql_csv(
+                            side_tables, side_outdir,
+                            db_path=_db_path, vintage=None)
+                    else:
+                        fill_columns_from_meta(side_tables, _db_path)
+                        p = _write_combined_col_sql_csv(
+                            side_tables, side_outdir,
+                            db_path=_db_path, vintage=None,
+                            coarse=coarse, preset=preset)
+                    csv_paths[f"csv_sql_file_{side_label}"] = p
+                results.update(csv_paths)
 
             # Generate SQL file
             aws_tables = [t for t in all_tables
@@ -735,7 +839,8 @@ async def api_generate_files(request: Request):
                         if sel:
                             tbl['_fine_cells'] = sel
                 _write_combined_sql(aws_tables, aws_outdir, extract_type,
-                                    db_path=_db_path, coarse=coarse)
+                                    db_path=_db_path, coarse=coarse,
+                                    preset=preset)
                 results["sql_file"] = os.path.join(aws_outdir, f"extract_{extract_type}.sql")
 
             # Cross-side bucket equality check (col extraction only — per-pair
@@ -764,6 +869,15 @@ async def api_load(request: Request):
     if level not in ("fine", "coarse"):
         return JSONResponse(status_code=400, content={
             "error": f"Unknown level '{level}'; expected 'fine' or 'coarse'."
+        })
+    # preset: 'quick' / 'standard' / 'detailed'. Persisted on each loaded
+    # _col_stats row so col_compare can filter by preset. When the caller
+    # doesn't supply one, the loader derives it from `level` for legacy
+    # /api/generate consumers (fine -> detailed, coarse -> quick).
+    preset = body.get("preset")
+    if preset and preset not in ("quick", "standard", "detailed"):
+        return JSONResponse(status_code=400, content={
+            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
         })
 
     buf = io.StringIO()
@@ -826,9 +940,10 @@ async def api_load(request: Request):
                         db_path=_db_path, csv_path=csv_path,
                         table_name=qname, mode="upsert",
                         source=tbl.get("source"), vintage=table_vintage,
-                        level=level,
+                        level=level, preset=preset,
                     )
-                    print(f"{qname}: {count} stat rows loaded ({level})")
+                    tag = preset or ("detailed" if level == "fine" else "quick")
+                    print(f"{qname}: {count} stat rows loaded ({level}, preset={tag})")
 
         return {"ok": True, "output": buf.getvalue()}
     except Exception as e:
@@ -1759,16 +1874,28 @@ async def api_load_col_stats_upload(
     file: UploadFile = File(...),
     table_name: str = Form(""),
     mode: str = Form("upsert"),
+    preset: str = Form(""),
 ):
     """Upload pre-computed column stats CSV.
 
     CSV should have: column_name, dt, col_type, n_total, n_missing, n_unique,
     mean, std, min_val, max_val, top_10
+
+    `preset` (optional, 'quick'/'standard'/'detailed') tags every loaded
+    _col_stats row so col_compare can later filter by preset. Empty
+    defers to the CSV's own `preset` column, falling back to 'detailed'
+    for legacy CSVs without one. Composite PK is (source_table,
+    column_name, dt) -- loading the same (col, dt) under a different
+    preset overwrites the prior row.
     """
     import tempfile
 
     if not table_name:
         return JSONResponse(status_code=400, content={"error": "table_name is required"})
+    if preset and preset not in ("quick", "standard", "detailed"):
+        return JSONResponse(status_code=400, content={
+            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
+        })
 
     try:
         content = await file.read()
@@ -1806,6 +1933,7 @@ async def api_load_col_stats_upload(
             mode=mode,
             source=tbl_cfg.get("source") if tbl_cfg else None,
             vintage=table_vintage,
+            preset=preset or None,
         )
 
         os.unlink(tmp_path)
@@ -1829,9 +1957,14 @@ async def api_load_col_stats_path(request: Request):
         csv_path = _resolve(csv_path)
     table_name = body.get("table_name", "")
     mode = body.get("mode", "upsert")
+    preset = body.get("preset", "") or ""
 
     if not table_name:
         return JSONResponse(status_code=400, content={"error": "table_name is required"})
+    if preset and preset not in ("quick", "standard", "detailed"):
+        return JSONResponse(status_code=400, content={
+            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
+        })
     if not csv_path or not os.path.exists(csv_path):
         return JSONResponse(status_code=400, content={"error": f"File not found: {csv_path}"})
 
@@ -1863,6 +1996,7 @@ async def api_load_col_stats_path(request: Request):
             mode=mode,
             source=tbl_cfg.get("source") if tbl_cfg else None,
             vintage=table_vintage,
+            preset=preset or None,
         )
 
         return {"ok": True, "loaded": count, "table_name": table_name}
@@ -1942,7 +2076,8 @@ async def api_save_col_comparison(pair_name: str, request: Request):
 
 @app.get("/api/compare/col/{pair_name}")
 async def api_compare_col_pair(pair_name: str, from_date: str = "",
-                               to_date: str = "", level: str = "fine"):
+                               to_date: str = "", level: str = "fine",
+                               preset: str = ""):
     """Compare col stats for a single pair — returns per-vintage comparisons.
 
     `level=coarse` returns the cheap-aggregate signals only
@@ -1952,10 +2087,21 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
 
     `level=fine` (default) returns the full row including mean/std/top_10 —
     used by the drill-down page after the user picks cells.
+
+    `preset` (optional, 'quick' / 'standard' / 'detailed') filters
+    _col_stats rows to those generated under the matching preset. Raises
+    400 with a structured `{ok: false, preset_missing: side, ...}` body
+    when either side has zero rows for the requested preset so the UI
+    can show a "re-extract under preset X for side Y" banner instead of
+    rendering an empty table.
     """
     if level not in ("coarse", "fine"):
         return JSONResponse(status_code=400, content={
             "error": f"Unknown level '{level}'; expected 'coarse' or 'fine'."
+        })
+    if preset and preset not in ("quick", "standard", "detailed"):
+        return JSONResponse(status_code=400, content={
+            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
         })
     try:
         from ..db import (
@@ -1988,21 +2134,39 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
             col_mappings = auto.get("matched", {})
 
         # Full comparison (all dates, like CLI compare-col)
-        comparison = compare_column_stats(
-            _db_path, table_left, table_right,
-            columns=list(col_mappings.keys()) if col_mappings else None,
-            col_mappings=col_mappings,
-            from_date=from_date or None,
-            to_date=to_date or None,
-            col_type_overrides=col_type_overrides,
-            level=level,
-        )
+        try:
+            comparison = compare_column_stats(
+                _db_path, table_left, table_right,
+                columns=list(col_mappings.keys()) if col_mappings else None,
+                col_mappings=col_mappings,
+                from_date=from_date or None,
+                to_date=to_date or None,
+                col_type_overrides=col_type_overrides,
+                level=level,
+                preset=preset or None,
+            )
+        except ValueError as ve:
+            # compare_column_stats raises when a preset filter leaves
+            # either side empty. Return 400 with a structured payload so
+            # col_compare.js can render a precise banner ("no rows for
+            # preset=X on table_left") instead of treating it as a 500.
+            msg = str(ve)
+            side = None
+            if table_left in msg:
+                side = 'left'
+            elif table_right in msg:
+                side = 'right'
+            return JSONResponse(status_code=400, content={
+                "ok": False, "error": msg, "preset": preset, "preset_missing": side,
+            })
 
         # Get all left/right column names for left-only/right-only
         stats_left = get_col_stats(_db_path, table_left,
-                                   from_date=from_date or None, to_date=to_date or None)
+                                   from_date=from_date or None, to_date=to_date or None,
+                                   preset=preset or None)
         stats_right = get_col_stats(_db_path, table_right,
-                                    from_date=from_date or None, to_date=to_date or None)
+                                    from_date=from_date or None, to_date=to_date or None,
+                                    preset=preset or None)
         all_left_cols = set(s["column_name"] for s in stats_left)
         all_right_cols = set(s["column_name"] for s in stats_right)
         mapped_left = set(col_mappings.keys())
@@ -2158,12 +2322,23 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
 
 @app.post("/api/compare/col/export/html")
 async def api_compare_col_export_html(request: Request):
-    """Generate full HTML report for col comparison (like CLI compare-col)."""
+    """Generate full HTML report for col comparison (like CLI compare-col).
+
+    Honors `preset` body param (one of 'quick'/'standard'/'detailed' or
+    empty for all). Per-pair empty-side errors are rendered as a stub
+    section in the report so the user sees which pair needs re-extracting
+    rather than getting a 500 for the whole batch.
+    """
     body = await request.json()
     from_date = body.get("from_date", "")
     to_date = body.get("to_date", "")
     title = body.get("title", "")
     subtitle = body.get("subtitle", "")
+    preset = body.get("preset", "") or ""
+    if preset and preset not in ("quick", "standard", "detailed"):
+        return JSONResponse(status_code=400, content={
+            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
+        })
     # Live UI state per pair: {pair_name: {comment_left, comment_right,
     # time_left, time_right}}. Falls back to pair_cfg when absent.
     live_pairs = body.get("pairs", {}) or {}
@@ -2201,14 +2376,25 @@ async def api_compare_col_export_html(request: Request):
             # row-compare's matching_dates would silently empty the export
             # when the date formats don't line up between row counts and col
             # stats (vintage-bucketed col stats vs raw row dates, etc.).
-            comparison = compare_column_stats(
-                _db_path, pair["table_left"], pair["table_right"],
-                columns=list(col_mappings.keys()) if col_mappings else None,
-                col_mappings=col_mappings,
-                from_date=from_date or None,
-                to_date=to_date or None,
-                col_type_overrides=col_type_overrides,
-            )
+            try:
+                comparison = compare_column_stats(
+                    _db_path, pair["table_left"], pair["table_right"],
+                    columns=list(col_mappings.keys()) if col_mappings else None,
+                    col_mappings=col_mappings,
+                    from_date=from_date or None,
+                    to_date=to_date or None,
+                    col_type_overrides=col_type_overrides,
+                    preset=preset or None,
+                )
+            except ValueError as ve:
+                # Per-pair skip on preset filter empty-side -- emit a stub
+                # section to the report so the user knows which pair was
+                # excluded and why.
+                row_sections.append(
+                    f"<h2>{pname}</h2>"
+                    f"<p style='color:#c00;'>Skipped: {ve}</p>"
+                )
+                continue
 
             meta_left = get_metadata(_db_path, pair["table_left"]) or {}
             meta_right = get_metadata(_db_path, pair["table_right"]) or {}
@@ -2271,6 +2457,11 @@ async def api_compare_col_export_log(request: Request):
     body = await request.json()
     from_date = body.get("from_date", "")
     to_date = body.get("to_date", "")
+    preset = body.get("preset", "") or ""
+    if preset and preset not in ("quick", "standard", "detailed"):
+        return JSONResponse(status_code=400, content={
+            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
+        })
 
     try:
         from ..db import list_table_pairs, get_metadata, get_row_comparison
@@ -2302,14 +2493,26 @@ async def api_compare_col_export_log(request: Request):
                 auto = match_columns_from_dicts(left_cols, right_cols)
                 col_mappings = auto.get("matched", {})
 
-            comparison = compare_column_stats(
-                _db_path, pair["table_left"], pair["table_right"],
-                columns=list(col_mappings.keys()) if col_mappings else None,
-                col_mappings=col_mappings,
-                from_date=from_date or None,
-                to_date=to_date or None,
-                col_type_overrides=col_type_overrides,
-            )
+            try:
+                comparison = compare_column_stats(
+                    _db_path, pair["table_left"], pair["table_right"],
+                    columns=list(col_mappings.keys()) if col_mappings else None,
+                    col_mappings=col_mappings,
+                    from_date=from_date or None,
+                    to_date=to_date or None,
+                    col_type_overrides=col_type_overrides,
+                    preset=preset or None,
+                )
+            except ValueError as ve:
+                # Per-pair skip when preset filter leaves a side empty —
+                # mirrors the Excel exporter's behavior. The combined log
+                # gets a "NO DATA" header for that pair so users can see
+                # which pair needs re-extracting without the entire export
+                # failing.
+                all_logs.append(
+                    f"=== {pname} (preset='{preset}') ===\n"
+                    f"  SKIP: {ve}\n")
+                continue
 
             meta_left = get_metadata(_db_path, pair["table_left"]) or {}
             meta_right = get_metadata(_db_path, pair["table_right"]) or {}
@@ -2468,8 +2671,21 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
 # ---------------------------------------------------------------------------
 
 @app.get("/api/compare/col/export/excel")
-async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
-    """Generate Excel workbook for col comparison — one sheet per pair, transposed layout."""
+async def api_compare_col_export_excel(from_date: str = "", to_date: str = "",
+                                         preset: str = ""):
+    """Generate Excel workbook for col comparison — one sheet per pair, transposed layout.
+
+    When `preset` is supplied, only _col_stats rows tagged with that
+    preset feed the comparison; the `_filter_active_stats` helper
+    below additionally drops any stat row that's universally empty
+    across the loaded data (e.g. Quick-preset rows have mean/std/top_10
+    blank, so those rows don't appear in the sheet at all). One sheet
+    per pair — today's layout, unchanged.
+    """
+    if preset and preset not in ("quick", "standard", "detailed"):
+        return JSONResponse(status_code=400, content={
+            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
+        })
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
@@ -2540,13 +2756,24 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = ""):
                 auto = match_columns_from_dicts(left_cols, right_cols)
                 col_mappings = auto.get("matched", {})
 
-            comparison = compare_column_stats(
-                _db_path, pair["table_left"], pair["table_right"],
-                columns=list(col_mappings.keys()) if col_mappings else None,
-                col_mappings=col_mappings,
-                from_date=from_date or None, to_date=to_date or None,
-                col_type_overrides=col_type_overrides,
-            )
+            try:
+                comparison = compare_column_stats(
+                    _db_path, pair["table_left"], pair["table_right"],
+                    columns=list(col_mappings.keys()) if col_mappings else None,
+                    col_mappings=col_mappings,
+                    from_date=from_date or None, to_date=to_date or None,
+                    col_type_overrides=col_type_overrides,
+                    preset=preset or None,
+                )
+            except ValueError as ve:
+                # Skip pairs that have no data under the requested preset.
+                # Excel export covers many pairs at once; a single empty
+                # pair shouldn't block the rest. We still add a stub
+                # sheet showing the reason so the user can see WHY.
+                ws_stub = wb.create_sheet(title=pname[:31] or "pair")
+                ws_stub.cell(row=1, column=1, value=f"No data for {pname} under preset='{preset}'")
+                ws_stub.cell(row=2, column=1, value=str(ve))
+                continue
 
             meta_left = get_metadata(_db_path, pair["table_left"]) or {}
             meta_right = get_metadata(_db_path, pair["table_right"]) or {}
@@ -3957,11 +4184,19 @@ async def api_col_filter_preview(pair_name: str, request: Request):
 
 @app.get("/api/pairs/{pair_name}/columns")
 async def api_get_pair_columns(pair_name: str):
-    """Return left/right columns, current col_mappings, col_rules, and auto-match results."""
+    """Return left/right columns, current col_mappings, col_rules, and auto-match results.
+
+    Auto-match suppresses any (left, right) tuple in `col_rejected` so a
+    pair the user explicitly trashed in the col_mapping UI never gets
+    re-suggested on page reload. Returns `col_type_overrides` so the UI
+    can pre-populate the per-row datatype dropdowns.
+    """
     try:
         from ..db import (
             get_table_pair, get_column_meta, get_pair_col_map_from_db,
             get_pair_col_rules, ensure_col_rules_column,
+            get_pair_col_rejected, get_pair_col_type_overrides,
+            get_pair_col_type_overrides_right,
         )
         from ..compare import match_columns_from_dicts
 
@@ -3978,9 +4213,12 @@ async def api_get_pair_columns(pair_name: str):
         left_cols = {c["column_name"]: c.get("data_type", "") for c in left_meta}
         right_cols = {c["column_name"]: c.get("data_type", "") for c in right_meta}
 
-        # Get existing mappings and rules
+        # Get existing mappings, rules, rejected list, and type overrides
         col_mappings = get_pair_col_map_from_db(_db_path, pair_name)
         col_rules_data = get_pair_col_rules(_db_path, pair_name)
+        col_rejected = get_pair_col_rejected(_db_path, pair_name)
+        col_type_overrides = get_pair_col_type_overrides(_db_path, pair_name)
+        col_type_overrides_right = get_pair_col_type_overrides_right(_db_path, pair_name)
 
         # Determine unmapped columns
         mapped_left = set(col_mappings.keys())
@@ -3988,12 +4226,21 @@ async def api_get_pair_columns(pair_name: str):
         unmapped_left = {k: v for k, v in left_cols.items() if k not in mapped_left}
         unmapped_right = {k: v for k, v in right_cols.items() if k not in mapped_right}
 
-        # Auto-match unmapped columns
+        # Auto-match unmapped columns, suppressing rejected pairs.
+        # match_columns_from_dicts matches by case-insensitive name; we
+        # filter its output to drop any (left, right) the user already
+        # rejected. Case-insensitive comparison so 'STATUS_CD' rejected
+        # also suppresses re-match of 'Status_Cd'.
+        rejected_set = {(l.lower(), r.lower()) for l, r in col_rejected}
         auto_result = match_columns_from_dicts(
             unmapped_left, unmapped_right,
             left_label=pair.get("source_left", "left"),
             right_label=pair.get("source_right", "right"),
         )
+        suggested = {
+            l: r for l, r in (auto_result.get("matched", {}) or {}).items()
+            if (l.lower(), r.lower()) not in rejected_set
+        }
 
         return {
             "pair_name": pair_name,
@@ -4005,8 +4252,80 @@ async def api_get_pair_columns(pair_name: str):
             "right_columns": right_cols,
             "col_mappings": col_mappings,
             "col_rules": col_rules_data,
-            "auto_match": auto_result.get("matched", {}),
+            "auto_match": suggested,
+            "col_rejected": col_rejected,
+            "col_type_overrides": col_type_overrides,
+            "col_type_overrides_right": col_type_overrides_right,
         }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/pairs/{pair_name}/col_rejected")
+async def api_save_pair_col_rejected(pair_name: str, request: Request):
+    """Replace the col_rejected list for the pair.
+
+    Body: {"rejected": [[left_col, right_col], ...]}
+    """
+    try:
+        from ..db import save_pair_col_rejected, get_table_pair
+        if not get_table_pair(_db_path, pair_name):
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+        body = await request.json()
+        rejected = body.get("rejected", []) or []
+        if not isinstance(rejected, list):
+            return JSONResponse(status_code=400, content={"error": "rejected must be a list"})
+        # Normalize: each entry must be a 2-element [left, right] list.
+        clean = []
+        for entry in rejected:
+            if isinstance(entry, list) and len(entry) == 2:
+                clean.append([str(entry[0]), str(entry[1])])
+        save_pair_col_rejected(_db_path, pair_name, clean)
+        return {"ok": True, "count": len(clean)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/pairs/{pair_name}/col_type_overrides")
+async def api_save_pair_col_type_overrides(pair_name: str, request: Request):
+    """Replace the LEFT-side per-column type overrides for the pair.
+
+    Body: {"overrides": {"LEFT_COL": "VARCHAR2(10)", ...}}
+    """
+    try:
+        from ..db import save_pair_col_type_overrides, get_table_pair
+        if not get_table_pair(_db_path, pair_name):
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+        body = await request.json()
+        overrides = body.get("overrides", {}) or {}
+        if not isinstance(overrides, dict):
+            return JSONResponse(status_code=400, content={"error": "overrides must be a dict"})
+        clean = {str(k): str(v) for k, v in overrides.items() if k and v}
+        save_pair_col_type_overrides(_db_path, pair_name, clean)
+        return {"ok": True, "count": len(clean)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/pairs/{pair_name}/col_type_overrides_right")
+async def api_save_pair_col_type_overrides_right(pair_name: str, request: Request):
+    """Replace the RIGHT-side per-column type overrides for the pair.
+
+    Body: {"overrides": {"LEFT_COL": "varchar(20)", ...}} -- keyed by
+    LEFT col name (the join key) so the row is identifiable across
+    both overrides without an extra mapping lookup.
+    """
+    try:
+        from ..db import save_pair_col_type_overrides_right, get_table_pair
+        if not get_table_pair(_db_path, pair_name):
+            return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
+        body = await request.json()
+        overrides = body.get("overrides", {}) or {}
+        if not isinstance(overrides, dict):
+            return JSONResponse(status_code=400, content={"error": "overrides must be a dict"})
+        clean = {str(k): str(v) for k, v in overrides.items() if k and v}
+        save_pair_col_type_overrides_right(_db_path, pair_name, clean)
+        return {"ok": True, "count": len(clean)}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 

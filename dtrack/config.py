@@ -169,6 +169,14 @@ def get_all_tables_from_unified(config):
         for side in ["left", "right"]:
             table_cfg = pair_config[side].copy()
 
+            # Tag the table with which side of the pair it came from.
+            # Used by the csv-source generator to route extract_*.sql to
+            # the LEFT or RIGHT outdir based on which side the CSV
+            # belongs to (so a pair like Oracle/left + CSV/right still
+            # writes each side's SQL file to the matching outdir, and
+            # the runner button knows which one to execute).
+            table_cfg.setdefault("_side", side)
+
             # Pair-level vintage propagates to both sides; per-side override wins
             # only if the per-side dict already specifies one (legacy configs).
             if pair_vintage and not table_cfg.get("vintage"):

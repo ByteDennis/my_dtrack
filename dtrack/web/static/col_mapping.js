@@ -157,6 +157,16 @@ async function loadColumns(name) {
             right_columns: data.right_columns || {},
             source_left: data.source_left || 'left',
             source_right: data.source_right || 'right',
+            // Persisted rejection list (server filters auto_match against
+            // this before returning, so anything in here is by definition
+            // NOT in auto_match — we keep it client-side for the next
+            // delete-and-reject cycle).
+            rejected: data.col_rejected || [],
+            // Per-column type overrides set by the user via the
+            // double-click-to-edit type spans on each mapped row.
+            // Both maps are keyed by LEFT col name (the join key).
+            type_overrides:       data.col_type_overrides       || {},
+            type_overrides_right: data.col_type_overrides_right || {},
         };
 
         renderPairBody(name);
@@ -252,12 +262,41 @@ function renderPairBody(name) {
                 ${Object.entries(mappings).sort((a,b) => a[0].localeCompare(b[0])).map(([left, right]) => {
                     const src = sources[left] || 'manual';
                     const srcClass = src.startsWith('rule') ? 'rule' : src;
-                    const lType = left_columns[left] ? ` (${esc(left_columns[left])})` : '';
-                    const rType = right_columns[right] ? ` (${esc(right_columns[right])})` : '';
+                    // Effective type: the manual override wins over the
+                    // _column_meta-discovered value. The pencil glyph
+                    // marks rows where the user has touched the type so
+                    // you can scan a 200-col table for "what did I edit?"
+                    // without opening anything. Both LEFT and RIGHT are
+                    // independently editable (dblclick the parenthesized
+                    // type span). Overrides keyed by LEFT col name in
+                    // both maps so a single (left, right) row maps to
+                    // one entry per side.
+                    const cache = mappingCache[name] || {};
+                    const ovL = cache.type_overrides       || {};
+                    const ovR = cache.type_overrides_right || {};
+                    const discoveredL = left_columns[left] || '';
+                    const discoveredR = right_columns[right] || '';
+                    const effectiveL = ovL[left] || discoveredL;
+                    const effectiveR = ovR[left] || discoveredR;
+                    const isOverridenL = !!ovL[left] && ovL[left] !== discoveredL;
+                    const isOverridenR = !!ovR[left] && ovR[left] !== discoveredR;
+                    const _typeSpan = (eff, isOv, side, discovered) => eff
+                        ? ` <span class="cm-type-edit"
+                                  data-pair="${escAttr(name)}"
+                                  data-col="${escAttr(left)}"
+                                  data-side="${side}"
+                                  data-orig="${escAttr(discovered)}"
+                                  ondblclick="startTypeEdit(this)"
+                                  title="Double-click to edit. Enter saves, Esc cancels."
+                                  style="cursor:text; ${isOv ? 'color:var(--jp-warn-color0); font-style:italic;' : 'color:var(--jp-ui-font-color2);'}"
+                            >(${esc(eff)}${isOv ? ' ✎' : ''})</span>`
+                        : '';
+                    const lTypeHtml = _typeSpan(effectiveL, isOverridenL, 'left',  discoveredL);
+                    const rTypeHtml = _typeSpan(effectiveR, isOverridenR, 'right', discoveredR);
                     return `<tr>
-                        <td class="cm-col-name">${esc(left)}${lType}</td>
+                        <td class="cm-col-name">${esc(left)}${lTypeHtml}</td>
                         <td style="text-align:center; color:var(--jp-ui-font-color3);">&rarr;</td>
-                        <td class="cm-col-name">${esc(right)}${rType}</td>
+                        <td class="cm-col-name">${esc(right)}${rTypeHtml}</td>
                         <td><span class="cm-source cm-source-${srcClass}">${esc(src)}</span></td>
                         <td style="text-align:center;">
                             <button class="btn-text cm-unmap-btn" onclick="unmapColumn('${name}', '${escAttr(left)}')" title="Unmap">&times;</button>
@@ -299,7 +338,15 @@ function renderPairBody(name) {
                 <span>Unmatched (${nUnmatched})</span>
             </summary>
             <div class="rc-details-body">
-                <div class="cm-table-wrap" style="max-height:150px; overflow:auto;">
+                <!-- Resizable: native vertical resize handle on the
+                     scroll wrapper. Default 150px, expandable up to 70vh
+                     so users with many unmatched columns can drag the
+                     pane down without scrolling inside a tiny window.
+                     min-height keeps the pane visible even when the
+                     user collapses it aggressively. -->
+                <div class="cm-table-wrap"
+                     style="height:150px; min-height:60px; max-height:70vh;
+                            resize:vertical; overflow:auto;">
                 <table class="data-table compact" style="font-family:var(--jp-code-font-family); font-size:12px;">
                     <thead><tr>
                         <th>LEFT (${esc(srcLeft)})</th>
@@ -394,6 +441,27 @@ function unmapColumn(name, leftCol) {
     const cache = mappingCache[name];
     if (!cache) return;
 
+    // Capture the (left, right) tuple before we drop it from the cache --
+    // we add it to the rejected list so the auto-matcher won't re-suggest
+    // this exact pairing on the next page load. The col_rejected list is
+    // persisted server-side; without it, deletions silently come back
+    // after the user navigates away and returns.
+    const rightCol = cache.mappings[leftCol];
+    if (rightCol) {
+        cache.rejected = cache.rejected || [];
+        const tup = [leftCol, rightCol];
+        const already = cache.rejected.some(
+            r => r[0] === tup[0] && r[1] === tup[1]);
+        if (!already) cache.rejected.push(tup);
+        // Persist immediately -- doesn't go through the debounced sync
+        // because we want the rejection to stick even if the user
+        // navigates away before the next sync flush.
+        fetch(`/api/pairs/${encodeURIComponent(name)}/col_rejected`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({rejected: cache.rejected}),
+        }).catch(() => {});
+    }
     delete cache.mappings[leftCol];
     delete cache.sources[leftCol];
     renderPairBody(name);
@@ -743,4 +811,72 @@ function notify(msg, type = 'success') {
         el.title = msg;
         setTimeout(() => { el.style.background = 'var(--jp-success-color0)'; }, 2000);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Inline type editor — double-click any (TYPE) span on a mapped row to
+// rename the side's effective type. Empty / unchanged-from-discovered
+// clears the override; a new value persists to col_type_overrides
+// (LEFT) or col_type_overrides_right (RIGHT). The pencil glyph in the
+// rendered span tracks override state without re-fetching the row.
+// ---------------------------------------------------------------------------
+
+function startTypeEdit(span) {
+    if (span.querySelector('input')) return;  // already editing
+    const pair  = span.dataset.pair;
+    const col   = span.dataset.col;
+    const side  = span.dataset.side;          // 'left' or 'right'
+    const orig  = span.dataset.orig || '';
+    // Strip the parens + the optional trailing " ✎" from the visible label
+    // so the input shows the bare type string.
+    const cur = (span.textContent || '').replace(/^\(/, '').replace(/\s*✎?\)$/, '');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = cur;
+    input.style.cssText =
+        'width:140px; font-size:11px; padding:1px 4px; ' +
+        'font-family:var(--jp-code-font-family); ' +
+        'border:1px solid var(--jp-brand-color1); border-radius:2px;';
+    input.dataset.orig = orig;
+    input.dataset.discoveredOnEnter = '0';
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); _commitTypeEdit(input, span, pair, col, side, orig); }
+        else if (e.key === 'Escape') { e.preventDefault(); renderPairBody(pair); }
+    });
+    input.addEventListener('blur', () => _commitTypeEdit(input, span, pair, col, side, orig));
+    span.innerHTML = '';
+    span.appendChild(input);
+    input.focus();
+    input.select();
+}
+
+async function _commitTypeEdit(input, span, pair, col, side, orig) {
+    const newVal = (input.value || '').trim();
+    const cache = mappingCache[pair];
+    if (!cache) return renderPairBody(pair);
+    const mapKey = side === 'right' ? 'type_overrides_right' : 'type_overrides';
+    cache[mapKey] = cache[mapKey] || {};
+    // Treat empty or "same as discovered" as a clear -> remove the override
+    // so the row reverts to plain (DISCOVERED_TYPE) display on next render.
+    if (!newVal || newVal === orig) {
+        delete cache[mapKey][col];
+    } else {
+        cache[mapKey][col] = newVal;
+    }
+    // Persist to the matching endpoint. Both endpoints accept the full map
+    // (server replaces in one shot), so we send the current cache state.
+    const endpoint = side === 'right'
+        ? `/api/pairs/${encodeURIComponent(pair)}/col_type_overrides_right`
+        : `/api/pairs/${encodeURIComponent(pair)}/col_type_overrides`;
+    try {
+        await fetch(endpoint, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({overrides: cache[mapKey]}),
+        });
+    } catch (e) {
+        notify(`Type override save failed: ${e.message}`, 'error');
+    }
+    renderPairBody(pair);
 }

@@ -63,7 +63,14 @@ async function refreshDbStatus() {
     try {
         const resp = await fetch('/api/status');
         const data = await resp.json();
-        const pairs = (data.pairs || []).filter(p => !p.skip);
+        let pairs = (data.pairs || []).filter(p => !p.skip);
+        // Honor global pair selection: when narrowed, show only those.
+        if (typeof getGlobalSelectedPairs === 'function') {
+            const sel = new Set(getGlobalSelectedPairs());
+            if (sel.size > 0) {
+                pairs = pairs.filter(p => sel.has(p.pair_name));
+            }
+        }
         if (!pairs.length) {
             el.innerHTML = '<div class="empty-message">No pairs configured</div>';
             return;

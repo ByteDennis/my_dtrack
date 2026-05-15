@@ -9,15 +9,189 @@ const STEP_ROUTES = {
     'load_row': '/load_row',
     'row_compare': '/row_compare',
     'col_mapping': '/col_mapping',
-    'col_gen_rough': '/col_gen_rough',
     'col_gen': '/col_gen',
     'load_col': '/load_col',
     'col_compare': '/col_compare',
     'csv_compare': '/csv_compare',
     'playground': '/playground',
     'sync': '/sync',
-    'benchmark': '/benchmark',
 };
+
+
+// ===========================================================================
+// Global pair selector
+// ===========================================================================
+//
+// A sticky, cross-page set of "selected pair names" backed by localStorage.
+// Pages that have per-page pair-pickers can consult this to pre-tick the
+// right checkboxes on load, and write back when the user toggles. The goal
+// is one source of truth so flipping pages doesn't lose your selection.
+//
+// API:
+//   getGlobalSelectedPairs()        -> string[]  (the persisted set)
+//   setGlobalSelectedPairs(arr)     -> void      (replace with arr)
+//   toggleGlobalPair(name, on)      -> void      (add/remove one)
+//   isGlobalPairSelected(name)      -> bool
+//   clearGlobalSelectedPairs()      -> void
+//   selectAllGlobalPairs(allNames)  -> void
+//   onGlobalPairSelectionChange(fn) -> unsubscribe()
+//
+// Pages can listen for cross-tab updates via the storage event the
+// browser fires when localStorage changes -- this implementation forwards
+// those to subscribers so a selector tweak in one tab updates a peer tab.
+//
+// Empty selection means "all pairs" (the default before the user has
+// touched anything). Pages should treat `[]` as "no narrow set yet, use
+// whatever the API would return without filtering."
+
+const _GLOBAL_PAIRS_KEY = 'dtrack-global-selected-pairs';
+const _globalPairsSubscribers = new Set();
+
+function getGlobalSelectedPairs() {
+    try {
+        const raw = localStorage.getItem(_GLOBAL_PAIRS_KEY);
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+}
+
+function setGlobalSelectedPairs(arr) {
+    const clean = Array.isArray(arr) ? [...new Set(arr.map(String))] : [];
+    try { localStorage.setItem(_GLOBAL_PAIRS_KEY, JSON.stringify(clean)); }
+    catch (e) {}
+    _notifyGlobalPairsChange(clean);
+}
+
+function toggleGlobalPair(name, on) {
+    const cur = new Set(getGlobalSelectedPairs());
+    if (on) cur.add(name); else cur.delete(name);
+    setGlobalSelectedPairs([...cur]);
+}
+
+function isGlobalPairSelected(name) {
+    return getGlobalSelectedPairs().includes(name);
+}
+
+function clearGlobalSelectedPairs() {
+    setGlobalSelectedPairs([]);
+}
+
+function selectAllGlobalPairs(allNames) {
+    setGlobalSelectedPairs(allNames || []);
+}
+
+function onGlobalPairSelectionChange(fn) {
+    _globalPairsSubscribers.add(fn);
+    return () => _globalPairsSubscribers.delete(fn);
+}
+
+function _notifyGlobalPairsChange(arr) {
+    for (const fn of _globalPairsSubscribers) {
+        try { fn(arr); } catch (e) { /* swallow */ }
+    }
+    _renderGlobalPairsBadge();
+}
+
+// Cross-tab sync: when localStorage changes in another tab the browser
+// fires a `storage` event in this tab. Forward to subscribers + refresh
+// the badge so the header count stays accurate without a reload.
+window.addEventListener('storage', (e) => {
+    if (e.key === _GLOBAL_PAIRS_KEY) {
+        _notifyGlobalPairsChange(getGlobalSelectedPairs());
+    }
+});
+
+function _renderGlobalPairsBadge() {
+    const badge = document.getElementById('global-pairs-badge');
+    if (!badge) return;
+    const arr = getGlobalSelectedPairs();
+    badge.textContent = arr.length === 0 ? 'all' : String(arr.length);
+}
+
+// First render after DOM loads (in case the layout includes the badge).
+document.addEventListener('DOMContentLoaded', _renderGlobalPairsBadge);
+
+// ---- Modal-based picker -----------------------------------------------------
+// openGlobalPairPicker(allPairsList) shows a modal with a checkbox per pair.
+// `allPairsList` is [{name, ...}, ...]; the picker only needs `.name`. Each
+// page that has the full pair list typically fetches it for its own purposes
+// and can pass it in. The modal mounts itself lazily so pages without it
+// don't pay any cost.
+
+async function openGlobalPairPicker(allPairsList) {
+    if (!allPairsList) {
+        // Fetch the list if the caller didn't supply one. Use
+        // /api/status (cheap; returns {pairs:[{pair_name,...}]}) which
+        // every page already calls. Earlier this hit /api/pairs which
+        // doesn't exist; the modal then rendered empty.
+        try {
+            const res = await fetch('/api/status');
+            if (res.ok) {
+                const data = await res.json();
+                allPairsList = (data.pairs || []).filter(p => !p.skip);
+            }
+        } catch (e) { allPairsList = []; }
+    }
+    if (!Array.isArray(allPairsList)) allPairsList = [];
+    const selected = new Set(getGlobalSelectedPairs());
+    let modal = document.getElementById('global-pair-picker-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'global-pair-picker-modal';
+        modal.className = 'modal';
+        modal.style.cssText = 'display:flex; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.45); align-items:center; justify-content:center; z-index:9999;';
+        modal.innerHTML = `
+            <div class="modal-content" style="max-width:520px; max-height:70vh; display:flex; flex-direction:column; background:var(--jp-layout-color0, white); border-radius:6px; padding:0; box-shadow:0 4px 16px rgba(0,0,0,0.2);">
+                <div class="modal-header" style="padding:14px 18px; border-bottom:1px solid var(--jp-border-color0); display:flex; justify-content:space-between; align-items:center;">
+                    <h3 style="margin:0; font-size:14px;">Global Pair Selection</h3>
+                    <button class="modal-close" onclick="closeGlobalPairPicker()" style="border:none; background:transparent; cursor:pointer; font-size:18px;">&times;</button>
+                </div>
+                <div class="modal-body" id="global-pair-picker-body" style="padding:14px 18px; overflow:auto; flex:1;">
+                </div>
+                <div class="modal-footer" style="padding:12px 18px; border-top:1px solid var(--jp-border-color0); display:flex; gap:8px; justify-content:space-between;">
+                    <div>
+                        <button class="btn-text" onclick="_gppToggleAll(true)">Select all</button>
+                        <button class="btn-text" onclick="_gppToggleAll(false)">Clear</button>
+                    </div>
+                    <button class="btn-primary" onclick="closeGlobalPairPicker()">Done</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    } else {
+        modal.style.display = 'flex';
+    }
+    const body = document.getElementById('global-pair-picker-body');
+    body.innerHTML = allPairsList.map(p => {
+        const name = p.name || p.pair_name || '';
+        const checked = selected.has(name) ? 'checked' : '';
+        return `<label style="display:flex; align-items:center; gap:8px; padding:4px 0; cursor:pointer; font-size:13px;">
+            <input type="checkbox" data-pair="${name}" ${checked} onchange="_gppOnToggle(this)">
+            ${name}
+        </label>`;
+    }).join('');
+}
+
+function closeGlobalPairPicker() {
+    const modal = document.getElementById('global-pair-picker-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+function _gppOnToggle(input) {
+    toggleGlobalPair(input.dataset.pair, input.checked);
+}
+
+function _gppToggleAll(on) {
+    const inputs = document.querySelectorAll(
+        '#global-pair-picker-body input[type="checkbox"]');
+    const names = [];
+    inputs.forEach(inp => {
+        inp.checked = on;
+        if (on) names.push(inp.dataset.pair);
+    });
+    setGlobalSelectedPairs(names);
+}
 
 function navigateToStep(step) {
     const url = STEP_ROUTES[step];

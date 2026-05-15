@@ -771,7 +771,8 @@ def _athena_portable_hash16(value_sql):
 
 
 def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
-                      full_table, wc, cte_prefix, col_dtype=None):
+                      full_table, wc, cte_prefix, col_dtype=None,
+                      preset=None):
     """Coarse col-stats SQL — cheap aggregates for Phase-1 rough drift detection.
 
     Emits the 14-column row schema (dt, column_name, col_type, n_total,
@@ -780,27 +781,16 @@ def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
     back empty in coarse mode; the loader's level="coarse" path preserves
     any prior fine values for those rather than overwriting with empty.
 
-    Two branches:
+    `preset` selects the stat subset (matches constants.STATS_PRESETS):
 
-    NUMERIC — single-pass aggregates, no GROUP BY p_col. min_val/max_val
-        are scalar MIN/MAX since "freq of a numeric value" isn't a useful
-        signal. length_avg / length_max are deliberately empty: on
-        numerics LENGTH(CAST(...)) is dominated by storage type (bigint
-        "0" is 1 char, double "0.0" is 3 chars) which adds presentation
-        noise to cross-platform compares.
-
-    CATEGORICAL — freq-table form. Mirrors the Oracle/Hadoop SAS path
-        (and the AWS fine path) so min/max come out as "val=cnt" and
-        length_avg / hash_sum are weighted by cnt. This costs one extra
-        GROUP BY col_expr scan vs the numeric branch, but for typical
-        categorical cardinalities (status codes, type flags, etc.) it's
-        cheap, and it makes Phase-1 rough cross-platform compares
-        directly comparable to the SAS side without any display fix-up.
-
-    n_unique uses precise COUNT(DISTINCT) on every code path so the
-    Athena side agrees exactly with the Oracle/Hadoop SAS side. An
-    earlier APPROX_DISTINCT (~2% HyperLogLog error) gave bogus Phase-1
-    mismatches on identical data and was dropped.
+      - 'quick' — flat aggregates only. No freq table, no COUNT(DISTINCT),
+        no md5/hash_sum, no top_10. Mirrors base.build_col_sql's quick
+        path on Oracle/Hadoop/CSV so all four engines emit the same
+        cheap shape. Use this on heavy / partitioned tables where the
+        WITH-chain would otherwise spill or scan twice.
+      - None / 'detailed' (legacy "coarse" mode) — full WITH-chain with
+        n_unique from the freq table and a `_coarse_lenhash` CTE that
+        produces real length_avg/length_max/hash_sum signals.
 
     Sentinel translation: every reference to `col_q` is replaced by an
     expression that maps configured sentinel values (-999, 'NA',
@@ -819,6 +809,42 @@ def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
     effective_type = col_dtype or col_type
     col_expr = apply_null_sentinels(col_q, effective_type, "athena")
     is_categorical = (col_type or "").lower() == "categorical"
+
+    if preset == 'quick':
+        # Flat-aggregate path: single SELECT, no WITH chain, no freq
+        # table. Mirrors base.build_col_sql's quick branch on the other
+        # dialects so all four engines emit the same lean shape under
+        # preset='quick'. n_unique/top_10/hash_sum are placeholders so
+        # the 14-column CSV schema stays stable.
+        if is_categorical:
+            cs = f"CAST({col_expr} AS VARCHAR)"
+            len_avg = (
+                f"CAST(SUM(LENGTH(TRIM({cs}))) / NULLIF(COUNT({col_expr}), 0) "
+                f"AS VARCHAR)"
+            )
+            len_max = f"CAST(MAX(LENGTH(TRIM({cs}))) AS VARCHAR)"
+        else:
+            # Numeric length is storage-format dominated, keep empty to
+            # match the other dialects.
+            len_avg = "''"
+            len_max = "''"
+        return f"""{cte_prefix}SELECT
+    {dt_select},
+    '{col_name}' AS column_name,
+    '{col_type}' AS col_type,
+    COUNT(*) AS n_total,
+    COUNT(*) - COUNT({col_expr}) AS n_missing,
+    0 AS n_unique,
+    '' AS mean,
+    '' AS std,
+    CAST(MIN({col_expr}) AS VARCHAR) AS min_val,
+    CAST(MAX({col_expr}) AS VARCHAR) AS max_val,
+    '' AS top_10,
+    {len_avg} AS length_avg,
+    {len_max} AS length_max,
+    '' AS hash_sum
+FROM {full_table}
+WHERE {wc}{group_by};"""
 
     if not is_categorical:
         # ---- NUMERIC branch: single-pass, no freq table. ----
@@ -976,7 +1002,7 @@ def _emit_col_block(blocks, header, sql, lifeboat_sql):
 
 
 def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
-                        coarse=False):
+                        coarse=False, preset=None):
     """Write a single combined .sql file with all AWS table queries.
 
     `coarse=True` emits the cheap-aggregate "coarse" SQL for every column —
@@ -988,6 +1014,14 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
     `coarse=False` (default) is the existing fine path: full freq aggregation,
     with the ID-skip auto-emitting coarse blocks for columns the probe
     flagged as near-unique.
+
+    `preset` ('quick' / 'standard' / 'detailed', per constants.STATS_PRESETS)
+    refines the coarse path further: 'quick' drops the freq-table CTE
+    chain entirely and emits a flat SELECT — no COUNT(DISTINCT), no
+    md5/hash_sum, no top_10 — matching base.build_col_sql's quick branch
+    on Oracle/Hadoop/CSV. 'detailed' / None preserves the existing
+    coarse-with-WITH-chain shape (back-compat with callers that pass
+    only `coarse=True`).
     """
     from datetime import datetime
     label = "coarse" if (coarse and extract_type == "col") else extract_type
@@ -1228,8 +1262,10 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                             "'" + str(v).replace("'", "''") + "'" for v in fine_vintages
                         )
                         wc_t_col = f"({wc_t}) AND ({trunc_expr} IN ({in_list}))"
-                    if col_name in id_cols:
-                        # ID-like: lite SQL, single GROUP BY trunc_expr pass.
+                    if col_name in id_cols or preset == 'quick':
+                        # ID-like OR preset=quick: lite SQL, single GROUP BY
+                        # trunc_expr pass. preset=quick forces the flat shape
+                        # across every col so no freq aggregation runs.
                         sql = _build_coarse_sql(
                             col_name, col_q,
                             'numeric' if is_num else 'categorical',
@@ -1237,6 +1273,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                             group_by=f"\nGROUP BY {trunc_expr}",
                             full_table=full_table, wc=wc_t_col, cte_prefix=cte_prefix,
                             col_dtype=col_dtype,
+                            preset=preset,
                         )
                         lifeboat = _build_lifeboat_col_sql_athena(
                             col_name, col_q, col_dtype, is_num,
@@ -1370,7 +1407,7 @@ ORDER BY s.dt;"""
                     dt_expr = f"'{dt_label}'"
                     block_suffix = f"/{dt_label}" if len(vintage_specs) > 1 else ""
 
-                    if is_id_like:
+                    if is_id_like or preset == 'quick':
                         sql = _build_coarse_sql(
                             col_name, col_q,
                             'numeric' if is_num else 'categorical',
@@ -1378,6 +1415,7 @@ ORDER BY s.dt;"""
                             group_by="",
                             full_table=full_table, wc=wc, cte_prefix=cte_prefix,
                             col_dtype=col_dtype,
+                            preset=preset,
                         )
                         lifeboat = _build_lifeboat_col_sql_athena(
                             col_name, col_q, col_dtype, is_num,

@@ -27,6 +27,57 @@ SQL_MARKER_CONN_MACRO  = '@conn_macro'
 SQL_MARKER_DEGRADE_SQL = '@degrade_sql'
 SQL_MARKER_END_DEGRADE = '@end_degrade'
 
+# Stats presets — drives the col_gen page's preset radio and the
+# /api/generate `preset` parameter. Each preset is a set of stat
+# names that the col SQL builder includes; stats not in the set are
+# emitted as '' in the result CSV so the canonical 14-column schema
+# stays consistent across presets.
+#
+# Tradeoffs (Hadoop-relevant):
+#   - quick: flat aggregates, NO freq table -> cheapest, partition-prune
+#     friendly. Categorical min/max are scalar (alphabetic MIN/MAX of
+#     the column), NOT the "val=cnt" form that requires the freq table.
+#   - standard: adds n_unique (COUNT DISTINCT) + hash_sum (portable
+#     md5-truncated-to-int16; single-pass SUM(hash16(col)) -- still
+#     no freq table). Cross-engine compare gets a meaningful signal.
+#   - detailed: adds top_10 + the "val=cnt" min/max form. Requires
+#     the WITH-chain freq table. This is the only preset where Hive
+#     emits a GROUP BY <col_expr>.
+#
+# Mean/std (rank-weighted from the freq table) are NOT included in any
+# preset -- empirical signal-to-noise was poor and they doubled the
+# query cost. Kept '' in every emitted row so the CSV schema doesn't
+# need to change.
+STATS_PRESETS = {
+    'quick': {
+        'n_total':     True,
+        'n_missing':   True,
+        'n_unique':    False,
+        'min_max':     True,  # scalar MIN/MAX (no =cnt suffix)
+        'length':      True,  # length_avg + length_max
+        'hash_sum':    False,
+        'top_10':      False,
+    },
+    'standard': {
+        'n_total':     True,
+        'n_missing':   True,
+        'n_unique':    True,
+        'min_max':     True,  # scalar
+        'length':      True,
+        'hash_sum':    True,
+        'top_10':      False,
+    },
+    'detailed': {
+        'n_total':     True,
+        'n_missing':   True,
+        'n_unique':    True,
+        'min_max':     True,  # =cnt form (freq-table-derived)
+        'length':      True,
+        'hash_sum':    True,
+        'top_10':      True,
+    },
+}
+
 # Per-platform runner config. Drives the generic run_extract_sql_file
 # helper: which env var caps worker count, what label to write into the
 # 'partial' CSV column for lifeboat-fallback rows, and which error
@@ -68,6 +119,18 @@ PLATFORM_RUNNER = {
         'worker_default':   8,
         'degraded_label':   'athena_degraded',
         'lifeboat_errors':  ['Query exhausted resources'],
+    },
+    # CSV-as-source: powered by DuckDB in-process. Workers are CPU-bound
+    # (in-memory query exec) so default to a few; no real per-conn
+    # concurrency limit but writing CSV results back to disk creates I/O
+    # contention. Lifeboat trigger covers DuckDB's "out of memory" /
+    # "could not allocate" patterns -- rare on small fixtures, possible
+    # when reading multi-GB CSVs into a single connection's table cache.
+    'csv': {
+        'worker_env':       'CSV_MAX_WORKERS',
+        'worker_default':   4,
+        'degraded_label':   'csv_degraded',
+        'lifeboat_errors':  ['Out of Memory', 'could not allocate', 'OutOfMemory'],
     },
 }
 

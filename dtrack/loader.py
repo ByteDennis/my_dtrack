@@ -373,6 +373,7 @@ def load_precomputed_col_stats(
     db_name: Optional[str] = None,
     vintage: str = "day",
     level: str = "fine",
+    preset: Optional[str] = None,
 ) -> int:
     """
     Load pre-computed column statistics from CSV into _col_stats table.
@@ -459,6 +460,13 @@ def load_precomputed_col_stats(
                 except (ValueError, KeyError):
                     label = ""
 
+            # Preset resolution order: explicit caller arg > CSV column >
+            # fall back to derive from `level` (legacy: 'fine' -> 'detailed',
+            # 'coarse' -> 'quick'). Storing per-row so a mixed-CSV load
+            # still tags each row with what it actually represents.
+            row_preset = preset or _get("preset", "") or (
+                "detailed" if level == "fine" else "quick"
+            )
             stat = {
                 "source_table": table_name,
                 "column_name": row.get("column_name", ""),
@@ -477,6 +485,7 @@ def load_precomputed_col_stats(
                 "length_max": _get("length_max", ""),
                 "hash_sum": _get("hash_sum", ""),
                 "partial": _get("partial", ""),
+                "preset": row_preset,
             }
             stats.append(stat)
 

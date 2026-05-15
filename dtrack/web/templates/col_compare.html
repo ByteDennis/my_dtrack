@@ -8,16 +8,26 @@
             <div class="section-header">
                 <h2>COL COMPARE</h2>
                 <div class="actions" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <!-- Level toggle: coarse uses cheap aggregates only (n_total/
-                         n_missing/n_unique/min/max/length_*/hash_sum). Fine adds
-                         rank-weighted mean/std and top_10 — much more expensive
-                         to extract. Default coarse so the page loads fast and
-                         flags suspicious cols; user toggles fine for drill-down. -->
-                    <label style="font-size:12px; display:flex; align-items:center; gap:6px;">
-                        Level:
-                        <select id="level-select" onchange="onLevelChange()" style="font-size:12px;">
-                            <option value="coarse" selected>Coarse (cheap)</option>
-                            <option value="fine">Fine (full)</option>
+                    <!-- Preset selector: replaces the old level toggle.
+                         Filters loaded _col_stats rows to those tagged
+                         with the selected preset (legacy NULL preset
+                         rows are accepted as 'detailed'). Empty = all
+                         rows regardless of preset. When a non-empty
+                         preset is chosen and either side has no rows
+                         for that preset, the pair body shows a
+                         "re-extract under preset X" banner instead of
+                         rendering an empty table. Note: the PK on
+                         _col_stats is (source_table, column_name, dt)
+                         -- loading the same (col, dt) under a different
+                         preset OVERWRITES the prior preset's row. -->
+                    <label style="font-size:12px; display:flex; align-items:center; gap:6px;"
+                           title="Filter by the preset under which col stats were loaded. Empty = all.">
+                        Preset:
+                        <select id="preset-select" onchange="onPresetChange()" style="font-size:12px;">
+                            <option value="" selected>(all)</option>
+                            <option value="quick">Quick</option>
+                            <option value="standard">Standard</option>
+                            <option value="detailed">Detailed</option>
                         </select>
                     </label>
                     <input type="text" id="global-title" placeholder="Report title" style="width:160px; font-size:12px;">

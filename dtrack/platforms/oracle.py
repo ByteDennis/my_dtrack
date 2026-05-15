@@ -158,20 +158,20 @@ def _query_oracle(sql, conn_macro, conn=None):
 
 def _build_col_sql_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
                           vintage=None, date_dtype=None, date_format=None,
-                          dt_label=None, coarse=False):
+                          dt_label=None, coarse=False, preset=None):
     """Build per-column stats SQL for Oracle. Thin wrapper over the
     dialect-parameterized base.build_col_sql; both Oracle and Hadoop now
     share the same template, with per-dialect fragments supplied by
     base._col_sql_dialect_ops('oracle').
 
-    coarse=True emits Phase-1 cheap-aggregate SQL (flat numeric, slim
-    categorical chain) for the col_gen_rough page.
+    `preset` ('quick'/'standard'/'detailed') selects the stats subset.
+    `coarse=True` aliases to preset='quick' for back-compat.
     """
     from .base import build_col_sql
     return build_col_sql('oracle', tbl_cfg, col, dtype, full_table,
                           cte_prefix=cte_prefix, vintage=vintage,
                           date_dtype=date_dtype, date_format=date_format,
-                          dt_label=dt_label, coarse=coarse)
+                          dt_label=dt_label, coarse=coarse, preset=preset)
 
 
 def _build_lifeboat_col_sql_oracle(tbl_cfg, col, dtype, full_table,
@@ -262,7 +262,7 @@ def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
 
 
 def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None,
-                                     vintage=None, coarse=False):
+                                     vintage=None, coarse=False, preset=None):
     """Emit extract_col.sql with one block per (table, column, bucket).
 
     Mirrors Athena's `_write_combined_sql` shape: when the table has a
@@ -394,26 +394,26 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None,
                         vintage='all',
                         date_dtype=None, date_format=None,
                         dt_label=dt_label,
-                        coarse=coarse,
-                    )
-                    lifeboat_sql = _build_lifeboat_col_sql_oracle(
-                        extract_cfg, col, dtype, full_table, cte_prefix,
-                        vintage='all',
-                        date_dtype=None, date_format=None,
-                        dt_label=dt_label,
+                        coarse=coarse, preset=preset,
                     )
                 except Exception as e:
                     blocks.append(f"-- {qname}/{col}/{bucket_label}")
                     blocks.append(f"-- SKIP: SQL build failed: {e}")
                     blocks.append("")
                     continue
+                # No /* @degrade_sql ... @end_degrade */ block: lifeboat
+                # emission was removed because (a) it doubled every block's
+                # line count and made the file hard to skim, and (b) the
+                # new Quick/Standard presets compute flat aggregates with
+                # no freq table, so the resource-exhaustion failures the
+                # lifeboat protected against (ORA-01652 from freq sort
+                # spilling temp) mostly don't occur anymore. The lifeboat
+                # builder (_build_lifeboat_col_sql_oracle / base.build_lifeboat_col_sql)
+                # is kept defined for a potential sidecar file in the future.
                 blocks.append(f"-- {qname}/{col}/{bucket_label}")
                 blocks.append(f"/* @conn_macro={conn_macro} */")
                 blocks.append(sql.strip())
                 blocks.append(";")
-                blocks.append("/* @degrade_sql")
-                blocks.append(lifeboat_sql.strip())
-                blocks.append("@end_degrade */")
                 blocks.append("")
 
     sql_path = os.path.join(outdir, oracle_sql_filename("col"))

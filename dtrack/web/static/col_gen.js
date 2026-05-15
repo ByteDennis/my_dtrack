@@ -2,6 +2,16 @@
 
 let pairs = [];
 
+// Stats included in each preset. Mirrors constants.STATS_PRESETS server-side.
+// Used to (a) pre-fill checkboxes when a preset radio is picked, (b) snap a
+// custom checkbox set back to the closest preset name on submit. Kept in
+// sync manually — if STATS_PRESETS changes server-side, update this too.
+const PRESET_STATS = {
+    quick:    {n_unique:false, min_max:true,  length:true,  hash_sum:false, top_10:false},
+    standard: {n_unique:true,  min_max:true,  length:true,  hash_sum:true,  top_10:false},
+    detailed: {n_unique:true,  min_max:true,  length:true,  hash_sum:true,  top_10:true},
+};
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
@@ -9,7 +19,85 @@ document.addEventListener('DOMContentLoaded', () => {
     loadPairs();
     loadGlobalSettings();
     initModalHandlers();
+    _initPresetRadio();
 });
+
+function _initPresetRadio() {
+    // Default preset is sourced from DTRACK_COL_PRESET set in the page
+    // <head> (which reads ?preset= or defaults to 'quick'). Tick that
+    // radio button (lives inside the Settings modal now) and apply its
+    // stats checkboxes. The active-preset badge on the page card shows
+    // the current selection at a glance without opening the modal.
+    const def = window.DTRACK_COL_PRESET || 'quick';
+    const radio = document.querySelector(`input[name="col-preset"][value="${def}"]`);
+    if (radio) radio.checked = true;
+    _applyPresetToCheckboxes(def);
+    _updateActivePresetBadge();
+}
+
+function _applyPresetToCheckboxes(preset) {
+    const stats = PRESET_STATS[preset];
+    if (!stats) return;  // custom: leave checkboxes as-is
+    for (const [name, on] of Object.entries(stats)) {
+        const cb = document.getElementById(`stat-${name}`);
+        if (cb) cb.checked = on;
+    }
+}
+
+function _updateActivePresetBadge() {
+    // Reads the radio inside the Settings modal and updates the small
+    // badge on the page card. Called on radio change, on stat toggle
+    // (which flips to Custom), and on Settings modal apply.
+    const badge = document.getElementById('active-preset-badge');
+    if (!badge) return;
+    const radio = document.querySelector('input[name="col-preset"]:checked');
+    badge.textContent = radio ? radio.value : 'quick';
+}
+
+function onPresetRadio() {
+    const radio = document.querySelector('input[name="col-preset"]:checked');
+    if (!radio) return;
+    if (radio.value !== 'custom') {
+        _applyPresetToCheckboxes(radio.value);
+    }
+    _updateActivePresetBadge();
+}
+
+function onStatToggle() {
+    // Any manual checkbox change flips the radio to Custom; the submit
+    // path will then snap to the closest canonical preset.
+    const custom = document.querySelector('input[name="col-preset"][value="custom"]');
+    if (custom) custom.checked = true;
+    _updateActivePresetBadge();
+}
+
+function _customStatsToPreset() {
+    // Read the current checkbox state and snap to the preset whose stats
+    // match. If no exact match, return the most-permissive preset that
+    // covers everything the user ticked (so they don't lose data).
+    const ticked = {
+        n_unique: document.getElementById('stat-n_unique')?.checked || false,
+        min_max:  document.getElementById('stat-min_max')?.checked  || false,
+        length:   document.getElementById('stat-length')?.checked   || false,
+        hash_sum: document.getElementById('stat-hash_sum')?.checked || false,
+        top_10:   document.getElementById('stat-top_10')?.checked   || false,
+    };
+    // Exact match first
+    for (const [name, stats] of Object.entries(PRESET_STATS)) {
+        const same = Object.entries(stats).every(([k, v]) => ticked[k] === v);
+        if (same) return name;
+    }
+    // Cover-mode: any preset whose stats are a superset of `ticked` works.
+    // Prefer the smallest such preset (quick < standard < detailed) so the
+    // user pays the lowest cost while still getting their requested stats.
+    const order = ['quick', 'standard', 'detailed'];
+    for (const name of order) {
+        const stats = PRESET_STATS[name];
+        const covers = Object.entries(ticked).every(([k, v]) => !v || stats[k]);
+        if (covers) return name;
+    }
+    return 'detailed';
+}
 
 function showHelp() {
     alert('Col Gen generates SAS/SQL scripts for extracting column-level statistics.\n\nSelect pairs and click "Generate Col Scripts" to create extraction files.');
@@ -75,9 +163,14 @@ function applySettings() {
         if (!p.toDate) p.toDate = globalTo;
     });
     saveGlobalSettings();
+    // Refresh the active-preset badge in case the user changed the
+    // page-settings (preset radio / stat checkboxes) inside the modal.
+    // The radio onchange handlers already updated the badge live, but
+    // re-running here makes the close-modal flow self-contained.
+    _updateActivePresetBadge();
     renderPairs();
     closeSettingsModal();
-    showSuccess('Global settings applied to all pairs');
+    showSuccess('Settings applied');
 }
 
 function clearGlobalDates() {
@@ -126,6 +219,14 @@ async function loadPairs() {
             try { return JSON.parse(localStorage.getItem('dtrack_col_filter') || '{}'); }
             catch { return {}; }
         })();
+        // Seed the per-page "selected" state from the global pair selector
+        // when the user has narrowed the global set; empty global means
+        // "all" so we leave each pair unselected (current default). This
+        // is one-way at load time -- subsequent toggles still update the
+        // global via togglePairSelection so the global stays in sync.
+        const globalSel = (typeof getGlobalSelectedPairs === 'function')
+            ? new Set(getGlobalSelectedPairs()) : new Set();
+        const useGlobal = globalSel.size > 0;
         pairs = (pairsData.pairs || []).map(p => {
             const serverFilter = p.col_filter || {};
             const cached = lsCache[p.name] || {};
@@ -144,13 +245,23 @@ async function loadPairs() {
                 colFilterInclude: include.join(', '),
                 colFilterExclude: exclude.join(', '),
                 filterPreview: null,   // {effective_count, total_mapped, pairs, unmapped_matches}
-                selected: false,
+                selected: useGlobal && globalSel.has(p.name),
                 expanded: false,
                 status: statusMap[p.name] || null,
             };
         });
 
         renderPairs();
+        // Subscribe to cross-tab / cross-page global selection changes so
+        // toggling on /col_compare reflects here without a reload.
+        if (typeof onGlobalPairSelectionChange === 'function') {
+            onGlobalPairSelectionChange((arr) => {
+                const sel = new Set(arr);
+                const useG = sel.size > 0;
+                pairs.forEach(p => { p.selected = useG && sel.has(p.name); });
+                renderPairs();
+            });
+        }
     } catch (e) {
         console.error('Failed to load pairs:', e);
         showError('Failed to load pairs: ' + e.message);
@@ -516,6 +627,10 @@ function togglePair(index) {
 function togglePairSelection(index) {
     syncPairFields();
     pairs[index].selected = !pairs[index].selected;
+    // Mirror to the global selector so other pages see the change.
+    if (typeof toggleGlobalPair === 'function') {
+        toggleGlobalPair(pairs[index].name, pairs[index].selected);
+    }
     syncSelectAllCheckbox();
     renderPairs();
 }
@@ -523,6 +638,11 @@ function togglePairSelection(index) {
 function selectAllPairs(selected) {
     syncPairFields();
     pairs.forEach(p => p.selected = selected);
+    // Mirror to the global selector: when "select all" is toggled, push
+    // the full set (or empty) so other pages match.
+    if (typeof setGlobalSelectedPairs === 'function') {
+        setGlobalSelectedPairs(selected ? pairs.map(p => p.name) : []);
+    }
     syncSelectAllCheckbox();
     renderPairs();
 }
@@ -607,13 +727,19 @@ async function generateAll() {
         logMessage(`  ${p.name}: ${from || '...'} → ${to || '...'} | vintage: ${v} | mode: ${p.mode}`, 'info');
     }
 
-    // Detect platforms
-    const awsSources = new Set(['aws', 'csv']);
+    // Detect platforms. NOTE: 'csv' is its own platform now (DuckDB-
+    // backed); previously this set treated csv as AWS, which caused
+    // the wrong runner button to be shown for csv-source pairs.
+    const awsSources = new Set(['aws']);
     const oracleSources = new Set(['oracle']);
     const hadoopSources = new Set(['hadoop']);
-    const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
+    const csvSources = new Set(['csv']);
+    const hasAws    = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
     const hasOracle = selected.some(p => oracleSources.has(p.left?.source) || oracleSources.has(p.right?.source));
     const hasHadoop = selected.some(p => hadoopSources.has(p.left?.source) || hadoopSources.has(p.right?.source));
+    const hasCsvLeft  = selected.some(p => csvSources.has(p.left?.source));
+    const hasCsvRight = selected.some(p => csvSources.has(p.right?.source));
+    const hasCsv      = hasCsvLeft || hasCsvRight;
 
     // The backend resolves per-pair fromDate/toDate from the config (set by
     // each card's From/To inputs via savePairSettings above). We only pass
@@ -622,20 +748,32 @@ async function generateAll() {
     const effectiveFrom = globalFrom;
     const effectiveTo = globalTo;
 
+    // Resolve preset from radio (preferred) -> page default
+    // (DTRACK_COL_PRESET) -> 'quick'. "Custom" maps back to the closest
+    // canonical preset via the ticked stats checkboxes -- effectively
+    // a "did the user tick the right boxes for one of the presets?"
+    // match; if no exact match, ship as the closest preset and log a
+    // warning so the user knows which canonical set was used.
+    const presetRadio = document.querySelector('input[name="col-preset"]:checked');
+    let preset = presetRadio ? presetRadio.value : (window.DTRACK_COL_PRESET || 'quick');
+    if (preset === 'custom') {
+        preset = _customStatsToPreset();
+        logMessage(`[preset] custom ticks resolved to '${preset}'`, 'warning');
+    }
     try {
         const genBody = {
             type: 'col',
             sas_outdir: document.getElementById('global-sas-outdir')?.value || './sas/',
             aws_outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
             pair_names: selected.map(p => p.name),
-            // Page-set window var picks coarse (Stage 1) vs fine (Stage 2).
-            // Defaults to 'fine' so the historical /col_gen page behaves the
-            // same as before; /col_gen_rough sets it to 'coarse' before
-            // loading this script.
-            level: window.DTRACK_GEN_LEVEL || 'fine',
+            // preset wins; legacy 'level' kept for backwards compatibility
+            // with any external caller that still POSTs level=fine|coarse.
+            preset: preset,
+            level: preset === 'detailed' ? 'fine' : 'coarse',
         };
         if (effectiveFrom) genBody.from_date = effectiveFrom;
         if (effectiveTo) genBody.to_date = effectiveTo;
+        logMessage(`[preset] generating with preset=${preset}`, 'info');
 
         const resp = await fetch('/api/generate', {
             method: 'POST',
@@ -670,7 +808,7 @@ async function generateAll() {
     }
 
     // Show Run buttons for platforms that have selected pairs.
-    if (hasAws || hasOracle || hasHadoop) {
+    if (hasAws || hasOracle || hasHadoop || hasCsv) {
         const btnDiv = document.createElement('div');
         btnDiv.style.cssText = 'margin:12px 0; display:flex; gap:12px; align-items:center; flex-wrap:wrap;';
         const parts = [];
@@ -689,6 +827,9 @@ async function generateAll() {
             parts.push(`<button class="btn-secondary" id="resume-hadoop-col-btn"
                 title="Re-run only blocks not already cached.">Resume Hadoop</button>`);
         }
+        if (hasCsv) {
+            parts.push(`<button class="btn-primary" id="run-csv-col-btn">Run CSV Extraction</button>`);
+        }
         btnDiv.innerHTML = parts.join('\n');
         log.appendChild(btnDiv);
 
@@ -704,6 +845,86 @@ async function generateAll() {
             document.getElementById('run-hadoop-col-btn').onclick = () => runColExtraction('hadoop', false);
             document.getElementById('resume-hadoop-col-btn').onclick = () => runColExtraction('hadoop', true);
         }
+        if (hasCsv) {
+            // CSV may need both passes (left + right); _runCsvCol handles
+            // sequencing so the user clicks once.
+            document.getElementById('run-csv-col-btn').onclick =
+                () => _runCsvCol(hasCsvLeft, hasCsvRight);
+        }
+    }
+}
+
+async function _runCsvCol(runLeft, runRight) {
+    // Drives one or two passes of /api/extract/run-sql with platform=csv,
+    // routing each side to the matching outdir. Mirrors the pairs.js
+    // CSV runner pattern -- duplicated here because col_gen has its
+    // own extract runner shape (runColExtraction handles cancel /
+    // resume / SSE wiring), and we want CSV to live under the same
+    // visual pattern as the other "Run X Extraction" buttons.
+    const btn = document.getElementById('run-csv-col-btn');
+    if (!btn) return;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    try {
+        if (runLeft)  { btn.textContent = 'Running CSV (left) col...';  await _runCsvColSide('csv-left'); }
+        if (runRight) { btn.textContent = 'Running CSV (right) col...'; await _runCsvColSide('csv-right'); }
+    } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+    }
+}
+
+async function _runCsvColSide(side) {
+    const writesLeft = side === 'csv-left';
+    const outdir = document.getElementById(
+        writesLeft ? 'global-sas-outdir' : 'global-aws-outdir'
+    )?.value || (writesLeft ? './sas/' : './csv/');
+    const njob = parseInt(document.getElementById(
+        writesLeft ? 'global-njob-left' : 'global-njob-right'
+    )?.value);
+    const reqBody = {type: 'col', platform: 'csv', outdir, resume: false};
+    if (njob > 0) reqBody.max_workers = njob;
+    logMessage(`Running CSV (${writesLeft ? 'left' : 'right'}) col extract from ${outdir}extract_col.sql...`, 'info');
+    try {
+        const resp = await fetch('/api/extract/run-sql', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(reqBody),
+        });
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, {stream: true});
+            const parts = buffer.split('\n\n');
+            buffer = parts.pop();
+            for (const part of parts) {
+                let eventType = 'message', data = '';
+                for (const line of part.split('\n')) {
+                    if (line.startsWith('event: ')) eventType = line.slice(7);
+                    else if (line.startsWith('data: ')) data = line.slice(6);
+                }
+                if (!data) continue;
+                const msg = JSON.parse(data);
+                if (eventType === 'progress') {
+                    const status = msg.ok ? `${msg.rows} rows, ${msg.elapsed}s` : `FAIL: ${msg.error}`;
+                    logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
+                    if (msg.table_csv_path) {
+                        logMessage(`  -> CSV written: ${msg.table_csv_path}`, 'success');
+                    }
+                } else if (eventType === 'done') {
+                    if (msg.ok) {
+                        logMessage(`CSV (${writesLeft ? 'left' : 'right'}) col complete: ${msg.succeeded}/${msg.total}`, 'success');
+                    } else {
+                        logMessage(`CSV col failed: ${msg.error || ''}`, 'error');
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        logMessage(`CSV col error: ${e.message}`, 'error');
     }
 }
 

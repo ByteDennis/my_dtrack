@@ -54,6 +54,14 @@ _SCHEMA = {
         # On those rows n_unique / hash_sum are NULL by design and the
         # comparator treats them as "skipped, not a mismatch".
         ("partial", "TEXT", ""),
+        # Preset under which the row was generated -- 'quick' / 'standard'
+        # / 'detailed' (or legacy 'fine' / 'coarse' for rows generated
+        # before the preset rename). Persisted so col_compare can filter
+        # the view by preset and surface the right subset of stats for
+        # the user-selected level without inferring from data shape.
+        # Empty / NULL for legacy rows is treated as 'detailed' on read
+        # (the historical default).
+        ("preset", "TEXT", ""),
     ],
     "_column_meta": [
         ("source_table", "TEXT", "NOT NULL"),
@@ -74,6 +82,24 @@ _SCHEMA = {
         ("col_rules", "TEXT", ""),
         ("col_include", "TEXT", ""),
         ("col_exclude", "TEXT", ""),
+        # JSON array of [left_col, right_col] pairs the user explicitly
+        # rejected via the col_mapping trash button. auto-match consults
+        # this list and never re-suggests a rejected (left, right) tuple,
+        # so deletions stay deleted across page reloads. Stored as a list
+        # of 2-element lists (JSON-safe).
+        ("col_rejected", "TEXT", ""),
+        # JSON object {left_col: type_override, ...} where the user has
+        # manually overridden the LEFT column's data type from what was
+        # discovered via _column_meta. Used by compare.resolve_col_type
+        # to pin the comparison type when left and right disagree, and
+        # eventually by the col-stats SQL builder to pick the right
+        # sentinel family (date vs numeric vs string).
+        ("col_type_overrides", "TEXT", ""),
+        # Same shape as col_type_overrides but for the RIGHT side, keyed
+        # by LEFT col name (so the row is identifiable across both
+        # overrides without extra joins). Empty/missing means use the
+        # discovered right-side type from _column_meta.
+        ("col_type_overrides_right", "TEXT", ""),
         ("created_at", "TEXT", ""),
     ],
     "_row_counts": [
@@ -536,7 +562,7 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
         cursor.execute("ALTER TABLE _col_stats ADD COLUMN vintage_label TEXT")
     except sqlite3.OperationalError:
         pass
-    for col in ("length_avg", "length_max", "hash_sum", "partial"):
+    for col in ("length_avg", "length_max", "hash_sum", "partial", "preset"):
         try:
             cursor.execute(f"ALTER TABLE _col_stats ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -552,8 +578,8 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 source_table, column_name, dt, col_type,
                 n_total, n_missing, n_unique,
                 min_val, max_val, vintage_label,
-                length_avg, length_max, hash_sum, partial
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                length_avg, length_max, hash_sum, partial, preset
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_table, column_name, dt) DO UPDATE SET
                 col_type     = excluded.col_type,
                 n_total      = excluded.n_total,
@@ -565,7 +591,8 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 length_avg   = excluded.length_avg,
                 length_max   = excluded.length_max,
                 hash_sum     = excluded.hash_sum,
-                partial      = excluded.partial
+                partial      = excluded.partial,
+                preset       = excluded.preset
         """
         for stat in stats:
             cursor.execute(sql, (
@@ -583,6 +610,7 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 stat.get("length_max", ""),
                 stat.get("hash_sum", ""),
                 stat.get("partial", ""),
+                stat.get("preset", ""),
             ))
     else:
         # Fine: full overwrite of all stat columns.
@@ -591,8 +619,8 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 source_table, column_name, dt, col_type,
                 n_total, n_missing, n_unique, mean, std,
                 min_val, max_val, top_10, vintage_label,
-                length_avg, length_max, hash_sum, partial
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                length_avg, length_max, hash_sum, partial, preset
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         for stat in stats:
             cursor.execute(sql, (
@@ -613,6 +641,7 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 stat.get("length_max", ""),
                 stat.get("hash_sum", ""),
                 stat.get("partial", ""),
+                stat.get("preset", ""),
             ))
 
     conn.commit()
@@ -625,7 +654,8 @@ def get_col_stats(
     column_name: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    preset: Optional[str] = None,
 ) -> List[Dict]:
     """
     Get column statistics from _col_stats table.
@@ -637,6 +667,11 @@ def get_col_stats(
         from_date: Optional start date filter (YYYY-MM-DD)
         to_date: Optional end date filter (YYYY-MM-DD)
         limit: Optional limit on number of rows
+        preset: Optional preset filter ('quick' / 'standard' / 'detailed').
+            Legacy rows with NULL/empty preset are accepted under any
+            requested preset (treated as 'detailed' for back-compat). When
+            specified, only rows matching the preset (or NULL/empty) are
+            returned; otherwise every preset is included.
 
     Returns:
         List of stat dictionaries
@@ -654,6 +689,17 @@ def get_col_stats(
     if column_name:
         query += " AND column_name = ?"
         params.append(column_name)
+
+    if preset:
+        # Accept rows with the requested preset OR with NULL/empty preset
+        # (legacy data generated before this column existed). The legacy
+        # rows were detailed-only, so treating them as 'detailed' on read
+        # is the historically-consistent choice.
+        if preset == 'detailed':
+            query += " AND (preset = ? OR preset IS NULL OR preset = '')"
+        else:
+            query += " AND preset = ?"
+        params.append(preset)
 
     cursor.execute(query, params)
     rows = cursor.fetchall()
@@ -1902,14 +1948,26 @@ def get_pair_col_rules(db_path: str, pair_name: str) -> dict:
 
 
 def ensure_col_filter_columns(db_path: str) -> None:
-    """Add col_include / col_exclude columns to _table_pairs if missing.
+    """Add col_include / col_exclude / col_rejected / col_type_overrides
+    columns to _table_pairs if missing.
 
     Tolerates running on an already-migrated DB. Called opportunistically
     before any read/write of these columns so older DBs get upgraded lazily
     without requiring an explicit migration step.
+
+    col_rejected: JSON array of [left_col, right_col] pairs the user
+        explicitly removed via the col_mapping trash button. The
+        auto-matcher consults this list at page-load time and never
+        re-suggests a rejected (left, right) tuple, so deletions stay
+        deleted across reloads.
+
+    col_type_overrides: JSON object {left_col: dtype_string} for manual
+        type overrides on the col_mapping page. Empty/missing means use
+        the discovered _column_meta type.
     """
     conn = sqlite3.connect(db_path)
-    for col in ("col_include", "col_exclude"):
+    for col in ("col_include", "col_exclude", "col_rejected",
+                "col_type_overrides", "col_type_overrides_right"):
         try:
             conn.execute(f"ALTER TABLE _table_pairs ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -1927,7 +1985,7 @@ def ensure_coarse_stat_columns(db_path: str) -> None:
     displays without flagging spurious diffs.
     """
     conn = sqlite3.connect(db_path)
-    for col in ("length_avg", "length_max", "hash_sum", "partial"):
+    for col in ("length_avg", "length_max", "hash_sum", "partial", "preset"):
         try:
             conn.execute(f"ALTER TABLE _col_stats ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -1984,6 +2042,118 @@ def get_pair_col_filter(db_path: str, pair_name: str) -> dict:
     inc = json.loads(row[0]) if row[0] else []
     exc = json.loads(row[1]) if row[1] else []
     return {"include": inc, "exclude": exc}
+
+
+def get_pair_col_rejected(db_path: str, pair_name: str) -> list:
+    """Load the user-rejected (left, right) mapping pairs for `pair_name`.
+
+    Returns list[[left_col, right_col]] (JSON shape). Empty when nothing
+    was ever rejected, or for legacy DBs without the column. The col_mapping
+    auto-matcher consults this list to suppress re-suggestion of pairs the
+    user explicitly removed.
+    """
+    import json
+    ensure_col_filter_columns(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT col_rejected FROM _table_pairs WHERE pair_name = ?", (pair_name,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return []
+    try:
+        return json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def save_pair_col_rejected(db_path: str, pair_name: str, rejected: list) -> None:
+    """Replace the col_rejected list for `pair_name`.
+
+    `rejected` is list[[left_col, right_col]]. Empty list clears the entry.
+    """
+    import json
+    ensure_col_filter_columns(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    payload = json.dumps(rejected) if rejected else None
+    cursor.execute(
+        "UPDATE _table_pairs SET col_rejected = ? WHERE pair_name = ?",
+        (payload, pair_name))
+    conn.commit()
+    conn.close()
+
+
+def get_pair_col_type_overrides(db_path: str, pair_name: str) -> dict:
+    """Load {left_col: dtype_override} for `pair_name`. Empty when none."""
+    import json
+    ensure_col_filter_columns(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT col_type_overrides FROM _table_pairs WHERE pair_name = ?",
+        (pair_name,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return {}
+    try:
+        return json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def save_pair_col_type_overrides(db_path: str, pair_name: str, overrides: dict) -> None:
+    """Replace the per-column type overrides for `pair_name`. Empty clears."""
+    import json
+    ensure_col_filter_columns(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    payload = json.dumps(overrides) if overrides else None
+    cursor.execute(
+        "UPDATE _table_pairs SET col_type_overrides = ? WHERE pair_name = ?",
+        (payload, pair_name))
+    conn.commit()
+    conn.close()
+
+
+def get_pair_col_type_overrides_right(db_path: str, pair_name: str) -> dict:
+    """Load right-side column type overrides for `pair_name`.
+
+    Same shape as get_pair_col_type_overrides but keyed by LEFT col
+    name (so the row is identifiable across both overrides). The value
+    is the right-side dtype string.
+    """
+    import json
+    ensure_col_filter_columns(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT col_type_overrides_right FROM _table_pairs WHERE pair_name = ?",
+        (pair_name,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return {}
+    try:
+        return json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def save_pair_col_type_overrides_right(db_path: str, pair_name: str, overrides: dict) -> None:
+    """Replace the right-side per-column type overrides. Empty clears."""
+    import json
+    ensure_col_filter_columns(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    payload = json.dumps(overrides) if overrides else None
+    cursor.execute(
+        "UPDATE _table_pairs SET col_type_overrides_right = ? WHERE pair_name = ?",
+        (payload, pair_name))
+    conn.commit()
+    conn.close()
 
 
 def get_pair_where_map_from_db(db_path: str, pair_name: str) -> Optional[Dict[str, List[str]]]:

@@ -10,13 +10,17 @@ const ICON = {
 let pairsData = [];
 let compareCache = {};
 
-function _currentLevel() {
-    return document.getElementById('level-select')?.value || 'coarse';
+function _currentPreset() {
+    // Empty string means "no filter" -- includes every row regardless of
+    // preset (the historical behavior before persisted preset existed).
+    // Users explicitly pick Quick / Standard / Detailed to narrow the view.
+    return document.getElementById('preset-select')?.value || '';
 }
 
-function onLevelChange() {
-    // Drop the cache so the new level fetches fresh comparisons that use the
-    // matching field set (coarse skips mean/std/top_10).
+function onPresetChange() {
+    // Preset filter changes the rows pulled from _col_stats — drop the
+    // cache and re-fetch every pair so the displayed comparison reflects
+    // only the preset's data.
     compareCache = {};
     runAll();
 }
@@ -129,6 +133,21 @@ async function loadPairs() {
         const data = await res.json();
         // Hide pairs the user toggled off on /pairs (skip=true).
         pairsData = (data.pairs || []).filter(p => !p.skip);
+        // Honor the global pair selector: when narrowed, only show those
+        // pairs (so the user doesn't have to scroll past pairs they're
+        // not currently working with). Empty global = show all (today's
+        // behavior).
+        if (typeof getGlobalSelectedPairs === 'function') {
+            const sel = new Set(getGlobalSelectedPairs());
+            if (sel.size > 0) {
+                pairsData = pairsData.filter(p => sel.has(p.pair_name));
+            }
+            // Re-render when the global set changes elsewhere (e.g. user
+            // toggled on the row-gen page or via the header picker).
+            if (typeof onGlobalPairSelectionChange === 'function') {
+                onGlobalPairSelectionChange(() => loadPairs());
+            }
+        }
         renderAccordion();
     } catch (e) {
         document.getElementById('pairs-accordion').innerHTML =
@@ -177,15 +196,37 @@ async function comparePair(name) {
 
     const from = document.getElementById('global-from')?.value || '';
     const to = document.getElementById('global-to')?.value || '';
-    const level = _currentLevel();
+    const preset = _currentPreset();
     const params = new URLSearchParams();
     if (from) params.set('from_date', from);
     if (to) params.set('to_date', to);
-    params.set('level', level);
+    if (preset) params.set('preset', preset);
 
     try {
         const res = await fetch(`/api/compare/col/${name}?${params}`);
-        if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) {
+            // Try to parse the structured error -- a preset filter with
+            // no rows on one side returns 400 with {preset_missing: 'left'|'right'}.
+            // Render a precise banner so the user knows which side to
+            // re-extract under the requested preset (loading the same
+            // (col, dt) under a new preset OVERWRITES the prior preset's
+            // data because the PK is (source_table, column_name, dt) --
+            // not (source_table, column_name, dt, preset)).
+            let payload = null;
+            try { payload = await res.json(); } catch (e) {}
+            if (payload && payload.preset_missing) {
+                const side = payload.preset_missing === 'left' ? 'LEFT' : 'RIGHT';
+                body.innerHTML = `<div class="empty-message" style="color:var(--jp-error-color0);">
+                    No <b>${preset}</b>-preset data loaded for <b>${side}</b> side of <b>${name}</b>.<br><br>
+                    To fix: <b>generate + extract + load</b> col stats under preset=<b>${preset}</b>
+                    for the ${side.toLowerCase()} side (loading a different preset for the same
+                    (column, date) overwrites the previously loaded preset's row).
+                </div>`;
+            } else {
+                throw new Error(payload?.error || await res.text());
+            }
+            return;
+        }
         const data = await res.json();
         compareCache[name] = data;
         renderPairBody(name, data);
@@ -375,28 +416,24 @@ function renderColTable(name, cols, vintage) {
         return (a.left_col || '').localeCompare(b.left_col || '');
     });
 
-    // Stat rows. Coarse rows show cheap signals; Mean/Std are fine-only and
-    // display only when the data has them. Length avg/max + Hash sum are the
-    // coarse-stage drift hints (structural shape + multiset checksum).
-    const level = _currentLevel();
-    const baseDefs = [
+    // Stat rows. The preset-driven model: every row is rendered, but
+    // stats not produced by the active preset (e.g. mean/std are
+    // intentionally dropped from all presets now; n_unique is only in
+    // Standard/Detailed; top_10 only in Detailed) come back as '' from
+    // the loaded _col_stats and render as "—". This keeps the table
+    // shape stable across preset switches and tells the user at a
+    // glance which stats their preset chose to skip.
+    const statDefs = [
         {label: 'Type',      keyL: 'col_type',       keyR: 'col_type',       isDiff: () => false, fmt: 'text'},
         {label: 'N_Total',   keyL: 'n_total_left',   keyR: 'n_total_right',  isDiff: c => c.n_total_diff !== 0, fmt: 'int'},
         {label: 'N_Missing', keyL: 'n_missing_left',  keyR: 'n_missing_right', isDiff: c => c.n_missing_diff !== 0, fmt: 'int'},
         {label: 'N_Unique',  keyL: 'n_unique_left',   keyR: 'n_unique_right',  isDiff: c => c.n_unique_diff !== 0, fmt: 'int'},
-    ];
-    const fineDefs = (level === 'fine') ? [
-        {label: 'Mean',      keyL: 'mean_left',       keyR: 'mean_right',      isDiff: c => c.mean_match === false, fmt: 'num'},
-        {label: 'Std',       keyL: 'std_left',        keyR: 'std_right',       isDiff: c => c.std_match === false, fmt: 'num'},
-    ] : [];
-    const tailDefs = [
         {label: 'Min',       keyL: 'min_left',        keyR: 'min_right',       isDiff: c => c.min_match === false, fmt: 'text'},
         {label: 'Max',       keyL: 'max_left',        keyR: 'max_right',       isDiff: c => c.max_match === false, fmt: 'text'},
         {label: 'Length avg',keyL: 'length_avg_left', keyR: 'length_avg_right', isDiff: c => c.length_avg_match === false, fmt: 'num'},
         {label: 'Length max',keyL: 'length_max_left', keyR: 'length_max_right', isDiff: c => c.length_max_match === false, fmt: 'int'},
         {label: 'Hash sum',  keyL: 'hash_sum_left',   keyR: 'hash_sum_right',   isDiff: c => c.hash_sum_match === false, fmt: 'sci'},
     ];
-    const statDefs = [...baseDefs, ...fineDefs, ...tailDefs];
 
     function fmtCell(val, fmt) {
         if (val == null || val === '') return '&mdash;';
@@ -526,9 +563,11 @@ function renderOnlyCols(cols, title) {
 function downloadExcel() {
     const from = document.getElementById('global-from')?.value || '';
     const to = document.getElementById('global-to')?.value || '';
+    const preset = _currentPreset();
     const params = new URLSearchParams();
     if (from) params.set('from_date', from);
     if (to) params.set('to_date', to);
+    if (preset) params.set('preset', preset);
     window.open(`/api/compare/col/export/excel?${params}`, '_blank');
 }
 
@@ -612,6 +651,7 @@ async function downloadHTML() {
                 title: document.getElementById('global-title')?.value || '',
                 subtitle: document.getElementById('global-subtitle')?.value || '',
                 pairs: live_pairs,
+                preset: _currentPreset(),
             }),
         });
         if (!res.ok) {
@@ -643,6 +683,7 @@ async function saveLogs() {
             body: JSON.stringify({
                 from_date: document.getElementById('global-from')?.value || '',
                 to_date: document.getElementById('global-to')?.value || '',
+                preset: _currentPreset(),
             }),
         });
         const data = await res.json();

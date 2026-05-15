@@ -25,6 +25,13 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7.0.0", "pytest-cov>=3.0.0", "ruff"]
 debug = ["ipdb>=0.13.0", "debugpy>=1.6.0"]
+# Required only when a pair has source=csv. The CSV-as-source mode reads
+# CSVs in-process via DuckDB so we can run the same row_gen / col_gen
+# pipeline against local files without engine credentials. dtrack as a
+# whole works fine without duckdb installed -- the import is lazy
+# inside platforms/csv_duckdb.py and surfaces a clear error message
+# when the user tries to extract from a csv-source pair without it.
+csv = ["duckdb>=0.10.0"]
 
 [project.scripts]
 dtrack = "dtrack.cli:main"

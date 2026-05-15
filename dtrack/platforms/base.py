@@ -1440,11 +1440,23 @@ def _col_sql_dialect_ops(dialect):
             'top10_listagg':      lambda item: (
                 f"concat_ws('; ', collect_list({item}))"
             ),
-            # Hadoop hash_sum intentionally blank: Hive HASH() and Athena
-            # xxhash64 never agree on identical data, so cross-platform
-            # hash_sum compares would always paint mismatches. Comparison
-            # treats empty as match=None (unknown), not as a false diff.
-            'hash_sum_expr':      lambda p_col: "CAST('' AS STRING)",
+            # Cross-engine-portable hash16: int(md5(utf8(trim(v)))[:4], 16),
+            # same formula as Oracle's _oracle_portable_hash16 and Athena's
+            # _athena_portable_hash16, so SUM(cnt * hash16) is comparable
+            # byte-for-byte across all three engines on identical data.
+            # An earlier version of this file left hash_sum as ''; that
+            # was the right call for Hive's built-in HASH() (which uses
+            # Java's hashCode and never agrees cross-engine) but wrong for
+            # the portable md5 formula. The legacy SAS template pulled the
+            # freq table and computed hash16 SAS-side via the exact same
+            # Python function (base.categorical_hash16) — this puts the
+            # computation back on the engine where it scales.
+            # CAST(cnt AS DOUBLE) prevents BIGINT overflow on the product
+            # for very-high-cardinality columns (matches Athena's choice).
+            'hash_sum_expr':      lambda p_col: (
+                f"SUM(CAST(cnt AS DOUBLE) * "
+                f"CAST(conv(substr(md5(trim({p_col})), 1, 4), 16, 10) AS DOUBLE))"
+            ),
             'cat_present':        "p_col IS NOT NULL AND TRIM(p_col) <> ''",
             'cat_missing':        "p_col IS NULL OR TRIM(p_col) = ''",
             'final_order_by':     '',
@@ -1458,12 +1470,123 @@ def _col_sql_dialect_ops(dialect):
             # expression (concat/substr or date_format), so no outer wrap.
             'dt_select_wrap':     lambda dt_expr: dt_expr,
         }
+    if dialect == 'duckdb':
+        # DuckDB powers the csv-source path (platforms/csv_duckdb.py).
+        # SQL flavor is closest to Postgres / standard SQL with most
+        # Hive built-ins also present, so this dialect borrows from
+        # both. Notable deviations:
+        #   - no `conv(hex, 16, 10)` -> hex parsing for hash16 uses
+        #     `('0x' || hex_str)::INTEGER` which DuckDB accepts.
+        #   - LISTAGG-equivalent is `string_agg(expr, ', ' ORDER BY ...)`
+        #     which DuckDB supports natively (better than Hive's
+        #     non-deterministic collect_list).
+        #   - date_trunc is standard SQL.
+        #   - is_oracle_typed=False (uses the same Hive-style numeric
+        #     dtype catalog).
+        return {
+            'wc_empty':           '1=1',
+            'is_oracle_typed':    False,
+            'cast_str':           lambda x: f'CAST({x} AS VARCHAR)',
+            'concat':             lambda *parts: f'concat({", ".join(parts)})',
+            'top10_coalesce':     lambda x, d: f'COALESCE({x}, {d})',
+            'mean_inner':         lambda x: f'AVG(CAST({x} AS DOUBLE))',
+            'std_inner':          lambda x: f'STDDEV_SAMP(CAST({x} AS DOUBLE))',
+            'mean_outer':         lambda x: f'CAST({x} AS VARCHAR)',
+            'std_outer':          lambda x: f'CAST({x} AS VARCHAR)',
+            'minmax_strcast':     lambda x: f'CAST({x} AS VARCHAR)',
+            'lifeboat_null_count':    'CAST(NULL AS BIGINT)',
+            'lifeboat_null_meanstd':  'CAST(NULL AS VARCHAR)',
+            'lifeboat_null_minmax':   'CAST(NULL AS VARCHAR)',
+            # DuckDB's string_agg honors ORDER BY -- gives a deterministic
+            # top_10 (unlike Hive's collect_list).
+            'top10_listagg':      lambda item: (
+                f"string_agg({item}, '; ' ORDER BY cnt DESC, p_col ASC)"
+            ),
+            # Portable hash16: same MD5-truncated-to-16-bit recipe as the
+            # other dialects. DuckDB has md5() returning lowercase hex,
+            # plus '0x'-prefixed hex literals are castable to INTEGER.
+            'hash_sum_expr':      lambda p_col: (
+                f"SUM(CAST(cnt AS DOUBLE) * "
+                f"CAST(('0x' || substr(md5(trim({p_col})), 1, 4))::INTEGER AS DOUBLE))"
+            ),
+            'cat_present':        "p_col IS NOT NULL AND TRIM(p_col) <> ''",
+            'cat_missing':        "p_col IS NULL OR TRIM(p_col) = ''",
+            'final_order_by':     '\nORDER BY t.dt',
+            'vintage_expr':       lambda tbl_cfg, date_col_q, vintage, date_dtype, date_format: (
+                _duckdb_vintage_expr(tbl_cfg, tbl_cfg['date_col'], vintage)
+            ),
+            'dt_select_wrap':     lambda dt_expr: dt_expr,
+        }
     raise ValueError(f"unknown dialect {dialect!r} for col SQL builder")
+
+
+def _duckdb_vintage_expr(tbl_cfg, date_col, vintage):
+    """DuckDB expression that buckets `date_col` to the configured vintage.
+
+    Returns a string-typed expression that downstream GROUP BY / dt_select
+    can use directly. DuckDB has standard `date_trunc('week', ...)` plus
+    full ISO date parsing for string columns, so this is shorter than
+    the Hive equivalent.
+    """
+    date_type = (tbl_cfg.get('date_type') or 'string_dash').lower()
+    # Coerce to DATE if not already
+    if date_type == 'string_compact':
+        parsed = f"strptime({date_col}, '%Y%m%d')::DATE"
+    elif date_type in ('string_dash', 'string'):
+        parsed = f"strptime({date_col}, '%Y-%m-%d')::DATE"
+    elif date_type in ('date', 'timestamp', 'datetime'):
+        parsed = f"CAST({date_col} AS DATE)"
+    else:
+        parsed = f"CAST({date_col} AS DATE)"
+
+    if vintage in (None, '', 'all'):
+        return "'all'"
+    if vintage == 'sample':
+        return "'sample'"
+    if vintage == 'day':
+        return f"strftime({parsed}, '%Y-%m-%d')"
+    unit = {'week': 'week', 'month': 'month',
+            'quarter': 'quarter', 'year': 'year'}.get(vintage)
+    if unit is None:
+        return f"strftime({parsed}, '%Y-%m-%d')"
+    return f"strftime(date_trunc('{unit}', {parsed}), '%Y-%m-%d')"
+
+
+def _hash16_flat_expr(dialect, col_expr):
+    """Single-row hash16 expression for the Quick/Standard flat SQL paths.
+
+    The freq-table-based hash_sum is SUM(cnt * hash16(p_col)). Mathematically
+    equivalent to SUM(hash16(col)) over every row (because hash16 is a pure
+    function, hashing each of N rows of the same value yields N times the
+    same hash16 value, identical to cnt × hash16(value)). The flat form
+    saves a GROUP BY <col_expr> and lets the Quick/Standard paths stay
+    single-pass.
+
+    Returns the SUM(...) expression directly so the caller drops it into
+    the top-level SELECT alongside the other flat aggregates.
+    """
+    if dialect == 'oracle':
+        from .oracle import _oracle_portable_hash16
+        return f"SUM(NVL({_oracle_portable_hash16(col_expr)}, 0))"
+    if dialect == 'hadoop':
+        return (
+            f"SUM(CAST(conv(substr(md5(trim(CAST({col_expr} AS STRING))), 1, 4), "
+            f"16, 10) AS DOUBLE))"
+        )
+    if dialect == 'duckdb':
+        # DuckDB lacks `conv()` but accepts hex literals via '0x' prefix
+        # cast to INTEGER. Same SUM(hash16) semantics as the other
+        # dialects -- byte-identical answer on identical data.
+        return (
+            f"SUM(CAST(('0x' || substr(md5(trim(CAST({col_expr} AS VARCHAR))), 1, 4))"
+            f"::INTEGER AS DOUBLE))"
+        )
+    raise ValueError(f"unknown dialect {dialect!r} for hash16 flat expr")
 
 
 def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
                    vintage=None, date_dtype=None, date_format=None,
-                   dt_label=None, coarse=False):
+                   dt_label=None, coarse=False, preset=None):
     """Build per-column stats SQL for any supported dialect.
 
     Returns (sql, is_numeric). The output schema is the canonical 14-field
@@ -1472,19 +1595,39 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
     for both numeric and categorical branches, so the downstream loader
     sees the same shape regardless of platform.
 
-    `coarse=True` emits the cheap-aggregate Phase-1 SQL: drops the freq-
-    table-derived rank-weighted mean/std (set to ''), drops top_10 (''),
-    and drops the freq-table-derived length_avg/length_max/hash_sum
-    (numeric branch always had these blank; categorical branch keeps
-    length stats but skips the agg/sstats/top_n CTEs entirely). Mirrors
-    Athena's _build_coarse_sql shape so col_gen_rough output is
-    cross-platform comparable. Numeric coarse is a flat SELECT (no WITH
-    chain); categorical coarse is a 4-CTE chain (freq → ranked →
-    totals → minmax + lenhash) instead of the 8-CTE fine chain. Used by
-    the col_gen_rough page; the col_gen page passes coarse=False.
+    `preset` selects which stats to compute (see constants.STATS_PRESETS):
 
-    See _col_sql_dialect_ops for what each dialect supplies.
+      - 'quick' (default for the col_gen_rough page): flat SELECT, no
+        freq table. n_total / n_missing / scalar MIN/MAX / single-pass
+        length stats. Categorical n_unique / hash_sum / top_10 are ''.
+        Cheapest path — partition-pruning friendly on Hive.
+
+      - 'standard': flat SELECT + n_unique (COUNT DISTINCT) + hash_sum
+        (SUM of single-row hash16, mathematically equivalent to the
+        freq-weighted SUM(cnt * hash16(p_col))). Still no freq table.
+
+      - 'detailed' (default for the col_gen page): full WITH-chain with
+        top_10 + alpha-rank-weighted min/max in `val=cnt` form. Only
+        path that does GROUP BY <col_expr>.
+
+    Mean/std (rank-weighted from the freq table) are dropped from every
+    preset — empirically poor signal and doubled the cost. Emitted as
+    '' to keep the CSV schema stable.
+
+    `coarse=True` is back-compat for legacy callers — aliases to
+    preset='quick' when preset is None. New code should pass preset=
+    explicitly.
+
+    See _col_sql_dialect_ops for the per-dialect SQL fragments.
     """
+    from ..constants import STATS_PRESETS
+    if preset is None:
+        preset = 'quick' if coarse else 'detailed'
+    if preset not in STATS_PRESETS:
+        raise ValueError(f"unknown preset {preset!r}; expected one of "
+                         f"{list(STATS_PRESETS.keys())}")
+    stats = STATS_PRESETS[preset]
+
     ops = _col_sql_dialect_ops(dialect)
     date_col = tbl_cfg['date_col']
     col_q = quote_ident(col, dialect)
@@ -1513,32 +1656,70 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
         freq_dt_select = wrapped
         freq_dt_group = f", {dt_expr}"
 
-    if numeric:
-        col_expr = apply_null_sentinels(col_q, dtype or "numeric", dialect)
-        if coarse:
-            # Coarse numeric: flat aggregates only. No mean / std / length /
-            # hash / top_10. min/max are scalar MIN/MAX (no `val=cnt`
-            # display because numerics don't carry a frequency display).
-            min_sql = ops['minmax_strcast'](f'MIN({col_expr})')
-            max_sql = ops['minmax_strcast'](f'MAX({col_expr})')
-            sql = f"""{cte_prefix}
+    # Quick / Standard share the flat-aggregate path: one SELECT, no WITH
+    # chain, GROUP BY dt only (or no GROUP BY when dt is a literal).
+    # Detailed uses the freq-table WITH chain. The branch decision is
+    # `stats['top_10']` -- only Detailed wants the freq table for top_10
+    # plus the val=cnt min/max form.
+    if not stats['top_10']:
+        col_expr = apply_null_sentinels(
+            col_q, dtype or ("numeric" if numeric else "categorical"), dialect)
+        n_unique_sql = (
+            f"COUNT(DISTINCT {col_expr})" if stats['n_unique'] else "0"
+        )
+        min_sql = (
+            ops['minmax_strcast'](f'MIN({col_expr})') if stats['min_max'] else "''"
+        )
+        max_sql = (
+            ops['minmax_strcast'](f'MAX({col_expr})') if stats['min_max'] else "''"
+        )
+        # Length stats only meaningful on categorical -- numeric LENGTH
+        # is dominated by display format (BIGINT "0" = 1 char, DOUBLE
+        # "0.0" = 3 chars), so kept '' on numeric even when stats['length'].
+        if stats['length'] and not numeric:
+            len_avg_sql = (
+                ops['cast_str'](f"SUM(LENGTH(TRIM(CAST({col_expr} AS "
+                                f"{'VARCHAR2(4000)' if dialect=='oracle' else 'STRING'})))) "
+                                f"/ NULLIF(COUNT({col_expr}), 0)")
+            )
+            len_max_sql = ops['cast_str'](
+                f"MAX(LENGTH(TRIM(CAST({col_expr} AS "
+                f"{'VARCHAR2(4000)' if dialect=='oracle' else 'STRING'}))))"
+            )
+        else:
+            len_avg_sql = "''"
+            len_max_sql = "''"
+        # Hash_sum is supported on Hadoop only when stats requests it
+        # (Standard / Detailed). On numeric it stays '' because hashing
+        # a number's string representation is storage-format-dependent.
+        if stats['hash_sum'] and not numeric:
+            hash_sum_sql = ops['cast_str'](_hash16_flat_expr(dialect, col_expr))
+        else:
+            hash_sum_sql = "''"
+        col_type_label = dtype if dtype else ('numeric' if numeric else 'categorical')
+        sql = f"""{cte_prefix}
 SELECT
     {dt_select},
-    '{dtype}' AS col_type,
+    '{col_type_label}' AS col_type,
     '{col}' AS column_name,
     COUNT(*) AS n_total,
     COUNT(*) - COUNT({col_expr}) AS n_missing,
-    COUNT(DISTINCT {col_expr}) AS n_unique,
+    {n_unique_sql} AS n_unique,
     '' AS mean,
     '' AS std,
     {min_sql} AS min_val,
     {max_sql} AS max_val,
     '' AS top_10,
-    '' AS length_avg,
-    '' AS length_max,
-    '' AS hash_sum
+    {len_avg_sql} AS length_avg,
+    {len_max_sql} AS length_max,
+    {hash_sum_sql} AS hash_sum
 FROM {full_table} WHERE {wc}{group_by}"""
-            return sql, True
+        return sql, numeric
+
+    # Detailed-only: full WITH-chain path for the rest of the function.
+    # The pre-existing code below handles this (kept verbatim).
+    if numeric:
+        col_expr = apply_null_sentinels(col_q, dtype or "numeric", dialect)
         mean_sql = ops['mean_outer'](ops['mean_inner'](col_expr))
         std_sql  = ops['std_outer'](ops['std_inner'](col_expr))
         min_sql  = ops['minmax_strcast'](f'MIN({col_expr})')

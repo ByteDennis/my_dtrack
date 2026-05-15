@@ -822,19 +822,20 @@ def _hadoop_vintage_expr(tbl_cfg, date_col, vintage):
 
 
 def _build_col_sql_hadoop(tbl_cfg, col, dtype, full_table, cte_prefix="",
-                           vintage=None, dt_label=None, coarse=False):
+                           vintage=None, dt_label=None, coarse=False,
+                           preset=None):
     """Thin wrapper over base.build_col_sql('hadoop', ...). The categorical
     WITH-chain template is shared with Oracle; per-dialect fragments
     (concat operator, cast-to-string, listagg-equivalent, missing/present
     conds, hash function) live in base._col_sql_dialect_ops('hadoop').
 
-    coarse=True emits Phase-1 cheap-aggregate SQL (flat numeric, slim
-    categorical chain) for the col_gen_rough page. Drops the freq-table-
-    derived rank-weighted mean/std and top_10."""
+    `preset` ('quick'/'standard'/'detailed') selects the stats subset.
+    `coarse=True` is back-compat alias for preset='quick' when preset
+    is None."""
     from .base import build_col_sql
     return build_col_sql('hadoop', tbl_cfg, col, dtype, full_table,
                           cte_prefix=cte_prefix, vintage=vintage,
-                          dt_label=dt_label, coarse=coarse)
+                          dt_label=dt_label, coarse=coarse, preset=preset)
 
 
 def _build_lifeboat_col_sql_hadoop(tbl_cfg, col, dtype, full_table,
@@ -922,7 +923,7 @@ def _write_combined_row_sql_hadoop(hadoop_tables, outdir, db_path=None, vintage=
 
 
 def _write_combined_col_sql_hadoop(hadoop_tables, outdir, db_path=None,
-                                     vintage=None, coarse=False):
+                                     vintage=None, coarse=False, preset=None):
     """extract_col.sql for Hadoop, one block per (table, column, bucket).
     Mirrors `_write_combined_col_sql_oracle`. User-typed `_exclude_dates`
     from the pair card is honored here via NOT IN appended to each WHERE.
@@ -999,63 +1000,82 @@ def _write_combined_col_sql_hadoop(hadoop_tables, outdir, db_path=None,
                 return exclude_clause
             return f"{wc} AND {exclude_clause}"
 
-        work_units = []
+        # Per-col emission with server-side GROUP BY vintage_expr is the
+        # only mode for Hadoop: each block returns ALL buckets for one
+        # column in a single query (matches the legacy SAS template's
+        # CONNECT TO HADOOP shape). For 179 cols × 181 weekly buckets
+        # that drops block count from 32,399 to 179 -- since every Hive
+        # query pays multi-second YARN/Tez container startup, per-bucket
+        # emission was the dominant wall-clock cost (the user observed
+        # 1333h eta for 398K blocks).
+        #
+        # Oracle stays on per-bucket emission (oracledb thin-client
+        # query startup is sub-millisecond; granular cancel + per-bucket
+        # visibility in the runner log are worth more there).
+        #
+        # WHERE composition:
+        #   - vintage=between (matching_dates exist) -> BETWEEN min..max
+        #     over ALL matching_dates, then GROUP BY vintage_expr
+        #     server-side. exclude_clause (user-typed _exclude_dates)
+        #     and base_where AND'd in. _date_bounds NOT added because
+        #     the matching_dates BETWEEN already constrains tighter.
+        #   - vintage=in_list (sample@N)         -> IN (sampled dates)
+        #   - vintage=all + _date_bounds present -> BETWEEN bounds
+        #   - else                                -> base_where only
         if date_filter['filter_type'] == 'between':
-            buckets = {}
-            for dt in date_filter['dates']:
-                buckets.setdefault(bucket_date(dt, effective_vintage), []).append(dt)
-            for bucket_key in sorted(buckets.keys()):
-                bucket_dates = buckets[bucket_key]
-                dw = build_date_range_with_gaps(
-                    date_col, bucket_dates, date_dtype,
-                    date_format=date_format)
-                # The bucket BETWEEN already constrains the scan to
-                # this bucket's exact date range, so we don't also
-                # AND in `_date_bounds` (the global from/to). Layering
-                # both produces empty result sets when the row_compare
-                # matching_dates were captured under different from/to
-                # than what's currently set on the page (saw this in
-                # the field: from=2026-05 + saved matching_dates=2022
-                # generated `dt >= '20260501' AND dt BETWEEN '20220101'
-                # AND '20220101'` which matched zero rows).
-                bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
-                work_units.append((bucket_key, _and_exclude(bucket_where), bucket_key))
+            dates = date_filter['dates']
+            full_range = build_date_range_with_gaps(
+                date_col, dates, date_dtype, date_format=date_format)
+            bucket_where = f"({orig_where}) AND {full_range}" if orig_where else full_range
+            per_col_where = _and_exclude(bucket_where)
+            # Tell _build_col_sql_hadoop to emit dt = vintage_expr in
+            # SELECT/GROUP BY (rather than a literal bucket label).
+            per_col_vintage = effective_vintage
+            per_col_dt_label = None
+            bucket_count = len(set(bucket_date(dt, effective_vintage) for dt in dates))
+            print(f"  {qname}: emitting 1 block per col, server-side GROUP BY "
+                  f"({bucket_count} buckets/col, vintage={effective_vintage})")
         elif date_filter['filter_type'] == 'in_list':
             dw = build_date_in_clause(
                 date_col, date_filter['dates'], date_dtype,
                 date_format=date_format)
             bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
-            work_units.append(('sample', _and_exclude(bucket_where), 'sample'))
+            per_col_where = _and_exclude(bucket_where)
+            per_col_vintage = 'all'
+            per_col_dt_label = 'sample'
         elif date_bounds:
             bw = f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds
-            work_units.append(('all', _and_exclude(bw), 'all'))
+            per_col_where = _and_exclude(bw)
+            per_col_vintage = 'all'
+            per_col_dt_label = 'all'
         else:
-            work_units.append(('all', _and_exclude(orig_where), 'all'))
+            per_col_where = _and_exclude(orig_where)
+            per_col_vintage = 'all'
+            per_col_dt_label = 'all'
 
         for col, dtype in non_date_cols:
-            for bucket_label, bucket_where, dt_label in work_units:
-                extract_cfg = dict(tbl)
-                extract_cfg['where'] = bucket_where
-                try:
-                    sql, _ = _build_col_sql_hadoop(
-                        extract_cfg, col, dtype, full_table, cte_prefix,
-                        vintage='all', dt_label=dt_label, coarse=coarse)
-                    lifeboat_sql = _build_lifeboat_col_sql_hadoop(
-                        extract_cfg, col, dtype, full_table, cte_prefix,
-                        vintage='all', dt_label=dt_label)
-                except Exception as e:
-                    blocks.append(f"-- {qname}/{col}/{bucket_label}")
-                    blocks.append(f"-- SKIP: SQL build failed: {e}")
-                    blocks.append("")
-                    continue
-                blocks.append(f"-- {qname}/{col}/{bucket_label}")
-                blocks.append(f"/* @conn_macro={conn_macro} */")
-                blocks.append(sql.strip())
-                blocks.append(";")
-                blocks.append("/* @degrade_sql")
-                blocks.append(lifeboat_sql.strip())
-                blocks.append("@end_degrade */")
+            extract_cfg = dict(tbl)
+            extract_cfg['where'] = per_col_where
+            try:
+                sql, _ = _build_col_sql_hadoop(
+                    extract_cfg, col, dtype, full_table, cte_prefix,
+                    vintage=per_col_vintage, dt_label=per_col_dt_label,
+                    coarse=coarse, preset=preset)
+            except Exception as e:
+                blocks.append(f"-- {qname}/{col}")
+                blocks.append(f"-- SKIP: SQL build failed: {e}")
                 blocks.append("")
+                continue
+            # Block name format: "qname/col" (no /bucket suffix). The
+            # runner groups blocks by qname for per-table CSV flush;
+            # one block now returns all buckets so the existing flush
+            # logic still works -- it just sees N rows per block
+            # instead of one row across N blocks.
+            blocks.append(f"-- {qname}/{col}")
+            blocks.append(f"/* @conn_macro={conn_macro} */")
+            blocks.append(sql.strip())
+            blocks.append(";")
+            blocks.append("")
 
     sql_path = os.path.join(outdir, hadoop_sql_filename("col"))
     with open(sql_path, 'w', encoding='utf-8') as f:

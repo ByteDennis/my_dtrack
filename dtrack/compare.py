@@ -84,11 +84,18 @@ def _stat_match_key(val, prefix, ndigits=STAT_ROUND_DECIMALS):
     Equality is a string compare with float-drift handled via rounding to
     STAT_ROUND_DECIMALS. Returns None for missing values.
 
-    For min/max specifically, two extra normalizations:
+    For min/max specifically, three extra normalizations:
       - strip the "cat=count" suffix (SAS fine path) so it agrees with the
         plain "cat" form (Athena coarse path) when the alpha-first /
         alpha-last value matches but the trailing count doesn't carry.
       - numeric mins/maxes like "0" vs "0.00" round to the same key.
+      - date-shaped strings (Oracle TIMESTAMP "01-MAR-26 07.04.04.000000",
+        ISO "2026-03-01 07:04:04", SAS "01MAR2026:07:04:04", numeric
+        YYYYMMDD, etc.) canonicalize to YYYY-MM-DD before comparison so
+        the same instant printed by Oracle vs Athena vs Hadoop hashes to
+        the same key. Hour / minute / second / fractional seconds are
+        intentionally discarded -- min/max at the column level is a
+        date-of-first / date-of-last signal, not a precise timestamp.
     """
     if val is None or val == '':
         return None
@@ -96,10 +103,28 @@ def _stat_match_key(val, prefix, ndigits=STAT_ROUND_DECIMALS):
     if prefix in ("mn", "mx") and "=" in s:
         # Strip "=count" first; numeric round below sees just the value.
         s = s.rsplit("=", 1)[0].strip()
+    # Date canonicalization runs BEFORE the numeric path, but only when the
+    # string contains a non-numeric character. Pure-numeric strings like
+    # "20260301" stay numeric (they may be IDs or YYYYMMDD-typed columns
+    # whose min/max should compare as integers regardless of dialect).
+    # Strings with letters / dashes / slashes / spaces / colons are
+    # candidates for date parsing -- this is what makes Oracle's
+    # "01-MAR-26 07.04.04.000000" match Athena's "2026-03-01" on the
+    # same date column. parse_date returns YYYY-MM-DD; on failure
+    # (genuine non-date string like a status code "ACCEPTED") it raises
+    # ValueError and we fall through to numeric / raw-string compare.
+    looks_date = any(c.isalpha() or c in '-/: ' for c in s)
+    if looks_date:
+        try:
+            from .date_utils import parse_date
+            return f"{prefix}_{parse_date(s)}"
+        except (ValueError, TypeError):
+            pass
     try:
         return f"{prefix}_{round(float(s), ndigits)}"
     except (ValueError, TypeError):
-        return f"{prefix}_{s}"
+        pass
+    return f"{prefix}_{s}"
 
 
 def _parse_top10(s):
@@ -249,6 +274,7 @@ def compare_column_stats(
     matched_dates=None,
     col_type_overrides=None,
     level="fine",
+    preset=None,
 ):
     """Compare column statistics between two tables.
 
@@ -261,10 +287,29 @@ def compare_column_stats(
     top_10, etc.). Used for the drill-down view after the user picks
     suspicious (col, dt) cells from the coarse view.
 
+    `preset` (optional, 'quick' / 'standard' / 'detailed') filters
+    _col_stats rows to those generated under the matching preset (legacy
+    NULL/empty rows are accepted as 'detailed'). Raises ValueError when
+    either side has zero matching rows -- the col_compare UI surfaces
+    this as a "no data loaded under preset X for side Y" banner so the
+    user knows to either re-extract or pick a different preset.
+
     Now resolves col_type disagreements using resolve_col_type().
     """
-    stats_left = get_col_stats(db_path, table_left, from_date=from_date, to_date=to_date)
-    stats_right = get_col_stats(db_path, table_right, from_date=from_date, to_date=to_date)
+    stats_left = get_col_stats(
+        db_path, table_left, from_date=from_date, to_date=to_date, preset=preset)
+    stats_right = get_col_stats(
+        db_path, table_right, from_date=from_date, to_date=to_date, preset=preset)
+    if preset and not stats_left:
+        raise ValueError(
+            f"No _col_stats rows for {table_left} with preset='{preset}'. "
+            f"Re-extract with preset='{preset}' or pick a different preset."
+        )
+    if preset and not stats_right:
+        raise ValueError(
+            f"No _col_stats rows for {table_right} with preset='{preset}'. "
+            f"Re-extract with preset='{preset}' or pick a different preset."
+        )
 
     def organize_stats(stats):
         organized = {}

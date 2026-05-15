@@ -389,6 +389,14 @@ function updateConnOptions(side) {
         });
         connSelect.disabled = false;
     }
+
+    // Toggle the CSV path field visibility — only meaningful when
+    // source=csv. Hiding it for other sources keeps the form tidy
+    // and prevents accidental saves of stale csv_path values.
+    const csvGroup = document.getElementById(`${side}-csv-path-group`);
+    if (csvGroup) {
+        csvGroup.style.display = (source === 'csv') ? '' : 'none';
+    }
 }
 
 // Global Settings — load from config, save back on apply
@@ -505,7 +513,32 @@ async function loadPairs() {
 
         if (response.ok && data.pairs) {
             pairs = data.pairs;
+            // Seed per-page selection from the global pair selector when
+            // it has been narrowed; empty global means "no narrow set,
+            // honor the server-saved skip state for each pair."
+            if (typeof getGlobalSelectedPairs === 'function') {
+                const sel = new Set(getGlobalSelectedPairs());
+                if (sel.size > 0) {
+                    pairs.forEach(p => {
+                        p.selected = sel.has(p.name);
+                        p.skip = !p.selected;
+                    });
+                }
+            }
             renderPairs();
+            // Cross-tab updates: if the global set changes elsewhere,
+            // re-seed and re-render.
+            if (typeof onGlobalPairSelectionChange === 'function') {
+                onGlobalPairSelectionChange((arr) => {
+                    const sel = new Set(arr);
+                    if (sel.size === 0) return;  // empty = leave skip state alone
+                    pairs.forEach(p => {
+                        p.selected = sel.has(p.name);
+                        p.skip = !p.selected;
+                    });
+                    renderPairs();
+                });
+            }
         } else {
             showError(`Load pairs failed: ${data.error || data.detail || 'HTTP ' + response.status}`);
         }
@@ -630,6 +663,10 @@ function togglePairSelection(index) {
     syncSelectAllCheckbox();
     renderPairs();
     _persistPairSkip({[pairs[index].name]: pairs[index].skip});
+    // Mirror to the global selector so other pages reflect this choice.
+    if (typeof toggleGlobalPair === 'function') {
+        toggleGlobalPair(pairs[index].name, pairs[index].selected);
+    }
 }
 
 function selectAllPairs(selected) {
@@ -642,6 +679,9 @@ function selectAllPairs(selected) {
     syncSelectAllCheckbox();
     renderPairs();
     _persistPairSkip(updates);
+    if (typeof setGlobalSelectedPairs === 'function') {
+        setGlobalSelectedPairs(selected ? pairs.map(p => p.name) : []);
+    }
 }
 
 function syncSelectAllCheckbox() {
@@ -699,6 +739,10 @@ function editPair(index) {
     updateConnOptions('left'); // Update conn options before setting value
     document.getElementById('left-conn').value = pair.left.conn_macro;
     document.getElementById('left-table').value = pair.left.table;
+    // csv_path is only meaningful when source=csv. Visibility was set
+    // by updateConnOptions above; the value loads regardless so an
+    // edit that switches source temporarily doesn't lose it.
+    document.getElementById('left-csv-path').value = pair.left.csv_path || '';
     document.getElementById('left-date-col').value = pair.left.date_col;
     document.getElementById('left-date-type').value = pair.left.date_type || 'date';
     document.getElementById('left-where').value = pair.left.where || '';
@@ -709,6 +753,7 @@ function editPair(index) {
     updateConnOptions('right'); // Update conn options before setting value
     document.getElementById('right-conn').value = pair.right.conn_macro;
     document.getElementById('right-table').value = pair.right.table;
+    document.getElementById('right-csv-path').value = pair.right.csv_path || '';
     document.getElementById('right-date-col').value = pair.right.date_col;
     document.getElementById('right-date-type').value = pair.right.date_type || 'date';
     document.getElementById('right-where').value = pair.right.where || '';
@@ -757,6 +802,11 @@ function clearPairForm() {
 }
 
 async function savePair() {
+    // csv_path is included on every save but only meaningful when
+    // source=csv. The backend `/api/generate` reads it via `_csv_from_clause`
+    // for csv-source tables; non-csv tables ignore it. Storing the value
+    // even when source != csv lets the user toggle source temporarily
+    // without losing the path.
     const pairData = {
         pair_name: document.getElementById('pair-name').value.trim(),
         description: document.getElementById('pair-desc').value.trim(),
@@ -764,6 +814,7 @@ async function savePair() {
             source: document.getElementById('left-source').value,
             conn_macro: document.getElementById('left-conn').value.trim(),
             table: document.getElementById('left-table').value.trim(),
+            csv_path: document.getElementById('left-csv-path').value.trim(),
             date_col: document.getElementById('left-date-col').value.trim(),
             date_type: document.getElementById('left-date-type').value,
             where: document.getElementById('left-where').value.trim(),
@@ -773,6 +824,7 @@ async function savePair() {
             source: document.getElementById('right-source').value,
             conn_macro: document.getElementById('right-conn').value.trim(),
             table: document.getElementById('right-table').value.trim(),
+            csv_path: document.getElementById('right-csv-path').value.trim(),
             date_col: document.getElementById('right-date-col').value.trim(),
             date_type: document.getElementById('right-date-type').value,
             where: document.getElementById('right-where').value.trim(),
@@ -964,6 +1016,7 @@ async function toggleQueryPreview() {
             source: document.getElementById('left-source').value,
             conn_macro: document.getElementById('left-conn').value,
             table: document.getElementById('left-table').value,
+            csv_path: document.getElementById('left-csv-path').value,
             name: document.getElementById('left-table').value.toLowerCase(),
             date_col: document.getElementById('left-date-col').value,
             date_type: document.getElementById('left-date-type').value,
@@ -974,6 +1027,7 @@ async function toggleQueryPreview() {
             source: document.getElementById('right-source').value,
             conn_macro: document.getElementById('right-conn').value,
             table: document.getElementById('right-table').value,
+            csv_path: document.getElementById('right-csv-path').value,
             name: document.getElementById('right-table').value.toLowerCase(),
             date_col: document.getElementById('right-date-col').value,
             date_type: document.getElementById('right-date-type').value,
@@ -1143,9 +1197,16 @@ async function generateAll() {
     const awsSources = new Set(['aws', 'csv']);
     const oracleSources = new Set(['oracle']);
     const hadoopSources = new Set(['hadoop']);
+    const csvSources = new Set(['csv']);
     const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
     const hasOracle = selected.some(p => oracleSources.has(p.left?.source) || oracleSources.has(p.right?.source));
     const hasHadoop = selected.some(p => hadoopSources.has(p.left?.source) || hadoopSources.has(p.right?.source));
+    // CSV mode (DuckDB in-process). Both sides MAY be csv -- in that case
+    // we run two passes (left outdir + right outdir) since each side
+    // wrote its extract_*.sql to its own outdir.
+    const hasCsvLeft  = selected.some(p => csvSources.has(p.left?.source));
+    const hasCsvRight = selected.some(p => csvSources.has(p.right?.source));
+    const hasCsv      = hasCsvLeft || hasCsvRight;
     // "SAS" header now covers SAS-local only (Oracle and Hadoop both moved to gen-first plain SQL extraction).
     const hasSas = selected.some(p => {
         const ls = p.left?.source, rs = p.right?.source;
@@ -1170,6 +1231,7 @@ async function generateAll() {
                     ${hasAws ? `<button class="btn-primary" id="run-aws-btn" style="font-size:11px; padding:3px 10px;">Run AWS Extraction</button>` : ''}
                     ${hasOracle ? `<button class="btn-primary" id="run-oracle-btn" style="font-size:11px; padding:3px 10px;">Run Oracle Extraction</button>` : ''}
                     ${hasHadoop ? `<button class="btn-primary" id="run-hadoop-btn" style="font-size:11px; padding:3px 10px;">Run Hadoop Extraction</button>` : ''}
+                    ${hasCsv ? `<button class="btn-primary" id="run-csv-btn" style="font-size:11px; padding:3px 10px;">Run CSV Extraction</button>` : ''}
                 </span>
             </div>
         </div>
@@ -1230,6 +1292,8 @@ async function generateAll() {
             if (result.sql_file) logMessage(`SQL file (AWS): ${result.sql_file}`, 'success');
             if (result.oracle_sql_file) logMessage(`SQL file (Oracle): ${result.oracle_sql_file}`, 'success');
             if (result.hadoop_sql_file) logMessage(`SQL file (Hadoop): ${result.hadoop_sql_file}`, 'success');
+            if (result.csv_sql_file_left)  logMessage(`SQL file (CSV left):  ${result.csv_sql_file_left}`, 'success');
+            if (result.csv_sql_file_right) logMessage(`SQL file (CSV right): ${result.csv_sql_file_right}`, 'success');
         } else {
             logMessage(`File generation error: ${result.error}`, 'error');
         }
@@ -1246,11 +1310,18 @@ async function generateAll() {
     async function _runExtraction(platform, btnId) {
         const btn = document.getElementById(btnId);
         if (!btn) return;
-        const _LABELS = {oracle: 'Oracle', hadoop: 'Hadoop', aws: 'AWS'};
+        // Pseudo-platforms 'csv-left' / 'csv-right' route a CSV extract
+        // to the LEFT or RIGHT outdir respectively; both map to the
+        // real backend platform 'csv'. The dedicated _runCsvExtraction
+        // helper composes both passes when a pair has CSV on both sides.
+        const realPlatform = platform.startsWith('csv') ? 'csv' : platform;
+        const _LABELS = {oracle: 'Oracle', hadoop: 'Hadoop', aws: 'AWS',
+                         'csv': 'CSV', 'csv-left': 'CSV (left)',
+                         'csv-right': 'CSV (right)'};
         const label = _LABELS[platform] || 'AWS';
-        // Oracle and Hadoop both write to the LEFT outdir (sas/) since both are
-        // gen-first plain SQL flows; AWS keeps the RIGHT outdir.
-        const writesLeft = (platform === 'oracle' || platform === 'hadoop');
+        // Oracle / Hadoop / csv-left all write to LEFT outdir;
+        // AWS / csv-right write to RIGHT outdir.
+        const writesLeft = (platform === 'oracle' || platform === 'hadoop' || platform === 'csv-left');
         const outdirInput = writesLeft ? 'global-sas-outdir' : 'global-aws-outdir';
         const defaultDir  = writesLeft ? './sas/' : './csv/';
         const fname = 'extract_row.sql';
@@ -1283,7 +1354,8 @@ async function generateAll() {
             try {
                 const reqBody = {
                     type: 'row',
-                    platform,
+                    // backend platform: collapse csv-left/csv-right -> csv
+                    platform: realPlatform,
                     outdir,
                 };
                 const nj = parseInt(document.getElementById(njobInput)?.value);
@@ -1366,6 +1438,91 @@ async function generateAll() {
     if (hasAws)    _runExtraction('aws',    'run-aws-btn');
     if (hasOracle) _runExtraction('oracle', 'run-oracle-btn');
     if (hasHadoop) _runExtraction('hadoop', 'run-hadoop-btn');
+
+    // CSV runner: one button drives both sides if needed. Click runs
+    // left first, then right (each is a separate /api/extract/run-sql
+    // call since each side wrote its extract_*.sql to its own outdir).
+    // Cancel mid-flight stops the current side; the other side still
+    // runs unless the user clicks again.
+    if (hasCsv) {
+        const btn = document.getElementById('run-csv-btn');
+        if (btn) {
+            btn.onclick = async () => {
+                btn.disabled = true;
+                const origText = btn.textContent;
+                try {
+                    if (hasCsvLeft) {
+                        btn.textContent = 'Running CSV (left)...';
+                        await _runCsvSide('csv-left');
+                    }
+                    if (hasCsvRight) {
+                        btn.textContent = 'Running CSV (right)...';
+                        await _runCsvSide('csv-right');
+                    }
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = origText;
+                }
+            };
+        }
+    }
+
+    async function _runCsvSide(side) {
+        // side = 'csv-left' or 'csv-right'. Reuses the streaming SSE
+        // dispatch by calling /api/extract/run-sql directly with
+        // platform=csv and the matching outdir.
+        const writesLeft = side === 'csv-left';
+        const outdir = document.getElementById(
+            writesLeft ? 'global-sas-outdir' : 'global-aws-outdir'
+        )?.value || (writesLeft ? './sas/' : './csv/');
+        const njob = parseInt(document.getElementById(
+            writesLeft ? 'global-njob-left' : 'global-njob-right'
+        )?.value);
+        const reqBody = {type: 'row', platform: 'csv', outdir};
+        if (njob > 0) reqBody.max_workers = njob;
+        logMessage(`Running CSV (${writesLeft ? 'left' : 'right'}) from ${outdir}extract_row.sql...`, 'info');
+        try {
+            const resp = await fetch('/api/extract/run-sql', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(reqBody),
+            });
+            // Drain SSE -- reuses the same event format as the other
+            // platforms; we just log each line through for now.
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, {stream: true});
+                const parts = buffer.split('\n\n');
+                buffer = parts.pop();
+                for (const part of parts) {
+                    let eventType = 'message';
+                    let data = '';
+                    for (const line of part.split('\n')) {
+                        if (line.startsWith('event: ')) eventType = line.slice(7);
+                        else if (line.startsWith('data: ')) data = line.slice(6);
+                    }
+                    if (!data) continue;
+                    const msg = JSON.parse(data);
+                    if (eventType === 'progress') {
+                        const status = msg.ok ? `${msg.rows} rows, ${msg.elapsed}s` : `FAIL: ${msg.error}`;
+                        logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
+                    } else if (eventType === 'done') {
+                        if (msg.ok) {
+                            logMessage(`CSV (${writesLeft ? 'left' : 'right'}) complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
+                        } else {
+                            logMessage(`CSV failed: ${msg.error || ''}`, 'error');
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            logMessage(`CSV (${writesLeft ? 'left' : 'right'}) error: ${e.message}`, 'error');
+        }
+    }
 }
 
 function _configBasename() {
