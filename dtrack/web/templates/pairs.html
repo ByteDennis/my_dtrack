@@ -336,6 +336,21 @@
                     </div>
                 </div>
 
+                <!-- Overwrite cache: when checked, /api/extract/run-sql
+                     forces a fresh re-execution of each block (cache_get
+                     returns None) but still writes the new result back
+                     to .cache.db, overwriting any stale entry. -->
+                <div style="margin-top:16px;">
+                    <label class="checkbox-inline" style="display:flex; align-items:center; gap:6px;">
+                        <input type="checkbox" id="global-overwrite-cache">
+                        <span><b>Overwrite cache</b>
+                            <span style="color:var(--jp-ui-font-color2); font-size:11px;">
+                                — re-run every query and replace the cached row in .cache.db
+                            </span>
+                        </span>
+                    </label>
+                </div>
+
                 <!-- Row 5: Stats accuracy global default. Per-pair settings
                      in the pair edit modal still override this. -->
                 <div style="margin-top:16px;">

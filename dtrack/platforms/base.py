@@ -23,6 +23,20 @@ _cache_db = None
 _cache_lock = threading.Lock()
 _cache_hits = 0
 _cache_misses = 0
+# When True, cache_get returns None unconditionally (forcing re-execution),
+# but cache_put still writes -- so the stale entry gets overwritten by the
+# fresh result. Toggled per-run from the web layer via set_cache_overwrite.
+_cache_overwrite = False
+
+
+def set_cache_overwrite(flag):
+    """Force cache misses (re-execute and overwrite) while still persisting
+    fresh results. Returns the previous value so callers can restore it.
+    """
+    global _cache_overwrite
+    prev = _cache_overwrite
+    _cache_overwrite = bool(flag)
+    return prev
 
 
 def set_cache_db(path):
@@ -81,6 +95,10 @@ def cache_get(sql, scope):
     """
     global _cache_hits, _cache_misses
     if not _cache_db:
+        return None
+    if _cache_overwrite:
+        with _cache_lock:
+            _cache_misses += 1
         return None
     import sqlite3
     import pickle

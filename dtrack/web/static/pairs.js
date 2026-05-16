@@ -423,6 +423,9 @@ async function loadGlobalSettings() {
         // Parallelism
         if (s.njob_left != null) document.getElementById('global-njob-left').value = s.njob_left;
         if (s.njob_right != null) document.getElementById('global-njob-right').value = s.njob_right;
+
+        const ow = document.getElementById('global-overwrite-cache');
+        if (ow) ow.checked = !!s.overwrite_cache;
     } catch (e) {
         // Non-critical — use hardcoded defaults
     }
@@ -437,6 +440,7 @@ async function saveGlobalSettings() {
         aws_outdir: document.getElementById('global-aws-outdir').value || './csv/',
         njob_left: parseInt(document.getElementById('global-njob-left').value) || 4,
         njob_right: parseInt(document.getElementById('global-njob-right').value) || 4,
+        overwrite_cache: !!document.getElementById('global-overwrite-cache')?.checked,
     };
     try {
         await fetch('/api/config', {
@@ -1360,6 +1364,7 @@ async function generateAll() {
                 };
                 const nj = parseInt(document.getElementById(njobInput)?.value);
                 if (nj > 0) reqBody.max_workers = nj;
+                if (document.getElementById('global-overwrite-cache')?.checked) reqBody.overwrite_cache = true;
 
                 const resp = await fetch('/api/extract/run-sql', {
                     method: 'POST',
@@ -1480,6 +1485,7 @@ async function generateAll() {
         )?.value);
         const reqBody = {type: 'row', platform: 'csv', outdir};
         if (njob > 0) reqBody.max_workers = njob;
+        if (document.getElementById('global-overwrite-cache')?.checked) reqBody.overwrite_cache = true;
         logMessage(`Running CSV (${writesLeft ? 'left' : 'right'}) from ${outdir}extract_row.sql...`, 'info');
         try {
             const resp = await fetch('/api/extract/run-sql', {

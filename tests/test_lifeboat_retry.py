@@ -1,20 +1,22 @@
 """Lifeboat (resource-exhaustion) retry path tests.
 
-When Oracle COUNT(DISTINCT) blows TEMP (ORA-01652) or Athena
-COUNT(DISTINCT) hits EXCEEDED_MEMORY_LIMIT on a high-cardinality column,
-the gen-first runners (`run_oracle_sql_file` / `run_sql_file`) catch the
-error and re-execute an embedded fallback SQL that drops the spilling
-aggregates. These tests cover the three plumbing pieces:
+Historical context: on a TEMP / memory blowup from COUNT(DISTINCT) /
+freq-CTE aggregation, the gen-first runners used to fall back to an
+embedded lifeboat SQL block. That auto-retry has been retired on
+Athena/Oracle/Hadoop in favor of clean single-pass Quick/Standard
+presets (Detailed still uses freq tables but doesn't auto-retry).
 
-  1. The lifeboat SQL builders emit the right shape (NULL n_unique, no
-     freq-table CTEs, same row schema as full SQL so the CSV header
-     stays stable).
-  2. The combined-SQL files carry `/* @degrade_sql ... @end_degrade */`
-     blocks and the parsers recover both the main SQL and the lifeboat
-     while stripping the comment from the executable SQL.
-  3. The comparator treats `partial='oracle_degraded'` /
-     `'athena_degraded'` rows as "n_unique / hash_sum skipped" rather
-     than mismatch, so a single degraded row doesn't paint every cell.
+These tests now cover only the surviving plumbing:
+
+  1. The lifeboat SQL **builders** are still defined and produce the
+     right shape — they're available for a future sidecar / opt-in
+     re-execution but aren't wired into the runner.
+  2. The parsers tolerate old extract_col.sql files that still carry
+     `/* @degrade_sql ... @end_degrade */` blocks (Trino treats `/*` as
+     a comment, so they pass through harmlessly).
+  3. The comparator still treats `partial='oracle_degraded'` /
+     `'athena_degraded'` rows from historical CSVs as "n_unique /
+     hash_sum skipped" rather than mismatch.
 """
 
 import os
@@ -144,22 +146,19 @@ def test_athena_lifeboat_numeric_drops_count_distinct():
 # the main SQL so the runner doesn't execute the comment text.
 # ---------------------------------------------------------------------------
 
-def test_athena_parse_sql_file_extracts_degrade_block():
+def test_athena_parse_sql_file_clean_blocks():
+    """Fresh extract_col.sql files no longer carry a @degrade_sql lifeboat
+    block (matches the oracle/hadoop layout). parse_sql_file should return
+    blocks with just `name` + `sql` — no `degrade_sql` key in the dict."""
     body = textwrap.dedent("""\
         -- dtrack AWS col extraction queries
         -- Generated: 2026-05-14
 
         -- db.tbl/col_a/_all
         SELECT COUNT(*) FROM db.tbl;
-        /* @degrade_sql
-        SELECT COUNT(*) AS n_total FROM db.tbl
-        @end_degrade */
 
         -- db.tbl/col_b/_all
         SELECT 1;
-        /* @degrade_sql
-        SELECT 2
-        @end_degrade */
     """)
     with tempfile.NamedTemporaryFile('w', suffix='.sql', delete=False) as f:
         f.write(body)
@@ -172,17 +171,21 @@ def test_athena_parse_sql_file_extracts_degrade_block():
     assert len(blocks) == 2
     assert blocks[0]['name'] == 'db.tbl/col_a/_all'
     assert blocks[0]['sql'] == 'SELECT COUNT(*) FROM db.tbl'
-    assert blocks[0]['degrade_sql'] == 'SELECT COUNT(*) AS n_total FROM db.tbl'
-    assert '@degrade_sql' not in blocks[0]['sql']
-    assert blocks[1]['degrade_sql'] == 'SELECT 2'
+    assert 'degrade_sql' not in blocks[0]
+    assert blocks[1]['sql'] == 'SELECT 1'
 
 
-def test_athena_parse_sql_file_handles_block_without_degrade():
-    """Row-extraction blocks don't carry @degrade_sql; degrade_sql must be
-    None (not a crash, not the next block's body)."""
+def test_athena_parse_sql_file_tolerates_old_degrade_blocks():
+    """Old extract_col.sql files in the wild may still embed
+    `/* @degrade_sql ... @end_degrade */`. Trino treats `/* ... */` as
+    a comment so we don't need to strip it — but the parser must not
+    crash and must keep the main SQL intact."""
     body = textwrap.dedent("""\
-        -- db.tbl
-        SELECT date_value, COUNT(*) FROM db.tbl GROUP BY date_value;
+        -- db.tbl/col_a/_all
+        SELECT COUNT(*) FROM db.tbl;
+        /* @degrade_sql
+        SELECT COUNT(*) AS n_total FROM db.tbl
+        @end_degrade */
     """)
     with tempfile.NamedTemporaryFile('w', suffix='.sql', delete=False) as f:
         f.write(body)
@@ -193,8 +196,8 @@ def test_athena_parse_sql_file_handles_block_without_degrade():
         os.unlink(path)
 
     assert len(blocks) == 1
-    assert blocks[0]['degrade_sql'] is None
-    assert 'SELECT date_value' in blocks[0]['sql']
+    assert 'SELECT COUNT(*) FROM db.tbl' in blocks[0]['sql']
+    assert 'degrade_sql' not in blocks[0]
 
 
 def test_oracle_parse_sql_file_extracts_degrade_and_conn_macro():
@@ -279,23 +282,15 @@ def test_has_col_differences_still_flags_n_total_when_degraded():
 # ---------------------------------------------------------------------------
 
 def test_athena_emit_and_parse_roundtrip():
-    """Build a lifeboat, embed it in a synthetic file the same way
-    _write_combined_sql does, and confirm parse_sql_file recovers it."""
+    """A freshly-written extract_col.sql block round-trips through
+    parse_sql_file with `name` + `sql` and no lifeboat metadata."""
     main_sql = "SELECT 'all' AS dt, 'col_a' AS column_name, " \
                "COUNT(DISTINCT col_a) AS n_unique FROM db.tbl"
-    lifeboat = _build_lifeboat_col_sql_athena(
-        col_name='col_a', col_q='col_a', col_dtype='varchar',
-        is_numeric=False,
-        dt_select="'all' AS dt", group_by='',
-        full_table='db.tbl', wc='1=1', cte_prefix='',
-    )
     body = (
         "-- dtrack AWS col extraction queries\n\n"
         "-- db.tbl/col_a/_all\n"
         f"{main_sql}\n"
-        "/* @degrade_sql\n"
-        f"{lifeboat}\n"
-        "@end_degrade */\n"
+        ";\n"
     )
     with tempfile.NamedTemporaryFile('w', suffix='.sql', delete=False) as f:
         f.write(body)
@@ -305,6 +300,6 @@ def test_athena_emit_and_parse_roundtrip():
     finally:
         os.unlink(path)
     assert len(blocks) == 1
+    assert blocks[0]['name'] == 'db.tbl/col_a/_all'
     assert 'COUNT(DISTINCT col_a)' in blocks[0]['sql']
-    assert blocks[0]['degrade_sql'] is not None
-    assert 'CAST(NULL AS BIGINT) AS n_unique' in blocks[0]['degrade_sql']
+    assert 'degrade_sql' not in blocks[0]

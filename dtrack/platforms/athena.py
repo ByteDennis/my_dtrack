@@ -986,18 +986,20 @@ FROM {full_table}
 WHERE {wc}{group_by}"""
 
 
-def _emit_col_block(blocks, header, sql, lifeboat_sql):
-    """Append a col-block emission (header + SQL + lifeboat) consistently.
+def _emit_col_block(blocks, header, sql):
+    """Append a col-block emission (header + SQL + spacer) consistently.
 
-    Centralizes the `-- header / SQL / @degrade_sql / spacer` pattern so
-    every col SQL site in _write_combined_sql produces the same on-disk
-    layout the parse + run paths expect.
+    No /* @degrade_sql ... @end_degrade */ block: lifeboat emission was
+    removed to match the clean layout of oracle.py / hadoop.py
+    extract_col.sql. The Quick/Standard presets use flat single-pass
+    aggregates that almost never trip Trino's EXCEEDED_*_MEMORY_LIMIT,
+    so the fallback added churn without paying for itself. The builder
+    (_build_lifeboat_col_sql_athena) is kept defined for a possible
+    sidecar file in the future.
     """
     blocks.append(header)
     blocks.append(sql.strip())
-    blocks.append("/* @degrade_sql")
-    blocks.append(lifeboat_sql.strip())
-    blocks.append("@end_degrade */")
+    blocks.append(";")
     blocks.append("")
 
 
@@ -1275,15 +1277,8 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                             col_dtype=col_dtype,
                             preset=preset,
                         )
-                        lifeboat = _build_lifeboat_col_sql_athena(
-                            col_name, col_q, col_dtype, is_num,
-                            dt_select=f"{trunc_expr} AS dt",
-                            group_by=f"\nGROUP BY {trunc_expr}",
-                            full_table=full_table, wc=wc_t_col,
-                            cte_prefix=cte_prefix,
-                        )
                         _emit_col_block(
-                            blocks, f"-- {qname}/{col_name}/_all", sql, lifeboat)
+                            blocks, f"-- {qname}/{col_name}/_all", sql)
                         continue
                     from .base import apply_null_sentinels
                     if is_num:
@@ -1367,18 +1362,11 @@ LEFT JOIN sstats ss ON s.dt = ss.dt
 LEFT JOIN minmax mm ON s.dt = mm.dt
 LEFT JOIN top_n t ON s.dt = t.dt
 ORDER BY s.dt;"""
-                    lifeboat = _build_lifeboat_col_sql_athena(
-                        col_name, col_q, col_dtype, is_num,
-                        dt_select=f"{trunc_expr} AS dt",
-                        group_by=f"\nGROUP BY {trunc_expr}",
-                        full_table=full_table, wc=wc_t_col,
-                        cte_prefix=cte_prefix,
-                    )
                     # Header name must be space-free so parse_sql_file picks
                     # it up as a block marker. `_all` suffix conveys that this
                     # block covers every bucket in one scan.
                     _emit_col_block(
-                        blocks, f"-- {qname}/{col_name}/_all", sql, lifeboat)
+                        blocks, f"-- {qname}/{col_name}/_all", sql)
                 continue  # next table; don't fall through to per-bucket loop
 
             # bucket / sample / all modes: one block per (column, vintage bucket).
@@ -1417,17 +1405,10 @@ ORDER BY s.dt;"""
                             col_dtype=col_dtype,
                             preset=preset,
                         )
-                        lifeboat = _build_lifeboat_col_sql_athena(
-                            col_name, col_q, col_dtype, is_num,
-                            dt_select=f"{dt_expr} AS dt",
-                            group_by="",
-                            full_table=full_table, wc=wc,
-                            cte_prefix=cte_prefix,
-                        )
                         _emit_col_block(
                             blocks,
                             f"-- {qname}/{col_name}{block_suffix}",
-                            sql, lifeboat)
+                            sql)
                         continue
                     from .base import apply_null_sentinels
                     if is_num:
@@ -1482,17 +1463,10 @@ SELECT
         ORDER BY cnt DESC
     ), '; ') FROM ranked WHERE rn <= 10), '') AS top_10;"""
 
-                    lifeboat = _build_lifeboat_col_sql_athena(
-                        col_name, col_q, col_dtype, is_num,
-                        dt_select=f"{dt_expr} AS dt",
-                        group_by="",
-                        full_table=full_table, wc=wc,
-                        cte_prefix=cte_prefix,
-                    )
                     _emit_col_block(
                         blocks,
                         f"-- {qname}/{col_name}{block_suffix}",
-                        sql, lifeboat)
+                        sql)
         else:
             # Row count query: layer user where + --from/--to bounds.
             date_bounds = tbl.get('_date_bounds', '')
@@ -1858,21 +1832,17 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
 def parse_sql_file(sql_path):
     """Parse a combined SQL file into named query blocks.
 
-    Returns list of dicts:
-        [{"name": "aws_cust_daily", "sql": "SELECT ...",
-          "degrade_sql": "SELECT ..." or None}]
+    Returns list of dicts: [{"name": "aws_cust_daily", "sql": "SELECT ..."}]
 
-    The file format uses '-- {qname}' as block markers.  Everything between
-    two markers (or between a marker and EOF) is one query.  Header lines
+    The file format uses '-- {qname}' as block markers. Everything between
+    two markers (or between a marker and EOF) is one query. Header lines
     (starting with '-- dtrack' or '-- Generated') are skipped.
 
-    Col blocks may carry a `/* @degrade_sql ... @end_degrade */` comment
-    holding a lifeboat fallback query — extracted into `degrade_sql` and
-    stripped from the main `sql` so the runner can execute the full query
-    by default and swap to the lifeboat on resource exhaustion.
+    Older extract_col.sql files written before the lifeboat cleanup may
+    still contain a `/* @degrade_sql ... @end_degrade */` block. Trino
+    treats `/* ... */` as a comment, so they pass through harmlessly --
+    we don't parse them out separately anymore.
     """
-    import re as _re
-
     with open(sql_path, 'r', encoding='utf-8') as f:
         text = f.read()
 
@@ -1882,17 +1852,9 @@ def parse_sql_file(sql_path):
 
     def _save(name, lines):
         raw = '\n'.join(lines).strip()
-        dm = _re.search(
-            r"/\*\s*@degrade_sql\s*(.*?)\s*@end_degrade\s*\*/",
-            raw, flags=_re.DOTALL)
-        degrade_sql = None
-        if dm:
-            degrade_sql = dm.group(1).strip().rstrip(';').strip()
-            raw = (raw[:dm.start()] + raw[dm.end():]).strip()
-        sql = raw.strip().rstrip(';').strip()
+        sql = raw.rstrip(';').strip()
         if sql:
-            blocks.append({"name": name, "sql": sql,
-                           "degrade_sql": degrade_sql})
+            blocks.append({"name": name, "sql": sql})
 
     for line in text.split('\n'):
         stripped = line.strip()
@@ -1976,8 +1938,9 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         # lacked these fields surface as empty strings and the compare
         # treats absent hash_sum as "unknown" (no diff flag).
         'length_avg', 'length_max', 'hash_sum',
-        # Lifeboat retry marker: 'athena_degraded' on rows produced by the
-        # @degrade_sql fallback after EXCEEDED_MEMORY_LIMIT etc.
+        # Legacy lifeboat marker. Always empty for fresh runs since the
+        # @degrade_sql fallback was retired; kept in the header so older
+        # CSVs that recorded 'athena_degraded' here still load cleanly.
         'partial',
     ]
 
@@ -2128,49 +2091,23 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                          "table": qname, "running": running_now,
                          "total": total_blocks, "eta_sec": eta_sec})
 
-        degraded = False
         try:
-            def _run(sql_to_run):
-                cached = _cache_get(sql_to_run, None)
-                if cached is not None:
-                    rows_, col_names_ = cached
-                else:
-                    aws_creds_renew()
-                    conn = athena_connect()
-                    cur = conn.cursor()
-                    cur.execute(sql_to_run)
-                    rows_ = cur.fetchall()
-                    col_names_ = (
-                        [desc[0] for desc in cur.description]
-                        if cur.description else [])
-                    cur.close()
-                    conn.close()
-                    _cache_put(sql_to_run, None,
-                               (rows_, col_names_), row_count=len(rows_))
-                return rows_, col_names_
-
-            try:
-                rows, col_names = _run(sql)
-            except Exception as exc:
-                # Retry once with the embedded lifeboat SQL on Trino
-                # resource-exhaustion errors. Any other failure (syntax,
-                # auth, cancel, network) falls through as before so the
-                # user sees the real error.
-                lifeboat = block.get('degrade_sql')
-                err_str = str(exc)
-                is_resource_err = (
-                    'EXCEEDED_MEMORY_LIMIT' in err_str
-                    or 'EXCEEDED_LOCAL_LIMIT' in err_str
-                    or 'exhausted resources' in err_str
-                    or 'EXCEEDED_GLOBAL_MEMORY_LIMIT' in err_str)
-                if is_col and lifeboat and is_resource_err:
-                    print(f"  [degrade] {block_name}: "
-                          f"{err_str.splitlines()[0]} — retrying without "
-                          f"n_unique/hash_sum", file=sys.stderr)
-                    rows, col_names = _run(lifeboat)
-                    degraded = True
-                else:
-                    raise
+            cached = _cache_get(sql, None)
+            if cached is not None:
+                rows, col_names = cached
+            else:
+                aws_creds_renew()
+                conn = athena_connect()
+                cur = conn.cursor()
+                cur.execute(sql)
+                rows = cur.fetchall()
+                col_names = (
+                    [desc[0] for desc in cur.description]
+                    if cur.description else [])
+                cur.close()
+                conn.close()
+                _cache_put(sql, None,
+                           (rows, col_names), row_count=len(rows))
             elapsed = time.time() - start_time
 
             if is_col:
@@ -2184,8 +2121,6 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                 parsed_rows = []
                 for row in rows:
                     row_dict = dict(zip(col_names_lc, row))
-                    if degraded:
-                        row_dict['partial'] = 'athena_degraded'
                     parsed_rows.append([row_dict.get(h, '') for h in _COL_HEADERS])
                 with _col_rows_lock:
                     _col_rows_by_table.setdefault(qname, []).extend(parsed_rows)
@@ -2202,8 +2137,7 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                         writer.writerow([row[0], row[1]])
 
             result = {"name": block_name, "ok": True, "rows": len(rows),
-                      "elapsed": round(elapsed, 1), "start": start_ts,
-                      "degraded": degraded}
+                      "elapsed": round(elapsed, 1), "start": start_ts}
             if not is_col:
                 result["csv_path"] = os.path.join(outdir, f"{block_name}{file_suffix}")
         except Exception as e:

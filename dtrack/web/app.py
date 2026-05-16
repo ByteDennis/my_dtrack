@@ -26,6 +26,105 @@ _dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=_dir / "static"), name="static")
 templates = Jinja2Templates(directory=_dir / "templates")
 
+
+# Request access log. Uvicorn's default access log is suppressed
+# (log_level="warning" in serve()), so this middleware is the only signal
+# the user sees in the `dtrack serve` console for routine API traffic.
+# We print METHOD, full path (with query string), and a short preview of
+# the request body (for JSON/form payloads). Skips /static/* to keep the
+# log readable.
+#
+# Implemented as a pure ASGI middleware -- NOT @app.middleware("http") /
+# BaseHTTPMiddleware -- because the latter wraps every request in an
+# internal anyio queue that breaks long-lived StreamingResponses
+# (specifically /api/extract/run-sql's SSE stream). The queue
+# implementation in BaseHTTPMiddleware mishandles `receive()` after the
+# body is consumed and surfaces as
+#   RuntimeError: unexpected message received http.request
+# on the very first SSE event. Sitting beneath BaseHTTPMiddleware at the
+# raw ASGI layer, we can drain + replay the body cleanly without
+# disturbing the streaming path.
+class _APILogMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        path = scope.get("path", "")
+        if path.startswith("/static/"):
+            return await self.app(scope, receive, send)
+
+        method = scope.get("method", "")
+        qs = scope.get("query_string", b"").decode("latin-1")
+        full_path = f"{path}?{qs}" if qs else path
+
+        body_preview = ""
+        downstream_receive = receive
+
+        if method in ("POST", "PUT", "PATCH", "DELETE"):
+            ctype = ""
+            for k, v in scope.get("headers", []):
+                if k == b"content-type":
+                    ctype = v.decode("latin-1").split(";")[0].strip().lower()
+                    break
+
+            if ctype in ("application/json",
+                          "application/x-www-form-urlencoded",
+                          "text/plain"):
+                # Drain the request body off the wire. Anything we capture
+                # here is replayed via `downstream_receive` so the handler
+                # can still call request.json() / await request.body().
+                body_chunks = []
+                more_body = True
+                while more_body:
+                    message = await receive()
+                    if message["type"] == "http.request":
+                        body_chunks.append(message.get("body", b""))
+                        more_body = message.get("more_body", False)
+                    elif message["type"] == "http.disconnect":
+                        # Client gone before sending the body; nothing
+                        # left to log or forward.
+                        return
+                raw = b"".join(body_chunks)
+
+                if raw:
+                    try:
+                        text = raw.decode("utf-8", errors="replace")
+                    except Exception:
+                        text = repr(raw[:200])
+                    if ctype == "application/json":
+                        try:
+                            text = json.dumps(json.loads(text), separators=(",", ":"))
+                        except Exception:
+                            pass
+                    text = text.replace("\n", " ").replace("\r", " ")
+                    if len(text) > 400:
+                        text = text[:400] + f"...<+{len(text) - 400}>"
+                    body_preview = f" body={text}"
+
+                # Build a receive that hands the buffered body to the
+                # handler exactly once, then falls through to the real
+                # upstream receive so http.disconnect (sent by uvicorn
+                # when the browser closes the SSE stream) still
+                # propagates and StreamingResponse can shut down.
+                replayed = False
+                async def downstream_receive():  # noqa: F811
+                    nonlocal replayed
+                    if not replayed:
+                        replayed = True
+                        return {"type": "http.request",
+                                "body": raw,
+                                "more_body": False}
+                    return await receive()
+
+        print(f"[api] {method} {full_path}{body_preview}", flush=True)
+        await self.app(scope, downstream_receive, send)
+
+
+app.add_middleware(_APILogMiddleware)
+
 # These are set by serve() before uvicorn.run()
 _db_path: str = ""
 _db_dir: str = ""  # directory containing the database — all relative paths resolve from here
@@ -259,7 +358,10 @@ async def api_extract(request: Request):
     body_outdir = body.get("outdir")
     outdir = _resolve(body_outdir) if body_outdir else _side_outdir(platform)
     max_workers = body.get("max_workers")
+    overwrite_cache = bool(body.get("overwrite_cache", False))
 
+    from ..platforms.base import set_cache_overwrite
+    prev_overwrite = set_cache_overwrite(overwrite_cache)
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
@@ -282,6 +384,8 @@ async def api_extract(request: Request):
         return JSONResponse(status_code=500, content={
             "ok": False, "error": str(e), "output": buf.getvalue()
         })
+    finally:
+        set_cache_overwrite(prev_overwrite)
 
 
 # Active-run registry. Each in-flight extraction is keyed by a uuid the
@@ -306,6 +410,115 @@ async def api_cancel_extract(run_id: str):
         })
     event.set()
     return {"ok": True, "run_id": run_id}
+
+
+@app.post("/api/extract/dry-run")
+async def api_dry_run_sql(request: Request):
+    """Execute the FIRST query from extract_{row,col}.sql without touching
+    the on-disk cache (.cache.db). Returns the rowset so the caller can
+    sanity-check the query (column shape, sample values, runtime) before
+    kicking off the full queue.
+
+    Body: {platform, type, outdir?, max_rows?}
+        platform: 'oracle' | 'hadoop' | 'aws' | 'athena' | 'csv'
+        type:     'row' | 'col' (default 'col')
+        outdir:   override the platform-side outdir
+        max_rows: cap rows in the response (default 100)
+    """
+    import time as _time
+    body = await request.json()
+    platform = (body.get("platform") or "").lower()
+    if platform in ("athena",):
+        platform = "aws"
+    extract_type = body.get("type", "col")
+    body_outdir = body.get("outdir")
+    outdir = _resolve(body_outdir) if body_outdir else _side_outdir(platform)
+    max_rows = int(body.get("max_rows") or 100)
+
+    sql_path = os.path.join(outdir, f"extract_{extract_type}.sql")
+    if not os.path.exists(sql_path):
+        return JSONResponse(status_code=404, content={
+            "ok": False, "error": f"SQL file not found: {sql_path}",
+        })
+
+    from ..platforms.base import parse_extract_sql_file
+    blocks = parse_extract_sql_file(sql_path)
+    if not blocks:
+        return JSONResponse(status_code=400, content={
+            "ok": False, "error": f"No SQL blocks found in {sql_path}",
+        })
+    block = blocks[0]
+    sql = block["sql"]
+    conn_macro = block.get("conn_macro")
+    block_name = block["name"]
+
+    # Bypass the on-disk query cache so dry-run never reads stale rows and
+    # never persists a new entry. set_cache_db is process-global so we
+    # snapshot the current path, swap to None for the call, then restore.
+    from ..platforms import base as _base
+    prev_cache = _base._cache_db
+    _base._cache_db = None
+    t0 = _time.time()
+    try:
+        if platform == "oracle":
+            from ..platforms.oracle import _query_oracle
+            rows = _query_oracle(sql, conn_macro)
+        elif platform == "hadoop":
+            from ..platforms.hadoop import _query_hadoop
+            rows = _query_hadoop(sql, conn_macro)
+        elif platform == "csv":
+            from ..platforms.csv_duckdb import _query_duckdb
+            rows = _query_duckdb(sql, conn_macro)
+        elif platform == "aws":
+            from ..platforms.athena import _query_athena
+            df = _query_athena(sql, data_base=conn_macro)
+            # _query_athena returns a DataFrame; normalize to list[dict].
+            try:
+                rows = df.to_dict(orient="records")
+            except Exception:
+                rows = list(df) if df is not None else []
+        else:
+            return JSONResponse(status_code=400, content={
+                "ok": False, "error": f"Unknown platform: {platform!r}",
+            })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "ok": False, "error": f"{type(e).__name__}: {e}",
+            "name": block_name, "sql": sql,
+        })
+    finally:
+        _base._cache_db = prev_cache
+
+    elapsed_ms = int((_time.time() - t0) * 1000)
+
+    # Normalize values for JSON (Decimal, datetime, etc.).
+    def _jsonable(v):
+        if v is None or isinstance(v, (str, int, float, bool)):
+            return v
+        try:
+            return str(v)
+        except Exception:
+            return repr(v)
+
+    rows = rows or []
+    total = len(rows)
+    truncated = total > max_rows
+    rows = rows[:max_rows]
+    columns = list(rows[0].keys()) if rows else []
+    norm_rows = [[_jsonable(r.get(c)) for c in columns] for r in rows]
+
+    return {
+        "ok": True,
+        "platform": platform,
+        "name": block_name,
+        "sql": sql,
+        "conn_macro": conn_macro,
+        "columns": columns,
+        "rows": norm_rows,
+        "row_count": total,
+        "truncated": truncated,
+        "elapsed_ms": elapsed_ms,
+    }
 
 
 @app.post("/api/extract/run-sql")
@@ -335,6 +548,7 @@ async def api_run_sql_file(request: Request):
     outdir = _resolve(body_outdir) if body_outdir else _side_outdir(platform)
     max_workers = body.get("max_workers")
     resume = bool(body.get("resume", False))
+    overwrite_cache = bool(body.get("overwrite_cache", False))
 
     sql_path = os.path.join(outdir, f"extract_{extract_type}.sql")
     if not os.path.exists(sql_path):
@@ -354,6 +568,12 @@ async def api_run_sql_file(request: Request):
         progress_q.put(result)
 
     def _run():
+        # Overwrite-cache toggle: cache_get returns None (forces re-execute)
+        # but cache_put still persists, so the stale entry is replaced by
+        # fresh rows. Each runner sets/clears _cache_db itself, so apply the
+        # flag inside the thread and clear in finally.
+        from ..platforms.base import set_cache_overwrite
+        prev_overwrite = set_cache_overwrite(overwrite_cache)
         try:
             if platform == "oracle":
                 from ..platforms.oracle import run_oracle_sql_file
@@ -404,6 +624,7 @@ async def api_run_sql_file(request: Request):
         except Exception as e:
             progress_q.put({"_done": True, "ok": False, "error": str(e)})
         finally:
+            set_cache_overwrite(prev_overwrite)
             with _active_runs_lock:
                 _active_runs.pop(run_id, None)
 

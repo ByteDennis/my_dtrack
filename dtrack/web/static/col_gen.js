@@ -118,6 +118,12 @@ function initModalHandlers() {
     document.getElementById('settings-modal').addEventListener('click', (e) => {
         if (e.target.id === 'settings-modal') closeSettingsModal();
     });
+    const dry = document.getElementById('dry-run-modal');
+    if (dry) {
+        dry.addEventListener('click', (e) => {
+            if (e.target.id === 'dry-run-modal') closeDryRunModal();
+        });
+    }
 }
 
 async function loadGlobalSettings() {
@@ -131,6 +137,8 @@ async function loadGlobalSettings() {
         if (s.to_date) document.getElementById('global-to-date').value = s.to_date;
         if (s.sas_outdir) document.getElementById('global-sas-outdir').value = s.sas_outdir;
         if (s.aws_outdir) document.getElementById('global-aws-outdir').value = s.aws_outdir;
+        const ow = document.getElementById('global-overwrite-cache');
+        if (ow) ow.checked = !!s.overwrite_cache;
     } catch (e) {
         // Non-critical
     }
@@ -142,6 +150,7 @@ async function saveGlobalSettings() {
         to_date: document.getElementById('global-to-date').value || '',
         sas_outdir: document.getElementById('global-sas-outdir').value || './sas/',
         aws_outdir: document.getElementById('global-aws-outdir').value || './csv/',
+        overwrite_cache: !!document.getElementById('global-overwrite-cache')?.checked,
     };
     try {
         await fetch('/api/config', {
@@ -171,6 +180,117 @@ function applySettings() {
     renderPairs();
     closeSettingsModal();
     showSuccess('Settings applied');
+}
+
+// ---------------------------------------------------------------------------
+// Dry Run — execute the first block of extract_col.sql for the chosen
+// platform without touching the on-disk cache, show result in a popup.
+// ---------------------------------------------------------------------------
+async function dryRunFirstQuery() {
+    const platform = document.getElementById('dry-run-platform').value;
+    const btn = document.getElementById('dry-run-btn');
+    // Oracle/Hadoop read from sas_outdir (LEFT); AWS/CSV-right read from
+    // aws_outdir. CSV is ambiguous — both sides are valid CSV destinations
+    // — so we pass the left dir by default (matches the dropdown semantics
+    // "first query"; the user can re-run to test the right side if needed).
+    const writesLeft = (platform === 'oracle' || platform === 'hadoop' || platform === 'csv');
+    const outdir = document.getElementById(
+        writesLeft ? 'global-sas-outdir' : 'global-aws-outdir'
+    )?.value || (writesLeft ? './sas/' : './csv/');
+
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Running...';
+    _renderDryRunLoading(platform, outdir);
+    openDryRunModal();
+    try {
+        const resp = await fetch('/api/extract/dry-run', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({platform, type: 'col', outdir, max_rows: 100}),
+        });
+        const data = await resp.json();
+        _renderDryRunResult(data);
+    } catch (e) {
+        _renderDryRunResult({ok: false, error: e.message});
+    } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+    }
+}
+
+// Settings-modal shortcut: re-generate extract_col.sql via /api/generate
+// without leaving the modal. Delegates to generateAll() so the preset,
+// pair selection, and per-pair date logic stay in one place.
+async function genSqlFromSettings() {
+    const btn = document.getElementById('gen-sql-btn');
+    if (!btn) return;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Generating...';
+    try {
+        await generateAll();
+    } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+    }
+}
+
+function openDryRunModal() {
+    document.getElementById('dry-run-modal').classList.add('active');
+}
+
+function closeDryRunModal() {
+    document.getElementById('dry-run-modal').classList.remove('active');
+}
+
+function _renderDryRunLoading(platform, outdir) {
+    document.getElementById('dry-run-summary').innerHTML =
+        `<span style="color:var(--jp-ui-font-color2);">Running first block of ${outdir}extract_col.sql on <b>${platform}</b>...</span>`;
+    document.getElementById('dry-run-sql').textContent = '';
+    document.getElementById('dry-run-result').innerHTML = '';
+}
+
+function _renderDryRunResult(data) {
+    const summary = document.getElementById('dry-run-summary');
+    const sqlEl = document.getElementById('dry-run-sql');
+    const resultEl = document.getElementById('dry-run-result');
+
+    if (!data.ok) {
+        summary.innerHTML = `<span style="color:var(--jp-error-color0, #c62828);">FAILED: ${_escapeHtml(data.error || 'unknown error')}</span>`;
+        sqlEl.textContent = data.sql || '';
+        resultEl.innerHTML = '';
+        return;
+    }
+    const blockName = _escapeHtml(data.name || '');
+    const cm = data.conn_macro ? ` | conn_macro=<code>${_escapeHtml(data.conn_macro)}</code>` : '';
+    const trunc = data.truncated
+        ? ` <span style="color:var(--jp-warn-color0);">(showing first ${data.rows.length})</span>` : '';
+    summary.innerHTML =
+        `<b>${blockName}</b> — ${data.row_count} row(s)${trunc} | ${data.elapsed_ms} ms${cm}` +
+        ` <span style="color:var(--jp-ui-font-color3);">| cache bypassed</span>`;
+    sqlEl.textContent = data.sql || '';
+
+    const cols = data.columns || [];
+    const rows = data.rows || [];
+    if (!rows.length) {
+        resultEl.innerHTML = '<div style="color:var(--jp-ui-font-color2); font-size:12px;">Query returned 0 rows.</div>';
+        return;
+    }
+    const head = cols.map(c => `<th style="text-align:left; padding:4px 8px; background:var(--jp-layout-color2); position:sticky; top:0;">${_escapeHtml(c)}</th>`).join('');
+    const body = rows.map(r =>
+        '<tr>' + r.map(v => {
+            const s = v == null ? '' : String(v);
+            return `<td style="padding:3px 8px; border-top:1px solid var(--jp-border-color1); font-family:var(--jp-code-font-family); font-size:11px;">${_escapeHtml(s)}</td>`;
+        }).join('') + '</tr>'
+    ).join('');
+    resultEl.innerHTML = `
+        <div style="overflow:auto; max-height:50vh; border:1px solid var(--jp-border-color1); border-radius:4px;">
+            <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                <thead><tr>${head}</tr></thead>
+                <tbody>${body}</tbody>
+            </table>
+        </div>`;
 }
 
 function clearGlobalDates() {
@@ -884,6 +1004,7 @@ async function _runCsvColSide(side) {
     )?.value);
     const reqBody = {type: 'col', platform: 'csv', outdir, resume: false};
     if (njob > 0) reqBody.max_workers = njob;
+    if (document.getElementById('global-overwrite-cache')?.checked) reqBody.overwrite_cache = true;
     logMessage(`Running CSV (${writesLeft ? 'left' : 'right'}) col extract from ${outdir}extract_col.sql...`, 'info');
     try {
         const resp = await fetch('/api/extract/run-sql', {
@@ -989,6 +1110,7 @@ async function runColExtraction(platform, resume = false) {
         };
         const nj = parseInt(document.getElementById(njobInput)?.value);
         if (nj > 0) reqBody.max_workers = nj;
+        if (document.getElementById('global-overwrite-cache')?.checked) reqBody.overwrite_cache = true;
 
         const resp = await fetch('/api/extract/run-sql', {
             method: 'POST',
