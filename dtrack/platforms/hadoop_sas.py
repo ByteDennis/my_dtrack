@@ -1992,7 +1992,8 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
 
 
 def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintage=None,
-            from_date=None, to_date=None, cells_filter=None, coarse=False):
+            from_date=None, to_date=None, cells_filter=None, coarse=False,
+            preset=None, stats_override=None):
     """
     Generate a single combined SAS file for Oracle data extraction.
 
@@ -2021,6 +2022,23 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     """
     if types is None:
         types = ["row", "col"]
+
+    # Map --preset/--stats-override onto the SAS path. The SAS template
+    # only branches on a single `coarse` flag (quick-equivalent), so:
+    #   preset='quick'      → coarse=True
+    #   preset='detailed'   → coarse=False
+    #   preset='standard'   → coarse=False (full extraction; per-stat
+    #                         masking happens post-extraction when CSVs
+    #                         are loaded via stats_override-aware paths)
+    # stats_override on the SAS side is not honored at SQL-gen time; the
+    # web-UI col_gen path handles it via /api/generate, not gen_sas. Warn
+    # so CLI callers know.
+    if preset == 'quick':
+        coarse = True
+    if stats_override:
+        print("WARNING: --stats-override has no effect on gen-sas (SAS "
+              "template emits the full coarse/fine schema). Apply per-stat "
+              "masking downstream or use gen-aws/gen-oracle.")
 
     # Use load_unified_config (not raw json.load) so each side gets its
     # `name` auto-derived from `table` via _derive_side_name. Without this,

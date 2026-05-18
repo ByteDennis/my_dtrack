@@ -31,6 +31,7 @@ from .base import (
     cache_stats,
     cache_get,
     cache_put,
+    _mask_stats_in_rows,
 )
 
 
@@ -1515,10 +1516,16 @@ GROUP BY {date_col_q};"""
 # Per-table column extraction helper
 # ---------------------------------------------------------------------------
 
-def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vintage=None):
+def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vintage=None,
+                            preset=None, stats_override=None):
     """Extract column stats for one AWS table -> {qname}_col.csv.
 
     Returns a timing dict on success, or None if skipped.
+
+    `preset` / `stats_override` mask disabled stat fields in the emitted
+    CSV. The SQL still runs full breadth (Athena cursor path uses a
+    hand-rolled unified query); the mask only blanks fields in the output
+    rows so the 14-column schema stays stable.
     """
     import time
     from datetime import datetime
@@ -1663,6 +1670,11 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
     if not all_stats:
         return None
 
+    # Apply preset/stats_override by blanking disabled stat columns. SQL
+    # already ran; this only changes what lands in the CSV so the 14-col
+    # schema stays stable while honoring the user's selection.
+    _mask_stats_in_rows(all_stats, preset, stats_override)
+
     # Write CSV (14-field schema mirrors Oracle/Hadoop for cross-engine compare)
     csv_path = os.path.join(outdir, f"{qname}_col.csv")
     fieldnames = [
@@ -1700,7 +1712,7 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
 # ---------------------------------------------------------------------------
 
 def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None, vintage=None, force=False,
-                from_date=None, to_date=None):
+                from_date=None, to_date=None, preset=None, stats_override=None):
     """
     Extract data directly from AWS Athena.
 
@@ -1798,7 +1810,8 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
 
     # --- Row extraction: write SQL file then run it ---
     if "row" in types:
-        _write_combined_sql(aws_tables, outdir, "row")
+        _write_combined_sql(aws_tables, outdir, "row",
+                            preset=preset, stats_override=stats_override)
         sql_path = os.path.join(outdir, "extract_row.sql")
         row_results = run_sql_file(sql_path, outdir, max_workers=max_workers, db_path=db_path)
         for r in row_results:
@@ -1817,7 +1830,8 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
         for tbl_cfg in aws_tables:
             try:
                 result = _extract_cols_for_table(
-                    tbl_cfg, outdir, max_workers=max_workers, db_path=db_path, vintage=vintage)
+                    tbl_cfg, outdir, max_workers=max_workers, db_path=db_path, vintage=vintage,
+                    preset=preset, stats_override=stats_override)
                 if result:
                     timing_records.append(result)
             except Exception as e:

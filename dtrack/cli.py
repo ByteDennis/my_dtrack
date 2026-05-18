@@ -67,6 +67,33 @@ def _load_config(config_path):
     return load_unified_config(config_path)
 
 
+# >>> parse comma-separated "n_unique=on,hash_sum=off" → {'n_unique': True, ...} <<< #
+def _parse_stats_override(spec):
+    if not spec:
+        return None
+    truthy = {'1', 'on', 'true', 'yes', 'y', 't'}
+    falsy = {'0', 'off', 'false', 'no', 'n', 'f'}
+    out = {}
+    for part in spec.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '=' not in part:
+            print(f"Error: --stats-override item '{part}' missing '='")
+            sys.exit(1)
+        k, v = part.split('=', 1)
+        k = k.strip().lower()
+        v = v.strip().lower()
+        if v in truthy:
+            out[k] = True
+        elif v in falsy:
+            out[k] = False
+        else:
+            print(f"Error: --stats-override value '{v}' is not on/off")
+            sys.exit(1)
+    return out or None
+
+
 def _require_db(db_path):
     """Exit if db doesn't exist."""
     if not os.path.exists(db_path):
@@ -711,8 +738,11 @@ def cmd_gen_sas(args):
     vintage = getattr(args, 'vintage', None)
     from_date = getattr(args, 'from_date', None)
     to_date = getattr(args, 'to_date', None)
+    preset = getattr(args, 'preset', None)
+    stats_override = _parse_stats_override(getattr(args, 'stats_override', None))
     gen_sas(args.config, args.outdir, types=types, db_path=db_path, vintage=vintage,
-            from_date=from_date, to_date=to_date)
+            from_date=from_date, to_date=to_date,
+            preset=preset, stats_override=stats_override)
 
 
 def cmd_gen_aws(args):
@@ -727,9 +757,12 @@ def cmd_gen_aws(args):
     force = getattr(args, 'force', False)
     from_date = getattr(args, 'from_date', None)
     to_date = getattr(args, 'to_date', None)
+    preset = getattr(args, 'preset', None)
+    stats_override = _parse_stats_override(getattr(args, 'stats_override', None))
     extract_aws(args.config, args.outdir, types=types, max_workers=args.workers,
                 db_path=db_path, vintage=vintage, force=force,
-                from_date=from_date, to_date=to_date)
+                from_date=from_date, to_date=to_date,
+                preset=preset, stats_override=stats_override)
 
 
 def cmd_gen_oracle(args):
@@ -744,9 +777,12 @@ def cmd_gen_oracle(args):
     force = getattr(args, 'force', False)
     from_date = getattr(args, 'from_date', None)
     to_date = getattr(args, 'to_date', None)
+    preset = getattr(args, 'preset', None)
+    stats_override = _parse_stats_override(getattr(args, 'stats_override', None))
     extract_oracle(args.config, args.outdir, types=types, max_workers=args.workers,
                    db_path=db_path, vintage=vintage, force=force,
-                   from_date=from_date, to_date=to_date)
+                   from_date=from_date, to_date=to_date,
+                   preset=preset, stats_override=stats_override)
 
 
 def cmd_match_columns(args):
@@ -870,6 +906,8 @@ def cmd_run(args):
         skip_compare=getattr(args, 'skip_compare', False),
         from_date=getattr(args, 'from_date', None),
         to_date=getattr(args, 'to_date', None),
+        preset=getattr(args, 'preset', None),
+        stats_override=_parse_stats_override(getattr(args, 'stats_override', None)),
     )
 
 
@@ -1069,6 +1107,13 @@ def main():
     p.add_argument('--title')
     p.add_argument('--subtitle')
 
+    _PRESET_HELP = ("Stats preset for column extraction: quick / standard / "
+                    "detailed (see constants.STATS_PRESETS)")
+    _STATS_OVERRIDE_HELP = ("Per-stat on/off toggles, comma-separated. Keys: "
+                           "n_total, n_missing, n_unique, min_max, length, "
+                           "hash_sum, top_10. Example: "
+                           "--stats-override n_unique=on,hash_sum=off")
+
     # gen-sas
     p = sub.add_parser('gen-sas', help='Generate SAS extraction files')
     p.add_argument('config')
@@ -1078,6 +1123,10 @@ def main():
     p.add_argument('--vintage')
     p.add_argument('--from-date', help='Start date for incremental extraction')
     p.add_argument('--to-date', help='End date for incremental extraction')
+    p.add_argument('--preset', choices=['quick', 'standard', 'detailed'],
+                   help=_PRESET_HELP)
+    p.add_argument('--stats-override', dest='stats_override',
+                   help=_STATS_OVERRIDE_HELP)
 
     # gen-aws
     p = sub.add_parser('gen-aws', help='Extract data from AWS Athena')
@@ -1090,6 +1139,10 @@ def main():
     p.add_argument('--force', action='store_true')
     p.add_argument('--from-date', help='Start date for incremental extraction')
     p.add_argument('--to-date', help='End date for incremental extraction')
+    p.add_argument('--preset', choices=['quick', 'standard', 'detailed'],
+                   help=_PRESET_HELP)
+    p.add_argument('--stats-override', dest='stats_override',
+                   help=_STATS_OVERRIDE_HELP)
 
     # gen-oracle
     p = sub.add_parser('gen-oracle', help='Extract data from Oracle (Python-direct via oracledb)')
@@ -1103,6 +1156,10 @@ def main():
     p.add_argument('--force', action='store_true')
     p.add_argument('--from-date', help='Start date for incremental extraction')
     p.add_argument('--to-date', help='End date for incremental extraction')
+    p.add_argument('--preset', choices=['quick', 'standard', 'detailed'],
+                   help=_PRESET_HELP)
+    p.add_argument('--stats-override', dest='stats_override',
+                   help=_STATS_OVERRIDE_HELP)
 
     # match-columns
     p = sub.add_parser('match-columns', help='Match columns between paired tables')
@@ -1139,6 +1196,10 @@ def main():
     p.add_argument('--skip-compare', action='store_true')
     p.add_argument('--from-date', help='Start date for incremental extraction')
     p.add_argument('--to-date', help='End date for incremental extraction')
+    p.add_argument('--preset', choices=['quick', 'standard', 'detailed'],
+                   help=_PRESET_HELP)
+    p.add_argument('--stats-override', dest='stats_override',
+                   help=_STATS_OVERRIDE_HELP)
 
     # serve
     p = sub.add_parser('serve', help='Start web UI')

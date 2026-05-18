@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>dtrack{% if page_title %} - {{ page_title }}{% endif %}</title>
+    <title>Data Reconciliation{% if page_title %} - {{ page_title }}{% endif %}</title>
     <link rel="stylesheet" href="/static/style_v2.css">
     {% block head_extra %}{% endblock %}
 </head>
 <body>
     <header>
         <div class="header-left">
-            <h1>dtrack</h1>
+            <h1>Data Reconciliation</h1>
         </div>
         <div class="header-right">
             <select id="step-selector" onchange="navigateToStep(this.value)">

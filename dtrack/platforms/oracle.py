@@ -42,6 +42,7 @@ from .base import (
     get_mock_dir,
     _extract_mock,
     _extract_mock_tables,
+    _mask_stats_in_rows,
 )
 
 
@@ -199,7 +200,8 @@ def _build_lifeboat_col_sql_oracle(tbl_cfg, col, dtype, full_table,
 
 def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
                        conn_macro=None, vintage=None,
-                       date_dtype=None, date_format=None, dt_label=None):
+                       date_dtype=None, date_format=None, dt_label=None,
+                       preset=None, stats_override=None):
     """Run per-column stats SQL on Oracle, return list of result dicts.
 
     Mirrors _extract_col_athena's structure and output (14-field CSV row
@@ -211,6 +213,7 @@ def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
         tbl_cfg, col, dtype, full_table, cte_prefix,
         vintage=vintage, date_dtype=date_dtype,
         date_format=date_format, dt_label=dt_label,
+        preset=preset, stats_override=stats_override,
     )
 
     if numeric:
@@ -427,7 +430,8 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None,
 
 
 def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
-                                   db_path=None, vintage=None):
+                                   db_path=None, vintage=None,
+                                   preset=None, stats_override=None):
     """Extract column stats for one Oracle table -> {qname}_col.csv.
 
     Parallel via ThreadPoolExecutor with cap = min(ORACLE_MAX_WORKERS, n_cols).
@@ -539,7 +543,7 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
             _cfg, col, dtype, full_table, cte_prefix,
             conn_macro=conn_macro, vintage=effective_vintage,
             date_dtype=extract_date_dtype, date_format=extract_date_format,
-            dt_label=_lbl)
+            dt_label=_lbl, preset=preset, stats_override=stats_override)
 
     if _max_workers <= 1:
         col_iter = non_date_cols
@@ -579,6 +583,12 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
 
     if not all_stats:
         return None
+
+    # Belt-and-suspenders: _build_col_sql_oracle already respects preset/
+    # stats_override at SQL-gen time. Re-apply on the materialized rows so
+    # the lifeboat / categorical paths that emit fields via fixed templates
+    # honor the same mask, keeping the 14-col CSV identical across paths.
+    _mask_stats_in_rows(all_stats, preset, stats_override)
 
     csv_path = os.path.join(outdir, f"{qname}_col.csv")
     fieldnames = [
@@ -751,7 +761,8 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
 
 
 def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=None,
-                   vintage=None, force=False, from_date=None, to_date=None):
+                   vintage=None, force=False, from_date=None, to_date=None,
+                   preset=None, stats_override=None):
     """Extract data directly from Oracle via oracledb.
 
     Mirrors extract_aws layout: per-table loop, row extraction first (cheap,
@@ -855,7 +866,8 @@ def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=No
             try:
                 result = _extract_cols_for_table_oracle(
                     tbl_cfg, outdir, max_workers=max_workers,
-                    db_path=db_path, vintage=vintage)
+                    db_path=db_path, vintage=vintage,
+                    preset=preset, stats_override=stats_override)
                 if result:
                     timing_records.append(result)
             except Exception as e:

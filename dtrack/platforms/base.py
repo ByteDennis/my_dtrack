@@ -287,6 +287,37 @@ def _format_sentinel_literal(val, kind, dialect):
     return f"DATE '{s}'"
 
 
+# >>> stat-key → emitted CSV fields, used by _mask_stats_in_rows <<< #
+_STAT_KEY_FIELDS = {
+    'n_total':   ('n_total',),
+    'n_missing': ('n_missing',),
+    'n_unique':  ('n_unique',),
+    'min_max':   ('min_val', 'max_val'),
+    'length':    ('length_avg', 'length_max'),
+    'hash_sum':  ('hash_sum',),
+    'top_10':    ('top_10',),
+}
+
+
+# >>> blank stat fields that preset/stats_override disabled <<< #
+def _mask_stats_in_rows(rows, preset=None, stats_override=None):
+    if preset is None and not stats_override:
+        return
+    from ..constants import STATS_PRESETS
+    base = STATS_PRESETS[preset or 'detailed']
+    effective = {k: bool((stats_override or {}).get(k, base[k])) for k in base}
+    blank_fields = []
+    for key, on in effective.items():
+        if not on:
+            blank_fields.extend(_STAT_KEY_FIELDS.get(key, ()))
+    if not blank_fields:
+        return
+    for row in rows:
+        for f in blank_fields:
+            if f in row:
+                row[f] = ''
+
+
 def apply_null_sentinels(col_ref, col_type, dialect, sentinels=None,
                          include_blank=True):
     """Wrap a SQL column reference with sentinel-to-NULL translation.
