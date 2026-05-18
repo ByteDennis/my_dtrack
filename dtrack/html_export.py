@@ -315,7 +315,9 @@ def generate_column_stats_html(
     left_cfg: Optional[Dict] = None,
     right_cfg: Optional[Dict] = None,
     description: str = '',
+    compare_fields=None,
 ) -> str:
+    cf = set(compare_fields) if compare_fields is not None else None
     """
     Generate HTML table rows for column statistics comparison.
 
@@ -352,7 +354,7 @@ def generate_column_stats_html(
     cols_with_diffs = set()
     for col, comparisons in comparison.items():
         for comp in comparisons:
-            if _has_differences(comp):
+            if _has_differences(comp, cf):
                 cols_with_diffs.add(col)
 
     n_cols = len(comparison)
@@ -461,18 +463,18 @@ def generate_column_stats_html(
                 if col not in col_diffs:
                     col_diffs[col] = []
 
-                # Collect differing stats (use vintage_label for display)
                 vlabel = comp.get('vintage_label', dt)
-                if comp.get('n_total_diff', 0) != 0:
+                _on = lambda k: cf is None or k in cf
+                if _on('n_total') and comp.get('n_total_diff', 0) != 0:
                     col_diffs[col].append((vlabel, 'n_total', comp['n_total_left'], comp['n_total_right'], comp['n_total_diff']))
-                if comp.get('n_missing_diff', 0) != 0:
+                if _on('n_missing') and comp.get('n_missing_diff', 0) != 0:
                     col_diffs[col].append((vlabel, 'n_missing', comp['n_missing_left'], comp['n_missing_right'], comp['n_missing_diff']))
-                if comp.get('n_unique_diff', 0) != 0:
+                if _on('n_unique') and comp.get('n_unique_diff', 0) != 0:
                     col_diffs[col].append((vlabel, 'n_unique', comp['n_unique_left'], comp['n_unique_right'], comp['n_unique_diff']))
                 if comp['col_type'] == 'numeric':
-                    if comp.get('mean_match') is False:
+                    if _on('mean') and comp.get('mean_match') is False:
                         col_diffs[col].append((vlabel, 'mean', comp.get('mean_left'), comp.get('mean_right'), None))
-                    if comp.get('std_match') is False:
+                    if _on('std') and comp.get('std_match') is False:
                         col_diffs[col].append((vlabel, 'std', comp.get('std_left'), comp.get('std_right'), None))
 
         # Prepare column details for 3-column layout
@@ -552,45 +554,10 @@ def generate_column_stats_html(
     return html
 
 
-def _has_differences(comp: Dict) -> bool:
-    """Check if comparison has any differences.
-
-    Mirrors compare._has_col_differences so the HTML/log exports count
-    the same diffs as the col_compare UI -- coarse drift hints
-    (length_avg / length_max / hash_sum) are now part of the diff
-    signal, not just mean/std/min/max.
-    """
-    # Check count differences
-    if comp.get('n_total_diff', 0) != 0:
-        return True
-    if comp.get('n_missing_diff', 0) != 0:
-        return True
-    if comp.get('n_unique_diff', 0) != 0:
-        return True
-
-    # mean/std/min/max apply to both numeric and categorical (categorical
-    # uses rank-weighted stats so permutations differ).
-    if comp.get('mean_match') is False:
-        return True
-    if comp.get('std_match') is False:
-        return True
-    if comp.get('min_match') is False:
-        return True
-    if comp.get('max_match') is False:
-        return True
-
-    # Coarse drift hints. length_avg / length_max are storage-form-
-    # independent (length of a string is the same on every engine), and
-    # hash_sum uses the portable 16-bit MD5 recipe so it agrees on
-    # identical categorical data across Hadoop / Athena / Oracle.
-    if comp.get('length_avg_match') is False:
-        return True
-    if comp.get('length_max_match') is False:
-        return True
-    if comp.get('hash_sum_match') is False:
-        return True
-
-    return False
+# >>> mirrors compare._has_col_differences; accepts optional field filter <<< #
+def _has_differences(comp: Dict, compare_fields=None) -> bool:
+    from .compare import _has_col_differences as _hcd
+    return _hcd(comp, compare_fields=compare_fields)
 
 
 def _get_worst_stat(comp: Dict) -> str:

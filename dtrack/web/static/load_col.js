@@ -13,11 +13,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 // ─────────────────────────────────────────────────────────────────────
 // Known tables (for the shared loader's auto-match)
 // ─────────────────────────────────────────────────────────────────────
+// >>> apply global-pair selection if any; empty = include all <<< //
+function _filterByGlobalPairs(tables) {
+    if (typeof getGlobalSelectedPairs !== 'function') return tables;
+    const sel = new Set(getGlobalSelectedPairs());
+    if (!sel.size) return tables;
+    return tables.filter(t => sel.has(t.pair_name));
+}
+
+let _allKnownTables = [];
+
 async function loadKnownTables() {
     try {
         const resp = await fetch('/api/status');
         const data = await resp.json();
-        // Hide pairs toggled off on /pairs (skip=true).
         const tables = (data.pairs || []).filter(p => !p.skip).map(p => ({
             pair_name: p.pair_name,
             table_left: p.table_left, table_right: p.table_right,
@@ -39,8 +48,16 @@ async function loadKnownTables() {
                 source_left: leftSource, source_right: rightSource,
             });
         }
-        knownTablesRef.current = tables;
+        _allKnownTables = tables;
+        knownTablesRef.current = _filterByGlobalPairs(tables);
     } catch (e) { console.error('Failed to load tables:', e); }
+}
+
+if (typeof onGlobalPairSelectionChange === 'function') {
+    onGlobalPairSelectionChange(() => {
+        knownTablesRef.current = _filterByGlobalPairs(_allKnownTables);
+        refreshDbStatus();
+    });
 }
 
 function initLoader() {

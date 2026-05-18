@@ -527,48 +527,38 @@ def compare_column_stats(
     return result
 
 
-def _has_col_differences(comp):
+# >>> field-key → diff predicate; single source of truth across helpers <<< #
+_DIFF_PREDICATES = {
+    'n_total':    lambda c: c.get('n_total_diff', 0) != 0,
+    'n_missing':  lambda c: c.get('n_missing_diff', 0) != 0,
+    'n_unique':   lambda c: c.get('n_unique_diff', 0) != 0 and not c.get('n_unique_skipped'),
+    'mean':       lambda c: c.get('mean_match') is False,
+    'std':        lambda c: c.get('std_match') is False,
+    'min':        lambda c: c.get('min_match') is False,
+    'max':        lambda c: c.get('max_match') is False,
+    'length_avg': lambda c: c.get('length_avg_match') is False,
+    'length_max': lambda c: c.get('length_max_match') is False,
+    'hash_sum':   lambda c: c.get('hash_sum_match') is False,
+}
+
+
+def _has_col_differences(comp, compare_fields=None):
     """Check if a column comparison has any statistical differences.
 
-    Covers both coarse signals (n_total/n_missing/n_unique/min/max +
-    length_avg/length_max/hash_sum) and fine signals (mean/std). Fields
-    absent from the comparison (match=None) don't contribute — that lets
-    a coarse comparison work without triggering false diffs on
-    fine-only fields, and vice versa for legacy rows lacking length_*/
-    hash_sum.
+    `compare_fields` (iterable of field keys) restricts the check to that
+    subset; None means "check every supported field" (the historical
+    behaviour). Fields absent from the comparison (match=None / diff=0)
+    don't contribute -- a coarse comparison still works without false
+    diffs on fine-only fields, and vice versa.
     """
-    if comp.get('n_total_diff', 0) != 0:
-        return True
-    if comp.get('n_missing_diff', 0) != 0:
-        return True
-    # When either side ran the lifeboat retry (resource exhaustion on
-    # COUNT(DISTINCT)), n_unique is NULL by design — a 0-vs-N "diff" here
-    # is noise, not drift. Suppress.
-    if comp.get('n_unique_diff', 0) != 0 and not comp.get('n_unique_skipped'):
-        return True
-
-    if comp.get('mean_match') is False:
-        return True
-    if comp.get('std_match') is False:
-        return True
-
-    # min/max use match keys (same rounding/string-prefix logic as mean/std)
-    # so "0" vs "0.00" is a match for numeric columns, while "{cat}={count}"
-    # strings still compare exactly for categorical columns.
-    if comp.get('min_match') is False:
-        return True
-    if comp.get('max_match') is False:
-        return True
-
-    # Coarse-only signals: cheap structural & multiset-checksum hints.
-    # Treated as a diff only if both sides have a value and they disagree.
-    if comp.get('length_avg_match') is False:
-        return True
-    if comp.get('length_max_match') is False:
-        return True
-    if comp.get('hash_sum_match') is False:
-        return True
-
+    if compare_fields is None:
+        keys = _DIFF_PREDICATES.keys()
+    else:
+        active = set(compare_fields)
+        keys = [k for k in _DIFF_PREDICATES if k in active]
+    for k in keys:
+        if _DIFF_PREDICATES[k](comp):
+            return True
     return False
 
 

@@ -27,23 +27,7 @@ app.mount("/static", StaticFiles(directory=_dir / "static"), name="static")
 templates = Jinja2Templates(directory=_dir / "templates")
 
 
-# Request access log. Uvicorn's default access log is suppressed
-# (log_level="warning" in serve()), so this middleware is the only signal
-# the user sees in the `dtrack serve` console for routine API traffic.
-# We print METHOD, full path (with query string), and a short preview of
-# the request body (for JSON/form payloads). Skips /static/* to keep the
-# log readable.
-#
-# Implemented as a pure ASGI middleware -- NOT @app.middleware("http") /
-# BaseHTTPMiddleware -- because the latter wraps every request in an
-# internal anyio queue that breaks long-lived StreamingResponses
-# (specifically /api/extract/run-sql's SSE stream). The queue
-# implementation in BaseHTTPMiddleware mishandles `receive()` after the
-# body is consumed and surfaces as
-#   RuntimeError: unexpected message received http.request
-# on the very first SSE event. Sitting beneath BaseHTTPMiddleware at the
-# raw ASGI layer, we can drain + replay the body cleanly without
-# disturbing the streaming path.
+# >>> pure-ASGI access log; drains+replays body so SSE handlers keep working <<< #
 class _APILogMiddleware:
     def __init__(self, app):
         self.app = app
@@ -51,7 +35,6 @@ class _APILogMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
-
         path = scope.get("path", "")
         if path.startswith("/static/"):
             return await self.app(scope, receive, send)
@@ -59,7 +42,6 @@ class _APILogMiddleware:
         method = scope.get("method", "")
         qs = scope.get("query_string", b"").decode("latin-1")
         full_path = f"{path}?{qs}" if qs else path
-
         body_preview = ""
         downstream_receive = receive
 
@@ -69,13 +51,9 @@ class _APILogMiddleware:
                 if k == b"content-type":
                     ctype = v.decode("latin-1").split(";")[0].strip().lower()
                     break
-
             if ctype in ("application/json",
                           "application/x-www-form-urlencoded",
                           "text/plain"):
-                # Drain the request body off the wire. Anything we capture
-                # here is replayed via `downstream_receive` so the handler
-                # can still call request.json() / await request.body().
                 body_chunks = []
                 more_body = True
                 while more_body:
@@ -84,11 +62,8 @@ class _APILogMiddleware:
                         body_chunks.append(message.get("body", b""))
                         more_body = message.get("more_body", False)
                     elif message["type"] == "http.disconnect":
-                        # Client gone before sending the body; nothing
-                        # left to log or forward.
                         return
                 raw = b"".join(body_chunks)
-
                 if raw:
                     try:
                         text = raw.decode("utf-8", errors="replace")
@@ -104,19 +79,12 @@ class _APILogMiddleware:
                         text = text[:400] + f"...<+{len(text) - 400}>"
                     body_preview = f" body={text}"
 
-                # Build a receive that hands the buffered body to the
-                # handler exactly once, then falls through to the real
-                # upstream receive so http.disconnect (sent by uvicorn
-                # when the browser closes the SSE stream) still
-                # propagates and StreamingResponse can shut down.
                 replayed = False
                 async def downstream_receive():  # noqa: F811
                     nonlocal replayed
                     if not replayed:
                         replayed = True
-                        return {"type": "http.request",
-                                "body": raw,
-                                "more_body": False}
+                        return {"type": "http.request", "body": raw, "more_body": False}
                     return await receive()
 
         print(f"[api] {method} {full_path}{body_preview}", flush=True)
@@ -2560,6 +2528,9 @@ async def api_compare_col_export_html(request: Request):
         return JSONResponse(status_code=400, content={
             "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
         })
+    compare_fields = body.get("compare_fields")
+    if compare_fields is not None and not isinstance(compare_fields, list):
+        compare_fields = None
     # Live UI state per pair: {pair_name: {comment_left, comment_right,
     # time_left, time_right}}. Falls back to pair_cfg when absent.
     live_pairs = body.get("pairs", {}) or {}
@@ -2651,6 +2622,7 @@ async def api_compare_col_export_html(request: Request):
                 time_map=time_map,
                 comment_left=comment_map.get("left", ""),
                 comment_right=comment_map.get("right", ""),
+                compare_fields=compare_fields,
             )
             row_sections.append(rows_html)
 
@@ -2683,6 +2655,9 @@ async def api_compare_col_export_log(request: Request):
         return JSONResponse(status_code=400, content={
             "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
         })
+    compare_fields = body.get("compare_fields")
+    if compare_fields is not None and not isinstance(compare_fields, list):
+        compare_fields = None
 
     try:
         from ..db import list_table_pairs, get_metadata, get_row_comparison
@@ -2740,7 +2715,8 @@ async def api_compare_col_export_log(request: Request):
             vintage = meta_left.get("vintage") or meta_right.get("vintage") or "day"
 
             log = _format_col_comparison_log(
-                pname, pair, comparison, vintage, col_mappings)
+                pname, pair, comparison, vintage, col_mappings,
+                compare_fields=compare_fields)
 
             # Write per-pair log file
             log_path = os.path.join(outdir, f"{pname}_col.log")
@@ -2755,15 +2731,19 @@ async def api_compare_col_export_log(request: Request):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mappings):
+def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mappings,
+                                compare_fields=None):
     """Format compact comparison log with diffs and top_10.
 
-    First vintage emits a top_10 dump for every column (handy for spot-
-    checking categorical distributions); subsequent vintages only emit
-    top_10 inside DIFF blocks.
+    `compare_fields` (optional list of field keys) narrows what counts as
+    a diff AND which per-field detail lines get emitted, matching the
+    col_compare UI's Compare-fields selector.
     """
     from ..compare import _has_col_differences
     from ..constants import STAT_ROUND_DECIMALS
+    cf = set(compare_fields) if compare_fields is not None else None
+    def _on(k):
+        return cf is None or k in cf
 
     def _fmt_round(v):
         if v is None or v == "":
@@ -2801,7 +2781,7 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
     n_matched = len(col_mappings)
     n_diff_cols = len(set(
         col for col, comps in comparison.items()
-        for c in comps if _has_col_differences(c)
+        for c in comps if _has_col_differences(c, compare_fields=cf)
     ))
     lines.append(f"  vintage: {vintage} | {len(vintages)} vintages | "
                  f"{n_matched} matched cols, {n_diff_cols} diff")
@@ -2812,7 +2792,8 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
 
     for vl in sorted_vls:
         col_comps = vintages[vl]
-        diffs = {col: c for col, c in col_comps.items() if _has_col_differences(c)}
+        diffs = {col: c for col, c in col_comps.items()
+                 if _has_col_differences(c, compare_fields=cf)}
         is_first = (vl == first_vl)
 
         if not diffs and not is_first:
@@ -2824,10 +2805,11 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
         else:
             lines.append(f"  MATCH: {vl} — all {len(col_comps)} columns match")
 
-        # Diff details
         for col, c in sorted(diffs.items()):
             parts = []
             for stat in ("n_total", "n_missing", "n_unique"):
+                if not _on(stat):
+                    continue
                 d = c.get(f"{stat}_diff", 0)
                 if d != 0:
                     l = c.get(f"{stat}_left", 0)
@@ -2835,22 +2817,19 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
                     sign = "+" if d > 0 else ""
                     parts.append(f"{stat} {sign}{d} ({l}->{r})")
 
-            if c.get("mean_match") is False:
+            if _on('mean') and c.get("mean_match") is False:
                 parts.append(f"mean ({_fmt_round(c.get('mean_left'))}->{_fmt_round(c.get('mean_right'))})")
-            if c.get("std_match") is False:
+            if _on('std') and c.get("std_match") is False:
                 parts.append(f"std ({_fmt_round(c.get('std_left'))}->{_fmt_round(c.get('std_right'))})")
-            if c.get("min_match") is False:
+            if _on('min') and c.get("min_match") is False:
                 parts.append(f"min ({c.get('min_left','?')}->{c.get('min_right','?')})")
-            if c.get("max_match") is False:
+            if _on('max') and c.get("max_match") is False:
                 parts.append(f"max ({c.get('max_left','?')}->{c.get('max_right','?')})")
-            # Coarse drift hints — keep the log in sync with the UI so
-            # downstream readers (PR notes, ticket dumps, etc.) see the
-            # same diff set the col_compare page flags.
-            if c.get("length_avg_match") is False:
+            if _on('length_avg') and c.get("length_avg_match") is False:
                 parts.append(f"length_avg ({_fmt_round(c.get('length_avg_left'))}->{_fmt_round(c.get('length_avg_right'))})")
-            if c.get("length_max_match") is False:
+            if _on('length_max') and c.get("length_max_match") is False:
                 parts.append(f"length_max ({_fmt_round(c.get('length_max_left'))}->{_fmt_round(c.get('length_max_right'))})")
-            if c.get("hash_sum_match") is False:
+            if _on('hash_sum') and c.get("hash_sum_match") is False:
                 parts.append(f"hash_sum ({_fmt_round(c.get('hash_sum_left'))}->{_fmt_round(c.get('hash_sum_right'))})")
 
             detail = "  ".join(parts) if parts else "values differ"
@@ -2893,7 +2872,8 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
 
 @app.get("/api/compare/col/export/excel")
 async def api_compare_col_export_excel(from_date: str = "", to_date: str = "",
-                                         preset: str = ""):
+                                         preset: str = "",
+                                         compare_fields: str = ""):
     """Generate Excel workbook for col comparison — one sheet per pair, transposed layout.
 
     When `preset` is supplied, only _col_stats rows tagged with that
@@ -2907,6 +2887,9 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = "",
         return JSONResponse(status_code=400, content={
             "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
         })
+    cf = None
+    if compare_fields:
+        cf = {k.strip() for k in compare_fields.split(",") if k.strip()}
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
@@ -2935,6 +2918,18 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = "",
         stat_keys_r_all = ["col_type", "n_total_right", "n_missing_right", "n_unique_right",
                         "mean_right", "std_right", "min_right", "max_right",
                         "length_avg_right", "length_max_right", "hash_sum_right"]
+        _ROW_TO_FIELD = {
+            "Type": None, "N_Total": "n_total", "N_Missing": "n_missing",
+            "N_Unique": "n_unique", "Mean": "mean", "Std": "std",
+            "Min": "min", "Max": "max", "Length avg": "length_avg",
+            "Length max": "length_max", "Hash sum": "hash_sum",
+        }
+        if cf is not None:
+            keep_idx = [i for i, label in enumerate(stat_rows_all)
+                        if _ROW_TO_FIELD[label] is None or _ROW_TO_FIELD[label] in cf]
+            stat_rows_all = [stat_rows_all[i] for i in keep_idx]
+            stat_keys_l_all = [stat_keys_l_all[i] for i in keep_idx]
+            stat_keys_r_all = [stat_keys_r_all[i] for i in keep_idx]
 
         def _filter_active_stats(comps):
             """Drop stat rows that are empty across all comps in this vintage.
@@ -3032,10 +3027,9 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = "",
 
             for vl in sorted(vintages.keys()):
                 comps = vintages[vl]
-                has_diff = any(_has_col_differences(c) for c in comps)
+                has_diff = any(_has_col_differences(c, compare_fields=cf) for c in comps)
 
-                # Sort: diff columns first, then matching, alphabetical within each group
-                comps.sort(key=lambda c: (0 if _has_col_differences(c) else 1, c.get("left_col", "")))
+                comps.sort(key=lambda c: (0 if _has_col_differences(c, compare_fields=cf) else 1, c.get("left_col", "")))
                 col_names_left = [c.get("left_col", "") for c in comps]
                 col_names_right = [c.get("right_col", "") or c.get("left_col", "") for c in comps]
 

@@ -17,6 +17,102 @@ function _currentPreset() {
     return document.getElementById('preset-select')?.value || '';
 }
 
+// >>> field-level Compare filter: drives table render + every export <<< //
+const COMPARE_FIELDS = [
+    {key: 'n_total',    label: 'N_Total'},
+    {key: 'n_missing',  label: 'N_Missing'},
+    {key: 'n_unique',   label: 'N_Unique'},
+    {key: 'min',        label: 'Min'},
+    {key: 'max',        label: 'Max'},
+    {key: 'length_avg', label: 'Length avg'},
+    {key: 'length_max', label: 'Length max'},
+    {key: 'hash_sum',   label: 'Hash sum'},
+];
+const _CF_KEY = 'dtrack-col-compare-fields';
+
+// >>> read selected field-keys from localStorage; default = all <<< //
+function _getCompareFields() {
+    try {
+        const raw = localStorage.getItem(_CF_KEY);
+        if (raw == null) return COMPARE_FIELDS.map(f => f.key);
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr)) return COMPARE_FIELDS.map(f => f.key);
+        const valid = new Set(COMPARE_FIELDS.map(f => f.key));
+        return arr.filter(k => valid.has(k));
+    } catch (e) { return COMPARE_FIELDS.map(f => f.key); }
+}
+
+function _saveCompareFields(arr) {
+    try { localStorage.setItem(_CF_KEY, JSON.stringify(arr)); } catch (e) {}
+}
+
+// >>> per-field diff predicate used by both filter + non-filter paths <<< //
+const _DIFF_FNS = {
+    n_total:    c => (c.n_total_diff || 0) !== 0,
+    n_missing:  c => (c.n_missing_diff || 0) !== 0,
+    n_unique:   c => (c.n_unique_diff || 0) !== 0,
+    min:        c => c.min_match === false,
+    max:        c => c.max_match === false,
+    length_avg: c => c.length_avg_match === false,
+    length_max: c => c.length_max_match === false,
+    hash_sum:   c => c.hash_sum_match === false,
+};
+
+// >>> recompute has_diff against the current Compare-field selection <<< //
+function _compHasDiff(comp) {
+    const active = new Set(_getCompareFields());
+    for (const [k, fn] of Object.entries(_DIFF_FNS)) {
+        if (active.has(k) && fn(comp)) return true;
+    }
+    return false;
+}
+
+function _refreshCompareFieldsSummary() {
+    const arr = _getCompareFields();
+    const el = document.getElementById('compare-fields-summary');
+    if (!el) return;
+    if (arr.length === COMPARE_FIELDS.length) el.textContent = 'all';
+    else if (arr.length === 0) el.textContent = 'none';
+    else el.textContent = `${arr.length}/${COMPARE_FIELDS.length}`;
+}
+
+function _renderCompareFieldsPanel() {
+    const list = document.getElementById('compare-fields-list');
+    if (!list) return;
+    const active = new Set(_getCompareFields());
+    list.innerHTML = COMPARE_FIELDS.map(f => `
+        <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
+            <input type="checkbox" data-field="${f.key}" ${active.has(f.key) ? 'checked' : ''}>
+            ${f.label}
+        </label>`).join('');
+    list.querySelectorAll('input[type=checkbox]').forEach(cb => {
+        cb.addEventListener('change', () => {
+            const sel = [...list.querySelectorAll('input:checked')].map(x => x.dataset.field);
+            _saveCompareFields(sel);
+            _refreshCompareFieldsSummary();
+            onCompareFieldsChange();
+        });
+    });
+}
+
+function setCompareFields(mode) {
+    const all = COMPARE_FIELDS.map(f => f.key);
+    _saveCompareFields(mode === 'all' ? all : []);
+    _renderCompareFieldsPanel();
+    _refreshCompareFieldsSummary();
+    onCompareFieldsChange();
+}
+
+// >>> re-render every expanded pair so the field filter takes effect <<< //
+function onCompareFieldsChange() {
+    for (const p of pairsData) {
+        const body = document.getElementById(`body-${p.pair_name}`);
+        if (body && body.style.display !== 'none' && compareCache[p.pair_name]) {
+            renderPairBody(p.pair_name, compareCache[p.pair_name]);
+        }
+    }
+}
+
 function onPresetChange() {
     // Preset filter changes the rows pulled from _col_stats — drop the
     // cache and re-fetch every pair so the displayed comparison reflects
@@ -122,6 +218,8 @@ async function generateFineForSelected() {
 // Init
 // ---------------------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', async () => {
+    _renderCompareFieldsPanel();
+    _refreshCompareFieldsSummary();
     await loadPairs();
     await runAll();
     _refreshSelectionBar();
@@ -262,7 +360,7 @@ async function syncColPair(name, data) {
     for (const v of vintages) {
         for (const c of (v.columns || [])) {
             allCols.add(c.left_col);
-            if (c.has_diff) diffCols.add(c.left_col);
+            if (_compHasDiff(c)) diffCols.add(c.left_col);
             else matchedCols.add(c.left_col);
         }
     }
@@ -385,7 +483,7 @@ function renderVintages(name, data) {
 
     return vintages.map((v, vi) => {
         const cols = v.columns || [];
-        const nDiff = cols.filter(c => c.has_diff).length;
+        const nDiff = cols.filter(c => _compHasDiff(c)).length;
         const nMatch = cols.length - nDiff;
         const statusText = nDiff > 0
             ? `<span style="color:var(--jp-warn-color0);">${nDiff} diff</span>, ${nMatch} match`
@@ -410,9 +508,9 @@ function renderColTable(name, cols, vintage) {
     if (!cols.length) return '<div class="empty-message">No matched columns</div>';
     const vlabel = vintage || '';
 
-    // Sort: diff columns first
     const sorted = [...cols].sort((a, b) => {
-        if (a.has_diff !== b.has_diff) return a.has_diff ? -1 : 1;
+        const ad = _compHasDiff(a), bd = _compHasDiff(b);
+        if (ad !== bd) return ad ? -1 : 1;
         return (a.left_col || '').localeCompare(b.left_col || '');
     });
 
@@ -423,17 +521,19 @@ function renderColTable(name, cols, vintage) {
     // the loaded _col_stats and render as "—". This keeps the table
     // shape stable across preset switches and tells the user at a
     // glance which stats their preset chose to skip.
-    const statDefs = [
-        {label: 'Type',      keyL: 'col_type',       keyR: 'col_type',       isDiff: () => false, fmt: 'text'},
-        {label: 'N_Total',   keyL: 'n_total_left',   keyR: 'n_total_right',  isDiff: c => c.n_total_diff !== 0, fmt: 'int'},
-        {label: 'N_Missing', keyL: 'n_missing_left',  keyR: 'n_missing_right', isDiff: c => c.n_missing_diff !== 0, fmt: 'int'},
-        {label: 'N_Unique',  keyL: 'n_unique_left',   keyR: 'n_unique_right',  isDiff: c => c.n_unique_diff !== 0, fmt: 'int'},
-        {label: 'Min',       keyL: 'min_left',        keyR: 'min_right',       isDiff: c => c.min_match === false, fmt: 'text'},
-        {label: 'Max',       keyL: 'max_left',        keyR: 'max_right',       isDiff: c => c.max_match === false, fmt: 'text'},
-        {label: 'Length avg',keyL: 'length_avg_left', keyR: 'length_avg_right', isDiff: c => c.length_avg_match === false, fmt: 'num'},
-        {label: 'Length max',keyL: 'length_max_left', keyR: 'length_max_right', isDiff: c => c.length_max_match === false, fmt: 'int'},
-        {label: 'Hash sum',  keyL: 'hash_sum_left',   keyR: 'hash_sum_right',   isDiff: c => c.hash_sum_match === false, fmt: 'sci'},
+    const _statDefsAll = [
+        {key: 'type',       label: 'Type',      keyL: 'col_type',        keyR: 'col_type',         isDiff: () => false, fmt: 'text'},
+        {key: 'n_total',    label: 'N_Total',   keyL: 'n_total_left',    keyR: 'n_total_right',    isDiff: c => c.n_total_diff !== 0, fmt: 'int'},
+        {key: 'n_missing',  label: 'N_Missing', keyL: 'n_missing_left',  keyR: 'n_missing_right',  isDiff: c => c.n_missing_diff !== 0, fmt: 'int'},
+        {key: 'n_unique',   label: 'N_Unique',  keyL: 'n_unique_left',   keyR: 'n_unique_right',   isDiff: c => c.n_unique_diff !== 0, fmt: 'int'},
+        {key: 'min',        label: 'Min',       keyL: 'min_left',        keyR: 'min_right',        isDiff: c => c.min_match === false, fmt: 'text'},
+        {key: 'max',        label: 'Max',       keyL: 'max_left',        keyR: 'max_right',        isDiff: c => c.max_match === false, fmt: 'text'},
+        {key: 'length_avg', label: 'Length avg',keyL: 'length_avg_left', keyR: 'length_avg_right', isDiff: c => c.length_avg_match === false, fmt: 'num'},
+        {key: 'length_max', label: 'Length max',keyL: 'length_max_left', keyR: 'length_max_right', isDiff: c => c.length_max_match === false, fmt: 'int'},
+        {key: 'hash_sum',   label: 'Hash sum',  keyL: 'hash_sum_left',   keyR: 'hash_sum_right',   isDiff: c => c.hash_sum_match === false, fmt: 'sci'},
     ];
+    const _activeFields = new Set(_getCompareFields());
+    const statDefs = _statDefsAll.filter(sd => sd.key === 'type' || _activeFields.has(sd.key));
 
     function fmtCell(val, fmt) {
         if (val == null || val === '') return '&mdash;';
@@ -461,7 +561,7 @@ function renderColTable(name, cols, vintage) {
     function colHeadersForSide(side) {
         return sorted.map((c, ci) => {
             const dispName = side === 'left' ? c.left_col : (c.right_col || c.left_col);
-            const icon = c.has_diff ? '<span style="color:var(--jp-warn-color0);">&#9888;</span> ' : '';
+            const icon = _compHasDiff(c) ? '<span style="color:var(--jp-warn-color0);">&#9888;</span> ' : '';
             if (side !== 'left') {
                 return `<th style="text-align:right; font-size:11px;">${icon}${esc(dispName)}</th>`;
             }
@@ -568,6 +668,10 @@ function downloadExcel() {
     if (from) params.set('from_date', from);
     if (to) params.set('to_date', to);
     if (preset) params.set('preset', preset);
+    const fields = _getCompareFields();
+    if (fields.length < COMPARE_FIELDS.length) {
+        params.set('compare_fields', fields.join(','));
+    }
     window.open(`/api/compare/col/export/excel?${params}`, '_blank');
 }
 
@@ -652,6 +756,7 @@ async function downloadHTML() {
                 subtitle: document.getElementById('global-subtitle')?.value || '',
                 pairs: live_pairs,
                 preset: _currentPreset(),
+                compare_fields: _getCompareFields(),
             }),
         });
         if (!res.ok) {
@@ -684,6 +789,7 @@ async function saveLogs() {
                 from_date: document.getElementById('global-from')?.value || '',
                 to_date: document.getElementById('global-to')?.value || '',
                 preset: _currentPreset(),
+                compare_fields: _getCompareFields(),
             }),
         });
         const data = await res.json();

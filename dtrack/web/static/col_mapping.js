@@ -24,15 +24,26 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // Wire up the shared drop-zone / scan / match / load UI in the
 // "LOAD COLUMNS CSV" section. Same component used by load_row and load_col.
+// >>> apply global-pair selection if any; empty = include all <<< //
+function _filterByGlobalPairs(items, keyFn) {
+    if (typeof getGlobalSelectedPairs !== 'function') return items;
+    const sel = new Set(getGlobalSelectedPairs());
+    if (!sel.size) return items;
+    return items.filter(it => sel.has(keyFn(it)));
+}
+
+let _allKnownTablesCM = [];
+let _knownTablesRefCM = null;
+
 async function initColumnsLoader() {
     if (typeof createCsvLoader !== 'function') {
         console.error('[col_mapping] csv_loader.js did not load');
         return;
     }
     const knownTables = { current: [] };
-    // Populate from both /api/status and /api/pairs/list so config-only
-    // pairs (not yet registered in _table_pairs) also auto-match.
-    knownTables.current = await loadKnownTables();
+    _allKnownTablesCM = await loadKnownTables();
+    knownTables.current = _filterByGlobalPairs(_allKnownTablesCM, t => t.pair_name);
+    _knownTablesRefCM = knownTables;
     console.log('[col_mapping] auto-match known tables:',
         knownTables.current.map(t => `${t.pair_name}: L=${t.table_left} R=${t.table_right}`));
 
@@ -64,17 +75,30 @@ async function initColumnsLoader() {
     console.log('[col_mapping] loader initialized');
 }
 
+let _allPairsCM = [];
+
 async function loadPairs() {
     try {
         const res = await fetch('/api/status');
         const data = await res.json();
-        // Hide pairs toggled off on /pairs (skip=true).
-        pairsData = (data.pairs || []).filter(p => !p.skip);
+        _allPairsCM = (data.pairs || []).filter(p => !p.skip);
+        pairsData = _filterByGlobalPairs(_allPairsCM, p => p.pair_name);
         renderAccordion();
     } catch (e) {
         document.getElementById('pairs-accordion').innerHTML =
             '<div class="empty-message">Failed to load pairs.</div>';
     }
+}
+
+if (typeof onGlobalPairSelectionChange === 'function') {
+    onGlobalPairSelectionChange(() => {
+        pairsData = _filterByGlobalPairs(_allPairsCM, p => p.pair_name);
+        if (_knownTablesRefCM) {
+            _knownTablesRefCM.current =
+                _filterByGlobalPairs(_allKnownTablesCM, t => t.pair_name);
+        }
+        renderAccordion();
+    });
 }
 
 // ---------------------------------------------------------------------------

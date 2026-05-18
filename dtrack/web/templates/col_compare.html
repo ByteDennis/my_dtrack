@@ -30,6 +30,29 @@
                             <option value="detailed">Detailed</option>
                         </select>
                     </label>
+                    <details id="compare-fields-dd"
+                             style="font-size:12px; position:relative;">
+                        <summary style="cursor:pointer; padding:4px 10px;
+                                        border:1px solid var(--jp-border-color1);
+                                        border-radius:3px; background:var(--jp-layout-color1);
+                                        user-select:none;"
+                                 title="Pick which stats are considered when flagging a column as drifted. Affects table, Excel, HTML and log exports.">
+                            Compare:&nbsp;<span id="compare-fields-summary" style="font-weight:600;">all</span>&nbsp;&#9662;
+                        </summary>
+                        <div id="compare-fields-panel"
+                             style="position:absolute; top:100%; right:0; z-index:30;
+                                    margin-top:4px; padding:8px 10px; min-width:200px;
+                                    border:1px solid var(--jp-border-color1);
+                                    border-radius:4px; background:var(--jp-layout-color1);
+                                    box-shadow:0 2px 6px rgba(0,0,0,0.15);">
+                            <div style="display:flex; justify-content:space-between; gap:8px;
+                                        font-size:11px; margin-bottom:6px;">
+                                <a href="#" onclick="setCompareFields('all'); return false;">Select all</a>
+                                <a href="#" onclick="setCompareFields('none'); return false;">None</a>
+                            </div>
+                            <div id="compare-fields-list" style="display:flex; flex-direction:column; gap:3px;"></div>
+                        </div>
+                    </details>
                     <input type="text" id="global-title" placeholder="Report title" style="width:160px; font-size:12px;">
                     <input type="text" id="global-subtitle" placeholder="Subtitle" style="width:160px; font-size:12px;">
                     <label style="font-size:12px; display:flex; align-items:center; gap:4px;">
