@@ -823,19 +823,12 @@ def _hadoop_vintage_expr(tbl_cfg, date_col, vintage):
 
 def _build_col_sql_hadoop(tbl_cfg, col, dtype, full_table, cte_prefix="",
                            vintage=None, dt_label=None, coarse=False,
-                           preset=None):
-    """Thin wrapper over base.build_col_sql('hadoop', ...). The categorical
-    WITH-chain template is shared with Oracle; per-dialect fragments
-    (concat operator, cast-to-string, listagg-equivalent, missing/present
-    conds, hash function) live in base._col_sql_dialect_ops('hadoop').
-
-    `preset` ('quick'/'standard'/'detailed') selects the stats subset.
-    `coarse=True` is back-compat alias for preset='quick' when preset
-    is None."""
+                           preset=None, stats_override=None):
     from .base import build_col_sql
     return build_col_sql('hadoop', tbl_cfg, col, dtype, full_table,
                           cte_prefix=cte_prefix, vintage=vintage,
-                          dt_label=dt_label, coarse=coarse, preset=preset)
+                          dt_label=dt_label, coarse=coarse, preset=preset,
+                          stats_override=stats_override)
 
 
 def _build_lifeboat_col_sql_hadoop(tbl_cfg, col, dtype, full_table,
@@ -923,7 +916,8 @@ def _write_combined_row_sql_hadoop(hadoop_tables, outdir, db_path=None, vintage=
 
 
 def _write_combined_col_sql_hadoop(hadoop_tables, outdir, db_path=None,
-                                     vintage=None, coarse=False, preset=None):
+                                     vintage=None, coarse=False, preset=None,
+                                     stats_override=None):
     """extract_col.sql for Hadoop, one block per (table, column, bucket).
     Mirrors `_write_combined_col_sql_oracle`. User-typed `_exclude_dates`
     from the pair card is honored here via NOT IN appended to each WHERE.
@@ -1060,7 +1054,8 @@ def _write_combined_col_sql_hadoop(hadoop_tables, outdir, db_path=None,
                 sql, _ = _build_col_sql_hadoop(
                     extract_cfg, col, dtype, full_table, cte_prefix,
                     vintage=per_col_vintage, dt_label=per_col_dt_label,
-                    coarse=coarse, preset=preset)
+                    coarse=coarse, preset=preset,
+                    stats_override=stats_override)
             except Exception as e:
                 blocks.append(f"-- {qname}/{col}")
                 blocks.append(f"-- SKIP: SQL build failed: {e}")

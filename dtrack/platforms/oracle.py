@@ -158,7 +158,8 @@ def _query_oracle(sql, conn_macro, conn=None):
 
 def _build_col_sql_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
                           vintage=None, date_dtype=None, date_format=None,
-                          dt_label=None, coarse=False, preset=None):
+                          dt_label=None, coarse=False, preset=None,
+                          stats_override=None):
     """Build per-column stats SQL for Oracle. Thin wrapper over the
     dialect-parameterized base.build_col_sql; both Oracle and Hadoop now
     share the same template, with per-dialect fragments supplied by
@@ -171,7 +172,8 @@ def _build_col_sql_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
     return build_col_sql('oracle', tbl_cfg, col, dtype, full_table,
                           cte_prefix=cte_prefix, vintage=vintage,
                           date_dtype=date_dtype, date_format=date_format,
-                          dt_label=dt_label, coarse=coarse, preset=preset)
+                          dt_label=dt_label, coarse=coarse, preset=preset,
+                          stats_override=stats_override)
 
 
 def _build_lifeboat_col_sql_oracle(tbl_cfg, col, dtype, full_table,
@@ -262,7 +264,8 @@ def _extract_col_oracle(tbl_cfg, col, dtype, full_table, cte_prefix="",
 
 
 def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None,
-                                     vintage=None, coarse=False, preset=None):
+                                     vintage=None, coarse=False, preset=None,
+                                     stats_override=None):
     """Emit extract_col.sql with one block per (table, column, bucket).
 
     Mirrors Athena's `_write_combined_sql` shape: when the table has a
@@ -395,6 +398,7 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None,
                         date_dtype=None, date_format=None,
                         dt_label=dt_label,
                         coarse=coarse, preset=preset,
+                        stats_override=stats_override,
                     )
                 except Exception as e:
                     blocks.append(f"-- {qname}/{col}/{bucket_label}")
@@ -580,13 +584,7 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
     fieldnames = [
         'column_name', 'dt', 'col_type', 'n_total', 'n_missing',
         'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
-        # Coarse signals — required for cross-engine compare with Hadoop/Athena.
-        # Numeric rows leave these empty (format divergence across engines
-        # would generate false drift hits on numbers).
         'length_avg', 'length_max', 'hash_sum',
-        # Lifeboat retry marker (always '' on the direct path — only the
-        # gen-first runner can trigger the degrade fallback).
-        'partial',
     ]
     with open(csv_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

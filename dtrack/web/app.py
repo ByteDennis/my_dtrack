@@ -726,6 +726,9 @@ async def api_generate_files(request: Request):
     if not preset:
         preset = 'quick' if level == 'coarse' else 'detailed'
     coarse = (extract_type == "col" and preset == 'quick')
+    stats_override = body.get("stats_override")
+    if stats_override is not None and not isinstance(stats_override, dict):
+        stats_override = None
 
     # cells: optional list of {pair, col, vintage} the col-compare UI sends
     # when the user has selected specific (column, vintage_label) cells for
@@ -933,7 +936,8 @@ async def api_generate_files(request: Request):
                     oracle_sql_path = _write_combined_col_sql_oracle(
                         oracle_tables, sas_outdir,
                         db_path=_db_path, vintage=None,
-                        coarse=coarse, preset=preset)
+                        coarse=coarse, preset=preset,
+                        stats_override=stats_override)
                 results["oracle_sql_file"] = oracle_sql_path
 
             # Generate Hadoop SQL file (gen-first plain Hive SQL, parallels
@@ -958,7 +962,8 @@ async def api_generate_files(request: Request):
                     hadoop_sql_path = _write_combined_col_sql_hadoop(
                         hadoop_tables, sas_outdir,
                         db_path=_db_path, vintage=None,
-                        coarse=coarse, preset=preset)
+                        coarse=coarse, preset=preset,
+                        stats_override=stats_override)
                 results["hadoop_sql_file"] = hadoop_sql_path
 
             # Generate CSV SQL files. Each csv-source table writes to
@@ -998,7 +1003,8 @@ async def api_generate_files(request: Request):
                         p = _write_combined_col_sql_csv(
                             side_tables, side_outdir,
                             db_path=_db_path, vintage=None,
-                            coarse=coarse, preset=preset)
+                            coarse=coarse, preset=preset,
+                            stats_override=stats_override)
                     csv_paths[f"csv_sql_file_{side_label}"] = p
                 results.update(csv_paths)
 
@@ -1029,7 +1035,8 @@ async def api_generate_files(request: Request):
                             tbl['_fine_cells'] = sel
                 _write_combined_sql(aws_tables, aws_outdir, extract_type,
                                     db_path=_db_path, coarse=coarse,
-                                    preset=preset)
+                                    preset=preset,
+                                    stats_override=stats_override)
                 results["sql_file"] = os.path.join(aws_outdir, f"extract_{extract_type}.sql")
 
             # Cross-side bucket equality check (col extraction only — per-pair
@@ -1059,16 +1066,6 @@ async def api_load(request: Request):
         return JSONResponse(status_code=400, content={
             "error": f"Unknown level '{level}'; expected 'fine' or 'coarse'."
         })
-    # preset: 'quick' / 'standard' / 'detailed'. Persisted on each loaded
-    # _col_stats row so col_compare can filter by preset. When the caller
-    # doesn't supply one, the loader derives it from `level` for legacy
-    # /api/generate consumers (fine -> detailed, coarse -> quick).
-    preset = body.get("preset")
-    if preset and preset not in ("quick", "standard", "detailed"):
-        return JSONResponse(status_code=400, content={
-            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
-        })
-
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
@@ -1129,10 +1126,9 @@ async def api_load(request: Request):
                         db_path=_db_path, csv_path=csv_path,
                         table_name=qname, mode="upsert",
                         source=tbl.get("source"), vintage=table_vintage,
-                        level=level, preset=preset,
+                        level=level,
                     )
-                    tag = preset or ("detailed" if level == "fine" else "quick")
-                    print(f"{qname}: {count} stat rows loaded ({level}, preset={tag})")
+                    print(f"{qname}: {count} stat rows loaded ({level})")
 
         return {"ok": True, "output": buf.getvalue()}
     except Exception as e:
@@ -2122,7 +2118,6 @@ async def api_load_col_stats_upload(
             mode=mode,
             source=tbl_cfg.get("source") if tbl_cfg else None,
             vintage=table_vintage,
-            preset=preset or None,
         )
 
         os.unlink(tmp_path)
@@ -2185,7 +2180,6 @@ async def api_load_col_stats_path(request: Request):
             mode=mode,
             source=tbl_cfg.get("source") if tbl_cfg else None,
             vintage=table_vintage,
-            preset=preset or None,
         )
 
         return {"ok": True, "loaded": count, "table_name": table_name}
@@ -2265,32 +2259,15 @@ async def api_save_col_comparison(pair_name: str, request: Request):
 
 @app.get("/api/compare/col/{pair_name}")
 async def api_compare_col_pair(pair_name: str, from_date: str = "",
-                               to_date: str = "", level: str = "fine",
-                               preset: str = ""):
+                               to_date: str = "", level: str = "fine"):
     """Compare col stats for a single pair — returns per-vintage comparisons.
 
-    `level=coarse` returns the cheap-aggregate signals only
-    (n_total/n_missing/n_unique/min/max/length_avg/length_max/hash_sum) — used
-    by the coarse compare page to flag suspicious (col, dt) cells without
-    having any rank-weighted/freq-table fields.
-
-    `level=fine` (default) returns the full row including mean/std/top_10 —
-    used by the drill-down page after the user picks cells.
-
-    `preset` (optional, 'quick' / 'standard' / 'detailed') filters
-    _col_stats rows to those generated under the matching preset. Raises
-    400 with a structured `{ok: false, preset_missing: side, ...}` body
-    when either side has zero rows for the requested preset so the UI
-    can show a "re-extract under preset X for side Y" banner instead of
-    rendering an empty table.
+    `level=coarse` returns the cheap-aggregate signals only; `level=fine`
+    (default) returns the full row including mean/std/top_10.
     """
     if level not in ("coarse", "fine"):
         return JSONResponse(status_code=400, content={
             "error": f"Unknown level '{level}'; expected 'coarse' or 'fine'."
-        })
-    if preset and preset not in ("quick", "standard", "detailed"):
-        return JSONResponse(status_code=400, content={
-            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
         })
     try:
         from ..db import (
@@ -2322,40 +2299,20 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
             auto = match_columns_from_dicts(left_cols, right_cols)
             col_mappings = auto.get("matched", {})
 
-        # Full comparison (all dates, like CLI compare-col)
-        try:
-            comparison = compare_column_stats(
-                _db_path, table_left, table_right,
-                columns=list(col_mappings.keys()) if col_mappings else None,
-                col_mappings=col_mappings,
-                from_date=from_date or None,
-                to_date=to_date or None,
-                col_type_overrides=col_type_overrides,
-                level=level,
-                preset=preset or None,
-            )
-        except ValueError as ve:
-            # compare_column_stats raises when a preset filter leaves
-            # either side empty. Return 400 with a structured payload so
-            # col_compare.js can render a precise banner ("no rows for
-            # preset=X on table_left") instead of treating it as a 500.
-            msg = str(ve)
-            side = None
-            if table_left in msg:
-                side = 'left'
-            elif table_right in msg:
-                side = 'right'
-            return JSONResponse(status_code=400, content={
-                "ok": False, "error": msg, "preset": preset, "preset_missing": side,
-            })
+        comparison = compare_column_stats(
+            _db_path, table_left, table_right,
+            columns=list(col_mappings.keys()) if col_mappings else None,
+            col_mappings=col_mappings,
+            from_date=from_date or None,
+            to_date=to_date or None,
+            col_type_overrides=col_type_overrides,
+            level=level,
+        )
 
-        # Get all left/right column names for left-only/right-only
         stats_left = get_col_stats(_db_path, table_left,
-                                   from_date=from_date or None, to_date=to_date or None,
-                                   preset=preset or None)
+                                   from_date=from_date or None, to_date=to_date or None)
         stats_right = get_col_stats(_db_path, table_right,
-                                    from_date=from_date or None, to_date=to_date or None,
-                                    preset=preset or None)
+                                    from_date=from_date or None, to_date=to_date or None)
         all_left_cols = set(s["column_name"] for s in stats_left)
         all_right_cols = set(s["column_name"] for s in stats_right)
         mapped_left = set(col_mappings.keys())
@@ -2523,16 +2480,9 @@ async def api_compare_col_export_html(request: Request):
     to_date = body.get("to_date", "")
     title = body.get("title", "")
     subtitle = body.get("subtitle", "")
-    preset = body.get("preset", "") or ""
-    if preset and preset not in ("quick", "standard", "detailed"):
-        return JSONResponse(status_code=400, content={
-            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
-        })
     compare_fields = body.get("compare_fields")
     if compare_fields is not None and not isinstance(compare_fields, list):
         compare_fields = None
-    # Live UI state per pair: {pair_name: {comment_left, comment_right,
-    # time_left, time_right}}. Falls back to pair_cfg when absent.
     live_pairs = body.get("pairs", {}) or {}
 
     try:
@@ -2568,25 +2518,14 @@ async def api_compare_col_export_html(request: Request):
             # row-compare's matching_dates would silently empty the export
             # when the date formats don't line up between row counts and col
             # stats (vintage-bucketed col stats vs raw row dates, etc.).
-            try:
-                comparison = compare_column_stats(
-                    _db_path, pair["table_left"], pair["table_right"],
-                    columns=list(col_mappings.keys()) if col_mappings else None,
-                    col_mappings=col_mappings,
-                    from_date=from_date or None,
-                    to_date=to_date or None,
-                    col_type_overrides=col_type_overrides,
-                    preset=preset or None,
-                )
-            except ValueError as ve:
-                # Per-pair skip on preset filter empty-side -- emit a stub
-                # section to the report so the user knows which pair was
-                # excluded and why.
-                row_sections.append(
-                    f"<h2>{pname}</h2>"
-                    f"<p style='color:#c00;'>Skipped: {ve}</p>"
-                )
-                continue
+            comparison = compare_column_stats(
+                _db_path, pair["table_left"], pair["table_right"],
+                columns=list(col_mappings.keys()) if col_mappings else None,
+                col_mappings=col_mappings,
+                from_date=from_date or None,
+                to_date=to_date or None,
+                col_type_overrides=col_type_overrides,
+            )
 
             meta_left = get_metadata(_db_path, pair["table_left"]) or {}
             meta_right = get_metadata(_db_path, pair["table_right"]) or {}
@@ -2650,11 +2589,6 @@ async def api_compare_col_export_log(request: Request):
     body = await request.json()
     from_date = body.get("from_date", "")
     to_date = body.get("to_date", "")
-    preset = body.get("preset", "") or ""
-    if preset and preset not in ("quick", "standard", "detailed"):
-        return JSONResponse(status_code=400, content={
-            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
-        })
     compare_fields = body.get("compare_fields")
     if compare_fields is not None and not isinstance(compare_fields, list):
         compare_fields = None
@@ -2689,26 +2623,14 @@ async def api_compare_col_export_log(request: Request):
                 auto = match_columns_from_dicts(left_cols, right_cols)
                 col_mappings = auto.get("matched", {})
 
-            try:
-                comparison = compare_column_stats(
-                    _db_path, pair["table_left"], pair["table_right"],
-                    columns=list(col_mappings.keys()) if col_mappings else None,
-                    col_mappings=col_mappings,
-                    from_date=from_date or None,
-                    to_date=to_date or None,
-                    col_type_overrides=col_type_overrides,
-                    preset=preset or None,
-                )
-            except ValueError as ve:
-                # Per-pair skip when preset filter leaves a side empty —
-                # mirrors the Excel exporter's behavior. The combined log
-                # gets a "NO DATA" header for that pair so users can see
-                # which pair needs re-extracting without the entire export
-                # failing.
-                all_logs.append(
-                    f"=== {pname} (preset='{preset}') ===\n"
-                    f"  SKIP: {ve}\n")
-                continue
+            comparison = compare_column_stats(
+                _db_path, pair["table_left"], pair["table_right"],
+                columns=list(col_mappings.keys()) if col_mappings else None,
+                col_mappings=col_mappings,
+                from_date=from_date or None,
+                to_date=to_date or None,
+                col_type_overrides=col_type_overrides,
+            )
 
             meta_left = get_metadata(_db_path, pair["table_left"]) or {}
             meta_right = get_metadata(_db_path, pair["table_right"]) or {}
@@ -2872,21 +2794,15 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
 
 @app.get("/api/compare/col/export/excel")
 async def api_compare_col_export_excel(from_date: str = "", to_date: str = "",
-                                         preset: str = "",
                                          compare_fields: str = ""):
     """Generate Excel workbook for col comparison — one sheet per pair, transposed layout.
 
-    When `preset` is supplied, only _col_stats rows tagged with that
-    preset feed the comparison; the `_filter_active_stats` helper
-    below additionally drops any stat row that's universally empty
-    across the loaded data (e.g. Quick-preset rows have mean/std/top_10
-    blank, so those rows don't appear in the sheet at all). One sheet
-    per pair — today's layout, unchanged.
+    `compare_fields` (comma-separated keys) restricts the visible stat
+    rows AND the per-vintage diff flag to that subset; empty = include
+    every supported field (n_total/n_missing/n_unique/min/max/length_*/
+    hash_sum). The `_filter_active_stats` helper additionally drops any
+    stat row that's universally empty across the loaded comparisons.
     """
-    if preset and preset not in ("quick", "standard", "detailed"):
-        return JSONResponse(status_code=400, content={
-            "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
-        })
     cf = None
     if compare_fields:
         cf = {k.strip() for k in compare_fields.split(",") if k.strip()}
@@ -2972,24 +2888,13 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = "",
                 auto = match_columns_from_dicts(left_cols, right_cols)
                 col_mappings = auto.get("matched", {})
 
-            try:
-                comparison = compare_column_stats(
-                    _db_path, pair["table_left"], pair["table_right"],
-                    columns=list(col_mappings.keys()) if col_mappings else None,
-                    col_mappings=col_mappings,
-                    from_date=from_date or None, to_date=to_date or None,
-                    col_type_overrides=col_type_overrides,
-                    preset=preset or None,
-                )
-            except ValueError as ve:
-                # Skip pairs that have no data under the requested preset.
-                # Excel export covers many pairs at once; a single empty
-                # pair shouldn't block the rest. We still add a stub
-                # sheet showing the reason so the user can see WHY.
-                ws_stub = wb.create_sheet(title=pname[:31] or "pair")
-                ws_stub.cell(row=1, column=1, value=f"No data for {pname} under preset='{preset}'")
-                ws_stub.cell(row=2, column=1, value=str(ve))
-                continue
+            comparison = compare_column_stats(
+                _db_path, pair["table_left"], pair["table_right"],
+                columns=list(col_mappings.keys()) if col_mappings else None,
+                col_mappings=col_mappings,
+                from_date=from_date or None, to_date=to_date or None,
+                col_type_overrides=col_type_overrides,
+            )
 
             meta_left = get_metadata(_db_path, pair["table_left"]) or {}
             meta_right = get_metadata(_db_path, pair["table_right"]) or {}

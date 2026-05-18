@@ -772,7 +772,7 @@ def _athena_portable_hash16(value_sql):
 
 def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
                       full_table, wc, cte_prefix, col_dtype=None,
-                      preset=None):
+                      preset=None, stats_override=None):
     """Coarse col-stats SQL — cheap aggregates for Phase-1 rough drift detection.
 
     Emits the 14-column row schema (dt, column_name, col_type, n_total,
@@ -811,38 +811,59 @@ def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
     is_categorical = (col_type or "").lower() == "categorical"
 
     if preset == 'quick':
-        # Flat-aggregate path: single SELECT, no WITH chain, no freq
-        # table. Mirrors base.build_col_sql's quick branch on the other
-        # dialects so all four engines emit the same lean shape under
-        # preset='quick'. n_unique/top_10/hash_sum are placeholders so
-        # the 14-column CSV schema stays stable.
-        if is_categorical:
+        from ..constants import STATS_PRESETS
+        base = STATS_PRESETS['quick']
+        if stats_override is not None:
+            stats = {k: bool(stats_override.get(k, base[k])) for k in base}
+        else:
+            stats = base
+
+        if is_categorical and stats['length']:
             cs = f"CAST({col_expr} AS VARCHAR)"
             len_avg = (
-                f"CAST(SUM(LENGTH(TRIM({cs}))) / NULLIF(COUNT({col_expr}), 0) "
-                f"AS VARCHAR)"
+                f"CAST(CAST(SUM(LENGTH(TRIM({cs}))) AS DOUBLE) "
+                f"/ NULLIF(COUNT({col_expr}), 0) AS VARCHAR)"
             )
             len_max = f"CAST(MAX(LENGTH(TRIM({cs}))) AS VARCHAR)"
         else:
-            # Numeric length is storage-format dominated, keep empty to
-            # match the other dialects.
             len_avg = "''"
             len_max = "''"
+
+        if stats['n_unique']:
+            n_unique_sql = f"COUNT(DISTINCT {col_expr})"
+        else:
+            n_unique_sql = "0"
+
+        if stats['min_max']:
+            min_sql = f"CAST(MIN({col_expr}) AS VARCHAR)"
+            max_sql = f"CAST(MAX({col_expr}) AS VARCHAR)"
+        else:
+            min_sql = "''"
+            max_sql = "''"
+
+        if stats['hash_sum'] and is_categorical:
+            hash_sum_sql = (
+                f"CAST(SUM(CAST({_athena_portable_hash16(col_expr)} "
+                f"AS DOUBLE)) AS VARCHAR)"
+            )
+        else:
+            hash_sum_sql = "''"
+
         return f"""{cte_prefix}SELECT
     {dt_select},
     '{col_name}' AS column_name,
     '{col_type}' AS col_type,
     COUNT(*) AS n_total,
     COUNT(*) - COUNT({col_expr}) AS n_missing,
-    0 AS n_unique,
+    {n_unique_sql} AS n_unique,
     '' AS mean,
     '' AS std,
-    CAST(MIN({col_expr}) AS VARCHAR) AS min_val,
-    CAST(MAX({col_expr}) AS VARCHAR) AS max_val,
+    {min_sql} AS min_val,
+    {max_sql} AS max_val,
     '' AS top_10,
     {len_avg} AS length_avg,
     {len_max} AS length_max,
-    '' AS hash_sum
+    {hash_sum_sql} AS hash_sum
 FROM {full_table}
 WHERE {wc}{group_by};"""
 
@@ -1004,7 +1025,7 @@ def _emit_col_block(blocks, header, sql):
 
 
 def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
-                        coarse=False, preset=None):
+                        coarse=False, preset=None, stats_override=None):
     """Write a single combined .sql file with all AWS table queries.
 
     `coarse=True` emits the cheap-aggregate "coarse" SQL for every column —
@@ -1265,9 +1286,6 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                         )
                         wc_t_col = f"({wc_t}) AND ({trunc_expr} IN ({in_list}))"
                     if col_name in id_cols or preset == 'quick':
-                        # ID-like OR preset=quick: lite SQL, single GROUP BY
-                        # trunc_expr pass. preset=quick forces the flat shape
-                        # across every col so no freq aggregation runs.
                         sql = _build_coarse_sql(
                             col_name, col_q,
                             'numeric' if is_num else 'categorical',
@@ -1276,6 +1294,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                             full_table=full_table, wc=wc_t_col, cte_prefix=cte_prefix,
                             col_dtype=col_dtype,
                             preset=preset,
+                            stats_override=stats_override,
                         )
                         _emit_col_block(
                             blocks, f"-- {qname}/{col_name}/_all", sql)
@@ -1404,6 +1423,7 @@ ORDER BY s.dt;"""
                             full_table=full_table, wc=wc, cte_prefix=cte_prefix,
                             col_dtype=col_dtype,
                             preset=preset,
+                            stats_override=stats_override,
                         )
                         _emit_col_block(
                             blocks,
@@ -1933,15 +1953,7 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
     _COL_HEADERS = [
         'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
         'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
-        # Coarse signals — emitted by both coarse and (planned) fine SQL,
-        # NULL-tolerant when read back. Fine rows from older runs that
-        # lacked these fields surface as empty strings and the compare
-        # treats absent hash_sum as "unknown" (no diff flag).
         'length_avg', 'length_max', 'hash_sum',
-        # Legacy lifeboat marker. Always empty for fresh runs since the
-        # @degrade_sql fallback was retired; kept in the header so older
-        # CSVs that recorded 'athena_degraded' here still load cleanly.
-        'partial',
     ]
 
     # For col mode, collect rows per table (blocks named "qname/col_name")

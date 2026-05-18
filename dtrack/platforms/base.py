@@ -1604,7 +1604,8 @@ def _hash16_flat_expr(dialect, col_expr):
 
 def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
                    vintage=None, date_dtype=None, date_format=None,
-                   dt_label=None, coarse=False, preset=None):
+                   dt_label=None, coarse=False, preset=None,
+                   stats_override=None):
     """Build per-column stats SQL for any supported dialect.
 
     Returns (sql, is_numeric). The output schema is the canonical 14-field
@@ -1644,7 +1645,16 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
     if preset not in STATS_PRESETS:
         raise ValueError(f"unknown preset {preset!r}; expected one of "
                          f"{list(STATS_PRESETS.keys())}")
-    stats = STATS_PRESETS[preset]
+    if stats_override is not None:
+        # Custom flag set wins: every key in the canonical preset shape
+        # is taken from `stats_override` if present, else falls back to
+        # the named preset's value. This lets col_gen's Custom radio
+        # turn OFF a stat the preset would have turned on (e.g. tick
+        # n_unique while keeping hash_sum disabled).
+        base_stats = STATS_PRESETS[preset]
+        stats = {k: bool(stats_override.get(k, base_stats[k])) for k in base_stats}
+    else:
+        stats = STATS_PRESETS[preset]
 
     ops = _col_sql_dialect_ops(dialect)
     date_col = tbl_cfg['date_col']
@@ -2183,27 +2193,11 @@ def run_extract_sql_file(sql_path, outdir, *,
                          "table": qname, "running": running_now,
                          "total": total_blocks, "eta_sec": eta_sec})
 
-        degraded = False
         try:
-            try:
-                rows = query_fn(sql, conn_macro)
-            except Exception as exc:
-                lifeboat = block.get('degrade_sql')
-                err_str = str(exc)
-                is_resource_err = any(p in err_str for p in cfg['lifeboat_errors'])
-                if is_col and lifeboat and is_resource_err:
-                    print(f"  [degrade] {block_name}: {err_str.splitlines()[0]}"
-                          f" — retrying without n_unique/hash_sum", file=sys.stderr)
-                    rows = query_fn(lifeboat, conn_macro)
-                    degraded = True
-                else:
-                    raise
+            rows = query_fn(sql, conn_macro)
             elapsed = time.time() - start_time
 
             if is_col:
-                if degraded:
-                    for r in rows:
-                        r['partial'] = cfg['degraded_label']
                 with _col_rows_lock:
                     _col_rows_by_table.setdefault(qname, []).extend(rows)
             else:
@@ -2211,8 +2205,7 @@ def run_extract_sql_file(sql_path, outdir, *,
                 row_csv_writer(rows, csv_path)
 
             result = {"name": block_name, "ok": True, "rows": len(rows),
-                      "elapsed": round(elapsed, 1), "start": start_ts,
-                      "degraded": degraded}
+                      "elapsed": round(elapsed, 1), "start": start_ts}
             if not is_col:
                 result["csv_path"] = os.path.join(outdir, f"{qname}{file_suffix}")
         except Exception as e:

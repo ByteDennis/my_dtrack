@@ -274,42 +274,18 @@ def compare_column_stats(
     matched_dates=None,
     col_type_overrides=None,
     level="fine",
-    preset=None,
 ):
     """Compare column statistics between two tables.
 
-    `level="coarse"` returns only the cheap-aggregate fields
-    (n_total/n_missing/n_unique/min/max/length_avg/length_max/hash_sum). Used
-    for the first-pass "this column might be worth more inspection" check
-    against coarse-extracted rows.
-
-    `level="fine"` (default) returns everything (rank-weighted mean/std,
-    top_10, etc.). Used for the drill-down view after the user picks
-    suspicious (col, dt) cells from the coarse view.
-
-    `preset` (optional, 'quick' / 'standard' / 'detailed') filters
-    _col_stats rows to those generated under the matching preset (legacy
-    NULL/empty rows are accepted as 'detailed'). Raises ValueError when
-    either side has zero matching rows -- the col_compare UI surfaces
-    this as a "no data loaded under preset X for side Y" banner so the
-    user knows to either re-extract or pick a different preset.
-
-    Now resolves col_type disagreements using resolve_col_type().
+    All loaded _col_stats rows are considered -- callers pick which stat
+    fields they care about via the col_compare UI's Compare-fields
+    selector (or its export equivalent). Resolves col_type disagreements
+    using resolve_col_type().
     """
     stats_left = get_col_stats(
-        db_path, table_left, from_date=from_date, to_date=to_date, preset=preset)
+        db_path, table_left, from_date=from_date, to_date=to_date)
     stats_right = get_col_stats(
-        db_path, table_right, from_date=from_date, to_date=to_date, preset=preset)
-    if preset and not stats_left:
-        raise ValueError(
-            f"No _col_stats rows for {table_left} with preset='{preset}'. "
-            f"Re-extract with preset='{preset}' or pick a different preset."
-        )
-    if preset and not stats_right:
-        raise ValueError(
-            f"No _col_stats rows for {table_right} with preset='{preset}'. "
-            f"Re-extract with preset='{preset}' or pick a different preset."
-        )
+        db_path, table_right, from_date=from_date, to_date=to_date)
 
     def organize_stats(stats):
         organized = {}
@@ -376,16 +352,6 @@ def compare_column_stats(
             l_unique = _safe_int(left_stat["n_unique"])
             r_unique = _safe_int(right_stat["n_unique"])
 
-            # Lifeboat-retry marker: when either side's row came from the
-            # `@degrade_sql` fallback path (engine ran out of TEMP / memory
-            # on the COUNT(DISTINCT) and the runner re-executed a minimal
-            # n_total/n_missing-only query), n_unique and hash_sum are NULL
-            # by design. Carry the marker through so _has_col_differences
-            # can treat those two cells as "skipped, not a mismatch".
-            l_partial = (left_stat.get("partial") or "").strip()
-            r_partial = (right_stat.get("partial") or "").strip()
-            unique_skipped = bool(l_partial) or bool(r_partial)
-
             comparison = {
                 "dt": dt,
                 "vintage_label": left_stat.get("vintage_label") or dt,
@@ -403,9 +369,6 @@ def compare_column_stats(
                 "n_unique_left": l_unique,
                 "n_unique_right": r_unique,
                 "n_unique_diff": r_unique - l_unique,
-                "partial_left": l_partial,
-                "partial_right": r_partial,
-                "n_unique_skipped": unique_skipped,
             }
 
             # min/max are emitted as "val=cnt" on every coarse-and-fine path
@@ -433,46 +396,39 @@ def compare_column_stats(
                 "max_match": (l_max_key == r_max_key) if (l_max_key is not None and r_max_key is not None) else None,
             })
 
-            # Coarse-only signals. Four cases per field:
-            #   - both populated, agree            → match=True
-            #   - both populated, disagree         → match=False (diff)
-            #   - both empty                       → match=None
-            #   - one populated, the other empty   → see below
-            #
-            # length_avg / length_max are comparable across platforms (a
-            # string's length is universal), so asymmetric presence is a
-            # real diff worth flagging.
-            #
-            # hash_sum is NOT comparable across platforms — Oracle/Hive/
-            # Athena use different hash functions, so cross-platform hash
-            # comparison is intrinsically noise. Asymmetric presence on
-            # hash_sum stays match=None (don't paint every cross-platform
-            # column red just because the hashes don't share a function).
+            # >>> detect date-shaped columns to skip length signals <<< #
+            def _is_date_string(v):
+                if v is None or v == '':
+                    return False
+                s = str(v).strip()
+                if not any(c.isalpha() or c in '-/: ' for c in s):
+                    return False
+                try:
+                    from .date_utils import parse_date
+                    parse_date(s)
+                    return True
+                except (ValueError, TypeError):
+                    return False
+            is_date_col = (
+                _is_date_string(left_stat.get("min_val")) and
+                _is_date_string(right_stat.get("min_val"))
+            ) or (
+                _is_date_string(left_stat.get("max_val")) and
+                _is_date_string(right_stat.get("max_val"))
+            )
+
             for field in ("length_avg", "length_max", "hash_sum"):
                 raw_l = left_stat.get(field)
                 raw_r = right_stat.get(field)
                 lv = raw_l.strip() if isinstance(raw_l, str) else (raw_l or "")
                 rv = raw_r.strip() if isinstance(raw_r, str) else (raw_r or "")
-                # Hash_sum from a lifeboat row is intentionally absent;
-                # treat as "skipped" so degraded rows don't paint the cell
-                # red just because one side dropped the aggregate.
-                if field == "hash_sum" and unique_skipped:
+                if field in ("length_avg", "length_max") and is_date_col:
                     comparison[f"{field}_left"] = lv
                     comparison[f"{field}_right"] = rv
                     comparison[f"{field}_match"] = None
                     continue
                 if lv and rv:
                     if field == "hash_sum":
-                        # Relative tolerance: at the 1e12-1e17 magnitudes
-                        # hash_sum lives in, DOUBLE summation-order
-                        # differences between engines can be ~hundreds
-                        # in absolute terms but ~1e-15 relative. Real
-                        # drift moves the sum by orders of magnitude
-                        # (a single changed value shifts cnt × hash by
-                        # at least 1, often much more), well above the
-                        # 1e-9 floor. So abs(diff)/max(|l|, |r|) < 1e-9
-                        # passes on identical data even with FP noise
-                        # while still flagging real drift.
                         try:
                             lf, rf = float(lv), float(rv)
                             denom = max(abs(lf), abs(rf), 1.0)
@@ -480,16 +436,11 @@ def compare_column_stats(
                         except (ValueError, TypeError):
                             match = (lv == rv)
                     else:
-                        # length_* values are small (single/double digits
-                        # for typical strings), so absolute tolerance is
-                        # fine and avoids spurious matches on tiny
-                        # relative diffs that ARE real drift.
                         try:
                             match = abs(float(lv) - float(rv)) < 1e-4
                         except (ValueError, TypeError):
                             match = (lv == rv)
                 elif lv or rv:
-                    # Asymmetric presence.
                     match = None if field == "hash_sum" else False
                 else:
                     match = None
@@ -531,7 +482,7 @@ def compare_column_stats(
 _DIFF_PREDICATES = {
     'n_total':    lambda c: c.get('n_total_diff', 0) != 0,
     'n_missing':  lambda c: c.get('n_missing_diff', 0) != 0,
-    'n_unique':   lambda c: c.get('n_unique_diff', 0) != 0 and not c.get('n_unique_skipped'),
+    'n_unique':   lambda c: c.get('n_unique_diff', 0) != 0,
     'mean':       lambda c: c.get('mean_match') is False,
     'std':        lambda c: c.get('std_match') is False,
     'min':        lambda c: c.get('min_match') is False,

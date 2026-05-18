@@ -13,9 +13,6 @@ COL_CSV_HEADERS = [
     'dt', 'column_name', 'col_type', 'n_total', 'n_missing',
     'n_unique', 'mean', 'std', 'min_val', 'max_val', 'top_10',
     'length_avg', 'length_max', 'hash_sum',
-    # Lifeboat marker: '<platform>_degraded' on rows produced by the
-    # @degrade_sql retry after a resource-exhaustion error; empty otherwise.
-    'partial',
 ]
 
 ROW_CSV_HEADERS = ['dt', 'row_count']

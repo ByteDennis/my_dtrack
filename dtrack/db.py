@@ -48,20 +48,6 @@ _SCHEMA = {
         ("length_avg", "TEXT", ""),
         ("length_max", "TEXT", ""),
         ("hash_sum", "TEXT", ""),
-        # Set to 'oracle_degraded' / 'athena_degraded' when the SQL-file
-        # runner retried a column with the lifeboat SQL after a resource
-        # exhaustion error (ORA-01652 / Athena EXCEEDED_MEMORY_LIMIT etc.).
-        # On those rows n_unique / hash_sum are NULL by design and the
-        # comparator treats them as "skipped, not a mismatch".
-        ("partial", "TEXT", ""),
-        # Preset under which the row was generated -- 'quick' / 'standard'
-        # / 'detailed' (or legacy 'fine' / 'coarse' for rows generated
-        # before the preset rename). Persisted so col_compare can filter
-        # the view by preset and surface the right subset of stats for
-        # the user-selected level without inferring from data shape.
-        # Empty / NULL for legacy rows is treated as 'detailed' on read
-        # (the historical default).
-        ("preset", "TEXT", ""),
     ],
     "_column_meta": [
         ("source_table", "TEXT", "NOT NULL"),
@@ -557,29 +543,24 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # Lazy schema upgrade for legacy DBs.
     try:
         cursor.execute("ALTER TABLE _col_stats ADD COLUMN vintage_label TEXT")
     except sqlite3.OperationalError:
         pass
-    for col in ("length_avg", "length_max", "hash_sum", "partial", "preset"):
+    for col in ("length_avg", "length_max", "hash_sum"):
         try:
             cursor.execute(f"ALTER TABLE _col_stats ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
             pass
 
     if mode == "coarse_merge":
-        # UPSERT: insert with coarse fields only on new rows; on conflict,
-        # update only the coarse columns. SQLite's ON CONFLICT requires the
-        # composite key to exist; insert NULL for fine columns so the
-        # initial INSERT path still satisfies NOT NULL on col_type.
         sql = """
             INSERT INTO _col_stats (
                 source_table, column_name, dt, col_type,
                 n_total, n_missing, n_unique,
                 min_val, max_val, vintage_label,
-                length_avg, length_max, hash_sum, partial, preset
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                length_avg, length_max, hash_sum
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_table, column_name, dt) DO UPDATE SET
                 col_type     = excluded.col_type,
                 n_total      = excluded.n_total,
@@ -590,9 +571,7 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 vintage_label= excluded.vintage_label,
                 length_avg   = excluded.length_avg,
                 length_max   = excluded.length_max,
-                hash_sum     = excluded.hash_sum,
-                partial      = excluded.partial,
-                preset       = excluded.preset
+                hash_sum     = excluded.hash_sum
         """
         for stat in stats:
             cursor.execute(sql, (
@@ -609,18 +588,15 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 stat.get("length_avg", ""),
                 stat.get("length_max", ""),
                 stat.get("hash_sum", ""),
-                stat.get("partial", ""),
-                stat.get("preset", ""),
             ))
     else:
-        # Fine: full overwrite of all stat columns.
         sql = """
             INSERT OR REPLACE INTO _col_stats (
                 source_table, column_name, dt, col_type,
                 n_total, n_missing, n_unique, mean, std,
                 min_val, max_val, top_10, vintage_label,
-                length_avg, length_max, hash_sum, partial, preset
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                length_avg, length_max, hash_sum
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         for stat in stats:
             cursor.execute(sql, (
@@ -640,8 +616,6 @@ def insert_col_stats(db_path: str, stats: List[Dict], mode: str = "fine") -> Non
                 stat.get("length_avg", ""),
                 stat.get("length_max", ""),
                 stat.get("hash_sum", ""),
-                stat.get("partial", ""),
-                stat.get("preset", ""),
             ))
 
     conn.commit()
@@ -655,51 +629,24 @@ def get_col_stats(
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
     limit: Optional[int] = None,
-    preset: Optional[str] = None,
 ) -> List[Dict]:
-    """
-    Get column statistics from _col_stats table.
+    """Get column statistics rows for one source table.
 
-    Args:
-        db_path: Path to SQLite database file
-        source_table: Name of the source table
-        column_name: Optional column name filter
-        from_date: Optional start date filter (YYYY-MM-DD)
-        to_date: Optional end date filter (YYYY-MM-DD)
-        limit: Optional limit on number of rows
-        preset: Optional preset filter ('quick' / 'standard' / 'detailed').
-            Legacy rows with NULL/empty preset are accepted under any
-            requested preset (treated as 'detailed' for back-compat). When
-            specified, only rows matching the preset (or NULL/empty) are
-            returned; otherwise every preset is included.
-
-    Returns:
-        List of stat dictionaries
+    Date filtering is done in Python (stored dt formats vary). Returns
+    every row for the (source_table, column_name) set; downstream
+    consumers (col_compare UI / exports) pick which stat fields to
+    display via their own field selector.
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Fetch all rows for this table — date filtering is done in Python
-    # because stored dt formats vary (ISO, YYYYMMDD, SAS datetime) and
-    # SQL string comparison doesn't work across formats.
     query = "SELECT * FROM _col_stats WHERE source_table = ?"
     params = [source_table]
 
     if column_name:
         query += " AND column_name = ?"
         params.append(column_name)
-
-    if preset:
-        # Accept rows with the requested preset OR with NULL/empty preset
-        # (legacy data generated before this column existed). The legacy
-        # rows were detailed-only, so treating them as 'detailed' on read
-        # is the historically-consistent choice.
-        if preset == 'detailed':
-            query += " AND (preset = ? OR preset IS NULL OR preset = '')"
-        else:
-            query += " AND preset = ?"
-        params.append(preset)
 
     cursor.execute(query, params)
     rows = cursor.fetchall()
@@ -1985,11 +1932,11 @@ def ensure_coarse_stat_columns(db_path: str) -> None:
     displays without flagging spurious diffs.
     """
     conn = sqlite3.connect(db_path)
-    for col in ("length_avg", "length_max", "hash_sum", "partial", "preset"):
+    for col in ("length_avg", "length_max", "hash_sum"):
         try:
             conn.execute(f"ALTER TABLE _col_stats ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
-            pass  # column already exists
+            pass
     conn.commit()
     conn.close()
 

@@ -10,13 +10,6 @@ const ICON = {
 let pairsData = [];
 let compareCache = {};
 
-function _currentPreset() {
-    // Empty string means "no filter" -- includes every row regardless of
-    // preset (the historical behavior before persisted preset existed).
-    // Users explicitly pick Quick / Standard / Detailed to narrow the view.
-    return document.getElementById('preset-select')?.value || '';
-}
-
 // >>> field-level Compare filter: drives table render + every export <<< //
 const COMPARE_FIELDS = [
     {key: 'n_total',    label: 'N_Total'},
@@ -28,6 +21,13 @@ const COMPARE_FIELDS = [
     {key: 'length_max', label: 'Length max'},
     {key: 'hash_sum',   label: 'Hash sum'},
 ];
+
+// >>> preset → which fields the col_gen extracted; UI uses to pre-select <<< //
+const PRESET_FIELDS = {
+    quick:    ['n_total', 'n_missing', 'min', 'max', 'length_avg', 'length_max'],
+    standard: ['n_total', 'n_missing', 'n_unique', 'min', 'max', 'length_avg', 'length_max', 'hash_sum'],
+    detailed: ['n_total', 'n_missing', 'n_unique', 'min', 'max', 'length_avg', 'length_max', 'hash_sum'],
+};
 const _CF_KEY = 'dtrack-col-compare-fields';
 
 // >>> read selected field-keys from localStorage; default = all <<< //
@@ -80,16 +80,18 @@ function _renderCompareFieldsPanel() {
     const list = document.getElementById('compare-fields-list');
     if (!list) return;
     const active = new Set(_getCompareFields());
-    list.innerHTML = COMPARE_FIELDS.map(f => `
-        <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
-            <input type="checkbox" data-field="${f.key}" ${active.has(f.key) ? 'checked' : ''}>
-            ${f.label}
-        </label>`).join('');
+    list.innerHTML = COMPARE_FIELDS.map(f =>
+        '<label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer; white-space:nowrap;">' +
+            `<input type="checkbox" data-field="${f.key}" ${active.has(f.key) ? 'checked' : ''}>` +
+            `<span>${f.label}</span>` +
+        '</label>'
+    ).join('');
     list.querySelectorAll('input[type=checkbox]').forEach(cb => {
         cb.addEventListener('change', () => {
             const sel = [...list.querySelectorAll('input:checked')].map(x => x.dataset.field);
             _saveCompareFields(sel);
             _refreshCompareFieldsSummary();
+            _refreshPresetSelectFromFields();
             onCompareFieldsChange();
         });
     });
@@ -100,25 +102,49 @@ function setCompareFields(mode) {
     _saveCompareFields(mode === 'all' ? all : []);
     _renderCompareFieldsPanel();
     _refreshCompareFieldsSummary();
+    _refreshPresetSelectFromFields();
     onCompareFieldsChange();
 }
 
-// >>> re-render every expanded pair so the field filter takes effect <<< //
+// >>> re-render every cached pair so the field filter takes effect <<< //
 function onCompareFieldsChange() {
-    for (const p of pairsData) {
-        const body = document.getElementById(`body-${p.pair_name}`);
-        if (body && body.style.display !== 'none' && compareCache[p.pair_name]) {
-            renderPairBody(p.pair_name, compareCache[p.pair_name]);
-        }
+    for (const name of Object.keys(compareCache)) {
+        const body = document.getElementById(`body-${name}`);
+        if (body) renderPairBody(name, compareCache[name]);
     }
 }
 
+// >>> derive which preset the current field set matches (or "custom") <<< //
+function _detectPresetFromFields() {
+    const cur = new Set(_getCompareFields());
+    const all = new Set(COMPARE_FIELDS.map(f => f.key));
+    if (cur.size === all.size && [...cur].every(k => all.has(k))) return '';
+    for (const name of ['quick', 'standard', 'detailed']) {
+        const want = new Set(PRESET_FIELDS[name]);
+        if (cur.size === want.size && [...cur].every(k => want.has(k))) return name;
+    }
+    return 'custom';
+}
+
+function _refreshPresetSelectFromFields() {
+    const sel = document.getElementById('preset-select');
+    if (!sel) return;
+    const want = _detectPresetFromFields();
+    if (sel.value !== want) sel.value = want;
+}
+
+// >>> preset selector drives Compare-fields; "custom" is a no-op marker <<< //
 function onPresetChange() {
-    // Preset filter changes the rows pulled from _col_stats — drop the
-    // cache and re-fetch every pair so the displayed comparison reflects
-    // only the preset's data.
-    compareCache = {};
-    runAll();
+    const preset = document.getElementById('preset-select')?.value || '';
+    if (preset === 'custom') return;
+    const fields = preset && PRESET_FIELDS[preset]
+        ? PRESET_FIELDS[preset]
+        : COMPARE_FIELDS.map(f => f.key);
+    _saveCompareFields(fields);
+    _renderCompareFieldsPanel();
+    _refreshCompareFieldsSummary();
+    _refreshPresetSelectFromFields();
+    onCompareFieldsChange();
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +246,13 @@ async function generateFineForSelected() {
 document.addEventListener('DOMContentLoaded', async () => {
     _renderCompareFieldsPanel();
     _refreshCompareFieldsSummary();
+    _refreshPresetSelectFromFields();
+    const dd = document.getElementById('compare-fields-dd');
+    if (dd) {
+        dd.addEventListener('toggle', () => {
+            if (dd.open) _renderCompareFieldsPanel();
+        });
+    }
     await loadPairs();
     await runAll();
     _refreshSelectionBar();
@@ -294,36 +327,16 @@ async function comparePair(name) {
 
     const from = document.getElementById('global-from')?.value || '';
     const to = document.getElementById('global-to')?.value || '';
-    const preset = _currentPreset();
     const params = new URLSearchParams();
     if (from) params.set('from_date', from);
     if (to) params.set('to_date', to);
-    if (preset) params.set('preset', preset);
 
     try {
         const res = await fetch(`/api/compare/col/${name}?${params}`);
         if (!res.ok) {
-            // Try to parse the structured error -- a preset filter with
-            // no rows on one side returns 400 with {preset_missing: 'left'|'right'}.
-            // Render a precise banner so the user knows which side to
-            // re-extract under the requested preset (loading the same
-            // (col, dt) under a new preset OVERWRITES the prior preset's
-            // data because the PK is (source_table, column_name, dt) --
-            // not (source_table, column_name, dt, preset)).
             let payload = null;
             try { payload = await res.json(); } catch (e) {}
-            if (payload && payload.preset_missing) {
-                const side = payload.preset_missing === 'left' ? 'LEFT' : 'RIGHT';
-                body.innerHTML = `<div class="empty-message" style="color:var(--jp-error-color0);">
-                    No <b>${preset}</b>-preset data loaded for <b>${side}</b> side of <b>${name}</b>.<br><br>
-                    To fix: <b>generate + extract + load</b> col stats under preset=<b>${preset}</b>
-                    for the ${side.toLowerCase()} side (loading a different preset for the same
-                    (column, date) overwrites the previously loaded preset's row).
-                </div>`;
-            } else {
-                throw new Error(payload?.error || await res.text());
-            }
-            return;
+            throw new Error(payload?.error || await res.text());
         }
         const data = await res.json();
         compareCache[name] = data;
@@ -663,11 +676,9 @@ function renderOnlyCols(cols, title) {
 function downloadExcel() {
     const from = document.getElementById('global-from')?.value || '';
     const to = document.getElementById('global-to')?.value || '';
-    const preset = _currentPreset();
     const params = new URLSearchParams();
     if (from) params.set('from_date', from);
     if (to) params.set('to_date', to);
-    if (preset) params.set('preset', preset);
     const fields = _getCompareFields();
     if (fields.length < COMPARE_FIELDS.length) {
         params.set('compare_fields', fields.join(','));
@@ -755,7 +766,6 @@ async function downloadHTML() {
                 title: document.getElementById('global-title')?.value || '',
                 subtitle: document.getElementById('global-subtitle')?.value || '',
                 pairs: live_pairs,
-                preset: _currentPreset(),
                 compare_fields: _getCompareFields(),
             }),
         });
@@ -788,7 +798,6 @@ async function saveLogs() {
             body: JSON.stringify({
                 from_date: document.getElementById('global-from')?.value || '',
                 to_date: document.getElementById('global-to')?.value || '',
-                preset: _currentPreset(),
                 compare_fields: _getCompareFields(),
             }),
         });

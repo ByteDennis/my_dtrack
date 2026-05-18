@@ -869,16 +869,26 @@ async function generateAll() {
     const effectiveTo = globalTo;
 
     // Resolve preset from radio (preferred) -> page default
-    // (DTRACK_COL_PRESET) -> 'quick'. "Custom" maps back to the closest
-    // canonical preset via the ticked stats checkboxes -- effectively
-    // a "did the user tick the right boxes for one of the presets?"
-    // match; if no exact match, ship as the closest preset and log a
-    // warning so the user knows which canonical set was used.
+    // (DTRACK_COL_PRESET) -> 'quick'. When the user picks "Custom",
+    // ship the explicit per-stat tick dict as `stats_override` and
+    // route through preset='quick' as the carrier — the backend uses
+    // the override directly, never snapping back up to a wider preset.
     const presetRadio = document.querySelector('input[name="col-preset"]:checked');
     let preset = presetRadio ? presetRadio.value : (window.DTRACK_COL_PRESET || 'quick');
+    let statsOverride = null;
     if (preset === 'custom') {
-        preset = _customStatsToPreset();
-        logMessage(`[preset] custom ticks resolved to '${preset}'`, 'warning');
+        statsOverride = {
+            n_total:   true,
+            n_missing: true,
+            n_unique:  document.getElementById('stat-n_unique')?.checked || false,
+            min_max:   document.getElementById('stat-min_max')?.checked  || false,
+            length:    document.getElementById('stat-length')?.checked   || false,
+            hash_sum:  document.getElementById('stat-hash_sum')?.checked || false,
+            top_10:    document.getElementById('stat-top_10')?.checked   || false,
+        };
+        preset = 'quick';
+        const on  = Object.entries(statsOverride).filter(([_, v]) => v).map(([k]) => k);
+        logMessage(`[preset] custom -> stats_override = ${on.join(', ')}`, 'info');
     }
     try {
         const genBody = {
@@ -886,11 +896,10 @@ async function generateAll() {
             sas_outdir: document.getElementById('global-sas-outdir')?.value || './sas/',
             aws_outdir: document.getElementById('global-aws-outdir')?.value || './csv/',
             pair_names: selected.map(p => p.name),
-            // preset wins; legacy 'level' kept for backwards compatibility
-            // with any external caller that still POSTs level=fine|coarse.
             preset: preset,
             level: preset === 'detailed' ? 'fine' : 'coarse',
         };
+        if (statsOverride) genBody.stats_override = statsOverride;
         if (effectiveFrom) genBody.from_date = effectiveFrom;
         if (effectiveTo) genBody.to_date = effectiveTo;
         logMessage(`[preset] generating with preset=${preset}`, 'info');

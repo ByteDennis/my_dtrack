@@ -303,17 +303,18 @@ def _write_combined_row_sql_csv(csv_tables, outdir, db_path=None, vintage=None):
 
 
 def _build_col_sql_csv(tbl_cfg, col, dtype, full_table, cte_prefix="",
-                       vintage=None, dt_label=None, coarse=False, preset=None):
-    """Thin wrapper over base.build_col_sql('duckdb', ...). Same shape
-    as the other platforms' wrappers."""
+                       vintage=None, dt_label=None, coarse=False, preset=None,
+                       stats_override=None):
     from .base import build_col_sql
     return build_col_sql('duckdb', tbl_cfg, col, dtype, full_table,
                           cte_prefix=cte_prefix, vintage=vintage,
-                          dt_label=dt_label, coarse=coarse, preset=preset)
+                          dt_label=dt_label, coarse=coarse, preset=preset,
+                          stats_override=stats_override)
 
 
 def _write_combined_col_sql_csv(csv_tables, outdir, db_path=None,
-                                  vintage=None, coarse=False, preset=None):
+                                  vintage=None, coarse=False, preset=None,
+                                  stats_override=None):
     """extract_col.sql for csv-source tables. Per-col emission with
     server-side GROUP BY vintage_expr (matches the Hadoop approach --
     minimal block count, DuckDB returns all buckets in one query)."""
@@ -410,7 +411,8 @@ def _write_combined_col_sql_csv(csv_tables, outdir, db_path=None,
                 sql, _ = _build_col_sql_csv(
                     extract_cfg, col, dtype, full_table, cte_prefix,
                     vintage=per_col_vintage, dt_label=per_col_dt_label,
-                    coarse=coarse, preset=preset)
+                    coarse=coarse, preset=preset,
+                    stats_override=stats_override)
             except Exception as e:
                 blocks.append(f"-- {qname}/{col}")
                 blocks.append(f"-- SKIP: SQL build failed: {e}")

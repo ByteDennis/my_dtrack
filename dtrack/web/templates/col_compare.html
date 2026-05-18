@@ -21,13 +21,14 @@
                          -- loading the same (col, dt) under a different
                          preset OVERWRITES the prior preset's row. -->
                     <label style="font-size:12px; display:flex; align-items:center; gap:6px;"
-                           title="Filter by the preset under which col stats were loaded. Empty = all.">
+                           title="Quick/Standard/Detailed pre-fills the Compare-fields below. Changing any checkbox flips this to Custom.">
                         Preset:
                         <select id="preset-select" onchange="onPresetChange()" style="font-size:12px;">
                             <option value="" selected>(all)</option>
                             <option value="quick">Quick</option>
                             <option value="standard">Standard</option>
                             <option value="detailed">Detailed</option>
+                            <option value="custom">Custom</option>
                         </select>
                     </label>
                     <details id="compare-fields-dd"

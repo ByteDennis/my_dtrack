@@ -234,46 +234,29 @@ def test_oracle_parse_sql_file_extracts_degrade_and_conn_macro():
 # them as drift.
 # ---------------------------------------------------------------------------
 
-def test_has_col_differences_suppresses_n_unique_when_degraded():
-    """A lifeboat row with n_unique=NULL vs a full row with n_unique=N
-    must NOT count as a difference, because the lifeboat path didn't even
-    compute distinct values."""
-    comp = {
-        'n_total_diff': 0,
-        'n_missing_diff': 0,
-        'n_unique_diff': 1_000_000,   # big "diff" but...
-        'n_unique_skipped': True,     # ...degraded → skip
-        'partial_left': 'oracle_degraded',
-        'partial_right': '',
-    }
-    assert _has_col_differences(comp) is False
+# >>> n_unique diff is always a real diff now that the lifeboat marker is gone <<< #
+def test_has_col_differences_flags_n_unique_diff():
+    assert _has_col_differences({
+        'n_total_diff': 0, 'n_missing_diff': 0, 'n_unique_diff': 5,
+    }) is True
 
 
-def test_has_col_differences_still_flags_n_unique_when_not_degraded():
-    """Sanity: when no partial flag is set, an n_unique diff is real drift."""
-    comp = {
-        'n_total_diff': 0,
-        'n_missing_diff': 0,
-        'n_unique_diff': 5,
-        'n_unique_skipped': False,
-        'partial_left': '',
-        'partial_right': '',
-    }
+def test_has_col_differences_flags_n_total_diff():
+    assert _has_col_differences({
+        'n_total_diff': 42, 'n_missing_diff': 0, 'n_unique_diff': 0,
+    }) is True
+
+
+def test_has_col_differences_clean_row_is_false():
+    assert _has_col_differences({
+        'n_total_diff': 0, 'n_missing_diff': 0, 'n_unique_diff': 0,
+    }) is False
+
+
+def test_compare_fields_filter_excludes_n_unique():
+    comp = {'n_total_diff': 0, 'n_missing_diff': 0, 'n_unique_diff': 7}
     assert _has_col_differences(comp) is True
-
-
-def test_has_col_differences_still_flags_n_total_when_degraded():
-    """n_total is COUNT(*) — survives the lifeboat unchanged. A real
-    diff on n_total IS drift even when one side ran the lifeboat."""
-    comp = {
-        'n_total_diff': 42,
-        'n_missing_diff': 0,
-        'n_unique_diff': 0,
-        'n_unique_skipped': True,
-        'partial_left': 'oracle_degraded',
-        'partial_right': '',
-    }
-    assert _has_col_differences(comp) is True
+    assert _has_col_differences(comp, compare_fields=['n_total', 'n_missing']) is False
 
 
 # ---------------------------------------------------------------------------
