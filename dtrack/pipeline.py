@@ -71,6 +71,7 @@ def run_pipeline(
     sas_tables = []
     aws_tables = []
     oracle_tables = []
+    databricks_tables = []
     for tbl in tables:
         source = (tbl.get("source") or "").lower()
         processed = tbl.get("processed") or ""
@@ -80,6 +81,8 @@ def run_pipeline(
             aws_tables.append(tbl)
         elif source == "oracle":
             oracle_tables.append(tbl)
+        elif source == "databricks":
+            databricks_tables.append(tbl)
         else:
             sas_tables.append(tbl)
 
@@ -107,6 +110,14 @@ def run_pipeline(
                         db_path=project_db, vintage=vintage, force=force,
                         from_date=from_date, to_date=to_date,
                         preset=preset, stats_override=stats_override)
+
+        if databricks_tables:
+            print(f"\n--- Extracting from Databricks ({len(databricks_tables)} tables) ---")
+            from .platforms.databricks import extract_databricks
+            extract_databricks(config_path, csv_outdir, types=types, max_workers=workers,
+                               db_path=project_db, vintage=vintage, force=force,
+                               from_date=from_date, to_date=to_date,
+                               preset=preset, stats_override=stats_override)
     else:
         print("Skipping extraction (--skip-extract)")
 
@@ -135,7 +146,7 @@ def _load_data(project_db, config, tables, csv_outdir, sas_outdir, types):
     for tbl in tables:
         qname = qualified_name(tbl)
         source = (tbl.get("source") or "").lower()
-        folder = csv_outdir if source in ("aws", "oracle") else sas_outdir
+        folder = csv_outdir if source in ("aws", "oracle", "databricks") else sas_outdir
 
         if "row" in types:
             csv_path = os.path.join(folder, f"{qname}_row.csv")

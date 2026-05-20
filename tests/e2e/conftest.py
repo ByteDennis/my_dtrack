@@ -93,6 +93,23 @@ _E2E_PAIRS = {
         "fromDate": "",
         "toDate": "",
     },
+    "aws_vs_databricks": {
+        "description": "e2e: AWS Athena YYYYMMDD vs Databricks YYYYMMDD",
+        "left": {
+            "name": "month_summary", "table": "month_summary",
+            "source": "aws", "conn_macro": "analytics_db",
+            "date_col": "month_dt", "date_type": "num_yyyymm",
+        },
+        "right": {
+            "name": "pos_daily", "table": "pos_daily",
+            "source": "databricks",
+            "conn_macro": "main.analytics",
+            "date_col": "snapshot_dt", "date_type": "int_compact",
+        },
+        "mode": "incremental",
+        "fromDate": "",
+        "toDate": "",
+    },
     "sas_dt_vs_aws_compact": {
         # sas source (gen_sas), aws right side. Mock CSVs:
         #   sas_acct_snap_row.csv  +  aws_acct_snap_aws_row.csv.
@@ -181,6 +198,7 @@ def workdir(tmp_path: Path, monkeypatch) -> dict:
         "mock": str(mock_local),
         "pair_oracle_aws": "oracle_date_vs_aws_int",
         "pair_sas_aws": "sas_dt_vs_aws_compact",
+        "pair_databricks": "aws_vs_databricks",
     }
 
 

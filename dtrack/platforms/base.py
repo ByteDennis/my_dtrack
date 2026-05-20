@@ -234,7 +234,7 @@ def quote_ident(name, dialect="oracle"):
 def _sentinel_dialect_key(dialect):
     """Map SQL dialect string to NULL_SENTINELS top-level key."""
     d = (dialect or "").lower()
-    if d in ("athena", "trino", "aws"):
+    if d in ("athena", "trino", "aws", "databricks", "spark"):
         return "aws"
     if d in ("hadoop", "hive"):
         return "hadoop"

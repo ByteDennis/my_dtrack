@@ -117,6 +117,19 @@ PLATFORM_RUNNER = {
         'degraded_label':   'athena_degraded',
         'lifeboat_errors':  ['Query exhausted resources'],
     },
+    'databricks': {
+        'worker_env':       'DATABRICKS_MAX_WORKERS',
+        'worker_default':   4,
+        'degraded_label':   'databricks_degraded',
+        'lifeboat_errors':  [
+            'Job aborted',
+            'OutOfMemoryError',
+            'memory limit',
+            'GC overhead',
+            'SparkOutOfMemoryError',
+            'ExecutorLostFailure',
+        ],
+    },
     # CSV-as-source: powered by DuckDB in-process. Workers are CPU-bound
     # (in-memory query exec) so default to a few; no real per-conn
     # concurrency limit but writing CSV results back to disk creates I/O
@@ -184,6 +197,7 @@ DATA_SOURCES = [
     {"value": "hadoop", "label": "SAS/Hadoop"},
     {"value": "sas", "label": "SAS Dataset"},
     {"value": "aws", "label": "AWS/Athena"},
+    {"value": "databricks", "label": "AWS/Databricks"},
     {"value": "csv", "label": "CSV"},
 ]
 
@@ -273,6 +287,7 @@ CONNECTION_MACROS = {
     "hadoop": ["hdp", "hadoop_prod"],
     "sas": ["work", "sasuser"],
     "aws": ["analytics_db", "warehouse_db", "mydb"],
+    "databricks": [],
     "csv": [],
 }
 

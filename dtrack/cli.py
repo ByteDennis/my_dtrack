@@ -765,6 +765,26 @@ def cmd_gen_aws(args):
                 preset=preset, stats_override=stats_override)
 
 
+def cmd_gen_databricks(args):
+    """Extract data from Databricks SQL (Python-direct via databricks-sql)."""
+    from .platforms.databricks import extract_databricks
+    if not os.path.exists(args.config):
+        print(f"Error: Config file not found: {args.config}")
+        sys.exit(1)
+    types = [args.type] if args.type != "both" else ["row", "col"]
+    db_path = getattr(args, 'db_path', None)
+    vintage = getattr(args, 'vintage', None)
+    force = getattr(args, 'force', False)
+    from_date = getattr(args, 'from_date', None)
+    to_date = getattr(args, 'to_date', None)
+    preset = getattr(args, 'preset', None)
+    stats_override = _parse_stats_override(getattr(args, 'stats_override', None))
+    extract_databricks(args.config, args.outdir, types=types, max_workers=args.workers,
+                       db_path=db_path, vintage=vintage, force=force,
+                       from_date=from_date, to_date=to_date,
+                       preset=preset, stats_override=stats_override)
+
+
 def cmd_gen_oracle(args):
     """Extract data from Oracle via oracledb (Python-direct)."""
     from .platforms.oracle import extract_oracle
@@ -1144,6 +1164,24 @@ def main():
     p.add_argument('--stats-override', dest='stats_override',
                    help=_STATS_OVERRIDE_HELP)
 
+    # gen-databricks
+    p = sub.add_parser('gen-databricks',
+                       help='Extract data from Databricks SQL (Python-direct via databricks-sql)')
+    p.add_argument('config')
+    p.add_argument('--outdir', default='./csv/')
+    p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
+    p.add_argument('--workers', type=int,
+                   help='Concurrent col-extraction workers (default: DATABRICKS_MAX_WORKERS or 4)')
+    p.add_argument('--db', dest='db_path')
+    p.add_argument('--vintage')
+    p.add_argument('--force', action='store_true')
+    p.add_argument('--from-date', help='Start date for incremental extraction')
+    p.add_argument('--to-date', help='End date for incremental extraction')
+    p.add_argument('--preset', choices=['quick', 'standard', 'detailed'],
+                   help=_PRESET_HELP)
+    p.add_argument('--stats-override', dest='stats_override',
+                   help=_STATS_OVERRIDE_HELP)
+
     # gen-oracle
     p = sub.add_parser('gen-oracle', help='Extract data from Oracle (Python-direct via oracledb)')
     p.add_argument('config')
@@ -1282,6 +1320,7 @@ def main():
         'compare-col': cmd_compare_col,
         'gen-sas': cmd_gen_sas,
         'gen-aws': cmd_gen_aws,
+        'gen-databricks': cmd_gen_databricks,
         'gen-oracle': cmd_gen_oracle,
         'match-columns': cmd_match_columns,
         'run': cmd_run,

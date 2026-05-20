@@ -32,6 +32,7 @@ debug = ["ipdb>=0.13.0", "debugpy>=1.6.0"]
 # inside platforms/csv_duckdb.py and surfaces a clear error message
 # when the user tries to extract from a csv-source pair without it.
 csv = ["duckdb>=0.10.0"]
+databricks = ["databricks-sql-connector>=3.0.0", "databricks-sdk>=0.18.0"]
 
 [project.scripts]
 dtrack = "dtrack.cli:main"

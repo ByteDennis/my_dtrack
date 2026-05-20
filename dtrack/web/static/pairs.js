@@ -370,29 +370,28 @@ async function _onDateTypeChange(changedSelect, otherSelect) {
     }
 }
 
+const CONN_PLACEHOLDERS = {
+    oracle:     'pb23',
+    hadoop:     'hdp',
+    sas:        'work',
+    aws:        'analytics_db',
+    databricks: 'catalog.schema  (or schema → uses DB_DEFAULT_CATALOG)',
+    csv:        '(not used)',
+};
+
 function updateConnOptions(side) {
     const sourceSelect = document.getElementById(`${side}-source`);
-    const connSelect = document.getElementById(`${side}-conn`);
+    const connInput = document.getElementById(`${side}-conn`);
+    const dlist = document.getElementById(`${side}-conn-options`);
     const source = sourceSelect.value;
 
-    // Clear existing options
-    connSelect.innerHTML = '';
-
-    // Add options for this source
     const options = CONNECTION_MACROS[source] || [];
-    if (options.length === 0) {
-        connSelect.add(new Option('—', ''));
-        connSelect.disabled = true;
-    } else {
-        options.forEach(opt => {
-            connSelect.add(new Option(opt, opt));
-        });
-        connSelect.disabled = false;
+    if (dlist) {
+        dlist.innerHTML = options.map(o => `<option value="${o}">`).join('');
     }
+    connInput.placeholder = CONN_PLACEHOLDERS[source] || '';
+    connInput.disabled = (source === 'csv');
 
-    // Toggle the CSV path field visibility — only meaningful when
-    // source=csv. Hiding it for other sources keeps the form tidy
-    // and prevents accidental saves of stale csv_path values.
     const csvGroup = document.getElementById(`${side}-csv-path-group`);
     if (csvGroup) {
         csvGroup.style.display = (source === 'csv') ? '' : 'none';

@@ -117,7 +117,7 @@ def _cfg():
 # on whichever side the pair config places them, so callers must pass
 # `outdir` explicitly for csv (the col_gen / pairs JS already does).
 _LEFT_PLATFORMS = {"oracle", "hadoop", "sas"}
-_RIGHT_PLATFORMS = {"aws", "athena"}
+_RIGHT_PLATFORMS = {"aws", "athena", "databricks"}
 
 
 def _side_outdir(platform: str) -> str:
@@ -343,6 +343,11 @@ async def api_extract(request: Request):
                 extract_oracle(_config_path, outdir, types=[extract_type],
                                db_path=_db_path, from_date=from_date, to_date=to_date,
                                max_workers=int(max_workers) if max_workers else None)
+            elif platform == "databricks":
+                from ..platforms.databricks import extract_databricks
+                extract_databricks(_config_path, outdir, types=[extract_type],
+                                   db_path=_db_path, from_date=from_date, to_date=to_date,
+                                   max_workers=int(max_workers) if max_workers else None)
             else:
                 from ..platforms.hadoop import gen_sas
                 gen_sas(_config_path, outdir, types=[extract_type],
@@ -852,7 +857,7 @@ async def api_generate_files(request: Request):
                         bounds.append(f"{date_col} <= {_format_date_bound(eff_to, date_type, is_sas, is_upper=True)}")
                 if bounds:
                     extra = " AND ".join(bounds)
-                    if source in ('aws', 'oracle', 'hadoop'):
+                    if source in ('aws', 'oracle', 'hadoop', 'databricks'):
                         # Gen-first platforms (AWS / Oracle / Hadoop) all run
                         # through builders that compose their own per-bucket
                         # BETWEEN from the row_comparison's matching_dates.
@@ -4794,7 +4799,7 @@ async def api_playground_run(request: Request):
     conn_id = body.get("conn") or ""
     row_cap = int(body.get("row_cap") or 200)
 
-    if engine not in ("athena", "oracle", "hadoop"):
+    if engine not in ("athena", "oracle", "hadoop", "databricks"):
         return JSONResponse(status_code=400, content={"error": f"Unsupported engine: {engine!r}"})
     if not sql:
         return JSONResponse(status_code=400, content={"error": "SQL is required"})
@@ -4878,7 +4883,7 @@ async def api_playground_run(request: Request):
                 conn.close()
             except Exception:
                 pass
-        else:
+        elif engine == "hadoop":
             from ..platforms.hadoop import hadoop_connect
             # Empty conn → hadoop_connect picks HADOOP_DSN env or
             # 'Hive_Prod'. SSL_CERT_FILE and DSN-not-found diagnostics
@@ -4886,6 +4891,22 @@ async def api_playground_run(request: Request):
             conn = hadoop_connect(conn_id or None)
             if conn is None:
                 raise RuntimeError("hadoop_connect returned None (mock mode?)")
+            cur = conn.cursor()
+            handle["cursor"] = cur
+            handle["conn"]   = conn
+            cur.execute(sql)
+            columns = [d[0] for d in (cur.description or [])]
+            fetched = cur.fetchall() or []
+            n_rows_total = len(fetched)
+            rows = [_row_to_strs(r, len(columns)) for r in fetched[:row_cap]]
+            try:
+                cur.close()
+                conn.close()
+            except Exception:
+                pass
+        else:
+            from ..platforms.databricks import databricks_connect
+            conn = databricks_connect(conn_id or None)
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn

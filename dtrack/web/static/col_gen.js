@@ -853,10 +853,12 @@ async function generateAll() {
     const awsSources = new Set(['aws']);
     const oracleSources = new Set(['oracle']);
     const hadoopSources = new Set(['hadoop']);
+    const databricksSources = new Set(['databricks']);
     const csvSources = new Set(['csv']);
     const hasAws    = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
     const hasOracle = selected.some(p => oracleSources.has(p.left?.source) || oracleSources.has(p.right?.source));
     const hasHadoop = selected.some(p => hadoopSources.has(p.left?.source) || hadoopSources.has(p.right?.source));
+    const hasDatabricks = selected.some(p => databricksSources.has(p.left?.source) || databricksSources.has(p.right?.source));
     const hasCsvLeft  = selected.some(p => csvSources.has(p.left?.source));
     const hasCsvRight = selected.some(p => csvSources.has(p.right?.source));
     const hasCsv      = hasCsvLeft || hasCsvRight;
@@ -937,7 +939,7 @@ async function generateAll() {
     }
 
     // Show Run buttons for platforms that have selected pairs.
-    if (hasAws || hasOracle || hasHadoop || hasCsv) {
+    if (hasAws || hasOracle || hasHadoop || hasDatabricks || hasCsv) {
         const btnDiv = document.createElement('div');
         btnDiv.style.cssText = 'margin:12px 0; display:flex; gap:12px; align-items:center; flex-wrap:wrap;';
         const parts = [];
@@ -956,6 +958,11 @@ async function generateAll() {
             parts.push(`<button class="btn-secondary" id="resume-hadoop-col-btn"
                 title="Re-run only blocks not already cached.">Resume Hadoop</button>`);
         }
+        if (hasDatabricks) {
+            parts.push(`<button class="btn-primary" id="run-databricks-col-btn">Run Databricks Extraction</button>`);
+            parts.push(`<button class="btn-secondary" id="resume-databricks-col-btn"
+                title="Re-run only blocks not already cached.">Resume Databricks</button>`);
+        }
         if (hasCsv) {
             parts.push(`<button class="btn-primary" id="run-csv-col-btn">Run CSV Extraction</button>`);
         }
@@ -973,6 +980,10 @@ async function generateAll() {
         if (hasHadoop) {
             document.getElementById('run-hadoop-col-btn').onclick = () => runColExtraction('hadoop', false);
             document.getElementById('resume-hadoop-col-btn').onclick = () => runColExtraction('hadoop', true);
+        }
+        if (hasDatabricks) {
+            document.getElementById('run-databricks-col-btn').onclick = () => runColExtraction('databricks', false);
+            document.getElementById('resume-databricks-col-btn').onclick = () => runColExtraction('databricks', true);
         }
         if (hasCsv) {
             // CSV may need both passes (left + right); _runCsvCol handles
@@ -1083,7 +1094,7 @@ async function runColExtraction(platform, resume = false) {
     const state = {controller, runId: null};
     _colRunState[ctrlKey] = state;
 
-    const _LABELS = {oracle: 'Oracle', hadoop: 'Hadoop', aws: 'AWS'};
+    const _LABELS = {oracle: 'Oracle', hadoop: 'Hadoop', aws: 'AWS', databricks: 'Databricks'};
     const label = _LABELS[platform] || 'AWS';
     // Oracle and Hadoop both write to LEFT outdir (sas/); AWS to RIGHT (csv/).
     const writesLeft = (platform === 'oracle' || platform === 'hadoop');

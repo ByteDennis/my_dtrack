@@ -27,7 +27,7 @@ async function pgCopyHistorySql(id, btn) {
 
 let _pgLastResult = null;
 let _pgHadoopProfiles = {libname: {}, procsql: {}};
-let _pgConnMacros = {oracle: [], aws: [], hadoop: []};
+let _pgConnMacros = {oracle: [], aws: [], hadoop: [], databricks: []};
 
 // Form fields we persist across page reloads / server restarts. Values are
 // stored under `dtrack-playground:<id>` in localStorage; saved on every
@@ -98,7 +98,7 @@ async function pgLoadConstants() {
         const data = await res.json();
         _pgHadoopProfiles.libname = data.HADOOP_LIBNAME_PROFILES || {};
         _pgHadoopProfiles.procsql = data.HADOOP_PROCSQL_PROFILES || {};
-        _pgConnMacros = data.CONNECTION_MACROS || {oracle: [], aws: [], hadoop: []};
+        _pgConnMacros = data.CONNECTION_MACROS || {oracle: [], aws: [], hadoop: [], databricks: []};
         pgSasRepopulateProfiles();
 
         // SAS-side Oracle macro dropdown (kept as <select>; macros are fixed).
@@ -121,6 +121,7 @@ function pgRepopulateConnDatalist() {
     if (!dl) return;
     const eng = _pgEngine();
     const key = eng === 'athena' ? 'aws'
+              : eng === 'databricks' ? 'databricks'
               : eng === 'oracle' ? 'oracle'
               : eng === 'hadoop' ? 'hadoop'
               : null;
@@ -202,6 +203,12 @@ function pgEngineChanged() {
                 '-- Tip: for column names that start with a digit or contain\n' +
                 '-- special chars, use double quotes — e.g. SELECT "123_col" FROM t.\n' +
                 '-- Single quotes \'\' make the value a string literal, not an identifier.';
+        } else if (eng === 'databricks') {
+            label.textContent = 'Databricks catalog.schema (optional)';
+            conn.placeholder = 'my_catalog.my_schema';
+            sqlBox.placeholder = "SELECT COUNT(*) FROM catalog.schema.trades WHERE trade_date = DATE '2026-05-01'\n" +
+                '\n-- Auth via DB_PROFILE + DB_HTTPS env vars (.env).\n' +
+                '-- Three-part table refs: catalog.schema.table.';
         } else if (eng === 'hadoop') {
             label.textContent = 'Hive ODBC DSN (default Hive_Prod)';
             conn.placeholder = 'Hive_Prod';
