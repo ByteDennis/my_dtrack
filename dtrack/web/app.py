@@ -524,7 +524,8 @@ async def api_run_sql_file(request: Request):
     overwrite_cache = bool(body.get("overwrite_cache", False))
 
     sql_path = os.path.join(outdir, f"extract_{extract_type}.sql")
-    if not os.path.exists(sql_path):
+    # >>> databricks doesn't pre-generate extract_*.sql; it builds SQL inside extract_databricks <<< #
+    if platform != "databricks" and not os.path.exists(sql_path):
         return JSONResponse(status_code=404, content={
             "ok": False, "error": f"SQL file not found: {sql_path}"
         })
@@ -578,6 +579,59 @@ async def api_run_sql_file(request: Request):
                     resume=resume,
                     cancel_event=cancel_event,
                 )
+            elif platform == "databricks":
+                # extract_databricks builds Spark SQL internally and runs it via
+                # databricks_connect; it doesn't take on_progress / cancel_event
+                # yet, so we tap stdout/stderr line-by-line into the SSE stream
+                # and check cancel_event only before starting.
+                from ..platforms.databricks import extract_databricks
+
+                class _LineQueueWriter:
+                    # >>> tee stdout: flush each completed line into progress_q as a 'log' event <<< #
+                    def __init__(self, q):
+                        self.q = q
+                        self._buf = ""
+
+                    def write(self, s):
+                        if not s:
+                            return
+                        self._buf += s
+                        while "\n" in self._buf:
+                            line, self._buf = self._buf.split("\n", 1)
+                            line = line.rstrip()
+                            if line:
+                                self.q.put({"_event": "log", "line": line})
+
+                    def flush(self):
+                        if self._buf.strip():
+                            self.q.put({"_event": "log", "line": self._buf.rstrip()})
+                            self._buf = ""
+
+                results = []
+                if cancel_event.is_set():
+                    progress_q.put({"_event": "log", "line": "[databricks] cancelled before start"})
+                else:
+                    tee = _LineQueueWriter(progress_q)
+                    ok_run = True
+                    err_msg = None
+                    try:
+                        with redirect_stdout(tee), redirect_stderr(tee):
+                            extract_databricks(
+                                _config_path, outdir, types=[extract_type],
+                                db_path=_db_path,
+                                max_workers=int(max_workers) if max_workers else None,
+                            )
+                    except Exception as e:
+                        ok_run = False
+                        err_msg = str(e)
+                        progress_q.put({"_event": "log", "line": f"[databricks] ERROR: {e}"})
+                    finally:
+                        tee.flush()
+                    results = [{
+                        "ok": ok_run,
+                        "name": "databricks",
+                        "error": err_msg or "",
+                    }]
             else:
                 from ..platforms.athena import run_sql_file
                 results = run_sql_file(
@@ -628,6 +682,9 @@ async def api_run_sql_file(request: Request):
                 # sequential when batches finish together).
                 msg.pop("_event")
                 yield f"event: start\ndata: {json.dumps(msg)}\n\n"
+            elif msg.get("_event") == "log":
+                msg.pop("_event")
+                yield f"event: log\ndata: {json.dumps(msg)}\n\n"
             else:
                 yield f"event: progress\ndata: {json.dumps(msg)}\n\n"
 

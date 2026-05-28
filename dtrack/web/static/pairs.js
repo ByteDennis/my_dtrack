@@ -1200,10 +1200,12 @@ async function generateAll() {
     const awsSources = new Set(['aws', 'csv']);
     const oracleSources = new Set(['oracle']);
     const hadoopSources = new Set(['hadoop']);
+    const databricksSources = new Set(['databricks']);
     const csvSources = new Set(['csv']);
     const hasAws = selected.some(p => awsSources.has(p.left?.source) || awsSources.has(p.right?.source));
     const hasOracle = selected.some(p => oracleSources.has(p.left?.source) || oracleSources.has(p.right?.source));
     const hasHadoop = selected.some(p => hadoopSources.has(p.left?.source) || hadoopSources.has(p.right?.source));
+    const hasDatabricks = selected.some(p => databricksSources.has(p.left?.source) || databricksSources.has(p.right?.source));
     // CSV mode (DuckDB in-process). Both sides MAY be csv -- in that case
     // we run two passes (left outdir + right outdir) since each side
     // wrote its extract_*.sql to its own outdir.
@@ -1232,6 +1234,7 @@ async function generateAll() {
                 <span>AWS / Oracle</span>
                 <span style="display:flex; gap:6px;">
                     ${hasAws ? `<button class="btn-primary" id="run-aws-btn" style="font-size:11px; padding:3px 10px;">Run AWS Extraction</button>` : ''}
+                    ${hasDatabricks ? `<button class="btn-primary" id="run-databricks-btn" style="font-size:11px; padding:3px 10px;">Run Databricks Extraction</button>` : ''}
                     ${hasOracle ? `<button class="btn-primary" id="run-oracle-btn" style="font-size:11px; padding:3px 10px;">Run Oracle Extraction</button>` : ''}
                     ${hasHadoop ? `<button class="btn-primary" id="run-hadoop-btn" style="font-size:11px; padding:3px 10px;">Run Hadoop Extraction</button>` : ''}
                     ${hasCsv ? `<button class="btn-primary" id="run-csv-btn" style="font-size:11px; padding:3px 10px;">Run CSV Extraction</button>` : ''}
@@ -1319,6 +1322,7 @@ async function generateAll() {
         // helper composes both passes when a pair has CSV on both sides.
         const realPlatform = platform.startsWith('csv') ? 'csv' : platform;
         const _LABELS = {oracle: 'Oracle', hadoop: 'Hadoop', aws: 'AWS',
+                         databricks: 'Databricks',
                          'csv': 'CSV', 'csv-left': 'CSV (left)',
                          'csv-right': 'CSV (right)'};
         const label = _LABELS[platform] || 'AWS';
@@ -1396,6 +1400,8 @@ async function generateAll() {
 
                         if (eventType === 'run_id') {
                             activeRunId = msg.run_id;
+                        } else if (eventType === 'log') {
+                            logMessage(msg.line, msg.level || 'info');
                         } else if (eventType === 'start') {
                             const eta = _fmtEta(msg.eta_sec);
                             const etaPart = eta ? ` | eta ${eta}` : '';
@@ -1439,9 +1445,10 @@ async function generateAll() {
             }
         };
     }
-    if (hasAws)    _runExtraction('aws',    'run-aws-btn');
-    if (hasOracle) _runExtraction('oracle', 'run-oracle-btn');
-    if (hasHadoop) _runExtraction('hadoop', 'run-hadoop-btn');
+    if (hasAws)        _runExtraction('aws',        'run-aws-btn');
+    if (hasDatabricks) _runExtraction('databricks', 'run-databricks-btn');
+    if (hasOracle)     _runExtraction('oracle',     'run-oracle-btn');
+    if (hasHadoop)     _runExtraction('hadoop',     'run-hadoop-btn');
 
     // CSV runner: one button drives both sides if needed. Click runs
     // left first, then right (each is a separate /api/extract/run-sql

@@ -1163,6 +1163,8 @@ async function runColExtraction(platform, resume = false) {
 
                 if (eventType === 'run_id') {
                     state.runId = msg.run_id;
+                } else if (eventType === 'log') {
+                    logMessage(msg.line, msg.level || 'info');
                 } else if (eventType === 'start') {
                     const eta = _fmtEta(msg.eta_sec);
                     const etaPart = eta ? ` | eta ${eta}` : '';
