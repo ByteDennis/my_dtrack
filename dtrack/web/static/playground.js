@@ -34,7 +34,7 @@ let _pgConnMacros = {oracle: [], aws: [], hadoop: [], databricks: []};
 // input/change event, restored on DOMContentLoaded after pgLoadConstants
 // has populated the dynamic dropdowns.
 const _PG_PERSIST_IDS = [
-    'pg-conn', 'pg-row-cap', 'pg-sql',
+    'pg-conn', 'pg-row-cap', 'pg-use-cache', 'pg-sql',
     'pg-sas-kind', 'pg-sas-method', 'pg-sas-conn',
     'pg-sas-profile',
     'pg-sas-server', 'pg-sas-host', 'pg-sas-schema', 'pg-sas-port',
@@ -45,7 +45,8 @@ const _PG_LS_PREFIX = 'dtrack-playground:';
 function _pgSaveField(id) {
     const el = document.getElementById(id);
     if (!el) return;
-    try { localStorage.setItem(_PG_LS_PREFIX + id, el.value); } catch (e) {}
+    const v = (el.type === 'checkbox') ? (el.checked ? '1' : '0') : el.value;
+    try { localStorage.setItem(_PG_LS_PREFIX + id, v); } catch (e) {}
 }
 
 function _pgRestoreField(id) {
@@ -54,6 +55,7 @@ function _pgRestoreField(id) {
     let v;
     try { v = localStorage.getItem(_PG_LS_PREFIX + id); } catch (e) { return; }
     if (v === null) return;
+    if (el.type === 'checkbox') { el.checked = (v === '1'); return; }
     // For <select>, only restore if the option exists (set by constants load).
     if (el.tagName === 'SELECT' && !Array.from(el.options).some(o => o.value === v)) return;
     el.value = v;
@@ -74,7 +76,7 @@ function _pgWirePersistence() {
     for (const id of _PG_PERSIST_IDS) {
         const el = document.getElementById(id);
         if (!el) continue;
-        const evt = (el.tagName === 'SELECT' || el.type === 'number') ? 'change' : 'input';
+        const evt = (el.tagName === 'SELECT' || el.type === 'number' || el.type === 'checkbox') ? 'change' : 'input';
         el.addEventListener(evt, () => _pgSaveField(id));
     }
     document.querySelectorAll('input[name="pg-engine"]').forEach(r => {
@@ -242,7 +244,8 @@ async function pgRun() {
     const conn = document.getElementById('pg-conn').value.trim();
     if (engine === 'oracle' && !conn) { _pgSetStatus('Oracle requires a connection macro.', 'error'); return; }
 
-    const rowCap = parseInt(document.getElementById('pg-row-cap').value || '200', 10);
+    const rowCap = parseInt(document.getElementById('pg-row-cap').value || '20', 10);
+    const useCache = document.getElementById('pg-use-cache').checked;
     _pgSetStatus('Running…');
     btn.disabled = true;
     document.getElementById('pg-cancel-btn').style.display = '';
@@ -251,7 +254,7 @@ async function pgRun() {
         const res = await fetch('/api/playground/run', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({engine, sql: sql.trim(), conn, row_cap: rowCap}),
+            body: JSON.stringify({engine, sql: sql.trim(), conn, row_cap: rowCap, use_cache: useCache}),
         });
         const data = await res.json();
         if (data && data.cancelled) {
@@ -262,7 +265,8 @@ async function pgRun() {
             _pgRenderError(data.error || `HTTP ${res.status}`);
         } else {
             _pgLastResult = data;
-            _pgSetStatus(`✓ ${data.n_rows_total} row${data.n_rows_total===1?'':'s'} · ${data.elapsed_sec}s`, 'ok');
+            const tag = data.cached ? ' · cached' : '';
+            _pgSetStatus(`✓ ${data.n_rows_total} row${data.n_rows_total===1?'':'s'} · ${data.elapsed_sec}s${tag}`, 'ok');
             _pgRenderResult(data);
         }
     } catch (e) {
@@ -391,6 +395,7 @@ function _pgRenderResult(data) {
         parts.push(`query_id <code>${_pgEsc(data.query_id)}</code>`);
     }
     parts.push(`showing first ${data.n_rows_returned}`);
+    if (data.cached) parts.push('<span style="color:var(--jp-success-color0);">cached</span>');
     meta.innerHTML = parts.join(' · ');
 
     const cols = data.columns || [];
@@ -415,16 +420,18 @@ function _pgRenderError(msg) {
 }
 
 function pgDownloadResultCSV() {
-    if (!_pgLastResult) { _pgSetStatus('No result to download.', 'error'); return; }
-    const cols = _pgLastResult.columns || [];
-    const rows = _pgLastResult.rows || [];
-    const csvCell = v => {
-        const s = v == null ? '' : String(v);
-        return /[",\n\r]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
-    };
-    const lines = [cols.map(csvCell).join(',')];
-    for (const r of rows) lines.push(r.map(csvCell).join(','));
-    _pgDownloadBlob(lines.join('\n'), 'playground_result.csv', 'text/csv');
+    if (!_pgLastResult || !_pgLastResult.cache_key) {
+        _pgSetStatus('No result to download.', 'error');
+        return;
+    }
+    // Stream from server so we never hold the full result in JS memory —
+    // browser writes straight to disk via native download.
+    const a = document.createElement('a');
+    a.href = `/api/playground/download/${_pgLastResult.cache_key}`;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
 }
 
 function _pgFmtBytes(n) {

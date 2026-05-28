@@ -4775,6 +4775,31 @@ def _row_to_strs(row, n_cols):
 # on the cursor / connection without blocking the running thread.
 _PLAYGROUND_RUNNING: dict = {}
 
+# >>> in-memory LRU of completed playground results, keyed by sha256(engine|conn|sql) <<< #
+import hashlib as _pg_hashlib
+from collections import OrderedDict as _PgOrderedDict
+_PLAYGROUND_CACHE: "_PgOrderedDict[str, dict]" = _PgOrderedDict()
+_PLAYGROUND_CACHE_MAX = 10
+
+
+def _pg_cache_key(engine: str, conn: str, sql: str) -> str:
+    raw = f"{engine}|{conn}|{sql}".encode("utf-8")
+    return _pg_hashlib.sha256(raw).hexdigest()
+
+
+def _pg_cache_put(key: str, entry: dict) -> None:
+    _PLAYGROUND_CACHE[key] = entry
+    _PLAYGROUND_CACHE.move_to_end(key)
+    while len(_PLAYGROUND_CACHE) > _PLAYGROUND_CACHE_MAX:
+        _PLAYGROUND_CACHE.popitem(last=False)
+
+
+def _pg_cache_get(key: str) -> Optional[dict]:
+    entry = _PLAYGROUND_CACHE.get(key)
+    if entry is not None:
+        _PLAYGROUND_CACHE.move_to_end(key)
+    return entry
+
 
 @app.post("/api/playground/run")
 async def api_playground_run(request: Request):
@@ -4797,12 +4822,37 @@ async def api_playground_run(request: Request):
     engine = (body.get("engine") or "").lower()
     sql = (body.get("sql") or "").strip()
     conn_id = body.get("conn") or ""
-    row_cap = int(body.get("row_cap") or 200)
+    row_cap = int(body.get("row_cap") or 20)
+    use_cache = bool(body.get("use_cache") or False)
 
     if engine not in ("athena", "oracle", "hadoop", "databricks"):
         return JSONResponse(status_code=400, content={"error": f"Unsupported engine: {engine!r}"})
     if not sql:
         return JSONResponse(status_code=400, content={"error": "SQL is required"})
+
+    cache_key = _pg_cache_key(engine, conn_id, sql)
+    if use_cache:
+        hit = _pg_cache_get(cache_key)
+        if hit is not None:
+            cached_rows = hit["rows"]
+            print(f"[playground] cache HIT {engine}/{conn_id or '-'} key={cache_key[:12]}",
+                  flush=True)
+            return {
+                "ok": True,
+                "cached": True,
+                "cache_key": cache_key,
+                "columns": hit["columns"],
+                "rows": cached_rows[:row_cap],
+                "n_rows_total": hit["n_rows_total"],
+                "n_rows_returned": min(len(cached_rows), row_cap),
+                "elapsed_sec": hit.get("elapsed_sec"),
+                "wall_sec": 0,
+                "engine_sec": hit.get("engine_sec"),
+                "total_sec": hit.get("total_sec"),
+                "data_scanned_bytes": hit.get("data_scanned_bytes"),
+                "query_id": hit.get("query_id"),
+                "history_id": hit.get("history_id"),
+            }
 
     # Insert the history row up front in 'running' status so the cancel
     # endpoint has an id to look up. We update with elapsed/status/n_rows
@@ -4829,6 +4879,7 @@ async def api_playground_run(request: Request):
 
     columns: list = []
     rows: list = []
+    all_rows: list = []
     n_rows_total = 0
     engine_sec: Optional[float] = None
     total_sec: Optional[float] = None
@@ -4840,7 +4891,7 @@ async def api_playground_run(request: Request):
     def _execute():
         """Runs in a worker thread. Stashes cur/conn into `handle` so the
         cancel endpoint can interrupt us. Returns (cols, rows, stats)."""
-        nonlocal columns, rows, n_rows_total, engine_sec, total_sec
+        nonlocal columns, rows, all_rows, n_rows_total, engine_sec, total_sec
         nonlocal data_scanned, query_id
 
         if engine == "athena":
@@ -4854,7 +4905,8 @@ async def api_playground_run(request: Request):
             columns = [d[0] for d in (cur.description or [])]
             fetched = cur.fetchall() or []
             n_rows_total = len(fetched)
-            rows = [_row_to_strs(r, len(columns)) for r in fetched[:row_cap]]
+            all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
+            rows = all_rows[:row_cap]
             ms = getattr(cur, 'engine_execution_time_in_millis', None)
             if ms is not None:
                 engine_sec = round(ms / 1000.0, 4)
@@ -4877,7 +4929,8 @@ async def api_playground_run(request: Request):
             columns = [d[0] for d in (cur.description or [])]
             fetched = cur.fetchall() or []
             n_rows_total = len(fetched)
-            rows = [_row_to_strs(r, len(columns)) for r in fetched[:row_cap]]
+            all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
+            rows = all_rows[:row_cap]
             try:
                 cur.close()
                 conn.close()
@@ -4898,7 +4951,8 @@ async def api_playground_run(request: Request):
             columns = [d[0] for d in (cur.description or [])]
             fetched = cur.fetchall() or []
             n_rows_total = len(fetched)
-            rows = [_row_to_strs(r, len(columns)) for r in fetched[:row_cap]]
+            all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
+            rows = all_rows[:row_cap]
             try:
                 cur.close()
                 conn.close()
@@ -4914,7 +4968,8 @@ async def api_playground_run(request: Request):
             columns = [d[0] for d in (cur.description or [])]
             fetched = cur.fetchall() or []
             n_rows_total = len(fetched)
-            rows = [_row_to_strs(r, len(columns)) for r in fetched[:row_cap]]
+            all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
+            rows = all_rows[:row_cap]
             try:
                 cur.close()
                 conn.close()
@@ -4964,8 +5019,25 @@ async def api_playground_run(request: Request):
             "wall_sec": wall_sec, "history_id": history_id,
         })
 
+    _pg_cache_put(cache_key, {
+        "engine": engine,
+        "conn": conn_id,
+        "sql": sql,
+        "columns": columns,
+        "rows": all_rows,
+        "n_rows_total": n_rows_total,
+        "elapsed_sec": elapsed,
+        "engine_sec": engine_sec,
+        "total_sec": total_sec,
+        "data_scanned_bytes": data_scanned,
+        "query_id": query_id,
+        "history_id": history_id,
+    })
+
     return {
         "ok": True,
+        "cached": False,
+        "cache_key": cache_key,
         "columns": columns,
         "rows": rows,
         "n_rows_total": n_rows_total,
@@ -4978,6 +5050,37 @@ async def api_playground_run(request: Request):
         "query_id": query_id,
         "history_id": history_id,
     }
+
+
+@app.get("/api/playground/download/{cache_key}")
+async def api_playground_download(cache_key: str):
+    # >>> stream full cached result as CSV so the browser never holds it in memory <<< #
+    entry = _pg_cache_get(cache_key)
+    if entry is None:
+        return JSONResponse(status_code=404, content={
+            "error": f"result {cache_key[:12]}… not in cache (server restart or evicted)"
+        })
+
+    columns = entry["columns"]
+    rows = entry["rows"]
+
+    def _csv_cell(v) -> str:
+        s = "" if v is None else str(v)
+        if any(c in s for c in (",", "\"", "\n", "\r")):
+            return "\"" + s.replace("\"", "\"\"") + "\""
+        return s
+
+    def _iter():
+        yield ",".join(_csv_cell(c) for c in columns) + "\n"
+        for r in rows:
+            yield ",".join(_csv_cell(v) for v in r) + "\n"
+
+    fname = f"playground_{cache_key[:12]}.csv"
+    return StreamingResponse(
+        _iter(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @app.post("/api/playground/cancel_running")

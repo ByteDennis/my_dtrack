@@ -29,7 +29,10 @@
                         <datalist id="pg-conn-list"></datalist>
                         <label style="font-size:11px;">
                             Row cap:
-                            <input type="number" id="pg-row-cap" value="200" min="1" max="100000" style="width:70px;">
+                            <input type="number" id="pg-row-cap" value="20" min="1" max="100000" style="width:70px;">
+                        </label>
+                        <label style="font-size:11px;" title="Reuse last result for the same engine+conn+SQL instead of re-running.">
+                            <input type="checkbox" id="pg-use-cache"> cache
                         </label>
                     </div>
                 </div>
