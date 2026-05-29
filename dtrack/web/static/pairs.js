@@ -1114,8 +1114,14 @@ async function previewQueries() {
     for (const {pair, data, error} of results) {
         const leftSql = error ? `Error: ${error}` : (data?.left?.sql || '(no left config)');
         const rightSql = error ? '' : (data?.right?.sql || '(no right config)');
-        const leftFile = data?.left?.output_file || '';
-        const rightFile = data?.right?.output_file || '';
+        const _fmtFile = (d) => {
+            if (!d) return '';
+            const sf = d.output_file ? `SQL file: ${d.output_file}` : '';
+            const cf = d.result_csv  ? `Result CSV: ${d.result_csv}` : '';
+            return [sf, cf].filter(Boolean).join(' · ');
+        };
+        const leftFile = _fmtFile(data?.left);
+        const rightFile = _fmtFile(data?.right);
 
         html += `
             <div style="margin-bottom: 24px;">

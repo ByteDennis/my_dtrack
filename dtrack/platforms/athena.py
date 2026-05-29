@@ -1514,19 +1514,8 @@ SELECT
                         f"-- {qname}/{col_name}{block_suffix}",
                         sql)
         else:
-            # Row count query: layer user where + --from/--to bounds.
-            date_bounds = tbl.get('_date_bounds', '')
-            wc_parts = []
-            if where.strip():
-                wc_parts.append(where.strip())
-            if date_bounds:
-                wc_parts.append(date_bounds)
-            full_where = " AND ".join(f"({p})" for p in wc_parts) if wc_parts else ""
-            where_clause = f"WHERE {full_where}" if full_where else ""
-            sql = f"""{cte_prefix}SELECT {date_col_q} AS date_value, COUNT(*) AS row_count
-FROM {full_table}
-{where_clause}
-GROUP BY {date_col_q};"""
+            # >>> single source of truth: same builder as /api/preview <<< #
+            sql = _build_row_sql_athena(tbl) + ";"
             blocks.append(f"-- {qname}")
             blocks.append(sql.strip())
             blocks.append("")

@@ -135,9 +135,11 @@ def _query_databricks(sql, catalog_schema=None):
 
 # >>> discover column_name + data_type from information_schema <<< #
 def _discover_columns_databricks(cursor, catalog, schema, table):
+    # >>> backtick-quote the catalog because Spark identifiers can't start with a digit (e.g. "062108..._catalog") <<< #
+    cat_q = f"`{catalog}`" if catalog else catalog
     sql = f"""
         SELECT column_name, data_type
-        FROM {catalog}.information_schema.columns
+        FROM {cat_q}.information_schema.columns
         WHERE table_schema = '{schema}' AND table_name = '{table}'
         ORDER BY ordinal_position
     """
@@ -174,14 +176,40 @@ def _build_row_sql_databricks(tbl_cfg):
     )
 
 
+# >>> aggregate extract_row.sql for every Databricks table — mirrors the Athena/Hadoop shape so previewed = saved <<< #
+def _write_combined_row_sql_databricks(databricks_tables, outdir):
+    import os as _os
+    from datetime import datetime as _dt
+    _os.makedirs(outdir, exist_ok=True)
+    blocks = [
+        "-- dtrack Databricks row extraction queries",
+        f"-- Generated: {_dt.now().isoformat()}",
+        "",
+    ]
+    for tbl in databricks_tables:
+        qname = qualified_name(tbl)
+        conn_macro = tbl.get("conn_macro", "") or ""
+        try:
+            sql = _build_row_sql_databricks(tbl)
+        except Exception as e:
+            blocks.append(f"-- {qname}")
+            blocks.append(f"-- SKIP: SQL build failed: {e}")
+            blocks.append("")
+            continue
+        blocks.append(f"-- {qname}")
+        blocks.append(f"/* @conn_macro={conn_macro} */")
+        blocks.append(sql + ";")
+        blocks.append("")
+    sql_path = _os.path.join(outdir, "extract_row.sql")
+    with open(sql_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(blocks))
+    return sql_path
+
+
 # >>> extract row counts for one Databricks table to {qname}_row.csv <<< #
 def _extract_rows_for_table_databricks(tbl_cfg, outdir):
     qname = qualified_name(tbl_cfg)
     sql = _build_row_sql_databricks(tbl_cfg)
-
-    sql_path = os.path.join(outdir, f"{qname}_row.sql")
-    with open(sql_path, "w", encoding="utf-8") as f:
-        f.write(f"-- {qname}\n{sql};\n")
 
     rows = _query_databricks(sql, tbl_cfg.get("conn_macro"))
 

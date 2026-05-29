@@ -1122,20 +1122,25 @@ async def api_generate_files(request: Request):
                     csv_paths[f"csv_sql_file_{side_label}"] = p
                 results.update(csv_paths)
 
-            # Discover Databricks columns. extract_databricks builds SQL
-            # in-process at run time (no extract_*.sql file) — so /api/generate's
-            # job for databricks is just discovery + a single log line.
+            # Discover Databricks columns and write the same shape extract_*.sql
+            # the other gen-first platforms produce — one aggregate file per
+            # outdir (not one per pair / table), so preview == saved file.
             databricks_tables = [t for t in all_tables
                                  if t.get('source', '').lower() == 'databricks']
             if databricks_tables:
                 os.makedirs(aws_outdir, exist_ok=True)
-                print(f"--- Databricks: {len(databricks_tables)} tables; "
-                      f"SQL built in-process at run time (no extract_*.sql) ---")
+                print(f"--- Databricks: {len(databricks_tables)} table(s) ---")
                 try:
                     _discover_databricks_columns_for_preview(
                         databricks_tables, aws_outdir, _db_path)
                 except Exception as e:
                     print(f"  databricks discovery failed: {e}")
+                if extract_type == "row":
+                    from ..platforms.databricks import _write_combined_row_sql_databricks
+                    dbx_sql_path = _write_combined_row_sql_databricks(
+                        databricks_tables, aws_outdir)
+                    results["databricks_sql_file"] = dbx_sql_path
+                    print(f"  SQL: {dbx_sql_path}")
 
             # Generate SQL file
             aws_tables = [t for t in all_tables
@@ -1173,6 +1178,19 @@ async def api_generate_files(request: Request):
             # so the downstream column comparison stays apples-to-apples).
             if extract_type == "col" and pair_names:
                 _check_pair_buckets(filtered_config, pair_names, from_date, to_date)
+
+            # >>> unified per-platform summary so the log shows every source, not just oracle/sas/hadoop <<< #
+            _counts = {
+                "oracle":     len(oracle_tables),
+                "hadoop":     len(hadoop_tables),
+                "aws":        len(aws_tables),
+                "databricks": len(databricks_tables),
+                "csv":        len(csv_tables_left) + len(csv_tables_right),
+                "sas":        sum(1 for t in all_tables
+                                  if (t.get('source') or '').lower() == 'sas'),
+            }
+            _summary = ", ".join(f"{k}={v}" for k, v in _counts.items())
+            print(f"All platforms: {sum(_counts.values())} table(s) ({_summary})")
 
         return {"ok": True, "output": buf.getvalue(), **results}
     except Exception as e:
@@ -4190,6 +4208,7 @@ async def api_preview(request: Request):
 
 def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
     # >>> delegate to the real per-platform row-SQL builder so preview == actual execution <<< #
+    from ..platforms.base import qualified_name
     source = (cfg.get("source") or "").lower()
     date_col = cfg.get("date_col", "")
     date_type = (cfg.get("date_type") or "").lower()
@@ -4197,15 +4216,21 @@ def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
     table = cfg.get("table", "")
     conn_macro = cfg.get("conn_macro", "")
 
-    output_base = f"{pair_name}_{side}_row"
+    # Compute qname so the displayed filename matches what the extractor
+    # actually writes — `{qname}_row.csv` is the per-table result for every
+    # platform, and databricks also writes `{qname}_row.sql`.
+    try:
+        qname = qualified_name(cfg)
+    except Exception:
+        qname = f"{conn_macro}.{table}" if conn_macro else (table or f"{pair_name}_{side}")
 
     # SAS / Oracle-via-SAS keep the legacy PROC-SQL wrapper because that is what
     # gen_sas actually emits (an .sas program the user submits in SAS Studio).
     if source == "sas":
-        return _build_preview_sas_sas(cfg, from_date, to_date, output_base, parallel)
+        return _build_preview_sas_sas(cfg, from_date, to_date, qname, parallel)
     if source == "oracle" and (cfg.get("via_sas") or cfg.get("processed", "").startswith("$")):
         # Oracle through SAS PROC SQL CONNECT — the gen_sas path.
-        return _build_preview_sas_oracle(cfg, from_date, to_date, output_base, parallel)
+        return _build_preview_sas_oracle(cfg, from_date, to_date, qname, parallel)
 
     # Build a `tbl_cfg` shape the per-platform helpers understand, then call
     # the same `_build_row_sql_*` function the runner uses. Date bounds get
@@ -4221,37 +4246,44 @@ def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
         date_col, date_type, from_date, to_date, source
     )
 
+    # Filename convention shared by every platform: the result CSV is
+    # `{qname}_row.csv`. The SQL source file is `extract_row.sql` for the
+    # aggregator platforms (aws/hadoop/oracle/csv) and `{qname}_row.sql` for
+    # databricks (per-table, no aggregator).
+    csv_out = f"{qname}_row.csv"
+
     if source == "aws":
         from ..platforms.athena import _build_row_sql_athena
         sql = _build_row_sql_athena(tbl_cfg)
         if parallel and int(parallel) > 1:
             sql = sql + f"\n-- max_workers={int(parallel)}"
-        return {"sql": sql, "output_file": f"{output_base}.sql"}
+        return {"sql": sql, "output_file": "extract_row.sql", "result_csv": csv_out}
 
     if source == "hadoop":
         from ..platforms.hadoop import _build_row_sql_hadoop
         sql = _build_row_sql_hadoop(tbl_cfg)
-        return {"sql": sql, "output_file": f"{output_base}.sql"}
+        return {"sql": sql, "output_file": "extract_row.sql", "result_csv": csv_out}
 
     if source == "databricks":
         from ..platforms.databricks import _build_row_sql_databricks
         sql = _build_row_sql_databricks(tbl_cfg)
-        return {"sql": sql, "output_file": f"{output_base}.sql"}
+        return {"sql": sql, "output_file": "extract_row.sql", "result_csv": csv_out}
 
     if source == "csv":
         from ..platforms.csv_duckdb import _build_row_sql_csv
         sql = _build_row_sql_csv(tbl_cfg)
-        return {"sql": sql, "output_file": f"{output_base}.sql"}
+        return {"sql": sql, "output_file": "extract_row.sql", "result_csv": csv_out}
 
     if source == "oracle":
         from ..platforms.oracle import _build_row_sql_oracle
         sql = _build_row_sql_oracle(tbl_cfg)
         if parallel and int(parallel) > 1:
             sql = sql.replace("SELECT", f"SELECT /*+ PARALLEL({int(parallel)}) */", 1)
-        return {"sql": sql, "output_file": f"{output_base}.sql"}
+        return {"sql": sql, "output_file": "extract_row.sql", "result_csv": csv_out}
 
     # Unknown source — surface a clear error instead of silently emitting Oracle.
-    return {"sql": f"-- unsupported source: {source!r}", "output_file": f"{output_base}.sql"}
+    return {"sql": f"-- unsupported source: {source!r}",
+            "output_file": "extract_row.sql", "result_csv": csv_out}
 
 
 def _preview_date_bounds(date_col, date_type, from_date, to_date, source):
@@ -4268,8 +4300,9 @@ def _preview_date_bounds(date_col, date_type, from_date, to_date, source):
     return " AND ".join(parts)
 
 
-def _build_preview_sas_sas(cfg, from_date, to_date, output_base, parallel):
+def _build_preview_sas_sas(cfg, from_date, to_date, qname, parallel):
     # >>> preview the SAS-local proc sql shape gen_sas would emit <<< #
+    output_base = qname
     date_col = cfg.get("date_col", "")
     date_type = (cfg.get("date_type") or "").lower()
     table = cfg.get("table", "")
@@ -4299,11 +4332,12 @@ def _build_preview_sas_sas(cfg, from_date, to_date, output_base, parallel):
         f"  group by {select_expr};\n"
         f"quit;"
     ).strip()
-    return {"sql": sql, "output_file": f"{output_base}.sas"}
+    return {"sql": sql, "output_file": "extract_row.sas", "result_csv": f"{qname}_row.csv"}
 
 
-def _build_preview_sas_oracle(cfg, from_date, to_date, output_base, parallel):
+def _build_preview_sas_oracle(cfg, from_date, to_date, qname, parallel):
     # >>> preview the SAS PROC SQL CONNECT TO ORACLE wrapper <<< #
+    output_base = qname
     date_col = cfg.get("date_col", "")
     date_type = (cfg.get("date_type") or "").lower()
     table = cfg.get("table", "")
@@ -4347,7 +4381,7 @@ def _build_preview_sas_oracle(cfg, from_date, to_date, output_base, parallel):
         f"  disconnect from oracle;\n"
         f"quit;"
     ).strip()
-    return {"sql": sql, "output_file": f"{output_base}.sas"}
+    return {"sql": sql, "output_file": "extract_row.sas", "result_csv": f"{qname}_row.csv"}
 
 
 def _preview_select_expr(date_col, date_type, source):
