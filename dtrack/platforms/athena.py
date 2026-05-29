@@ -1025,6 +1025,31 @@ def _emit_col_block(blocks, header, sql):
     blocks.append("")
 
 
+# >>> standalone Athena row SQL builder (extracted so the web /api/preview can call the same code path as the runner) <<< #
+def _build_row_sql_athena(tbl_cfg):
+    database = tbl_cfg.get("conn_macro", "")
+    table = tbl_cfg.get("table", "")
+    date_col = tbl_cfg.get("date_col", "")
+    date_col_q = quote_ident(date_col, "athena")
+    raw_full = f"{database}.{table}" if database else table
+    full_table, cte_prefix = resolve_table(tbl_cfg, raw_full)
+    where = tbl_cfg.get("where", "")
+    date_bounds = tbl_cfg.get("_date_bounds", "")
+    wc_parts = []
+    if where and where.strip():
+        wc_parts.append(where.strip())
+    if date_bounds and date_bounds.strip():
+        wc_parts.append(date_bounds.strip())
+    full_where = " AND ".join(f"({p})" for p in wc_parts) if wc_parts else ""
+    where_clause = f"WHERE {full_where}" if full_where else ""
+    return (
+        f"{cte_prefix}SELECT {date_col_q} AS date_value, COUNT(*) AS row_count\n"
+        f"FROM {full_table}\n"
+        f"{where_clause}\n"
+        f"GROUP BY {date_col_q}"
+    ).strip()
+
+
 def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                         coarse=False, preset=None, stats_override=None):
     """Write a single combined .sql file with all AWS table queries.

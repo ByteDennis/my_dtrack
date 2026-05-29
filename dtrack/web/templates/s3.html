@@ -1,0 +1,98 @@
+{% extends "_layout.html" %}
+{% set current_page = "s3" %}
+{% set page_title = "S3 Browser" %}
+
+{% block content %}
+        <section class="card">
+            <div class="section-header">
+                <h2>S3 BROWSER</h2>
+                <div class="actions" style="font-size:12px; color:var(--jp-ui-font-color2);">
+                    Browse a bucket, drag-or-pick uploads, per-row download / delete.
+                    Reuses the existing AWS credentials (aws_creds_renew).
+                </div>
+            </div>
+
+            <div class="rc-stats-grid" style="margin-bottom:12px;">
+                <div class="rc-stat-card" style="grid-column:1/-1;">
+                    <div class="rc-stat-label">Bucket / URL</div>
+                    <div class="rc-stat-row" style="gap:8px; flex-wrap:wrap;">
+                        <input type="text" id="s3-url" list="s3-url-list"
+                               placeholder="s3://my-bucket/path/"
+                               style="flex:1; min-width:300px;">
+                        <datalist id="s3-url-list"></datalist>
+                        <button class="btn-text" onclick="s3RefreshCreds()" title="Renew AWS credentials">↻ Creds</button>
+                        <button class="btn-primary" onclick="s3Go()">Go</button>
+                        <button class="btn-text" onclick="s3ClearHistory()" title="Forget remembered S3 URLs">Clear list</button>
+                    </div>
+                    <div id="s3-recent-hint" style="font-size:11px; color:var(--jp-ui-font-color2); margin-top:4px;"></div>
+                </div>
+
+                <div class="rc-stat-card">
+                    <div class="rc-stat-label">Status</div>
+                    <div id="s3-status" style="font-size:12px; color:var(--jp-ui-font-color2);">—</div>
+                </div>
+
+                <div class="rc-stat-card">
+                    <div class="rc-stat-label">Actions</div>
+                    <div class="rc-stat-row" style="gap:6px; flex-wrap:wrap;">
+                        <button class="btn-text" onclick="s3DownloadSelected()" title="Download checked objects">⬇ Download</button>
+                        <button class="btn-text" onclick="s3DeleteSelected()"   title="Delete checked objects">🗑 Delete</button>
+                        <button class="btn-text" onclick="s3NewFolder()"        title="Create a folder (zero-byte placeholder)">✎ New folder</button>
+                        <button class="btn-text" onclick="s3Go()"               title="Refresh list">↻ List</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="rc-stat-card" style="padding:0;">
+                <table class="data-table compact" id="s3-table" style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th style="width:24px;"><input type="checkbox" id="s3-check-all" onclick="s3ToggleAll(this.checked)"></th>
+                            <th>Name</th>
+                            <th style="width:90px; text-align:right;">Size</th>
+                            <th style="width:160px;">Modified</th>
+                            <th style="width:80px;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="s3-tbody">
+                        <tr><td colspan="5" class="empty-message">Enter a bucket URL above and click Go.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="section-header">
+                <h2>UPLOAD</h2>
+                <div class="actions" style="font-size:12px; color:var(--jp-ui-font-color2);">
+                    Destination uses the bucket + prefix above.
+                </div>
+            </div>
+            <div id="s3-drop"
+                 ondragover="event.preventDefault(); this.classList.add('drag');"
+                 ondragleave="this.classList.remove('drag');"
+                 ondrop="event.preventDefault(); this.classList.remove('drag'); s3OnDrop(event);"
+                 style="border:2px dashed var(--jp-border-color1); border-radius:4px; padding:24px; text-align:center; cursor:pointer;"
+                 onclick="document.getElementById('s3-file-input').click()">
+                <div style="font-size:13px; color:var(--jp-ui-font-color2);">
+                    Drag files here, or <span style="color:var(--jp-brand-color1); text-decoration:underline;">click to choose</span>.
+                </div>
+                <input type="file" id="s3-file-input" multiple
+                       style="display:none;" onchange="s3OnFiles(this.files)">
+                <div id="s3-upload-queue" style="margin-top:12px; font-size:11px; color:var(--jp-ui-font-color2);"></div>
+                <div style="margin-top:8px;">
+                    <label style="font-size:11px;">
+                        <input type="checkbox" id="s3-overwrite"> overwrite if exists
+                    </label>
+                </div>
+                <div style="margin-top:8px;">
+                    <button class="btn-primary" id="s3-upload-btn" onclick="s3StartUpload()" disabled>Start upload</button>
+                    <span id="s3-upload-progress" style="margin-left:12px; font-size:12px;"></span>
+                </div>
+            </div>
+        </section>
+{% endblock %}
+
+{% block scripts %}
+    <script src="/static/s3.js"></script>
+{% endblock %}

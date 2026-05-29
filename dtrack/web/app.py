@@ -199,6 +199,10 @@ async def playground_page(request: Request):
 async def csv_compare_page(request: Request):
     return templates.TemplateResponse(request, "csv_compare.html")
 
+@app.get("/s3", response_class=HTMLResponse)
+async def s3_page(request: Request):
+    return templates.TemplateResponse(request, "s3.html")
+
 
 # ---------------------------------------------------------------------------
 # API routes
@@ -754,6 +758,55 @@ def _check_pair_buckets(filtered_config, pair_names, from_date, to_date):
                   f"first divergence at index {diff_idx} | source: {source} | WARNING")
 
 
+def _discover_databricks_columns_for_preview(databricks_tables, outdir, db_path):
+    # >>> mirror _discover_and_write_columns but for Databricks (information_schema.columns) <<< #
+    import csv as csv_mod
+    from ..db import insert_column_meta, get_column_meta
+    from ..platforms.base import qualified_name
+    from ..platforms.databricks import databricks_connect, _discover_columns_databricks
+    cursors_by_cs = {}
+    try:
+        for tbl in databricks_tables:
+            qname = qualified_name(tbl)
+            raw_table = tbl.get("table", "")
+            cs = tbl.get("conn_macro", "") or ""
+            existing = get_column_meta(db_path, qname)
+            if existing:
+                print(f"  {qname}: found {len(existing)} columns in _column_meta")
+                cols = {c["column_name"]: c.get("data_type", "") for c in existing}
+            else:
+                if not cs or "." not in cs:
+                    print(f"  {qname}: SKIP discovery — conn_macro is not catalog.schema")
+                    continue
+                catalog, schema = cs.split(".", 1)
+                if cs not in cursors_by_cs:
+                    print(f"  {qname}: connecting to Databricks ({cs})...")
+                    conn = databricks_connect(cs)
+                    cursors_by_cs[cs] = (conn, conn.cursor())
+                conn, cur = cursors_by_cs[cs]
+                cols = _discover_columns_databricks(cur, catalog, schema, raw_table)
+                if cols:
+                    insert_column_meta(db_path, qname, cols, source="databricks")
+                    print(f"  {qname}: discovered {len(cols)} columns from Databricks")
+                else:
+                    print(f"  {qname}: no columns found in Databricks")
+                    continue
+            col_csv = os.path.join(outdir, f"{qname}_columns.csv")
+            with open(col_csv, "w", newline="") as f:
+                w = csv_mod.writer(f)
+                w.writerow(["COLUMN_NAME", "DATA_TYPE"])
+                for cn, ct in sorted(cols.items()):
+                    w.writerow([cn, ct])
+            print(f"  {qname}: wrote {len(cols)} columns to {col_csv}")
+    finally:
+        for cs, (conn, cur) in cursors_by_cs.items():
+            try:
+                cur.close()
+                conn.close()
+            except Exception:
+                pass
+
+
 @app.post("/api/generate")
 async def api_generate_files(request: Request):
     """Generate SAS and SQL files without running extraction.
@@ -1010,11 +1063,10 @@ async def api_generate_files(request: Request):
                 from ..platforms.hadoop import (
                     _write_combined_row_sql_hadoop,
                     _write_combined_col_sql_hadoop,
-                    _discover_and_write_columns,
                 )
                 from ..platforms.base import fill_columns_from_meta
                 os.makedirs(sas_outdir, exist_ok=True)
-                _discover_and_write_columns(hadoop_tables, sas_outdir, _db_path)
+                # >>> hadoop discovery already happened inside gen_sas above (hadoop is in sas_hadoop_tables) — do not re-run <<< #
                 if extract_type == "row":
                     hadoop_sql_path = _write_combined_row_sql_hadoop(
                         hadoop_tables, sas_outdir,
@@ -1069,6 +1121,21 @@ async def api_generate_files(request: Request):
                             stats_override=stats_override)
                     csv_paths[f"csv_sql_file_{side_label}"] = p
                 results.update(csv_paths)
+
+            # Discover Databricks columns. extract_databricks builds SQL
+            # in-process at run time (no extract_*.sql file) — so /api/generate's
+            # job for databricks is just discovery + a single log line.
+            databricks_tables = [t for t in all_tables
+                                 if t.get('source', '').lower() == 'databricks']
+            if databricks_tables:
+                os.makedirs(aws_outdir, exist_ok=True)
+                print(f"--- Databricks: {len(databricks_tables)} tables; "
+                      f"SQL built in-process at run time (no extract_*.sql) ---")
+                try:
+                    _discover_databricks_columns_for_preview(
+                        databricks_tables, aws_outdir, _db_path)
+                except Exception as e:
+                    print(f"  databricks discovery failed: {e}")
 
             # Generate SQL file
             aws_tables = [t for t in all_tables
@@ -4122,116 +4189,165 @@ async def api_preview(request: Request):
 
 
 def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
-    """Build preview SQL for one side of a pair."""
+    # >>> delegate to the real per-platform row-SQL builder so preview == actual execution <<< #
     source = (cfg.get("source") or "").lower()
     date_col = cfg.get("date_col", "")
     date_type = (cfg.get("date_type") or "").lower()
-    vintage_raw = cfg.get("vintage", "")
     where_clause = cfg.get("where", "")
-    processed = cfg.get("processed", "")
     table = cfg.get("table", "")
     conn_macro = cfg.get("conn_macro", "")
 
-    is_oracle = source == "oracle"
-    is_sas = source == "sas"
-    is_aws = source == "aws"
+    output_base = f"{pair_name}_{side}_row"
 
-    # --- SELECT/GROUP BY expression (with TRUNC/datepart for bucketing) ---
-    select_expr = _preview_select_expr(date_col, date_type, source)
-    if vintage_raw:
-        select_expr = vintage_raw
+    # SAS / Oracle-via-SAS keep the legacy PROC-SQL wrapper because that is what
+    # gen_sas actually emits (an .sas program the user submits in SAS Studio).
+    if source == "sas":
+        return _build_preview_sas_sas(cfg, from_date, to_date, output_base, parallel)
+    if source == "oracle" and (cfg.get("via_sas") or cfg.get("processed", "").startswith("$")):
+        # Oracle through SAS PROC SQL CONNECT — the gen_sas path.
+        return _build_preview_sas_oracle(cfg, from_date, to_date, output_base, parallel)
 
-    # --- WHERE uses raw column (no TRUNC), adjusts literals instead ---
-    where_col = date_col
-
-    # --- Resolve table and CTE ---
-    cte_prefix = ""
-    query_table = table
-
-    if is_sas:
-        query_table = f"{conn_macro}.{table}" if conn_macro else table
-    elif is_aws:
-        if processed:
-            alias = f"{pair_name}_{side}"
-            cte_prefix = f"WITH {alias} AS (\n  {processed}\n)\n"
-            query_table = alias
-        else:
-            query_table = f"{conn_macro}.{table}" if conn_macro else table
-    else:  # oracle
-        if processed:
-            alias = cfg.get("name", f"{pair_name}_{side}")
-            cte_prefix = f"WITH {alias} AS ({processed}) "
-            query_table = alias
-
-    # --- WHERE conditions ---
-    conditions = []
-    _lit = lambda d: _preview_date_literal(d, date_type, is_sas, source)
-    if from_date and to_date:
-        conditions.append(f"{where_col} BETWEEN {_lit(from_date)} AND {_lit(to_date)}")
-    elif from_date:
-        conditions.append(f"{where_col} >= {_lit(from_date)}")
-    elif to_date:
-        conditions.append(f"{where_col} <= {_lit(to_date)}")
+    # Build a `tbl_cfg` shape the per-platform helpers understand, then call
+    # the same `_build_row_sql_*` function the runner uses. Date bounds get
+    # rendered into `_date_bounds` so the builder ANDs them into the WHERE.
+    tbl_cfg = dict(cfg)
+    tbl_cfg.setdefault("table", table)
+    tbl_cfg.setdefault("date_col", date_col)
+    tbl_cfg.setdefault("date_type", date_type)
+    tbl_cfg.setdefault("conn_macro", conn_macro)
     if where_clause:
-        conditions.append(f"({where_clause})")
+        tbl_cfg["where"] = where_clause
+    tbl_cfg["_date_bounds"] = _preview_date_bounds(
+        date_col, date_type, from_date, to_date, source
+    )
 
-    where_str = ""
-    if conditions:
-        where_str = "WHERE " + "\n      AND ".join(conditions)
+    if source == "aws":
+        from ..platforms.athena import _build_row_sql_athena
+        sql = _build_row_sql_athena(tbl_cfg)
+        if parallel and int(parallel) > 1:
+            sql = sql + f"\n-- max_workers={int(parallel)}"
+        return {"sql": sql, "output_file": f"{output_base}.sql"}
 
-    # --- Parallel hint ---
+    if source == "hadoop":
+        from ..platforms.hadoop import _build_row_sql_hadoop
+        sql = _build_row_sql_hadoop(tbl_cfg)
+        return {"sql": sql, "output_file": f"{output_base}.sql"}
+
+    if source == "databricks":
+        from ..platforms.databricks import _build_row_sql_databricks
+        sql = _build_row_sql_databricks(tbl_cfg)
+        return {"sql": sql, "output_file": f"{output_base}.sql"}
+
+    if source == "csv":
+        from ..platforms.csv_duckdb import _build_row_sql_csv
+        sql = _build_row_sql_csv(tbl_cfg)
+        return {"sql": sql, "output_file": f"{output_base}.sql"}
+
+    if source == "oracle":
+        from ..platforms.oracle import _build_row_sql_oracle
+        sql = _build_row_sql_oracle(tbl_cfg)
+        if parallel and int(parallel) > 1:
+            sql = sql.replace("SELECT", f"SELECT /*+ PARALLEL({int(parallel)}) */", 1)
+        return {"sql": sql, "output_file": f"{output_base}.sql"}
+
+    # Unknown source — surface a clear error instead of silently emitting Oracle.
+    return {"sql": f"-- unsupported source: {source!r}", "output_file": f"{output_base}.sql"}
+
+
+def _preview_date_bounds(date_col, date_type, from_date, to_date, source):
+    # >>> render a WHERE-fragment like "date_col >= X AND date_col <= Y" in the column's stored shape <<< #
+    if not (from_date or to_date):
+        return ""
+    is_sas = source == "sas"
+    _lit = lambda d: _preview_date_literal(d, date_type, is_sas, source)
+    parts = []
+    if from_date:
+        parts.append(f"{date_col} >= {_lit(from_date)}")
+    if to_date:
+        parts.append(f"{date_col} <= {_lit(to_date)}")
+    return " AND ".join(parts)
+
+
+def _build_preview_sas_sas(cfg, from_date, to_date, output_base, parallel):
+    # >>> preview the SAS-local proc sql shape gen_sas would emit <<< #
+    date_col = cfg.get("date_col", "")
+    date_type = (cfg.get("date_type") or "").lower()
+    table = cfg.get("table", "")
+    conn_macro = cfg.get("conn_macro", "")
+    where_clause = cfg.get("where", "")
+    processed = cfg.get("processed", "")
+    select_expr = _preview_select_expr(date_col, date_type, "sas")
+    query_table = f"{conn_macro}.{table}" if conn_macro else table
+    _lit = lambda d: _preview_date_literal(d, date_type, True, "sas")
+    conds = []
+    if from_date and to_date:
+        conds.append(f"{date_col} between {_lit(from_date)} and {_lit(to_date)}")
+    elif from_date:
+        conds.append(f"{date_col} >= {_lit(from_date)}")
+    elif to_date:
+        conds.append(f"{date_col} <= {_lit(to_date)}")
+    if where_clause:
+        conds.append(f"({where_clause})")
+    where_str = ("    where " + "\n      and ".join(conds)) if conds else ""
+    setup = f"{processed}\n\n" if processed else ""
+    sql = (
+        f"{setup}proc sql;\n"
+        f"  create table work.{output_base} as\n"
+        f"  select {select_expr} as date_value, count(*) as row_count\n"
+        f"  from {query_table}\n"
+        f"{where_str}\n"
+        f"  group by {select_expr};\n"
+        f"quit;"
+    ).strip()
+    return {"sql": sql, "output_file": f"{output_base}.sas"}
+
+
+def _build_preview_sas_oracle(cfg, from_date, to_date, output_base, parallel):
+    # >>> preview the SAS PROC SQL CONNECT TO ORACLE wrapper <<< #
+    date_col = cfg.get("date_col", "")
+    date_type = (cfg.get("date_type") or "").lower()
+    table = cfg.get("table", "")
+    conn_macro = cfg.get("conn_macro", "")
+    where_clause = cfg.get("where", "")
+    processed = cfg.get("processed", "")
+    select_expr = _preview_select_expr(date_col, date_type, "oracle")
+    query_table = table
+    cte_prefix = ""
+    if processed:
+        alias = cfg.get("name", f"{output_base}_cte")
+        cte_prefix = f"WITH {alias} AS ({processed}) "
+        query_table = alias
+    _lit = lambda d: _preview_date_literal(d, date_type, False, "oracle")
+    conds = []
+    if from_date and to_date:
+        conds.append(f"{date_col} BETWEEN {_lit(from_date)} AND {_lit(to_date)}")
+    elif from_date:
+        conds.append(f"{date_col} >= {_lit(from_date)}")
+    elif to_date:
+        conds.append(f"{date_col} <= {_lit(to_date)}")
+    if where_clause:
+        conds.append(f"({where_clause})")
+    where_str = ("    WHERE " + "\n      AND ".join(conds)) if conds else ""
     parallel_int = int(parallel) if parallel else 0
-    ora_hint = f" /*+ PARALLEL({parallel_int}) */" if parallel_int > 1 and (is_oracle or is_sas) else ""
-    aws_hint = f"  -- max_workers={parallel_int}" if parallel_int > 1 and is_aws else ""
-
-    # --- Build SQL by platform ---
-    output_file = f"{pair_name}_{side}_row"
-
-    if is_aws:
-        sql = f"""{cte_prefix}SELECT
-  {select_expr} AS date_value,
-  COUNT(*) AS row_count
-FROM {query_table}
-{where_str}
-GROUP BY {select_expr}
-ORDER BY date_value;{aws_hint}""".strip()
-        return {"sql": sql, "output_file": f"{output_file}.sql"}
-
-    elif is_sas:
-        # SAS setup + proc sql on local dataset
-        setup = ""
-        if processed:
-            setup = f"{processed}\n\n"
-        indent_where = where_str.replace("\n", "\n    ") if where_str else ""
-        sql = f"""{setup}proc sql;
-  create table work.{output_file} as
-  select
-    {select_expr} as date_value,
-    count(*) as row_count
-  from {query_table}
-  {indent_where}
-  group by {select_expr};
-quit;""".strip()
-        return {"sql": sql, "output_file": f"{output_file}.sas"}
-
-    else:
-        # Oracle via SAS proc sql passthrough
-        indent_where = ("    " + where_str.replace("\n", "\n    ")) if where_str else ""
-        inner_sql = f"""{cte_prefix}SELECT{ora_hint}
-      {select_expr} AS date_value,
-      COUNT(*) AS row_count
-    FROM {query_table}
-    {indent_where}
-    GROUP BY {select_expr}"""
-        sql = f"""proc sql;
-  %{conn_macro}
-  create table work.{output_file} as
-  select * from connection to oracle (
-    {inner_sql.strip()}
-  );
-  disconnect from oracle;
-quit;""".strip()
-        return {"sql": sql, "output_file": f"{output_file}.sas"}
+    ora_hint = f" /*+ PARALLEL({parallel_int}) */" if parallel_int > 1 else ""
+    inner = (
+        f"{cte_prefix}SELECT{ora_hint}\n"
+        f"      {select_expr} AS date_value, COUNT(*) AS row_count\n"
+        f"    FROM {query_table}\n"
+        f"{where_str}\n"
+        f"    GROUP BY {select_expr}"
+    )
+    sql = (
+        f"proc sql;\n"
+        f"  %{conn_macro}\n"
+        f"  create table work.{output_base} as\n"
+        f"  select * from connection to oracle (\n"
+        f"    {inner.strip()}\n"
+        f"  );\n"
+        f"  disconnect from oracle;\n"
+        f"quit;"
+    ).strip()
+    return {"sql": sql, "output_file": f"{output_base}.sas"}
 
 
 def _preview_select_expr(date_col, date_type, source):
@@ -5310,6 +5426,257 @@ async def api_playground_history_delete(run_id: int):
     if not ok:
         return JSONResponse(status_code=404, content={"error": "run not found"})
     return {"ok": True}
+
+
+@app.post("/api/playground/history/clear")
+async def api_playground_history_clear():
+    # >>> wipe every row from _playground_history <<< #
+    from ..db import clear_playground_history
+    n = clear_playground_history(_db_path)
+    return {"ok": True, "deleted": n}
+
+
+@app.post("/api/playground/cache/clear")
+async def api_playground_cache_clear():
+    # >>> drop the in-memory LRU that backs Download CSV / use-cache toggle <<< #
+    n = len(_PLAYGROUND_CACHE)
+    _PLAYGROUND_CACHE.clear()
+    return {"ok": True, "cleared": n}
+
+
+@app.post("/api/playground/cache/clear-extraction")
+async def api_playground_cache_clear_extraction():
+    # >>> delete .cache.db files under known outdirs; forces extractors to re-execute <<< #
+    import glob as _glob
+    deleted = []
+    # Pick up the side-outdirs that the global-settings store has remembered;
+    # fall back to common defaults so first-run users aren't no-op'd.
+    candidates = set()
+    for plat in ("aws", "athena", "databricks", "oracle", "hadoop", "csv"):
+        try:
+            d = _side_outdir(plat)
+            if d:
+                candidates.add(d)
+        except Exception:
+            pass
+    candidates.update(["./csv/", "./sas/"])
+    for outdir in candidates:
+        cache = os.path.join(outdir, ".cache.db")
+        if os.path.exists(cache):
+            try:
+                os.remove(cache)
+                deleted.append(cache)
+            except OSError as e:
+                print(f"[cache clear] failed to remove {cache}: {e}", flush=True)
+    return {"ok": True, "deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
+# S3 Browser: list / upload / download / delete inside an S3 bucket. Reuses
+# the existing aws_creds_renew() pipeline so credentials are refreshed on the
+# fly. boto3 picks up AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+# AWS_SESSION_TOKEN automatically. The page lives at /s3.
+# ---------------------------------------------------------------------------
+
+def _s3_get_client():
+    from .platforms.athena import aws_creds_renew  # type: ignore
+    aws_creds_renew()
+    try:
+        import boto3
+    except ImportError:
+        raise RuntimeError("boto3 not installed — pip install boto3")
+    return boto3.client("s3")
+
+
+def _s3_creds_status():
+    from .platforms.athena import _aws_creds_expires  # type: ignore
+    import time
+    has_keys = bool(os.environ.get("AWS_ACCESS_KEY_ID"))
+    remaining = None
+    if _aws_creds_expires:
+        remaining = max(0, int(_aws_creds_expires - time.time()))
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or ""
+    return {"has_keys": has_keys, "ttl_seconds": remaining, "region": region}
+
+
+@app.get("/api/s3/creds")
+async def api_s3_creds():
+    try:
+        from .platforms.athena import aws_creds_renew
+        aws_creds_renew()
+    except Exception as e:
+        return {"ok": False, "error": str(e), **_s3_creds_status()}
+    return {"ok": True, **_s3_creds_status()}
+
+
+@app.get("/api/s3/list")
+async def api_s3_list(bucket: str = "", prefix: str = ""):
+    # >>> list "folders" (CommonPrefixes via delimiter='/') and objects under prefix <<< #
+    bucket = (bucket or "").strip()
+    prefix = (prefix or "").lstrip("/")
+    if not bucket:
+        return JSONResponse(status_code=400, content={"error": "bucket required"})
+    try:
+        s3 = _s3_get_client()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    folders = []
+    objects = []
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        total_size = 0
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
+            for cp in page.get("CommonPrefixes", []) or []:
+                folders.append({"key": cp["Prefix"]})
+            for obj in page.get("Contents", []) or []:
+                # Skip the "folder placeholder" object that matches the prefix exactly.
+                if obj["Key"] == prefix:
+                    continue
+                objects.append({
+                    "key":  obj["Key"],
+                    "size": obj["Size"],
+                    "modified": obj["LastModified"].isoformat() if obj.get("LastModified") else "",
+                    "etag": (obj.get("ETag") or "").strip('"'),
+                })
+                total_size += obj["Size"]
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "error": f"{type(e).__name__}: {e}",
+            "bucket": bucket, "prefix": prefix,
+        })
+
+    return {
+        "ok": True,
+        "bucket": bucket,
+        "prefix": prefix,
+        "folders": folders,
+        "objects": objects,
+        "total_size": total_size,
+        "object_count": len(objects),
+    }
+
+
+@app.get("/api/s3/download")
+async def api_s3_download(bucket: str, key: str):
+    # >>> stream a single object back as a download <<< #
+    if not bucket or not key:
+        return JSONResponse(status_code=400, content={"error": "bucket and key required"})
+    try:
+        s3 = _s3_get_client()
+        obj = s3.get_object(Bucket=bucket, Key=key)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"{type(e).__name__}: {e}"})
+
+    def _iter():
+        body = obj["Body"]
+        try:
+            while True:
+                chunk = body.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            try:
+                body.close()
+            except Exception:
+                pass
+
+    fname = key.rsplit("/", 1)[-1] or "object"
+    return StreamingResponse(
+        _iter(),
+        media_type=obj.get("ContentType") or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.post("/api/s3/upload")
+async def api_s3_upload(
+    bucket: str = Form(...),
+    prefix: str = Form(""),
+    overwrite: str = Form("false"),
+    files: list[UploadFile] = File(...),
+):
+    # >>> upload one-or-many files to bucket/prefix; uses upload_fileobj for multipart <<< #
+    if not bucket:
+        return JSONResponse(status_code=400, content={"error": "bucket required"})
+    prefix = (prefix or "").lstrip("/")
+    if prefix and not prefix.endswith("/"):
+        prefix = prefix + "/"
+    overwrite_bool = str(overwrite).lower() in ("1", "true", "yes", "on")
+
+    try:
+        s3 = _s3_get_client()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    results = []
+    for f in files:
+        key = prefix + f.filename
+        # Existence check (cheap HeadObject) when overwrite=false.
+        if not overwrite_bool:
+            try:
+                s3.head_object(Bucket=bucket, Key=key)
+                results.append({"ok": False, "key": key, "error": "exists (overwrite=false)"})
+                continue
+            except Exception:
+                pass  # 404 means safe to upload
+        try:
+            s3.upload_fileobj(f.file, bucket, key)
+            results.append({"ok": True, "key": key})
+        except Exception as e:
+            results.append({"ok": False, "key": key, "error": f"{type(e).__name__}: {e}"})
+
+    return {"ok": all(r["ok"] for r in results), "results": results}
+
+
+@app.delete("/api/s3/delete")
+async def api_s3_delete(request: Request):
+    # >>> delete one or many keys (bulk via delete_objects) <<< #
+    body = await request.json()
+    bucket = (body.get("bucket") or "").strip()
+    keys = body.get("keys") or []
+    if isinstance(keys, str):
+        keys = [keys]
+    if not bucket or not keys:
+        return JSONResponse(status_code=400, content={"error": "bucket and keys required"})
+    try:
+        s3 = _s3_get_client()
+        # delete_objects caps at 1000 per call.
+        deleted, errors = [], []
+        for i in range(0, len(keys), 1000):
+            chunk = keys[i:i + 1000]
+            resp = s3.delete_objects(
+                Bucket=bucket,
+                Delete={"Objects": [{"Key": k} for k in chunk], "Quiet": False},
+            )
+            for d in resp.get("Deleted", []) or []:
+                deleted.append(d.get("Key"))
+            for e in resp.get("Errors", []) or []:
+                errors.append({"key": e.get("Key"), "error": e.get("Message")})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"{type(e).__name__}: {e}"})
+    return {"ok": not errors, "deleted": deleted, "errors": errors}
+
+
+@app.post("/api/s3/new-folder")
+async def api_s3_new_folder(request: Request):
+    # >>> create a "folder" by putting an empty object ending in '/' <<< #
+    body = await request.json()
+    bucket = (body.get("bucket") or "").strip()
+    prefix = (body.get("prefix") or "").lstrip("/")
+    name = (body.get("name") or "").strip().strip("/")
+    if not bucket or not name:
+        return JSONResponse(status_code=400, content={"error": "bucket and name required"})
+    if prefix and not prefix.endswith("/"):
+        prefix = prefix + "/"
+    key = f"{prefix}{name}/"
+    try:
+        s3 = _s3_get_client()
+        s3.put_object(Bucket=bucket, Key=key, Body=b"")
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"{type(e).__name__}: {e}"})
+    return {"ok": True, "key": key}
 
 
 # ---------------------------------------------------------------------------

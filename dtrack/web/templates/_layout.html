@@ -29,6 +29,7 @@
                 {% endfor %}
             </select>
             <a href="/playground" style="text-decoration:none;"><button type="button"{% if current_page == "playground" %} disabled{% endif %}>Playground</button></a>
+            <a href="/s3" style="text-decoration:none;"><button type="button"{% if current_page == "s3" %} disabled{% endif %}>S3</button></a>
             <a href="/sync" style="text-decoration:none;"><button type="button"{% if current_page == "sync" %} disabled{% endif %}>Sync</button></a>
             {% block nav_extras %}{% endblock %}
             <!-- Global pair selector indicator. Click to open the picker

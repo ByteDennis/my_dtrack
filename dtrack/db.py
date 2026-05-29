@@ -2314,3 +2314,10 @@ def delete_playground_run(db_path: str, run_id: int) -> bool:
             (run_id,),
         )
         return cur.rowcount > 0
+
+
+def clear_playground_history(db_path: str) -> int:
+    # >>> wipe all rows from _playground_history; returns count deleted <<< #
+    with sqlite3.connect(db_path) as c:
+        cur = c.execute("DELETE FROM _playground_history")
+        return cur.rowcount

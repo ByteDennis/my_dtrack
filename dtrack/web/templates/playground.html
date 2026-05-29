@@ -124,6 +124,9 @@
                 <h2>HISTORY</h2>
                 <div class="actions">
                     <button class="btn-text" onclick="pgLoadHistory()">Reload</button>
+                    <button class="btn-text" onclick="pgClearHistory()" title="Delete every row from _playground_history">Clear history</button>
+                    <button class="btn-text" onclick="pgClearCache()" title="Wipe the in-memory LRU that backs the use-cache toggle + Download CSV">Clear cache</button>
+                    <button class="btn-text" onclick="pgClearExtractionCache()" title="Delete .cache.db files under csv/ and sas/ — forces extractors to re-run on Athena/Oracle/Hive">Clear extraction cache</button>
                 </div>
             </div>
             <div id="pg-history">

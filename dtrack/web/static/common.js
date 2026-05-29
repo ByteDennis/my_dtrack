@@ -14,6 +14,7 @@ const STEP_ROUTES = {
     'col_compare': '/col_compare',
     'csv_compare': '/csv_compare',
     'playground': '/playground',
+    's3': '/s3',
     'sync': '/sync',
 };
 

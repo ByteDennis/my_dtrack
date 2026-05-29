@@ -547,3 +547,49 @@ async function pgDeleteRun(id) {
         console.error('delete failed:', e);
     }
 }
+
+async function pgClearHistory() {
+    if (!confirm('Delete every row from _playground_history?\n\nThis cannot be undone.')) return;
+    try {
+        const res = await fetch('/api/playground/history/clear', {method: 'POST'});
+        const data = await res.json();
+        if (res.ok) {
+            _pgSetStatus(`Cleared ${data.deleted} history row${data.deleted === 1 ? '' : 's'}.`, 'ok');
+            pgLoadHistory();
+        } else {
+            _pgSetStatus(`Clear failed: ${data.error || res.status}`, 'error');
+        }
+    } catch (e) {
+        _pgSetStatus(`Clear failed: ${e.message}`, 'error');
+    }
+}
+
+async function pgClearCache() {
+    try {
+        const res = await fetch('/api/playground/cache/clear', {method: 'POST'});
+        const data = await res.json();
+        if (res.ok) {
+            _pgSetStatus(`Cleared ${data.cleared} cached result${data.cleared === 1 ? '' : 's'}.`, 'ok');
+        } else {
+            _pgSetStatus(`Clear failed: ${data.error || res.status}`, 'error');
+        }
+    } catch (e) {
+        _pgSetStatus(`Clear failed: ${e.message}`, 'error');
+    }
+}
+
+async function pgClearExtractionCache() {
+    if (!confirm('Delete every .cache.db file under known outdirs (csv/, sas/, …)?\n\nFuture extractor runs will re-execute every block — Athena scans will be re-billed.')) return;
+    try {
+        const res = await fetch('/api/playground/cache/clear-extraction', {method: 'POST'});
+        const data = await res.json();
+        if (res.ok) {
+            const n = (data.deleted || []).length;
+            _pgSetStatus(`Deleted ${n} cache file${n === 1 ? '' : 's'}.`, 'ok');
+        } else {
+            _pgSetStatus(`Clear failed: ${data.error || res.status}`, 'error');
+        }
+    } catch (e) {
+        _pgSetStatus(`Clear failed: ${e.message}`, 'error');
+    }
+}
