@@ -54,6 +54,7 @@ Thumbs.db
 # Documentation
 *.md
 !instruct.md
+!example/nbs/tutorials/*.md
 .env
 thesis
 week_report*
