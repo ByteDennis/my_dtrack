@@ -195,6 +195,7 @@ NULL_SENTINELS = {
 DATA_SOURCES = [
     {"value": "oracle", "label": "SAS/Oracle"},
     {"value": "hadoop", "label": "SAS/Hadoop"},
+    {"value": "hadoop_sas", "label": "Hadoop/SAS"},
     {"value": "sas", "label": "SAS Dataset"},
     {"value": "aws", "label": "AWS/Athena"},
     {"value": "databricks", "label": "AWS/Databricks"},

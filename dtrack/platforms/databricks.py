@@ -24,13 +24,11 @@ passing a vintage_transform on the pair.
 
 import csv
 import os
-import threading
 from datetime import datetime
 
 from .base import (
     qualified_name,
     is_numeric_type,
-    resolve_table,
     build_date_in_clause,
     build_date_range_with_gaps,
     resolve_date_format,
@@ -39,13 +37,12 @@ from .base import (
     fill_columns_from_meta,
     inject_where_from_config,
     quote_ident,
+    apply_null_sentinels,
     set_cache_db,
+    cache_get,
+    cache_put,
     _mask_stats_in_rows,
 )
-
-
-_sql_log_file = None
-_sql_log_lock = threading.Lock()
 
 
 # >>> Spark-SQL flavor of athena._athena_portable_hash16 (same 16-bit MD5 recipe, Databricks dialect) <<< #
@@ -107,17 +104,14 @@ def databricks_connect(catalog_schema=None):
     return dbx_sql.connect(**kwargs)
 
 
-# >>> append `sql` to the per-qname log file used by _extract_cols_for_table_databricks <<< #
-def _log_sql(label, sql):
-    if not _sql_log_file:
-        return
-    with _sql_log_lock:
-        with open(_sql_log_file, "a", encoding="utf-8") as f:
-            f.write(f"\n-- {label}\n{sql.rstrip()};\n")
-
-
 # >>> run one SQL block and return rows of dicts keyed by lowercase column name <<< #
 def _query_databricks(sql, catalog_schema=None):
+    # Consult the shared SQL-result cache first (set by run_databricks_sql_file)
+    # so re-running the same extract_*.sql skips blocks that already succeeded
+    # — mirrors the Oracle / Hadoop runners' resume behavior.
+    cached = cache_get(sql, catalog_schema)
+    if cached is not None:
+        return cached
     conn = databricks_connect(catalog_schema)
     try:
         cur = conn.cursor()
@@ -125,6 +119,7 @@ def _query_databricks(sql, catalog_schema=None):
         cols = [d[0].lower() for d in (cur.description or [])]
         out = [dict(zip(cols, row)) for row in cur.fetchall()]
         cur.close()
+        cache_put(sql, catalog_schema, out, row_count=len(out))
         return out
     finally:
         try:
@@ -133,18 +128,23 @@ def _query_databricks(sql, catalog_schema=None):
             pass
 
 
-# >>> discover column_name + data_type from information_schema <<< #
+# >>> discover column_name + data_type via DESCRIBE catalog.schema.table (col 0 = name, col 1 = type) <<< #
 def _discover_columns_databricks(cursor, catalog, schema, table):
-    # >>> backtick-quote the catalog because Spark identifiers can't start with a digit (e.g. "062108..._catalog") <<< #
-    cat_q = f"`{catalog}`" if catalog else catalog
-    sql = f"""
-        SELECT column_name, data_type
-        FROM {cat_q}.information_schema.columns
-        WHERE table_schema = '{schema}' AND table_name = '{table}'
-        ORDER BY ordinal_position
-    """
-    cursor.execute(sql)
-    return {row[0]: row[1] for row in cursor.fetchall()}
+    # Backtick-quote each part: Spark identifiers can't start with a digit
+    # (e.g. "062108..._catalog") and DESCRIBE needs a valid 3-part reference.
+    parts = [p for p in (catalog, schema, table) if p]
+    full = ".".join(f"`{p}`" for p in parts)
+    cursor.execute(f"DESCRIBE {full}")
+    cols = {}
+    for row in cursor.fetchall():
+        name = (row[0] or "").strip() if row[0] is not None else ""
+        # Spark's DESCRIBE appends a blank row then a "# Partition Information"
+        # / "# col_name" section for partitioned tables -- stop at the first
+        # blank or comment marker so partition keys aren't double-counted.
+        if not name or name.startswith("#"):
+            break
+        cols[name] = (row[1] or "").strip() if len(row) > 1 and row[1] is not None else ""
+    return cols
 
 
 # >>> resolve "catalog.schema.table" with column quoting for SQL emission <<< #
@@ -168,7 +168,7 @@ def _build_row_sql_databricks(tbl_cfg):
         parts.append(bounds)
     wc = " AND ".join(parts) if parts else "1=1"
     return (
-        f"SELECT {date_col_q} AS date_value, COUNT(*) AS row_count\n"
+        f"SELECT {date_col_q} AS dt, COUNT(*) AS row_count\n"
         f"FROM {full_table}\n"
         f"WHERE {wc}\n"
         f"GROUP BY {date_col_q}\n"
@@ -206,203 +206,196 @@ def _write_combined_row_sql_databricks(databricks_tables, outdir):
     return sql_path
 
 
-# >>> extract row counts for one Databricks table to {qname}_row.csv <<< #
-def _extract_rows_for_table_databricks(tbl_cfg, outdir):
-    qname = qualified_name(tbl_cfg)
-    sql = _build_row_sql_databricks(tbl_cfg)
+# >>> per-column stats SQL for one Databricks column — emits all 14 COL_CSV_HEADERS columns <<< #
+def _build_col_sql_databricks(col, dtype, full_table, where, dt_label="all"):
+    numeric = is_numeric_type(dtype, is_oracle=False)
+    col_q = quote_ident(col, "athena")
+    wc = (where or "").strip() or "(1=1)"
+    col_lit = col.replace("'", "''")
+    dt_lit = (dt_label or "all").replace("'", "''")
+    if numeric:
+        ce = apply_null_sentinels(col_q, dtype or "numeric", "athena")
+        return (
+            f"SELECT '{dt_lit}' AS dt, '{col_lit}' AS column_name, "
+            f"'numeric' AS col_type, "
+            f"COUNT(*) AS n_total, COUNT(*) - COUNT({ce}) AS n_missing, "
+            f"COUNT(DISTINCT {ce}) AS n_unique, "
+            f"AVG(CAST({ce} AS DOUBLE)) AS mean, "
+            f"STDDEV_SAMP(CAST({ce} AS DOUBLE)) AS std, "
+            f"CAST(MIN({ce}) AS STRING) AS min_val, "
+            f"CAST(MAX({ce}) AS STRING) AS max_val, "
+            f"CAST(NULL AS STRING) AS top_10, "
+            f"CAST(NULL AS STRING) AS length_avg, "
+            f"CAST(NULL AS STRING) AS length_max, "
+            f"CAST(NULL AS STRING) AS hash_sum\n"
+            f"FROM {full_table} WHERE {wc}")
+    ce = apply_null_sentinels(col_q, dtype or "categorical", "athena")
+    return (
+        f"SELECT '{dt_lit}' AS dt, '{col_lit}' AS column_name, "
+        f"'categorical' AS col_type, "
+        f"COUNT(*) AS n_total, COUNT(*) - COUNT({ce}) AS n_missing, "
+        f"COUNT(DISTINCT {ce}) AS n_unique, "
+        f"CAST(NULL AS STRING) AS mean, CAST(NULL AS STRING) AS std, "
+        f"MIN(CAST({ce} AS STRING)) AS min_val, "
+        f"MAX(CAST({ce} AS STRING)) AS max_val, "
+        f"CAST(NULL AS STRING) AS top_10, "
+        f"CAST(AVG(LENGTH(CAST({ce} AS STRING))) AS STRING) AS length_avg, "
+        f"CAST(MAX(LENGTH(CAST({ce} AS STRING))) AS STRING) AS length_max, "
+        f"CAST(NULL AS STRING) AS hash_sum\n"
+        f"FROM {full_table} WHERE {wc}")
 
-    rows = _query_databricks(sql, tbl_cfg.get("conn_macro"))
 
-    csv_path = os.path.join(outdir, f"{qname}_row.csv")
-    with open(csv_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["date_value", "row_count"])
-        for r in rows:
-            w.writerow([r.get("date_value"), r.get("row_count")])
-    print(f"  Row counts: {csv_path} ({len(rows)} dates)")
-
-
-# >>> extract per-column stats for one Databricks table -> {qname}_col.csv <<< #
-def _extract_cols_for_table_databricks(tbl_cfg, outdir, max_workers=None,
-                                       db_path=None, vintage=None,
-                                       preset=None, stats_override=None):
-    from .athena import _extract_col_athena
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    name = tbl_cfg["name"]
-    date_col = tbl_cfg["date_col"]
-    full_table = _full_table(tbl_cfg)
-    cte_prefix = ""
-
-    columns = tbl_cfg.get("columns", {})
-    if not columns:
-        print(f"  WARNING: No columns specified for {name}. "
-              f"Use 'dtrack load-columns' or provide columns in config.")
-        return None
-
-    non_date_cols = [(c, d) for c, d in columns.items()
-                     if c.lower() != date_col.lower()]
-
+# >>> compose the effective WHERE + dt label for a table's col extraction window <<< #
+def _col_where_and_label_databricks(tbl_cfg, db_path, vintage):
     table_vintage = tbl_cfg.get("vintage", vintage)
     date_filter = compute_date_filter(tbl_cfg, db_path, table_vintage)
     resolve_date_format(date_filter, tbl_cfg)
-
-    qname = qualified_name(tbl_cfg)
-    log_path = os.path.join(outdir, f"{qname}_col.sql")
-    with open(log_path, "w", encoding="utf-8") as f:
-        f.write(f"-- SQL queries for {qname} col extraction\n"
-                f"-- {datetime.now().isoformat()}\n\n")
-    global _sql_log_file
-    _sql_log_file = log_path
-
-    set_cache_db(os.path.join(outdir, ".cache.db"))
-    start = datetime.now()
-
-    extract_cfg = dict(tbl_cfg)
+    date_col = tbl_cfg["date_col"]
     orig_where = (tbl_cfg.get("where") or "").strip()
     bounds = (tbl_cfg.get("_date_bounds") or "").strip()
-    eff_vintage = date_filter.get("vintage", "all")
     eff_dtype = date_filter.get("date_dtype")
     eff_fmt = date_filter.get("date_format")
-
+    dt_label = "all"
     if date_filter["filter_type"] == "between":
         dw = build_date_range_with_gaps(
             date_col, date_filter["dates"], eff_dtype, date_format=eff_fmt)
-        extract_cfg["where"] = f"({orig_where}) AND {dw}" if orig_where else dw
+        where = f"({orig_where}) AND {dw}" if orig_where else dw
     elif date_filter["filter_type"] == "in_list":
         dw = build_date_in_clause(
             date_col, date_filter["dates"], eff_dtype, date_format=eff_fmt)
-        extract_cfg["where"] = f"({orig_where}) AND {dw}" if orig_where else dw
-        eff_vintage = "all"; eff_dtype = None
+        where = f"({orig_where}) AND {dw}" if orig_where else dw
+        dt_label = "sample"
     elif bounds:
-        extract_cfg["where"] = f"({orig_where}) AND {bounds}" if orig_where else bounds
-
-    dt_label = "sample" if date_filter["filter_type"] == "in_list" else None
-
-    workers = max_workers or int(os.environ.get("DATABRICKS_MAX_WORKERS") or 4)
-    workers = max(1, min(workers, len(non_date_cols)))
-
-    all_stats = []
-
-    def _one(col_dtype):
-        c, dt = col_dtype
-        return _extract_col_athena(
-            extract_cfg, c, dt, full_table, cte_prefix,
-            database=tbl_cfg.get("conn_macro"),
-            vintage=eff_vintage, date_dtype=eff_dtype,
-            date_format=eff_fmt, dt_label=dt_label,
-            _query=lambda s, data_base=None: _query_databricks(
-                s, data_base or tbl_cfg.get("conn_macro")),
-        ) if _extract_col_athena_accepts_query() else _query_databricks_fallback(
-            extract_cfg, c, dt, full_table, eff_vintage, eff_dtype, eff_fmt,
-            dt_label, tbl_cfg.get("conn_macro"))
-
-    if workers <= 1:
-        for cd in non_date_cols:
-            try:
-                all_stats.extend(_one(cd))
-            except Exception as e:
-                print(f"  Warning: Failed to extract {cd[0]}: {e}")
+        where = f"({orig_where}) AND {bounds}" if orig_where else bounds
     else:
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = {ex.submit(_one, cd): cd[0] for cd in non_date_cols}
-            for fut in as_completed(futs):
-                try:
-                    all_stats.extend(fut.result())
-                except Exception as e:
-                    print(f"  Warning: Failed to extract {futs[fut]}: {e}")
+        where = orig_where
+    return where, dt_label
 
-    _sql_log_file = None
-    set_cache_db(None)
-    elapsed = (datetime.now() - start).total_seconds()
 
-    if not all_stats:
-        return None
-
-    _mask_stats_in_rows(all_stats, preset, stats_override)
-
-    csv_path = os.path.join(outdir, f"{qname}_col.csv")
-    fieldnames = [
-        "column_name", "dt", "col_type", "n_total", "n_missing",
-        "n_unique", "mean", "std", "min_val", "max_val", "top_10",
-        "length_avg", "length_max", "hash_sum",
+# >>> aggregate extract_col.sql for every Databricks table — one block per (table, column) <<< #
+def _write_combined_col_sql_databricks(databricks_tables, outdir, db_path=None,
+                                       vintage=None, coarse=False, preset=None,
+                                       stats_override=None):
+    os.makedirs(outdir, exist_ok=True)
+    blocks = [
+        "-- dtrack Databricks col extraction queries",
+        f"-- Generated: {datetime.now().isoformat()}",
+        "",
     ]
-    with open(csv_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for s in sorted(all_stats, key=lambda x: (x["column_name"], x["dt"])):
-            w.writerow({k: s.get(k, "") for k in fieldnames})
+    for tbl in databricks_tables:
+        qname = qualified_name(tbl)
+        conn_macro = tbl.get("conn_macro", "") or ""
+        full_table = _full_table(tbl)
+        date_col = tbl.get("date_col", "")
+        columns = tbl.get("columns", {})
+        if not columns:
+            blocks.append(f"-- {qname}")
+            blocks.append("-- SKIP: no columns defined")
+            blocks.append("")
+            continue
+        non_date_cols = [(c, d) for c, d in columns.items()
+                         if c.lower() != date_col.lower()]
+        if not non_date_cols:
+            blocks.append(f"-- {qname}")
+            blocks.append("-- SKIP: no non-date columns")
+            blocks.append("")
+            continue
+        try:
+            where, dt_label = _col_where_and_label_databricks(tbl, db_path, vintage)
+        except Exception as e:
+            blocks.append(f"-- {qname}")
+            blocks.append(f"-- SKIP: date filter build failed: {e}")
+            blocks.append("")
+            continue
+        for col, dtype in non_date_cols:
+            try:
+                sql = _build_col_sql_databricks(col, dtype, full_table, where, dt_label)
+            except Exception as e:
+                blocks.append(f"-- {qname}/{col}")
+                blocks.append(f"-- SKIP: SQL build failed: {e}")
+                blocks.append("")
+                continue
+            blocks.append(f"-- {qname}/{col}")
+            blocks.append(f"/* @conn_macro={conn_macro} */")
+            blocks.append(sql + ";")
+            blocks.append("")
+    sql_path = os.path.join(outdir, "extract_col.sql")
+    with open(sql_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(blocks))
+    return sql_path
 
-    print(f"  Column stats: {csv_path} ({len(all_stats)} rows, {elapsed:.1f}s)")
-    return {"table": name, "step": "col",
-            "start": start.isoformat(), "end": "",
-            "elapsed_sec": elapsed}
+
+# >>> parse + execute extract_{row,col}.sql via databricks_connect (gen-then-run, mirrors run_hadoop_sql_file) <<< #
+def run_databricks_sql_file(sql_path, outdir, max_workers=None, db_path=None,
+                            on_progress=None, resume=False, cancel_event=None,
+                            preset=None, stats_override=None):
+    from .base import run_extract_sql_file
+
+    def _qf(sql, conn_macro):
+        rows = _query_databricks(sql, conn_macro)
+        if preset is not None or stats_override:
+            _mask_stats_in_rows(rows, preset, stats_override)
+        return rows
+
+    set_cache_db(os.path.join(outdir, ".cache.db"))
+    try:
+        return run_extract_sql_file(
+            sql_path, outdir,
+            query_fn=_qf,
+            platform="databricks",
+            max_workers=max_workers,
+            on_progress=on_progress,
+            cancel_event=cancel_event,
+        )
+    finally:
+        set_cache_db(None)
 
 
-# >>> probe whether the linked _extract_col_athena exposes a _query hook <<< #
-def _extract_col_athena_accepts_query():
-    from inspect import signature
-    from .athena import _extract_col_athena
-    return "_query" in signature(_extract_col_athena).parameters
-
-
-# >>> fallback shim when _extract_col_athena cannot be cleanly reused <<< #
-def _query_databricks_fallback(extract_cfg, col, dtype, full_table,
-                               vintage, date_dtype, date_format, dt_label,
-                               catalog_schema):
-    from .base import apply_null_sentinels
-    numeric = is_numeric_type(dtype, is_oracle=False)
-    col_q = quote_ident(col, "athena")
-    where = (extract_cfg.get("where") or "").strip() or "(1=1)"
-    if dt_label is not None:
-        dt_select = f"'{dt_label}' AS dt"
-        group_by = ""
-    elif vintage == "all" or not vintage or vintage == "day":
-        dt_select = "'all' AS dt"
-        group_by = ""
-    else:
-        dt_select = "'all' AS dt"
-        group_by = ""
-    if numeric:
-        ce = apply_null_sentinels(col_q, dtype or "numeric", "athena")
-        sql = (f"SELECT {dt_select}, '{dtype}' AS col_type, "
-               f"COUNT(*) AS n_total, COUNT(*) - COUNT({ce}) AS n_missing, "
-               f"COUNT(DISTINCT {ce}) AS n_unique, AVG(CAST({ce} AS DOUBLE)) AS mean, "
-               f"STDDEV_SAMP(CAST({ce} AS DOUBLE)) AS std, "
-               f"MIN({ce}) AS min_val, MAX({ce}) AS max_val "
-               f"FROM {full_table} WHERE {where}{group_by}")
-    else:
-        ce = apply_null_sentinels(col_q, dtype or "categorical", "athena")
-        sql = (f"SELECT {dt_select}, '{dtype}' AS col_type, "
-               f"COUNT(*) AS n_total, COUNT(*) - COUNT({ce}) AS n_missing, "
-               f"COUNT(DISTINCT {ce}) AS n_unique, "
-               f"CAST(NULL AS DOUBLE) AS mean, CAST(NULL AS DOUBLE) AS std, "
-               f"MIN(CAST({ce} AS STRING)) AS min_val, "
-               f"MAX(CAST({ce} AS STRING)) AS max_val, "
-               f"AVG(LENGTH(CAST({ce} AS STRING))) AS length_avg, "
-               f"MAX(LENGTH(CAST({ce} AS STRING))) AS length_max "
-               f"FROM {full_table} WHERE {where}{group_by}")
-    _log_sql(col, sql)
-    rows = _query_databricks(sql, catalog_schema)
-    out = []
-    for r in rows:
-        out.append({
-            "dt": str(r.get("dt", "all")),
-            "column_name": col,
-            "col_type": "numeric" if numeric else "categorical",
-            "n_total": str(r.get("n_total") or 0),
-            "n_missing": str(r.get("n_missing") or 0),
-            "n_unique": str(r.get("n_unique") or 0),
-            "mean": "" if r.get("mean") is None else str(r["mean"]),
-            "std": "" if r.get("std") is None else str(r["std"]),
-            "min_val": "" if r.get("min_val") is None else str(r["min_val"]),
-            "max_val": "" if r.get("max_val") is None else str(r["max_val"]),
-            "top_10": "",
-            "length_avg": "" if r.get("length_avg") is None else str(r["length_avg"]),
-            "length_max": "" if r.get("length_max") is None else str(r["length_max"]),
-            "hash_sum": "",
-        })
-    return out
+# >>> discover columns (DESCRIBE) for any databricks table missing them; seed _column_meta + columns.csv <<< #
+def _ensure_columns_databricks(databricks_tables, outdir, db_path):
+    from ..db import insert_column_meta, get_column_meta
+    cursors_by_cs = {}
+    try:
+        for tbl in databricks_tables:
+            if tbl.get("columns"):
+                continue
+            qname = qualified_name(tbl)
+            raw_table = tbl.get("table", "")
+            cs = _resolve_catalog_schema(tbl.get("conn_macro"))
+            cols = None
+            if db_path:
+                existing = get_column_meta(db_path, qname)
+                if existing:
+                    cols = {c["column_name"]: c.get("data_type", "") for c in existing}
+            if cols is None:
+                if not cs or "." not in cs:
+                    print(f"  {qname}: SKIP discovery — conn_macro is not catalog.schema")
+                    continue
+                catalog, schema = cs.split(".", 1)
+                if cs not in cursors_by_cs:
+                    print(f"  {qname}: connecting to Databricks ({cs})...")
+                    conn = databricks_connect(cs)
+                    cursors_by_cs[cs] = (conn, conn.cursor())
+                _, cur = cursors_by_cs[cs]
+                cols = _discover_columns_databricks(cur, catalog, schema, raw_table)
+                if cols and db_path:
+                    insert_column_meta(db_path, qname, cols, source="databricks")
+                    print(f"  {qname}: discovered {len(cols)} columns from Databricks")
+            if cols:
+                tbl["columns"] = dict(cols)
+                col_csv = os.path.join(outdir, f"{qname}_columns.csv")
+                with open(col_csv, "w", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(["COLUMN_NAME", "DATA_TYPE"])
+                    for cn, ct in sorted(cols.items()):
+                        w.writerow([cn, ct])
+    finally:
+        for cs, (conn, cur) in cursors_by_cs.items():
+            try:
+                cur.close()
+                conn.close()
+            except Exception:
+                pass
 
 
 # >>> top-level entry: extract row + col CSVs for every databricks-source table <<< #
@@ -471,42 +464,27 @@ def extract_databricks(config_path, outdir, types=None, max_workers=None,
         _extract_mock_tables(dbx_tables, outdir, types, mock_dir)
         return
 
-    if db_path and "col" in types:
-        fill_columns_from_meta(dbx_tables, db_path)
+    # Gen-then-run: write the same aggregate extract_{row,col}.sql the other
+    # platforms produce, then execute the saved file block-by-block. This makes
+    # what's previewed == what's saved == what's run (no in-memory rebuild),
+    # matching Athena / Hadoop / Oracle.
+    if "col" in types:
+        if db_path:
+            fill_columns_from_meta(dbx_tables, db_path)
+        _ensure_columns_databricks(dbx_tables, outdir, db_path)
 
-    timing = []
-    for tbl_cfg in dbx_tables:
-        name = tbl_cfg["name"]
-        print(f"\nExtracting: {name} ({_full_table(tbl_cfg)})")
-        if "row" in types:
-            try:
-                _extract_rows_for_table_databricks(tbl_cfg, outdir)
-            except Exception as e:
-                print(f"  ERROR row extraction for {name}: {e}")
-                timing.append({"table": name, "step": "row", "status": str(e)})
-        if "col" in types:
-            try:
-                t = _extract_cols_for_table_databricks(
-                    tbl_cfg, outdir, max_workers=max_workers,
-                    db_path=db_path, vintage=vintage,
-                    preset=preset, stats_override=stats_override)
-                if t:
-                    timing.append(t)
-            except NotImplementedError as e:
-                print(f"  SKIP col for {name}: {e}")
-            except Exception as e:
-                print(f"  ERROR col extraction for {name}: {e}")
-
-    if timing:
-        timing_path = os.path.join(outdir, "_timing.csv")
-        with open(timing_path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["table", "step", "start",
-                                              "end", "elapsed_sec", "status"])
-            w.writeheader()
-            for r in timing:
-                w.writerow({k: r.get(k, "") for k in
-                            ("table", "step", "start", "end",
-                             "elapsed_sec", "status")})
-        print(f"\nTiming log: {timing_path}")
+    if "row" in types:
+        print(f"\n--- Databricks row extraction ({len(dbx_tables)} tables) ---")
+        row_path = _write_combined_row_sql_databricks(dbx_tables, outdir)
+        run_databricks_sql_file(row_path, outdir, max_workers=max_workers,
+                                db_path=db_path)
+    if "col" in types:
+        print(f"\n--- Databricks col extraction ({len(dbx_tables)} tables) ---")
+        col_path = _write_combined_col_sql_databricks(
+            dbx_tables, outdir, db_path=db_path, vintage=vintage,
+            preset=preset, stats_override=stats_override)
+        run_databricks_sql_file(col_path, outdir, max_workers=max_workers,
+                                db_path=db_path, preset=preset,
+                                stats_override=stats_override)
 
     print(f"\nExtraction complete. Output in: {outdir}")

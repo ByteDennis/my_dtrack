@@ -2141,8 +2141,15 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
         tbl['_to_date'] = eff_to
 
     # Oracle tables go through dtrack.platforms.oracle.extract_oracle now
-    # (Python-direct via oracledb). gen_sas handles SAS-local and Hadoop only.
-    oracle_tables = [t for t in all_tables if t.get('source', '').lower() in ('sas', 'hadoop')]
+    # (Python-direct via oracledb). gen_sas handles SAS-local and hadoop_sas
+    # only -- `source=hadoop` runs directly through hadoop_connect (the
+    # gen-first plain-Hive path in platforms/hadoop), so it is intentionally
+    # excluded here. `hadoop_sas` is normalized to `hadoop` so every downstream
+    # SAS dialect helper / template keeps working unchanged.
+    oracle_tables = [t for t in all_tables if t.get('source', '').lower() in ('sas', 'hadoop_sas')]
+    for t in oracle_tables:
+        if t.get('source', '').lower() == 'hadoop_sas':
+            t['source'] = 'hadoop'
 
     if not oracle_tables:
         print("No SAS/Hadoop tables found in config")
@@ -2420,9 +2427,14 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     if env_path:
         print(f"  Credentials: from {env_path}")
 
-    # Discover and save column metadata CSVs (Oracle/SAS tables only)
+    # Discover and save column metadata CSVs (Oracle/SAS tables only). Hadoop
+    # is intentionally excluded: hadoop_sas tables (normalized to 'hadoop'
+    # above) get their columns from the generated SAS file at runtime, and
+    # `source=hadoop` (direct) is not in this gen path at all -- routing it
+    # through _discover_and_write_columns here would trigger an unwanted
+    # hadoop_connect DESCRIBE.
     sas_tables = [t for t in all_tables
-                  if t.get('source', '').lower() in ('oracle', 'sas', 'hadoop', '')]
+                  if t.get('source', '').lower() in ('oracle', 'sas', '')]
     if db_path and sas_tables:
         _discover_and_write_columns(sas_tables, outdir, db_path)
 

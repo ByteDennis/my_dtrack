@@ -4,7 +4,11 @@ Originally exercised both Oracle and Hadoop libname / approx-distinct behaviour
 via gen_sas. The Oracle path was retired when Oracle moved to the Python-direct
 extraction module (dtrack.platforms.oracle), so Oracle-source assertions here
 were deleted along with that code. The remaining test pins the Hadoop-side
-APPROX_DISTINCT toggle, which still flows through gen_sas + column_hadoop.sas.
+APPROX_DISTINCT toggle, which flows through gen_sas + column_hadoop.sas.
+
+Note: the SAS route for Hadoop is now `source=hadoop_sas` ("Hadoop/SAS").
+`source=hadoop` ("SAS/Hadoop") runs directly through hadoop_connect and does
+not go through gen_sas at all.
 """
 
 import json
@@ -24,7 +28,7 @@ def isolated_env(monkeypatch):
 
 
 def test_approx_distinct_on_hadoop(isolated_env, tmp_path, monkeypatch):
-    """DTRACK_APPROX_DISTINCT=1 + Hadoop source -> APPROX_DISTINCT in generated SAS."""
+    """DTRACK_APPROX_DISTINCT=1 + hadoop_sas source -> APPROX_DISTINCT in generated SAS."""
     monkeypatch.setenv("DTRACK_APPROX_DISTINCT", "1")
     monkeypatch.setenv("HDP_SERVER", "hadoop.example.com")
     monkeypatch.setenv("HDP_URI", "jdbc:hive2://hadoop.example.com:10000/usrf")
@@ -32,7 +36,7 @@ def test_approx_distinct_on_hadoop(isolated_env, tmp_path, monkeypatch):
         "pairs": {
             "demo": {
                 "left": {
-                    "name": "src", "table": "MYTBL", "source": "hadoop",
+                    "name": "src", "table": "MYTBL", "source": "hadoop_sas",
                     "conn_macro": "hdp", "date_col": "DT", "date_type": "date",
                     "columns": {"AMT": "DOUBLE"},
                 },

@@ -695,8 +695,21 @@ def _discover_and_write_columns(all_tables, outdir, db_path):
                         print(f"  {qname}: no columns found in Oracle")
             except Exception as e:
                 print(f"  {qname}: Oracle column discovery failed ({e})")
+        elif source == 'hadoop':
+            # source=hadoop runs directly through hadoop_connect (pyodbc), so
+            # discover columns the same way: DESCRIBE {schema}.{table} via Hive.
+            # (source=hadoop_sas keeps the SAS-time discovery below.)
+            try:
+                columns = _discover_columns_hadoop(conn_macro, raw_table)
+                if columns:
+                    insert_column_meta(db_path, qname, columns, source=source)
+                    print(f"  {qname}: discovered {len(columns)} columns from Hadoop")
+                else:
+                    print(f"  {qname}: no columns found in Hadoop")
+            except Exception as e:
+                print(f"  {qname}: Hadoop column discovery failed ({e})")
         else:
-            # SAS / Hadoop -- columns discovered via generated SAS file
+            # SAS / hadoop_sas -- columns discovered via generated SAS file
             print(f"  {qname}: columns will be discovered by SAS (source={source})")
             continue
 
@@ -1142,6 +1155,36 @@ def _query_hadoop(sql, conn_macro):
     return result
 
 
+def _discover_columns_hadoop(conn_macro, table):
+    """Discover (column_name -> data_type) for a Hive table via hadoop_connect.
+
+    Runs `DESCRIBE {schema}.{table}` (schema = conn_macro, the Athena-style
+    database) and reads col 0 = name, col 1 = type. Hive's DESCRIBE appends a
+    blank row + a `# Partition Information` section for partitioned tables, so
+    we stop at the first blank / comment marker. Returns {} in mock mode (no
+    live cluster)."""
+    full = f"{conn_macro}.{table}" if conn_macro else table
+    conn = hadoop_connect()
+    if conn is None:
+        return {}
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(f"DESCRIBE {full}")
+            cols = {}
+            for row in cur.fetchall() or []:
+                name = (str(row[0]).strip() if row[0] is not None else "")
+                if not name or name.startswith('#'):
+                    break
+                dtype = (str(row[1]).strip() if len(row) > 1 and row[1] is not None else "")
+                cols[name] = dtype
+            return cols
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
 def run_hadoop_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                         on_progress=None, resume=False, cancel_event=None):
     """Thin wrapper over base.run_extract_sql_file with platform='hadoop'.
@@ -1170,6 +1213,86 @@ def run_hadoop_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         )
     finally:
         set_cache_db(None)
+
+
+def extract_hadoop(config_path, outdir, types=None, max_workers=None, db_path=None,
+                   vintage=None, force=False, from_date=None, to_date=None,
+                   preset=None, stats_override=None):
+    """Direct Hive extraction (gen-then-run): write extract_{row,col}.sql then
+    execute it through hadoop_connect (pyodbc). Mirrors extract_oracle's shape
+    but uses the plain-Hive gen-first path -- no SAS involved.
+
+    Only `source=hadoop` tables are handled here; `source=hadoop_sas` is the
+    SAS route (gen_sas -> extract_*.sas) and is excluded.
+    """
+    if types is None:
+        types = ["row", "col"]
+
+    from ..config import load_unified_config
+    config = load_unified_config(config_path)
+    if db_path:
+        from ..db import get_pair_col_map_from_db, get_pair_col_filter
+        for pname, pcfg in config.get("pairs", {}).items():
+            if not pcfg.get("col_map"):
+                m = get_pair_col_map_from_db(db_path, pname)
+                if m:
+                    pcfg["col_map"] = m
+            if not pcfg.get("col_filter"):
+                cf = get_pair_col_filter(db_path, pname)
+                if cf.get("include") or cf.get("exclude"):
+                    pcfg["col_filter"] = cf
+
+    os.makedirs(outdir, exist_ok=True)
+    all_tables = load_tables_from_config(config)
+    hadoop_tables = [t for t in all_tables
+                     if t.get('source', '').lower() == 'hadoop']
+    if not hadoop_tables:
+        print("No Hadoop tables found in config")
+        return
+
+    for tbl in hadoop_tables:
+        if vintage:
+            tbl['vintage'] = vintage
+        elif 'vintage' not in tbl:
+            tbl['vintage'] = 'all'
+    inject_where_from_config(hadoop_tables, config)
+
+    if from_date or to_date:
+        for tbl in hadoop_tables:
+            date_col = tbl.get('date_col', '')
+            if not date_col:
+                continue
+            if from_date and to_date:
+                tbl['_date_bounds'] = build_date_between_clause(
+                    date_col, from_date, to_date, tbl.get('date_type'))
+            tbl['_from_date'] = from_date
+            tbl['_to_date'] = to_date
+
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        _extract_mock_tables(hadoop_tables, outdir, types, mock_dir)
+        return
+
+    if "col" in types:
+        _discover_and_write_columns(hadoop_tables, outdir, db_path)
+        if db_path:
+            fill_columns_from_meta(hadoop_tables, db_path)
+
+    if "row" in types:
+        sql_path = _write_combined_row_sql_hadoop(
+            hadoop_tables, outdir, db_path=db_path, vintage=vintage)
+        print(f"\n--- Hadoop row extraction from {sql_path} ---")
+        run_hadoop_sql_file(sql_path, outdir, max_workers=max_workers,
+                            db_path=db_path)
+    if "col" in types:
+        sql_path = _write_combined_col_sql_hadoop(
+            hadoop_tables, outdir, db_path=db_path, vintage=vintage,
+            preset=preset, stats_override=stats_override)
+        print(f"\n--- Hadoop col extraction from {sql_path} ---")
+        run_hadoop_sql_file(sql_path, outdir, max_workers=max_workers,
+                            db_path=db_path)
+
+    print(f"\nExtraction complete. Output in: {outdir}")
 
 
 # ---------------------------------------------------------------------------

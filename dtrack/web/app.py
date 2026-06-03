@@ -994,10 +994,13 @@ async def api_generate_files(request: Request):
                 print(f"[date bounds] {tbl['name']}: from={eff_from} to={eff_to} "
                       f"(source: {'pair' if (pair_from or pair_to) else 'global'})")
 
-            # Generate SAS file (SAS-local + Hadoop only — Oracle now has its
-            # own Python-direct path). Use filtered config if pairs selected.
+            # Generate SAS file (SAS-local + hadoop_sas only). `source=hadoop`
+            # runs directly through hadoop_connect (.sql, below); only
+            # `source=hadoop_sas` is extracted through SAS (extract_*.sas).
+            # Oracle has its own Python-direct path. Use filtered config if
+            # pairs selected.
             sas_hadoop_tables = [t for t in all_tables
-                                 if t.get('source', '').lower() in ('sas', 'hadoop')]
+                                 if t.get('source', '').lower() in ('sas', 'hadoop_sas')]
             if sas_hadoop_tables:
                 from ..platforms.hadoop import gen_sas
                 if pair_names:
@@ -1063,10 +1066,13 @@ async def api_generate_files(request: Request):
                 from ..platforms.hadoop import (
                     _write_combined_row_sql_hadoop,
                     _write_combined_col_sql_hadoop,
+                    _discover_and_write_columns,
                 )
                 from ..platforms.base import fill_columns_from_meta
                 os.makedirs(sas_outdir, exist_ok=True)
-                # >>> hadoop discovery already happened inside gen_sas above (hadoop is in sas_hadoop_tables) — do not re-run <<< #
+                # >>> source=hadoop runs only through hadoop_connect — discover its
+                #     columns here (gen_sas no longer handles plain hadoop) <<< #
+                _discover_and_write_columns(hadoop_tables, sas_outdir, _db_path)
                 if extract_type == "row":
                     hadoop_sql_path = _write_combined_row_sql_hadoop(
                         hadoop_tables, sas_outdir,
@@ -1139,8 +1145,17 @@ async def api_generate_files(request: Request):
                     from ..platforms.databricks import _write_combined_row_sql_databricks
                     dbx_sql_path = _write_combined_row_sql_databricks(
                         databricks_tables, aws_outdir)
-                    results["databricks_sql_file"] = dbx_sql_path
-                    print(f"  SQL: {dbx_sql_path}")
+                else:
+                    from ..platforms.databricks import _write_combined_col_sql_databricks
+                    from ..platforms.base import fill_columns_from_meta
+                    fill_columns_from_meta(databricks_tables, _db_path)
+                    dbx_sql_path = _write_combined_col_sql_databricks(
+                        databricks_tables, aws_outdir,
+                        db_path=_db_path, vintage=None,
+                        coarse=coarse, preset=preset,
+                        stats_override=stats_override)
+                results["databricks_sql_file"] = dbx_sql_path
+                print(f"  SQL: {dbx_sql_path}")
 
             # Generate SQL file
             aws_tables = [t for t in all_tables
@@ -4263,6 +4278,15 @@ def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
         from ..platforms.hadoop import _build_row_sql_hadoop
         sql = _build_row_sql_hadoop(tbl_cfg)
         return {"sql": sql, "output_file": "extract_row.sql", "result_csv": csv_out}
+
+    if source == "hadoop_sas":
+        # hadoop_sas is extracted through SAS (gen_sas -> extract_row.sas); the
+        # inner Hive query SAS passes through is the same hadoop row SQL.
+        from ..platforms.hadoop import _build_row_sql_hadoop
+        inner = _build_row_sql_hadoop(tbl_cfg)
+        sql = ("/* hadoop_sas: written into extract_row.sas; SAS runs this via\n"
+               "   PROC SQL CONNECT TO HADOOP passthrough */\n" + inner)
+        return {"sql": sql, "output_file": "extract_row.sas", "result_csv": csv_out}
 
     if source == "databricks":
         from ..platforms.databricks import _build_row_sql_databricks
