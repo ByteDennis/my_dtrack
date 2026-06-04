@@ -53,6 +53,26 @@ def test_col_sql_emits_every_header_alias():
         assert "'amt' AS column_name" in sql
 
 
+def test_number_leading_column_is_backticked_not_double_quoted():
+    # Spark treats "2_amt" as a STRING literal; the column must be backticked.
+    for dtype in ("double", "string"):
+        sql = _build_col_sql_databricks("2_amt", dtype, "cat.sch.tbl", "1=1", "all")
+        assert "`2_amt`" in sql, sql
+        assert '"2_amt"' not in sql
+        # the literal column_name alias is still a quoted string, unaffected
+        assert "'2_amt' AS column_name" in sql
+
+
+def test_full_table_backticks_only_invalid_parts():
+    from dtrack.platforms.databricks import _full_table
+    # normal names stay bare (so cross-engine refs / tests keep matching)
+    assert _full_table({"conn_macro": "main.warehouse", "table": "trades"}) \
+        == "main.warehouse.trades"
+    # digit-leading catalog / table get backticked
+    assert _full_table({"conn_macro": "062108_catalog.wh", "table": "2_tbl"}) \
+        == "`062108_catalog`.wh.`2_tbl`"
+
+
 def test_numeric_vs_categorical_col_type_literal():
     num = _build_col_sql_databricks("amt", "DOUBLE", "t", "1=1", "all")
     cat = _build_col_sql_databricks("ccy", "STRING", "t", "1=1", "all")

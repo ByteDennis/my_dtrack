@@ -214,9 +214,13 @@ def quote_ident(name, dialect="oracle"):
     """Wrap a SQL identifier in the dialect's quote char ONLY when the bare
     form is invalid (starts with a digit, contains spaces / hyphens / dots).
 
-    - Athena / Trino / Oracle: ANSI double quotes  →  "123col"
-    - Hive / Hadoop:           backticks            →  `123col`
-    - SAS:                     no change            (caller handles via macro var)
+    - Athena / Trino / Oracle:        ANSI double quotes  →  "123col"
+    - Hive / Hadoop / Databricks/Spark: backticks         →  `123col`
+    - SAS:                            no change            (caller handles via macro var)
+
+    Databricks/Spark uses backticks like Hive — ANSI double quotes are STRING
+    literals there, so a digit-leading column like `2_amt` double-quoted would
+    silently become the constant '2_amt' (and error in ANSI type checks).
 
     Conservative: leaves valid bare names unchanged so existing extractions
     keep their case-insensitive resolution against Oracle/Hive tables. Quoted
@@ -226,7 +230,7 @@ def quote_ident(name, dialect="oracle"):
     """
     if not name or _BARE_IDENT_RE.match(name):
         return name
-    if dialect == "hadoop":
+    if dialect in ("hadoop", "hive", "databricks", "spark"):
         return f"`{name}`"
     return f'"{name}"'
 

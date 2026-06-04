@@ -147,17 +147,24 @@ def _discover_columns_databricks(cursor, catalog, schema, table):
     return cols
 
 
-# >>> resolve "catalog.schema.table" with column quoting for SQL emission <<< #
+# >>> resolve "catalog.schema.table"; backtick only the parts that aren't valid bare Spark identifiers <<< #
 def _full_table(tbl_cfg):
     cs = _resolve_catalog_schema(tbl_cfg.get("conn_macro"))
     table = tbl_cfg.get("table") or ""
-    return f"{cs}.{table}" if cs else table
+    parts = []
+    if cs:
+        parts.extend(p for p in cs.split(".") if p)
+    if table:
+        parts.append(table)
+    # quote_ident leaves `main`/`warehouse`/`trades` bare but backticks a
+    # digit-leading catalog like `062108..._catalog` so the FROM clause is valid.
+    return ".".join(quote_ident(p, "databricks") for p in parts)
 
 
 # >>> build per-table row-count SQL block <<< #
 def _build_row_sql_databricks(tbl_cfg):
     date_col = tbl_cfg["date_col"]
-    date_col_q = quote_ident(date_col, "athena")
+    date_col_q = quote_ident(date_col, "databricks")
     full_table = _full_table(tbl_cfg)
     where = (tbl_cfg.get("where") or "").strip()
     bounds = (tbl_cfg.get("_date_bounds") or "").strip()
@@ -209,12 +216,12 @@ def _write_combined_row_sql_databricks(databricks_tables, outdir):
 # >>> per-column stats SQL for one Databricks column — emits all 14 COL_CSV_HEADERS columns <<< #
 def _build_col_sql_databricks(col, dtype, full_table, where, dt_label="all"):
     numeric = is_numeric_type(dtype, is_oracle=False)
-    col_q = quote_ident(col, "athena")
+    col_q = quote_ident(col, "databricks")
     wc = (where or "").strip() or "(1=1)"
     col_lit = col.replace("'", "''")
     dt_lit = (dt_label or "all").replace("'", "''")
     if numeric:
-        ce = apply_null_sentinels(col_q, dtype or "numeric", "athena")
+        ce = apply_null_sentinels(col_q, dtype or "numeric", "databricks")
         return (
             f"SELECT '{dt_lit}' AS dt, '{col_lit}' AS column_name, "
             f"'numeric' AS col_type, "
@@ -229,7 +236,7 @@ def _build_col_sql_databricks(col, dtype, full_table, where, dt_label="all"):
             f"CAST(NULL AS STRING) AS length_max, "
             f"CAST(NULL AS STRING) AS hash_sum\n"
             f"FROM {full_table} WHERE {wc}")
-    ce = apply_null_sentinels(col_q, dtype or "categorical", "athena")
+    ce = apply_null_sentinels(col_q, dtype or "categorical", "databricks")
     return (
         f"SELECT '{dt_lit}' AS dt, '{col_lit}' AS column_name, "
         f"'categorical' AS col_type, "
@@ -444,7 +451,7 @@ def extract_databricks(config_path, outdir, types=None, max_workers=None,
             date_col = tbl.get("date_col", "")
             if not date_col:
                 continue
-            date_col_q = quote_ident(date_col, "athena")
+            date_col_q = quote_ident(date_col, "databricks")
             date_type = (tbl.get("date_type") or "").lower()
             from .athena import _format_athena_date_bound
             bounds = []
