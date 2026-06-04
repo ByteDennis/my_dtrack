@@ -5512,7 +5512,7 @@ async def api_playground_cache_clear_extraction():
 # ---------------------------------------------------------------------------
 
 def _s3_get_client():
-    from .platforms.athena import aws_creds_renew  # type: ignore
+    from ..platforms.athena import aws_creds_renew  # type: ignore
     aws_creds_renew()
     try:
         import boto3
@@ -5522,7 +5522,7 @@ def _s3_get_client():
 
 
 def _s3_creds_status():
-    from .platforms.athena import _aws_creds_expires  # type: ignore
+    from ..platforms.athena import _aws_creds_expires  # type: ignore
     import time
     has_keys = bool(os.environ.get("AWS_ACCESS_KEY_ID"))
     remaining = None
@@ -5535,7 +5535,7 @@ def _s3_creds_status():
 @app.get("/api/s3/creds")
 async def api_s3_creds():
     try:
-        from .platforms.athena import aws_creds_renew
+        from ..platforms.athena import aws_creds_renew
         aws_creds_renew()
     except Exception as e:
         return {"ok": False, "error": str(e), **_s3_creds_status()}

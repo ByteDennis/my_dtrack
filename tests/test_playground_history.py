@@ -1,7 +1,9 @@
 """Tests for the _playground_history schema + CRUD helpers in dtrack.db."""
 
+import gc
 import os
 import tempfile
+import time
 
 import pytest
 
@@ -21,8 +23,17 @@ def fresh_db():
     os.unlink(path)
     init_database(path)
     yield path
-    if os.path.exists(path):
-        os.unlink(path)
+    # Windows holds a file lock until every sqlite connection is closed and
+    # collected; force GC and retry the unlink so teardown can't fail with
+    # "used by another process".
+    gc.collect()
+    for _ in range(5):
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+            break
+        except PermissionError:
+            time.sleep(0.1)
 
 
 def test_insert_and_list(fresh_db):
