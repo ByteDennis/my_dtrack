@@ -312,15 +312,18 @@ async def api_constants():
 
 @app.post("/api/extract")
 async def api_extract(request: Request):
-    """Run gen-sas / gen-aws / gen-oracle extraction.
+    """Run a platform extraction directly (not the streaming run-sql path).
 
     platform:
-      - 'aws'    -> athena.extract_aws (pyathena)
-      - 'oracle' -> oracle.extract_oracle (oracledb, gen-first row + direct-cursor col)
-      - 'sas'    -> hadoop.gen_sas (SAS + Hadoop)
+      - 'aws'        -> athena.extract_aws (pyathena)
+      - 'oracle'     -> oracle.extract_oracle (oracledb)
+      - 'databricks' -> databricks.extract_databricks (gen-then-run)
+      - 'hadoop'     -> hadoop.extract_hadoop (direct hadoop_connect, gen-then-run)
+      - 'sas' / 'hadoop_sas' -> hadoop.gen_sas (SAS code generation)
+    Any other value is rejected with 400 -- there is no silent default.
     """
     body = await request.json()
-    platform = body.get("platform", "aws")
+    platform = (body.get("platform") or "aws").lower()
     extract_type = body.get("type", "row")
     from_date = body.get("from_date")
     to_date = body.get("to_date")
@@ -352,10 +355,23 @@ async def api_extract(request: Request):
                 extract_databricks(_config_path, outdir, types=[extract_type],
                                    db_path=_db_path, from_date=from_date, to_date=to_date,
                                    max_workers=int(max_workers) if max_workers else None)
-            else:
+            elif platform == "hadoop":
+                # source=hadoop runs directly through hadoop_connect (.sql),
+                # NOT through gen_sas (which now only handles sas / hadoop_sas).
+                from ..platforms.hadoop import extract_hadoop
+                extract_hadoop(_config_path, outdir, types=[extract_type],
+                               db_path=_db_path, from_date=from_date, to_date=to_date,
+                               max_workers=int(max_workers) if max_workers else None)
+            elif platform in ("sas", "hadoop_sas"):
                 from ..platforms.hadoop import gen_sas
                 gen_sas(_config_path, outdir, types=[extract_type],
                         db_path=_db_path, from_date=from_date, to_date=to_date)
+            else:
+                return JSONResponse(status_code=400, content={
+                    "ok": False,
+                    "error": (f"unknown platform {platform!r}; expected one of "
+                              "aws / oracle / databricks / hadoop / sas / hadoop_sas"),
+                })
         return {"ok": True, "output": buf.getvalue()}
     except Exception as e:
         return JSONResponse(status_code=500, content={

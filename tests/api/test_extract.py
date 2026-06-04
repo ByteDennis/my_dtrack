@@ -17,18 +17,28 @@ focus on:
 """
 
 
-def test_extract_unknown_platform_routes_to_hadoop_default(client, api_workdir):
-    # Body without `platform` defaults to 'aws' on /api/extract; we exercise
-    # the routing-only path by passing platform='aws' but a bogus SQL so the
-    # downstream raises -- proves the endpoint shape, not the backend.
+def test_extract_aws_routing_shape(client, api_workdir):
+    # Routing-only check for a known platform: platform='aws' reaches
+    # extract_aws. We accept 200 (conn set up on a dev box) or 500 (no
+    # backend / sample tables missing); we DON'T expect 404 / 422.
     resp = client.post("/api/extract", json={
         "platform": "aws", "type": "row",
         "outdir": api_workdir["aws_outdir"],
         "from_date": "2024-01-01", "to_date": "2024-01-02",
     })
-    # We accept 200 (succeeded on a dev box where the conn is set up) or 500
-    # (no backend / sample tables missing). What we DON'T expect is 404 / 422.
     assert resp.status_code in (200, 500), resp.text
+
+
+def test_extract_unknown_platform_rejected(client, api_workdir):
+    # There is no silent default: an unrecognised platform is a 400. It used to
+    # fall through to gen_sas, which is wrong now that source=hadoop runs
+    # directly via hadoop_connect rather than through the SAS generator.
+    resp = client.post("/api/extract", json={
+        "platform": "totally-made-up", "type": "row",
+        "outdir": api_workdir["aws_outdir"],
+    })
+    assert resp.status_code == 400, resp.text
+    assert "unknown platform" in resp.json()["error"].lower()
 
 
 def test_dry_run_404_when_sql_file_missing(client, api_workdir):

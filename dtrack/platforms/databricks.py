@@ -10,10 +10,12 @@ prepended so `{DB_DEFAULT_CATALOG}.{conn_macro}.{table}` is what hits
 Databricks. An empty/missing conn_macro falls through to the
 warehouse's default catalog.schema.
 
-Real-mode auth re-uses the corporate AWS credential renewer
-(aws_creds_renew) before opening a databricks.sql connection -- the
-workspace sits behind the same proxy as Athena. OAuth is handled via
-databricks.sdk Config + the DB_PROFILE / DB_HTTPS env vars.
+Real-mode auth is OAuth via databricks.sdk Config + the DB_PROFILE /
+DB_HTTPS env vars (loaded from .env). The workspace sits behind the same
+corporate proxy as Athena, so databricks_connect sets HTTPS_PROXY from
+AWS_USR / AWS_PWD / AWS_HOST -- but it does NOT run the full
+aws_creds_renew() AWS token dance, which Databricks doesn't need and whose
+TTL-gated proxy mutation otherwise made runs flaky.
 
 Col extraction defers to the Athena SQL builder (Spark SQL on Databricks
 shares enough of Trino's dialect -- date_parse/date_trunc/SUBSTR/
@@ -79,8 +81,19 @@ def databricks_connect(catalog_schema=None):
             "pip install 'dtrack[databricks]'"
         ) from e
 
-    from .athena import aws_creds_renew
-    aws_creds_renew()
+    # Databricks needs only two things from the environment: DB_PROFILE +
+    # DB_HTTPS (loaded from .env), and the corporate HTTPS proxy. It does NOT
+    # need the AWS token renewal that aws_creds_renew() performs — only the
+    # proxy that function also sets. Calling the full aws_creds_renew() routed
+    # Databricks through the AWS token dance and (intermittently, because it's
+    # TTL-gated) was the reason a chunk could run in the playground yet fail
+    # from the col_gen runner. So set just the proxy here, the same way
+    # aws_creds_renew() does, from AWS_USR / AWS_PWD / AWS_HOST when present.
+    _usr = os.environ.get("AWS_USR")
+    _pwd = os.environ.get("AWS_PWD")
+    _host = os.environ.get("AWS_HOST")
+    if _usr and _pwd and _host:
+        os.environ["HTTPS_PROXY"] = f"http://{_usr}:{_pwd}@{_host}:8080"
 
     profile = os.environ.get("DB_PROFILE")
     http_path = os.environ.get("DB_HTTPS")
