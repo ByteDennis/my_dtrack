@@ -39,7 +39,7 @@ def test_row_sql_aliases_dt_not_date_value():
     sql = _build_row_sql_databricks(_tbl())
     assert " AS dt," in sql
     assert "date_value" not in sql
-    assert "main.warehouse.trades" in sql
+    assert "`main`.warehouse.trades" in sql
 
 
 def test_col_sql_emits_every_header_alias():
@@ -63,14 +63,17 @@ def test_number_leading_column_is_backticked_not_double_quoted():
         assert "'2_amt' AS column_name" in sql
 
 
-def test_full_table_backticks_only_invalid_parts():
+def test_full_table_always_backticks_catalog():
     from dtrack.platforms.databricks import _full_table
-    # normal names stay bare (so cross-engine refs / tests keep matching)
+    # catalog is always backticked; schema/table stay bare when valid
     assert _full_table({"conn_macro": "main.warehouse", "table": "trades"}) \
-        == "main.warehouse.trades"
-    # digit-leading catalog / table get backticked
+        == "`main`.warehouse.trades"
+    # digit-leading catalog / table get backticked too
     assert _full_table({"conn_macro": "062108_catalog.wh", "table": "2_tbl"}) \
         == "`062108_catalog`.wh.`2_tbl`"
+    # no catalog (bare schema, or none) -> first part is a schema, stays bare
+    assert _full_table({"conn_macro": "warehouse", "table": "trades"}) \
+        == "warehouse.trades"
 
 
 def test_numeric_vs_categorical_col_type_literal():
@@ -95,7 +98,7 @@ def test_combined_col_file_parses_into_per_column_blocks():
     assert names == [f"{qn}/amt", f"{qn}/ccy"]
     for b in blocks:
         assert b["conn_macro"] == "main.warehouse"
-        assert "main.warehouse.trades" in b["sql"]
+        assert "`main`.warehouse.trades" in b["sql"]
 
 
 def test_combined_row_and_col_are_single_aggregate_files():

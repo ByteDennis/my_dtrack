@@ -160,7 +160,7 @@ def _discover_columns_databricks(cursor, catalog, schema, table):
     return cols
 
 
-# >>> resolve "catalog.schema.table"; backtick only the parts that aren't valid bare Spark identifiers <<< #
+# >>> resolve "catalog.schema.table"; always backtick the catalog, schema/table only when not valid bare Spark identifiers <<< #
 def _full_table(tbl_cfg):
     cs = _resolve_catalog_schema(tbl_cfg.get("conn_macro"))
     table = tbl_cfg.get("table") or ""
@@ -169,9 +169,14 @@ def _full_table(tbl_cfg):
         parts.extend(p for p in cs.split(".") if p)
     if table:
         parts.append(table)
-    # quote_ident leaves `main`/`warehouse`/`trades` bare but backticks a
-    # digit-leading catalog like `062108..._catalog` so the FROM clause is valid.
-    return ".".join(quote_ident(p, "databricks") for p in parts)
+    has_catalog = bool(cs) and "." in cs
+    out = []
+    for i, p in enumerate(parts):
+        if i == 0 and has_catalog:
+            out.append(p if p.startswith("`") else f"`{p}`")
+        else:
+            out.append(quote_ident(p, "databricks"))
+    return ".".join(out)
 
 
 # >>> build per-table row-count SQL block <<< #

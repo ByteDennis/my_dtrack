@@ -1671,7 +1671,7 @@ async def api_set_pair_skip(request: Request):
                 # Drop the key entirely when re-enabling, to keep dtrack.json clean.
                 pairs_cfg[name].pop("skip", None)
 
-        save_unified_config(_config_path, config)
+        save_unified_config(config, _config_path)
         return {"ok": True, "updated": list(updates.keys())}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
@@ -4828,7 +4828,7 @@ async def api_save_col_mappings(pair_name: str, request: Request):
                     pairs_cfg[pair_name]["col_map"] = mappings
                 else:
                     pairs_cfg[pair_name].pop("col_map", None)
-                save_unified_config(_config_path, config)
+                save_unified_config(config, _config_path)
                 json_synced = True
         except Exception as e:
             # JSON sync failure shouldn't fail the save — DB write already
@@ -5738,8 +5738,8 @@ async def api_csv_compare_inspect(left: UploadFile = File(...),
 async def api_csv_compare_run(
     left: UploadFile = File(...),
     right: UploadFile = File(...),
-    pk_cols: str = Form(...),
-    compare_cols: str = Form(...),
+    pk_cols: str = Form(""),
+    compare_cols: str = Form(""),
     pk_cols_right: str = Form(""),
     compare_cols_right: str = Form(""),
     n_examples: int = Form(10),
