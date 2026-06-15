@@ -77,13 +77,13 @@ def load_row_count_csv(
         reader = csv.DictReader(f)
         headers = reader.fieldnames
 
-        # Auto-detect columns if not provided
-        if date_col is None:
+        # Auto-detect columns if not provided or not present in headers
+        if date_col is None or date_col not in headers:
             date_col = detect_date_column(headers)
             if date_col is None:
                 date_col = headers[0]  # Default to first column
 
-        if count_col is None:
+        if count_col is None or count_col not in headers:
             count_col = detect_count_column(headers)
             if count_col is None:
                 count_col = headers[1]  # Default to second column

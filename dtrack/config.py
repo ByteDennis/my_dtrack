@@ -123,9 +123,12 @@ def save_unified_config(config, config_path):
     """
     import copy
     out = copy.deepcopy(config)
-    for pair_cfg in out.get("pairs", {}).values():
+    # >>> strip a side's name only when it matches the table-derived one, so divergent names survive reload <<< #
+    for pair_name, pair_cfg in out.get("pairs", {}).items():
         for side in ("left", "right"):
-            pair_cfg.get(side, {}).pop("name", None)
+            side_cfg = pair_cfg.get(side, {})
+            if side_cfg.get("name") == _derive_side_name(side_cfg, pair_name):
+                side_cfg.pop("name", None)
     validate_unified_config(out)
     with open(config_path, 'w') as f:
         json.dump(out, f, indent=2)

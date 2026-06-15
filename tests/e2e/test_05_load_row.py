@@ -68,7 +68,7 @@ def test_load_row_populates_row_counts_for_all_sides(
 
 def test_load_row_updates_metadata_date_range(
         initialized_db, run_cli, db_rows):
-    """_metadata.min_date / max_date / row_count_total should be set."""
+    """_metadata.min_date_loaded / max_date_loaded / row_count_total should be set."""
     wd = initialized_db
     _seed_aws_csvs(wd, run_cli)
     run_cli("load-row",
@@ -77,15 +77,15 @@ def test_load_row_updates_metadata_date_range(
 
     meta = db_rows(
         wd["db"],
-        "SELECT min_date, max_date, row_count_total FROM _metadata "
+        "SELECT min_date_loaded, max_date_loaded, row_count_total FROM _metadata "
         "WHERE table_name=?",
         ("aws_pos_snapshot",),
     )
     assert meta, "_metadata row not created for aws_pos_snapshot"
     m = meta[0]
-    assert m["min_date"] and m["max_date"], (
+    assert m["min_date_loaded"] and m["max_date_loaded"], (
         f"min/max date not populated: {m}")
-    assert m["min_date"] <= m["max_date"]
+    assert m["min_date_loaded"] <= m["max_date_loaded"]
 
 
 def test_load_row_upsert_is_idempotent(initialized_db, run_cli, db_rows):

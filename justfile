@@ -20,6 +20,11 @@ db := "testing/project.db"
 config := "testing/config.json"
 port := "8080"
 
+# Where the e2e mock fixtures live. Override per machine:
+#   just mockdir=example/testing/mock test-e2e
+mockdir := "testing/mock"
+export DTRACK_E2E_MOCK_DIR := mockdir
+
 # list recipes
 default:
     @just --list
@@ -110,9 +115,13 @@ status *args:
 test *args:
     pytest {{args}}
 
-# run tests with coverage
-test-cov:
-    pytest --cov=dtrack --cov-report=term-missing
+# run tests with coverage (pass --lf to re-run only last-failed, --ff for failed-first)
+test-cov *args:
+    pytest --cov=dtrack --cov-report=term-missing {{args}}
+
+# (re)generate e2e mock fixtures into {{mockdir}} (pass --seed N, or --out to override)
+gen-mock *args:
+    python testing/generate_mock_data.py --out {{mockdir}} {{args}}
 
 # lint check (if ruff is available)
 lint:

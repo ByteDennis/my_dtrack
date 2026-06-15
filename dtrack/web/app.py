@@ -1226,7 +1226,6 @@ async def api_load(request: Request):
                         table_name=qname, mode="upsert",
                         source=tbl.get("source"),
                         date_col=tbl.get("date_col"),
-                        where_clause=tbl.get("where", ""),
                     )
                     rows = get_row_counts(_db_path, qname)
                     print(f"{qname}: {len(rows)} date buckets loaded")
@@ -1876,7 +1875,6 @@ async def api_load_row_files(request: Request):
                         mode=mode,
                         source=tbl.get("source"),
                         date_col=tbl.get("date_col"),
-                        where_clause=tbl.get("where", ""),
                     )
                     loaded += 1
                     break

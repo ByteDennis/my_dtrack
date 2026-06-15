@@ -181,7 +181,7 @@ class _Pipe:
 
     def match_columns(self):
         self._cli("match-columns", project_db=self.wd["db"],
-                  config=self.wd["config"], mode="merge")
+                  config=self.wd["config"], mode="merge", yes=True)
 
     def compare(self, kind):
         html = Path(self.wd["out"]) / f"compare_{kind}.html"

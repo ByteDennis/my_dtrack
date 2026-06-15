@@ -2144,6 +2144,25 @@ def sync_config_to_db(db_path: str, config: Dict[str, Any]) -> None:
         config: Unified configuration dictionary
     """
     import json
+    from .platforms.base import qualified_name
+
+    # Upsert each pair's col_map into _table_pairs so match-columns persists
+    # even when no compare has registered the pair yet. register_table_pair is
+    # INSERT OR REPLACE (preserves col_rules/include/exclude) and opens its own
+    # connection, so it runs before we open ours to avoid write-lock contention.
+    for pair_name, pair_config in config.get("pairs", {}).items():
+        if pair_config.get("skip"):
+            continue
+        col_map = pair_config.get("col_map", {})
+        left = pair_config.get("left", {})
+        right = pair_config.get("right", {})
+        if col_map and left.get("name") and right.get("name"):
+            register_table_pair(
+                db_path, pair_name,
+                qualified_name(left), qualified_name(right),
+                source_left=left.get("source"), source_right=right.get("source"),
+                col_mappings=col_map,
+            )
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -2151,14 +2170,6 @@ def sync_config_to_db(db_path: str, config: Dict[str, Any]) -> None:
     for pair_name, pair_config in config.get("pairs", {}).items():
         if pair_config.get("skip"):
             continue
-        # Update col_map in _table_pairs
-        col_map = pair_config.get("col_map", {})
-        if col_map:
-            col_mappings_json = json.dumps(col_map)
-            cursor.execute(
-                "UPDATE _table_pairs SET col_mappings = ? WHERE pair_name = ?",
-                (col_mappings_json, pair_name)
-            )
 
         # Update where_map and metadata in _row_comparison
         where_map = pair_config.get("where_map", {})

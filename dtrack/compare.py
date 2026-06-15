@@ -208,6 +208,17 @@ def compare_row_counts(db_path, table_left, table_right, from_date=None, to_date
     dict_right = {dt: count for dt, count in rows_right if dt}
     all_dates = set(dict_left.keys()) | set(dict_right.keys())
 
+    # >>> within the overlap window a single-side date is a mismatch with the other side = 0 <<< #
+    ov_start = ov_end = None
+    if dict_left and dict_right:
+        ov_start = max(min(dict_left), min(dict_right))
+        ov_end = min(max(dict_left), max(dict_right))
+        if ov_start > ov_end:
+            ov_start = ov_end = None
+
+    def _in_overlap(dt):
+        return ov_start is not None and ov_start <= dt <= ov_end
+
     only_left = []
     only_right = []
     matching = []
@@ -220,9 +231,15 @@ def compare_row_counts(db_path, table_left, table_right, from_date=None, to_date
             else:
                 mismatched.append((dt, dict_left[dt], dict_right[dt]))
         elif dt in dict_left:
-            only_left.append((dt, dict_left[dt]))
+            if _in_overlap(dt):
+                mismatched.append((dt, dict_left[dt], 0))
+            else:
+                only_left.append((dt, dict_left[dt]))
         else:
-            only_right.append((dt, dict_right[dt]))
+            if _in_overlap(dt):
+                mismatched.append((dt, 0, dict_right[dt]))
+            else:
+                only_right.append((dt, dict_right[dt]))
 
     summary = {
         "date_range_left": (

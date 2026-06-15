@@ -171,7 +171,6 @@ def _load_data(project_db, config, tables, csv_outdir, sas_outdir, types):
                     mode="upsert",
                     source=tbl.get("source"),
                     date_col=tbl.get("date_col"),
-                    where_clause=tbl.get("where", ""),
                 )
                 rows = get_row_counts(project_db, qname)
                 print(f"  {qname}: {len(rows)} date buckets loaded")

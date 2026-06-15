@@ -31,7 +31,7 @@ def test_match_columns_writes_col_map_to_config_and_db(
     pair = wd["pair_oracle_aws"]
 
     run_cli("match-columns", project_db=wd["db"], config=wd["config"],
-            mode="merge")
+            mode="merge", yes=True)
 
     # 1. pairs.json side
     cfg = json.loads(Path(wd["config"]).read_text())
@@ -69,7 +69,7 @@ def test_match_columns_merge_preserves_manual_overrides(
     Path(wd["config"]).write_text(json.dumps(cfg, indent=2))
 
     run_cli("match-columns", project_db=wd["db"], config=wd["config"],
-            mode="merge")
+            mode="merge", yes=True)
 
     cfg2 = json.loads(Path(wd["config"]).read_text())
     col_map = cfg2["pairs"][pair]["col_map"]
@@ -93,7 +93,7 @@ def test_match_columns_replace_drops_existing(seeded_columns, run_cli):
     Path(wd["config"]).write_text(json.dumps(cfg, indent=2))
 
     run_cli("match-columns", project_db=wd["db"], config=wd["config"],
-            mode="replace")
+            mode="replace", yes=True)
 
     cfg2 = json.loads(Path(wd["config"]).read_text())
     col_map = cfg2["pairs"][pair]["col_map"]

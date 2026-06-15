@@ -117,7 +117,7 @@ def test_compare_col_persists_col_comparison_and_html(
     # Need match-columns to populate col_map before compare-col can find
     # columns to diff.
     run_cli("match-columns", project_db=wd["db"], config=wd["config"],
-            mode="merge")
+            mode="merge", yes=True)
     _seed_pipeline_to_col(wd, run_cli)
 
     html_col = os.path.join(wd["output_dir"], "compare_col.html")
@@ -157,7 +157,7 @@ def test_compare_col_no_date_filter_short_circuits_matching_dates(
 
     wd = seeded_columns
     run_cli("match-columns", project_db=wd["db"], config=wd["config"],
-            mode="merge")
+            mode="merge", yes=True)
     _seed_pipeline_to_col(wd, run_cli)
 
     # Wipe matching_dates so an "intersect with empty" would skip

@@ -13,6 +13,25 @@ def _comment_icon(comment):
     return f' <span title="{safe}" style="cursor:help; color:#5b7083;">ⓘ</span>'
 
 
+def _fmt_time(val):
+    """Format time value: raw seconds (int/float) → human readable, strings pass through."""
+    if val is None or val == '—' or val == '':
+        return '—'
+    try:
+        secs = float(val)
+    except (TypeError, ValueError):
+        return str(val)  # already a string like "42 sec"
+    if secs < 60:
+        return f"{secs:.0f} sec"
+    elif secs < 3600:
+        m, s = divmod(int(secs), 60)
+        return f"{m} min {s} sec" if s else f"{m} min"
+    else:
+        h, rem = divmod(int(secs), 3600)
+        m = rem // 60
+        return f"{h} hour {m} min" if m else f"{h} hour"
+
+
 def generate_row_count_html(
     pair_name: str,
     source_left: str,
@@ -99,24 +118,6 @@ def generate_row_count_html(
     # Data rows
     time_left = '—'
     time_right = '—'
-    def _fmt_time(val):
-        """Format time value: raw seconds (int/float) → human readable, strings pass through."""
-        if val is None or val == '—' or val == '':
-            return '—'
-        try:
-            secs = float(val)
-        except (TypeError, ValueError):
-            return str(val)  # already a string like "42 sec"
-        if secs < 60:
-            return f"{secs:.0f} sec"
-        elif secs < 3600:
-            m, s = divmod(int(secs), 60)
-            return f"{m} min {s} sec" if s else f"{m} min"
-        else:
-            h, rem = divmod(int(secs), 3600)
-            m = rem // 60
-            return f"{h} hour {m} min" if m else f"{h} hour"
-
     if time_map:
         time_left = _fmt_time(time_map.get(source_left, time_map.get('left', '—')))
         time_right = _fmt_time(time_map.get(source_right, time_map.get('right', '—')))

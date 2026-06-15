@@ -71,6 +71,8 @@ def _load_config(config_path):
 def _parse_stats_override(spec):
     if not spec:
         return None
+    if isinstance(spec, dict):
+        return {str(k).strip().lower(): bool(v) for k, v in spec.items()} or None
     truthy = {'1', 'on', 'true', 'yes', 'y', 't'}
     falsy = {'0', 'off', 'false', 'no', 'n', 'f'}
     out = {}
@@ -332,6 +334,13 @@ def _print_row_comparison(db_path, table_left, table_right, source_left, source_
 
     result = compare_row_counts(db_path, table_left, table_right, from_date=from_date, to_date=to_date)
     summary = result["summary"]
+
+    if summary["count_left"] == 0 or summary["count_right"] == 0:
+        empty_side = source_left if summary["count_left"] == 0 else source_right
+        empty_tbl = table_left if summary["count_left"] == 0 else table_right
+        print(f"ERROR: pair '{pair_name}': {empty_side} side ({empty_tbl}) has no "
+              f"loaded rows -- skipping (run load-row for it first)")
+        return None
     dr_left = summary['date_range_left']
     dr_right = summary['date_range_right']
 
@@ -497,6 +506,8 @@ def cmd_compare_row(args):
             pair_name=pair_name,
             date_col_left=dc_left, date_col_right=dc_right,
         )
+        if result is None:
+            continue
 
         # HITL: skip/ignore prompt
         if not yes:
@@ -857,9 +868,14 @@ def cmd_match_columns(args):
             print(f"Existing mappings: {len(existing_col_map)}")
 
         if left_only or right_only:
-            left_items = [(c['name'], c['type']) for c in left_only]
-            right_items = [(c['name'], c['type']) for c in right_only]
-            matched = prompt_mapping(left_items, right_items, existing_map=matched)
+            interactive = sys.stdin.isatty() and not getattr(args, 'yes', False)
+            if interactive:
+                left_items = [(c['name'], c['type']) for c in left_only]
+                right_items = [(c['name'], c['type']) for c in right_only]
+                matched = prompt_mapping(left_items, right_items, existing_map=matched)
+            else:
+                print(f"  {len(left_only)} unmatched left + {len(right_only)} unmatched right "
+                      f"column(s) left unmapped (non-interactive; run in a terminal without --yes to map them)")
 
         matched_columns[pair_name] = matched
 
@@ -1204,6 +1220,8 @@ def main():
     p.add_argument('project_db')
     p.add_argument('--config', required=True)
     p.add_argument('--mode', default='merge', choices=['merge', 'replace'])
+    p.add_argument('--yes', action='store_true',
+                   help='non-interactive: keep auto-matches, skip the manual mapping prompt')
 
     # list
     p = sub.add_parser('list', help='List all tables')

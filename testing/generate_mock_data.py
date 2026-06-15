@@ -41,7 +41,7 @@ def write_csv(path, rows, header=("date_value", "row_count")):
         w = csv.writer(f)
         w.writerow(header)
         w.writerows(rows)
-    print(f"  {path.relative_to(HERE)}  ({len(rows)} rows)")
+    print(f"  {path.name}  ({len(rows)} rows)")
 
 
 def base_counts(start, end, base=300, noise=50, weekend_dip=True):
@@ -237,10 +237,24 @@ def gen_pair5():
 # ============================================================================
 
 if __name__ == "__main__":
-    print("Generating mock data for dtrack testing...")
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Generate deterministic mock CSV fixtures for dtrack e2e tests.")
+    parser.add_argument("--out", default=str(MOCK),
+                        help="output directory (default: testing/mock)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="random seed for reproducible data (default: 42)")
+    args = parser.parse_args()
+
+    MOCK = Path(args.out)
+    MOCK.mkdir(parents=True, exist_ok=True)
+    random.seed(args.seed)
+
+    print(f"Generating mock data (seed={args.seed}) into {MOCK} ...")
     gen_pair1()
     gen_pair2()
     gen_pair3()
     gen_pair4()
     gen_pair5()
-    print(f"\nDone! Files in {MOCK.relative_to(HERE)}/")
+    print(f"\nDone! Files in {MOCK}/")

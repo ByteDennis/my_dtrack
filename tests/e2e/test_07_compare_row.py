@@ -24,7 +24,8 @@ from pathlib import Path
 
 def _seed_loaded_rows(workdir, run_cli):
     for sub, out in (("gen-aws", "csv_outdir"),
-                     ("gen-oracle", "csv_outdir")):
+                     ("gen-oracle", "csv_outdir"),
+                     ("gen-databricks", "csv_outdir")):
         run_cli(sub, config=workdir["config"], outdir=workdir[out],
                 type="row", workers=None, db_path=workdir["db"],
                 vintage=None, force=False, from_date=None, to_date=None,
@@ -120,7 +121,7 @@ def test_compare_row_yes_mode_is_idempotent(initialized_db, run_cli, db_rows):
         wd["db"],
         "SELECT COUNT(*) AS n FROM _row_comparison",
     )
-    # Exactly one row per pair (2 pairs).
-    assert rows[0]["n"] == 2, (
-        f"expected 2 _row_comparison rows after 2x compare-row; "
+    # Exactly one row per pair (3 pairs, all sides loaded).
+    assert rows[0]["n"] == 3, (
+        f"expected 3 _row_comparison rows after 2x compare-row; "
         f"got {rows[0]['n']}")
