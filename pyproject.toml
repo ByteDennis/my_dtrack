@@ -39,3 +39,14 @@ dtrack = "dtrack.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["dtrack"]
+
+[tool.pytest.ini_options]
+# Live-integration pair marks (mirror LIVE_PAIRS keys in
+# tests/integration/conftest.py); registered here so `pytest tests/` is
+# warning-free. New pairs are also registered dynamically by that conftest's
+# pytest_configure, so add an entry here only to silence the full-suite run.
+markers = [
+    "oracle_vs_athena: live pair oracle vs athena",
+    "oracle_vs_databricks: live pair oracle vs databricks",
+    "hadoop_vs_athena: live pair hadoop vs athena",
+]

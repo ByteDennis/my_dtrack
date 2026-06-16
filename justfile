@@ -25,6 +25,13 @@ port := "8080"
 mockdir := "testing/mock"
 export DTRACK_E2E_MOCK_DIR := mockdir
 
+# Base dir for the live e2e pipeline; outputs land in {{e2edir}}/{csv,sas,output}
+e2edir := "testing"
+
+# Set force=1 to ignore the e2e skip-cache and re-run every expensive stage:
+#   just force=1 e2e all
+force := ""
+
 # list recipes
 default:
     @just --list
@@ -95,13 +102,84 @@ load-row folder="./csv/" *args:
 load-col folder="./csv/" *args:
     dtrack load-col {{db}} {{folder}} {{args}}
 
-# compare row counts for a pair
-compare-row pair *args:
-    dtrack compare-row {{db}} --pair {{pair}} {{args}}
+# compare row counts (all pairs in config) -> output/compare_row.html
+compare-row *args:
+    dtrack compare-row {{db}} --config {{config}} --html {{e2edir}}/output/compare_row.html -y {{args}}
 
-# compare column stats for a pair
-compare-col pair *args:
-    dtrack compare-col {{db}} --pair {{pair}} {{args}}
+# compare column stats (all pairs in config) -> output/compare_col.html
+compare-col *args:
+    dtrack compare-col {{db}} --config {{config}} --html {{e2edir}}/output/compare_col.html -y {{args}}
+
+# --- live e2e pipeline: real backends -> HTML -----------------------------
+# Single entry point. type = row | col | all. Outputs land in
+# {{e2edir}}/output/compare_{row,col}.html. Override the backend with
+# `just config=my_live.json e2e all`.
+#
+#   row : extract-row -> load-row -> compare-row              (writes _row_comparison)
+#   col : load-columns -> extract-col -> load-col -> match-columns -> compare-col
+#   all : row, then col
+#
+# col SQL is filtered to the matching dates row-compare wrote, so the row
+# phase MUST finish first. `all` enforces this; running `col` on its own
+# REQUIRES a prior `just e2e row` (or `all`) to have populated _row_comparison.
+#
+# --skip-mapping skips column discovery + auto-match (load-columns and
+# match-columns); it then relies on the col_map already in the config, with
+# compare-col falling back to same-named columns. Use it only when the config
+# already carries `columns` (and ideally `col_map`) for each side.
+#
+# SKIP-CACHE: the three expensive backend stages (row extract, col discover,
+# col extract) drop a sentinel in {{e2edir}}/.state/ on success and are
+# skipped while it exists. The cheap local steps (load / compare / match)
+# always re-run, so reports stay fresh and the DB is repopulated from the
+# cached CSVs even after a reset. Force a fresh pull with `just force=1 e2e
+# ...` or wipe the cache with `just e2e-clean`.
+e2e type="all" *flags:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{type}}" in row|col|all) ;; *) echo "usage: just e2e [row|col|all] [--skip-mapping]" >&2; exit 2 ;; esac
+    skip_mapping=0
+    for f in {{flags}}; do case "$f" in --skip-mapping) skip_mapping=1 ;; esac; done
+    out="{{e2edir}}/output"; state="{{e2edir}}/.state"; mkdir -p "$state"
+    is_done()   { [ -z "{{force}}" ] && [ -f "$state/$1.done" ]; }
+    mark_done() { touch "$state/$1.done"; }
+    if [ "{{type}}" = "row" ] || [ "{{type}}" = "all" ]; then
+        if is_done row.extract; then echo ">>> [row] extract: cached"; else
+            echo ">>> [row] extract"
+            dtrack run {{db}} --config {{config}} --outdir {{e2edir}} --type row --skip-load --skip-compare -y
+            mark_done row.extract
+        fi
+        echo ">>> [row] load"
+        dtrack run {{db}} --config {{config}} --outdir {{e2edir}} --type row --skip-extract --skip-compare -y
+        echo ">>> [row] compare"
+        dtrack run {{db}} --config {{config}} --outdir {{e2edir}} --type row --skip-extract --skip-load -y
+    fi
+    if [ "{{type}}" = "col" ] || [ "{{type}}" = "all" ]; then
+        if [ "$skip_mapping" -eq 0 ]; then
+            if is_done col.discover; then echo ">>> [col] discover: cached"; else
+                echo ">>> [col] discover columns (load-columns -> _column_meta)"
+                dtrack load-columns {{db}} --config {{config}}
+                mark_done col.discover
+            fi
+        fi
+        if is_done col.extract; then echo ">>> [col] extract: cached"; else
+            echo ">>> [col] extract (filtered to row-compare matching dates)"
+            dtrack run {{db}} --config {{config}} --outdir {{e2edir}} --type col --skip-load --skip-compare -y
+            mark_done col.extract
+        fi
+        echo ">>> [col] load"
+        dtrack run {{db}} --config {{config}} --outdir {{e2edir}} --type col --skip-extract --skip-compare -y
+        if [ "$skip_mapping" -eq 0 ]; then
+            echo ">>> [col] match-columns (--skip-mapping to skip)"
+            dtrack match-columns {{db}} --config {{config}} --yes
+        fi
+        echo ">>> [col] compare"
+        dtrack compare-col {{db}} --config {{config}} --html "$out/compare_col.html" -y
+    fi
+
+# wipe the e2e skip-cache so the next `just e2e` re-runs every expensive stage
+e2e-clean:
+    rm -rf {{e2edir}}/.state
 
 # run a SQL query against the database
 query sql *args:

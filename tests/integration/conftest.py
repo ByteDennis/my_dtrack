@@ -2,19 +2,23 @@
 
 Unlike tests/e2e/ (DTRACK_MOCK, fixture CSVs) and tests/api/ (HTTP plumbing,
 tolerates 200/500), these tests actually connect to the real backends and run
-dtrack's generated SQL against REAL tables, across the matrix
-left in {oracle, hadoop} x right in {athena, databricks}.
+dtrack's generated SQL against REAL tables.
 
-One pipeline stage per file (test_01_extract_row ... test_06_compare_col). The
-`combo` fixture parametrizes every test over the matrix; `live_workdir` gives
-each test an isolated sandbox; `pipe` bundles the stage operations bound to it.
+Each entry in LIVE_PAIRS is one self-contained (left, right) pair -- mirroring
+_E2E_PAIRS in tests/e2e/conftest.py -- carrying the real table on each side,
+its date column, the explicit `columns` map col extraction needs, and the
+left<->right `col_map`. Tests parametrize over these pairs; pick a subset by
+the per-pair mark (the dict key), e.g.:
+
+    pytest tests/integration --run-live -m oracle_vs_athena
+    pytest tests/integration --run-live --run-databricks -m oracle_vs_databricks
 
 Skipped by default -- opt in with CLI flags (no env vars):
     pytest tests/integration --run-live
     pytest tests/integration --run-live --run-databricks
 
-BEFORE RUNNING: fill in LIVE_TABLES below with tables that exist on YOUR
-servers (table name, conn_macro, date column + its type).
+BEFORE RUNNING: fill in LIVE_PAIRS below with tables + columns that exist on
+YOUR servers.
 """
 
 import json
@@ -33,27 +37,6 @@ from dtrack.platforms.oracle import extract_oracle
 
 _HERE = Path(__file__).resolve().parent
 
-
-# >>> fill these in with tables that actually exist on YOUR servers <<< #
-LIVE_TABLES = {
-    "oracle": {
-        "table": "SCHEMA.YOUR_ORACLE_TABLE", "conn_macro": "pb23",
-        "date_col": "RPT_DT", "date_type": "date",
-    },
-    "hadoop": {
-        "table": "db.your_hive_table", "conn_macro": "hive_prod",
-        "date_col": "rpt_dt", "date_type": "string_dash",
-    },
-    "athena": {
-        "table": "your_athena_table", "conn_macro": "analytics_db",
-        "date_col": "rpt_dt", "date_type": "string_dash",
-    },
-    "databricks": {
-        "table": "your_databricks_table", "conn_macro": "main.analytics",
-        "date_col": "rpt_dt", "date_type": "date",
-    },
-}
-
 # >>> direct extract fn per platform; hadoop is direct ODBC (extract_hadoop) -- no gen-hadoop CLI command <<< #
 _EXTRACT_FN = {
     "oracle": extract_oracle, "hadoop": extract_hadoop,
@@ -65,21 +48,91 @@ _SOURCE = {
     "oracle": "oracle", "hadoop": "hadoop", "athena": "aws", "databricks": "databricks",
 }
 
-LEFT = ["oracle", "hadoop"]
-RIGHT = ["athena", "databricks"]
+
+# >>> named live pairs; fill each side with a real table + its columns on YOUR servers <<< #
+# Per-side keys: platform (oracle|hadoop|athena|databricks), name, table,
+# conn_macro, date_col, date_type, columns {name: sql_type}. The `columns` map
+# is what col extraction reads -- omit it and col extraction prints
+# "No columns specified ..." and skips the table. `col_map` maps left->right
+# column names so match-columns / compare-col line the two sides up.
+LIVE_PAIRS = {
+    "oracle_vs_athena": {
+        "description": "live: oracle vs athena",
+        "left": {
+            "platform": "oracle",
+            "name": "oracle_probe", "table": "SCHEMA.YOUR_ORACLE_TABLE",
+            "conn_macro": "pb23", "date_col": "RPT_DT", "date_type": "date",
+            "columns": {"id": "NUMBER", "amount": "NUMBER", "name": "VARCHAR2"},
+        },
+        "right": {
+            "platform": "athena",
+            "name": "athena_probe", "table": "your_athena_table",
+            "conn_macro": "analytics_db", "date_col": "rpt_dt", "date_type": "string_dash",
+            "columns": {"id": "bigint", "amount": "double", "name": "string"},
+        },
+        "col_map": {"id": "id", "amount": "amount", "name": "name"},
+    },
+    "oracle_vs_databricks": {
+        "description": "live: oracle vs databricks",
+        "left": {
+            "platform": "oracle",
+            "name": "oracle_probe", "table": "SCHEMA.YOUR_ORACLE_TABLE",
+            "conn_macro": "pb23", "date_col": "RPT_DT", "date_type": "date",
+            "columns": {"id": "NUMBER", "amount": "NUMBER", "name": "VARCHAR2"},
+        },
+        "right": {
+            "platform": "databricks",
+            "name": "databricks_probe", "table": "your_databricks_table",
+            "conn_macro": "main.analytics", "date_col": "rpt_dt", "date_type": "date",
+            "columns": {"id": "bigint", "amount": "double", "name": "string"},
+        },
+        "col_map": {"id": "id", "amount": "amount", "name": "name"},
+    },
+    "hadoop_vs_athena": {
+        "description": "live: hadoop vs athena",
+        "left": {
+            "platform": "hadoop",
+            "name": "hadoop_probe", "table": "db.your_hive_table",
+            "conn_macro": "hive_prod", "date_col": "rpt_dt", "date_type": "string_dash",
+            "columns": {"id": "bigint", "amount": "double", "name": "string"},
+        },
+        "right": {
+            "platform": "athena",
+            "name": "athena_probe", "table": "your_athena_table",
+            "conn_macro": "analytics_db", "date_col": "rpt_dt", "date_type": "string_dash",
+            "columns": {"id": "bigint", "amount": "double", "name": "string"},
+        },
+        "col_map": {"id": "id", "amount": "amount", "name": "name"},
+    },
+}
 
 
 def pytest_addoption(parser):
     parser.addoption("--run-live", action="store_true", default=False,
-                     help="run live integration tests (need real .env + LIVE_TABLES filled in)")
+                     help="run live integration tests (need real .env + LIVE_PAIRS filled in)")
     parser.addoption("--run-databricks", action="store_true", default=False,
-                     help="include the slow databricks live combos")
+                     help="include the slow databricks live pairs")
 
 
-# >>> True when this test's combo has databricks on either side <<< #
+# >>> register one mark per LIVE_PAIRS key so `-m <pair>` selects it without warnings <<< #
+def pytest_configure(config):
+    for pair_name in LIVE_PAIRS:
+        config.addinivalue_line("markers", f"{pair_name}: live pair '{pair_name}'")
+
+
+# >>> platforms on either side of a named pair <<< #
+def _pair_platforms(pair_name):
+    pair = LIVE_PAIRS[pair_name]
+    return (pair["left"]["platform"], pair["right"]["platform"])
+
+
+# >>> True when this test's pair has databricks on either side <<< #
 def _is_databricks(item):
     cs = getattr(item, "callspec", None)
-    return bool(cs) and "databricks" in cs.params.get("combo", ())
+    if not cs:
+        return False
+    pair_name = cs.params.get("pair_name")
+    return bool(pair_name) and "databricks" in _pair_platforms(pair_name)
 
 
 # >>> skip everything under tests/integration/ unless opted in; scoped by path since modifyitems is global <<< #
@@ -99,34 +152,40 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_db)
 
 
-# >>> the (left, right) matrix; databricks combos are gated in modifyitems via the combo param <<< #
-def _combo_params():
-    return [pytest.param((left, right), id=f"{left}_x_{right}")
-            for left in LEFT for right in RIGHT]
+# >>> one param per named pair, each tagged with its own mark for `-m` selection <<< #
+def _pair_params():
+    return [pytest.param(name, id=name, marks=getattr(pytest.mark, name))
+            for name in LIVE_PAIRS]
 
 
 # >>> {source}_{name} qname dtrack uses for a side's stored rows / output CSV <<< #
-def _qname(plat):
-    return f"{_SOURCE[plat]}_{plat}_probe"
+def _qname(side):
+    return f"{_SOURCE[side['platform']]}_{side['name']}"
 
 
-# >>> assemble a one-pair config wiring a real left table against a real right table <<< #
-def _build_config(path, left, right):
-    def _side(plat):
-        spec = LIVE_TABLES[plat]
-        return {
-            "name": f"{plat}_probe", "table": spec["table"],
-            "source": _SOURCE[plat], "conn_macro": spec["conn_macro"],
-            "date_col": spec["date_col"], "date_type": spec["date_type"],
-        }
+# >>> turn a LIVE_PAIRS side into a config table dict (platform -> source) <<< #
+def _side_cfg(side):
+    return {
+        "name": side["name"], "table": side["table"],
+        "source": _SOURCE[side["platform"]], "conn_macro": side["conn_macro"],
+        "date_col": side["date_col"], "date_type": side["date_type"],
+        "columns": side.get("columns", {}),
+    }
+
+
+# >>> write a one-pair config wiring the named pair's real tables + col_map <<< #
+def _build_config(path, pair_name):
+    pair = LIVE_PAIRS[pair_name]
     cfg = {
         "metadata": {"title": "live-matrix"},
         "settings": {"sas_outdir": "./sas/", "aws_outdir": "./csv/",
                      "from_date": "", "to_date": ""},
-        "pairs": {f"{left}_vs_{right}": {
-            "description": f"live: {left} vs {right}",
-            "left": _side(left), "right": _side(right),
-            "mode": "incremental", "fromDate": "", "toDate": "",
+        "pairs": {pair_name: {
+            "description": pair.get("description", pair_name),
+            "left": _side_cfg(pair["left"]), "right": _side_cfg(pair["right"]),
+            "col_map": pair.get("col_map", {}),
+            "mode": "incremental",
+            "fromDate": pair.get("from_date", ""), "toDate": pair.get("to_date", ""),
         }},
     }
     Path(path).write_text(json.dumps(cfg, indent=2))
@@ -142,28 +201,28 @@ def _loaded_count(db_path, qname, table):
         conn.close()
 
 
-# >>> live-pipeline operations bound to one combo's sandbox -- the per-stage files drive this <<< #
+# >>> live-pipeline operations bound to one pair's sandbox -- the per-stage files drive this <<< #
 class _Pipe:
     def __init__(self, wd):
         self.wd = wd
-        self.sides = (wd["left"], wd["right"])
+        self.sides = (wd["pair"]["left"], wd["pair"]["right"])
 
     def _cli(self, sub, **kw):
         getattr(cli_mod, f"cmd_{sub.replace('-', '_')}")(Namespace(**kw))
 
     def extract(self, kind):
-        for plat in self.sides:
-            _EXTRACT_FN[plat](self.wd["config"], self.wd["csv"], types=[kind],
-                              max_workers=None, db_path=self.wd["db"], vintage=None,
-                              force=False, from_date=None, to_date=None,
-                              preset=None, stats_override=None)
+        for side in self.sides:
+            _EXTRACT_FN[side["platform"]](self.wd["config"], self.wd["csv"], types=[kind],
+                                          max_workers=None, db_path=self.wd["db"], vintage=None,
+                                          force=False, from_date=None, to_date=None,
+                                          preset=None, stats_override=None)
 
     def assert_real_csv(self, kind):
-        for plat in self.sides:
-            csv = Path(self.wd["csv"]) / f"{_qname(plat)}_{kind}.csv"
-            assert csv.exists(), f"{plat}: extract produced no {csv.name} (table absent or SQL failed?)"
+        for side in self.sides:
+            csv = Path(self.wd["csv"]) / f"{_qname(side)}_{kind}.csv"
+            assert csv.exists(), f"{side['platform']}: extract produced no {csv.name} (table absent or SQL failed?)"
             lines = [ln for ln in csv.read_text().splitlines() if ln.strip()]
-            assert len(lines) > 1, f"{plat}: {csv.name} has no data rows (header only): {lines[:2]}"
+            assert len(lines) > 1, f"{side['platform']}: {csv.name} has no data rows (header only): {lines[:2]}"
 
     def load(self, kind):
         if kind == "row":
@@ -175,9 +234,9 @@ class _Pipe:
 
     def assert_loaded(self, kind):
         table = "_row_counts" if kind == "row" else "_col_stats"
-        for plat in self.sides:
-            assert _loaded_count(self.wd["db"], _qname(plat), table) > 0, \
-                f"{plat}: nothing loaded into {table} for {_qname(plat)}"
+        for side in self.sides:
+            assert _loaded_count(self.wd["db"], _qname(side), table) > 0, \
+                f"{side['platform']}: nothing loaded into {table} for {_qname(side)}"
 
     def match_columns(self):
         self._cli("match-columns", project_db=self.wd["db"],
@@ -199,27 +258,26 @@ class _Pipe:
         assert html.exists(), f"compare-{kind} produced no HTML report"
 
 
-# >>> parametrize every test over the (left, right) matrix <<< #
-@pytest.fixture(params=_combo_params())
-def combo(request):
+# >>> parametrize every test over the named pairs (mark-selectable via -m) <<< #
+@pytest.fixture(params=_pair_params())
+def pair_name(request):
     return request.param
 
 
-# >>> per-combo isolated sandbox: temp db + one-pair config wiring the real tables <<< #
+# >>> per-pair isolated sandbox: temp db + one-pair config wiring the real tables <<< #
 @pytest.fixture
-def live_workdir(combo, tmp_path):
-    left, right = combo
+def live_workdir(pair_name, tmp_path):
     csv_dir = tmp_path / "csv"; csv_dir.mkdir()
     out_dir = tmp_path / "output"; out_dir.mkdir()
     db = str(tmp_path / "dtrack.db")
     config = str(tmp_path / "dtrack.json")
     init_database(db)
-    _build_config(config, left, right)
-    return {"left": left, "right": right, "csv": str(csv_dir),
-            "out": str(out_dir), "db": db, "config": config}
+    _build_config(config, pair_name)
+    return {"pair_name": pair_name, "pair": LIVE_PAIRS[pair_name],
+            "csv": str(csv_dir), "out": str(out_dir), "db": db, "config": config}
 
 
-# >>> stage operations bound to this combo's sandbox <<< #
+# >>> stage operations bound to this pair's sandbox <<< #
 @pytest.fixture
 def pipe(live_workdir):
     return _Pipe(live_workdir)
