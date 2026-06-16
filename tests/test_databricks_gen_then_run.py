@@ -63,8 +63,11 @@ def test_number_leading_column_is_backticked_not_double_quoted():
         assert "'2_amt' AS column_name" in sql
 
 
-def test_full_table_always_backticks_catalog():
+def test_full_table_always_backticks_catalog(monkeypatch):
     from dtrack.platforms.databricks import _full_table
+    # A bare conn_macro is promoted to <catalog>.<schema> when DB_DEFAULT_CATALOG
+    # is set in the env; clear it so the no-catalog case is deterministic.
+    monkeypatch.delenv("DB_DEFAULT_CATALOG", raising=False)
     # catalog is always backticked; schema/table stay bare when valid
     assert _full_table({"conn_macro": "main.warehouse", "table": "trades"}) \
         == "`main`.warehouse.trades"

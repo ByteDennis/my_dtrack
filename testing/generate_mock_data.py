@@ -235,6 +235,22 @@ def gen_pair5():
 
 
 # ============================================================================
+# PAIR 6: aws_vs_databricks
+#   Left:  aws        / month_summary → INTEGER YYYYMM (shared with pair 5)
+#   Right: databricks / pos_daily     → INTEGER YYYYMMDD daily
+# ============================================================================
+def gen_pair6():
+    print("\n[6] aws_vs_databricks")
+    rows = base_counts(HIST_START, HIST_END, base=300, noise=160)
+    write_csv(MOCK / "databricks_pos_daily_row.csv",
+              [(fmt_int(d), n) for d, n in rows])
+
+    inc = base_counts(INCR_START, INCR_END, base=300, noise=160)
+    write_csv(MOCK / "databricks_pos_daily_row_incr.csv",
+              [(fmt_int(d), n) for d, n in inc])
+
+
+# ============================================================================
 
 if __name__ == "__main__":
     import argparse
@@ -257,4 +273,5 @@ if __name__ == "__main__":
     gen_pair3()
     gen_pair4()
     gen_pair5()
+    gen_pair6()
     print(f"\nDone! Files in {MOCK}/")

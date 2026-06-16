@@ -178,8 +178,8 @@ def workdir(tmp_path: Path, monkeypatch) -> dict:
     mock_csvs = list(MOCK_DIR.glob("*.csv")) if MOCK_DIR.exists() else []
     if not mock_csvs:
         pytest.skip(
-            f"e2e mock fixtures missing/empty at {MOCK_DIR}; restore them with "
-            f"'git restore testing/mock/' (they are tracked in git)")
+            f"e2e mock fixtures missing/empty at {MOCK_DIR}; generate them with "
+            f"'python testing/generate_mock_data.py'")
     shutil.copytree(MOCK_DIR, mock_local)
 
     _write_config(config_path)

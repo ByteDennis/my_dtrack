@@ -27,6 +27,9 @@ htmlcov/
 .tox/
 .hypothesis/
 
+# Generated e2e mock fixtures (reproduce via: python testing/generate_mock_data.py)
+testing/mock/
+
 # IDEs
 .vscode/
 .idea/

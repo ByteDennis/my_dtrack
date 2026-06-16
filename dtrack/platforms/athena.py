@@ -1864,7 +1864,7 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
     if timing_records:
         timing_path = os.path.join(outdir, '_timing.csv')
         with open(timing_path, 'w', newline='') as f:
-            fieldnames = ['table', 'step', 'start', 'end', 'elapsed_sec']
+            fieldnames = ['table', 'step', 'start', 'end', 'elapsed_sec', 'status']
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(timing_records)
