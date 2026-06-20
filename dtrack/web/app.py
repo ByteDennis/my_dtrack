@@ -4954,6 +4954,68 @@ def _row_to_strs(row, n_cols):
     return out
 
 
+# >>> split ;-separated SQL into statements, respecting quotes and comments <<< #
+def _split_sql_statements(sql):
+    stmts, buf = [], []
+    i, n = 0, len(sql)
+    in_squote = in_dquote = in_line = in_block = False
+    while i < n:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ''
+        if in_line:
+            buf.append(ch)
+            if ch == '\n':
+                in_line = False
+        elif in_block:
+            buf.append(ch)
+            if ch == '*' and nxt == '/':
+                buf.append(nxt); i += 1; in_block = False
+        elif in_squote:
+            buf.append(ch)
+            if ch == "'":
+                if nxt == "'":
+                    buf.append(nxt); i += 1
+                else:
+                    in_squote = False
+        elif in_dquote:
+            buf.append(ch)
+            if ch == '"':
+                in_dquote = False
+        elif ch == '-' and nxt == '-':
+            in_line = True; buf.append(ch)
+        elif ch == '/' and nxt == '*':
+            in_block = True; buf.append(ch)
+        elif ch == "'":
+            in_squote = True; buf.append(ch)
+        elif ch == '"':
+            in_dquote = True; buf.append(ch)
+        elif ch == ';':
+            stmt = ''.join(buf).strip()
+            if stmt:
+                stmts.append(stmt)
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    stmt = ''.join(buf).strip()
+    if stmt:
+        stmts.append(stmt)
+    return stmts
+
+
+# >>> run all but the last statement on `cur`, execute+return (columns, rows) of the last <<< #
+def _run_multi_sql(cur, sql):
+    stmts = _split_sql_statements(sql)
+    if not stmts:
+        stmts = [sql]
+    for stmt in stmts[:-1]:
+        cur.execute(stmt)
+    cur.execute(stmts[-1])
+    columns = [d[0] for d in (cur.description or [])]
+    fetched = cur.fetchall() or []
+    return columns, fetched
+
+
 # Registry of currently-running playground queries: history_id → handle dict.
 # Populated when a query starts, popped when it ends (whether ok / error /
 # cancelled). The cancel endpoint looks up the handle and calls .cancel()
@@ -5086,9 +5148,7 @@ async def api_playground_run(request: Request):
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn
-            cur.execute(sql)
-            columns = [d[0] for d in (cur.description or [])]
-            fetched = cur.fetchall() or []
+            columns, fetched = _run_multi_sql(cur, sql)
             n_rows_total = len(fetched)
             all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
             rows = all_rows[:row_cap]
@@ -5110,9 +5170,7 @@ async def api_playground_run(request: Request):
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn
-            cur.execute(sql)
-            columns = [d[0] for d in (cur.description or [])]
-            fetched = cur.fetchall() or []
+            columns, fetched = _run_multi_sql(cur, sql)
             n_rows_total = len(fetched)
             all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
             rows = all_rows[:row_cap]
@@ -5132,9 +5190,7 @@ async def api_playground_run(request: Request):
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn
-            cur.execute(sql)
-            columns = [d[0] for d in (cur.description or [])]
-            fetched = cur.fetchall() or []
+            columns, fetched = _run_multi_sql(cur, sql)
             n_rows_total = len(fetched)
             all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
             rows = all_rows[:row_cap]
@@ -5149,9 +5205,7 @@ async def api_playground_run(request: Request):
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn
-            cur.execute(sql)
-            columns = [d[0] for d in (cur.description or [])]
-            fetched = cur.fetchall() or []
+            columns, fetched = _run_multi_sql(cur, sql)
             n_rows_total = len(fetched)
             all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
             rows = all_rows[:row_cap]
