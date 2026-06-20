@@ -70,21 +70,9 @@ serve-reload *args:
 init *args:
     dtrack init {{db}} {{args}}
 
-# refresh database schema (add missing columns)
-refresh *args:
-    dtrack refresh {{db}} {{args}}
-
 # diagnose env-file + Oracle macros + AWS vars resolution
 doctor *args:
     dtrack doctor {{args}}
-
-# load pairs from config JSON
-load-map *args:
-    dtrack load-map {{db}} {{config}} --type row {{args}}
-
-# list all pairs
-pairs *args:
-    dtrack list-pairs {{db}} -v {{args}}
 
 # generate SAS extraction scripts
 gen-sas outdir="./sas/" *args:
@@ -140,19 +128,19 @@ e2e type="all" *flags:
     case "{{type}}" in row|col|all) ;; *) echo "usage: just e2e [row|col|all] [--skip-mapping]" >&2; exit 2 ;; esac
     skip_mapping=0
     for f in {{flags}}; do case "$f" in --skip-mapping) skip_mapping=1 ;; esac; done
-    out="{{e2edir}}/output"; state="{{e2edir}}/.state"; mkdir -p "$state"
+    out="{{e2edir}}/output"; state="{{e2edir}}/.state"; mkdir -p "$state" "$out"
     is_done()   { [ -z "{{force}}" ] && [ -f "$state/$1.done" ]; }
     mark_done() { touch "$state/$1.done"; }
     if [ "{{type}}" = "row" ] || [ "{{type}}" = "all" ]; then
         if is_done row.extract; then echo ">>> [row] extract: cached"; else
             echo ">>> [row] extract"
-            dtrack run {{db}} --config {{config}} --outdir {{e2edir}} --type row --skip-load --skip-compare -y
+            dtrack extract {{db}} --config {{config}} --outdir {{e2edir}} --type row
             mark_done row.extract
         fi
         echo ">>> [row] load"
-        dtrack run {{db}} --config {{config}} --outdir {{e2edir}} --type row --skip-extract --skip-compare -y
+        dtrack load-row {{db}} {{e2edir}}/csv --config {{config}}
         echo ">>> [row] compare"
-        dtrack run {{db}} --config {{config}} --outdir {{e2edir}} --type row --skip-extract --skip-load -y
+        dtrack compare-row {{db}} --config {{config}} --html "$out/compare_row.html" -y
     fi
     if [ "{{type}}" = "col" ] || [ "{{type}}" = "all" ]; then
         if [ "$skip_mapping" -eq 0 ]; then
@@ -164,11 +152,11 @@ e2e type="all" *flags:
         fi
         if is_done col.extract; then echo ">>> [col] extract: cached"; else
             echo ">>> [col] extract (filtered to row-compare matching dates)"
-            dtrack run {{db}} --config {{config}} --outdir {{e2edir}} --type col --skip-load --skip-compare -y
+            dtrack extract {{db}} --config {{config}} --outdir {{e2edir}} --type col
             mark_done col.extract
         fi
         echo ">>> [col] load"
-        dtrack run {{db}} --config {{config}} --outdir {{e2edir}} --type col --skip-extract --skip-compare -y
+        dtrack load-col {{db}} {{e2edir}}/csv --config {{config}}
         if [ "$skip_mapping" -eq 0 ]; then
             echo ">>> [col] match-columns (--skip-mapping to skip)"
             dtrack match-columns {{db}} --config {{config}} --yes
@@ -184,10 +172,6 @@ e2e-clean:
 # run a SQL query against the database
 query sql *args:
     dtrack query {{db}} "{{sql}}" {{args}}
-
-# show database status
-status *args:
-    dtrack status {{db}} {{args}}
 
 # run tests
 test *args:

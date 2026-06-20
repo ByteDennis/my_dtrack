@@ -132,32 +132,35 @@ def test_databricks_full_row_workflow(initialized_db, run_cli, db_rows):
     assert isinstance(md, list)
 
 
-def test_run_pipeline_includes_databricks(initialized_db, run_cli, db_rows):
-    """`dtrack run` end-to-end must classify the databricks source and
-    call extract_databricks alongside the other extractors.
+def test_extract_includes_databricks(initialized_db, run_cli, db_rows):
+    """`dtrack extract` must classify the databricks source and call
+    extract_databricks alongside the other extractors.
     """
     wd = initialized_db
     _ensure_aws_month_mock(wd)
 
-    run_cli("run",
+    run_cli("extract",
             project_db=wd["db"], config=wd["config"],
             outdir=wd["dir"],
             sas_outdir=wd["sas_outdir"], csv_outdir=wd["csv_outdir"],
-            type="row", vintage="day", yes=True,
-            html_row=os.path.join(wd["output_dir"], "compare_row.html"),
-            html_col=os.path.join(wd["output_dir"], "compare_col.html"),
-            title=None, subtitle=None,
-            workers=None, force=False,
-            skip_extract=False, skip_load=False, skip_compare=False,
-            from_date=None, to_date=None,
-            preset=None, stats_override=None)
+            type="row", vintage="day", workers=None, force=False,
+            from_date=None, to_date=None, preset=None, stats_override=None)
+    run_cli("load-row",
+            project_db=wd["db"], folder=wd["csv_outdir"], config=wd["config"],
+            mode="upsert", db=None, date_var=None)
 
     rows = db_rows(
         wd["db"],
         "SELECT COUNT(*) AS n FROM _row_counts WHERE source_table=?",
         ("databricks_pos_daily",),
     )
-    assert rows[0]["n"] > 0, "dtrack run didn't load any Databricks rows"
+    assert rows[0]["n"] > 0, "dtrack extract didn't load any Databricks rows"
+
+    run_cli("compare-row",
+            project_db=wd["db"], config=wd["config"],
+            from_date=None, to_date=None, yes=True,
+            html=os.path.join(wd["output_dir"], "compare_row.html"),
+            title=None, subtitle=None)
 
     cmp_rows = db_rows(
         wd["db"],

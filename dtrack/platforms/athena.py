@@ -1860,15 +1860,8 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
         cursor.close()
         conn.close()
 
-    # Export timing log
-    if timing_records:
-        timing_path = os.path.join(outdir, '_timing.csv')
-        with open(timing_path, 'w', newline='') as f:
-            fieldnames = ['table', 'step', 'start', 'end', 'elapsed_sec', 'status']
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(timing_records)
-        print(f"\nTiming log: {timing_path}")
+    from .base import write_timing_csv
+    write_timing_csv(outdir, timing_records)
 
     print(f"\nExtraction complete. Output in: {outdir}")
 

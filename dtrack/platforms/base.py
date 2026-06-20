@@ -1326,6 +1326,21 @@ def _extract_mock_tables(tables, outdir, types, mock_dir):
     print(f"\n[mock] Extraction complete. Output in: {outdir}")
 
 
+# >>> write per-table extraction timing rows to {outdir}/_timing.csv <<< #
+def write_timing_csv(outdir, records):
+    if not records:
+        return None
+    import csv
+    timing_path = os.path.join(outdir, '_timing.csv')
+    with open(timing_path, 'w', newline='') as f:
+        writer = csv.DictWriter(
+            f, fieldnames=['table', 'step', 'start', 'end', 'elapsed_sec', 'status'])
+        writer.writeheader()
+        writer.writerows(records)
+    print(f"\nTiming log: {timing_path}")
+    return timing_path
+
+
 def load_tables_from_config(config):
     """Load tables from config (unified format only)."""
     if "pairs" in config and isinstance(config["pairs"], dict):

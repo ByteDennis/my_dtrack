@@ -878,14 +878,8 @@ def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=No
                     'start': '', 'end': '', 'elapsed_sec': 0, 'status': str(e),
                 })
 
-    if timing_records:
-        timing_path = os.path.join(outdir, '_timing.csv')
-        with open(timing_path, 'w', newline='') as f:
-            fieldnames = ['table', 'step', 'start', 'end', 'elapsed_sec', 'status']
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(timing_records)
-        print(f"\nTiming log: {timing_path}")
+    from .base import write_timing_csv
+    write_timing_csv(outdir, timing_records)
 
     print(f"\nExtraction complete. Output in: {outdir}")
 

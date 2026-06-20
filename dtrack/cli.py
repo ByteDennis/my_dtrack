@@ -9,11 +9,9 @@ import sys
 
 from .db import (
     init_database,
-    list_tables,
     get_row_counts,
     get_col_stats,
     get_metadata,
-    list_table_pairs,
     get_table_pair,
     register_table_pair,
     insert_column_meta,
@@ -889,57 +887,23 @@ def cmd_match_columns(args):
         print(f"Synced to database: {args.project_db}")
 
 
-def cmd_list(args):
-    """List all tables in the database."""
-    _require_db(args.project_db)
-    tables = list_tables(args.project_db)
-    if not tables:
-        print("No tables found")
-        return
-    print(f"\n{'Table':<30} {'Type':<8} {'Source':<10} {'Vintage':<8}")
-    print("-" * 60)
-    for t in tables:
-        print(f"{t.get('table_name',''):<30} {t.get('data_type',''):<8} {t.get('source',''):<10} {t.get('vintage',''):<8}")
-    print(f"\nTotal: {len(tables)} tables")
-
-
-def cmd_list_pairs(args):
-    """List all registered table pairs."""
-    _require_db(args.project_db)
-    pairs = list_table_pairs(args.project_db)
-    if not pairs:
-        print("No table pairs found")
-        return
-    print(f"\n{'Pair Name':<25} {'Left Table':<25} {'Right Table':<25} {'Mappings':<10}")
-    print("-" * 90)
-    for p in pairs:
-        m = p["col_mappings"]
-        map_str = f"{len(m)} cols" if m else "(none)"
-        print(f"{p['pair_name']:<25} {p['table_left']:<25} {p['table_right']:<25} {map_str:<10}")
-    print(f"\nTotal: {len(pairs)} pair(s)")
-
-
-def cmd_run(args):
-    """Run the full pipeline: init → extract → load → compare → HTML."""
-    from .pipeline import run_pipeline
-    run_pipeline(
-        project_db=args.project_db,
+# >>> classify config tables by source and run each platform's extractor <<< #
+def cmd_extract(args):
+    from .extract import extract_all
+    from .db import init_database
+    if not os.path.exists(args.project_db):
+        init_database(args.project_db)
+        print(f"Initialized database: {args.project_db}")
+    extract_all(
         config_path=args.config,
         outdir=getattr(args, 'outdir', None),
         sas_outdir=getattr(args, 'sas_outdir', None),
         csv_outdir=getattr(args, 'csv_outdir', None),
         types=[args.type] if args.type != "both" else ["row", "col"],
+        max_workers=getattr(args, 'workers', None),
+        db_path=args.project_db,
         vintage=getattr(args, 'vintage', None),
-        yes=getattr(args, 'yes', False),
-        html_row=getattr(args, 'html_row', None),
-        html_col=getattr(args, 'html_col', None),
-        title=getattr(args, 'title', None),
-        subtitle=getattr(args, 'subtitle', None),
-        workers=getattr(args, 'workers', None),
         force=getattr(args, 'force', False),
-        skip_extract=getattr(args, 'skip_extract', False),
-        skip_load=getattr(args, 'skip_load', False),
-        skip_compare=getattr(args, 'skip_compare', False),
         from_date=getattr(args, 'from_date', None),
         to_date=getattr(args, 'to_date', None),
         preset=getattr(args, 'preset', None),
@@ -1223,33 +1187,17 @@ def main():
     p.add_argument('--yes', action='store_true',
                    help='non-interactive: keep auto-matches, skip the manual mapping prompt')
 
-    # list
-    p = sub.add_parser('list', help='List all tables')
-    p.add_argument('project_db')
-
-    # list-pairs
-    p = sub.add_parser('list-pairs', help='List table pairs')
-    p.add_argument('project_db')
-
-    # run (full pipeline)
-    p = sub.add_parser('run', help='Run full pipeline (init → extract → load → compare → HTML)')
+    # extract (classify config tables by source, run each platform extractor)
+    p = sub.add_parser('extract', help='Extract row/col CSVs for all platforms in the config')
     p.add_argument('project_db')
     p.add_argument('--config', required=True)
-    p.add_argument('--outdir', help='Base output directory')
+    p.add_argument('--outdir', help='Base output directory (csv/ + sas/ derived from it)')
     p.add_argument('--sas-outdir', help='SAS output directory')
     p.add_argument('--csv-outdir', help='CSV output directory')
     p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
     p.add_argument('--vintage')
-    p.add_argument('-y', '--yes', action='store_true', help='Skip prompts')
-    p.add_argument('--html-row', help='Row comparison HTML path')
-    p.add_argument('--html-col', help='Column comparison HTML path')
-    p.add_argument('--title')
-    p.add_argument('--subtitle')
     p.add_argument('--workers', type=int)
     p.add_argument('--force', action='store_true')
-    p.add_argument('--skip-extract', action='store_true')
-    p.add_argument('--skip-load', action='store_true')
-    p.add_argument('--skip-compare', action='store_true')
     p.add_argument('--from-date', help='Start date for incremental extraction')
     p.add_argument('--to-date', help='End date for incremental extraction')
     p.add_argument('--preset', choices=['quick', 'standard', 'detailed'],
@@ -1341,9 +1289,7 @@ def main():
         'gen-databricks': cmd_gen_databricks,
         'gen-oracle': cmd_gen_oracle,
         'match-columns': cmd_match_columns,
-        'run': cmd_run,
-        'list': cmd_list,
-        'list-pairs': cmd_list_pairs,
+        'extract': cmd_extract,
         'serve': cmd_serve,
         'query': cmd_query,
         'doctor': cmd_doctor,
