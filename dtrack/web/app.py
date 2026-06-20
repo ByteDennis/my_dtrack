@@ -340,33 +340,14 @@ async def api_extract(request: Request):
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
-            if platform == "aws":
-                from ..platforms.athena import extract_aws
-                extract_aws(_config_path, outdir, types=[extract_type],
-                            db_path=_db_path, from_date=from_date, to_date=to_date,
-                            max_workers=int(max_workers) if max_workers else None)
-            elif platform == "oracle":
-                from ..platforms.oracle import extract_oracle
-                extract_oracle(_config_path, outdir, types=[extract_type],
-                               db_path=_db_path, from_date=from_date, to_date=to_date,
-                               max_workers=int(max_workers) if max_workers else None)
-            elif platform == "databricks":
-                from ..platforms.databricks import extract_databricks
-                extract_databricks(_config_path, outdir, types=[extract_type],
-                                   db_path=_db_path, from_date=from_date, to_date=to_date,
-                                   max_workers=int(max_workers) if max_workers else None)
-            elif platform == "hadoop":
-                # source=hadoop runs directly through hadoop_connect (.sql),
-                # NOT through gen_sas (which now only handles sas / hadoop_sas).
-                from ..platforms.hadoop import extract_hadoop
-                extract_hadoop(_config_path, outdir, types=[extract_type],
-                               db_path=_db_path, from_date=from_date, to_date=to_date,
-                               max_workers=int(max_workers) if max_workers else None)
-            elif platform in ("sas", "hadoop_sas"):
-                from ..platforms.hadoop import gen_sas
-                gen_sas(_config_path, outdir, types=[extract_type],
-                        db_path=_db_path, from_date=from_date, to_date=to_date)
-            else:
+            # source=hadoop runs directly through hadoop_connect (.sql); sas /
+            # hadoop_sas go through gen_sas (no max_workers). The dispatch +
+            # signature handling lives in extract.extract_one.
+            from ..extract import extract_one
+            ok = extract_one(platform, _config_path, outdir, types=[extract_type],
+                             db_path=_db_path, from_date=from_date, to_date=to_date,
+                             max_workers=int(max_workers) if max_workers else None)
+            if not ok:
                 return JSONResponse(status_code=400, content={
                     "ok": False,
                     "error": (f"unknown platform {platform!r}; expected one of "
