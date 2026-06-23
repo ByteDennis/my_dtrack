@@ -103,9 +103,13 @@ compare-col *args:
 # {{e2edir}}/output/compare_{row,col}.html. Override the backend with
 # `just config=my_live.json e2e all`.
 #
-#   row : extract-row -> load-row -> compare-row              (writes _row_comparison)
-#   col : load-columns -> extract-col -> load-col -> match-columns -> compare-col
+#   row : extract-row -> discover-columns -> load-row -> compare-row
+#   col : discover-columns -> extract-col -> load-col -> match-columns -> compare-col
 #   all : row, then col
+#
+# discover-columns (load-columns -> _column_meta) runs once per invocation
+# (shared `discover` sentinel); it lands in the row phase so column/datatype
+# metadata is downloaded as early as `just e2e row`.
 #
 # col SQL is filtered to the matching dates row-compare wrote, so the row
 # phase MUST finish first. `all` enforces this; running `col` on its own
@@ -116,8 +120,8 @@ compare-col *args:
 # compare-col falling back to same-named columns. Use it only when the config
 # already carries `columns` (and ideally `col_map`) for each side.
 #
-# SKIP-CACHE: the three expensive backend stages (row extract, col discover,
-# col extract) drop a sentinel in {{e2edir}}/.state/ on success and are
+# SKIP-CACHE: the expensive backend stages (row extract, discover, col
+# extract) drop a sentinel in {{e2edir}}/.state/ on success and are
 # skipped while it exists. The cheap local steps (load / compare / match)
 # always re-run, so reports stay fresh and the DB is repopulated from the
 # cached CSVs even after a reset. Force a fresh pull with `just force=1 e2e
@@ -131,25 +135,27 @@ e2e type="all" *flags:
     out="{{e2edir}}/output"; state="{{e2edir}}/.state"; mkdir -p "$state" "$out"
     is_done()   { [ -z "{{force}}" ] && [ -f "$state/$1.done" ]; }
     mark_done() { touch "$state/$1.done"; }
+    do_discover() {
+        [ "$skip_mapping" -eq 0 ] || return 0
+        if is_done discover; then echo ">>> discover columns: cached"; return 0; fi
+        echo ">>> discover columns (load-columns -> _column_meta)"
+        dtrack load-columns {{db}} --config {{config}}
+        mark_done discover
+    }
     if [ "{{type}}" = "row" ] || [ "{{type}}" = "all" ]; then
         if is_done row.extract; then echo ">>> [row] extract: cached"; else
             echo ">>> [row] extract"
             dtrack extract {{db}} --config {{config}} --outdir {{e2edir}} --type row
             mark_done row.extract
         fi
+        do_discover
         echo ">>> [row] load"
         dtrack load-row {{db}} {{e2edir}}/csv --config {{config}}
         echo ">>> [row] compare"
         dtrack compare-row {{db}} --config {{config}} --html "$out/compare_row.html" -y
     fi
     if [ "{{type}}" = "col" ] || [ "{{type}}" = "all" ]; then
-        if [ "$skip_mapping" -eq 0 ]; then
-            if is_done col.discover; then echo ">>> [col] discover: cached"; else
-                echo ">>> [col] discover columns (load-columns -> _column_meta)"
-                dtrack load-columns {{db}} --config {{config}}
-                mark_done col.discover
-            fi
-        fi
+        do_discover
         if is_done col.extract; then echo ">>> [col] extract: cached"; else
             echo ">>> [col] extract (filtered to row-compare matching dates)"
             dtrack extract {{db}} --config {{config}} --outdir {{e2edir}} --type col
