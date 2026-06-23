@@ -71,6 +71,10 @@ def extract_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
     config = load_unified_config(config_path)
     groups = classify_tables_by_platform(get_all_tables_from_unified(config))
 
+    from .logmgr import get_logger
+    get_logger().info("[extract] types=%s groups=%s", types,
+                      {k: len(v) for k, v in groups.items() if v})
+
     if groups["sas"]:
         print(f"\n--- Generating SAS extraction ({len(groups['sas'])} tables) ---")
         from .platforms.hadoop import gen_sas

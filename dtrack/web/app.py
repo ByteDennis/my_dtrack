@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,11 +17,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from ..logmgr import get_logger, enable_console
+
 # ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="dtrack")
+enable_console()  # >>> shared dtrack logger -> file + this terminal <<< #
 
 _dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=_dir / "static"), name="static")
@@ -87,8 +91,24 @@ class _APILogMiddleware:
                         return {"type": "http.request", "body": raw, "more_body": False}
                     return await receive()
 
-        print(f"[api] {method} {full_path}{body_preview}", flush=True)
-        await self.app(scope, downstream_receive, send)
+        log = get_logger()
+        log.info(f"[api] >> {method} {full_path}{body_preview}")
+        t0 = time.perf_counter()
+        status = {"code": "?"}
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                status["code"] = message["status"]
+            await send(message)
+
+        try:
+            await self.app(scope, downstream_receive, send_wrapper)
+        except Exception:
+            log.exception(f"[api] !! {method} {full_path} raised")
+            raise
+        finally:
+            ms = (time.perf_counter() - t0) * 1000
+            log.info(f"[api] << {method} {full_path} -> {status['code']} ({ms:.0f}ms)")
 
 
 app.add_middleware(_APILogMiddleware)

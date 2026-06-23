@@ -179,6 +179,12 @@ e2e-clean:
 query sql *args:
     dtrack query {{db}} "{{sql}}" {{args}}
 
+# tail the unified dtrack log (web API + CLI). Override path with DTRACK_LOG.
+logs:
+    #!/usr/bin/env bash
+    f="${DTRACK_LOG:-$HOME/.dtrack/dtrack.log}"
+    echo "tailing $f"; tail -n 80 -f "$f"
+
 # run tests
 test *args:
     pytest {{args}}
