@@ -266,7 +266,8 @@ def _build_col_sql_databricks(col, dtype, full_table, where, dt_label="all"):
         f"CAST(NULL AS STRING) AS top_10, "
         f"CAST(AVG(LENGTH(CAST({ce} AS STRING))) AS STRING) AS length_avg, "
         f"CAST(MAX(LENGTH(CAST({ce} AS STRING))) AS STRING) AS length_max, "
-        f"CAST(NULL AS STRING) AS hash_sum\n"
+        f"CAST(SUM(CAST(conv(substr(md5(trim(CAST({ce} AS STRING))), 1, 4), 16, 10) "
+        f"AS DOUBLE)) AS STRING) AS hash_sum\n"
         f"FROM {full_table} WHERE {wc}")
 
 
