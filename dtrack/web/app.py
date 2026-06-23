@@ -4807,6 +4807,12 @@ async def api_save_col_mappings(pair_name: str, request: Request):
                     pairs_cfg[pair_name]["col_map"] = mappings
                 else:
                     pairs_cfg[pair_name].pop("col_map", None)
+                # Mirror col_rules too so `dtrack match-columns` can re-apply
+                # the same wildcard/regex rules (compare.apply_column_rules).
+                if rules_data and rules_data.get("rules"):
+                    pairs_cfg[pair_name]["col_rules"] = rules_data
+                else:
+                    pairs_cfg[pair_name].pop("col_rules", None)
                 save_unified_config(config, _config_path)
                 json_synced = True
         except Exception as e:

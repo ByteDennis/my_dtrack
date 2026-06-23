@@ -641,7 +641,11 @@ function applyColumnRulesJS(rules, unmappedLeft, unmappedRight) {
                     const re = new RegExp(patLeft, 'i');
                     const m = leftCol.match(re);
                     if (m && m[0] === leftCol) {
-                        const transformed = leftCol.replace(re, patRight);
+                        // accept Python-style \1 / \g<name> backrefs too
+                        const patRightJS = patRight
+                            .replace(/\\(\d+)/g, '$$$1')
+                            .replace(/\\g<([^>]+)>/g, '$$<$1>');
+                        const transformed = leftCol.replace(re, patRightJS);
                         if (rightSet.has(transformed)) {
                             newMappings[leftCol] = transformed;
                             ruleSources[leftCol] = `rule:${ruleIdx}`;

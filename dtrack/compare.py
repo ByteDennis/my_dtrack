@@ -565,35 +565,48 @@ def match_columns_from_dicts(left_cols, right_cols, left_label="left", right_lab
     return result
 
 
+# >>> transform value via a wildcard rule: `*` capture and paired (a|b)->(A|B) alternation <<< #
 def _wildcard_transform(value, pat_from, pat_to):
-    """Transform a value by matching pat_from (fnmatch with *) and applying pat_to.
+    has_star = '*' in pat_from
+    has_alt = '(' in pat_from and '(' in pat_to
+    if not has_star and not has_alt:
+        return pat_to if value == pat_from else None
 
-    The * in pat_from captures the variable portion, which replaces * in pat_to.
+    # Paired alternation: the first (a|b) on the left maps positionally to the
+    # first (A|B) on the right; an optional `*` is captured as group 2.
+    if has_alt:
+        lm = re.search(r'\(([^)]+)\)', pat_from)
+        rm = re.search(r'\(([^)]+)\)', pat_to)
+        if lm and rm:
+            left_alts = lm.group(1).split('|')
+            right_alts = rm.group(1).split('|')
+            alt_re = '(' + '|'.join(re.escape(a) for a in left_alts) + ')'
+            full = re.sub(r'\([^)]+\)', alt_re, pat_from, count=1).replace('*', '(.*)')
+            m = re.fullmatch(full, value, re.IGNORECASE)
+            if not m:
+                return None
+            captured = m.group(1)
+            idx = next((i for i, a in enumerate(left_alts)
+                        if a.lower() == captured.lower()), -1)
+            if idx < 0 or idx >= len(right_alts):
+                return None
+            result = re.sub(r'\([^)]+\)', right_alts[idx], pat_to, count=1)
+            if m.lastindex and m.lastindex >= 2 and m.group(2) is not None:
+                result = result.replace('*', m.group(2))
+            return result
 
-    >>> _wildcard_transform("AMT_TOTAL", "AMT_*", "amount_*")
-    'amount_TOTAL'
-    >>> _wildcard_transform("STATUS", "AMT_*", "amount_*")
-    """
-    # Convert fnmatch pattern to regex to capture the * part
-    if '*' not in pat_from:
-        if value == pat_from:
-            return pat_to
-        return None
-
-    # Escape everything except *, then replace * with capture group
-    regex = ''
-    for ch in pat_from:
-        if ch == '*':
-            regex += '(.*)'
-        else:
-            regex += re.escape(ch)
-
+    regex = ''.join('(.*)' if ch == '*' else re.escape(ch) for ch in pat_from)
     m = re.fullmatch(regex, value, re.IGNORECASE)
     if not m:
         return None
+    return pat_to.replace('*', m.group(1))
 
-    captured = m.group(1)
-    return pat_to.replace('*', captured)
+
+# >>> accept JS-style $1 / $<name> backrefs in a regex replacement template <<< #
+def _to_py_backrefs(template):
+    template = re.sub(r'\$(\d+)', r'\\\1', template)
+    template = re.sub(r'\$<([^>]+)>', r'\\g<\1>', template)
+    return template
 
 
 def apply_column_rules(rules, unmatched_left, unmatched_right):
@@ -632,7 +645,7 @@ def apply_column_rules(rules, unmatched_left, unmatched_right):
                 try:
                     m = re.fullmatch(pat_left, left_col, re.IGNORECASE)
                     if m:
-                        transformed = m.expand(pat_right)
+                        transformed = m.expand(_to_py_backrefs(pat_right))
                         if transformed in right_set:
                             new_mappings[left_col] = transformed
                             rule_sources[left_col] = f"rule:{rule_idx}"

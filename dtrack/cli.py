@@ -33,6 +33,7 @@ from .compare import (
     get_column_mapping,
     parse_col_map_string,
     match_columns_from_dicts,
+    apply_column_rules,
     _has_col_differences,
 )
 from .config import (
@@ -859,6 +860,19 @@ def cmd_match_columns(args):
         existing_right = set(existing_col_map.values())
         left_only = [c for c in left_only if c['name'] not in existing_left]
         right_only = [c for c in right_only if c['name'] not in existing_right]
+
+        # Apply saved wildcard/regex col_rules to the still-unmatched columns,
+        # mirroring the web UI (same compare.apply_column_rules engine).
+        rule_list = (pair_config.get('col_rules') or {}).get('rules') or []
+        if rule_list:
+            rule_maps, _ = apply_column_rules(
+                rule_list, [c['name'] for c in left_only], [c['name'] for c in right_only])
+            if rule_maps:
+                matched.update(rule_maps)
+                rmatched_right = set(rule_maps.values())
+                left_only = [c for c in left_only if c['name'] not in rule_maps]
+                right_only = [c for c in right_only if c['name'] not in rmatched_right]
+                print(f"Rule-matched: {len(rule_maps)} columns")
 
         auto_count = len(matched) - len(existing_col_map)
         print(f"Auto-matched: {auto_count} columns")
