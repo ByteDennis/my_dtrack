@@ -423,11 +423,11 @@ def _build_where_from_dates(table_cfg, matching_dates, excluded_dates, db_path=N
         elif source == 'aws':
             col_expr = f"CAST({date_col} AS DATE)"
             def fmt_date(d):
-                return f"'{d}'" if re.match(r'^\d{6}$', str(d)) else f"DATE '{d}'"
+                return f"'{d}'" if re.match(r'^\d{6}$', str(d)) else f"DATE '{str(d).split()[0]}'"
         else:
             col_expr = f"TRUNC({date_col})"
             def fmt_date(d):
-                return f"'{d}'" if re.match(r'^\d{6}$', str(d)) else f"DATE '{d}'"
+                return f"'{d}'" if re.match(r'^\d{6}$', str(d)) else f"DATE '{str(d).split()[0]}'"
     else:
         col_expr = date_col
         from .date_utils import DateConverter
@@ -444,7 +444,7 @@ def _build_where_from_dates(table_cfg, matching_dates, excluded_dates, db_path=N
             if date_dtype.startswith(('VARCHAR', 'CHAR', 'STRING', 'TEXT')):
                 return f"'{original}'"
             elif date_dtype.startswith(('DATE', 'TIMESTAMP')):
-                return f"DATE '{original}'"
+                return f"DATE '{str(original).split()[0]}'"
             return f"'{original}'"
 
     parts = []

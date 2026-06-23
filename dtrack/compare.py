@@ -458,7 +458,7 @@ def compare_column_stats(
                         except (ValueError, TypeError):
                             match = (lv == rv)
                 elif lv or rv:
-                    match = None if field == "hash_sum" else False
+                    match = False
                 else:
                     match = None
                 comparison[f"{field}_left"] = lv
