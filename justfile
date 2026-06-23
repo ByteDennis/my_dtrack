@@ -52,6 +52,34 @@ force := ""
 default:
     @just --list
 
+# per-subcommand help for a recipe (`just help e2e`); no arg = recipe list
+help topic="":
+    #!/usr/bin/env bash
+    case "{{topic}}" in
+    "") just --list ;;
+    e2e)
+        echo "just [pair=NAME] [force=1] e2e <subcommand> [dtrack extract/generate flags]"
+        echo
+        echo "  row       generate+run-sql extract_row.<platform>.sql -> discover -> load-row -> compare-row"
+        echo "  col-gen   match-columns (auto) -> generate csv/extract_col.<platform>.sql (NO run)"
+        echo "            review the SQL, then col-run"
+        echo "  col-run   run-sql (executes the generated SQL) -> load-col -> compare-col"
+        echo "  col       col-gen then col-run (no pause)"
+        echo "  all       row, then col   (default)"
+        echo
+        echo "  (column annotation is done in the web col_mapping page, not the CLI)"
+        echo "  extra flags are forwarded to the underlying dtrack extract/generate, e.g.:"
+        echo "    --vintage day|week|month|quarter|year|all   bucket granularity"
+        echo "    --preset quick|standard|detailed            col-stats depth"
+        echo "    --stats-override ...                        per-stat override"
+        echo "    --from-date / --to-date YYYY-MM-DD          incremental window"
+        echo "    e.g.  just pair=month e2e col-gen --vintage month --preset detailed"
+        echo "  pair=NAME            use {{configdir}}/NAME.json; HTML + .state namespaced _NAME"
+        echo "  force=1              ignore skip-cache; re-run row/discover/col extract"
+        ;;
+    *) just --show "{{topic}}" ;;
+    esac
+
 # editable pipx install — source stays in this repo, edits are live
 pipx:
     pipx uninstall dtrack || true
@@ -120,18 +148,24 @@ compare-col *args:
 # with `just config=my_live.json e2e all`, or pick a pair-subset config with
 # `just pair=tableA e2e ...` (see the pair/configdir vars above).
 #
-#   row     : extract-row -> discover-columns -> load-row -> compare-row
-#   col-gen : discover-columns -> match-columns (mapcsv|auto) -> extract-col;
-#             writes csv/extract_col.sql then STOPS so you can review the SQL
-#   col-run : load-col -> compare-col
+#   row     : generate extract_row.<platform>.sql -> run-sql -> discover -> load-row -> compare-row
+#   col-gen : discover-columns -> match-columns (auto)
+#             -> `dtrack generate` writes csv/extract_col.<platform>.sql, then STOPS (no run)
+#   col-run : `dtrack run-sql` executes the generated SQL -> load-col -> compare-col
 #   col     : col-gen then col-run (no pause)
 #   all     : row, then col
 #
-# Mirrors the web col_gen flow: column matching happens BEFORE the col
-# extraction SQL is generated, so extract_col.sql is scoped to the matched
-# col_map. Review csv/extract_col.sql after `col-gen`, then run `col-run`.
-# (In mock mode `col-gen` also copies the col fixtures; against real backends
-# it runs the queries — there is no generate-without-run step yet.)
+# Mirrors the web col_gen flow: matching happens BEFORE the col SQL is
+# generated, so extract_col.sql is scoped to the matched col_map. `col-gen`
+# uses `dtrack generate` (writes SQL only, never runs; one
+# extract_col.<platform>.sql per platform so they don't clobber), then
+# `col-run` runs the reviewed file via `dtrack run-sql` (mirrors the web
+# /api/extract/run-sql — executes the SAME extract_col.<platform>.sql block by
+# block, not a regenerate). Extraction flags (--vintage --preset
+# --stats-override --from/--to-date) are baked into the SQL at `col-gen`, so
+# put them on col-gen; on col-run only --vintage / date flags still matter (they
+# reach compare-col). Matching is automatic (auto-match + --map-csv + the pair's
+# saved col_rules); annotate columns in the web col_mapping page, not the CLI.
 #
 # discover-columns (load-columns -> _column_meta + csv/{qname}_columns.csv)
 # runs once per invocation (shared `discover` sentinel); it lands in the row
@@ -140,11 +174,6 @@ compare-col *args:
 # col SQL is filtered to the matching dates row-compare wrote, so the row
 # phase MUST finish first. `all` enforces this; running `col*` on its own
 # REQUIRES a prior `just e2e row` (or `all`) to have populated _row_comparison.
-#
-# --skip-mapping skips column discovery + match (load-columns and
-# match-columns); it then relies on the col_map already in the config, with
-# compare-col falling back to same-named columns. Use it only when the config
-# already carries `columns` (and ideally `col_map`) for each side.
 #
 # SKIP-CACHE: the expensive backend stages (row extract, discover, col
 # extract) drop a sentinel in {{e2edir}}/.state/ on success and are
@@ -155,51 +184,65 @@ compare-col *args:
 e2e type="all" *flags:
     #!/usr/bin/env bash
     set -euo pipefail
-    case "{{type}}" in row|col-gen|col-run|col|all) ;; *) echo "usage: just [pair=NAME] e2e [row|col-gen|col-run|col|all] [--skip-mapping]" >&2; exit 2 ;; esac
+    case "{{type}}" in row|col-gen|col-run|col|all) ;; *) echo "usage: just [pair=NAME] e2e [row|col-gen|col-run|col|all]   (details: just help e2e)" >&2; exit 2 ;; esac
     [ -f "{{config}}" ] || { echo "config not found: {{config}} (pair='{{pair}}')" >&2; exit 2; }
-    skip_mapping=0
-    for f in {{flags}}; do case "$f" in --skip-mapping) skip_mapping=1 ;; esac; done
+    ext=""; cmprow=""; cmpcol=""
+    set -- {{flags}}
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --no-date-filter) cmpcol="$cmpcol --no-date-filter"; shift ;;
+            --vintage)        ext="$ext --vintage $2"; case "$2" in month|quarter|year) cmpcol="$cmpcol --vintage $2" ;; esac; shift 2 ;;
+            --preset)         ext="$ext --preset $2"; shift 2 ;;
+            --stats-override) ext="$ext --stats-override $2"; shift 2 ;;
+            --from-date)      ext="$ext --from-date $2"; cmprow="$cmprow --from-date $2"; cmpcol="$cmpcol --from-date $2"; shift 2 ;;
+            --to-date)        ext="$ext --to-date $2"; cmprow="$cmprow --to-date $2"; cmpcol="$cmpcol --to-date $2"; shift 2 ;;
+            *)                ext="$ext $1"; shift ;;
+        esac
+    done
     out="{{e2edir}}/output"; state="{{e2edir}}/.state{{suffix}}"; mkdir -p "$state" "$out"
+    logf="${DTRACK_LOG:-$out/run.log}"
+    say() { echo ">>> $1"; printf '%s INFO [justfile.e2e] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$logf"; }
     is_done()   { [ -z "{{force}}" ] && [ -f "$state/$1.done" ]; }
     mark_done() { touch "$state/$1.done"; }
     do_discover() {
-        [ "$skip_mapping" -eq 0 ] || return 0
-        if is_done discover; then echo ">>> discover columns: cached"; return 0; fi
-        echo ">>> discover columns (load-columns -> _column_meta + csv/{qname}_columns.csv)"
+        if is_done discover; then say "discover columns: cached (skip-cache)"; return 0; fi
+        say "discover columns (load-columns -> _column_meta + csv/{qname}_columns.csv)"
         dtrack load-columns {{db}} --config {{config}} --columns-dir "{{e2edir}}/csv"
         mark_done discover
     }
     do_row() {
-        if is_done row.extract; then echo ">>> [row] extract: cached"; else
-            echo ">>> [row] extract"
-            dtrack extract {{db}} --config {{config}} --outdir {{e2edir}} --type row
-            mark_done row.extract
+        if is_done row.run; then say "[row] run-sql: cached (skip-cache)"; else
+            say "[row] generate extract_row.<platform>.sql$ext (NO run)"
+            dtrack generate {{db}} --config {{config}} --outdir {{e2edir}} --type row $ext
+            say "[row] run-sql (execute the generated extract_row.<platform>.sql; mock-copies fixtures)"
+            dtrack run-sql {{db}} --config {{config}} --outdir {{e2edir}} --type row
+            mark_done row.run
         fi
         do_discover
-        echo ">>> [row] load"
+        say "[row] load"
         dtrack load-row {{db}} {{e2edir}}/csv --config {{config}}
-        echo ">>> [row] compare"
-        dtrack compare-row {{db}} --config {{config}} --html "$out/compare_row{{suffix}}.html" -y
+        say "[row] compare$cmprow"
+        dtrack compare-row {{db}} --config {{config}} --html "$out/compare_row{{suffix}}.html" -y $cmprow
     }
     do_col_gen() {
         do_discover
-        if [ "$skip_mapping" -eq 0 ]; then
-            echo ">>> [col] match-columns BEFORE generate (mapcsv: {{mapcsv}}; --skip-mapping to skip)"
-            dtrack match-columns {{db}} --config {{config}} --map-csv "{{mapcsv}}" --yes
-        fi
-        if is_done col.extract; then echo ">>> [col] extract: cached"; else
-            echo ">>> [col] extract + generate csv/extract_col.sql (scoped to matched cols + matching dates)"
-            dtrack extract {{db}} --config {{config}} --outdir {{e2edir}} --type col
-            mark_done col.extract
-        fi
+        say "[col] match-columns (auto; col_map in config is kept; mapcsv: {{mapcsv}})"
+        dtrack match-columns {{db}} --config {{config}} --map-csv "{{mapcsv}}" --yes
+        say "[col] generate csv/extract_col.<platform>.sql$ext (scoped to matched cols + matching dates; NO run)"
+        dtrack generate {{db}} --config {{config}} --outdir {{e2edir}} --type col $ext
         pa=""; [ -n "{{pair}}" ] && pa="pair={{pair}} "
-        echo ">>> [col-gen] review {{e2edir}}/csv/extract_col.sql, then run: just ${pa}e2e col-run"
+        say "[col-gen] review {{e2edir}}/csv/extract_col.*.sql, then run: just ${pa}e2e col-run"
     }
     do_col_run() {
-        echo ">>> [col] load"
+        if is_done col.run; then say "[col] run-sql: cached (skip-cache)"; else
+            say "[col] run-sql (execute the reviewed extract_col.<platform>.sql; mock-copies fixtures)"
+            dtrack run-sql {{db}} --config {{config}} --outdir {{e2edir}} --type col
+            mark_done col.run
+        fi
+        say "[col] load"
         dtrack load-col {{db}} {{e2edir}}/csv --config {{config}}
-        echo ">>> [col] compare"
-        dtrack compare-col {{db}} --config {{config}} --html "$out/compare_col{{suffix}}.html" -y
+        say "[col] compare$cmpcol"
+        dtrack compare-col {{db}} --config {{config}} --html "$out/compare_col{{suffix}}.html" -y $cmpcol
     }
     case "{{type}}" in
         row)     do_row ;;

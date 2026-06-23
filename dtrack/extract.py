@@ -58,7 +58,7 @@ def extract_one(platform, config_path, outdir, types=None, db_path=None,
 def extract_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
                 types=None, max_workers=None, db_path=None, vintage=None,
                 force=False, from_date=None, to_date=None,
-                preset=None, stats_override=None):
+                preset=None, stats_override=None, gen_only=False):
     if types is None:
         types = ["row", "col"]
     if outdir is None:
@@ -75,41 +75,99 @@ def extract_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
     get_logger().info("[extract] types=%s groups=%s", types,
                       {k: len(v) for k, v in groups.items() if v})
 
+    verb = "Generating" if gen_only else "Extracting"
+
     if groups["sas"]:
         print(f"\n--- Generating SAS extraction ({len(groups['sas'])} tables) ---")
         from .platforms.hadoop import gen_sas
         gen_sas(config_path, sas_outdir, types=types, db_path=db_path, vintage=vintage,
                 from_date=from_date, to_date=to_date,
-                preset=preset, stats_override=stats_override)
+                preset=preset, stats_override=stats_override, gen_only=gen_only)
 
     if groups["oracle"]:
-        print(f"\n--- Extracting from Oracle ({len(groups['oracle'])} tables) ---")
+        print(f"\n--- {verb} from Oracle ({len(groups['oracle'])} tables) ---")
         from .platforms.oracle import extract_oracle
         extract_oracle(config_path, csv_outdir, types=types, max_workers=max_workers,
                        db_path=db_path, vintage=vintage, force=force,
                        from_date=from_date, to_date=to_date,
-                       preset=preset, stats_override=stats_override)
+                       preset=preset, stats_override=stats_override, gen_only=gen_only)
 
     if groups["aws"]:
-        print(f"\n--- Extracting from Athena ({len(groups['aws'])} tables) ---")
+        print(f"\n--- {verb} from Athena ({len(groups['aws'])} tables) ---")
         from .platforms.athena import extract_aws
         extract_aws(config_path, csv_outdir, types=types, max_workers=max_workers,
                     db_path=db_path, vintage=vintage, force=force,
                     from_date=from_date, to_date=to_date,
-                    preset=preset, stats_override=stats_override)
+                    preset=preset, stats_override=stats_override, gen_only=gen_only)
 
     if groups["hadoop"]:
-        print(f"\n--- Extracting from Hadoop ({len(groups['hadoop'])} tables) ---")
+        print(f"\n--- {verb} from Hadoop ({len(groups['hadoop'])} tables) ---")
         from .platforms.hadoop import extract_hadoop
         extract_hadoop(config_path, csv_outdir, types=types, max_workers=max_workers,
                        db_path=db_path, vintage=vintage, force=force,
                        from_date=from_date, to_date=to_date,
-                       preset=preset, stats_override=stats_override)
+                       preset=preset, stats_override=stats_override, gen_only=gen_only)
 
     if groups["databricks"]:
-        print(f"\n--- Extracting from Databricks ({len(groups['databricks'])} tables) ---")
+        print(f"\n--- {verb} from Databricks ({len(groups['databricks'])} tables) ---")
         from .platforms.databricks import extract_databricks
         extract_databricks(config_path, csv_outdir, types=types, max_workers=max_workers,
                            db_path=db_path, vintage=vintage, force=force,
                            from_date=from_date, to_date=to_date,
-                           preset=preset, stats_override=stats_override)
+                           preset=preset, stats_override=stats_override, gen_only=gen_only)
+
+
+# >>> platform string -> (runner, mock-env-var) for run_sql_all <<< #
+_RUNNERS = {
+    "aws": ("dtrack.platforms.athena", "run_sql_file", "DTRACK_ATHENA_MOCK"),
+    "oracle": ("dtrack.platforms.oracle", "run_oracle_sql_file", "DTRACK_ORACLE_MOCK"),
+    "hadoop": ("dtrack.platforms.hadoop", "run_hadoop_sql_file", "DTRACK_HADOOP_MOCK"),
+    "databricks": ("dtrack.platforms.databricks", "run_databricks_sql_file", "DTRACK_DATABRICKS_MOCK"),
+}
+
+
+# >>> execute already-generated extract_{type}.<platform>.sql via each platform's runner (mirrors web /api/extract/run-sql) <<< #
+def run_sql_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
+                types=None, max_workers=None, db_path=None, resume=False):
+    import importlib
+    if types is None:
+        types = ["row", "col"]
+    if outdir is None:
+        outdir = os.getcwd()
+    if sas_outdir is None:
+        sas_outdir = os.path.join(outdir, "sas")
+    if csv_outdir is None:
+        csv_outdir = os.path.join(outdir, "csv")
+
+    config = load_unified_config(config_path)
+    groups = classify_tables_by_platform(get_all_tables_from_unified(config))
+
+    from .logmgr import get_logger
+    get_logger().info("[run-sql] types=%s groups=%s", types,
+                      {k: len(v) for k, v in groups.items() if v})
+
+    for platform in ("oracle", "aws", "hadoop", "databricks"):
+        tbls = groups.get(platform) or []
+        if not tbls:
+            continue
+        mock_dir = os.environ.get("DTRACK_MOCK") or os.environ.get(_RUNNERS[platform][2])
+        if mock_dir:
+            from .platforms.base import _extract_mock_tables
+            print(f"\n--- [run-sql] {platform}: mock copy ({len(tbls)} tables) ---")
+            _extract_mock_tables(tbls, csv_outdir, types, mock_dir)
+            continue
+        mod_name, fn_name, _ = _RUNNERS[platform]
+        runner = getattr(importlib.import_module(mod_name), fn_name)
+        for t in types:
+            sql_path = os.path.join(csv_outdir, f"extract_{t}.{platform}.sql")
+            if not os.path.exists(sql_path):
+                print(f"[run-sql] {platform} {t}: missing {sql_path} "
+                      f"(run `dtrack generate --type {t}` first)")
+                continue
+            print(f"\n--- [run-sql] {platform} {t}: {sql_path} ---")
+            runner(sql_path, csv_outdir, max_workers=max_workers,
+                   db_path=db_path, resume=resume)
+
+    if groups.get("sas"):
+        print(f"\n--- [run-sql] sas ({len(groups['sas'])} tables): run extract_{{type}}.sas "
+              f"on the SAS server (not executed here) ---")

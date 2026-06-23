@@ -232,16 +232,18 @@ def _write_combined_row_sql_databricks(databricks_tables, outdir):
 
 
 # >>> per-column stats SQL for one Databricks column — emits all 14 COL_CSV_HEADERS columns <<< #
-def _build_col_sql_databricks(col, dtype, full_table, where, dt_label="all"):
+def _build_col_sql_databricks(col, dtype, full_table, where, dt_label="all", dt_expr=None):
     numeric = is_numeric_type(dtype, is_oracle=False)
     col_q = quote_ident(col, "databricks")
     wc = (where or "").strip() or "(1=1)"
     col_lit = col.replace("'", "''")
     dt_lit = (dt_label or "all").replace("'", "''")
+    dt_select = f"CAST({dt_expr} AS STRING)" if dt_expr else f"'{dt_lit}'"
+    group_by = f"\nGROUP BY {dt_expr}" if dt_expr else ""
     if numeric:
         ce = apply_null_sentinels(col_q, dtype or "numeric", "databricks")
         return (
-            f"SELECT '{dt_lit}' AS dt, '{col_lit}' AS column_name, "
+            f"SELECT {dt_select} AS dt, '{col_lit}' AS column_name, "
             f"'numeric' AS col_type, "
             f"COUNT(*) AS n_total, COUNT(*) - COUNT({ce}) AS n_missing, "
             f"COUNT(DISTINCT {ce}) AS n_unique, "
@@ -253,10 +255,10 @@ def _build_col_sql_databricks(col, dtype, full_table, where, dt_label="all"):
             f"CAST(NULL AS STRING) AS length_avg, "
             f"CAST(NULL AS STRING) AS length_max, "
             f"CAST(NULL AS STRING) AS hash_sum\n"
-            f"FROM {full_table} WHERE {wc}")
+            f"FROM {full_table} WHERE {wc}{group_by}")
     ce = apply_null_sentinels(col_q, dtype or "categorical", "databricks")
     return (
-        f"SELECT '{dt_lit}' AS dt, '{col_lit}' AS column_name, "
+        f"SELECT {dt_select} AS dt, '{col_lit}' AS column_name, "
         f"'categorical' AS col_type, "
         f"COUNT(*) AS n_total, COUNT(*) - COUNT({ce}) AS n_missing, "
         f"COUNT(DISTINCT {ce}) AS n_unique, "
@@ -268,7 +270,7 @@ def _build_col_sql_databricks(col, dtype, full_table, where, dt_label="all"):
         f"CAST(MAX(LENGTH(CAST({ce} AS STRING))) AS STRING) AS length_max, "
         f"CAST(SUM(CAST(conv(substr(md5(trim(CAST({ce} AS STRING))), 1, 4), 16, 10) "
         f"AS DOUBLE)) AS STRING) AS hash_sum\n"
-        f"FROM {full_table} WHERE {wc}")
+        f"FROM {full_table} WHERE {wc}{group_by}")
 
 
 # >>> compose the effective WHERE + dt label for a table's col extraction window <<< #
@@ -295,7 +297,17 @@ def _col_where_and_label_databricks(tbl_cfg, db_path, vintage):
         where = f"({orig_where}) AND {bounds}" if orig_where else bounds
     else:
         where = orig_where
-    return where, dt_label
+    # Per-bucket grouping: bucket the date column by vintage in the SQL so col
+    # stats come back one row per week/month/... (mirrors Athena). 'sample' /
+    # 'all' / 'day' stay a single aggregate row. Reuses Athena's Trino-dialect
+    # date_trunc expr (per this module's stated dialect sharing).
+    dt_expr = None
+    if dt_label != "sample" and table_vintage in ("week", "month", "quarter", "year"):
+        from .athena import _vintage_date_expr_athena
+        dt_expr = _vintage_date_expr_athena(
+            quote_ident(date_col, "databricks"), table_vintage,
+            date_dtype=eff_dtype, date_format=eff_fmt)
+    return where, dt_label, dt_expr
 
 
 # >>> aggregate extract_col.sql for every Databricks table — one block per (table, column) <<< #
@@ -327,7 +339,7 @@ def _write_combined_col_sql_databricks(databricks_tables, outdir, db_path=None,
             blocks.append("")
             continue
         try:
-            where, dt_label = _col_where_and_label_databricks(tbl, db_path, vintage)
+            where, dt_label, dt_expr = _col_where_and_label_databricks(tbl, db_path, vintage)
         except Exception as e:
             blocks.append(f"-- {qname}")
             blocks.append(f"-- SKIP: date filter build failed: {e}")
@@ -335,7 +347,7 @@ def _write_combined_col_sql_databricks(databricks_tables, outdir, db_path=None,
             continue
         for col, dtype in non_date_cols:
             try:
-                sql = _build_col_sql_databricks(col, dtype, full_table, where, dt_label)
+                sql = _build_col_sql_databricks(col, dtype, full_table, where, dt_label, dt_expr)
             except Exception as e:
                 blocks.append(f"-- {qname}/{col}")
                 blocks.append(f"-- SKIP: SQL build failed: {e}")
@@ -428,7 +440,7 @@ def _ensure_columns_databricks(databricks_tables, outdir, db_path):
 def extract_databricks(config_path, outdir, types=None, max_workers=None,
                        db_path=None, vintage=None, force=False,
                        from_date=None, to_date=None,
-                       preset=None, stats_override=None):
+                       preset=None, stats_override=None, gen_only=False):
     if types is None:
         types = ["row", "col"]
 
@@ -484,6 +496,21 @@ def extract_databricks(config_path, outdir, types=None, max_workers=None,
                 tbl["_date_bounds"] = " AND ".join(bounds)
             tbl["_from_date"] = from_date
             tbl["_to_date"] = to_date
+
+    if gen_only:
+        from .base import tag_generated_sql
+        if "row" in types:
+            _write_combined_row_sql_databricks(dbx_tables, outdir)
+            tag_generated_sql(outdir, "row", "databricks")
+        if "col" in types:
+            if db_path:
+                fill_columns_from_meta(dbx_tables, db_path)
+            _write_combined_col_sql_databricks(dbx_tables, outdir, db_path=db_path,
+                                               vintage=vintage, preset=preset,
+                                               stats_override=stats_override)
+            tag_generated_sql(outdir, "col", "databricks")
+        print(f"[gen-only] wrote Databricks extract SQL to {outdir} (no extraction)")
+        return
 
     if mock_dir:
         from .base import _extract_mock_tables

@@ -51,7 +51,7 @@ from .config import (
     get_col_type_overrides,
 )
 from .platforms.base import qualified_name, is_sas_table
-from .interact import prompt_skip_pair, prompt_ignore_items, prompt_mapping, confirm, save_and_pause
+from .interact import prompt_skip_pair, prompt_ignore_items, confirm, save_and_pause
 
 
 # ============================================================================
@@ -306,6 +306,38 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
             cursor.close()
             conn.close()
 
+        if not columns:
+            print(f"WARNING: No columns found for {conn_macro}.{raw_table}")
+            return
+    elif source.lower() == 'databricks':
+        mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_DATABRICKS_MOCK')
+        if mock_dir:
+            mock_csv = os.path.join(mock_dir, f"{store_name}_columns.csv")
+            if not os.path.exists(mock_csv):
+                print(f"WARNING: [mock] File not found: {mock_csv}, skipping {store_name}")
+                return
+            columns = {}
+            with open(mock_csv, 'r', newline='') as f:
+                for row in csv_mod.DictReader(f):
+                    row = {k.strip(): v for k, v in row.items()}
+                    name = row.get('column_name') or row.get('COLUMN_NAME', '')
+                    dtype = row.get('data_type') or row.get('DATA_TYPE', '')
+                    if name:
+                        columns[name] = dtype
+            print(f"[mock] Loaded {len(columns)} columns from {mock_csv}")
+        elif conn_macro and '.' in conn_macro:
+            from .platforms.databricks import databricks_connect, _discover_columns_databricks
+            catalog, schema = conn_macro.split('.', 1)
+            print(f"Connecting to Databricks ({conn_macro})...")
+            conn = databricks_connect(conn_macro)
+            cursor = conn.cursor()
+            print(f"Discovering columns for: {conn_macro}.{raw_table}")
+            columns = _discover_columns_databricks(cursor, catalog, schema, raw_table)
+            cursor.close()
+            conn.close()
+        else:
+            print(f"WARNING: {store_name}: databricks conn_macro must be catalog.schema, got '{conn_macro}'")
+            return
         if not columns:
             print(f"WARNING: No columns found for {conn_macro}.{raw_table}")
             return
@@ -881,17 +913,19 @@ def cmd_match_columns(args):
         replace_mode = getattr(args, 'mode', 'merge') == 'replace'
         existing_col_map = {} if replace_mode else pair_config.get('col_map', {})
 
-        result = match_columns_from_dicts(left_cols, right_cols, left_table, right_table)
-        matched = {**result.get('matched', {}), **existing_col_map}
-
-        left_only = result.get(f'{left_table}_only', [])
-        right_only = result.get(f'{right_table}_only', [])
-
-        # Filter already-mapped
-        existing_left = set(existing_col_map.keys())
-        existing_right = set(existing_col_map.values())
-        left_only = [c for c in left_only if c['name'] not in existing_left]
-        right_only = [c for c in right_only if c['name'] not in existing_right]
+        if existing_col_map:
+            matched = dict(existing_col_map)
+            mapped_right = set(existing_col_map.values())
+            left_only = [{'name': c, 'type': t} for c, t in left_cols.items()
+                         if c not in existing_col_map]
+            right_only = [{'name': c, 'type': t} for c, t in right_cols.items()
+                          if c not in mapped_right]
+            print(f"  col_map already defined ({len(existing_col_map)}); skipping auto-match")
+        else:
+            result = match_columns_from_dicts(left_cols, right_cols, left_table, right_table)
+            matched = dict(result.get('matched', {}))
+            left_only = result.get(f'{left_table}_only', [])
+            right_only = result.get(f'{right_table}_only', [])
 
         # Apply saved wildcard/regex col_rules to the still-unmatched columns,
         # mirroring the web UI (same compare.apply_column_rules engine).
@@ -920,14 +954,8 @@ def cmd_match_columns(args):
             print(f"Existing mappings: {len(existing_col_map)}")
 
         if left_only or right_only:
-            interactive = sys.stdin.isatty() and not getattr(args, 'yes', False)
-            if interactive:
-                left_items = [(c['name'], c['type']) for c in left_only]
-                right_items = [(c['name'], c['type']) for c in right_only]
-                matched = prompt_mapping(left_items, right_items, existing_map=matched)
-            else:
-                print(f"  {len(left_only)} unmatched left + {len(right_only)} unmatched right "
-                      f"column(s) left unmapped (non-interactive; run in a terminal without --yes to map them)")
+            print(f"  {len(left_only)} unmatched left + {len(right_only)} unmatched right "
+                  f"column(s) left unmapped (map them in the web col_mapping page or via --map-csv)")
 
         matched_columns[pair_name] = matched
 
@@ -962,6 +990,48 @@ def cmd_extract(args):
         to_date=getattr(args, 'to_date', None),
         preset=getattr(args, 'preset', None),
         stats_override=_parse_stats_override(getattr(args, 'stats_override', None)),
+    )
+
+
+# >>> execute already-generated extract_{row,col}.<platform>.sql via each platform's runner (mirrors web run-sql) <<< #
+def cmd_run_sql(args):
+    from .extract import run_sql_all
+    from .db import init_database
+    if not os.path.exists(args.project_db):
+        init_database(args.project_db)
+        print(f"Initialized database: {args.project_db}")
+    run_sql_all(
+        config_path=args.config,
+        outdir=getattr(args, 'outdir', None),
+        sas_outdir=getattr(args, 'sas_outdir', None),
+        csv_outdir=getattr(args, 'csv_outdir', None),
+        types=[args.type] if args.type != "both" else ["row", "col"],
+        db_path=args.project_db,
+        max_workers=getattr(args, 'workers', None),
+        resume=getattr(args, 'resume', False),
+    )
+
+
+# >>> write extract_{row,col} SQL/SAS for every platform WITHOUT running (review before extract) <<< #
+def cmd_generate(args):
+    from .extract import extract_all
+    from .db import init_database
+    if not os.path.exists(args.project_db):
+        init_database(args.project_db)
+        print(f"Initialized database: {args.project_db}")
+    extract_all(
+        config_path=args.config,
+        outdir=getattr(args, 'outdir', None),
+        sas_outdir=getattr(args, 'sas_outdir', None),
+        csv_outdir=getattr(args, 'csv_outdir', None),
+        types=[args.type] if args.type != "both" else ["row", "col"],
+        db_path=args.project_db,
+        vintage=getattr(args, 'vintage', None),
+        from_date=getattr(args, 'from_date', None),
+        to_date=getattr(args, 'to_date', None),
+        preset=getattr(args, 'preset', None),
+        stats_override=_parse_stats_override(getattr(args, 'stats_override', None)),
+        gen_only=True,
     )
 
 
@@ -1263,6 +1333,35 @@ def main():
     p.add_argument('--stats-override', dest='stats_override',
                    help=_STATS_OVERRIDE_HELP)
 
+    # run-sql (execute already-generated extract_{row,col}.<platform>.sql files)
+    p = sub.add_parser('run-sql',
+                       help='Run already-generated extract_{row,col}.<platform>.sql files (see `dtrack generate`)')
+    p.add_argument('project_db')
+    p.add_argument('--config', required=True)
+    p.add_argument('--outdir', help='Base output directory (csv/ + sas/ derived from it)')
+    p.add_argument('--sas-outdir', help='SAS output directory')
+    p.add_argument('--csv-outdir', help='CSV output directory')
+    p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
+    p.add_argument('--workers', type=int)
+    p.add_argument('--resume', action='store_true', help='Skip blocks whose output CSV already exists')
+
+    # generate (write extract_{row,col} SQL/SAS only; no extraction)
+    p = sub.add_parser('generate',
+                       help='Write extract_{row,col} SQL/SAS for all platforms WITHOUT running')
+    p.add_argument('project_db')
+    p.add_argument('--config', required=True)
+    p.add_argument('--outdir', help='Base output directory (csv/ + sas/ derived from it)')
+    p.add_argument('--sas-outdir', help='SAS output directory')
+    p.add_argument('--csv-outdir', help='CSV output directory')
+    p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
+    p.add_argument('--vintage')
+    p.add_argument('--from-date', help='Start date for incremental extraction')
+    p.add_argument('--to-date', help='End date for incremental extraction')
+    p.add_argument('--preset', choices=['quick', 'standard', 'detailed'],
+                   help=_PRESET_HELP)
+    p.add_argument('--stats-override', dest='stats_override',
+                   help=_STATS_OVERRIDE_HELP)
+
     # serve
     p = sub.add_parser('serve', help='Start web UI')
     p.add_argument('project_db')
@@ -1348,6 +1447,8 @@ def main():
         'gen-oracle': cmd_gen_oracle,
         'match-columns': cmd_match_columns,
         'extract': cmd_extract,
+        'generate': cmd_generate,
+        'run-sql': cmd_run_sql,
         'serve': cmd_serve,
         'query': cmd_query,
         'doctor': cmd_doctor,
@@ -1356,7 +1457,9 @@ def main():
     handler = commands.get(args.command)
     if handler:
         from .logmgr import get_logger
+        import shlex
         log = get_logger()
+        log.info("[cli] $ %s", shlex.join(['dtrack', *sys.argv[1:]]))
         log.info("[cli] %s %s", args.command,
                  {k: v for k, v in vars(args).items()
                   if v not in (None, False) and k not in ('command', 'debug')})

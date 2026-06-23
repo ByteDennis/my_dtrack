@@ -1732,7 +1732,7 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
 # ---------------------------------------------------------------------------
 
 def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None, vintage=None, force=False,
-                from_date=None, to_date=None, preset=None, stats_override=None):
+                from_date=None, to_date=None, preset=None, stats_override=None, gen_only=False):
     """
     Extract data directly from AWS Athena.
 
@@ -1810,6 +1810,20 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
                 tbl['_date_bounds'] = " AND ".join(bounds)
             tbl['_from_date'] = from_date
             tbl['_to_date'] = to_date
+    if gen_only:
+        from .base import tag_generated_sql
+        if "row" in types:
+            _write_combined_sql(aws_tables, outdir, "row",
+                                preset=preset, stats_override=stats_override)
+            tag_generated_sql(outdir, "row", "aws")
+        if "col" in types:
+            if db_path:
+                fill_columns_from_meta(aws_tables, db_path)
+            _write_combined_sql(aws_tables, outdir, "col", db_path=db_path,
+                                preset=preset, stats_override=stats_override)
+            tag_generated_sql(outdir, "col", "aws")
+        print(f"[gen-only] wrote Athena extract SQL to {outdir} (no extraction)")
+        return
     # Mock mode: copy CSVs + write SQL files, then return
     if mock_dir:
         _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir)

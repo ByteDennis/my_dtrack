@@ -1217,7 +1217,7 @@ def run_hadoop_sql_file(sql_path, outdir, max_workers=None, db_path=None,
 
 def extract_hadoop(config_path, outdir, types=None, max_workers=None, db_path=None,
                    vintage=None, force=False, from_date=None, to_date=None,
-                   preset=None, stats_override=None):
+                   preset=None, stats_override=None, gen_only=False):
     """Direct Hive extraction (gen-then-run): write extract_{row,col}.sql then
     execute it through hadoop_connect (pyodbc). Mirrors extract_oracle's shape
     but uses the plain-Hive gen-first path -- no SAS involved.
@@ -1267,6 +1267,22 @@ def extract_hadoop(config_path, outdir, types=None, max_workers=None, db_path=No
                     date_col, from_date, to_date, tbl.get('date_type'))
             tbl['_from_date'] = from_date
             tbl['_to_date'] = to_date
+
+    if gen_only:
+        from .base import tag_generated_sql
+        if "row" in types:
+            _write_combined_row_sql_hadoop(hadoop_tables, outdir,
+                                           db_path=db_path, vintage=vintage)
+            tag_generated_sql(outdir, "row", "hadoop")
+        if "col" in types:
+            if db_path:
+                fill_columns_from_meta(hadoop_tables, db_path)
+            _write_combined_col_sql_hadoop(hadoop_tables, outdir, db_path=db_path,
+                                           vintage=vintage, preset=preset,
+                                           stats_override=stats_override)
+            tag_generated_sql(outdir, "col", "hadoop")
+        print(f"[gen-only] wrote Hadoop extract SQL to {outdir} (no extraction)")
+        return
 
     mock_dir = get_mock_dir()
     if mock_dir:

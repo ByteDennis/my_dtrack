@@ -762,7 +762,7 @@ def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
 
 def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=None,
                    vintage=None, force=False, from_date=None, to_date=None,
-                   preset=None, stats_override=None):
+                   preset=None, stats_override=None, gen_only=False):
     """Extract data directly from Oracle via oracledb.
 
     Mirrors extract_aws layout: per-table loop, row extraction first (cheap,
@@ -822,6 +822,22 @@ def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=No
                 tbl['_date_bounds'] = " AND ".join(bounds)
             tbl['_from_date'] = from_date
             tbl['_to_date'] = to_date
+
+    if gen_only:
+        from .base import tag_generated_sql
+        if "row" in types:
+            _write_combined_row_sql_oracle(oracle_tables, outdir,
+                                           db_path=db_path, vintage=vintage)
+            tag_generated_sql(outdir, "row", "oracle")
+        if "col" in types:
+            if db_path:
+                fill_columns_from_meta(oracle_tables, db_path)
+            _write_combined_col_sql_oracle(oracle_tables, outdir,
+                                           db_path=db_path, vintage=vintage,
+                                           preset=preset, stats_override=stats_override)
+            tag_generated_sql(outdir, "col", "oracle")
+        print(f"[gen-only] wrote Oracle extract SQL to {outdir} (no extraction)")
+        return
 
     if mock_dir:
         _extract_mock_tables(oracle_tables, outdir, types, mock_dir)

@@ -1338,6 +1338,17 @@ def _extract_mock_tables(tables, outdir, types, mock_dir):
     print(f"\n[mock] Extraction complete. Output in: {outdir}")
 
 
+# >>> rename a just-generated extract_{type}.sql to extract_{type}.{platform}.sql so platforms sharing one dir don't clobber (review only) <<< #
+def tag_generated_sql(outdir, extract_type, platform):
+    src = os.path.join(outdir, f"extract_{extract_type}.sql")
+    if not os.path.exists(src):
+        return None
+    dst = os.path.join(outdir, f"extract_{extract_type}.{platform}.sql")
+    os.replace(src, dst)
+    print(f"[gen-only] {dst}")
+    return dst
+
+
 # >>> append timing rows to per-table {outdir}/{qname}_timing.csv (row + col logs accumulate) <<< #
 def write_timing_csv(outdir, records, tables=None):
     if not records:

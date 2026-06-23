@@ -1993,7 +1993,7 @@ def _gen_sas_col_local(tbl_cfg, db_path=None, sas_lib='WORK', out_dir='.'):
 
 def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintage=None,
             from_date=None, to_date=None, cells_filter=None, coarse=False,
-            preset=None, stats_override=None):
+            preset=None, stats_override=None, gen_only=False):
     """
     Generate a single combined SAS file for Oracle data extraction.
 
@@ -2438,8 +2438,9 @@ def gen_sas(config_path, outdir, types=None, env_path=None, db_path=None, vintag
     if db_path and sas_tables:
         _discover_and_write_columns(sas_tables, outdir, db_path)
 
-    # In mock mode, also copy mock CSVs to outdir
-    if mock_dir:
+    # In mock mode, also copy mock CSVs to outdir (skipped for gen-only: SQL/SAS
+    # is already written above; we just don't fake the extraction).
+    if mock_dir and not gen_only:
         _extract_sas_mock(config_path, outdir, types, db_path, mock_dir)
 
 

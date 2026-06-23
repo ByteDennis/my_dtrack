@@ -36,7 +36,8 @@ def get_logger():
             fh = RotatingFileHandler(path, maxBytes=20_000_000, backupCount=3)
             fh.setLevel(_level())
             fh.setFormatter(logging.Formatter(
-                "%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S"))
+                "%(asctime)s %(levelname)s [%(module)s.%(funcName)s:%(lineno)d] %(message)s",
+                "%Y-%m-%d %H:%M:%S"))
             lg.addHandler(fh)
         except Exception:
             pass

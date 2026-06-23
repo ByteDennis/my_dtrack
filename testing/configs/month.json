@@ -47,7 +47,12 @@
           "right": ""
         }
       },
-      "diff_map": {}
+      "diff_map": {},
+      "col_map": {
+        "AMT": "amt",
+        "CNT": "cnt",
+        "MONTH_FLAG": "month_flag"
+      }
     }
   }
 }
