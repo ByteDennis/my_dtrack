@@ -141,8 +141,8 @@ e2e type="all" *flags:
     do_discover() {
         [ "$skip_mapping" -eq 0 ] || return 0
         if is_done discover; then echo ">>> discover columns: cached"; return 0; fi
-        echo ">>> discover columns (load-columns -> _column_meta)"
-        dtrack load-columns {{db}} --config {{config}}
+        echo ">>> discover columns (load-columns -> _column_meta + csv/_columns.csv)"
+        dtrack load-columns {{db}} --config {{config}} --columns-csv "{{e2edir}}/csv/_columns.csv"
         mark_done discover
     }
     if [ "{{type}}" = "row" ] || [ "{{type}}" = "all" ]; then
@@ -174,9 +174,23 @@ e2e type="all" *flags:
         dtrack compare-col {{db}} --config {{config}} --html "$out/compare_col.html" -y
     fi
 
-# wipe the e2e skip-cache so the next `just e2e` re-runs every expensive stage
-e2e-clean:
-    rm -rf {{e2edir}}/.state
+# clean e2e generated artifacts under {{e2edir}}. level: state | data | all
+#   state (default) = skip-cache sentinels (.state) only; cheap steps re-run, data kept
+#   data            = .state + csv + sas; forces re-extraction from the backend
+#   all             = + output + project db; keeps config.json, mock/, generate_mock_data.py
+e2e-clean level="state":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{level}}" in
+        state) rm -rf "{{e2edir}}/.state"
+               echo "cleaned: .state (skip-cache)" ;;
+        data)  rm -rf "{{e2edir}}/.state" "{{e2edir}}/csv" "{{e2edir}}/sas"
+               echo "cleaned: .state + csv + sas (forces re-extract)" ;;
+        all)   rm -rf "{{e2edir}}/.state" "{{e2edir}}/csv" "{{e2edir}}/sas" \
+                      "{{e2edir}}/output" "{{db}}" "{{db}}-shm" "{{db}}-wal"
+               echo "cleaned: all generated artifacts (kept config.json, mock/, generate_mock_data.py)" ;;
+        *) echo "usage: just e2e-clean [state|data|all]" >&2; exit 2 ;;
+    esac
 
 # run a SQL query against the database
 query sql *args:

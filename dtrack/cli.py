@@ -255,6 +255,19 @@ def cmd_load_columns(args):
         print(f"{qname}: discovering columns from {source} ({conn_macro}: {raw_table})")
         _load_columns_entry(args.project_db, qname, raw_table, source, conn_macro)
 
+    out_csv = getattr(args, 'columns_csv', None)
+    if out_csv:
+        os.makedirs(os.path.dirname(out_csv) or '.', exist_ok=True)
+        with open(out_csv, 'w', newline='') as f:
+            w = csv_mod.writer(f)
+            w.writerow(['source', 'table', 'column_name', 'data_type'])
+            for tbl in tables:
+                qname = qualified_name(tbl)
+                for m in (get_column_meta(args.project_db, qname) or []):
+                    w.writerow([tbl.get('source', ''), tbl.get('table', ''),
+                                m['column_name'], m.get('data_type', '')])
+        print(f"Wrote column metadata: {out_csv}")
+
 
 def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
     """Discover and load columns for one table entry."""
@@ -1096,6 +1109,8 @@ def main():
     p.add_argument('--config', required=True, help='Unified config JSON')
     p.add_argument('--csv', dest='csv_files', action='append', default=[],
                    help='Metadata CSV (repeatable)')
+    p.add_argument('--columns-csv', dest='columns_csv',
+                   help='Also dump discovered columns (source,table,column,type) to this CSV')
 
     # compare-row
     p = sub.add_parser('compare-row', help='Compare row counts')
@@ -1311,13 +1326,11 @@ def main():
 
     handler = commands.get(args.command)
     if handler:
-        from .logmgr import get_logger, tee_to_log
+        from .logmgr import get_logger
         log = get_logger()
         log.info("[cli] %s %s", args.command,
                  {k: v for k, v in vars(args).items()
                   if v not in (None, False) and k not in ('command', 'debug')})
-        # serve is long-running (its own web logging); don't tee it.
-        restore = (lambda: None) if args.command == 'serve' else tee_to_log()
         try:
             handler(args)
             log.info("[cli] %s done", args.command)
@@ -1329,8 +1342,6 @@ def main():
             import traceback
             traceback.print_exc()
             sys.exit(1)
-        finally:
-            restore()
     else:
         print(f"Unknown command: {args.command}")
         sys.exit(1)

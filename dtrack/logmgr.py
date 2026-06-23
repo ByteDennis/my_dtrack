@@ -2,7 +2,6 @@
 
 import logging
 import os
-import sys
 from logging.handlers import RotatingFileHandler
 
 _logger = None
@@ -55,45 +54,3 @@ def enable_console():
         sh.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S"))
         lg.addHandler(sh)
     return lg
-
-
-# >>> stream wrapper: passes writes through and logs each completed line <<< #
-class _Tee:
-    def __init__(self, stream, level):
-        self._stream = stream
-        self._level = level
-        self._buf = ""
-
-    def write(self, s):
-        self._stream.write(s)
-        self._buf += s
-        if "\n" in self._buf:
-            *lines, self._buf = self._buf.split("\n")
-            lg = get_logger()
-            for ln in lines:
-                ln = ln.rstrip("\r")
-                if ln.strip():
-                    lg.log(self._level, ln)
-
-    def flush(self):
-        self._stream.flush()
-
-    def isatty(self):
-        f = getattr(self._stream, "isatty", None)
-        return bool(f()) if f else False
-
-    def __getattr__(self, name):
-        return getattr(self._stream, name)
-
-
-# >>> route every stdout/stderr line into the log too; returns a restore() fn <<< #
-def tee_to_log(level=logging.DEBUG):
-    get_logger()
-    out, err = sys.stdout, sys.stderr
-    sys.stdout = _Tee(out, level)
-    sys.stderr = _Tee(err, level)
-
-    def restore():
-        sys.stdout, sys.stderr = out, err
-
-    return restore
