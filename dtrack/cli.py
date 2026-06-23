@@ -833,6 +833,19 @@ def cmd_match_columns(args):
     _require_db(args.project_db)
     config = _load_config(args.config)
 
+    file_maps = {}
+    map_csv = getattr(args, 'map_csv', None)
+    if map_csv:
+        import csv as csv_mod
+        with open(map_csv, newline='') as f:
+            for row in csv_mod.DictReader(f):
+                row = {k.strip().lower(): (v or '').strip() for k, v in row.items()}
+                p = row.get('pair') or row.get('pair_name')
+                lcol = row.get('left') or row.get('left_column')
+                rcol = row.get('right') or row.get('right_column')
+                if p and lcol and rcol:
+                    file_maps.setdefault(p, {})[lcol] = rcol
+
     matched_columns = {}
     for pair_name, pair_config in config["pairs"].items():
         left = pair_config['left']
@@ -886,6 +899,14 @@ def cmd_match_columns(args):
                 left_only = [c for c in left_only if c['name'] not in rule_maps]
                 right_only = [c for c in right_only if c['name'] not in rmatched_right]
                 print(f"Rule-matched: {len(rule_maps)} columns")
+
+        pair_file_map = file_maps.get(pair_name, {})
+        if pair_file_map:
+            matched.update(pair_file_map)
+            mapped_r = set(pair_file_map.values())
+            left_only = [c for c in left_only if c['name'] not in pair_file_map]
+            right_only = [c for c in right_only if c['name'] not in mapped_r]
+            print(f"File-mapped: {len(pair_file_map)} columns (--map-csv)")
 
         auto_count = len(matched) - len(existing_col_map)
         print(f"Auto-matched: {auto_count} columns")
@@ -1213,6 +1234,8 @@ def main():
     p.add_argument('project_db')
     p.add_argument('--config', required=True)
     p.add_argument('--mode', default='merge', choices=['merge', 'replace'])
+    p.add_argument('--map-csv', dest='map_csv',
+                   help='Explicit mappings CSV (pair,left,right); overrides auto/rules')
     p.add_argument('--yes', action='store_true',
                    help='non-interactive: keep auto-matches, skip the manual mapping prompt')
 
