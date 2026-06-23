@@ -1631,12 +1631,13 @@ def _duckdb_vintage_expr(tbl_cfg, date_col, vintage):
     the Hive equivalent.
     """
     date_type = (tbl_cfg.get('date_type') or 'string_dash').lower()
-    # Coerce to DATE if not already
-    if date_type == 'string_compact':
-        parsed = f"strptime({date_col}, '%Y%m%d')::DATE"
+    # Coerce to DATE. CAST(... AS VARCHAR) first so strptime works whether
+    # read_csv_auto inferred the column as VARCHAR, DATE, or BIGINT (a YYYYMMDD
+    # int still casts to its digit string). For dash/ISO dates CAST(... AS DATE)
+    # parses both a 'YYYY-MM-DD' string and an already-DATE column.
+    if date_type in ('string_compact', 'num'):
+        parsed = f"strptime(CAST({date_col} AS VARCHAR), '%Y%m%d')::DATE"
     elif date_type in ('string_dash', 'string'):
-        parsed = f"strptime({date_col}, '%Y-%m-%d')::DATE"
-    elif date_type in ('date', 'timestamp', 'datetime'):
         parsed = f"CAST({date_col} AS DATE)"
     else:
         parsed = f"CAST({date_col} AS DATE)"

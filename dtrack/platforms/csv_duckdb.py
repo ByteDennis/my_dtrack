@@ -42,6 +42,12 @@ from .base import (
     set_cache_db,
     cache_get,
     cache_put,
+    load_tables_from_config,
+    fill_columns_from_meta,
+    inject_where_from_config,
+    get_mock_dir,
+    _extract_mock_tables,
+    tag_generated_sql,
 )
 
 
@@ -498,3 +504,96 @@ def _discover_and_write_csv_columns(csv_tables, outdir, db_path):
             for name, dt in cols.items():
                 w.writerow([name, dt])
         print(f"  {qname}: discovered {len(cols)} columns -> {col_csv}")
+
+
+# >>> CLI entrypoint: discover -> write extract_{type}.csv.sql -> (optionally) run via DuckDB <<< #
+def extract_csv(config_path, outdir, types=None, max_workers=None, db_path=None,
+                vintage=None, force=False, from_date=None, to_date=None,
+                preset=None, stats_override=None, gen_only=False):
+    """Extract row/col CSVs for csv-source pairs using DuckDB.
+
+    Mirrors extract_oracle's shape: filter csv tables, discover columns,
+    apply CLI date bounds, then either emit extract_{type}.csv.sql
+    (gen_only) or generate-and-run via run_csv_sql_file. The plain
+    extract_{type}.sql is renamed to extract_{type}.csv.sql by
+    tag_generated_sql so run_sql_all picks it up.
+    """
+    if types is None:
+        types = ["row", "col"]
+
+    from ..config import load_unified_config
+    config = load_unified_config(config_path)
+    if db_path:
+        from ..db import get_pair_col_map_from_db, get_pair_col_filter
+        for pname, pcfg in config.get("pairs", {}).items():
+            if not pcfg.get("col_map"):
+                db_map = get_pair_col_map_from_db(db_path, pname)
+                if db_map:
+                    pcfg["col_map"] = db_map
+            if not pcfg.get("col_filter"):
+                cf = get_pair_col_filter(db_path, pname)
+                if cf.get("include") or cf.get("exclude"):
+                    pcfg["col_filter"] = cf
+
+    os.makedirs(outdir, exist_ok=True)
+
+    all_tables = load_tables_from_config(config)
+    csv_tables = [t for t in all_tables
+                  if (t.get('source') or '').lower() == 'csv']
+    if not csv_tables:
+        print("No CSV tables found in config")
+        return
+
+    for tbl in csv_tables:
+        if vintage:
+            tbl['vintage'] = vintage
+        elif 'vintage' not in tbl:
+            tbl['vintage'] = 'all'
+    inject_where_from_config(csv_tables, config)
+
+    if from_date or to_date:
+        for tbl in csv_tables:
+            date_col = tbl.get('date_col', '')
+            if not date_col:
+                continue
+            date_col_q = quote_ident(date_col, "duckdb")
+            bounds = []
+            if from_date:
+                bounds.append(f"{date_col_q} >= DATE '{from_date}'")
+            if to_date:
+                bounds.append(f"{date_col_q} <= DATE '{to_date}'")
+            if bounds:
+                tbl['_date_bounds'] = " AND ".join(bounds)
+            tbl['_from_date'] = from_date
+            tbl['_to_date'] = to_date
+
+    _discover_and_write_csv_columns(csv_tables, outdir, db_path)
+
+    def _gen(t):
+        if t == "row":
+            _write_combined_row_sql_csv(csv_tables, outdir,
+                                        db_path=db_path, vintage=vintage)
+        else:
+            if db_path:
+                fill_columns_from_meta(csv_tables, db_path)
+            _write_combined_col_sql_csv(csv_tables, outdir,
+                                        db_path=db_path, vintage=vintage,
+                                        preset=preset, stats_override=stats_override)
+
+    if gen_only:
+        for t in types:
+            _gen(t)
+            tag_generated_sql(outdir, t, "csv")
+        print(f"[gen-only] wrote CSV extract SQL to {outdir} (no extraction)")
+        return
+
+    mock_dir = get_mock_dir()
+    if mock_dir:
+        _extract_mock_tables(csv_tables, outdir, types, mock_dir)
+        return
+
+    for t in types:
+        _gen(t)
+        sql_path = os.path.join(outdir, csv_sql_filename(t))
+        run_csv_sql_file(sql_path, outdir, max_workers=max_workers,
+                         db_path=db_path, resume=not force)

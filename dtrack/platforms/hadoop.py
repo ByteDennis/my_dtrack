@@ -649,7 +649,7 @@ def _discover_and_write_columns(all_tables, outdir, db_path):
     for tbl in all_tables:
         source = (tbl.get('source') or '').lower()
         qname = qualified_name(tbl)
-        raw_table = tbl['table']
+        raw_table = tbl.get('table', '') or ''
         conn_macro = tbl.get('conn_macro', '')
         columns = None
 
@@ -658,6 +658,12 @@ def _discover_and_write_columns(all_tables, outdir, db_path):
         if existing:
             columns = {c["column_name"]: c.get("data_type", "") for c in existing}
             print(f"  {qname}: found {len(columns)} columns in _column_meta")
+        elif tbl.get('processed'):
+            # CTE joins multiple tables -> no single table to DESCRIBE. Rely on
+            # user-supplied columns in _column_meta (load via `dtrack load-columns`).
+            print(f"  {qname}: 'processed' CTE — discovery skipped; "
+                  f"load {qname}_columns.csv via `dtrack load-columns` first")
+            continue
         elif source == 'aws':
             try:
                 database = conn_macro or tbl.get('database', '')

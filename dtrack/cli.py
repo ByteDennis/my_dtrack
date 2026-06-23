@@ -235,10 +235,12 @@ def cmd_load_columns(args):
                         key = (src.lower(), tbl.lower())
                         csv_lookup.setdefault(key, {})[col] = dt
 
+    cols_dir = getattr(args, 'columns_dir', None)
+
     for tbl in tables:
         source = tbl.get('source', '')
         qname = qualified_name(tbl)
-        raw_table = tbl['table']
+        raw_table = tbl.get('table', '') or ''
         name = tbl.get('name', '')
 
         csv_key = (source.lower(), raw_table.lower())
@@ -251,11 +253,40 @@ def cmd_load_columns(args):
             print(f"{qname}: loaded {count} columns from CSV")
             continue
 
+        # A 'processed' CTE joins multiple tables, so it has no single physical
+        # table to DESCRIBE. Never live-discover it; read the user-supplied
+        # {qname}_columns.csv (variable -> data_type) instead.
+        if tbl.get('processed'):
+            columns = _read_sidecar_columns(cols_dir, qname)
+            if columns:
+                count = insert_column_meta(args.project_db, qname, columns, source=source)
+                print(f"{qname}: loaded {count} columns from {qname}_columns.csv "
+                      f"(processed/CTE — discovery skipped)")
+            else:
+                print(f"WARNING: {qname}: 'processed' CTE — automatic discovery skipped. "
+                      f"Provide {qname}_columns.csv (column_name,data_type) in "
+                      f"{cols_dir or 'the columns dir (--columns-dir)'}")
+            continue
+
+        if source.lower() == 'csv':
+            from .platforms.csv_duckdb import discover_csv_columns
+            csv_path = tbl.get('csv_path', '')
+            if not csv_path or not os.path.exists(csv_path):
+                print(f"{qname}: csv_path missing or not found ({csv_path!r}); skipping")
+                continue
+            columns = discover_csv_columns(csv_path)
+            if not columns:
+                print(f"{qname}: no columns discovered from {csv_path}")
+                continue
+            count = insert_column_meta(args.project_db, qname, columns, source=source)
+            print(f"{qname}: discovered {count} columns from {csv_path}")
+            continue
+
         conn_macro = tbl.get('conn_macro', '')
         print(f"{qname}: discovering columns from {source} ({conn_macro}: {raw_table})")
         _load_columns_entry(args.project_db, qname, raw_table, source, conn_macro)
 
-    out_dir = getattr(args, 'columns_dir', None)
+    out_dir = cols_dir
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
         for tbl in tables:
@@ -271,6 +302,28 @@ def cmd_load_columns(args):
                 for m in meta:
                     w.writerow([m['column_name'], m.get('data_type', '')])
             print(f"Wrote column metadata: {col_csv}")
+
+
+# >>> read a user-supplied {qname}_columns.csv (column_name/variable -> data_type) <<< #
+def _read_sidecar_columns(columns_dir, qname):
+    import csv as csv_mod
+    if not columns_dir:
+        return None
+    path = os.path.join(columns_dir, f"{qname}_columns.csv")
+    if not os.path.exists(path):
+        return None
+    cols = {}
+    with open(path, 'r', newline='') as f:
+        for row in csv_mod.DictReader(f):
+            row = {k.strip(): v for k, v in row.items()}
+            col = (row.get('column_name') or row.get('COLUMN_NAME')
+                   or row.get('variable') or row.get('VARIABLE')
+                   or row.get('name') or row.get('NAME') or '')
+            dt = (row.get('data_type') or row.get('DATA_TYPE')
+                  or row.get('type') or row.get('TYPE') or '')
+            if col:
+                cols[col] = dt
+    return cols or None
 
 
 def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
@@ -632,6 +685,14 @@ def cmd_compare_row(args):
             f.write(doc)
         print(f"HTML report: {html_path}")
 
+        excel_path = os.path.splitext(html_path)[0] + '.xlsx'
+        from .excel import build_row_comparison_workbook
+        wb = build_row_comparison_workbook(
+            args.project_db, args.config, args.from_date, args.to_date)
+        os.makedirs(os.path.dirname(excel_path) or '.', exist_ok=True)
+        wb.save(excel_path)
+        print(f"Excel report: {excel_path}")
+
 
 def cmd_compare_col(args):
     """Compare column statistics between paired tables."""
@@ -778,6 +839,14 @@ def cmd_compare_col(args):
         with open(html_path, 'w', encoding='utf-8') as f:
             f.write(doc)
         print(f"HTML report: {html_path}")
+
+        excel_path = getattr(args, 'excel', None) or os.path.splitext(html_path)[0] + '.xlsx'
+        from .excel import build_col_comparison_workbook
+        wb = build_col_comparison_workbook(
+            args.project_db, args.config, args.from_date, args.to_date)
+        os.makedirs(os.path.dirname(excel_path) or '.', exist_ok=True)
+        wb.save(excel_path)
+        print(f"Excel report: {excel_path}")
 
     try:
         save_unified_config(config, args.config)
@@ -1230,6 +1299,7 @@ def main():
     p.add_argument('--vintage', choices=['month', 'quarter', 'year'])
     p.add_argument('-y', '--yes', action='store_true', help='Skip prompts')
     p.add_argument('--html')
+    p.add_argument('--excel', help='Excel report path (default: alongside --html as .xlsx)')
     p.add_argument('--title')
     p.add_argument('--subtitle')
 

@@ -7,13 +7,13 @@ from .config import load_unified_config, get_all_tables_from_unified
 
 # >>> group config tables by the platform that extracts them <<< #
 def classify_tables_by_platform(tables):
-    groups = {"sas": [], "aws": [], "oracle": [], "databricks": [], "hadoop": []}
+    groups = {"sas": [], "aws": [], "oracle": [], "databricks": [], "hadoop": [], "csv": []}
     for tbl in tables:
         source = (tbl.get("source") or "").lower()
         processed = tbl.get("processed") or ""
         if processed.startswith("$"):
             groups["sas"].append(tbl)
-        elif source in ("aws", "oracle", "databricks", "hadoop"):
+        elif source in ("aws", "oracle", "databricks", "hadoop", "csv"):
             groups[source].append(tbl)
         else:
             groups["sas"].append(tbl)
@@ -35,6 +35,9 @@ def get_platform_extractor(platform):
     if platform == "hadoop":
         from .platforms.hadoop import extract_hadoop
         return extract_hadoop
+    if platform == "csv":
+        from .platforms.csv_duckdb import extract_csv
+        return extract_csv
     if platform in ("sas", "hadoop_sas"):
         from .platforms.hadoop import gen_sas
         return gen_sas
@@ -116,6 +119,14 @@ def extract_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
                            from_date=from_date, to_date=to_date,
                            preset=preset, stats_override=stats_override, gen_only=gen_only)
 
+    if groups["csv"]:
+        print(f"\n--- {verb} from CSV/DuckDB ({len(groups['csv'])} tables) ---")
+        from .platforms.csv_duckdb import extract_csv
+        extract_csv(config_path, csv_outdir, types=types, max_workers=max_workers,
+                    db_path=db_path, vintage=vintage, force=force,
+                    from_date=from_date, to_date=to_date,
+                    preset=preset, stats_override=stats_override, gen_only=gen_only)
+
 
 # >>> platform string -> (runner, mock-env-var) for run_sql_all <<< #
 _RUNNERS = {
@@ -123,6 +134,7 @@ _RUNNERS = {
     "oracle": ("dtrack.platforms.oracle", "run_oracle_sql_file", "DTRACK_ORACLE_MOCK"),
     "hadoop": ("dtrack.platforms.hadoop", "run_hadoop_sql_file", "DTRACK_HADOOP_MOCK"),
     "databricks": ("dtrack.platforms.databricks", "run_databricks_sql_file", "DTRACK_DATABRICKS_MOCK"),
+    "csv": ("dtrack.platforms.csv_duckdb", "run_csv_sql_file", "DTRACK_CSV_MOCK"),
 }
 
 
@@ -146,7 +158,7 @@ def run_sql_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
     get_logger().info("[run-sql] types=%s groups=%s", types,
                       {k: len(v) for k, v in groups.items() if v})
 
-    for platform in ("oracle", "aws", "hadoop", "databricks"):
+    for platform in ("oracle", "aws", "hadoop", "databricks", "csv"):
         tbls = groups.get(platform) or []
         if not tbls:
             continue

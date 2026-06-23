@@ -477,6 +477,14 @@ def generate_column_stats_html(
                         col_diffs[col].append((vlabel, 'mean', comp.get('mean_left'), comp.get('mean_right'), None))
                     if _on('std') and comp.get('std_match') is False:
                         col_diffs[col].append((vlabel, 'std', comp.get('std_left'), comp.get('std_right'), None))
+                # min/max/length/hash mismatches — match the header's diff count
+                # (_has_col_differences checks these too) so a column whose only
+                # diff is here doesn't render as "0 diffs".
+                for _stat in ('min', 'max', 'length_avg', 'length_max', 'hash_sum'):
+                    if _on(_stat) and comp.get(f'{_stat}_match') is False:
+                        col_diffs[col].append(
+                            (vlabel, _stat, comp.get(f'{_stat}_left'),
+                             comp.get(f'{_stat}_right'), None))
 
         # Prepare column details for 3-column layout
         col_details_list = []
@@ -509,10 +517,14 @@ def generate_column_stats_html(
                 stats_list = vintage_diffs[dt]
                 stats_display = []
                 for stat, left, right, diff in stats_list:
+                    if isinstance(diff, bool):
+                        diff = None
                     if isinstance(diff, float):
-                        stats_display.append(f'{stat} {diff:+.2f} ({left:.2f}→{right:.2f})')
-                    else:
+                        stats_display.append(f'{stat} {diff:+.2f} ({left}→{right})')
+                    elif isinstance(diff, int):
                         stats_display.append(f'{stat} {diff:+,} ({left:,}→{right:,})')
+                    else:
+                        stats_display.append(f'{stat}: {left} → {right}')
 
                 col_html += f'├─ {dt}: {", ".join(stats_display)}<br>\n'
 
