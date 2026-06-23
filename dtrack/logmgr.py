@@ -1,33 +1,41 @@
-"""Unified logging: web API calls + CLI commands -> one rotating log file."""
+"""Unified logging: web API + CLI + full pipeline detail -> one rotating log file."""
 
 import logging
 import os
+import sys
 from logging.handlers import RotatingFileHandler
 
 _logger = None
 
 
-# >>> single log path; override with DTRACK_LOG, default ~/.dtrack/dtrack.log <<< #
+# >>> single log path; override with DTRACK_LOG, default <cwd>/output/dtrack.log <<< #
 def log_path():
     p = os.environ.get("DTRACK_LOG")
     if p:
         return os.path.expanduser(p)
-    return os.path.join(os.path.expanduser("~"), ".dtrack", "dtrack.log")
+    return os.path.join(os.getcwd(), "output", "dtrack.log")
 
 
-# >>> shared 'dtrack' logger writing to the single log file; idempotent <<< #
+# >>> file log level; DTRACK_LOG_LEVEL overrides, default DEBUG (capture everything) <<< #
+def _level():
+    name = os.environ.get("DTRACK_LOG_LEVEL", "DEBUG").upper()
+    return getattr(logging, name, logging.DEBUG)
+
+
+# >>> shared 'dtrack' logger writing the single log file; idempotent <<< #
 def get_logger():
     global _logger
     if _logger is not None:
         return _logger
     lg = logging.getLogger("dtrack")
-    lg.setLevel(logging.INFO)
+    lg.setLevel(logging.DEBUG)
     lg.propagate = False
     if not any(isinstance(h, RotatingFileHandler) for h in lg.handlers):
         path = log_path()
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            fh = RotatingFileHandler(path, maxBytes=5_000_000, backupCount=3)
+            fh = RotatingFileHandler(path, maxBytes=20_000_000, backupCount=3)
+            fh.setLevel(_level())
             fh.setFormatter(logging.Formatter(
                 "%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S"))
             lg.addHandler(fh)
@@ -37,12 +45,55 @@ def get_logger():
     return lg
 
 
-# >>> also echo the shared logger to stderr (used by the web server) <<< #
+# >>> also echo the shared logger to stderr at INFO (used by the web server) <<< #
 def enable_console():
     lg = get_logger()
     if not any(isinstance(h, logging.StreamHandler)
                and not isinstance(h, RotatingFileHandler) for h in lg.handlers):
         sh = logging.StreamHandler()
+        sh.setLevel(logging.INFO)
         sh.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S"))
         lg.addHandler(sh)
     return lg
+
+
+# >>> stream wrapper: passes writes through and logs each completed line <<< #
+class _Tee:
+    def __init__(self, stream, level):
+        self._stream = stream
+        self._level = level
+        self._buf = ""
+
+    def write(self, s):
+        self._stream.write(s)
+        self._buf += s
+        if "\n" in self._buf:
+            *lines, self._buf = self._buf.split("\n")
+            lg = get_logger()
+            for ln in lines:
+                ln = ln.rstrip("\r")
+                if ln.strip():
+                    lg.log(self._level, ln)
+
+    def flush(self):
+        self._stream.flush()
+
+    def isatty(self):
+        f = getattr(self._stream, "isatty", None)
+        return bool(f()) if f else False
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+# >>> route every stdout/stderr line into the log too; returns a restore() fn <<< #
+def tee_to_log(level=logging.DEBUG):
+    get_logger()
+    out, err = sys.stdout, sys.stderr
+    sys.stdout = _Tee(out, level)
+    sys.stderr = _Tee(err, level)
+
+    def restore():
+        sys.stdout, sys.stderr = out, err
+
+    return restore

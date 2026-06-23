@@ -1470,7 +1470,10 @@ ORDER BY s.dt;"""
     CAST(STDDEV_SAMP(CAST({col_expr} AS DOUBLE)) AS VARCHAR) AS std,
     CAST(MIN({col_expr}) AS VARCHAR) AS min_val,
     CAST(MAX({col_expr}) AS VARCHAR) AS max_val,
-    '' AS top_10
+    '' AS top_10,
+    '' AS length_avg,
+    '' AS length_max,
+    '' AS hash_sum
 FROM {full_table}
 WHERE {wc};"""
                     else:
@@ -1507,7 +1510,10 @@ SELECT
     COALESCE((SELECT ARRAY_JOIN(ARRAY_AGG(
         p_col || '(' || CAST(cnt AS VARCHAR) || ')'
         ORDER BY cnt DESC
-    ), '; ') FROM ranked WHERE rn <= 10), '') AS top_10;"""
+    ), '; ') FROM ranked WHERE rn <= 10), '') AS top_10,
+    CAST((SELECT SUM(CAST(cnt AS DOUBLE) * LENGTH(TRIM(p_col))) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0) FROM ranked) AS VARCHAR) AS length_avg,
+    CAST((SELECT MAX(LENGTH(TRIM(p_col))) FROM ranked) AS VARCHAR) AS length_max,
+    CAST((SELECT SUM(CAST(cnt AS DOUBLE) * CAST({_athena_portable_hash16("p_col")} AS DOUBLE)) FROM ranked) AS VARCHAR) AS hash_sum;"""
 
                     _emit_col_block(
                         blocks,

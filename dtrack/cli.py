@@ -1311,22 +1311,26 @@ def main():
 
     handler = commands.get(args.command)
     if handler:
-        from .logmgr import get_logger
+        from .logmgr import get_logger, tee_to_log
         log = get_logger()
         log.info("[cli] %s %s", args.command,
                  {k: v for k, v in vars(args).items()
                   if v not in (None, False) and k not in ('command', 'debug')})
-        if args.debug:
+        # serve is long-running (its own web logging); don't tee it.
+        restore = (lambda: None) if args.command == 'serve' else tee_to_log()
+        try:
             handler(args)
-        else:
-            try:
-                handler(args)
-            except Exception as e:
-                log.exception("[cli] %s failed: %s", args.command, e)
-                print(f"Error: {e}", file=sys.stderr)
-                import traceback
-                traceback.print_exc()
-                sys.exit(1)
+            log.info("[cli] %s done", args.command)
+        except Exception as e:
+            log.exception("[cli] %s failed: %s", args.command, e)
+            if args.debug:
+                raise
+            print(f"Error: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        finally:
+            restore()
     else:
         print(f"Unknown command: {args.command}")
         sys.exit(1)
