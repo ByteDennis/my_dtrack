@@ -7,12 +7,12 @@ from logging.handlers import RotatingFileHandler
 _logger = None
 
 
-# >>> single log path; override with DTRACK_LOG, default <cwd>/output/dtrack.log <<< #
+# >>> single log path; override with DTRACK_LOG, default <cwd>/output/run.log <<< #
 def log_path():
     p = os.environ.get("DTRACK_LOG")
     if p:
         return os.path.expanduser(p)
-    return os.path.join(os.getcwd(), "output", "dtrack.log")
+    return os.path.join(os.getcwd(), "output", "run.log")
 
 
 # >>> file log level; DTRACK_LOG_LEVEL overrides, default DEBUG (capture everything) <<< #

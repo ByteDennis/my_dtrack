@@ -835,7 +835,9 @@ def cmd_match_columns(args):
 
     file_maps = {}
     map_csv = getattr(args, 'map_csv', None)
-    if map_csv:
+    if map_csv and not os.path.exists(map_csv):
+        print(f"--map-csv not found, skipping: {map_csv}")
+    elif map_csv:
         import csv as csv_mod
         with open(map_csv, newline='') as f:
             for row in csv_mod.DictReader(f):

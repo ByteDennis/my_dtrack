@@ -28,8 +28,12 @@ export DTRACK_E2E_MOCK_DIR := mockdir
 # Base dir for the live e2e pipeline; outputs land in {{e2edir}}/{csv,sas,output}
 e2edir := "testing"
 
-# Unified pipeline log (every CLI command + full stdout detail). See `just logs`.
-export DTRACK_LOG := e2edir + "/output/dtrack.log"
+# Unified pipeline log (every CLI command + errors). See `just logs`.
+export DTRACK_LOG := e2edir + "/output/run.log"
+
+# Explicit col-mapping file for `e2e col` (CSV: pair,left,right). Optional —
+# if it doesn't exist, match-columns just falls back to auto + col_rules.
+mapcsv := e2edir + "/csv/col_map.csv"
 
 # Set force=1 to ignore the e2e skip-cache and re-run every expensive stage:
 #   just force=1 e2e all
@@ -167,8 +171,8 @@ e2e type="all" *flags:
         echo ">>> [col] load"
         dtrack load-col {{db}} {{e2edir}}/csv --config {{config}}
         if [ "$skip_mapping" -eq 0 ]; then
-            echo ">>> [col] match-columns (--skip-mapping to skip)"
-            dtrack match-columns {{db}} --config {{config}} --yes
+            echo ">>> [col] match-columns (--skip-mapping to skip; explicit: {{mapcsv}})"
+            dtrack match-columns {{db}} --config {{config}} --map-csv "{{mapcsv}}" --yes
         fi
         echo ">>> [col] compare"
         dtrack compare-col {{db}} --config {{config}} --html "$out/compare_col.html" -y
@@ -196,10 +200,10 @@ e2e-clean level="state":
 query sql *args:
     dtrack query {{db}} "{{sql}}" {{args}}
 
-# tail the unified pipeline log ({{e2edir}}/output/dtrack.log; override with DTRACK_LOG)
+# tail the unified pipeline log ({{e2edir}}/output/run.log; override with DTRACK_LOG)
 logs:
     #!/usr/bin/env bash
-    f="${DTRACK_LOG:-{{e2edir}}/output/dtrack.log}"
+    f="${DTRACK_LOG:-{{e2edir}}/output/run.log}"
     echo "tailing $f"; tail -n 120 -f "$f"
 
 # run tests
