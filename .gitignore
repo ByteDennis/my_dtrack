@@ -30,6 +30,10 @@ htmlcov/
 # Generated e2e mock fixtures (reproduce via: python testing/generate_mock_data.py)
 testing/mock/
 
+# Pipeline run logs (unified logging -> output/run.log, rotated)
+run.log
+run.log.*
+
 # understand-anything generated cache / knowledge graph
 .understand-anything/
 
