@@ -1,0 +1,53 @@
+{
+  "metadata": {
+    "title": "dtrack Test Suite",
+    "subtitle": "pair set: month"
+  },
+  "pairs": {
+    "oracle_month_vs_aws_month": {
+      "description": "Oracle INTEGER YYYYMM vs AWS INTEGER YYYYMM. Right missing Oct, Nov has count mismatch.",
+      "left": {
+        "table": "MONTH_SUMMARY",
+        "source": "oracle",
+        "conn_macro": "pb30",
+        "date_col": "MONTH_FLAG",
+        "date_type": "num"
+      },
+      "right": {
+        "table": "month_summary",
+        "source": "aws",
+        "conn_macro": "warehouse_db",
+        "date_col": "month_flag",
+        "date_type": "num"
+      },
+      "mode": "incremental",
+      "fromDate": "",
+      "toDate": "2024-12-31",
+      "where_map": {
+        "left": "MONTH_FLAG >= '202412' AND MONTH_FLAG <= '202412' AND MONTH_FLAG NOT IN ('202411')",
+        "right": "month_flag >= '202412' AND month_flag <= '202412' AND month_flag NOT IN ('202411')"
+      },
+      "time_map": {
+        "row": {
+          "left": "\u2014",
+          "right": "\u2014"
+        },
+        "col": {
+          "left": "\u2014",
+          "right": "\u2014"
+        }
+      },
+      "comment_map": {
+        "row": {
+          "left": "",
+          "right": ""
+        },
+        "col": {
+          "left": "",
+          "right": ""
+        }
+      },
+      "diff_map": {}
+    }
+  }
+}

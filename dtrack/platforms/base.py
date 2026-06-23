@@ -1297,11 +1297,13 @@ def _extract_mock(config_path, outdir, types, db_path, mock_dir, source_filter):
     print(f"\n[mock] Extraction complete. Output in: {outdir}")
 
 
+# >>> copy mock CSVs for a pre-built list of table configs (+ per-table timing) <<< #
 def _extract_mock_tables(tables, outdir, types, mock_dir):
-    """Copy mock CSVs for a pre-built list of table configs."""
     import shutil
+    from datetime import datetime
     os.makedirs(outdir, exist_ok=True)
 
+    timing_records = []
     for tbl_cfg in tables:
         qname = qualified_name(tbl_cfg)
         source = tbl_cfg.get('source', '')
@@ -1313,6 +1315,7 @@ def _extract_mock_tables(tables, outdir, types, mock_dir):
                 continue
             src = os.path.join(mock_dir, f"{qname}_{typ}.csv")
             dst = os.path.join(outdir, f"{qname}_{typ}.csv")
+            start = datetime.now()
             if os.path.exists(src):
                 shutil.copy2(src, dst)
                 with open(dst) as f:
@@ -1320,25 +1323,45 @@ def _extract_mock_tables(tables, outdir, types, mock_dir):
                 label_str = "Row counts" if typ == "row" else "Column stats"
                 unit = "dates" if typ == "row" else "rows"
                 print(f"  [mock] {label_str}: {dst} ({n_rows} {unit})")
+                status = ''
             else:
                 print(f"  [mock] File not found: {src}")
+                status = 'mock file not found'
+            timing_records.append({
+                'table': tbl_cfg.get('name', qname), 'step': typ,
+                'start': start.strftime('%Y-%m-%d %H:%M:%S'), 'end': '',
+                'elapsed_sec': round((datetime.now() - start).total_seconds(), 3),
+                'status': status,
+            })
 
+    write_timing_csv(outdir, timing_records, tables)
     print(f"\n[mock] Extraction complete. Output in: {outdir}")
 
 
-# >>> write per-table extraction timing rows to {outdir}/_timing.csv <<< #
-def write_timing_csv(outdir, records):
+# >>> append timing rows to per-table {outdir}/{qname}_timing.csv (row + col logs accumulate) <<< #
+def write_timing_csv(outdir, records, tables=None):
     if not records:
         return None
     import csv
-    timing_path = os.path.join(outdir, '_timing.csv')
-    with open(timing_path, 'w', newline='') as f:
-        writer = csv.DictWriter(
-            f, fieldnames=['table', 'step', 'start', 'end', 'elapsed_sec', 'status'])
-        writer.writeheader()
-        writer.writerows(records)
-    print(f"\nTiming log: {timing_path}")
-    return timing_path
+    name2qname = {t.get('name', ''): qualified_name(t) for t in (tables or [])}
+    fields = ['step', 'start', 'end', 'elapsed_sec', 'status']
+    by_table = {}
+    for r in records:
+        by_table.setdefault(r.get('table', ''), []).append(r)
+    written = []
+    for tname, recs in by_table.items():
+        qname = name2qname.get(tname) or tname
+        timing_path = os.path.join(outdir, f"{qname}_timing.csv")
+        is_new = not os.path.exists(timing_path)
+        with open(timing_path, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fields, extrasaction='ignore')
+            if is_new:
+                writer.writeheader()
+            for r in recs:
+                writer.writerow({k: r.get(k, '') for k in fields})
+        print(f"Timing log: {timing_path}")
+        written.append(timing_path)
+    return written
 
 
 def load_tables_from_config(config):

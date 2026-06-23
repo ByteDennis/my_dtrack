@@ -1867,7 +1867,7 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
         conn.close()
 
     from .base import write_timing_csv
-    write_timing_csv(outdir, timing_records)
+    write_timing_csv(outdir, timing_records, aws_tables)
 
     print(f"\nExtraction complete. Output in: {outdir}")
 

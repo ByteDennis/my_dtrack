@@ -17,7 +17,6 @@
 # Add Oracle macros not in MACRO2SVC via DTRACK_ORACLE_MACROS=pb40:svc_x,pb50:svc_y.
 
 db := "testing/project.db"
-config := "testing/config.json"
 port := "8080"
 
 # Where the e2e mock fixtures live. Override per machine:
@@ -27,6 +26,16 @@ export DTRACK_E2E_MOCK_DIR := mockdir
 
 # Base dir for the live e2e pipeline; outputs land in {{e2edir}}/{csv,sas,output}
 e2edir := "testing"
+
+# Run a subset of pairs from a dedicated config. Drop per-set files in
+# {{configdir}}/ (e.g. tableA.json, tableB.json), each holding only its own
+# `pairs`, then select one with `just pair=tableA e2e ...`. All sets share
+# {{db}}; the HTML output and skip-cache (.state) are namespaced by the set
+# name so sets never clobber each other. No pair= => {{e2edir}}/config.json.
+pair := ""
+configdir := e2edir + "/configs"
+config := if pair == "" { e2edir + "/config.json" } else { configdir + "/" + pair + ".json" }
+suffix := if pair == "" { "" } else { "_" + pair }
 
 # Unified pipeline log (every CLI command + errors). See `just logs`.
 export DTRACK_LOG := e2edir + "/output/run.log"
@@ -106,23 +115,33 @@ compare-col *args:
     dtrack compare-col {{db}} --config {{config}} --html {{e2edir}}/output/compare_col.html -y {{args}}
 
 # --- live e2e pipeline: real backends -> HTML -----------------------------
-# Single entry point. type = row | col | all. Outputs land in
-# {{e2edir}}/output/compare_{row,col}.html. Override the backend with
-# `just config=my_live.json e2e all`.
+# Single entry point. type = row | col-gen | col-run | col | all. Outputs land
+# in {{e2edir}}/output/compare_{row,col}[_<pair>].html. Override the backend
+# with `just config=my_live.json e2e all`, or pick a pair-subset config with
+# `just pair=tableA e2e ...` (see the pair/configdir vars above).
 #
-#   row : extract-row -> discover-columns -> load-row -> compare-row
-#   col : discover-columns -> extract-col -> load-col -> match-columns -> compare-col
-#   all : row, then col
+#   row     : extract-row -> discover-columns -> load-row -> compare-row
+#   col-gen : discover-columns -> match-columns (mapcsv|auto) -> extract-col;
+#             writes csv/extract_col.sql then STOPS so you can review the SQL
+#   col-run : load-col -> compare-col
+#   col     : col-gen then col-run (no pause)
+#   all     : row, then col
 #
-# discover-columns (load-columns -> _column_meta) runs once per invocation
-# (shared `discover` sentinel); it lands in the row phase so column/datatype
-# metadata is downloaded as early as `just e2e row`.
+# Mirrors the web col_gen flow: column matching happens BEFORE the col
+# extraction SQL is generated, so extract_col.sql is scoped to the matched
+# col_map. Review csv/extract_col.sql after `col-gen`, then run `col-run`.
+# (In mock mode `col-gen` also copies the col fixtures; against real backends
+# it runs the queries — there is no generate-without-run step yet.)
+#
+# discover-columns (load-columns -> _column_meta + csv/{qname}_columns.csv)
+# runs once per invocation (shared `discover` sentinel); it lands in the row
+# phase so column/datatype metadata is downloaded as early as `just e2e row`.
 #
 # col SQL is filtered to the matching dates row-compare wrote, so the row
-# phase MUST finish first. `all` enforces this; running `col` on its own
+# phase MUST finish first. `all` enforces this; running `col*` on its own
 # REQUIRES a prior `just e2e row` (or `all`) to have populated _row_comparison.
 #
-# --skip-mapping skips column discovery + auto-match (load-columns and
+# --skip-mapping skips column discovery + match (load-columns and
 # match-columns); it then relies on the col_map already in the config, with
 # compare-col falling back to same-named columns. Use it only when the config
 # already carries `columns` (and ideally `col_map`) for each side.
@@ -136,20 +155,21 @@ compare-col *args:
 e2e type="all" *flags:
     #!/usr/bin/env bash
     set -euo pipefail
-    case "{{type}}" in row|col|all) ;; *) echo "usage: just e2e [row|col|all] [--skip-mapping]" >&2; exit 2 ;; esac
+    case "{{type}}" in row|col-gen|col-run|col|all) ;; *) echo "usage: just [pair=NAME] e2e [row|col-gen|col-run|col|all] [--skip-mapping]" >&2; exit 2 ;; esac
+    [ -f "{{config}}" ] || { echo "config not found: {{config}} (pair='{{pair}}')" >&2; exit 2; }
     skip_mapping=0
     for f in {{flags}}; do case "$f" in --skip-mapping) skip_mapping=1 ;; esac; done
-    out="{{e2edir}}/output"; state="{{e2edir}}/.state"; mkdir -p "$state" "$out"
+    out="{{e2edir}}/output"; state="{{e2edir}}/.state{{suffix}}"; mkdir -p "$state" "$out"
     is_done()   { [ -z "{{force}}" ] && [ -f "$state/$1.done" ]; }
     mark_done() { touch "$state/$1.done"; }
     do_discover() {
         [ "$skip_mapping" -eq 0 ] || return 0
         if is_done discover; then echo ">>> discover columns: cached"; return 0; fi
-        echo ">>> discover columns (load-columns -> _column_meta + csv/_columns.csv)"
-        dtrack load-columns {{db}} --config {{config}} --columns-csv "{{e2edir}}/csv/_columns.csv"
+        echo ">>> discover columns (load-columns -> _column_meta + csv/{qname}_columns.csv)"
+        dtrack load-columns {{db}} --config {{config}} --columns-dir "{{e2edir}}/csv"
         mark_done discover
     }
-    if [ "{{type}}" = "row" ] || [ "{{type}}" = "all" ]; then
+    do_row() {
         if is_done row.extract; then echo ">>> [row] extract: cached"; else
             echo ">>> [row] extract"
             dtrack extract {{db}} --config {{config}} --outdir {{e2edir}} --type row
@@ -159,24 +179,35 @@ e2e type="all" *flags:
         echo ">>> [row] load"
         dtrack load-row {{db}} {{e2edir}}/csv --config {{config}}
         echo ">>> [row] compare"
-        dtrack compare-row {{db}} --config {{config}} --html "$out/compare_row.html" -y
-    fi
-    if [ "{{type}}" = "col" ] || [ "{{type}}" = "all" ]; then
+        dtrack compare-row {{db}} --config {{config}} --html "$out/compare_row{{suffix}}.html" -y
+    }
+    do_col_gen() {
         do_discover
+        if [ "$skip_mapping" -eq 0 ]; then
+            echo ">>> [col] match-columns BEFORE generate (mapcsv: {{mapcsv}}; --skip-mapping to skip)"
+            dtrack match-columns {{db}} --config {{config}} --map-csv "{{mapcsv}}" --yes
+        fi
         if is_done col.extract; then echo ">>> [col] extract: cached"; else
-            echo ">>> [col] extract (filtered to row-compare matching dates)"
+            echo ">>> [col] extract + generate csv/extract_col.sql (scoped to matched cols + matching dates)"
             dtrack extract {{db}} --config {{config}} --outdir {{e2edir}} --type col
             mark_done col.extract
         fi
+        pa=""; [ -n "{{pair}}" ] && pa="pair={{pair}} "
+        echo ">>> [col-gen] review {{e2edir}}/csv/extract_col.sql, then run: just ${pa}e2e col-run"
+    }
+    do_col_run() {
         echo ">>> [col] load"
         dtrack load-col {{db}} {{e2edir}}/csv --config {{config}}
-        if [ "$skip_mapping" -eq 0 ]; then
-            echo ">>> [col] match-columns (--skip-mapping to skip; explicit: {{mapcsv}})"
-            dtrack match-columns {{db}} --config {{config}} --map-csv "{{mapcsv}}" --yes
-        fi
         echo ">>> [col] compare"
-        dtrack compare-col {{db}} --config {{config}} --html "$out/compare_col.html" -y
-    fi
+        dtrack compare-col {{db}} --config {{config}} --html "$out/compare_col{{suffix}}.html" -y
+    }
+    case "{{type}}" in
+        row)     do_row ;;
+        col-gen) do_col_gen ;;
+        col-run) do_col_run ;;
+        col)     do_col_gen; do_col_run ;;
+        all)     do_row; do_col_gen; do_col_run ;;
+    esac
 
 # clean e2e generated artifacts under {{e2edir}}. level: state | data | all
 #   state (default) = skip-cache sentinels (.state) only; cheap steps re-run, data kept
@@ -186,13 +217,13 @@ e2e-clean level="state":
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{level}}" in
-        state) rm -rf "{{e2edir}}/.state"
-               echo "cleaned: .state (skip-cache)" ;;
-        data)  rm -rf "{{e2edir}}/.state" "{{e2edir}}/csv" "{{e2edir}}/sas"
-               echo "cleaned: .state + csv + sas (forces re-extract)" ;;
-        all)   rm -rf "{{e2edir}}/.state" "{{e2edir}}/csv" "{{e2edir}}/sas" \
+        state) rm -rf "{{e2edir}}"/.state*
+               echo "cleaned: .state* (skip-cache, all pair sets)" ;;
+        data)  rm -rf "{{e2edir}}"/.state* "{{e2edir}}/csv" "{{e2edir}}/sas"
+               echo "cleaned: .state* + csv + sas (forces re-extract)" ;;
+        all)   rm -rf "{{e2edir}}"/.state* "{{e2edir}}/csv" "{{e2edir}}/sas" \
                       "{{e2edir}}/output" "{{db}}" "{{db}}-shm" "{{db}}-wal"
-               echo "cleaned: all generated artifacts (kept config.json, mock/, generate_mock_data.py)" ;;
+               echo "cleaned: all generated artifacts (kept config.json, configs/, mock/, generate_mock_data.py)" ;;
         *) echo "usage: just e2e-clean [state|data|all]" >&2; exit 2 ;;
     esac
 
@@ -204,7 +235,8 @@ query sql *args:
 logs:
     #!/usr/bin/env bash
     f="${DTRACK_LOG:-{{e2edir}}/output/run.log}"
-    echo "tailing $f"; tail -n 120 -f "$f"
+    echo "tailing $f (ctrl+c to stop)"
+    exec tail -n 120 -f "$f"
 
 # run tests
 test *args:

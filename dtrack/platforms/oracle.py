@@ -879,7 +879,7 @@ def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=No
                 })
 
     from .base import write_timing_csv
-    write_timing_csv(outdir, timing_records)
+    write_timing_csv(outdir, timing_records, oracle_tables)
 
     print(f"\nExtraction complete. Output in: {outdir}")
 

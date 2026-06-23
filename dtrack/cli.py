@@ -255,18 +255,22 @@ def cmd_load_columns(args):
         print(f"{qname}: discovering columns from {source} ({conn_macro}: {raw_table})")
         _load_columns_entry(args.project_db, qname, raw_table, source, conn_macro)
 
-    out_csv = getattr(args, 'columns_csv', None)
-    if out_csv:
-        os.makedirs(os.path.dirname(out_csv) or '.', exist_ok=True)
-        with open(out_csv, 'w', newline='') as f:
-            w = csv_mod.writer(f)
-            w.writerow(['source', 'table', 'column_name', 'data_type'])
-            for tbl in tables:
-                qname = qualified_name(tbl)
-                for m in (get_column_meta(args.project_db, qname) or []):
-                    w.writerow([tbl.get('source', ''), tbl.get('table', ''),
-                                m['column_name'], m.get('data_type', '')])
-        print(f"Wrote column metadata: {out_csv}")
+    out_dir = getattr(args, 'columns_dir', None)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+        for tbl in tables:
+            qname = qualified_name(tbl)
+            meta = sorted(get_column_meta(args.project_db, qname) or [],
+                          key=lambda m: m['column_name'])
+            if not meta:
+                continue
+            col_csv = os.path.join(out_dir, f"{qname}_columns.csv")
+            with open(col_csv, 'w', newline='') as f:
+                w = csv_mod.writer(f)
+                w.writerow(['COLUMN_NAME', 'DATA_TYPE'])
+                for m in meta:
+                    w.writerow([m['column_name'], m.get('data_type', '')])
+            print(f"Wrote column metadata: {col_csv}")
 
 
 def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
@@ -1132,8 +1136,8 @@ def main():
     p.add_argument('--config', required=True, help='Unified config JSON')
     p.add_argument('--csv', dest='csv_files', action='append', default=[],
                    help='Metadata CSV (repeatable)')
-    p.add_argument('--columns-csv', dest='columns_csv',
-                   help='Also dump discovered columns (source,table,column,type) to this CSV')
+    p.add_argument('--columns-dir', dest='columns_dir',
+                   help='Dump per-table {qname}_columns.csv (COLUMN_NAME,DATA_TYPE) into this dir')
 
     # compare-row
     p = sub.add_parser('compare-row', help='Compare row counts')
