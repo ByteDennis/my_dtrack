@@ -1,11 +1,15 @@
 """Comparison functionality for row counts and column statistics."""
 
 import json
+import os
 import re
 from fnmatch import fnmatch
-from .db import get_row_counts, get_col_stats, get_table_pair, list_table_pairs
+from .db import (get_row_counts, get_col_stats, get_table_pair, list_table_pairs,
+                 get_pair_col_map_from_db)
+from .config import load_unified_config
 from .date_utils import parse_date
 from .constants import STAT_ROUND_DECIMALS
+from .platforms.base import quote_ident, resolve_table
 
 
 def resolve_col_filter(col_map, include_patterns=None, exclude_patterns=None):
@@ -654,3 +658,263 @@ def apply_column_rules(rules, unmatched_left, unmatched_right):
                     continue
 
     return new_mappings, rule_sources
+
+
+_SUPPORTED = ("aws", "oracle", "databricks", "csv")
+
+
+# >>> source -> SQL dialect string used by quote_ident / hash16 exprs <<< #
+def _dialect(source):
+    return {"aws": "athena", "csv": "duckdb", "oracle": "oracle",
+            "databricks": "databricks"}.get((source or "").lower())
+
+
+# >>> per-value 16-bit MD5 hash expression matching each platform's col extraction <<< #
+def _hash16_expr(source, col_q):
+    src = (source or "").lower()
+    if src == "oracle":
+        from .platforms.oracle import _oracle_portable_hash16
+        return _oracle_portable_hash16(col_q)
+    if src == "aws":
+        from .platforms.athena import _athena_portable_hash16
+        return _athena_portable_hash16(col_q)
+    if src == "databricks":
+        from .platforms.databricks import _databricks_portable_hash16
+        return _databricks_portable_hash16(col_q)
+    if src == "csv":
+        return (f"CAST(('0x' || substr(md5(trim(CAST({col_q} AS VARCHAR))), "
+                f"1, 4)) AS INTEGER)")
+    return "NULL"
+
+
+# >>> (from_ref, cte_prefix) for a table, honoring processed CTEs where supported <<< #
+def _full_table_and_cte(tbl):
+    src = (tbl.get("source") or "").lower()
+    if src == "databricks":
+        from .platforms.databricks import _full_table
+        return _full_table(tbl), ""
+    if src == "csv":
+        cp = tbl.get("conn_macro", "") or ""
+        return resolve_table(tbl, f"'{cp}'" if cp else tbl.get("table", ""))
+    if src == "aws":
+        return resolve_table(tbl, f"{tbl.get('conn_macro','')}.{tbl.get('table','')}")
+    return resolve_table(tbl)
+
+
+# >>> run a SELECT against the table's backend; return list[dict] (lowercase cols) <<< #
+def _run_query(tbl, sql):
+    src = (tbl.get("source") or "").lower()
+    cm = tbl.get("conn_macro", "") or ""
+    if src == "aws":
+        from .platforms.athena import _query_athena
+        df = _query_athena(sql, cm)
+        return df.to_dict("records")
+    if src == "databricks":
+        from .platforms.databricks import _query_databricks
+        return _query_databricks(sql, cm)
+    if src == "csv":
+        from .platforms.csv_duckdb import _query_duckdb
+        return _query_duckdb(sql, cm)
+    if src == "oracle":
+        from .db import oracle_connect
+        conn = oracle_connect(cm)
+        if conn is None:
+            return []
+        try:
+            cur = conn.cursor()
+            cur.execute(sql)
+            cols = [d[0].lower() for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur.close()
+            return rows
+        finally:
+            conn.close()
+    raise ValueError(f"sample-hash: unsupported source {src!r} "
+                     f"(supported: {', '.join(_SUPPORTED)})")
+
+
+def _limit(source, n):
+    return f"FETCH FIRST {n} ROWS ONLY" if (source or "").lower() == "oracle" else f"LIMIT {n}"
+
+
+def _lit(v):
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+# >>> sample up to n distinct key tuples from the left side <<< #
+def _sample_keys(tbl, key_cols, n):
+    src = tbl.get("source", "")
+    d = _dialect(src)
+    ft, cte = _full_table_and_cte(tbl)
+    keys_q = ", ".join(quote_ident(k, d) for k in key_cols)
+    notnull = " AND ".join(f"{quote_ident(k, d)} IS NOT NULL" for k in key_cols)
+    base_where = (tbl.get("where") or "").strip() or "1=1"
+    sql = (f"{cte}SELECT DISTINCT {keys_q} FROM {ft} "
+           f"WHERE ({base_where}) AND {notnull} {_limit(src, n)}")
+    rows = _run_query(tbl, sql)
+    out = []
+    for r in rows:
+        out.append(tuple(r[k.lower()] for k in key_cols))
+    return out
+
+
+def _key_in_clause(key_cols_q, key_tuples):
+    if not key_tuples:
+        return "1=0"
+    if len(key_cols_q) == 1:
+        vals = ", ".join(_lit(t[0]) for t in key_tuples)
+        return f"{key_cols_q[0]} IN ({vals})"
+    ors = []
+    for t in key_tuples:
+        ands = " AND ".join(f"{kq} = {_lit(v)}" for kq, v in zip(key_cols_q, t))
+        ors.append(f"({ands})")
+    return "(" + " OR ".join(ors) + ")"
+
+
+# >>> fetch value + hash16 for each (key, column) on one side; keyed by key tuple <<< #
+def _fetch_side(tbl, key_cols, value_cols, key_tuples):
+    src = tbl.get("source", "")
+    d = _dialect(src)
+    ft, cte = _full_table_and_cte(tbl)
+    key_cols_q = [quote_ident(k, d) for k in key_cols]
+    parts = [f'{kq} AS "__k{i}"' for i, kq in enumerate(key_cols_q)]
+    for j, c in enumerate(value_cols):
+        cq = quote_ident(c, d)
+        parts.append(f'{cq} AS "__v{j}"')
+        parts.append(f'{_hash16_expr(src, cq)} AS "__h{j}"')
+    where = _key_in_clause(key_cols_q, key_tuples)
+    base_where = (tbl.get("where") or "").strip()
+    if base_where:
+        where = f"({base_where}) AND {where}"
+    sql = f"{cte}SELECT {', '.join(parts)} FROM {ft} WHERE {where}"
+    rows = _run_query(tbl, sql)
+    by_key = {}
+    for r in rows:
+        k = tuple(r.get(f"__k{i}") for i in range(len(key_cols)))
+        by_key[tuple(str(x) for x in k)] = r
+    return by_key
+
+
+# >>> sample-hash one pair: returns (header, rows) for the Excel sheet <<< #
+def _sample_pair(project_db, pair_name, pair_cfg, key_cols, n):
+    left = dict(pair_cfg["left"])
+    right = dict(pair_cfg["right"])
+    for side in (left, right):
+        side.setdefault("name", "")
+    col_map = pair_cfg.get("col_map") or get_pair_col_map_from_db(project_db, pair_name) or {}
+    if not col_map:
+        print(f"  {pair_name}: no col_map; run `dtrack match-columns` first. Skipping.")
+        return None
+    for src in (left.get("source", ""), right.get("source", "")):
+        if (src or "").lower() not in _SUPPORTED:
+            print(f"  {pair_name}: source {src!r} not supported by sample-hash "
+                  f"({', '.join(_SUPPORTED)}). Skipping.")
+            return None
+
+    left_keys = key_cols
+    right_keys = [col_map.get(k, k) for k in key_cols]
+    value_pairs = [(l, r) for l, r in col_map.items() if l not in key_cols]
+    left_vals = [l for l, _ in value_pairs]
+    right_vals = [r for _, r in value_pairs]
+
+    key_tuples = _sample_keys(left, left_keys, n)
+    if not key_tuples:
+        print(f"  {pair_name}: no key rows sampled from left. Skipping.")
+        return None
+    norm_keys = [tuple(str(x) for x in t) for t in key_tuples]
+
+    left_by = _fetch_side(left, left_keys, left_vals, key_tuples)
+    right_by = _fetch_side(right, right_keys, right_vals, key_tuples)
+
+    cols_hdr = ["key"]
+    for l, r in value_pairs:
+        label = l if l == r else f"{l}->{r}"
+        cols_hdr += [f"{label}.L", f"{label}.Lh16", f"{label}.R", f"{label}.Rh16", f"{label}.match"]
+
+    rows = []
+    for nk in norm_keys:
+        lrow = left_by.get(nk, {})
+        rrow = right_by.get(nk, {})
+        out = ["|".join(nk)]
+        for j in range(len(value_pairs)):
+            lv = lrow.get(f"__v{j}")
+            rv = rrow.get(f"__v{j}")
+            lh = lrow.get(f"__h{j}")
+            rh = rrow.get(f"__h{j}")
+            match = (lh is not None and rh is not None and str(lh) == str(rh))
+            out += [_disp(lv), _disp(lh), _disp(rv), _disp(rh), "OK" if match else "DIFF"]
+        rows.append(out)
+    return cols_hdr, rows
+
+
+def _disp(v):
+    return "" if v is None else str(v)
+
+
+# >>> write one sheet per pair; highlight DIFF rows; bold header <<< #
+def _write_excel(out_path, sheets):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    wb = Workbook()
+    wb.remove(wb.active)
+    diff_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    bad_fill = PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_type="solid")
+    bold = Font(bold=True)
+    for name, (header, rows) in sheets.items():
+        ws = wb.create_sheet(title=name[:31])
+        ws.append(header)
+        for c in ws[1]:
+            c.font = bold
+        match_cols = [i for i, h in enumerate(header) if h.endswith(".match")]
+        for row in rows:
+            ws.append(row)
+            r = ws[ws.max_row]
+            for mc in match_cols:
+                if row[mc] == "DIFF":
+                    for c in r:
+                        c.fill = diff_fill
+                    r[mc].fill = bad_fill
+    wb.save(out_path)
+    return out_path
+
+
+# >>> CLI entry: sample N keys/pair, dump per-column value+backend hash16 to Excel <<< #
+def sample_hash(project_db, config_path, key, pair=None, n=20, out=None):
+    if not key:
+        raise ValueError("sample-hash requires --key <col>[,<col2>...]")
+    key_cols = [k.strip() for k in str(key).split(",") if k.strip()]
+    config = load_unified_config(config_path)
+    pairs = config.get("pairs", {})
+    if pair:
+        if pair not in pairs:
+            raise ValueError(f"pair {pair!r} not in config")
+        items = [(pair, pairs[pair])]
+    else:
+        items = [(p, c) for p, c in pairs.items() if not c.get("skip")]
+
+    sheets = {}
+    for pname, pcfg in items:
+        print(f"\n--- sample-hash: {pname} (key={','.join(key_cols)}, n={n}) ---")
+        try:
+            res = _sample_pair(project_db, pname, pcfg, key_cols, n)
+        except Exception as e:
+            print(f"  {pname}: failed: {e}")
+            continue
+        if res:
+            sheets[pname] = res
+            diffs = sum(1 for row in res[1] for v in row if v == "DIFF")
+            print(f"  {pname}: {len(res[1])} rows sampled, {diffs} cell hash diffs")
+
+    if not sheets:
+        print("\nNo pairs produced output (need col_map + supported sources).")
+        return None
+    out = out or "sample_hash.xlsx"
+    _write_excel(out, sheets)
+    print(f"\nExcel report: {out}")
+    return out

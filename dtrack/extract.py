@@ -177,8 +177,15 @@ def run_sql_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
                       f"(run `dtrack generate --type {t}` first)")
                 continue
             print(f"\n--- [run-sql] {platform} {t}: {sql_path} ---")
-            runner(sql_path, csv_outdir, max_workers=max_workers,
-                   db_path=db_path, resume=resume)
+            res = runner(sql_path, csv_outdir, max_workers=max_workers,
+                         db_path=db_path, resume=resume) or []
+            failed = [r for r in res if not r.get("ok")]
+            ok = len(res) - len(failed)
+            print(f"[run-sql] {platform} {t}: {ok} ok, {len(failed)} failed")
+            for r in failed[:20]:
+                print(f"    FAIL {r.get('name')}: {r.get('error')}")
+            if len(failed) > 20:
+                print(f"    ... +{len(failed) - 20} more failed")
 
     if groups.get("sas"):
         print(f"\n--- [run-sql] sas ({len(groups['sas'])} tables): run extract_{{type}}.sas "

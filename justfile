@@ -16,7 +16,11 @@
 # Override env-file path with --env=/path or DTRACK_ENV_FILE=/path.
 # Add Oracle macros not in MACRO2SVC via DTRACK_ORACLE_MACROS=pb40:svc_x,pb50:svc_y.
 
-db := "testing/project.db"
+# Shared working dir for BOTH the web UI and the e2e/CLI pipeline: holds
+# pairs.json (config), project.db, and csv/ sas/ output/. Point web + cli at
+# the same workdir so they operate on one project.
+workdir := "testing"
+db := workdir + "/project.db"
 port := "8080"
 
 # Where the e2e mock fixtures live. Override per machine:
@@ -25,17 +29,23 @@ mockdir := "testing/mock"
 export DTRACK_E2E_MOCK_DIR := mockdir
 
 # Base dir for the live e2e pipeline; outputs land in {{e2edir}}/{csv,sas,output}
-e2edir := "testing"
+e2edir := workdir
 
 # Run a subset of pairs from a dedicated config. Drop per-set files in
 # {{configdir}}/ (e.g. tableA.json, tableB.json), each holding only its own
 # `pairs`, then select one with `just pair=tableA e2e ...`. All sets share
 # {{db}}; the HTML output and skip-cache (.state) are namespaced by the set
-# name so sets never clobber each other. No pair= => {{e2edir}}/config.json.
+# name so sets never clobber each other. No pair= => {{workdir}}/pairs.json
+# (the same config the web UI uses).
 pair := ""
-configdir := e2edir + "/configs"
-config := if pair == "" { e2edir + "/config.json" } else { configdir + "/" + pair + ".json" }
+configdir := workdir
+config := if pair == "" { workdir + "/pairs.json" } else { configdir + "/" + pair + ".json" }
 suffix := if pair == "" { "" } else { "_" + pair }
+
+# Where e2e comparison reports (compare_{row,col}[_pair].{html,xlsx}) are
+# written. Override to keep e2e output separate from the web UI's output dir,
+# e.g. when running web + e2e at once:  just resultdir=testing/e2e_out e2e all
+resultdir := e2edir + "/output"
 
 # Unified pipeline log (every CLI command + errors). See `just logs`.
 export DTRACK_LOG := e2edir + "/output/run.log"
@@ -75,6 +85,7 @@ help topic="":
         echo "    --from-date / --to-date YYYY-MM-DD          incremental window"
         echo "    e.g.  just pair=month e2e col-gen --vintage month --preset detailed"
         echo "  pair=NAME            use {{configdir}}/NAME.json; HTML + .state namespaced _NAME"
+        echo "  resultdir=DIR        where reports land (default {{e2edir}}/output; separate from web)"
         echo "  force=1              ignore skip-cache; re-run row/discover/col extract"
         ;;
     *) just --show "{{topic}}" ;;
@@ -199,8 +210,9 @@ e2e type="all" *flags:
             *)                ext="$ext $1"; shift ;;
         esac
     done
-    out="{{e2edir}}/output"; state="{{e2edir}}/.state{{suffix}}"; mkdir -p "$state" "$out"
-    logf="${DTRACK_LOG:-$out/run.log}"
+    out="{{resultdir}}"; state="{{e2edir}}/.state{{suffix}}"
+    logf="${DTRACK_LOG:-{{e2edir}}/output/run.log}"
+    mkdir -p "$state" "$out" "$(dirname "$logf")"
     say() { echo ">>> $1"; printf '%s INFO [justfile.e2e] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$logf"; }
     is_done()   { [ -z "{{force}}" ] && [ -f "$state/$1.done" ]; }
     mark_done() { touch "$state/$1.done"; }
@@ -255,7 +267,7 @@ e2e type="all" *flags:
 # clean e2e generated artifacts under {{e2edir}}. level: state | data | all
 #   state (default) = skip-cache sentinels (.state) only; cheap steps re-run, data kept
 #   data            = .state + csv + sas; forces re-extraction from the backend
-#   all             = + output + project db; keeps config.json, mock/, generate_mock_data.py
+#   all             = + output + project db; keeps pairs.json, mock/, generate_mock_data.py
 e2e-clean level="state":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -266,9 +278,15 @@ e2e-clean level="state":
                echo "cleaned: .state* + csv + sas (forces re-extract)" ;;
         all)   rm -rf "{{e2edir}}"/.state* "{{e2edir}}/csv" "{{e2edir}}/sas" \
                       "{{e2edir}}/output" "{{db}}" "{{db}}-shm" "{{db}}-wal"
-               echo "cleaned: all generated artifacts (kept config.json, configs/, mock/, generate_mock_data.py)" ;;
+               echo "cleaned: all generated artifacts (kept pairs.json, mock/, generate_mock_data.py)" ;;
         *) echo "usage: just e2e-clean [state|data|all]" >&2; exit 2 ;;
     esac
+
+# sample N rows by key from both sides -> value + backend hash16 to excel (debug hash_sum)
+#   just key=cust_id sample-hash                 # all pairs, n=20
+#   just key=cust_id pair=tableA sample-hash -n 50
+sample-hash key="" *args:
+    dtrack sample-hash {{db}} --config {{config}} --key {{key}} {{ if pair == "" { "" } else { "--pair " + pair } }} --out {{e2edir}}/output/sample_hash{{suffix}}.xlsx {{args}}
 
 # run a SQL query against the database
 query sql *args:

@@ -17,10 +17,11 @@ ThreadPool dispatch, lifeboat retry, per-qname CSV flush, cancel,
 on_progress events, .cache.db) is reused unchanged. Only the per-block
 query function and the column-discovery helper are dialect-specific.
 
-`csv_path` is read from `tbl_cfg['csv_path']`. Empty / missing leaves
-the FROM clause as the bare table name, which DuckDB resolves against
-its catalog (so a caller can pre-register tables under a different
-name if desired).
+The CSV file path is read from `tbl_cfg['conn_macro']` (every source
+carries its locator there; csv has no DSN, so conn_macro IS the path).
+Empty / missing leaves the FROM clause as the bare table name, which
+DuckDB resolves against its catalog (so a caller can pre-register
+tables under a different name if desired).
 """
 
 import os
@@ -225,18 +226,15 @@ def csv_sql_filename(extract_type):
 def _csv_from_clause(tbl_cfg):
     """Return the FROM-clause table reference for a csv-source pair.
 
-    Prefers tbl_cfg['csv_path'] (quoted string literal -- DuckDB
-    accepts this directly). Falls back to tbl_cfg['table'] if no
-    csv_path is set, which lets a caller pre-register tables under a
-    different name in the DuckDB catalog.
+    Prefers tbl_cfg['conn_macro'] (the CSV file path, quoted as a string
+    literal -- DuckDB accepts this directly; the runner's
+    _rewrite_csv_from_clauses swaps in read_csv_auto at execution time).
+    Falls back to tbl_cfg['table'] when conn_macro is empty, which lets a
+    caller pre-register tables under a different name in the catalog.
     """
-    csv_path = tbl_cfg.get('csv_path', '') or ''
-    if csv_path:
-        # DuckDB single-quotes a path literal as the table reference.
-        # The runner's _rewrite_csv_from_clauses swaps in the cached
-        # view at execution time so multiple blocks against the same
-        # CSV don't re-parse.
-        return f"'{csv_path}'"
+    path = tbl_cfg.get('conn_macro', '') or ''
+    if path:
+        return f"'{path}'"
     return tbl_cfg.get('table', '') or tbl_cfg.get('name', 'unknown')
 
 
@@ -483,15 +481,15 @@ def _discover_and_write_csv_columns(csv_tables, outdir, db_path):
     from ..db import insert_column_meta
     os.makedirs(outdir, exist_ok=True)
     for tbl in csv_tables:
-        csv_path = tbl.get('csv_path', '')
-        if not csv_path or not os.path.exists(csv_path):
-            print(f"  {qualified_name(tbl)}: csv_path missing or not found "
-                  f"({csv_path!r}); skipping discovery")
+        path = tbl.get('conn_macro', '')
+        if not path or not os.path.exists(path):
+            print(f"  {qualified_name(tbl)}: conn_macro (csv path) missing or not found "
+                  f"({path!r}); skipping discovery")
             continue
         qname = qualified_name(tbl)
-        cols = discover_csv_columns(csv_path)
+        cols = discover_csv_columns(path)
         if not cols:
-            print(f"  {qname}: DuckDB returned no columns for {csv_path}")
+            print(f"  {qname}: DuckDB returned no columns for {path}")
             continue
         if db_path:
             insert_column_meta(db_path, qname, cols, source='csv')

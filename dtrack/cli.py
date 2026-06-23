@@ -270,16 +270,16 @@ def cmd_load_columns(args):
 
         if source.lower() == 'csv':
             from .platforms.csv_duckdb import discover_csv_columns
-            csv_path = tbl.get('csv_path', '')
-            if not csv_path or not os.path.exists(csv_path):
-                print(f"{qname}: csv_path missing or not found ({csv_path!r}); skipping")
+            path = tbl.get('conn_macro', '')
+            if not path or not os.path.exists(path):
+                print(f"{qname}: conn_macro (csv path) missing or not found ({path!r}); skipping")
                 continue
-            columns = discover_csv_columns(csv_path)
+            columns = discover_csv_columns(path)
             if not columns:
-                print(f"{qname}: no columns discovered from {csv_path}")
+                print(f"{qname}: no columns discovered from {path}")
                 continue
             count = insert_column_meta(args.project_db, qname, columns, source=source)
-            print(f"{qname}: discovered {count} columns from {csv_path}")
+            print(f"{qname}: discovered {count} columns from {path}")
             continue
 
         conn_macro = tbl.get('conn_macro', '')
@@ -1062,6 +1062,20 @@ def cmd_extract(args):
     )
 
 
+# >>> sample N rows by key from both sides; dump value + backend hash16 to Excel <<< #
+def cmd_sample_hash(args):
+    _require_db(args.project_db)
+    from .compare import sample_hash
+    sample_hash(
+        project_db=args.project_db,
+        config_path=args.config,
+        key=args.key,
+        pair=getattr(args, 'pair', None),
+        n=getattr(args, 'sample_n', 20),
+        out=getattr(args, 'out', None),
+    )
+
+
 # >>> execute already-generated extract_{row,col}.<platform>.sql via each platform's runner (mirrors web run-sql) <<< #
 def cmd_run_sql(args):
     from .extract import run_sql_all
@@ -1385,6 +1399,18 @@ def main():
     p.add_argument('--yes', action='store_true',
                    help='non-interactive: keep auto-matches, skip the manual mapping prompt')
 
+    # sample-hash (sample N rows by key from both sides; dump value+hash16 to Excel)
+    p = sub.add_parser('sample-hash',
+                       help='Sample N rows by key from both sides; dump value + backend hash16 to Excel (debug hash_sum)')
+    p.add_argument('project_db')
+    p.add_argument('--config', required=True)
+    p.add_argument('--key', required=True,
+                   help='Left key column (right resolved via col_map); composite via comma')
+    p.add_argument('--pair', help='Restrict to one pair (default: all non-skipped pairs)')
+    p.add_argument('-n', '--sample', dest='sample_n', type=int, default=20,
+                   help='Number of rows to sample per pair (default 20)')
+    p.add_argument('--out', help='Output .xlsx path (default sample_hash.xlsx)')
+
     # extract (classify config tables by source, run each platform extractor)
     p = sub.add_parser('extract', help='Extract row/col CSVs for all platforms in the config')
     p.add_argument('project_db')
@@ -1519,6 +1545,7 @@ def main():
         'extract': cmd_extract,
         'generate': cmd_generate,
         'run-sql': cmd_run_sql,
+        'sample-hash': cmd_sample_hash,
         'serve': cmd_serve,
         'query': cmd_query,
         'doctor': cmd_doctor,

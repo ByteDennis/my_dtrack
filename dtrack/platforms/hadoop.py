@@ -31,7 +31,10 @@ def hadoop_connect(dsn: Optional[str] = None, *,
     makes the driver pick the wrong cert and the TLS handshake fails
     with "SSL_connect: certificate verify failed". The original value
     is restored in `finally` so concurrent Athena work isn't disturbed
-    once the handshake completes.
+    once the handshake completes. A trivial probe query runs under the same
+    lock to force the SASL/GSSAPI handshake to finish serialized — concurrent
+    connects otherwise fail with "[28000][Simba][ThriftExtension] ... SASL";
+    data queries still run in parallel once each connection is authenticated.
 
     Mock mode: when `DTRACK_MOCK` or `DTRACK_HADOOP_MOCK` is set, returns
     None so unit / integration tests don't need a live Hive cluster.
@@ -54,7 +57,7 @@ def hadoop_connect(dsn: Optional[str] = None, *,
         saved = os.environ.pop('SSL_CERT_FILE', None)
         try:
             try:
-                return pyodbc.connect(f"DSN={dsn}", autocommit=autocommit)
+                conn = pyodbc.connect(f"DSN={dsn}", autocommit=autocommit)
             except pyodbc.InterfaceError as exc:
                 msg = str(exc)
                 if 'IM002' in msg or 'Data source name not found' in msg:
@@ -91,6 +94,11 @@ def hadoop_connect(dsn: Optional[str] = None, *,
                     )
                     raise pyodbc.InterfaceError(msg + hint) from exc
                 raise
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchall()
+            cur.close()
+            return conn
         finally:
             if saved is not None:
                 os.environ['SSL_CERT_FILE'] = saved

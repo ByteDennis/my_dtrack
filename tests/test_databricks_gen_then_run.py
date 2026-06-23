@@ -14,10 +14,9 @@ import os
 import tempfile
 
 from dtrack.constants import COL_CSV_HEADERS
-from dtrack.platforms.base import parse_extract_sql_file
+from dtrack.platforms.base import parse_extract_sql_file, build_col_sql
 from dtrack.platforms.databricks import (
     _build_row_sql_databricks,
-    _build_col_sql_databricks,
     _write_combined_col_sql_databricks,
     _write_combined_row_sql_databricks,
 )
@@ -33,6 +32,14 @@ def _tbl(**ov):
     }
     base.update(ov)
     return base
+
+
+def _build_col_sql_databricks(col, dtype, full_table, where="1=1", dt_label="all",
+                              preset="detailed"):
+    tbl = _tbl(where=where)
+    sql, _ = build_col_sql("databricks", tbl, col, dtype, full_table,
+                           dt_label=dt_label, preset=preset)
+    return sql
 
 
 def test_row_sql_aliases_dt_not_date_value():
@@ -82,9 +89,8 @@ def test_full_table_always_backticks_catalog(monkeypatch):
 def test_numeric_vs_categorical_col_type_literal():
     num = _build_col_sql_databricks("amt", "DOUBLE", "t", "1=1", "all")
     cat = _build_col_sql_databricks("ccy", "STRING", "t", "1=1", "all")
-    assert "'numeric' AS col_type" in num
-    assert "'categorical' AS col_type" in cat
-    # categorical computes length stats; numeric leaves them NULL
+    assert "'DOUBLE' AS col_type" in num
+    assert "'STRING' AS col_type" in cat
     assert "LENGTH(" in cat
     assert "LENGTH(" not in num
 

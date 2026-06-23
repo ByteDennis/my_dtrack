@@ -811,9 +811,9 @@ def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
     col_expr = apply_null_sentinels(col_q, effective_type, "athena")
     is_categorical = (col_type or "").lower() == "categorical"
 
-    if preset == 'quick':
+    if preset in ('quick', 'standard'):
         from ..constants import STATS_PRESETS
-        base = STATS_PRESETS['quick']
+        base = STATS_PRESETS[preset]
         if stats_override is not None:
             stats = {k: bool(stats_override.get(k, base[k])) for k in base}
         else:
@@ -1244,10 +1244,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
             # freq aggregation per col. Probe WHERE matches the broadest
             # table-level filter so the cardinality classification reflects
             # what the col SQL would actually scan.
-            if coarse:
-                # In coarse mode, every column emits the cheap-aggregate
-                # SQL — no probe needed (id-skip is irrelevant when
-                # everything is "lite").
+            if coarse or preset in ('quick', 'standard'):
                 id_cols = set(c for c, _ in col_list)
             else:
                 probe_wc_parts = []

@@ -477,9 +477,6 @@ def generate_column_stats_html(
                         col_diffs[col].append((vlabel, 'mean', comp.get('mean_left'), comp.get('mean_right'), None))
                     if _on('std') and comp.get('std_match') is False:
                         col_diffs[col].append((vlabel, 'std', comp.get('std_left'), comp.get('std_right'), None))
-                # min/max/length/hash mismatches — match the header's diff count
-                # (_has_col_differences checks these too) so a column whose only
-                # diff is here doesn't render as "0 diffs".
                 for _stat in ('min', 'max', 'length_avg', 'length_max', 'hash_sum'):
                     if _on(_stat) and comp.get(f'{_stat}_match') is False:
                         col_diffs[col].append(

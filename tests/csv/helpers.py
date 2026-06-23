@@ -3,7 +3,7 @@
 Two kinds of CSV files show up in these tests:
 
 1. **Raw source data** — the actual table data a `source=csv` pair points at
-   via `csv_path`. DuckDB reads these during extraction. `write_data_csv`.
+   via `conn_macro`. DuckDB reads these during extraction. `write_data_csv`.
 
 2. **Canonical extractor output** — the per-table `{qname}_row.csv` /
    `{qname}_col.csv` that EVERY platform's extractor emits in the same schema
@@ -27,7 +27,7 @@ from dtrack.constants import COL_CSV_HEADERS, ROW_CSV_HEADERS
 # ---------------------------------------------------------------------------
 
 def write_data_csv(path, header, rows) -> str:
-    """Write a raw data CSV (the file a source=csv table reads via csv_path)."""
+    """Write a raw data CSV (the file a source=csv table reads via conn_macro)."""
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
@@ -43,10 +43,9 @@ def csv_table(name, csv_path, *, date_col="trade_date", date_type="string_dash",
         "name": name,
         "table": name,
         "source": "csv",
-        "csv_path": str(csv_path),
+        "conn_macro": str(csv_path),
         "date_col": date_col,
         "date_type": date_type,
-        "conn_macro": "csv",
         "where": where,
         "vintage": vintage,
         "_side": side,
@@ -129,9 +128,9 @@ def unified_config_csv_pair(left_csv, right_csv, *, sas_outdir, aws_outdir,
     """Minimal unified config with a single csv↔csv pair (left + right)."""
     cols = {"trade_date": "DATE", "ccy": "VARCHAR", "amt": "DOUBLE"}
     side = lambda name, path: {
-        "name": name, "table": name, "source": "csv", "csv_path": str(path),
+        "name": name, "table": name, "source": "csv", "conn_macro": str(path),
         "date_col": "trade_date", "date_type": "string_dash",
-        "conn_macro": "csv", "columns": cols,
+        "columns": cols,
     }
     return {
         "metadata": {"title": "csv-suite"},

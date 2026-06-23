@@ -1522,9 +1522,9 @@ def _col_sql_dialect_ops(dialect):
             ),
             'dt_select_wrap':     lambda dt_expr: f"TO_CHAR({dt_expr}, 'YYYY-MM-DD')",
         }
-    if dialect == 'hadoop':
+    if dialect in ('hadoop', 'databricks'):
         from .hadoop import _hadoop_vintage_expr
-        return {
+        ops = {
             'wc_empty':           '1=1',
             'is_oracle_typed':    False,
             'cast_str':           lambda x: f'CAST({x} AS STRING)',
@@ -1572,6 +1572,15 @@ def _col_sql_dialect_ops(dialect):
             # expression (concat/substr or date_format), so no outer wrap.
             'dt_select_wrap':     lambda dt_expr: dt_expr,
         }
+        if dialect == 'databricks':
+            from .athena import _vintage_date_expr_athena
+            ops['vintage_expr'] = (
+                lambda tbl_cfg, date_col_q, vintage, date_dtype, date_format:
+                _vintage_date_expr_athena(date_col_q, vintage,
+                                          date_dtype=date_dtype, date_format=date_format)
+            )
+            ops['dt_select_wrap'] = lambda dt_expr: f"CAST({dt_expr} AS STRING)"
+        return ops
     if dialect == 'duckdb':
         # DuckDB powers the csv-source path (platforms/csv_duckdb.py).
         # SQL flavor is closest to Postgres / standard SQL with most
@@ -1671,7 +1680,7 @@ def _hash16_flat_expr(dialect, col_expr):
     if dialect == 'oracle':
         from .oracle import _oracle_portable_hash16
         return f"SUM(NVL({_oracle_portable_hash16(col_expr)}, 0))"
-    if dialect == 'hadoop':
+    if dialect in ('hadoop', 'databricks'):
         return (
             f"SUM(CAST(conv(substr(md5(trim(CAST({col_expr} AS STRING))), 1, 4), "
             f"16, 10) AS DOUBLE))"

@@ -376,7 +376,7 @@ const CONN_PLACEHOLDERS = {
     sas:        'work',
     aws:        'analytics_db',
     databricks: 'catalog.schema  (or schema → uses DB_DEFAULT_CATALOG)',
-    csv:        '(not used)',
+    csv:        '/abs/path/to/data.csv',
 };
 
 function updateConnOptions(side) {
@@ -390,12 +390,7 @@ function updateConnOptions(side) {
         dlist.innerHTML = options.map(o => `<option value="${o}">`).join('');
     }
     connInput.placeholder = CONN_PLACEHOLDERS[source] || '';
-    connInput.disabled = (source === 'csv');
-
-    const csvGroup = document.getElementById(`${side}-csv-path-group`);
-    if (csvGroup) {
-        csvGroup.style.display = (source === 'csv') ? '' : 'none';
-    }
+    connInput.disabled = false;
 }
 
 // Global Settings — load from config, save back on apply
@@ -742,10 +737,6 @@ function editPair(index) {
     updateConnOptions('left'); // Update conn options before setting value
     document.getElementById('left-conn').value = pair.left.conn_macro;
     document.getElementById('left-table').value = pair.left.table;
-    // csv_path is only meaningful when source=csv. Visibility was set
-    // by updateConnOptions above; the value loads regardless so an
-    // edit that switches source temporarily doesn't lose it.
-    document.getElementById('left-csv-path').value = pair.left.csv_path || '';
     document.getElementById('left-date-col').value = pair.left.date_col;
     document.getElementById('left-date-type').value = pair.left.date_type || 'date';
     document.getElementById('left-where').value = pair.left.where || '';
@@ -756,7 +747,6 @@ function editPair(index) {
     updateConnOptions('right'); // Update conn options before setting value
     document.getElementById('right-conn').value = pair.right.conn_macro;
     document.getElementById('right-table').value = pair.right.table;
-    document.getElementById('right-csv-path').value = pair.right.csv_path || '';
     document.getElementById('right-date-col').value = pair.right.date_col;
     document.getElementById('right-date-type').value = pair.right.date_type || 'date';
     document.getElementById('right-where').value = pair.right.where || '';
@@ -805,11 +795,6 @@ function clearPairForm() {
 }
 
 async function savePair() {
-    // csv_path is included on every save but only meaningful when
-    // source=csv. The backend `/api/generate` reads it via `_csv_from_clause`
-    // for csv-source tables; non-csv tables ignore it. Storing the value
-    // even when source != csv lets the user toggle source temporarily
-    // without losing the path.
     const pairData = {
         pair_name: document.getElementById('pair-name').value.trim(),
         description: document.getElementById('pair-desc').value.trim(),
@@ -817,7 +802,6 @@ async function savePair() {
             source: document.getElementById('left-source').value,
             conn_macro: document.getElementById('left-conn').value.trim(),
             table: document.getElementById('left-table').value.trim(),
-            csv_path: document.getElementById('left-csv-path').value.trim(),
             date_col: document.getElementById('left-date-col').value.trim(),
             date_type: document.getElementById('left-date-type').value,
             where: document.getElementById('left-where').value.trim(),
@@ -827,7 +811,6 @@ async function savePair() {
             source: document.getElementById('right-source').value,
             conn_macro: document.getElementById('right-conn').value.trim(),
             table: document.getElementById('right-table').value.trim(),
-            csv_path: document.getElementById('right-csv-path').value.trim(),
             date_col: document.getElementById('right-date-col').value.trim(),
             date_type: document.getElementById('right-date-type').value,
             where: document.getElementById('right-where').value.trim(),
@@ -1019,7 +1002,6 @@ async function toggleQueryPreview() {
             source: document.getElementById('left-source').value,
             conn_macro: document.getElementById('left-conn').value,
             table: document.getElementById('left-table').value,
-            csv_path: document.getElementById('left-csv-path').value,
             name: document.getElementById('left-table').value.toLowerCase(),
             date_col: document.getElementById('left-date-col').value,
             date_type: document.getElementById('left-date-type').value,
@@ -1030,7 +1012,6 @@ async function toggleQueryPreview() {
             source: document.getElementById('right-source').value,
             conn_macro: document.getElementById('right-conn').value,
             table: document.getElementById('right-table').value,
-            csv_path: document.getElementById('right-csv-path').value,
             name: document.getElementById('right-table').value.toLowerCase(),
             date_col: document.getElementById('right-date-col').value,
             date_type: document.getElementById('right-date-type').value,

@@ -96,19 +96,6 @@
                             <label>Table *</label>
                             <input type="text" id="left-table" placeholder="CUST_DAILY_VW">
                         </div>
-                        <!-- CSV path: only meaningful when source=csv. Shown
-                             inline; the JS toggles visibility via
-                             updateCsvPathVisibility on source change. The
-                             value is required for source=csv (otherwise the
-                             FROM clause uses the bare Table value, which
-                             DuckDB tries to resolve against its catalog
-                             and almost always fails). -->
-                        <div class="form-group" id="left-csv-path-group" style="display:none;">
-                            <label>CSV Path *</label>
-                            <input type="text" id="left-csv-path"
-                                   placeholder="/path/to/data.csv"
-                                   title="Absolute path to a CSV file readable by the Data Reconciliation process. Read in-process via DuckDB.">
-                        </div>
                         <div class="form-row">
                             <div class="form-group">
                                 <label>Date Column *</label>
@@ -152,12 +139,6 @@
                         <div class="form-group">
                             <label>Table *</label>
                             <input type="text" id="right-table" placeholder="customer_daily">
-                        </div>
-                        <div class="form-group" id="right-csv-path-group" style="display:none;">
-                            <label>CSV Path *</label>
-                            <input type="text" id="right-csv-path"
-                                   placeholder="/path/to/data.csv"
-                                   title="Absolute path to a CSV file readable by the Data Reconciliation process. Read in-process via DuckDB.">
                         </div>
                         <div class="form-row">
                             <div class="form-group">
