@@ -23,16 +23,49 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function _initPresetRadio() {
-    // Default preset is sourced from DTRACK_COL_PRESET set in the page
-    // <head> (which reads ?preset= or defaults to 'quick'). Tick that
-    // radio button (lives inside the Settings modal now) and apply its
-    // stats checkboxes. The active-preset badge on the page card shows
-    // the current selection at a glance without opening the modal.
-    const def = window.DTRACK_COL_PRESET || 'quick';
-    const radio = document.querySelector(`input[name="col-preset"][value="${def}"]`);
-    if (radio) radio.checked = true;
-    _applyPresetToCheckboxes(def);
+    // Restore the last-used preset/stats from localStorage if present;
+    // otherwise fall back to DTRACK_COL_PRESET (from ?preset= or 'quick').
+    if (!_lsRestorePreset()) {
+        const def = window.DTRACK_COL_PRESET || 'quick';
+        const radio = document.querySelector(`input[name="col-preset"][value="${def}"]`);
+        if (radio) radio.checked = true;
+        _applyPresetToCheckboxes(def);
+    }
     _updateActivePresetBadge();
+}
+
+const _LS_PRESET_KEY = 'dtrack_col_preset';
+
+// >>> persist current preset + stat checkboxes to localStorage <<< //
+function _lsSavePreset() {
+    const radio = document.querySelector('input[name="col-preset"]:checked');
+    const stats = {};
+    for (const name of ['n_unique', 'min_max', 'length', 'hash_sum', 'top_10']) {
+        stats[name] = document.getElementById(`stat-${name}`)?.checked || false;
+    }
+    try {
+        localStorage.setItem(_LS_PRESET_KEY,
+            JSON.stringify({preset: radio ? radio.value : 'quick', stats}));
+    } catch {}
+}
+
+// >>> restore preset + stat checkboxes from localStorage; false if nothing saved <<< //
+function _lsRestorePreset() {
+    let saved;
+    try { saved = JSON.parse(localStorage.getItem(_LS_PRESET_KEY) || 'null'); }
+    catch { return false; }
+    if (!saved || !saved.preset) return false;
+    const radio = document.querySelector(`input[name="col-preset"][value="${saved.preset}"]`);
+    if (radio) radio.checked = true;
+    if (saved.preset === 'custom' && saved.stats) {
+        for (const [name, on] of Object.entries(saved.stats)) {
+            const cb = document.getElementById(`stat-${name}`);
+            if (cb) cb.checked = on;
+        }
+    } else {
+        _applyPresetToCheckboxes(saved.preset);
+    }
+    return true;
 }
 
 function _applyPresetToCheckboxes(preset) {
@@ -61,6 +94,7 @@ function onPresetRadio() {
         _applyPresetToCheckboxes(radio.value);
     }
     _updateActivePresetBadge();
+    _lsSavePreset();
 }
 
 function onStatToggle() {
@@ -69,6 +103,7 @@ function onStatToggle() {
     const custom = document.querySelector('input[name="col-preset"][value="custom"]');
     if (custom) custom.checked = true;
     _updateActivePresetBadge();
+    _lsSavePreset();
 }
 
 function _customStatsToPreset() {
