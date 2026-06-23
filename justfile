@@ -28,6 +28,9 @@ export DTRACK_E2E_MOCK_DIR := mockdir
 # Base dir for the live e2e pipeline; outputs land in {{e2edir}}/{csv,sas,output}
 e2edir := "testing"
 
+# Unified pipeline log (every CLI command + full stdout detail). See `just logs`.
+export DTRACK_LOG := e2edir + "/output/dtrack.log"
+
 # Set force=1 to ignore the e2e skip-cache and re-run every expensive stage:
 #   just force=1 e2e all
 force := ""
@@ -179,11 +182,11 @@ e2e-clean:
 query sql *args:
     dtrack query {{db}} "{{sql}}" {{args}}
 
-# tail the unified dtrack log (web API + CLI). Override path with DTRACK_LOG.
+# tail the unified pipeline log ({{e2edir}}/output/dtrack.log; override with DTRACK_LOG)
 logs:
     #!/usr/bin/env bash
-    f="${DTRACK_LOG:-$HOME/.dtrack/dtrack.log}"
-    echo "tailing $f"; tail -n 80 -f "$f"
+    f="${DTRACK_LOG:-{{e2edir}}/output/dtrack.log}"
+    echo "tailing $f"; tail -n 120 -f "$f"
 
 # run tests
 test *args:

@@ -1,0 +1,12 @@
+2026-06-23 11:08:37 INFO [api] >> POST /api/csv_compare/inspect
+2026-06-23 11:08:37 INFO [api] << POST /api/csv_compare/inspect -> 200 (6ms)
+2026-06-23 11:08:38 INFO [api] >> POST /api/csv_compare/run
+2026-06-23 11:08:38 INFO [api] << POST /api/csv_compare/run -> 200 (27ms)
+2026-06-23 11:08:38 INFO [api] >> POST /api/csv_compare/run
+2026-06-23 11:08:38 INFO [api] << POST /api/csv_compare/run -> 400 (4ms)
+2026-06-23 11:08:38 INFO [api] >> POST /api/generate body={"type":"row","sas_outdir":"/tmp/claude-1001/pytest-of-dalab2/pytest-141/test_generate_writes_csv_extra0/sas","aws_outdir":"/tmp/claude-1001/pytest-of-dalab2/pytest-141/test_generate_writes_csv_extra0/csv"}
+2026-06-23 11:08:38 INFO [api] << POST /api/generate -> 200 (286ms)
+2026-06-23 11:08:39 INFO [api] >> POST /api/generate body={"type":"row","sas_outdir":"/tmp/claude-1001/pytest-of-dalab2/pytest-141/test_generate_then_run_csv_pro0/sas","aws_outdir":"/tmp/claude-1001/pytest-of-dalab2/pytest-141/test_generate_then_run_csv_pro0/csv"}
+2026-06-23 11:08:39 INFO [api] << POST /api/generate -> 200 (198ms)
+2026-06-23 11:08:39 INFO [api] >> POST /api/extract/run-sql body={"platform":"csv","type":"row","outdir":"/tmp/claude-1001/pytest-of-dalab2/pytest-141/test_generate_then_run_csv_pro0/sas"}
+2026-06-23 11:08:39 INFO [api] << POST /api/extract/run-sql -> 200 (211ms)
