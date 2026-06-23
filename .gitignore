@@ -30,6 +30,9 @@ htmlcov/
 # Generated e2e mock fixtures (reproduce via: python testing/generate_mock_data.py)
 testing/mock/
 
+# understand-anything generated cache / knowledge graph
+.understand-anything/
+
 # IDEs
 .vscode/
 .idea/
