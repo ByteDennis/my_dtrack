@@ -1076,6 +1076,171 @@ def cmd_sample_hash(args):
     )
 
 
+# >>> parse --keys / --keys-file into an ordered unique list of key values <<< #
+def _col_sample_key_values(args):
+    vals = []
+    if getattr(args, 'keys', None):
+        vals += args.keys.split(',')
+    if getattr(args, 'keys_file', None):
+        with open(args.keys_file) as f:
+            vals += f.read().splitlines()
+    seen, out = set(), []
+    for v in vals:
+        v = v.strip()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+
+# >>> coerce a CLI key string to int/float when numeric so SQL literals stay unquoted <<< #
+def _col_sample_coerce(v):
+    try:
+        return int(v)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        return v
+
+
+_COLSAMPLE_OPEN = "/*COLSAMPLE_START*/"
+_COLSAMPLE_CLOSE = "/*COLSAMPLE_END*/"
+
+
+# >>> strip a prior col-sample key filter from a where clause so re-runs don't stack <<< #
+def _col_sample_strip(where):
+    if not where or _COLSAMPLE_OPEN not in where:
+        return (where or "").strip()
+    pat = re.escape(_COLSAMPLE_OPEN) + r".*?" + re.escape(_COLSAMPLE_CLOSE)
+    w = re.sub(r"\s*AND\s*" + pat, "", where, flags=re.S)
+    w = re.sub(pat + r"\s*AND\s*", "", w, flags=re.S)
+    w = re.sub(pat, "", w, flags=re.S)
+    return w.strip()
+
+
+# >>> case-insensitive col_map lookup; fall back to the same name on the other side <<< #
+def _col_sample_map_lookup(col_map, key):
+    if key in col_map:
+        return col_map[key]
+    kl = key.lower()
+    for k, v in col_map.items():
+        if k.lower() == kl:
+            return v
+    return key
+
+
+# >>> col-sample: deterministic-sample keys, persist key IN (...) into where_map, generate col SQL <<< #
+def cmd_col_sample(args):
+    _require_db(args.project_db)
+    import json
+    import random
+    import tempfile
+    from .extract import extract_all
+    from .db import get_pair_col_map_from_db
+    from .compare import sample_keys_hashed, _key_in_clause, _dialect
+    from .platforms.base import quote_ident
+
+    with open(args.config) as f:
+        config = json.load(f)
+    pairs = config.get("pairs", {})
+    if not pairs:
+        print("No pairs in config")
+        return
+
+    if args.pair:
+        if args.pair not in pairs:
+            print(f"Pair not found: {args.pair}")
+            sys.exit(1)
+        targets = [args.pair]
+    else:
+        targets = [n for n, p in pairs.items() if not p.get("skip")]
+
+    manual = _col_sample_key_values(args)
+    n = getattr(args, 'sample_n', 20)
+    sampled = []
+
+    for pname in targets:
+        pcfg = pairs[pname]
+        left = pcfg.get("left", {})
+        right = pcfg.get("right", {})
+        col_map = pcfg.get("col_map") or get_pair_col_map_from_db(args.project_db, pname) or {}
+        pcfg["col_map"] = col_map
+        right_key = _col_sample_map_lookup(col_map, args.key)
+        ld = _dialect(left.get("source", ""))
+        rd = _dialect(right.get("source", ""))
+
+        wm = pcfg.setdefault("where_map", {})
+        base_left = _col_sample_strip(wm.get("left", ""))
+        base_right = _col_sample_strip(wm.get("right", ""))
+
+        if manual:
+            key_tuples = [(_col_sample_coerce(v),) for v in manual]
+        else:
+            probe = dict(left)
+            probe["where"] = base_left
+            key_tuples = sample_keys_hashed(probe, [args.key], n)
+        if not key_tuples:
+            print(f"[col-sample] {pname}: no keys found; skipping")
+            continue
+
+        left_in = _key_in_clause([quote_ident(args.key, ld)], key_tuples)
+        right_in = _key_in_clause([quote_ident(right_key, rd)], key_tuples)
+        wm["left"] = (f"({base_left}) AND " if base_left else "") + \
+            f"{_COLSAMPLE_OPEN}{left_in}{_COLSAMPLE_CLOSE}"
+        wm["right"] = (f"({base_right}) AND " if base_right else "") + \
+            f"{_COLSAMPLE_OPEN}{right_in}{_COLSAMPLE_CLOSE}"
+        sampled.append(pname)
+        print(f"[col-sample] {pname}: {len(key_tuples)} keys on {args.key}/{right_key} -> where_map")
+
+    if not sampled:
+        print("[col-sample] nothing sampled; no SQL written")
+        return
+
+    with open(args.config, "w") as f:
+        json.dump(config, f, indent=2)
+    print(f"[col-sample] persisted key filter into {args.config} (where_map, AND-merged)")
+
+    for pname in sampled:
+        pcfg = pairs[pname]
+        if args.cols:
+            inc = [c.strip() for c in args.cols.split(",") if c.strip()]
+        elif getattr(args, 'sample_cols', None):
+            dcol = (pcfg.get("left", {}).get("date_col", "") or "").lower()
+            pool = [c for c in (pcfg.get("col_map") or {}).keys()
+                    if c.lower() not in (dcol, args.key.lower())]
+            inc = random.sample(pool, min(args.sample_cols, len(pool))) if pool else []
+            print(f"[col-sample] {pname}: random {len(inc)} of {len(pool)} value cols -> {inc}")
+        else:
+            inc = None
+        if inc is not None:
+            pcfg["col_filter"] = {"include": inc, "exclude": []}
+
+    temp_cfg = dict(config)
+    temp_cfg["pairs"] = {p: pairs[p] for p in sampled}
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    json.dump(temp_cfg, tmp)
+    tmp.close()
+    try:
+        extract_all(
+            config_path=tmp.name,
+            outdir=getattr(args, 'outdir', None),
+            types=['col'],
+            db_path=args.project_db,
+            vintage=getattr(args, 'vintage', None),
+            from_date=getattr(args, 'from_date', None),
+            to_date=getattr(args, 'to_date', None),
+            preset=getattr(args, 'preset', None),
+            stats_override=_parse_stats_override(getattr(args, 'stats_override', None)),
+            gen_only=True,
+        )
+    finally:
+        os.unlink(tmp.name)
+    print("[col-sample] generated extract_col.<platform>.sql. "
+          "Execute: dtrack run-sql --type col  (or `just force=1 e2e col-run`)")
+
+
 # >>> execute already-generated extract_{row,col}.<platform>.sql via each platform's runner (mirrors web run-sql) <<< #
 def cmd_run_sql(args):
     from .extract import run_sql_all
@@ -1458,6 +1623,30 @@ def main():
     p.add_argument('--stats-override', dest='stats_override',
                    help=_STATS_OVERRIDE_HELP)
 
+    # col-sample (deterministic-sample rows by key + columns, write key IN (...) to where_map, generate col SQL)
+    p = sub.add_parser('col-sample',
+                       help='Sample rows by key (deterministic) + columns, write key IN (...) into where_map, '
+                            'and generate col SQL (then run-sql --type col)')
+    p.add_argument('project_db')
+    p.add_argument('--config', required=True)
+    p.add_argument('--key', required=True,
+                   help='Key column on left (right resolved via col_map)')
+    p.add_argument('-n', '--sample', dest='sample_n', type=int, default=20,
+                   help='Number of keys to sample per pair (default 20)')
+    p.add_argument('--keys', help='Explicit key values (comma) to use instead of sampling')
+    p.add_argument('--keys-file', dest='keys_file',
+                   help='File of key values (one per line) instead of sampling')
+    p.add_argument('--pair', help='Restrict to one pair (default: all non-skipped pairs)')
+    p.add_argument('--cols', help='Columns to compare (comma, left names); else all mapped')
+    p.add_argument('--sample-cols', dest='sample_cols', type=int,
+                   help='Randomly sample N columns from col_map')
+    p.add_argument('--outdir', help='Base output directory (csv/ derived from it)')
+    p.add_argument('--vintage')
+    p.add_argument('--from-date')
+    p.add_argument('--to-date')
+    p.add_argument('--preset', choices=['quick', 'standard', 'detailed'], help=_PRESET_HELP)
+    p.add_argument('--stats-override', dest='stats_override', help=_STATS_OVERRIDE_HELP)
+
     # serve
     p = sub.add_parser('serve', help='Start web UI')
     p.add_argument('project_db')
@@ -1546,6 +1735,7 @@ def main():
         'generate': cmd_generate,
         'run-sql': cmd_run_sql,
         'sample-hash': cmd_sample_hash,
+        'col-sample': cmd_col_sample,
         'serve': cmd_serve,
         'query': cmd_query,
         'doctor': cmd_doctor,

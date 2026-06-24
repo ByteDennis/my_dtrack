@@ -288,6 +288,14 @@ e2e-clean level="state":
 sample-hash key="" *args:
     dtrack sample-hash {{db}} --config {{config}} --key {{key}} {{ if pair == "" { "" } else { "--pair " + pair } }} --out {{e2edir}}/output/sample_hash{{suffix}}.xlsx {{args}}
 
+# col-sample: deterministic-sample rows by key (-> where_map) + cols, generate col SQL only
+#   just key=cust_id col-sample                      # all pairs, n=20
+#   just key=cust_id col-sample -n 50 --cols amt,ccy
+#   just key=cust_id pair=tableA col-sample --sample-cols 5 --vintage month
+# then execute the generated SQL:  just force=1 [pair=NAME] e2e col-run
+col-sample key="" *args:
+    dtrack col-sample {{db}} --config {{config}} --key {{key}} {{ if pair == "" { "" } else { "--pair " + pair } }} --outdir {{e2edir}} {{args}}
+
 # run a SQL query against the database
 query sql *args:
     dtrack query {{db}} "{{sql}}" {{args}}

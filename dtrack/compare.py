@@ -764,6 +764,23 @@ def _sample_keys(tbl, key_cols, n):
     return out
 
 
+# >>> deterministic hash-spread sample of up to n distinct key tuples from the left (for col-sample) <<< #
+def sample_keys_hashed(tbl, key_cols, n):
+    src = tbl.get("source", "")
+    d = _dialect(src)
+    ft, cte = _full_table_and_cte(tbl)
+    keys_q = [quote_ident(k, d) for k in key_cols]
+    notnull = " AND ".join(f"{kq} IS NOT NULL" for kq in keys_q)
+    base_where = (tbl.get("where") or "").strip() or "1=1"
+    order_expr = _hash16_expr(src, keys_q[0])
+    sql = (f"{cte}SELECT {', '.join(keys_q)} FROM {ft} "
+           f"WHERE ({base_where}) AND {notnull} "
+           f"GROUP BY {', '.join(keys_q)} "
+           f"ORDER BY {order_expr} {_limit(src, n)}")
+    rows = _run_query(tbl, sql)
+    return [tuple(r[k.lower()] for k in key_cols) for r in rows]
+
+
 def _key_in_clause(key_cols_q, key_tuples):
     if not key_tuples:
         return "1=0"
