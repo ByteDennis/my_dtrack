@@ -238,6 +238,19 @@ def _csv_from_clause(tbl_cfg):
     return tbl_cfg.get('table', '') or tbl_cfg.get('name', 'unknown')
 
 
+# >>> format a canonical YYYY-MM-DD as a DuckDB literal matching the date column's stored type <<< #
+def _csv_date_bound_literal(canon_date, dtype, date_type):
+    ymd = canon_date.replace('-', '')
+    dt = (dtype or '').upper()
+    if dt.startswith(('BIGINT', 'INT', 'HUGEINT', 'DECIMAL', 'DOUBLE', 'FLOAT', 'NUMERIC', 'NUMBER')):
+        return ymd
+    if dt.startswith(('DATE', 'TIMESTAMP')):
+        return f"DATE '{canon_date}'"
+    if (date_type or '').lower() == 'string_compact':
+        return f"'{ymd}'"
+    return f"'{canon_date}'"
+
+
 def _build_row_sql_csv(tbl_cfg, db_path=None, vintage=None):
     """DuckDB row-count SQL for one csv-source table.
 
@@ -251,7 +264,7 @@ def _build_row_sql_csv(tbl_cfg, db_path=None, vintage=None):
     from_ref = _csv_from_clause(tbl_cfg)
 
     parts = []
-    base_where = (tbl_cfg.get('where', '') or '').strip()
+    base_where = '' if tbl_cfg.get('_where_from_config') else (tbl_cfg.get('where', '') or '').strip()
     date_bounds = (tbl_cfg.get('_date_bounds', '') or '').strip()
     if base_where:
         parts.append(base_where)
@@ -554,12 +567,19 @@ def extract_csv(config_path, outdir, types=None, max_workers=None, db_path=None,
             date_col = tbl.get('date_col', '')
             if not date_col:
                 continue
+            path = tbl.get('conn_macro', '') or ''
+            dtype = ''
+            if path and os.path.exists(path):
+                cols = discover_csv_columns(path)
+                dtype = next((v for k, v in cols.items()
+                              if k.lower() == date_col.lower()), '')
+            date_type = tbl.get('date_type')
             date_col_q = quote_ident(date_col, "duckdb")
             bounds = []
             if from_date:
-                bounds.append(f"{date_col_q} >= DATE '{from_date}'")
+                bounds.append(f"{date_col_q} >= {_csv_date_bound_literal(from_date, dtype, date_type)}")
             if to_date:
-                bounds.append(f"{date_col_q} <= DATE '{to_date}'")
+                bounds.append(f"{date_col_q} <= {_csv_date_bound_literal(to_date, dtype, date_type)}")
             if bounds:
                 tbl['_date_bounds'] = " AND ".join(bounds)
             tbl['_from_date'] = from_date

@@ -446,7 +446,7 @@ def load_precomputed_col_stats(
                 canonical_dt = parse_date(raw_dt) if raw_dt else raw_dt
             except ValueError as e:
                 canonical_dt = raw_dt
-                if not stats:  # print once
+                if not stats and raw_dt not in ('all', 'sample'):  # print once
                     print(f"  [vintage_label] WARNING: parse_date({raw_dt!r}) failed: {e}")
             label = ""
             if canonical_dt and effective_vintage:

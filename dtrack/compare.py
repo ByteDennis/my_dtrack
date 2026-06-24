@@ -11,6 +11,8 @@ from .date_utils import parse_date
 from .constants import STAT_ROUND_DECIMALS
 from .platforms.base import quote_ident, resolve_table
 
+_DATE_SENTINELS = frozenset({'all', 'sample'})
+
 
 def resolve_col_filter(col_map, include_patterns=None, exclude_patterns=None):
     """Apply include/exclude glob patterns against col_map keys.
@@ -352,7 +354,8 @@ def compare_column_stats(
         comparisons = []
         all_dates = set(left_dates.keys()) | set(right_dates.keys())
         if matched_dates is not None:
-            all_dates = all_dates & matched_dates
+            all_dates = {d for d in all_dates
+                         if d in _DATE_SENTINELS or d in matched_dates}
 
         for dt in sorted(all_dates):
             if dt not in left_dates or dt not in right_dates:

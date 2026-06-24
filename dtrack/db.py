@@ -665,10 +665,11 @@ def get_col_stats(
                 canon = parse_date(raw_dt)
             except ValueError:
                 canon = raw_dt
-            if from_date and canon < from_date:
-                continue
-            if to_date and canon > to_date:
-                continue
+            if canon not in ('all', 'sample'):
+                if from_date and canon < from_date:
+                    continue
+                if to_date and canon > to_date:
+                    continue
             filtered.append(r)
         results = filtered
 
