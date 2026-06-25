@@ -216,6 +216,25 @@ def load_row_counts(
     })
 
 
+# >>> read a {qname}_columns.csv sidecar (column_name/variable/name -> data_type), case-insensitive headers <<< #
+def read_columns_sidecar(path):
+    if not path or not os.path.exists(path):
+        return {}
+    out = {}
+    try:
+        with open(path, 'r', newline='') as f:
+            for row in csv.DictReader(f):
+                row = {(k or '').strip().lower(): v for k, v in row.items()}
+                col = (row.get('column_name') or row.get('variable')
+                       or row.get('name') or '')
+                dt = row.get('data_type') or row.get('type') or ''
+                if col:
+                    out[col] = dt
+    except Exception:
+        return {}
+    return out
+
+
 def load_column_data_csv(
     csv_path: str,
     date_col: str,

@@ -223,17 +223,64 @@ def csv_sql_filename(extract_type):
     return f"extract_{extract_type}.sql"
 
 
+# >>> map an original-DB type annotation to the closest DuckDB read type <<< #
+def _duckdb_type(decl):
+    raw = (decl or '').upper().strip()
+    base = raw.split('(')[0].strip()
+    if base in ('NUMBER', 'NUMERIC', 'DECIMAL', 'DEC'):
+        import re as _re
+        m = _re.search(r'\(\s*\d+\s*,\s*(\d+)\s*\)', raw)
+        return 'BIGINT' if (m and int(m.group(1)) == 0) else 'DOUBLE'
+    if base in ('INT', 'INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'LONG', 'INT64', 'INT32'):
+        return 'BIGINT'
+    if base in ('DOUBLE', 'FLOAT', 'REAL', 'BINARY_DOUBLE', 'BINARY_FLOAT', 'FLOAT64'):
+        return 'DOUBLE'
+    if base in ('VARCHAR', 'VARCHAR2', 'CHAR', 'NCHAR', 'NVARCHAR', 'NVARCHAR2',
+                'STRING', 'TEXT', 'CLOB', 'CHARACTER'):
+        return 'VARCHAR'
+    if base in ('DATE',):
+        return 'DATE'
+    if base in ('TIMESTAMP', 'DATETIME'):
+        return 'TIMESTAMP'
+    return 'VARCHAR'
+
+
+# >>> effective read types: declared (config) wins, inferred BOOLEAN -> VARCHAR; returns (all_types, overrides) <<< #
+def _resolve_csv_types(inferred, declared):
+    decl_lower = {k.lower(): v for k, v in (declared or {}).items()}
+    effective, overrides = {}, {}
+    for col, inf in inferred.items():
+        if col.lower() in decl_lower:
+            ddl = _duckdb_type(decl_lower[col.lower()])
+            effective[col] = ddl
+            overrides[col] = ddl
+        elif (inf or '').upper().startswith('BOOL'):
+            effective[col] = 'VARCHAR'
+            overrides[col] = 'VARCHAR'
+        else:
+            effective[col] = inf
+    return effective, overrides
+
+
 def _csv_from_clause(tbl_cfg):
     """Return the FROM-clause table reference for a csv-source pair.
 
-    Prefers tbl_cfg['conn_macro'] (the CSV file path, quoted as a string
-    literal -- DuckDB accepts this directly; the runner's
-    _rewrite_csv_from_clauses swaps in read_csv_auto at execution time).
-    Falls back to tbl_cfg['table'] when conn_macro is empty, which lets a
-    caller pre-register tables under a different name in the catalog.
+    Prefers tbl_cfg['conn_macro'] (the CSV file path). When the table
+    carries `_read_types` (original-DB type annotations + boolean
+    coercion, see _resolve_csv_types) it emits an explicit
+    read_csv(..., types={...}) so DuckDB reads each column as the source
+    type instead of re-inferring it -- this keeps both sides of a pair on
+    the same type (fixing BIGINT-vs-DOUBLE drift) and avoids TRIM(BOOLEAN)
+    binder errors. Without overrides it returns the bare quoted path,
+    which the runner's _rewrite_csv_from_clauses swaps to read_csv_auto.
+    Falls back to tbl_cfg['table'] when conn_macro is empty.
     """
     path = tbl_cfg.get('conn_macro', '') or ''
     if path:
+        types = tbl_cfg.get('_read_types') or {}
+        if types:
+            type_map = ", ".join(f"'{c}': '{t}'" for c, t in types.items())
+            return f"read_csv('{path}', header=true, types={{{type_map}}})"
         return f"'{path}'"
     return tbl_cfg.get('table', '') or tbl_cfg.get('name', 'unknown')
 
@@ -500,15 +547,27 @@ def _discover_and_write_csv_columns(csv_tables, outdir, db_path):
                   f"({path!r}); skipping discovery")
             continue
         qname = qualified_name(tbl)
-        cols = discover_csv_columns(path)
-        if not cols:
+        inferred = discover_csv_columns(path)
+        if not inferred:
             print(f"  {qname}: DuckDB returned no columns for {path}")
             continue
+        # An existing {qname}_columns.csv sidecar (auto-written before, or
+        # hand-edited with original-DB types) is the source of truth: its
+        # types are merged in as declared (config `columns` still wins) and
+        # the file is not overwritten.
+        from ..loader import read_columns_sidecar
+        col_csv = os.path.join(outdir, f"{qname}_columns.csv")
+        sidecar = read_columns_sidecar(col_csv)
+        declared = {**sidecar, **(tbl.get('columns') or {})}
+        cols, overrides = _resolve_csv_types(inferred, declared)
+        if overrides:
+            tbl['_read_types'] = overrides
         if db_path:
             insert_column_meta(db_path, qname, cols, source='csv')
-        # Sidecar CSV so the user can inspect / load via the same path
-        # the engine platforms use.
-        col_csv = os.path.join(outdir, f"{qname}_columns.csv")
+        if os.path.exists(col_csv):
+            print(f"  {qname}: kept existing {qname}_columns.csv "
+                  f"({len(sidecar)} types) -> not overwritten")
+            continue
         with open(col_csv, 'w', newline='') as f:
             w = csv.writer(f)
             w.writerow(['column_name', 'data_type'])

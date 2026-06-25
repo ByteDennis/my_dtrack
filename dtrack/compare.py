@@ -9,9 +9,19 @@ from .db import (get_row_counts, get_col_stats, get_table_pair, list_table_pairs
 from .config import load_unified_config
 from .date_utils import parse_date
 from .constants import STAT_ROUND_DECIMALS
-from .platforms.base import quote_ident, resolve_table
+from .platforms.base import (quote_ident, resolve_table,
+                             _is_numeric_col_type, _is_date_col_type)
 
 _DATE_SENTINELS = frozenset({'all', 'sample'})
+
+
+# >>> normalize a col_type label (raw DB type or dtrack tag) to numeric/date/categorical <<< #
+def _col_family(t):
+    if _is_numeric_col_type(t):
+        return 'numeric'
+    if _is_date_col_type(t):
+        return 'date'
+    return 'categorical'
 
 
 def resolve_col_filter(col_map, include_patterns=None, exclude_patterns=None):
@@ -276,18 +286,24 @@ def compare_row_counts(db_path, table_left, table_right, from_date=None, to_date
 # ============================================================================
 
 def resolve_col_type(left_type, right_type, overrides=None, col_name=None):
-    """Resolve disagreeing column types. Categorical is the safe default.
+    """Resolve column types to a normalized family (numeric/date/categorical).
+
+    Both sides are mapped to a family first, so BIGINT vs DOUBLE (both
+    numeric) resolve to 'numeric' instead of being treated as a mismatch.
+    Differing families fall back to categorical, the safe default for
+    stat comparison.
 
     >>> resolve_col_type("categorical", "numeric")
     'categorical'
     >>> resolve_col_type("numeric", "numeric")
     'numeric'
+    >>> resolve_col_type("BIGINT", "DOUBLE")
+    'numeric'
     """
     if overrides and col_name and col_name in overrides:
         return overrides[col_name]
-    if left_type == right_type:
-        return left_type
-    return "categorical"
+    lf, rf = _col_family(left_type), _col_family(right_type)
+    return lf if lf == rf else "categorical"
 
 
 def compare_column_stats(

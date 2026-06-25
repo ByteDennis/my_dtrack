@@ -50,7 +50,7 @@ from .config import (
     get_ignored_columns,
     get_col_type_overrides,
 )
-from .platforms.base import qualified_name, is_sas_table
+from .platforms.base import qualified_name, is_sas_table, is_numeric_type
 from .interact import prompt_skip_pair, prompt_ignore_items, confirm, save_and_pause
 
 
@@ -253,6 +253,15 @@ def cmd_load_columns(args):
             print(f"{qname}: loaded {count} columns from CSV")
             continue
 
+        # Prefer a user-provided {qname}_columns.csv sidecar over live
+        # discovery, so hand-edited types (column -> datatype) are honored.
+        existing = _read_sidecar_columns(cols_dir, qname)
+        if existing:
+            count = insert_column_meta(args.project_db, qname, existing, source=source)
+            print(f"{qname}: loaded {count} columns from existing "
+                  f"{qname}_columns.csv (discovery skipped)")
+            continue
+
         # A 'processed' CTE joins multiple tables, so it has no single physical
         # table to DESCRIBE. Never live-discover it; read the user-supplied
         # {qname}_columns.csv (variable -> data_type) instead.
@@ -296,6 +305,9 @@ def cmd_load_columns(args):
             if not meta:
                 continue
             col_csv = os.path.join(out_dir, f"{qname}_columns.csv")
+            if os.path.exists(col_csv):
+                print(f"Kept existing column metadata (not overwritten): {col_csv}")
+                continue
             with open(col_csv, 'w', newline='') as f:
                 w = csv_mod.writer(f)
                 w.writerow(['COLUMN_NAME', 'DATA_TYPE'])
@@ -306,23 +318,10 @@ def cmd_load_columns(args):
 
 # >>> read a user-supplied {qname}_columns.csv (column_name/variable -> data_type) <<< #
 def _read_sidecar_columns(columns_dir, qname):
-    import csv as csv_mod
+    from .loader import read_columns_sidecar
     if not columns_dir:
         return None
-    path = os.path.join(columns_dir, f"{qname}_columns.csv")
-    if not os.path.exists(path):
-        return None
-    cols = {}
-    with open(path, 'r', newline='') as f:
-        for row in csv_mod.DictReader(f):
-            row = {k.strip(): v for k, v in row.items()}
-            col = (row.get('column_name') or row.get('COLUMN_NAME')
-                   or row.get('variable') or row.get('VARIABLE')
-                   or row.get('name') or row.get('NAME') or '')
-            dt = (row.get('data_type') or row.get('DATA_TYPE')
-                  or row.get('type') or row.get('TYPE') or '')
-            if col:
-                cols[col] = dt
+    cols = read_columns_sidecar(os.path.join(columns_dir, f"{qname}_columns.csv"))
     return cols or None
 
 
@@ -954,6 +953,7 @@ def cmd_match_columns(args):
                     file_maps.setdefault(p, {})[lcol] = rcol
 
     matched_columns = {}
+    type_violations = []
     for pair_name, pair_config in config["pairs"].items():
         left = pair_config['left']
         right = pair_config['right']
@@ -1026,7 +1026,21 @@ def cmd_match_columns(args):
             print(f"  {len(left_only)} unmatched left + {len(right_only)} unmatched right "
                   f"column(s) left unmapped (map them in the web col_mapping page or via --map-csv)")
 
+        for lcol, rcol in matched.items():
+            lt = left_cols.get(lcol, '')
+            rt = right_cols.get(rcol, '')
+            if lt and rt and is_numeric_type(lt) != is_numeric_type(rt):
+                type_violations.append((pair_name, lcol, lt, rcol, rt))
+
         matched_columns[pair_name] = matched
+
+    if type_violations:
+        print("\nERROR: numeric <-> categorical/date column mappings detected "
+              "(stats are not comparable across type families):")
+        for pn, lc, lt, rc, rt in type_violations:
+            print(f"  [{pn}] {lc} ({lt}) <-> {rc} ({rt})")
+        print("Fix the col_map or the column types, then re-run. No changes saved.")
+        sys.exit(1)
 
     if matched_columns:
         for pair_name, m in matched_columns.items():
