@@ -217,6 +217,14 @@ function pgEngineChanged() {
             sqlBox.placeholder = "SELECT COUNT(*) FROM schema.tbl WHERE trade_date >= '2026-05-01'\n" +
                 "\n-- Connects via pyodbc.connect('DSN=<name>', autocommit=True).\n" +
                 "-- SSL_CERT_FILE is temporarily unset around the connect call.";
+        } else if (eng === 'csv') {
+            label.textContent = 'CSV file path (conn_macro)';
+            conn.placeholder = '/path/to/file.csv';
+            sqlBox.placeholder = "SELECT COUNT(*) FROM data WHERE amt > 0\n" +
+                "\n-- DuckDB runs in-process on the SERVER. The CSV path above is\n" +
+                "-- registered as the view `data`; you can also write\n" +
+                "--   SELECT * FROM '/path/to/file.csv'  (read_csv_auto).\n" +
+                "-- Only the capped result rows reach the browser (no in-browser load).";
         } else {
             label.textContent = 'Oracle macro (e.g. pb23)';
             conn.placeholder = 'pb23';
@@ -243,6 +251,7 @@ async function pgRun() {
     if (!sql.trim()) { _pgSetStatus('SQL is empty.', 'error'); return; }
     const conn = document.getElementById('pg-conn').value.trim();
     if (engine === 'oracle' && !conn) { _pgSetStatus('Oracle requires a connection macro.', 'error'); return; }
+    if (engine === 'csv' && !conn) { _pgSetStatus('CSV requires a file path.', 'error'); return; }
 
     const rowCap = parseInt(document.getElementById('pg-row-cap').value || '20', 10);
     const useCache = document.getElementById('pg-use-cache').checked;

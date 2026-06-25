@@ -90,7 +90,7 @@ PLATFORM_RUNNER = {
     },
     'hadoop': {
         'worker_env':       'HADOOP_MAX_WORKERS',
-        'worker_default':   4,
+        'worker_default':   1,
         'degraded_label':   'hadoop_degraded',
         # Trigger the @degrade_sql lifeboat for Hive memory / executor /
         # container exhaustion patterns. Broad on purpose: Hive surfaces

@@ -4927,6 +4927,26 @@ async def api_playground_run(request: Request):
                 conn.close()
             except Exception:
                 pass
+        elif engine == "csv":
+            from ..platforms.csv_duckdb import duckdb_connect, _rewrite_csv_from_clauses
+            conn = duckdb_connect()
+            if conn is None:
+                raise RuntimeError("DuckDB unavailable (install 'dtrack[csv]').")
+            handle["conn"] = conn
+            if conn_id and os.path.exists(conn_id):
+                conn.execute(
+                    "CREATE OR REPLACE VIEW data AS "
+                    f"SELECT * FROM read_csv_auto('{conn_id}', header=true)")
+            res = conn.execute(_rewrite_csv_from_clauses(sql))
+            columns = [d[0] for d in (res.description or [])]
+            fetched = res.fetchall()
+            n_rows_total = len(fetched)
+            all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
+            rows = all_rows[:row_cap]
+            try:
+                conn.close()
+            except Exception:
+                pass
         else:
             from ..platforms.databricks import databricks_connect
             conn = databricks_connect(conn_id or None)

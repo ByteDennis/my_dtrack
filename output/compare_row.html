@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>api-test</title>
+    <title>repro</title>
     
     <style>
         body {
@@ -54,7 +54,7 @@
 </head>
 <body>
     <div class="page-title">
-        api-test
+        repro
         <div class="update-note">
             <svg class="calendar-icon" viewBox="0 0 24 24">
                 <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
@@ -62,7 +62,7 @@
                 <line x1="8" y1="2" x2="8" y2="6" />
                 <line x1="3" y1="10" x2="21" y2="10" />
             </svg>
-            Latest update: Jun 11, 2026
+            Latest update: Jun 25, 2026
         </div>
     </div>
 
@@ -90,33 +90,33 @@
 
         <tbody>
 
-            <!-- t_pair -->
+            <!-- p -->
             <tr>
                 <td colspan="6" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">
-                    fixture pair for api tests | <b>T_LEFT</b> (PB23) | <b>T_RIGHT</b> (ANALYTICS_DB)
+                    int vs double + boolean | <b>L</b> (/TMP/REPRO/LEFT.CSV) | <b>R</b> (/TMP/REPRO/RIGHT.CSV)
                 </td>
             </tr>
             <tr>
-                <td style="border:1px solid #ccc; padding:8px;">ORACLE</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
-                <td style="border:1px solid #ccc; padding:8px;">0 (0.00 M)</td>
+                <td style="border:1px solid #ccc; padding:8px;">CSV</td>
+                <td style="border:1px solid #ccc; padding:8px;">dt</td>
+                <td style="border:1px solid #ccc; padding:8px; color:#1565c0; font-weight:600;">2024-01-01</td>
+                <td style="border:1px solid #ccc; padding:8px; color:#1565c0; font-weight:600;">2024-01-02</td>
+                <td style="border:1px solid #ccc; padding:8px;">3 (0.00 M)</td>
                 <td style="border:1px solid #ccc; padding:8px;">—</td>
             </tr>
             <tr>
-                <td style="border:1px solid #ccc; padding:8px;">AWS</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
-                <td style="border:1px solid #ccc; padding:8px;">—</td>
-                <td style="border:1px solid #ccc; padding:8px;">0 (0.00 M)</td>
+                <td style="border:1px solid #ccc; padding:8px;">CSV</td>
+                <td style="border:1px solid #ccc; padding:8px;">dt</td>
+                <td style="border:1px solid #ccc; padding:8px; color:#1565c0; font-weight:600;">2024-01-01</td>
+                <td style="border:1px solid #ccc; padding:8px; color:#1565c0; font-weight:600;">2024-01-02</td>
+                <td style="border:1px solid #ccc; padding:8px;">3 (0.00 M)</td>
                 <td style="border:1px solid #ccc; padding:8px;">—</td>
             </tr>
             <tr>
                 <td colspan="6" style="border:1px solid #ccc; padding:4px;">
                     <details style="margin:0;">
                         <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">
-                            <span style="">oracle only: 0</span>, <span style="">aws only: 0</span>, <span style="color:green;">days match: 0</span>, <span style="">days mismatch: 0</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px; margin-left:8px;"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+                            <span style="">csv only: 0</span>, <span style="">csv only: 0</span>, <span style="color:green;">days match: 2</span>, <span style="">days mismatch: 0</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px; margin-left:8px;"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
                         </summary>
                         <div style="padding:8px; font-size:12px;">
                             <p style="margin:8px 0; color:green;">✓ All dates match perfectly!</p>
