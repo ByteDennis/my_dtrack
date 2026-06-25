@@ -1375,6 +1375,20 @@ def cmd_doctor(args):
 
     env_loaded = os.environ.get('DTRACK_ENV_FILE_LOADED', '<none found>')
     print(f"env file:  {env_loaded}")
+    try:
+        from dotenv import find_dotenv
+        shadowed = []
+        for fname in ('dtrack.conf', '.env', 'dtrack.env'):
+            found = find_dotenv(usecwd=True, filename=fname)
+            if found and os.path.abspath(found) != os.path.abspath(env_loaded):
+                shadowed.append(found)
+        if shadowed:
+            print(f"  NOTE: only the file above is loaded; these are IGNORED: "
+                  f"{', '.join(shadowed)}")
+            print(f"        (put HADOOP_DSN/PCDS_USR/etc. in the loaded file, "
+                  f"or a shell-exported var will also override it)")
+    except Exception:
+        pass
     print()
 
     print("Oracle macros (MACRO2SVC + overrides):")
@@ -1412,6 +1426,15 @@ def cmd_doctor(args):
     print("SAS env:")
     for var in ('SAS_LIB', 'OUT_DIR', 'EMAIL_TO',
                 'SAS_CACHE_DIR', 'SAS_ROW_REDO', 'SAS_COL_REDO'):
+        val = os.environ.get(var)
+        print(f"  {var:24s} = {val if val else '<unset>'}")
+    print()
+
+    print("Hadoop / Hive (ODBC) env:")
+    hdsn = os.environ.get('HADOOP_DSN')
+    print(f"  {'HADOOP_DSN':24s} = {hdsn if hdsn else '<unset, default Hive_Prod>'}")
+    for var in ('KRB5CCNAME', 'KRB5_CONFIG', 'KRB5_KTNAME',
+                'SSL_CERT_FILE', 'HTTPS_PROXY'):
         val = os.environ.get(var)
         print(f"  {var:24s} = {val if val else '<unset>'}")
 

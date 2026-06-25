@@ -55,6 +55,16 @@ def hadoop_connect(dsn: Optional[str] = None, *,
 
     with _HADOOP_CONNECT_LOCK:
         saved = os.environ.pop('SSL_CERT_FILE', None)
+        if os.environ.get('DTRACK_HADOOP_DEBUG'):
+            import sys as _sys
+            import threading as _th
+            print(f"[hadoop] connect DSN={dsn!r} thread={_th.current_thread().name} "
+                  f"SSL_CERT_FILE={'popped' if saved is not None else 'unset'} "
+                  f"KRB5CCNAME={os.environ.get('KRB5CCNAME', '<unset>')} "
+                  f"KRB5_CONFIG={os.environ.get('KRB5_CONFIG', '<unset>')} "
+                  f"KRB5_KTNAME={os.environ.get('KRB5_KTNAME', '<unset>')} "
+                  f"HTTPS_PROXY={os.environ.get('HTTPS_PROXY', '<unset>')}",
+                  file=_sys.stderr, flush=True)
         try:
             try:
                 conn = pyodbc.connect(f"DSN={dsn}", autocommit=autocommit)

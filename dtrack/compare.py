@@ -5,11 +5,11 @@ import os
 import re
 from fnmatch import fnmatch
 from .db import (get_row_counts, get_col_stats, get_table_pair, list_table_pairs,
-                 get_pair_col_map_from_db)
+                 get_pair_col_map_from_db, get_column_meta)
 from .config import load_unified_config
 from .date_utils import parse_date
 from .constants import STAT_ROUND_DECIMALS
-from .platforms.base import (quote_ident, resolve_table,
+from .platforms.base import (quote_ident, resolve_table, qualified_name,
                              _is_numeric_col_type, _is_date_col_type)
 
 _DATE_SENTINELS = frozenset({'all', 'sample'})
@@ -837,6 +837,15 @@ def _fetch_side(tbl, key_cols, value_cols, key_tuples):
     return by_key
 
 
+# >>> case-insensitive set of columns recorded for a table in _column_meta (empty if none) <<< #
+def _present_cols(project_db, tbl):
+    try:
+        meta = get_column_meta(project_db, qualified_name(tbl))
+    except Exception:
+        meta = []
+    return {m["column_name"].lower() for m in meta if m.get("column_name")}
+
+
 # >>> sample-hash one pair: returns (header, rows) for the Excel sheet <<< #
 def _sample_pair(project_db, pair_name, pair_cfg, key_cols, n):
     left = dict(pair_cfg["left"])
@@ -853,9 +862,28 @@ def _sample_pair(project_db, pair_name, pair_cfg, key_cols, n):
                   f"({', '.join(_SUPPORTED)}). Skipping.")
             return None
 
+    left_present = _present_cols(project_db, left)
+    right_present = _present_cols(project_db, right)
+
+    def _ok(col, present):
+        return (not present) or (str(col).lower() in present)
+
     left_keys = key_cols
     right_keys = [col_map.get(k, k) for k in key_cols]
-    value_pairs = [(l, r) for l, r in col_map.items() if l not in key_cols]
+    value_pairs, dropped = [], []
+    for l, r in col_map.items():
+        if l in key_cols:
+            continue
+        if _ok(l, left_present) and _ok(r, right_present):
+            value_pairs.append((l, r))
+        else:
+            dropped.append(l if l == r else f"{l}->{r}")
+    if dropped:
+        print(f"  {pair_name}: skipping {len(dropped)} column(s) absent on one "
+              f"side: {', '.join(dropped)}")
+    if not value_pairs:
+        print(f"  {pair_name}: no matched columns present on both sides. Skipping.")
+        return None
     left_vals = [l for l, _ in value_pairs]
     right_vals = [r for _, r in value_pairs]
 

@@ -1572,14 +1572,15 @@ def _col_sql_dialect_ops(dialect):
             # expression (concat/substr or date_format), so no outer wrap.
             'dt_select_wrap':     lambda dt_expr: dt_expr,
         }
-        if dialect == 'databricks':
-            from .athena import _vintage_date_expr_athena
-            ops['vintage_expr'] = (
-                lambda tbl_cfg, date_col_q, vintage, date_dtype, date_format:
-                _vintage_date_expr_athena(date_col_q, vintage,
-                                          date_dtype=date_dtype, date_format=date_format)
-            )
-            ops['dt_select_wrap'] = lambda dt_expr: f"CAST({dt_expr} AS STRING)"
+        # Databricks/Spark shares Hive's cast/concat/hash fragments (above)
+        # AND Hive's vintage bucketing: _hadoop_vintage_expr builds buckets
+        # from substr/concat/date_format/next_day/to_date and deliberately
+        # avoids date_trunc() and date_parse() -- both of which are absent or
+        # invalid in Spark SQL (date_parse is Trino-only; older runtimes
+        # reject date_trunc). The earlier Athena override emitted
+        # date_parse(CAST(col AS VARCHAR), ...), which fails on Spark with
+        # "no function date_parse" / bare-VARCHAR primitive-type errors, so
+        # databricks now uses the hadoop branch unchanged.
         return ops
     if dialect == 'duckdb':
         # DuckDB powers the csv-source path (platforms/csv_duckdb.py).

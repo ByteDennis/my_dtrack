@@ -127,9 +127,18 @@ def _query_databricks(sql, catalog_schema=None):
     conn = databricks_connect(catalog_schema)
     try:
         cur = conn.cursor()
-        cur.execute(sql)
-        cols = [d[0].lower() for d in (cur.description or [])]
-        out = [dict(zip(cols, row)) for row in cur.fetchall()]
+        # Blocks are multi-statement (USE CATALOG; USE SCHEMA; SELECT ...) so
+        # the leading session statements run on the same cursor before the
+        # query. Split on ';' (generated SQL never embeds ';' in a literal);
+        # keep the rows from the last statement that returns a result set.
+        out = []
+        for stmt in (s.strip() for s in sql.split(";")):
+            if not stmt:
+                continue
+            cur.execute(stmt)
+            if cur.description:
+                cols = [d[0].lower() for d in cur.description]
+                out = [dict(zip(cols, row)) for row in cur.fetchall()]
         cur.close()
         cache_put(sql, catalog_schema, out, row_count=len(out))
         return out
@@ -159,23 +168,32 @@ def _discover_columns_databricks(cursor, catalog, schema, table):
     return cols
 
 
-# >>> resolve "catalog.schema.table"; always backtick the catalog, schema/table only when not valid bare Spark identifiers <<< #
+# >>> resolve "schema.table" (catalog is set per-block via USE CATALOG, not qualified inline) <<< #
 def _full_table(tbl_cfg):
     cs = _resolve_catalog_schema(tbl_cfg.get("conn_macro"))
     table = tbl_cfg.get("table") or ""
-    parts = []
-    if cs:
-        parts.extend(p for p in cs.split(".") if p)
-    if table:
-        parts.append(table)
-    has_catalog = bool(cs) and "." in cs
+    parts = [p for p in (cs or "").split(".") if p]
+    schema = parts[-1] if parts else ""
     out = []
-    for i, p in enumerate(parts):
-        if i == 0 and has_catalog:
-            out.append(p if p.startswith("`") else f"`{p}`")
-        else:
-            out.append(quote_ident(p, "databricks"))
+    if schema:
+        out.append(quote_ident(schema, "databricks"))
+    if table:
+        out.append(quote_ident(table, "databricks"))
     return ".".join(out)
+
+
+# >>> "USE CATALOG `cat`;\nUSE SCHEMA `sch`;" prefix from conn_macro (catalog always backticked) <<< #
+def _use_catalog_prefix(conn_macro):
+    cs = _resolve_catalog_schema(conn_macro)
+    parts = [p for p in (cs or "").split(".") if p]
+    lines = []
+    if len(parts) >= 2:
+        cat = parts[0] if parts[0].startswith("`") else f"`{parts[0]}`"
+        lines.append(f"USE CATALOG {cat};")
+        lines.append(f"USE SCHEMA {quote_ident(parts[-1], 'databricks')};")
+    elif len(parts) == 1:
+        lines.append(f"USE SCHEMA {quote_ident(parts[0], 'databricks')};")
+    return ("\n".join(lines) + "\n") if lines else ""
 
 
 # >>> build per-table row-count SQL block <<< #
@@ -222,7 +240,7 @@ def _write_combined_row_sql_databricks(databricks_tables, outdir):
             continue
         blocks.append(f"-- {qname}")
         blocks.append(f"/* @conn_macro={conn_macro} */")
-        blocks.append(sql + ";")
+        blocks.append(_use_catalog_prefix(conn_macro) + sql + ";")
         blocks.append("")
     sql_path = _os.path.join(outdir, "extract_row.sql")
     with open(sql_path, "w", encoding="utf-8") as f:
@@ -310,7 +328,7 @@ def _write_combined_col_sql_databricks(databricks_tables, outdir, db_path=None,
                 continue
             blocks.append(f"-- {qname}/{col}")
             blocks.append(f"/* @conn_macro={conn_macro} */")
-            blocks.append(sql.strip() + ";")
+            blocks.append(_use_catalog_prefix(conn_macro) + sql.strip() + ";")
             blocks.append("")
     sql_path = os.path.join(outdir, "extract_col.sql")
     with open(sql_path, "w", encoding="utf-8") as f:

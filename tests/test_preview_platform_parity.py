@@ -57,7 +57,7 @@ PLATFORM_CASES = [
     ),
     pytest.param(
         "databricks", ".sql",
-        ["SELECT", "FROM", "row_count", "`main`.warehouse.trades", "GROUP BY"],
+        ["SELECT", "FROM", "row_count", "warehouse.trades", "GROUP BY"],
         ["connect to oracle", "proc sql"],
         id="databricks",
     ),

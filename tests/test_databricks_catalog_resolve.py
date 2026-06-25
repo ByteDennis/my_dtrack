@@ -40,14 +40,14 @@ def test_resolve_passes_bare_schema_through_when_default_missing(monkeypatch):
 def test_full_table_uses_resolved_catalog_schema(monkeypatch):
     monkeypatch.setenv("DB_DEFAULT_CATALOG", "main")
     tbl = {"conn_macro": "analytics", "table": "pos_daily"}
-    # catalog (prepended from DB_DEFAULT_CATALOG) is always backticked
-    assert _full_table(tbl) == "`main`.analytics.pos_daily"
+    # catalog is set per-block via USE CATALOG; the table ref is schema.table
+    assert _full_table(tbl) == "analytics.pos_daily"
 
 
 def test_full_table_keeps_two_part_macro_intact(monkeypatch):
     monkeypatch.setenv("DB_DEFAULT_CATALOG", "ignored")
     tbl = {"conn_macro": "prod.fact_loans", "table": "snapshot"}
-    assert _full_table(tbl) == "`prod`.fact_loans.snapshot"
+    assert _full_table(tbl) == "fact_loans.snapshot"
 
 
 def test_full_table_returns_bare_table_when_macro_missing(monkeypatch):
