@@ -64,12 +64,12 @@ Thumbs.db
 # Documentation
 *.md
 !instruct.md
-!example/nbs/tutorials/*.md
-!tests/csv/README.md
 .env
 thesis
 week_report*
-example/*
-!example/report/
-!example/nbs/
-!example/*.sas
+
+# Local-only — kept on disk, untracked from the remote tree (history retains prior commits)
+example/
+output/
+testing/
+tests/
