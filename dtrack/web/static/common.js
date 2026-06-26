@@ -295,11 +295,11 @@ function apiLog(message, type = 'info') {
 }
 
 // Canonical HTML escapers — every page delegates to these (single source).
-// escHtml: text nodes (&<>); escAttr: also quotes for attribute contexts.
+// escHtml: text nodes (&<>); escHtmlAttr: also quotes for attribute contexts.
 function escHtml(s) {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
-function escAttr(s) {
+function escHtmlAttr(s) {
     return escHtml(s).replace(/"/g,'&quot;');
 }
 function _escHtml(s) { return escHtml(s); }

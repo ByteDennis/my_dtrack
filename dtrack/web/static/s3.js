@@ -85,7 +85,7 @@ function _s3SetStatus(text, kind) {
 
 function _s3Esc(s) {
     if (s == null) return '';
-    return escAttr(s);
+    return escHtmlAttr(s);
 }
 
 function _s3FmtBytes(n) {

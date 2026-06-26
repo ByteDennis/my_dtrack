@@ -824,7 +824,7 @@ async function downloadAllExcel() {
 // ---------------------------------------------------------------------------
 function esc(s) {
     if (!s) return '';
-    return escAttr(s);
+    return escHtmlAttr(s);
 }
 
 function escAttr(s) {
