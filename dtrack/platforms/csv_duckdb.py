@@ -9,6 +9,7 @@ from .base import (
     build_date_in_clause,
     build_date_range_with_gaps,
     resolve_date_format,
+    apply_pair_date_bounds,
     compute_date_filter,
     set_cache_db,
     cache_get,
@@ -470,29 +471,23 @@ def extract_csv(config_path, outdir, types=None, max_workers=None, db_path=None,
             tbl['vintage'] = 'all'
     inject_where_from_config(csv_tables, config)
 
-    if from_date or to_date:
-        for tbl in csv_tables:
-            date_col = tbl.get('date_col', '')
-            if not date_col:
-                continue
-            path = tbl.get('conn_macro', '') or ''
-            dtype = ''
-            if path and os.path.exists(path):
-                q, esc = _csv_quote_escape(tbl)
-                cols = discover_csv_columns(path, q, esc)
-                dtype = next((v for k, v in cols.items()
-                              if k.lower() == date_col.lower()), '')
-            date_type = tbl.get('date_type')
-            date_col_q = quote_ident(date_col, "duckdb")
-            bounds = []
-            if from_date:
-                bounds.append(f"{date_col_q} >= {_csv_date_bound_literal(from_date, dtype, date_type)}")
-            if to_date:
-                bounds.append(f"{date_col_q} <= {_csv_date_bound_literal(to_date, dtype, date_type)}")
-            if bounds:
-                tbl['_date_bounds'] = " AND ".join(bounds)
-            tbl['_from_date'] = from_date
-            tbl['_to_date'] = to_date
+    def _csv_bounds(tbl, date_col, eff_from, eff_to):
+        path = tbl.get('conn_macro', '') or ''
+        dtype = ''
+        if path and os.path.exists(path):
+            q, esc = _csv_quote_escape(tbl)
+            cols = discover_csv_columns(path, q, esc)
+            dtype = next((v for k, v in cols.items()
+                          if k.lower() == date_col.lower()), '')
+        date_type = tbl.get('date_type')
+        date_col_q = quote_ident(date_col, "duckdb")
+        bounds = []
+        if eff_from:
+            bounds.append(f"{date_col_q} >= {_csv_date_bound_literal(eff_from, dtype, date_type)}")
+        if eff_to:
+            bounds.append(f"{date_col_q} <= {_csv_date_bound_literal(eff_to, dtype, date_type)}")
+        return " AND ".join(bounds)
+    apply_pair_date_bounds(csv_tables, config, from_date, to_date, _csv_bounds)
 
     _discover_and_write_csv_columns(csv_tables, outdir, db_path)
 

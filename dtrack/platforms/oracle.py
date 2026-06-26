@@ -18,6 +18,7 @@ from .base import (
     build_stats_sql,
     build_top10_sql,
     quote_ident,
+    apply_pair_date_bounds,
     set_cache_db,
     cache_stats,
     cache_get,
@@ -603,21 +604,15 @@ def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=No
             tbl['vintage'] = 'all'
     inject_where_from_config(oracle_tables, config)
 
-    if from_date or to_date:
-        for tbl in oracle_tables:
-            date_col = tbl.get('date_col', '')
-            if not date_col:
-                continue
-            date_col_q = quote_ident(date_col, "oracle")
-            bounds = []
-            if from_date:
-                bounds.append(f"{date_col_q} >= DATE '{from_date}'")
-            if to_date:
-                bounds.append(f"{date_col_q} <= DATE '{to_date}'")
-            if bounds:
-                tbl['_date_bounds'] = " AND ".join(bounds)
-            tbl['_from_date'] = from_date
-            tbl['_to_date'] = to_date
+    def _oracle_bounds(tbl, date_col, eff_from, eff_to):
+        date_col_q = quote_ident(date_col, "oracle")
+        bounds = []
+        if eff_from:
+            bounds.append(f"{date_col_q} >= DATE '{eff_from}'")
+        if eff_to:
+            bounds.append(f"{date_col_q} <= DATE '{eff_to}'")
+        return " AND ".join(bounds)
+    apply_pair_date_bounds(oracle_tables, config, from_date, to_date, _oracle_bounds)
 
     if gen_only:
         from .base import tag_generated_sql

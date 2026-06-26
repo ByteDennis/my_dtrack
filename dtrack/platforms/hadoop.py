@@ -75,7 +75,8 @@ from .base import (
     qualified_name,
     resolve_table,
     apply_null_sentinels,
-    build_date_between_clause,
+    build_date_bounds_clause,
+    apply_pair_date_bounds,
     build_date_in_clause,
     build_date_range_with_gaps,
     resolve_date_format,
@@ -706,16 +707,9 @@ def extract_hadoop(config_path, outdir, types=None, max_workers=None, db_path=No
             tbl['vintage'] = 'all'
     inject_where_from_config(hadoop_tables, config)
 
-    if from_date or to_date:
-        for tbl in hadoop_tables:
-            date_col = tbl.get('date_col', '')
-            if not date_col:
-                continue
-            if from_date and to_date:
-                tbl['_date_bounds'] = build_date_between_clause(
-                    date_col, from_date, to_date, tbl.get('date_type'))
-            tbl['_from_date'] = from_date
-            tbl['_to_date'] = to_date
+    apply_pair_date_bounds(
+        hadoop_tables, config, from_date, to_date,
+        lambda tbl, dc, f, t: build_date_bounds_clause(dc, f, t, tbl.get('date_type')))
 
     if gen_only:
         from .base import tag_generated_sql

@@ -394,6 +394,60 @@ def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=F
             return f"{date_col} BETWEEN '{fmt_min}' AND '{fmt_max}'"
         return f"{date_col} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
 
+# >>> effective (from,to): CLI args win, else the table's pair-config fromDate/toDate <<< #
+def resolve_pair_date_bounds(tbl, config, from_date, to_date):
+    eff_from = from_date or None
+    eff_to = to_date or None
+    if eff_from and eff_to:
+        return eff_from, eff_to
+    pairs = (config or {}).get('pairs', {}) or {}
+    for pname in tbl.get('_pairs', []) or []:
+        pc = pairs.get(pname, {}) or {}
+        cf = pc.get('fromDate')
+        ct = pc.get('toDate')
+        cf = cf.strip() if isinstance(cf, str) else cf
+        ct = ct.strip() if isinstance(ct, str) else ct
+        if not eff_from and cf:
+            eff_from = cf
+        if not eff_to and ct:
+            eff_to = ct
+    return eff_from, eff_to
+
+# >>> date-bounds WHERE fragment honoring single-sided bounds; '' if neither <<< #
+def build_date_bounds_clause(date_col, from_date, to_date, date_dtype,
+                             date_format=None, custom_date_types=None):
+    if from_date and to_date:
+        return build_date_between_clause(
+            date_col, from_date, to_date, date_dtype,
+            date_format=date_format, custom_date_types=custom_date_types)
+    if from_date:
+        lit = format_date_bounds_literals(
+            from_date, from_date, date_dtype, date_format=date_format,
+            custom_date_types=custom_date_types)[0]
+        return f"{date_col} >= {lit}"
+    if to_date:
+        lit = format_date_bounds_literals(
+            to_date, to_date, date_dtype, date_format=date_format,
+            custom_date_types=custom_date_types)[1]
+        return f"{date_col} <= {lit}"
+    return ""
+
+# >>> uniform date-bounds application for every platform: CLI args or config <<< #
+# >>> fromDate/toDate, single-sided ok; clause_fn renders the engine literal <<< #
+def apply_pair_date_bounds(tables, config, from_date, to_date, clause_fn):
+    for tbl in tables:
+        date_col = tbl.get('date_col', '')
+        if not date_col:
+            continue
+        eff_from, eff_to = resolve_pair_date_bounds(tbl, config, from_date, to_date)
+        if not (eff_from or eff_to):
+            continue
+        clause = clause_fn(tbl, date_col, eff_from, eff_to)
+        if clause:
+            tbl['_date_bounds'] = clause
+        tbl['_from_date'] = eff_from
+        tbl['_to_date'] = eff_to
+
 # >>> Return (from_lit, to_lit): the platform-formatted date literals that <<< #
 def format_date_bounds_literals(min_date, max_date, date_dtype, is_sas=False,
                                 date_format=None, custom_date_types=None):

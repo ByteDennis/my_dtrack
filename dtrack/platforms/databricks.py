@@ -14,6 +14,7 @@ from .base import (
     fill_columns_from_meta,
     inject_where_from_config,
     quote_ident,
+    apply_pair_date_bounds,
     set_cache_db,
     cache_get,
     cache_put,
@@ -391,25 +392,19 @@ def extract_databricks(config_path, outdir, types=None, max_workers=None,
             tbl["vintage"] = "all"
     inject_where_from_config(dbx_tables, config)
 
-    if from_date or to_date:
-        for tbl in dbx_tables:
-            date_col = tbl.get("date_col", "")
-            if not date_col:
-                continue
-            date_col_q = quote_ident(date_col, "databricks")
-            date_type = (tbl.get("date_type") or "").lower()
-            from .athena import _format_athena_date_bound
-            bounds = []
-            if from_date:
-                bounds.append(f"{date_col_q} >= "
-                              f"{_format_athena_date_bound(from_date, date_type, False)}")
-            if to_date:
-                bounds.append(f"{date_col_q} <= "
-                              f"{_format_athena_date_bound(to_date, date_type, True)}")
-            if bounds:
-                tbl["_date_bounds"] = " AND ".join(bounds)
-            tbl["_from_date"] = from_date
-            tbl["_to_date"] = to_date
+    def _dbx_bounds(tbl, date_col, eff_from, eff_to):
+        date_col_q = quote_ident(date_col, "databricks")
+        date_type = (tbl.get("date_type") or "").lower()
+        from .athena import _format_athena_date_bound
+        bounds = []
+        if eff_from:
+            bounds.append(f"{date_col_q} >= "
+                          f"{_format_athena_date_bound(eff_from, date_type, False)}")
+        if eff_to:
+            bounds.append(f"{date_col_q} <= "
+                          f"{_format_athena_date_bound(eff_to, date_type, True)}")
+        return " AND ".join(bounds)
+    apply_pair_date_bounds(dbx_tables, config, from_date, to_date, _dbx_bounds)
 
     if gen_only:
         from .base import tag_generated_sql

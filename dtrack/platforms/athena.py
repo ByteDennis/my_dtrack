@@ -12,6 +12,7 @@ from .base import (
     is_numeric_type,
     resolve_table,
     build_date_between_clause,
+    apply_pair_date_bounds,
     build_date_in_clause,
     build_date_range_with_gaps,
     resolve_date_format,
@@ -1241,24 +1242,18 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
             tbl['vintage'] = 'all'
     inject_where_from_config(aws_tables, config)
 
-    if from_date or to_date:
-        for tbl in aws_tables:
-            date_col = tbl.get('date_col', '')
-            if not date_col:
-                continue
-            date_col_q = quote_ident(date_col, "athena")
-            date_type = (tbl.get('date_type') or '').lower()
-            bounds = []
-            if from_date:
-                lit = _format_athena_date_bound(from_date, date_type, is_upper=False)
-                bounds.append(f"{date_col_q} >= {lit}")
-            if to_date:
-                lit = _format_athena_date_bound(to_date, date_type, is_upper=True)
-                bounds.append(f"{date_col_q} <= {lit}")
-            if bounds:
-                tbl['_date_bounds'] = " AND ".join(bounds)
-            tbl['_from_date'] = from_date
-            tbl['_to_date'] = to_date
+    def _athena_bounds(tbl, date_col, eff_from, eff_to):
+        date_col_q = quote_ident(date_col, "athena")
+        date_type = (tbl.get('date_type') or '').lower()
+        bounds = []
+        if eff_from:
+            bounds.append(f"{date_col_q} >= "
+                          f"{_format_athena_date_bound(eff_from, date_type, is_upper=False)}")
+        if eff_to:
+            bounds.append(f"{date_col_q} <= "
+                          f"{_format_athena_date_bound(eff_to, date_type, is_upper=True)}")
+        return " AND ".join(bounds)
+    apply_pair_date_bounds(aws_tables, config, from_date, to_date, _athena_bounds)
     if gen_only:
         from .base import tag_generated_sql
         if "row" in types:
