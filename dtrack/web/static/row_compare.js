@@ -474,7 +474,7 @@ function fmtRange(range) {
 
 function esc(s) {
     if (!s) return '';
-    return s.replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return escHtmlAttr(s);
 }
 
 function notify(msg, type = 'success') {

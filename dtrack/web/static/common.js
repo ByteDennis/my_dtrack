@@ -495,6 +495,14 @@ async function parseSSE(resp, onEvent) {
     }
 }
 
+// >>> narrow a known-tables list by the sticky global pair selection (empty = all) <<< //
+function filterByGlobalPairs(tables) {
+    if (typeof getGlobalSelectedPairs !== 'function') return tables;
+    const sel = new Set(getGlobalSelectedPairs());
+    if (!sel.size) return tables;
+    return tables.filter(t => sel.has(t.pair_name));
+}
+
 // >>> known tables for the loaders' auto-match: /api/status + config pairs <<< //
 // Shared by Load Row + Load Col; callers apply their own post-filtering.
 async function buildKnownTables() {

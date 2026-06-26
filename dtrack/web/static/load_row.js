@@ -14,10 +14,21 @@ document.addEventListener('DOMContentLoaded', async () => {
 // ─────────────────────────────────────────────────────────────────────
 // Known tables (for the shared loader's auto-match)
 // ─────────────────────────────────────────────────────────────────────
+let _allKnownTables = [];
+
 async function loadKnownTables() {
     try {
-        knownTablesRef.current = await buildKnownTables();
+        const tables = await buildKnownTables();
+        _allKnownTables = tables;
+        knownTablesRef.current = filterByGlobalPairs(tables);
     } catch (e) { console.error('Failed to load tables:', e); }
+}
+
+if (typeof onGlobalPairSelectionChange === 'function') {
+    onGlobalPairSelectionChange(() => {
+        knownTablesRef.current = filterByGlobalPairs(_allKnownTables);
+        refreshDbStatus();
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────
