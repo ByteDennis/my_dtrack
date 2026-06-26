@@ -33,6 +33,7 @@ def _assert(row_cmp, col_cmp, strict, negative=False):
     assert row_cmp["only_left"] == [] and row_cmp["only_right"] == []
     amt = col_cmp["amt"][0]
     ccy = col_cmp["ccy"][0]
+    dts = col_cmp["dts"][0]
     if negative:
         # a genuine value change surfaces in the numeric stats even under STRICT
         assert (amt["min_match"] is False or amt["max_match"] is False), amt
@@ -43,9 +44,13 @@ def _assert(row_cmp, col_cmp, strict, negative=False):
     if strict:
         assert ccy["hash_sum_match"] is True, ccy
         assert ccy["n_unique_diff"] == 0, ccy
+        # DATE(source) vs TIMESTAMP(target) 00:00:00 drift reconciled by STRICT
+        assert dts["hash_sum_match"] is True, dts
     else:
         assert ccy["hash_sum_match"] is False, ccy
         assert ccy["n_unique_diff"] != 0, ccy
+        # the date/timestamp presentation drift surfaces without STRICT
+        assert dts["hash_sum_match"] is False, dts
 
 
 # >>> the full no-strict / strict / negative-control sweep for one pair <<< #

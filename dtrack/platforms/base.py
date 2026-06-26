@@ -1301,7 +1301,8 @@ def _strict_normalize(dialect, expr, family):
     if dialect == 'oracle':
         s = f'TO_CHAR({expr})'
         if family == 'date':
-            return f"TO_CHAR(CAST({expr} AS TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS')"
+            return ("REGEXP_REPLACE(TO_CHAR(CAST(" + expr +
+                    " AS TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS'), ' 00:00:00$', '')")
         if family == 'numeric':
             return (f"REGEXP_REPLACE(REGEXP_REPLACE({s}, "
                     f"'(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')")

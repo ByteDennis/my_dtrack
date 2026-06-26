@@ -21,8 +21,10 @@ from dtrack.loader import load_row_counts, load_precomputed_col_stats
 from dtrack.compare import compare_row_counts, compare_column_stats
 
 
-# >>> columns extracted on every side: amt (numeric), ccy (categorical) <<< #
-COLS = [("amt", "numeric"), ("ccy", "categorical")]
+# >>> columns extracted on every side: amt (numeric), ccy (categorical), dts (date) <<< #
+# dts is seeded as DATE on the source side and TIMESTAMP on the target side (the
+# real migration drift); STRICT's date-family normalization must reconcile them.
+COLS = [("amt", "numeric"), ("ccy", "categorical"), ("dts", "date")]
 
 
 # >>> canonical col-stat dict (COL_CSV_HEADERS schema) from an engine result row <<< #
@@ -53,16 +55,24 @@ class EngineSide:
         return {"name": table, "table": table, "source": self.dialect,
                 "conn_macro": "", "date_col": "rpt_dt", "date_type": self.date_type}
 
+    # >>> dtype passed to build_col_sql for a column (dts differs by drift side) <<< #
+    def _dtype_for(self, col, date_drift):
+        if col == "amt":
+            return self.amt_dtype
+        if col == "ccy":
+            return self.ccy_dtype
+        return "TIMESTAMP" if date_drift else "DATE"
+
     # >>> seed + extract row counts and per-col stats for one dataset <<< #
-    def extract(self, table, data, strict):
-        self.seed(table, data)
+    def extract(self, table, data, strict, date_drift=False):
+        self.seed(table, data, date_drift)
         cfg = self.cfg(table)
         ft = self.full_table(table)
         row_rows = self.select_rows(self.row_sql(cfg))
         row_canon = [(self._dt(dt), int(cnt)) for dt, cnt in row_rows]
         col_canon = []
         for col, col_type in COLS:
-            dtype = self.amt_dtype if col == "amt" else self.ccy_dtype
+            dtype = self._dtype_for(col, date_drift)
             sql, _ = build_col_sql(self.dialect, cfg, col, dtype, ft,
                                    vintage="all", strict=strict)
             rec = self.select_dicts(sql)[0]
@@ -97,13 +107,20 @@ class OracleSide(EngineSide):
     def __init__(self, cur):
         self.cur = cur
 
-    def seed(self, table, data):
+    def seed(self, table, data, date_drift=False):
         self.cur.execute(f"BEGIN EXECUTE IMMEDIATE 'DROP TABLE {table}'; "
                          f"EXCEPTION WHEN OTHERS THEN NULL; END;")
+        dts_type = "TIMESTAMP" if date_drift else "DATE"
         self.cur.execute(f"CREATE TABLE {table} "
-                         f"(rpt_dt VARCHAR2(20), amt NUMBER, ccy VARCHAR2(20))")
+                         f"(rpt_dt VARCHAR2(20), amt NUMBER, ccy VARCHAR2(20), dts {dts_type})")
+        if date_drift:
+            conv = "TO_TIMESTAMP(:4,'YYYY-MM-DD HH24:MI:SS')"
+            rows = [(d, a, c, d + " 00:00:00") for d, a, c in data]
+        else:
+            conv = "TO_DATE(:4,'YYYY-MM-DD')"
+            rows = [(d, a, c, d) for d, a, c in data]
         self.cur.executemany(
-            f"INSERT INTO {table} (rpt_dt, amt, ccy) VALUES (:1, :2, :3)", data)
+            f"INSERT INTO {table} (rpt_dt, amt, ccy, dts) VALUES (:1, :2, :3, {conv})", rows)
         self.cur.connection.commit()
 
     def row_sql(self, cfg):
@@ -122,12 +139,16 @@ class HiveSide(EngineSide):
     def __init__(self, cur):
         self.cur = cur
 
-    def seed(self, table, data):
+    def seed(self, table, data, date_drift=False):
         self.cur.execute(f"DROP TABLE IF EXISTS {table}")
+        dts_type = "TIMESTAMP" if date_drift else "DATE"
         self.cur.execute(f"CREATE TABLE {table} "
-                         f"(rpt_dt STRING, amt BIGINT, ccy STRING)")
+                         f"(rpt_dt STRING, amt BIGINT, ccy STRING, dts {dts_type})")
+
+        def _dlit(d):
+            return f"TIMESTAMP '{d} 00:00:00'" if date_drift else f"DATE '{d}'"
         values = ", ".join(
-            f"('{d}', {a}, '{c}')" for d, a, c in data)
+            f"('{d}', {a}, '{c}', {_dlit(d)})" for d, a, c in data)
         self.cur.execute(f"INSERT INTO {table} VALUES {values}")
 
     def row_sql(self, cfg):
@@ -155,11 +176,15 @@ class TrinoSide(EngineSide):
         c["conn_macro"] = "memory.default"
         return c
 
-    def seed(self, table, data):
+    def seed(self, table, data, date_drift=False):
         ft = self.full_table(table)
         self._run(f"DROP TABLE IF EXISTS {ft}")
-        self._run(f"CREATE TABLE {ft} (rpt_dt varchar, amt integer, ccy varchar)")
-        values = ", ".join(f"('{d}', {a}, '{c}')" for d, a, c in data)
+        dts_type = "timestamp(3)" if date_drift else "date"
+        self._run(f"CREATE TABLE {ft} (rpt_dt varchar, amt integer, ccy varchar, dts {dts_type})")
+
+        def _dlit(d):
+            return f"TIMESTAMP '{d} 00:00:00'" if date_drift else f"DATE '{d}'"
+        values = ", ".join(f"('{d}', {a}, '{c}', {_dlit(d)})" for d, a, c in data)
         self._run(f"INSERT INTO {ft} VALUES {values}")
 
     def _run(self, sql):
@@ -182,10 +207,14 @@ class SparkSide(EngineSide):
     def __init__(self, spark):
         self.spark = spark
 
-    def seed(self, table, data):
-        df = self.spark.createDataFrame(
-            [(str(d), int(a), str(c)) for d, a, c in data],
-            ["rpt_dt", "amt", "ccy"])
+    def seed(self, table, data, date_drift=False):
+        import datetime as _dt
+
+        def _dval(d):
+            y, m, dd = (int(x) for x in d.split("-"))
+            return _dt.datetime(y, m, dd) if date_drift else _dt.date(y, m, dd)
+        rows = [(str(d), int(a), str(c), _dval(d)) for d, a, c in data]
+        df = self.spark.createDataFrame(rows, ["rpt_dt", "amt", "ccy", "dts"])
         df.createOrReplaceTempView(table)
 
     def row_sql(self, cfg):
@@ -212,27 +241,26 @@ class DuckdbSide(EngineSide):
         c = super().cfg(table)
         c["source"] = "csv"
         c["conn_macro"] = self._path
-        c["_read_types"] = {"rpt_dt": "VARCHAR", "amt": "BIGINT", "ccy": "VARCHAR"}
+        dts = "TIMESTAMP" if getattr(self, "_drift", False) else "DATE"
+        c["_read_types"] = {"rpt_dt": "VARCHAR", "amt": "BIGINT",
+                            "ccy": "VARCHAR", "dts": dts}
         return c
 
-    def seed(self, table, data):
+    def seed(self, table, data, date_drift=False):
+        self._drift = date_drift
         self._path = os.path.join(self.tmpdir, f"{table}.csv")
         with open(self._path, "w", newline="") as f:
             w = _csv.writer(f)
-            w.writerow(["rpt_dt", "amt", "ccy"])
+            w.writerow(["rpt_dt", "amt", "ccy", "dts"])
             for d, a, c in data:
-                w.writerow([d, a, c])
+                w.writerow([d, a, c, (d + " 00:00:00") if date_drift else d])
 
     def _conn(self):
         import duckdb
         return duckdb.connect(":memory:")
 
-    def full_table_expr(self, table):
-        from dtrack.platforms.csv_duckdb import _csv_from_clause
-        return _csv_from_clause(self.cfg(table))
-
-    def extract(self, table, data, strict):
-        self.seed(table, data)
+    def extract(self, table, data, strict, date_drift=False):
+        self.seed(table, data, date_drift)
         cfg = self.cfg(table)
         from dtrack.platforms.csv_duckdb import _csv_from_clause
         ft = _csv_from_clause(cfg)
@@ -242,7 +270,7 @@ class DuckdbSide(EngineSide):
             row_canon = [(str(dt), int(cnt)) for dt, cnt in rrows]
             col_canon = []
             for col, col_type in COLS:
-                dtype = self.amt_dtype if col == "amt" else self.ccy_dtype
+                dtype = self._dtype_for(col, date_drift)
                 sql, _ = build_col_sql("duckdb", cfg, col, dtype, ft,
                                        vintage="all", strict=strict)
                 cur = con.execute(sql)
@@ -280,8 +308,8 @@ def run_parity(tmp_path, left_side, right_side, left_data, right_data, strict):
     outdir = os.path.join(str(tmp_path), f"out_{int(strict)}")
     os.makedirs(outdir, exist_ok=True)
 
-    l_row, l_col = left_side.extract("mig_src", left_data, strict)
-    r_row, r_col = right_side.extract("mig_tgt", right_data, strict)
+    l_row, l_col = left_side.extract("mig_src", left_data, strict, date_drift=False)
+    r_row, r_col = right_side.extract("mig_tgt", right_data, strict, date_drift=True)
     _load_side(db, outdir, "mig_src", l_row, l_col)
     _load_side(db, outdir, "mig_tgt", r_row, r_col)
 
