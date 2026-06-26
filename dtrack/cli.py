@@ -1468,7 +1468,8 @@ def main():
                    help='Left key column (right resolved via col_map); composite via comma')
     p.add_argument('--pair', help='Restrict to one pair (default: all non-skipped pairs)')
     p.add_argument('-n', '--sample', dest='sample_n', type=int, default=20,
-                   help='Number of rows to sample per pair (default 20)')
+                   help='Rows to sample per pair (default 20). -1 = ignore values '
+                        'and report KEY combinations unmatched across sides (anti-join)')
     p.add_argument('--out', help='Output .xlsx path (default sample_hash.xlsx)')
 
     p = sub.add_parser('extract', help='Extract row/col CSVs for all platforms in the config')

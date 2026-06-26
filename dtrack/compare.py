@@ -643,6 +643,19 @@ def _sample_keys(tbl, key_cols, n):
         out.append(tuple(r[k.lower()] for k in key_cols))
     return out
 
+# >>> all distinct key tuples from one side (no limit), in the given key order <<< #
+def _all_keys(tbl, key_cols):
+    src = tbl.get("source", "")
+    d = _dialect(src)
+    ft, cte = _full_table_and_cte(tbl)
+    keys_q = ", ".join(quote_ident(k, d) for k in key_cols)
+    notnull = " AND ".join(f"{quote_ident(k, d)} IS NOT NULL" for k in key_cols)
+    base_where = (tbl.get("where") or "").strip() or "1=1"
+    sql = (f"{cte}SELECT DISTINCT {keys_q} FROM {ft} "
+           f"WHERE ({base_where}) AND {notnull}")
+    rows = _run_query(tbl, sql)
+    return [tuple(r[k.lower()] for k in key_cols) for r in rows]
+
 # >>> deterministic hash-spread sample of up to n distinct key tuples from the left (for col-sample) <<< #
 def sample_keys_hashed(tbl, key_cols, n):
     src = tbl.get("source", "")
@@ -775,6 +788,31 @@ def _sample_pair(project_db, pair_name, pair_cfg, key_cols, n):
 def _disp(v):
     return "" if v is None else str(v)
 
+# >>> n=-1: full key-set anti-join — key tuples present on one side but not the other <<< #
+def _reconcile_keys_pair(project_db, pair_name, pair_cfg, key_cols):
+    left = dict(pair_cfg["left"])
+    right = dict(pair_cfg["right"])
+    for side in (left, right):
+        side.setdefault("name", "")
+    for src in (left.get("source", ""), right.get("source", "")):
+        if (src or "").lower() not in _SUPPORTED:
+            print(f"  {pair_name}: source {src!r} not supported by sample-hash "
+                  f"({', '.join(_SUPPORTED)}). Skipping.")
+            return None
+    col_map = pair_cfg.get("col_map") or get_pair_col_map_from_db(project_db, pair_name) or {}
+    left_keys = key_cols
+    right_keys = [col_map.get(k, k) for k in key_cols]
+    left_set = {tuple(str(x) for x in t) for t in _all_keys(left, left_keys)}
+    right_set = {tuple(str(x) for x in t) for t in _all_keys(right, right_keys)}
+    left_only = sorted(left_set - right_set)
+    right_only = sorted(right_set - left_set)
+    print(f"  {pair_name}: left={len(left_set)} right={len(right_set)} distinct keys; "
+          f"{len(left_only)} left-only, {len(right_only)} right-only")
+    header = list(key_cols) + ["side"]
+    rows = ([list(t) + ["LEFT_ONLY"] for t in left_only]
+            + [list(t) + ["RIGHT_ONLY"] for t in right_only])
+    return header, rows
+
 # >>> write one sheet per pair; highlight DIFF rows; bold header <<< #
 def _write_excel(out_path, sheets):
     from openpyxl import Workbook
@@ -815,18 +853,24 @@ def sample_hash(project_db, config_path, key, pair=None, n=20, out=None):
     else:
         items = [(p, c) for p, c in pairs.items() if not c.get("skip")]
 
+    reconcile = (n == -1)
     sheets = {}
     for pname, pcfg in items:
-        print(f"\n--- sample-hash: {pname} (key={','.join(key_cols)}, n={n}) ---")
+        mode = "all rows, key-reconcile" if reconcile else f"n={n}"
+        print(f"\n--- sample-hash: {pname} (key={','.join(key_cols)}, {mode}) ---")
         try:
-            res = _sample_pair(project_db, pname, pcfg, key_cols, n)
+            if reconcile:
+                res = _reconcile_keys_pair(project_db, pname, pcfg, key_cols)
+            else:
+                res = _sample_pair(project_db, pname, pcfg, key_cols, n)
         except Exception as e:
             print(f"  {pname}: failed: {e}")
             continue
         if res:
             sheets[pname] = res
-            diffs = sum(1 for row in res[1] for v in row if v == "DIFF")
-            print(f"  {pname}: {len(res[1])} rows sampled, {diffs} cell hash diffs")
+            if not reconcile:
+                diffs = sum(1 for row in res[1] for v in row if v == "DIFF")
+                print(f"  {pname}: {len(res[1])} rows sampled, {diffs} cell hash diffs")
 
     if not sheets:
         print("\nNo pairs produced output (need col_map + supported sources).")
