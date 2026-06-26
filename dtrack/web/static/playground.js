@@ -251,7 +251,12 @@ async function pgRun() {
     if (!sql.trim()) { _pgSetStatus('SQL is empty.', 'error'); return; }
     const conn = document.getElementById('pg-conn').value.trim();
     if (engine === 'oracle' && !conn) { _pgSetStatus('Oracle requires a connection macro.', 'error'); return; }
-    if (engine === 'csv' && !conn) { _pgSetStatus('CSV requires a file path.', 'error'); return; }
+    // CSV path can come from the field above (registered as view `data`) OR
+    // straight from the query (FROM '/path.csv'); only block when neither has it.
+    if (engine === 'csv' && !conn && !/\.csv\b/i.test(sql)) {
+        _pgSetStatus("CSV needs a file path — in the field above, or as FROM '/path.csv' in the query.", 'error');
+        return;
+    }
 
     const rowCap = parseInt(document.getElementById('pg-row-cap').value || '20', 10);
     const useCache = document.getElementById('pg-use-cache').checked;
