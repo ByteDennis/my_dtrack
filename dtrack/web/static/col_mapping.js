@@ -824,7 +824,7 @@ async function downloadAllExcel() {
 // ---------------------------------------------------------------------------
 function esc(s) {
     if (!s) return '';
-    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return escAttr(s);
 }
 
 function escAttr(s) {

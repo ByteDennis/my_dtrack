@@ -726,7 +726,7 @@ function fmtDiff(n) {
 
 function esc(s) {
     if (!s) return '';
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return escHtml(s);
 }
 
 function notify(msg, type = 'success') {
@@ -775,13 +775,7 @@ async function downloadHTML() {
             return;
         }
         const html = await res.text();
-        const blob = new Blob([html], { type: 'text/html' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'col_compare.html';
-        a.click();
-        URL.revokeObjectURL(url);
+        downloadBlob(html, 'col_compare.html', 'text/html');
     } catch (e) {
         notify(`HTML export failed: ${e.message}`, 'error');
     }

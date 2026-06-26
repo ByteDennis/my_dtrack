@@ -5,7 +5,7 @@ let _cvRightInfo = null;
 
 function _cvEsc(s) {
     if (s == null) return '';
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return escHtml(s);
 }
 
 async function cvInspect() {

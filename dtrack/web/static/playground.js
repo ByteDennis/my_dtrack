@@ -168,7 +168,7 @@ function pgSasProfileChanged() {
 
 function _pgEsc(s) {
     if (s == null) return '';
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return escHtml(s);
 }
 
 function _pgEngine() {
@@ -452,13 +452,7 @@ function _pgFmtBytes(n) {
 }
 
 function _pgDownloadBlob(content, filename, mime) {
-    const blob = new Blob([content], {type: mime || 'application/octet-stream'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(content, filename, mime);
 }
 
 // ---------------------------------------------------------------------------

@@ -294,9 +294,15 @@ function apiLog(message, type = 'info') {
     if (cnt) cnt.textContent = String(_logCount);
 }
 
-function _escHtml(s) {
+// Canonical HTML escapers — every page delegates to these (single source).
+// escHtml: text nodes (&<>); escAttr: also quotes for attribute contexts.
+function escHtml(s) {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+function escAttr(s) {
+    return escHtml(s).replace(/"/g,'&quot;');
+}
+function _escHtml(s) { return escHtml(s); }
 
 // ---------------------------------------------------------------------------
 // Intercept all fetch calls to log API requests/responses
@@ -382,3 +388,96 @@ window.fetch = async function(url, options = {}) {
         throw e;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Shared page utilities (consolidated from pairs.js / col_gen.js and others).
+// These rely only on the page already having the relevant DOM ids, so pages
+// that lack them simply never call the helper.
+// ---------------------------------------------------------------------------
+
+// >>> top-right transient success/error toasts <<< //
+function showSuccess(message) {
+    const notification = document.createElement('div');
+    notification.style.cssText = `position: fixed; top: 20px; right: 20px; z-index: 2000; background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; padding: 12px 20px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); font-size: 13px;`;
+    notification.textContent = message;
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 3000);
+}
+
+function showError(message) {
+    const notification = document.createElement('div');
+    notification.style.cssText = `position: fixed; top: 20px; right: 20px; z-index: 2000; background: #fbe9e7; color: #c62828; border: 1px solid #ef9a9a; padding: 12px 20px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); font-size: 13px;`;
+    notification.textContent = message;
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 5000);
+}
+
+// >>> global from/to date inputs (Row Gen + Col Gen io-bar) <<< //
+function clearGlobalDates() {
+    document.getElementById('global-from-date').value = '';
+    document.getElementById('global-to-date').value = '';
+}
+
+function setQuickDate(days) {
+    const today = new Date();
+    const fromDate = new Date(today);
+    if (typeof days === 'number') {
+        fromDate.setDate(today.getDate() - days);
+    } else if (days === 'week') {
+        const dayOfWeek = today.getDay();
+        fromDate.setDate(today.getDate() - dayOfWeek);
+    } else if (days === 'month') {
+        fromDate.setDate(1);
+    }
+    document.getElementById('global-from-date').valueAsDate = fromDate;
+    document.getElementById('global-to-date').valueAsDate = today;
+}
+
+// >>> humanize an ETA in seconds for SSE progress lines <<< //
+function _fmtEta(sec) {
+    if (sec == null || !isFinite(sec) || sec < 1) return '';
+    sec = Math.round(sec);
+    if (sec < 60)    return `${sec}s`;
+    if (sec < 3600)  return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    return `${h}h ${m}m`;
+}
+
+// >>> append a line to the #generation-log panel <<< //
+function logMessage(message, type = 'info') {
+    const log = document.getElementById('generation-log');
+    const empty = log.querySelector('.log-empty');
+    if (empty) empty.remove();
+    const time = new Date().toLocaleTimeString();
+    const className = type === 'success' ? 'log-success'
+        : type === 'error' ? 'log-error'
+        : type === 'warning' ? 'log-warning'
+        : '';
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    entry.innerHTML = `<span class="log-time">${time}</span><span class="log-message ${className}">${message}</span>`;
+    log.appendChild(entry);
+    log.scrollTop = log.scrollHeight;
+}
+
+// >>> reflect per-pair selection into the #select-all-pairs tri-state box <<< //
+function syncSelectAllCheckbox() {
+    const cb = document.getElementById('select-all-pairs');
+    if (!cb) return;
+    const allSelected = pairs.length > 0 && pairs.every(p => p.selected);
+    const someSelected = pairs.some(p => p.selected);
+    cb.checked = allSelected;
+    cb.indeterminate = someSelected && !allSelected;
+}
+
+// >>> trigger a client-side file download from in-memory content <<< //
+function downloadBlob(content, filename, mime) {
+    const blob = new Blob([content], {type: mime || 'application/octet-stream'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+}

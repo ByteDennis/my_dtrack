@@ -85,7 +85,7 @@ function _s3SetStatus(text, kind) {
 
 function _s3Esc(s) {
     if (s == null) return '';
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return escAttr(s);
 }
 
 function _s3FmtBytes(n) {

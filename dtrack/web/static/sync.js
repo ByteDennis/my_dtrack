@@ -2,7 +2,7 @@
 
 function _syncEsc(s) {
     if (s == null) return '';
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return escHtml(s);
 }
 
 function _syncFmt(v) {
