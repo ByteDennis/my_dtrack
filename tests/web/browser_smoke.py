@@ -77,6 +77,34 @@ def main():
         with sync_playwright() as p:
             browser = p.chromium.launch(channel="chrome", headless=True,
                                         args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+            # runtime-verify the extracted parseSSE: a real SSE byte stream split
+            # across reads (exercises the cross-read buffer), asserting event order.
+            vpage = browser.new_page()
+            vpage.goto(BASE + "/pairs", wait_until="networkidle", timeout=15000)
+            sse = vpage.evaluate("""async () => {
+                const chunks = [
+                    'event: log\\ndata: {"line":"a","level":"info"}\\n\\nevent: prog',
+                    'ress\\ndata: {"done":1,"total":2}\\n\\n',
+                    'event: done\\ndata: {"ok":true}\\n\\n'];
+                const enc = new TextEncoder();
+                const stream = new ReadableStream({start(c){
+                    for (const ch of chunks) c.enqueue(enc.encode(ch));
+                    c.close();
+                }});
+                const events = [];
+                await parseSSE({body: stream}, (et, msg) => events.push([et, msg]));
+                return events;
+            }""")
+            expected = [["log", {"line": "a", "level": "info"}],
+                        ["progress", {"done": 1, "total": 2}],
+                        ["done", {"ok": True}]]
+            if sse == expected:
+                print("OK   parseSSE runtime (cross-read buffer + event order)")
+            else:
+                failures.append(("parseSSE", [f"got {sse}"], [], []))
+                print(f"FAIL parseSSE runtime: {sse}")
+            vpage.close()
             for path in PAGES:
                 page = browser.new_page()
                 errors, console_errs = [], []
