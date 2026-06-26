@@ -131,7 +131,6 @@ def get_all_tables_from_unified(config):
             selected_left  = [l for l, _ in resolved["pairs"]]
             selected_right = [r for _, r in resolved["pairs"]]
 
-        pair_approx = pair_config.get("approx_distinct")
         pair_strict = pair_config.get("strict")
 
         for side in ["left", "right"]:
@@ -144,9 +143,6 @@ def get_all_tables_from_unified(config):
 
             if pair_strict is not None and table_cfg.get("strict") is None:
                 table_cfg["strict"] = pair_strict
-
-            if pair_approx is not None and "_pair_approx_distinct" not in table_cfg:
-                table_cfg["_pair_approx_distinct"] = pair_approx
 
             if col_map:
                 if side == "left":

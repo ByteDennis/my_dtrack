@@ -106,24 +106,22 @@ def test_global_settings_round_trip(client):
     # Unset -> all keys present, all None.
     resp = client.get("/api/global_settings")
     assert resp.status_code == 200
-    keys = {"approx_distinct", "ora_retry_count", "ora_retry_sleep",
+    keys = {"ora_retry_count", "ora_retry_sleep",
             "hdp_retry_count", "hdp_retry_sleep"}
     assert set(resp.json().keys()) == keys
 
     # Set a few; ints get coerced from strings; None clears.
     resp = client.post("/api/global_settings", json={
-        "approx_distinct": True,
         "ora_retry_count": "5",
         "ora_retry_sleep": 60,
     })
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
-    assert body["approx_distinct"] is True
     assert body["ora_retry_count"] == 5
     assert body["ora_retry_sleep"] == 60
 
-    # Clear approx_distinct with explicit null.
-    resp = client.post("/api/global_settings", json={"approx_distinct": None})
+    # None clears a key.
+    resp = client.post("/api/global_settings", json={"ora_retry_sleep": None})
     assert resp.status_code == 200
-    assert resp.json()["approx_distinct"] is None
+    assert resp.json()["ora_retry_sleep"] is None

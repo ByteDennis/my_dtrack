@@ -48,10 +48,6 @@ async function openSettingsModal() {
     try {
         const resp = await fetch('/api/global_settings');
         const data = await resp.json();
-        const v = data && data.approx_distinct;
-        const radio = v === true ? 'approx' : 'exact';  // null/false → exact
-        const el = document.querySelector(`input[name="global-approx"][value="${radio}"]`);
-        if (el) el.checked = true;
 
         // Retry knobs -- null/missing => fall back to 3 attempts × 30s.
         _retrySettings = {
@@ -153,11 +149,6 @@ async function applyGlobalSettings() {
 
     saveGlobalSettings();
 
-    // Persist global stats-accuracy to dtrack.json.metadata.approx_distinct
-    // independently of the per-pair fields below.
-    const approxSel = document.querySelector('input[name="global-approx"]:checked');
-    const approx = approxSel && approxSel.value === 'approx';
-
     // Capture the currently-displayed retry values into the cache so the
     // about-to-be-POSTed payload reflects the dropdown's current source.
     onRetrySourceChanged();
@@ -167,7 +158,6 @@ async function applyGlobalSettings() {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                approx_distinct:  approx,
                 ora_retry_count:  _retrySettings.ora_count,
                 ora_retry_sleep:  _retrySettings.ora_sleep,
                 hdp_retry_count:  _retrySettings.hdp_count,
@@ -757,14 +747,6 @@ function editPair(index) {
     document.getElementById('pair-from-date').value = pair.fromDate || '';
     document.getElementById('pair-to-date').value = pair.toDate || '';
 
-    // Stats accuracy: missing field → inherit; true → approx; false → exact.
-    const approxRaw = pair.approx_distinct;
-    const approxRadio = approxRaw === true ? 'approx'
-                      : approxRaw === false ? 'exact'
-                      : 'inherit';
-    const approxEl = document.querySelector(`input[name="pair-approx"][value="${approxRadio}"]`);
-    if (approxEl) approxEl.checked = true;
-
     document.getElementById('query-preview-panel').style.display = 'none';
     document.getElementById('pair-modal').classList.add('active');
 
@@ -820,13 +802,6 @@ async function savePair() {
         fromDate: document.getElementById('pair-from-date').value,
         toDate: document.getElementById('pair-to-date').value,
     };
-
-    // Stats accuracy: 'inherit' → null on the wire (clears the per-pair key
-    // so the global setting takes over); 'exact' → false; 'approx' → true.
-    const approxSel = document.querySelector('input[name="pair-approx"]:checked');
-    const approxVal = approxSel ? approxSel.value : 'inherit';
-    pairData.approx_distinct = approxVal === 'inherit' ? null
-                             : approxVal === 'approx';
 
     // Validation
     if (!pairData.pair_name) {
@@ -915,7 +890,6 @@ async function copyPair(index) {
         vintage:      src.vintage || '',
         col_map:      src.col_map || {},
         col_filter:   src.col_filter || null,
-        approx_distinct: (typeof src.approx_distinct === 'boolean') ? src.approx_distinct : null,
         excludeDates: src.excludeDates || [],
         dateRangeMode: src.dateRangeMode || 'global',
         overlap:      src.overlap ?? 7,

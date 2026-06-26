@@ -1379,14 +1379,14 @@ async def api_update_pair(pair_name: str, request: Request):
         pair_cfg = config["pairs"][pair_name]
 
         _PAIR_KEYS = {"left", "right", "col_map", "col_filter", "description", "mode",
-                       "vintage", "approx_distinct",
+                       "vintage", "strict",
                        "fromDate", "toDate", "dateRangeMode", "overlap",
                        "skip", "ignore_rows", "ignore_columns",
                        "col_type_overrides", "where_map", "time_map",
                        "comment_map", "diff_map", "excludeDates"}
         for key in _PAIR_KEYS:
             if key in body:
-                if key in ("col_filter", "approx_distinct") and body[key] is None:
+                if key in ("col_filter", "strict") and body[key] is None:
                     pair_cfg.pop(key, None)
                 else:
                     pair_cfg[key] = body[key]
@@ -4724,7 +4724,6 @@ async def api_get_global_settings():
     config = load_unified_config(_config_path)
     meta = config.get("metadata") or {}
     return {
-        "approx_distinct":  meta.get("approx_distinct"),
         "ora_retry_count":  meta.get("ora_retry_count"),
         "ora_retry_sleep":  meta.get("ora_retry_sleep"),
         "hdp_retry_count":  meta.get("hdp_retry_count"),
@@ -4738,12 +4737,6 @@ async def api_set_global_settings(request: Request):
     body = await request.json()
     config = load_unified_config(_config_path)
     meta = config.setdefault("metadata", {})
-    if "approx_distinct" in body:
-        v = body["approx_distinct"]
-        if v is None:
-            meta.pop("approx_distinct", None)
-        else:
-            meta["approx_distinct"] = bool(v)
     for k in ("ora_retry_count", "ora_retry_sleep",
               "hdp_retry_count", "hdp_retry_sleep"):
         if k in body:
@@ -4758,7 +4751,6 @@ async def api_set_global_settings(request: Request):
     save_unified_config(config, _config_path)
     return {
         "ok": True,
-        "approx_distinct":  meta.get("approx_distinct"),
         "ora_retry_count":  meta.get("ora_retry_count"),
         "ora_retry_sleep":  meta.get("ora_retry_sleep"),
         "hdp_retry_count":  meta.get("hdp_retry_count"),
