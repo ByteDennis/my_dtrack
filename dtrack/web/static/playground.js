@@ -26,20 +26,13 @@ async function pgCopyHistorySql(id, btn) {
 }
 
 let _pgLastResult = null;
-let _pgHadoopProfiles = {libname: {}, procsql: {}};
 let _pgConnMacros = {oracle: [], aws: [], hadoop: [], databricks: []};
 
 // Form fields we persist across page reloads / server restarts. Values are
 // stored under `dtrack-playground:<id>` in localStorage; saved on every
 // input/change event, restored on DOMContentLoaded after pgLoadConstants
 // has populated the dynamic dropdowns.
-const _PG_PERSIST_IDS = [
-    'pg-conn', 'pg-row-cap', 'pg-use-cache', 'pg-sql',
-    'pg-sas-kind', 'pg-sas-method', 'pg-sas-conn',
-    'pg-sas-profile',
-    'pg-sas-server', 'pg-sas-host', 'pg-sas-schema', 'pg-sas-port',
-    'pg-sas-jar-path', 'pg-sas-config-path',
-];
+const _PG_PERSIST_IDS = ['pg-conn', 'pg-row-cap', 'pg-use-cache', 'pg-sql'];
 const _PG_LS_PREFIX = 'dtrack-playground:';
 
 function _pgSaveField(id) {
@@ -98,20 +91,8 @@ async function pgLoadConstants() {
     try {
         const res = await fetch('/api/constants');
         const data = await res.json();
-        _pgHadoopProfiles.libname = data.HADOOP_LIBNAME_PROFILES || {};
-        _pgHadoopProfiles.procsql = data.HADOOP_PROCSQL_PROFILES || {};
         _pgConnMacros = data.CONNECTION_MACROS || {oracle: [], aws: [], hadoop: [], databricks: []};
-        pgSasRepopulateProfiles();
-
-        // SAS-side Oracle macro dropdown (kept as <select>; macros are fixed).
-        const sel = document.getElementById('pg-sas-conn');
-        const ora = _pgConnMacros.oracle || [];
-        if (sel) {
-            sel.innerHTML = ora.map(m => `<option value="${m}">${m}</option>`).join('');
-            if (ora.length) sel.value = ora[0];
-        }
-        // Main conn datalist (editable with suggestions) — populated by
-        // pgEngineChanged based on whichever engine is currently selected.
+        // conn datalist (editable suggestions) — populated by pgEngineChanged
         pgRepopulateConnDatalist();
     } catch (e) {
         console.error('pgLoadConstants failed:', e);
@@ -131,41 +112,6 @@ function pgRepopulateConnDatalist() {
     dl.innerHTML = macros.map(m => `<option value="${m}">`).join('');
 }
 
-function pgSasRepopulateProfiles() {
-    // Refill the Hadoop profile dropdown with the set matching the current
-    // method (libname vs procsql have different profile catalogs because
-    // the two statements take different params on this user's box).
-    const sel = document.getElementById('pg-sas-profile');
-    if (!sel) return;
-    const method = document.getElementById('pg-sas-method').value;
-    const profiles = _pgHadoopProfiles[method] || {};
-    sel.innerHTML = '<option value="">(custom)</option>';
-    for (const name of Object.keys(profiles)) {
-        const opt = document.createElement('option');
-        opt.value = name;
-        opt.textContent = name;
-        sel.appendChild(opt);
-    }
-    const first = Object.keys(profiles)[0];
-    if (first) {
-        sel.value = first;
-        pgSasProfileChanged();
-    }
-}
-
-function pgSasProfileChanged() {
-    const method = document.getElementById('pg-sas-method').value;
-    const name = document.getElementById('pg-sas-profile').value;
-    const p = (_pgHadoopProfiles[method] || {})[name];
-    if (!p) return;
-    if (p.server      != null) document.getElementById('pg-sas-server').value      = p.server;
-    if (p.host        != null) document.getElementById('pg-sas-host').value        = p.host;
-    if (p.schema      != null) document.getElementById('pg-sas-schema').value      = p.schema;
-    if (p.port        != null) document.getElementById('pg-sas-port').value        = p.port;
-    if (p.jar_path    != null) document.getElementById('pg-sas-jar-path').value    = p.jar_path;
-    if (p.config_path != null) document.getElementById('pg-sas-config-path').value = p.config_path;
-}
-
 function _pgEsc(s) {
     if (s == null) return '';
     return escHtml(s);
@@ -177,27 +123,12 @@ function _pgEngine() {
 
 function pgEngineChanged() {
     const eng = _pgEngine();
-    const isSAS = eng === 'sas';
-    document.getElementById('pg-sas-controls').style.display = isSAS ? 'flex' : 'none';
-    document.getElementById('pg-download-btn').style.display = 'none';
-
-    // Athena/Oracle still use the single conn input. SAS hides it because
-    // its connection details live in the SAS controls block below.
-    const connRow = document.getElementById('pg-conn').parentElement.parentElement;
-    connRow.style.display = isSAS ? 'none' : '';
-
     const sqlBox = document.getElementById('pg-sql');
-    if (isSAS) {
-        sqlBox.placeholder = "SAS code body — wrapped between scaffold lines.\n" +
-            "  LIBNAME mode: write SAS code (libref `ora` or `hdp` is mounted).\n" +
-            "  PROC SQL CONNECT: write native passthrough SQL.";
-        pgSasKindChanged();
-    } else {
-        const label = document.getElementById('pg-conn-label');
-        const conn = document.getElementById('pg-conn');
-        // Refill the conn datalist from CONNECTION_MACROS for the new engine.
-        pgRepopulateConnDatalist();
-        if (eng === 'athena') {
+    const label = document.getElementById('pg-conn-label');
+    const conn = document.getElementById('pg-conn');
+    // Refill the conn datalist from CONNECTION_MACROS for the new engine.
+    pgRepopulateConnDatalist();
+    if (eng === 'athena') {
             label.textContent = 'Athena database (optional)';
             conn.placeholder = 'my_database';
             sqlBox.placeholder = 'SELECT COUNT(*) FROM trades WHERE trade_date = DATE \'2026-05-01\'\n' +
@@ -230,24 +161,12 @@ function pgEngineChanged() {
             conn.placeholder = 'pb23';
             sqlBox.placeholder = "SELECT COUNT(*) FROM owner.tbl WHERE trade_date >= DATE '2026-05-01'";
         }
-    }
-}
-
-function pgSasKindChanged() {
-    const kind = document.getElementById('pg-sas-kind').value;
-    document.getElementById('pg-sas-oracle-inline').style.display = kind === 'oracle' ? 'flex' : 'none';
-    document.getElementById('pg-sas-hadoop-inline').style.display = kind === 'hadoop' ? 'flex' : 'none';
-    document.getElementById('pg-sas-hadoop').style.display        = kind === 'hadoop' ? 'flex' : 'none';
 }
 
 async function pgRun() {
     const engine = _pgEngine();
     const sql = document.getElementById('pg-sql').value;
     const btn = document.getElementById('pg-run-btn');
-    document.getElementById('pg-download-btn').style.display = 'none';
-
-    if (engine === 'sas') return pgRunSAS();
-
     if (!sql.trim()) { _pgSetStatus('SQL is empty.', 'error'); return; }
     const conn = document.getElementById('pg-conn').value.trim();
     if (engine === 'oracle' && !conn) { _pgSetStatus('Oracle requires a connection macro.', 'error'); return; }
@@ -309,71 +228,6 @@ async function pgCancel() {
     }
 }
 
-let _pgLastSAS = null;
-
-async function pgRunSAS() {
-    const kind   = document.getElementById('pg-sas-kind').value;
-    const method = document.getElementById('pg-sas-method').value;
-    const sql    = document.getElementById('pg-sql').value;
-
-    const reqBody = {kind, method, sql};
-    if (kind === 'oracle') {
-        reqBody.conn_macro = document.getElementById('pg-sas-conn').value.trim();
-        if (!reqBody.conn_macro) { _pgSetStatus('Oracle needs a macro (e.g. pb23).', 'error'); return; }
-    } else {
-        reqBody.server      = document.getElementById('pg-sas-server').value.trim();
-        reqBody.host        = document.getElementById('pg-sas-host').value.trim();
-        reqBody.schema      = document.getElementById('pg-sas-schema').value.trim();
-        reqBody.port        = parseInt(document.getElementById('pg-sas-port').value || '10000', 10);
-        reqBody.jar_path    = document.getElementById('pg-sas-jar-path').value.trim() || undefined;
-        reqBody.config_path = document.getElementById('pg-sas-config-path').value.trim() || undefined;
-        for (const f of ['server', 'host', 'schema']) {
-            if (!reqBody[f]) { _pgSetStatus(`Hadoop needs \`${f}\`.`, 'error'); return; }
-        }
-    }
-
-    _pgSetStatus('Generating SAS…');
-    const btn = document.getElementById('pg-run-btn');
-    btn.disabled = true;
-
-    try {
-        const res = await fetch('/api/playground/sas', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(reqBody),
-        });
-        const data = await res.json();
-        if (!res.ok || !data.ok) {
-            _pgSetStatus(`Error: ${data.error || res.status}`, 'error');
-            _pgRenderError(data.error || `HTTP ${res.status}`);
-        } else {
-            _pgLastSAS = data;
-            _pgSetStatus(`✓ ${data.filename} (${data.content.length.toLocaleString()} chars)`, 'ok');
-            _pgRenderSAS(data);
-            document.getElementById('pg-download-btn').style.display = '';
-        }
-    } catch (e) {
-        _pgSetStatus(`Network error: ${e.message}`, 'error');
-        _pgRenderError(e.message);
-    } finally {
-        btn.disabled = false;
-        pgLoadHistory();
-    }
-}
-
-function pgDownloadSAS() {
-    if (!_pgLastSAS) return;
-    _pgDownloadBlob(_pgLastSAS.content, _pgLastSAS.filename, 'text/plain');
-}
-
-function _pgRenderSAS(data) {
-    const card = document.getElementById('pg-result-card');
-    card.style.display = '';
-    document.getElementById('pg-result-meta').textContent =
-        `${data.filename} · ${data.content.length.toLocaleString()} chars · fill in %let oracle_usr / oracle_pwd, then submit in SAS`;
-    document.getElementById('pg-result').innerHTML =
-        `<pre style="font-family:var(--jp-code-font-family,monospace); font-size:12px; white-space:pre-wrap; margin:0;">${_pgEsc(data.content)}</pre>`;
-}
 
 function _pgSetStatus(text, kind) {
     const el = document.getElementById('pg-status');
@@ -587,7 +441,7 @@ async function pgClearCache() {
 }
 
 async function pgClearExtractionCache() {
-    if (!confirm('Delete every .cache.db file under known outdirs (csv/, sas/, …)?\n\nFuture extractor runs will re-execute every block — Athena scans will be re-billed.')) return;
+    if (!confirm('Delete every .cache.db file under csv/?\n\nFuture extractor runs will re-execute every block — Athena scans will be re-billed.')) return;
     try {
         const res = await fetch('/api/playground/cache/clear-extraction', {method: 'POST'});
         const data = await res.json();

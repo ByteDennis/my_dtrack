@@ -38,62 +38,6 @@
                 </div>
             </div>
 
-            <div id="pg-sas-controls" style="display:none; flex-direction:column; gap:8px; padding:8px 0;">
-                <div style="display:flex; gap:18px; flex-wrap:wrap; align-items:center;">
-                    <label style="font-size:12px;">Kind:
-                        <select id="pg-sas-kind" onchange="pgSasKindChanged()">
-                            <option value="oracle" selected>Oracle</option>
-                            <option value="hadoop">Hadoop / Hive</option>
-                        </select>
-                    </label>
-                    <label style="font-size:12px;">Method:
-                        <select id="pg-sas-method" onchange="pgSasRepopulateProfiles()">
-                            <option value="libname" selected>LIBNAME</option>
-                            <option value="procsql">PROC SQL CONNECT</option>
-                        </select>
-                    </label>
-                    <span id="pg-sas-oracle-inline" style="display:flex; gap:8px; align-items:center;">
-                        <label style="font-size:12px;">Macro:
-                            <select id="pg-sas-conn" style="min-width:120px;"></select>
-                        </label>
-                        <span style="font-size:11px; color:var(--jp-ui-font-color2);">
-                            from CONNECTION_MACROS; resolves via MACRO2SVC + DTRACK_ORACLE_MACROS; user/pwd from .env
-                        </span>
-                    </span>
-                    <span id="pg-sas-hadoop-inline" style="display:none; gap:8px; align-items:center;">
-                        <label style="font-size:12px;">Profile:
-                            <select id="pg-sas-profile" onchange="pgSasProfileChanged()" style="min-width:140px;">
-                                <option value="">(custom)</option>
-                            </select>
-                        </label>
-                    </span>
-                </div>
-                <div id="pg-sas-hadoop" style="display:none; flex-direction:column; gap:6px;">
-                    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
-                        <label style="font-size:12px;">Server:
-                            <input type="text" id="pg-sas-server" placeholder="hadoop.example.com" style="width:200px;">
-                        </label>
-                        <label style="font-size:12px;">Host:
-                            <input type="text" id="pg-sas-host" placeholder="REALM.EXAMPLE.COM" style="width:200px;">
-                        </label>
-                        <label style="font-size:12px;">Schema:
-                            <input type="text" id="pg-sas-schema" placeholder="my_schema" style="width:140px;">
-                        </label>
-                        <label style="font-size:12px;">Port:
-                            <input type="number" id="pg-sas-port" value="10000" style="width:70px;">
-                        </label>
-                    </div>
-                    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
-                        <label style="font-size:12px;">JAR path:
-                            <input type="text" id="pg-sas-jar-path" placeholder="/sas/bin/Software/Hadoop/OSH/Jars" style="width:300px;">
-                        </label>
-                        <label style="font-size:12px;">Config path:
-                            <input type="text" id="pg-sas-config-path" placeholder="/sas/bin/Software/Hadoop/OSH/PROD" style="width:300px;">
-                        </label>
-                    </div>
-                </div>
-            </div>
-
             <div id="pg-sql-wrap">
                 <textarea id="pg-sql" rows="8" spellcheck="false"
                           placeholder="SELECT COUNT(*) FROM trades WHERE trade_date = DATE '2026-05-01'"
@@ -103,7 +47,6 @@
             <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
                 <button id="pg-run-btn" class="btn-primary" onclick="pgRun()">▶ Run</button>
                 <button id="pg-cancel-btn" class="btn-secondary" style="display:none;" onclick="pgCancel()">⏹ Cancel</button>
-                <button id="pg-download-btn" class="btn-text" style="display:none;" onclick="pgDownloadSAS()">Download .sas</button>
                 <span id="pg-status" style="font-size:12px; color:var(--jp-ui-font-color2); margin-left:auto;"></span>
             </div>
         </section>
@@ -126,7 +69,7 @@
                     <button class="btn-text" onclick="pgLoadHistory()">Reload</button>
                     <button class="btn-text" onclick="pgClearHistory()" title="Delete every row from _playground_history">Clear history</button>
                     <button class="btn-text" onclick="pgClearCache()" title="Wipe the in-memory LRU that backs the use-cache toggle + Download CSV">Clear cache</button>
-                    <button class="btn-text" onclick="pgClearExtractionCache()" title="Delete .cache.db files under csv/ and sas/ — forces extractors to re-run on Athena/Oracle/Hive">Clear extraction cache</button>
+                    <button class="btn-text" onclick="pgClearExtractionCache()" title="Delete .cache.db files under csv/ — forces extractors to re-run on Athena/Oracle/Hive">Clear extraction cache</button>
                 </div>
             </div>
             <div id="pg-history">
