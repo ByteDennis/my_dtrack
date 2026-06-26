@@ -1128,6 +1128,39 @@ def _col_sql_dialect_ops(dialect):
             ),
             'dt_select_wrap':     lambda dt_expr: dt_expr,
         }
+    if dialect in ('athena', 'trino', 'aws'):
+        from .athena import _athena_portable_hash16, _vintage_date_expr_athena
+        return {
+            'wc_empty':           '(1=1)',
+            'is_oracle_typed':    False,
+            'cast_str':           lambda x: f'CAST({x} AS VARCHAR)',
+            'concat':             lambda *parts: f'concat({", ".join(parts)})',
+            'top10_coalesce':     lambda x, d: f'COALESCE({x}, {d})',
+            'mean_inner':         lambda x: f'AVG(CAST({x} AS DOUBLE))',
+            'std_inner':          lambda x: f'STDDEV_SAMP(CAST({x} AS DOUBLE))',
+            'mean_outer':         lambda x: f'CAST({x} AS VARCHAR)',
+            'std_outer':          lambda x: f'CAST({x} AS VARCHAR)',
+            'minmax_strcast':     lambda x: f'CAST({x} AS VARCHAR)',
+            'lifeboat_null_count':    'CAST(NULL AS BIGINT)',
+            'lifeboat_null_meanstd':  'CAST(NULL AS VARCHAR)',
+            'lifeboat_null_minmax':   'CAST(NULL AS VARCHAR)',
+            'top10_listagg':      lambda item: (
+                f"ARRAY_JOIN(ARRAY_AGG({item} ORDER BY cnt DESC, p_col ASC), '; ')"
+            ),
+            'hash_sum_expr':      lambda p_col: (
+                f"SUM(CAST(cnt AS DOUBLE) * "
+                f"CAST({_athena_portable_hash16(p_col)} AS DOUBLE))"
+            ),
+            'cat_present':        "p_col IS NOT NULL AND TRIM(p_col) <> ''",
+            'cat_missing':        "p_col IS NULL OR TRIM(p_col) = ''",
+            'final_order_by':     '\nORDER BY t.dt',
+            'vintage_expr':       lambda tbl_cfg, date_col_q, vintage, date_dtype, date_format: (
+                _vintage_date_expr_athena(date_col_q, vintage,
+                                          tbl_cfg.get('vintage_transform'),
+                                          date_dtype, date_format)
+            ),
+            'dt_select_wrap':     lambda dt_expr: f'CAST({dt_expr} AS VARCHAR)',
+        }
     raise ValueError(f"unknown dialect {dialect!r} for col SQL builder")
 
 # >>> DuckDB expression that buckets `date_col` to the configured vintage <<< #
@@ -1167,6 +1200,9 @@ def _hash16_flat_expr(dialect, col_expr):
             f"SUM(CAST(('0x' || substr(md5(trim(CAST({col_expr} AS VARCHAR))), 1, 4))"
             f"::INTEGER AS DOUBLE))"
         )
+    if dialect in ('athena', 'trino', 'aws'):
+        from .athena import _athena_portable_hash16
+        return f"SUM(CAST({_athena_portable_hash16(col_expr)} AS DOUBLE))"
     raise ValueError(f"unknown dialect {dialect!r} for hash16 flat expr")
 
 # >>> Build per-column stats SQL for any supported dialect <<< #

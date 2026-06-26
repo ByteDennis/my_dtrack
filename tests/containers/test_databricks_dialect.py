@@ -32,3 +32,10 @@ def test_databricks_col_sql_executes(spark):
     assert is_numeric
     rows = spark.sql(sql).collect()
     assert len(rows) == 1
+    rec = rows[0].asDict()
+    assert int(rec["n_total"]) == 3
+    assert int(rec["n_missing"]) == 0
+    assert int(rec["n_unique"]) == 3
+    assert float(rec["mean"]) == 20.0
+    assert float(rec["min_val"]) == 10.0
+    assert float(rec["max_val"]) == 30.0

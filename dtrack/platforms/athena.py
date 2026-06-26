@@ -21,6 +21,7 @@ from .base import (
     inject_where_from_config,
     build_stats_sql,
     build_top10_sql,
+    build_col_sql,
     quote_ident,
     set_cache_db,
     cache_stats,
@@ -969,88 +970,14 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                         _emit_col_block(
                             blocks, f"-- {qname}/{col_name}/_all", sql)
                         continue
-                    from .base import apply_null_sentinels
-                    if is_num:
-                        col_expr = apply_null_sentinels(col_q, col_dtype or "numeric", "athena")
-                        sql = f"""{cte_prefix}SELECT
-    {trunc_expr} AS dt,
-    '{col_name}' AS column_name,
-    'numeric' AS col_type,
-    COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col_expr}) AS n_missing,
-    COUNT(DISTINCT {col_expr}) AS n_unique,
-    CAST(AVG(CAST({col_expr} AS DOUBLE)) AS VARCHAR) AS mean,
-    CAST(STDDEV_SAMP(CAST({col_expr} AS DOUBLE)) AS VARCHAR) AS std,
-    CAST(MIN({col_expr}) AS VARCHAR) AS min_val,
-    CAST(MAX({col_expr}) AS VARCHAR) AS max_val,
-    '' AS top_10
-FROM {full_table}
-WHERE {wc_t_col}
-GROUP BY {trunc_expr};"""
-                    else:
-                        col_expr = apply_null_sentinels(col_q, col_dtype or "categorical", "athena")
-                        sql = f"""{cte_prefix}WITH freq AS (
-    SELECT {trunc_expr} AS dt,
-           CAST({col_expr} AS VARCHAR) AS p_col,
-           COUNT(*) AS cnt
-    FROM {full_table}
-    WHERE {wc_t_col}
-    GROUP BY {trunc_expr}, {col_expr}
-),
-ranked AS (
-    SELECT dt, p_col, cnt,
-           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY UPPER(TRIM(p_col)), p_col) AS rnk_alpha,
-           COUNT(*) OVER (PARTITION BY dt) AS k_alpha,
-           ROW_NUMBER() OVER (PARTITION BY dt ORDER BY cnt DESC, p_col ASC) AS rn
-    FROM freq WHERE p_col IS NOT NULL AND TRIM(p_col) <> ''
-),
-top_n AS (
-    SELECT dt,
-           ARRAY_JOIN(ARRAY_AGG(
-               p_col || '(' || CAST(cnt AS VARCHAR) || ')'
-               ORDER BY cnt DESC
-           ), '; ') AS top_10
-    FROM ranked WHERE rn <= 10
-    GROUP BY dt
-),
-totals AS (
-    SELECT dt,
-           SUM(cnt) AS n_total,
-           COALESCE(SUM(CASE WHEN p_col IS NULL OR TRIM(p_col) = '' THEN cnt ELSE 0 END), 0) AS n_missing,
-           SUM(CASE WHEN p_col IS NOT NULL AND TRIM(p_col) <> '' THEN 1 ELSE 0 END) AS n_unique
-    FROM freq GROUP BY dt
-),
-agg AS (
-    SELECT dt,
-           SUM(CAST(cnt AS DOUBLE)) AS sum_cnt,
-           SUM(CAST(cnt AS DOUBLE) * rnk_alpha) AS sum_cnt_rnk,
-           SUM(CAST(cnt AS DOUBLE) * rnk_alpha * rnk_alpha) AS sum_cnt_rnk2
-    FROM ranked GROUP BY dt
-),
-sstats AS (
-    SELECT dt,
-           CAST(sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0) AS VARCHAR) AS mean,
-           CAST(SQRT(GREATEST(
-               sum_cnt_rnk2 * 1.0 / NULLIF(sum_cnt, 0)
-               - (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0))
-               * (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0)), 0)) AS VARCHAR) AS std
-    FROM agg
-),
-minmax AS (
-    SELECT dt,
-           MAX(CASE WHEN rnk_alpha = 1       THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) AS min_val,
-           MAX(CASE WHEN rnk_alpha = k_alpha THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) AS max_val
-    FROM ranked GROUP BY dt
-)
-SELECT s.dt, '{col_name}' AS column_name, 'categorical' AS col_type,
-       s.n_total, s.n_missing, s.n_unique,
-       ss.mean, ss.std, mm.min_val, mm.max_val,
-       COALESCE(t.top_10, '') AS top_10
-FROM totals s
-LEFT JOIN sstats ss ON s.dt = ss.dt
-LEFT JOIN minmax mm ON s.dt = mm.dt
-LEFT JOIN top_n t ON s.dt = t.dt
-ORDER BY s.dt;"""
+                    col_cfg = dict(tbl)
+                    col_cfg['where'] = wc_t_col
+                    sql, _ = build_col_sql(
+                        'athena', col_cfg, col_name, col_dtype, full_table,
+                        cte_prefix=cte_prefix, vintage=vintage,
+                        date_dtype=date_filter.get('date_dtype'),
+                        date_format=date_filter.get('date_format'),
+                        preset=preset, stats_override=stats_override)
                     _emit_col_block(
                         blocks, f"-- {qname}/{col_name}/_all", sql)
                 continue
@@ -1088,64 +1015,12 @@ ORDER BY s.dt;"""
                             f"-- {qname}/{col_name}{block_suffix}",
                             sql)
                         continue
-                    from .base import apply_null_sentinels
-                    if is_num:
-                        col_expr = apply_null_sentinels(col_q, col_dtype or "numeric", "athena")
-                        sql = f"""{cte_prefix}SELECT
-    {dt_expr} AS dt,
-    '{col_name}' AS column_name,
-    'numeric' AS col_type,
-    COUNT(*) AS n_total,
-    COUNT(*) - COUNT({col_expr}) AS n_missing,
-    COUNT(DISTINCT {col_expr}) AS n_unique,
-    CAST(AVG(CAST({col_expr} AS DOUBLE)) AS VARCHAR) AS mean,
-    CAST(STDDEV_SAMP(CAST({col_expr} AS DOUBLE)) AS VARCHAR) AS std,
-    CAST(MIN({col_expr}) AS VARCHAR) AS min_val,
-    CAST(MAX({col_expr}) AS VARCHAR) AS max_val,
-    '' AS top_10,
-    '' AS length_avg,
-    '' AS length_max,
-    '' AS hash_sum
-FROM {full_table}
-WHERE {wc};"""
-                    else:
-                        col_expr = apply_null_sentinels(col_q, col_dtype or "categorical", "athena")
-                        sql = f"""{cte_prefix}WITH freq AS (
-    SELECT
-        CAST({col_expr} AS VARCHAR) AS p_col,
-        COUNT(*) AS cnt
-    FROM {full_table}
-    WHERE {wc}
-    GROUP BY {col_expr}
-),
-ranked AS (
-    SELECT p_col, cnt,
-        ROW_NUMBER() OVER (ORDER BY UPPER(TRIM(p_col)), p_col) AS rnk_alpha,
-        COUNT(*) OVER () AS k_alpha,
-        ROW_NUMBER() OVER (ORDER BY cnt DESC, p_col ASC) AS rn
-    FROM freq WHERE p_col IS NOT NULL AND TRIM(p_col) <> ''
-)
-SELECT
-    {dt_expr} AS dt,
-    '{col_name}' AS column_name,
-    'categorical' AS col_type,
-    (SELECT SUM(cnt) FROM freq) AS n_total,
-    COALESCE((SELECT SUM(cnt) FROM freq WHERE p_col IS NULL OR TRIM(p_col) = ''), 0) AS n_missing,
-    (SELECT SUM(CASE WHEN p_col IS NOT NULL AND TRIM(p_col) <> '' THEN 1 ELSE 0 END) FROM freq) AS n_unique,
-    CAST((SELECT SUM(CAST(cnt AS DOUBLE) * rnk_alpha) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0) FROM ranked) AS VARCHAR) AS mean,
-    CAST((SELECT SQRT(GREATEST(
-        SUM(CAST(cnt AS DOUBLE) * rnk_alpha * rnk_alpha) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0)
-        - POWER(SUM(CAST(cnt AS DOUBLE) * rnk_alpha) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0), 2),
-        0)) FROM ranked) AS VARCHAR) AS std,
-    (SELECT MAX(CASE WHEN rnk_alpha = 1       THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) FROM ranked) AS min_val,
-    (SELECT MAX(CASE WHEN rnk_alpha = k_alpha THEN TRIM(p_col) || '=' || CAST(cnt AS VARCHAR) END) FROM ranked) AS max_val,
-    COALESCE((SELECT ARRAY_JOIN(ARRAY_AGG(
-        p_col || '(' || CAST(cnt AS VARCHAR) || ')'
-        ORDER BY cnt DESC
-    ), '; ') FROM ranked WHERE rn <= 10), '') AS top_10,
-    CAST((SELECT SUM(CAST(cnt AS DOUBLE) * LENGTH(TRIM(p_col))) / NULLIF(SUM(CAST(cnt AS DOUBLE)), 0) FROM ranked) AS VARCHAR) AS length_avg,
-    CAST((SELECT MAX(LENGTH(TRIM(p_col))) FROM ranked) AS VARCHAR) AS length_max,
-    CAST((SELECT SUM(CAST(cnt AS DOUBLE) * CAST({_athena_portable_hash16("p_col")} AS DOUBLE)) FROM ranked) AS VARCHAR) AS hash_sum;"""
+                    col_cfg = dict(tbl)
+                    col_cfg['where'] = wc
+                    sql, _ = build_col_sql(
+                        'athena', col_cfg, col_name, col_dtype, full_table,
+                        cte_prefix=cte_prefix, vintage='all', dt_label=dt_label,
+                        preset=preset, stats_override=stats_override)
 
                     _emit_col_block(
                         blocks,

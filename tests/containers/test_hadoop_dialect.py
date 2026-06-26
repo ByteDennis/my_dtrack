@@ -32,5 +32,13 @@ def test_hadoop_col_sql_executes(hive_cursor):
                                     vintage="all")
     assert is_numeric
     cur.execute(sql)
+    cols = [d[0].split('.')[-1].lower() for d in cur.description]
     rows = cur.fetchall()
     assert len(rows) == 1
+    rec = dict(zip(cols, rows[0]))
+    assert int(rec["n_total"]) == 3
+    assert int(rec["n_missing"]) == 0
+    assert int(rec["n_unique"]) == 3
+    assert float(rec["mean"]) == 20.0
+    assert float(rec["min_val"]) == 10.0
+    assert float(rec["max_val"]) == 30.0
