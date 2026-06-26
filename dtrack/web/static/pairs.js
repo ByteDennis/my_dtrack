@@ -1306,60 +1306,39 @@ async function generateAll() {
                     body: JSON.stringify(reqBody),
                 });
 
-                const reader = resp.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
+                await parseSSE(resp, (eventType, msg) => {
 
-                while (true) {
-                    const {done, value} = await reader.read();
-                    if (done) break;
-                    buffer += decoder.decode(value, {stream: true});
-
-                    const parts = buffer.split('\n\n');
-                    buffer = parts.pop();
-
-                    for (const part of parts) {
-                        let eventType = 'message';
-                        let data = '';
-                        for (const line of part.split('\n')) {
-                            if (line.startsWith('event: ')) eventType = line.slice(7);
-                            else if (line.startsWith('data: ')) data = line.slice(6);
+                    if (eventType === 'run_id') {
+                        activeRunId = msg.run_id;
+                    } else if (eventType === 'log') {
+                        logMessage(msg.line, msg.level || 'info');
+                    } else if (eventType === 'start') {
+                        const eta = _fmtEta(msg.eta_sec);
+                        const etaPart = eta ? ` | eta ${eta}` : '';
+                        logMessage(`[start | running=${msg.running}${etaPart}] ${msg.name}`, 'info');
+                    } else if (eventType === 'progress') {
+                        const status = msg.cancelled
+                            ? 'cancelled (not submitted)'
+                            : (msg.ok ? `${msg.rows} dates, ${msg.elapsed}s` : `FAIL: ${msg.error}`);
+                        const eta = _fmtEta(msg.eta_sec);
+                        const etaPart = eta ? ` | eta ${eta}` : '';
+                        const runningPart = msg.running != null ? ` | running=${msg.running}` : '';
+                        logMessage(`[${msg.done}/${msg.total}${runningPart}${etaPart}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
+                        if (msg.csv_path) {
+                            logMessage(`  -> CSV written: ${msg.csv_path}`, 'success');
                         }
-                        if (!data) continue;
-                        const msg = JSON.parse(data);
-
-                        if (eventType === 'run_id') {
-                            activeRunId = msg.run_id;
-                        } else if (eventType === 'log') {
-                            logMessage(msg.line, msg.level || 'info');
-                        } else if (eventType === 'start') {
-                            const eta = _fmtEta(msg.eta_sec);
-                            const etaPart = eta ? ` | eta ${eta}` : '';
-                            logMessage(`[start | running=${msg.running}${etaPart}] ${msg.name}`, 'info');
-                        } else if (eventType === 'progress') {
-                            const status = msg.cancelled
-                                ? 'cancelled (not submitted)'
-                                : (msg.ok ? `${msg.rows} dates, ${msg.elapsed}s` : `FAIL: ${msg.error}`);
-                            const eta = _fmtEta(msg.eta_sec);
-                            const etaPart = eta ? ` | eta ${eta}` : '';
-                            const runningPart = msg.running != null ? ` | running=${msg.running}` : '';
-                            logMessage(`[${msg.done}/${msg.total}${runningPart}${etaPart}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
-                            if (msg.csv_path) {
-                                logMessage(`  -> CSV written: ${msg.csv_path}`, 'success');
-                            }
-                        } else if (eventType === 'done') {
-                            if (msg.ok) {
-                                logMessage(`${label} extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
-                            } else if (msg.results) {
-                                const failed = msg.results.filter(r => !r.ok);
-                                failed.forEach(r => logMessage(`  FAILED: ${r.name} — ${r.error}`, 'error'));
-                                logMessage(`${msg.succeeded}/${msg.total} succeeded, ${msg.failed} failed`, 'error');
-                            } else {
-                                logMessage(`${label} error: ${msg.error}`, 'error');
-                            }
+                    } else if (eventType === 'done') {
+                        if (msg.ok) {
+                            logMessage(`${label} extraction complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
+                        } else if (msg.results) {
+                            const failed = msg.results.filter(r => !r.ok);
+                            failed.forEach(r => logMessage(`  FAILED: ${r.name} — ${r.error}`, 'error'));
+                            logMessage(`${msg.succeeded}/${msg.total} succeeded, ${msg.failed} failed`, 'error');
+                        } else {
+                            logMessage(`${label} error: ${msg.error}`, 'error');
                         }
                     }
-                }
+                });
             } catch (err) {
                 if (err.name === 'AbortError') {
                     logMessage(`${label} extraction cancelled (queued blocks short-circuited; in-flight queries finish their query but no new ones are sent)`, 'info');
@@ -1431,36 +1410,18 @@ async function generateAll() {
             });
             // Drain SSE -- reuses the same event format as the other
             // platforms; we just log each line through for now.
-            const reader = resp.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-            while (true) {
-                const {done, value} = await reader.read();
-                if (done) break;
-                buffer += decoder.decode(value, {stream: true});
-                const parts = buffer.split('\n\n');
-                buffer = parts.pop();
-                for (const part of parts) {
-                    let eventType = 'message';
-                    let data = '';
-                    for (const line of part.split('\n')) {
-                        if (line.startsWith('event: ')) eventType = line.slice(7);
-                        else if (line.startsWith('data: ')) data = line.slice(6);
-                    }
-                    if (!data) continue;
-                    const msg = JSON.parse(data);
-                    if (eventType === 'progress') {
-                        const status = msg.ok ? `${msg.rows} rows, ${msg.elapsed}s` : `FAIL: ${msg.error}`;
-                        logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
-                    } else if (eventType === 'done') {
-                        if (msg.ok) {
-                            logMessage(`CSV (${writesLeft ? 'left' : 'right'}) complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
-                        } else {
-                            logMessage(`CSV failed: ${msg.error || ''}`, 'error');
-                        }
+            await parseSSE(resp, (eventType, msg) => {
+                if (eventType === 'progress') {
+                    const status = msg.ok ? `${msg.rows} rows, ${msg.elapsed}s` : `FAIL: ${msg.error}`;
+                    logMessage(`[${msg.done}/${msg.total}] ${msg.name}: ${status}`, msg.ok ? 'info' : 'error');
+                } else if (eventType === 'done') {
+                    if (msg.ok) {
+                        logMessage(`CSV (${writesLeft ? 'left' : 'right'}) complete: ${msg.succeeded}/${msg.total} succeeded`, 'success');
+                    } else {
+                        logMessage(`CSV failed: ${msg.error || ''}`, 'error');
                     }
                 }
-            }
+            });
         } catch (e) {
             logMessage(`CSV (${writesLeft ? 'left' : 'right'}) error: ${e.message}`, 'error');
         }

@@ -471,6 +471,30 @@ function syncSelectAllCheckbox() {
     cb.indeterminate = someSelected && !allSelected;
 }
 
+// >>> consume a fetch SSE stream; calls onEvent(eventType, JSON.parse(data)) per event <<< //
+async function parseSSE(resp, onEvent) {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {stream: true});
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop();
+        for (const part of parts) {
+            let eventType = 'message';
+            let data = '';
+            for (const line of part.split('\n')) {
+                if (line.startsWith('event: ')) eventType = line.slice(7);
+                else if (line.startsWith('data: ')) data = line.slice(6);
+            }
+            if (!data) continue;
+            await onEvent(eventType, JSON.parse(data));
+        }
+    }
+}
+
 // >>> known tables for the loaders' auto-match: /api/status + config pairs <<< //
 // Shared by Load Row + Load Col; callers apply their own post-filtering.
 async function buildKnownTables() {
