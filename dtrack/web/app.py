@@ -22,6 +22,15 @@ _dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=_dir / "static"), name="static")
 templates = Jinja2Templates(directory=_dir / "templates")
 
+# >>> force browsers to revalidate static assets (ETag 304 if unchanged) so a <<< #
+# >>> stale cached common.js never skews against a freshly-edited page script <<< #
+@app.middleware("http")
+async def _revalidate_static(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 # >>> pure-ASGI access log; drains+replays body so SSE handlers keep working <<< #
 class _APILogMiddleware:
     def __init__(self, app):
