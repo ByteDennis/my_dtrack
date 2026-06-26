@@ -1,4 +1,3 @@
-"""Data loading functionality for row counts and column statistics"""
 
 import csv
 import os
@@ -7,104 +6,67 @@ from typing import List, Tuple, Optional
 from collections import defaultdict
 import pandas as pd
 
-from .date_utils import parse_date, bucket_date, detect_format, format_vintage_label, DateConverter
+from .date_utils import parse_date, bucket_date, detect_format, format_vintage_label
 from .db import (
     upsert_row_counts,
     insert_col_stats,
     update_metadata,
     get_metadata,
-    patch_metadata,
 )
 from .stats import compute_column_stats
 
-
-# Column name aliases for automatic detection
 DATE_ALIASES = {'rpg_dt', 'eff_dt', 'dt', 'date', 'run_date', 'snap_dt', 'snapshot_dt', 'date_value'}
 COUNT_ALIASES = {'row_count', 'rowcount', 'count', 'cnt', 'rows'}
 
-
+# >>> Detect which column is the date column based on common aliases <<< #
 def detect_date_column(headers: List[str]) -> Optional[str]:
-    """
-    Detect which column is the date column based on common aliases.
-
-    Args:
-        headers: List of column headers
-
-    Returns:
-        Name of the date column, or None if not found
-    """
     for header in headers:
         if header.lower().strip() in DATE_ALIASES:
             return header
     return None
 
-
+# >>> Detect which column is the count column based on common aliases <<< #
 def detect_count_column(headers: List[str]) -> Optional[str]:
-    """
-    Detect which column is the count column based on common aliases.
-
-    Args:
-        headers: List of column headers
-
-    Returns:
-        Name of the count column, or None if not found
-    """
     for header in headers:
         if header.lower().strip() in COUNT_ALIASES:
             return header
     return None
 
-
+# >>> Load row counts from a CSV file <<< #
 def load_row_count_csv(
     csv_path: str,
     date_col: Optional[str] = None,
     count_col: Optional[str] = None,
 ) -> Tuple[List[Tuple[str, int]], Optional[str]]:
-    """
-    Load row counts from a CSV file.
-
-    Args:
-        csv_path: Path to CSV file
-        date_col: Name of date column (auto-detected if None)
-        count_col: Name of count column (auto-detected if None)
-
-    Returns:
-        Tuple of (list of (date, row_count) tuples, detected_date_format)
-    """
     detected_format = None
 
     with open(csv_path, 'r', newline='') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
 
-        # Auto-detect columns if not provided or not present in headers
         if date_col is None or date_col not in headers:
             date_col = detect_date_column(headers)
             if date_col is None:
-                date_col = headers[0]  # Default to first column
+                date_col = headers[0]
 
         if count_col is None or count_col not in headers:
             count_col = detect_count_column(headers)
             if count_col is None:
-                count_col = headers[1]  # Default to second column
+                count_col = headers[1]
 
-        # Read and aggregate data
         data = defaultdict(int)
         for row in reader:
             date_str = row[date_col].strip()
             count_str = row[count_col].strip()
 
-            # Detect format from first valid date value
             if detected_format is None and date_str:
                 try:
                     detected_format = detect_format(date_str)
                 except ValueError:
                     pass
 
-            # Keep original date string (no normalization)
             dt = date_str
 
-            # Parse count
             try:
                 count = int(count_str)
             except ValueError:
@@ -113,10 +75,9 @@ def load_row_count_csv(
 
             data[dt] += count
 
-    # Convert to sorted list
     return sorted(data.items()), detected_format
 
-
+# >>> Load row counts from CSV file(s) into the database <<< #
 def load_row_counts(
     db_path: str,
     file_or_folder: str,
@@ -129,24 +90,8 @@ def load_row_counts(
     date_col: Optional[str] = None,
     date_var_override: Optional[str] = None,
 ) -> None:
-    """
-    Load row counts from CSV file(s) into the database.
-
-    Args:
-        db_path: Path to SQLite database
-        file_or_folder: Path to CSV file or folder containing CSV files
-        table_name: Name of the table to create/update
-        mode: Load mode (replace, append, upsert)
-        vintage: Time granularity
-        source: Data source identifier (aws, oracle, sas)
-        db_name: Database or service name
-        source_table: Original table name
-        date_col: Date column name for CSV parsing (auto-detected if None)
-        date_var_override: Source DB column name to store in metadata (e.g. RPT_DT)
-    """
     path = Path(file_or_folder)
 
-    # Get list of CSV files
     if path.is_file():
         csv_files = [path]
     elif path.is_dir():
@@ -154,7 +99,6 @@ def load_row_counts(
     else:
         raise ValueError(f"Path does not exist: {file_or_folder}")
 
-    # Load data from all CSV files
     all_data = defaultdict(int)
     detected_format = None
     for csv_file in csv_files:
@@ -164,14 +108,11 @@ def load_row_counts(
         )
         if fmt and not detected_format:
             detected_format = fmt
-        # Aggregate data
         for dt, count in data:
             all_data[dt] += count
 
-    # Convert to list
     data_list = sorted(all_data.items())
 
-    # Insert data based on mode
     if mode == "replace":
         import sqlite3
         conn = sqlite3.connect(db_path)
@@ -187,11 +128,9 @@ def load_row_counts(
     else:
         raise ValueError(f"Invalid mode: {mode}")
 
-    # Compute date range from loaded data
     min_dt = min(dt for dt, _ in data_list) if data_list else None
     max_dt = max(dt for dt, _ in data_list) if data_list else None
 
-    # For upsert mode, expand existing range
     if mode == "upsert" and (min_dt or max_dt):
         existing = get_metadata(db_path, table_name)
         if existing:
@@ -200,7 +139,6 @@ def load_row_counts(
             if existing.get("max_date_loaded") and max_dt:
                 max_dt = max(max_dt, existing["max_date_loaded"])
 
-    # Update metadata
     total_count = sum(count for _, count in data_list)
     update_metadata(db_path, {
         "table_name": table_name,
@@ -214,7 +152,6 @@ def load_row_counts(
         "min_date_loaded": min_dt,
         "max_date_loaded": max_dt,
     })
-
 
 # >>> read a {qname}_columns.csv sidecar (column_name/variable/name -> data_type), case-insensitive headers <<< #
 def read_columns_sidecar(path):
@@ -234,7 +171,7 @@ def read_columns_sidecar(path):
         return {}
     return out
 
-
+# >>> Load column data from a CSV file into a pandas DataFrame <<< #
 def load_column_data_csv(
     csv_path: str,
     date_col: str,
@@ -243,40 +180,22 @@ def load_column_data_csv(
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
 ) -> pd.DataFrame:
-    """
-    Load column data from a CSV file into a pandas DataFrame.
-
-    Args:
-        csv_path: Path to CSV file
-        date_col: Name of the date column
-        vintage: Time granularity
-        columns: List of columns to include (None = all columns)
-        from_date: Start date filter (YYYY-MM-DD)
-        to_date: End date filter (YYYY-MM-DD)
-
-    Returns:
-        Pandas DataFrame with data
-    """
-    # Read CSV
     df = pd.read_csv(csv_path)
 
-    # Parse and bucket dates
     df[date_col] = df[date_col].apply(lambda x: parse_date(str(x)))
     df[date_col] = df[date_col].apply(lambda x: bucket_date(x, vintage))
 
-    # Filter by date range
     if from_date:
         df = df[df[date_col] >= from_date]
     if to_date:
         df = df[df[date_col] <= to_date]
 
-    # Select columns
     if columns:
         df = df[[date_col] + columns]
 
     return df
 
-
+# >>> Load column statistics from a CSV file into the database <<< #
 def load_column_data(
     db_path: str,
     file_path: str,
@@ -290,23 +209,6 @@ def load_column_data(
     source: Optional[str] = None,
     db_name: Optional[str] = None,
 ) -> None:
-    """
-    Load column statistics from a CSV file into the database.
-
-    Args:
-        db_path: Path to SQLite database
-        file_path: Path to CSV file
-        source_table: Name of the source table
-        date_col: Name of the date column
-        columns: List of columns to analyze (None = all except date_col)
-        mode: Load mode (replace, upsert)
-        vintage: Time granularity
-        from_date: Start date filter
-        to_date: End date filter
-        source: Data source identifier
-        db_name: Database or service name
-    """
-    # Load data
     df = load_column_data_csv(
         csv_path=file_path,
         date_col=date_col,
@@ -316,7 +218,6 @@ def load_column_data(
         to_date=to_date,
     )
 
-    # Compute statistics
     stats = compute_column_stats(
         df=df,
         source_table=source_table,
@@ -324,16 +225,13 @@ def load_column_data(
         columns=columns,
     )
 
-    # Add vintage_label to each stat
     for stat in stats:
         try:
             stat["vintage_label"] = format_vintage_label(stat["dt"], vintage)
         except (ValueError, KeyError):
             stat["vintage_label"] = ""
 
-    # Insert stats
     if mode == "replace":
-        # Delete existing stats for this source_table
         import sqlite3
         conn = sqlite3.connect(db_path)
         conn.execute("DELETE FROM _col_stats WHERE source_table = ?", (source_table,))
@@ -342,7 +240,6 @@ def load_column_data(
 
     insert_col_stats(db_path, stats)
 
-    # Update metadata
     update_metadata(db_path, {
         "table_name": source_table,
         "source": source,
@@ -352,8 +249,6 @@ def load_column_data(
         "data_type": "col",
     })
 
-
-# Column name aliases for pre-computed stats CSV
 _COL_STATS_ALIASES = {
     'n_total': ['n_total', 'col_count', 'count'],
     'n_missing': ['n_missing', 'col_missing', 'missing'],
@@ -363,22 +258,20 @@ _COL_STATS_ALIASES = {
     'min_val': ['min_val', 'col_min', 'min'],
     'max_val': ['max_val', 'col_max', 'max'],
     'top_10': ['top_10', 'col_freq', 'freq', 'top10'],
-    # Coarse signals
     'length_avg': ['length_avg', 'len_avg', 'avg_len'],
     'length_max': ['length_max', 'len_max', 'max_len'],
     'hash_sum': ['hash_sum', 'hashsum'],
 }
 
-
+# >>> Find the actual CSV header for a field using aliases <<< #
 def _resolve_col(headers, field, aliases):
-    """Find the actual CSV header for a field using aliases."""
     for alias in aliases:
         for h in headers:
             if h.lower().strip() == alias.lower():
                 return h
     return None
 
-
+# >>> Load pre-computed column statistics from CSV into _col_stats table <<< #
 def load_precomputed_col_stats(
     db_path: str,
     csv_path: str,
@@ -389,40 +282,12 @@ def load_precomputed_col_stats(
     vintage: str = "day",
     level: str = "fine",
 ) -> int:
-    """
-    Load pre-computed column statistics from CSV into _col_stats table.
-
-    Expected CSV columns (with alias support):
-        column_name, dt, col_type, n_total, n_missing, n_unique,
-        mean/col_avg, std/col_std, min_val/col_min, max_val/col_max,
-        top_10/col_freq, length_avg, length_max, hash_sum
-
-    Args:
-        db_path: Path to SQLite database
-        csv_path: Path to CSV file with pre-computed stats
-        table_name: Table name to associate stats with
-        mode: Load mode (upsert or replace). "replace" deletes all existing
-              rows for the table first; only valid for level="fine" (a coarse
-              re-load shouldn't wipe fine-extracted rows).
-        source: Data source identifier
-        db_name: Database name
-        level: "fine" (default) — full upsert of every column.
-               "coarse" — merge: writes only the cheap signals
-               (n_total/n_missing/n_unique/min_val/max_val/length_avg/
-               length_max/hash_sum), preserving any existing mean/std/top_10
-               from a prior fine extraction. mode="replace" is forced to
-               "upsert" in coarse to avoid dropping fine rows.
-
-    Returns:
-        Number of rows loaded
-    """
     import sqlite3
 
     with open(csv_path, 'r', newline='') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
 
-        # Resolve aliased column names
         col_map = {}
         for field, aliases in _COL_STATS_ALIASES.items():
             resolved = _resolve_col(headers, field, aliases)
@@ -435,13 +300,9 @@ def load_precomputed_col_stats(
             conn.commit()
             conn.close()
         elif mode == "replace" and level == "coarse":
-            # Coarse-replace would wipe fine rows produced by an earlier
-            # drill-down. Silently downgrade to upsert/coarse-merge.
             print(f"  [load-col] level=coarse: ignoring mode='replace' to "
                   f"preserve any existing fine rows for {table_name}")
 
-        # Resolve effective vintage for labeling:
-        # sample@N -> day, all -> skip labels, others -> as-is
         if vintage.startswith('sample@'):
             effective_vintage = 'day'
         elif vintage == 'all':
@@ -459,13 +320,12 @@ def load_precomputed_col_stats(
                     return row[field]
                 return default
 
-            # Normalize dt to YYYY-MM-DD and compute vintage label
             raw_dt = row.get("dt", "")
             try:
                 canonical_dt = parse_date(raw_dt) if raw_dt else raw_dt
             except ValueError as e:
                 canonical_dt = raw_dt
-                if not stats and raw_dt not in ('all', 'sample'):  # print once
+                if not stats and raw_dt not in ('all', 'sample'):
                     print(f"  [vintage_label] WARNING: parse_date({raw_dt!r}) failed: {e}")
             label = ""
             if canonical_dt and effective_vintage:
@@ -497,9 +357,7 @@ def load_precomputed_col_stats(
     insert_col_stats(db_path, stats,
                      mode="coarse_merge" if level == "coarse" else "fine")
 
-    # Compute date range from loaded stats (already canonical YYYY-MM-DD)
     dt_values = [s["dt"] for s in stats if s.get("dt")]
-    # Parse to canonical form in case any failed parse_date above
     canonical_dts = []
     for d in dt_values:
         try:
@@ -509,7 +367,6 @@ def load_precomputed_col_stats(
     min_dt = min(canonical_dts) if canonical_dts else None
     max_dt = max(canonical_dts) if canonical_dts else None
 
-    # For upsert mode, expand existing range
     if mode == "upsert" and (min_dt or max_dt):
         existing = get_metadata(db_path, table_name)
         if existing:
@@ -518,7 +375,6 @@ def load_precomputed_col_stats(
             if existing.get("max_date_loaded") and max_dt:
                 max_dt = max(max_dt, existing["max_date_loaded"])
 
-    # Update metadata
     update_metadata(db_path, {
         "table_name": table_name,
         "source": source,

@@ -1,24 +1,16 @@
-"""Extraction dispatch: classify config tables by source, run each platform's extractor."""
 
 import os
 
 from .config import load_unified_config, get_all_tables_from_unified
 
-
 # >>> group config tables by the platform that extracts them <<< #
 def classify_tables_by_platform(tables):
-    groups = {"sas": [], "aws": [], "oracle": [], "databricks": [], "hadoop": [], "csv": []}
+    groups = {"aws": [], "oracle": [], "databricks": [], "hadoop": [], "csv": []}
     for tbl in tables:
         source = (tbl.get("source") or "").lower()
-        processed = tbl.get("processed") or ""
-        if processed.startswith("$"):
-            groups["sas"].append(tbl)
-        elif source in ("aws", "oracle", "databricks", "hadoop", "csv"):
+        if source in groups:
             groups[source].append(tbl)
-        else:
-            groups["sas"].append(tbl)
     return groups
-
 
 # >>> platform string -> extractor callable (lazy import); None if unknown <<< #
 def get_platform_extractor(platform):
@@ -38,11 +30,7 @@ def get_platform_extractor(platform):
     if platform == "csv":
         from .platforms.csv_duckdb import extract_csv
         return extract_csv
-    if platform in ("sas", "hadoop_sas"):
-        from .platforms.hadoop import gen_sas
-        return gen_sas
     return None
-
 
 # >>> run a single platform's extractor (web /api/extract path); False if unknown <<< #
 def extract_one(platform, config_path, outdir, types=None, db_path=None,
@@ -50,15 +38,13 @@ def extract_one(platform, config_path, outdir, types=None, db_path=None,
     fn = get_platform_extractor(platform)
     if fn is None:
         return False
-    kwargs = dict(types=types, db_path=db_path, from_date=from_date, to_date=to_date)
-    if (platform or "").lower() not in ("sas", "hadoop_sas"):
-        kwargs["max_workers"] = max_workers
+    kwargs = dict(types=types, db_path=db_path, from_date=from_date, to_date=to_date,
+                  max_workers=max_workers)
     fn(config_path, outdir, **kwargs)
     return True
 
-
 # >>> classify config tables and run every platform extractor that has tables <<< #
-def extract_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
+def extract_all(config_path, outdir=None, csv_outdir=None,
                 types=None, max_workers=None, db_path=None, vintage=None,
                 force=False, from_date=None, to_date=None,
                 preset=None, stats_override=None, gen_only=False):
@@ -66,8 +52,6 @@ def extract_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
         types = ["row", "col"]
     if outdir is None:
         outdir = os.getcwd()
-    if sas_outdir is None:
-        sas_outdir = os.path.join(outdir, "sas")
     if csv_outdir is None:
         csv_outdir = os.path.join(outdir, "csv")
 
@@ -79,13 +63,6 @@ def extract_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
                       {k: len(v) for k, v in groups.items() if v})
 
     verb = "Generating" if gen_only else "Extracting"
-
-    if groups["sas"]:
-        print(f"\n--- Generating SAS extraction ({len(groups['sas'])} tables) ---")
-        from .platforms.hadoop import gen_sas
-        gen_sas(config_path, sas_outdir, types=types, db_path=db_path, vintage=vintage,
-                from_date=from_date, to_date=to_date,
-                preset=preset, stats_override=stats_override, gen_only=gen_only)
 
     if groups["oracle"]:
         print(f"\n--- {verb} from Oracle ({len(groups['oracle'])} tables) ---")
@@ -127,7 +104,6 @@ def extract_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
                     from_date=from_date, to_date=to_date,
                     preset=preset, stats_override=stats_override, gen_only=gen_only)
 
-
 # >>> platform string -> (runner, mock-env-var) for run_sql_all <<< #
 _RUNNERS = {
     "aws": ("dtrack.platforms.athena", "run_sql_file", "DTRACK_ATHENA_MOCK"),
@@ -137,17 +113,14 @@ _RUNNERS = {
     "csv": ("dtrack.platforms.csv_duckdb", "run_csv_sql_file", "DTRACK_CSV_MOCK"),
 }
 
-
 # >>> execute already-generated extract_{type}.<platform>.sql via each platform's runner (mirrors web /api/extract/run-sql) <<< #
-def run_sql_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
+def run_sql_all(config_path, outdir=None, csv_outdir=None,
                 types=None, max_workers=None, db_path=None, resume=False):
     import importlib
     if types is None:
         types = ["row", "col"]
     if outdir is None:
         outdir = os.getcwd()
-    if sas_outdir is None:
-        sas_outdir = os.path.join(outdir, "sas")
     if csv_outdir is None:
         csv_outdir = os.path.join(outdir, "csv")
 
@@ -186,7 +159,3 @@ def run_sql_all(config_path, outdir=None, sas_outdir=None, csv_outdir=None,
                 print(f"    FAIL {r.get('name')}: {r.get('error')}")
             if len(failed) > 20:
                 print(f"    ... +{len(failed) - 20} more failed")
-
-    if groups.get("sas"):
-        print(f"\n--- [run-sql] sas ({len(groups['sas'])} tables): run extract_{{type}}.sas "
-              f"on the SAS server (not executed here) ---")

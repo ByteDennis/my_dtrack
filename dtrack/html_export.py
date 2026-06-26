@@ -1,26 +1,22 @@
-"""HTML export functionality for comparison reports"""
 
 from typing import Dict, List, Optional
 from datetime import datetime
 
-
+# >>> Return ⓘ tooltip HTML if comment is non-empty, else empty string <<< #
 def _comment_icon(comment):
-    """Return ⓘ tooltip HTML if comment is non-empty, else empty string."""
     if not comment:
         return ''
-    # Escape HTML entities in comment
     safe = comment.replace('&', '&amp;').replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
     return f' <span title="{safe}" style="cursor:help; color:#5b7083;">ⓘ</span>'
 
-
+# >>> Format time value: raw seconds (int/float) → human readable, strings pass through <<< #
 def _fmt_time(val):
-    """Format time value: raw seconds (int/float) → human readable, strings pass through."""
     if val is None or val == '—' or val == '':
         return '—'
     try:
         secs = float(val)
     except (TypeError, ValueError):
-        return str(val)  # already a string like "42 sec"
+        return str(val)
     if secs < 60:
         return f"{secs:.0f} sec"
     elif secs < 3600:
@@ -31,7 +27,7 @@ def _fmt_time(val):
         m = rem // 60
         return f"{h} hour {m} min" if m else f"{h} hour"
 
-
+# >>> Generate HTML table rows for row count comparison <<< #
 def generate_row_count_html(
     pair_name: str,
     source_left: str,
@@ -49,34 +45,13 @@ def generate_row_count_html(
     right_cfg: Optional[Dict] = None,
     description: str = '',
 ) -> str:
-    """
-    Generate HTML table rows for row count comparison.
-
-    Args:
-        pair_name: Name of the table pair
-        source_left: Left source label (e.g., "oracle", "aws")
-        source_right: Right source label (e.g., "aws")
-        table_left: Left table name
-        table_right: Right table name
-        comparison: Result from compare_row_counts()
-        metadata_left: Optional metadata for left table
-        metadata_right: Optional metadata for right table
-        comment_left: Optional comment for left source (shown as ⓘ tooltip)
-        comment_right: Optional comment for right source (shown as ⓘ tooltip)
-        description: Optional description to show instead of pair_name in banner
-
-    Returns:
-        HTML string with table rows
-    """
     summary = comparison['summary']
 
-    # Count statistics
     n_match = len(comparison['matching'])
     n_mismatch = len(comparison['mismatched'])
     n_only_left = len(comparison['only_left'])
     n_only_right = len(comparison['only_right'])
 
-    # Build banner text
     label = description or pair_name
     banner_text = label
     if left_cfg and right_cfg:
@@ -86,7 +61,6 @@ def generate_row_count_html(
         conn_r = right_cfg.get('conn_macro', '').upper()
         banner_text = f'{label} | <b>{tbl_l}</b>{f" ({conn_l})" if conn_l else ""} | <b>{tbl_r}</b>{f" ({conn_r})" if conn_r else ""}'
 
-    # Generate HTML rows
     html = f'''
             <!-- {pair_name} -->
             <tr>
@@ -96,7 +70,6 @@ def generate_row_count_html(
             </tr>
 '''
 
-    # Get date columns and format row counts (with vintage suffix)
     date_col_left = (metadata_left.get('date_var') or '—') if metadata_left else '—'
     date_col_right = (metadata_right.get('date_var') or '—') if metadata_right else '—'
     vintage_left = metadata_left.get('vintage', '') if metadata_left else ''
@@ -106,7 +79,6 @@ def generate_row_count_html(
     if vintage_right and date_col_right != '—':
         date_col_right = f"{date_col_right} ({vintage_right.upper()})"
 
-    # Format row counts with billions
     def format_count(count):
         if count >= 1_000_000_000:
             billions = count / 1_000_000_000
@@ -115,14 +87,12 @@ def generate_row_count_html(
             millions = count / 1_000_000
             return f'{count:,} ({millions:.2f} M)'
 
-    # Data rows
     time_left = '—'
     time_right = '—'
     if time_map:
         time_left = _fmt_time(time_map.get(source_left, time_map.get('left', '—')))
         time_right = _fmt_time(time_map.get(source_right, time_map.get('right', '—')))
 
-    # Calculate overlap for highlighting (guard against None/missing dates)
     left_min, left_max = summary['date_range_left']
     right_min, right_max = summary['date_range_right']
     has_overlap = bool(left_min and right_min and left_max and right_max)
@@ -133,7 +103,6 @@ def generate_row_count_html(
         if overlap_start > overlap_end:
             has_overlap = False
 
-    # Style helpers for min/max overlap highlighting
     def _min_style(val):
         base = 'border:1px solid #ccc; padding:8px;'
         if has_overlap and val and val == overlap_start:
@@ -172,7 +141,6 @@ def generate_row_count_html(
     all_only_left = comparison['only_left']
     all_only_right = comparison['only_right']
 
-    # Split only-left/only-right into overlap vs outside
     if has_overlap:
         only_left_in_overlap = [(dt, c) for dt, c in all_only_left if overlap_start <= dt <= overlap_end]
         only_left_outside = [(dt, c) for dt, c in all_only_left if not (overlap_start <= dt <= overlap_end)]
@@ -184,13 +152,10 @@ def generate_row_count_html(
         only_right_in_overlap = []
         only_right_outside = all_only_right
 
-    # Details row with summary stats as clickable header
-    # Red only when there are misloads (one-sided dates inside overlap range)
     only_left_style = 'color:#c62828; font-weight:600;' if len(only_left_in_overlap) > 0 else ''
     only_right_style = 'color:#c62828; font-weight:600;' if len(only_right_in_overlap) > 0 else ''
     mismatch_style = 'color:#c62828; font-weight:600;' if n_mismatch > 0 else ''
     summary_text = f'<span style="{only_left_style}">{source_left} only: {n_only_left}</span>, <span style="{only_right_style}">{source_right} only: {n_only_right}</span>, <span style="color:green;">days match: {n_match}</span>, <span style="{mismatch_style}">days mismatch: {n_mismatch}</span>'
-    # Paperclip icon for CSV attachment placeholder
     attach_icon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px; margin-left:8px;"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>'
 
     html += f'''            <tr>
@@ -202,17 +167,14 @@ def generate_row_count_html(
                         <div style="padding:8px; font-size:12px;">
 '''
 
-    # If no issues, show message
     if n_mismatch == 0 and n_only_left == 0 and n_only_right == 0:
         html += '                            <p style="margin:8px 0; color:green;">✓ All dates match perfectly!</p>\n'
     else:
-        # Side-by-side layout with 3 columns separated by bars
         bar_style = 'border-left:1px solid #ddd;'
         html += '                            <table style="width:100%; border:none; border-spacing:0;">\n'
         html += '                                <tr style="vertical-align:top;">\n'
         source_left, source_right = source_left.upper(), source_right.upper()
 
-        # Column 1: Mismatch details
         html += '                                    <td style="width:32%; padding:0 12px 0 0; border:none;">\n'
         if n_mismatch > 0:
             html += f'                                        <p style="margin:4px 0; font-weight:600; text-align:center;">Mismatched Dates ({n_mismatch})</p>\n'
@@ -235,13 +197,11 @@ def generate_row_count_html(
             html += '                                        <p style="margin:4px 0; color:#999;">No mismatches</p>\n'
         html += '                                    </td>\n'
 
-        # Column 2: Only-left details — overlap (red) then outside (gray)
         html += f'                                    <td style="width:32%; padding:0 12px; {bar_style}">\n'
         if n_only_left > 0:
             html += f'                                        <p style="margin:4px 0; font-weight:600; text-align:center;">{source_left}-Only Dates ({n_only_left})</p>\n'
             html += '                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">\n'
             html += f'                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_left}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_right}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>\n'
-            # In-overlap rows (date in red, rest black) — expandable
             for dt, count in only_left_in_overlap[:10]:
                 html += f'                                            <tr><td style="padding:2px; font-size:10px; color:#c62828;">{dt}</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-{count:,}</td></tr>\n'
             if len(only_left_in_overlap) > 10:
@@ -250,7 +210,6 @@ def generate_row_count_html(
                 for dt, count in only_left_in_overlap[10:]:
                     html += f'                                            <tr><td style="padding:2px; font-size:10px; color:#c62828;">{dt}</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-{count:,}</td></tr>\n'
                 html += '                                            </table></details></td></tr>\n'
-            # Outside-overlap: 1 gray row + summary
             if only_left_outside:
                 dt0, c0 = only_left_outside[0]
                 html += f'                                            <tr style="color:#999;"><td style="padding:2px; font-size:10px;">{dt0}</td><td style="padding:2px; font-size:10px;">{c0:,}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-{c0:,}</td></tr>\n'
@@ -261,13 +220,11 @@ def generate_row_count_html(
             html += f'                                        <p style="margin:4px 0; color:#999;">No {source_left}-Only dates</p>\n'
         html += '                                    </td>\n'
 
-        # Column 3: Only-right details — overlap (red) then outside (gray)
         html += f'                                    <td style="width:32%; padding:0 0 0 12px; {bar_style}">\n'
         if n_only_right > 0:
             html += f'                                        <p style="margin:4px 0; font-weight:600; text-align:center;">{source_right}-Only Dates ({n_only_right})</p>\n'
             html += '                                        <table style="border-collapse:collapse; font-size:11px; width:100%;">\n'
             html += f'                                            <tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_left}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">{source_right}</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>\n'
-            # In-overlap rows (date in red, rest black) — expandable
             for dt, count in only_right_in_overlap[:10]:
                 html += f'                                            <tr><td style="padding:2px; font-size:10px; color:#c62828;">{dt}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">+{count:,}</td></tr>\n'
             if len(only_right_in_overlap) > 10:
@@ -276,7 +233,6 @@ def generate_row_count_html(
                 for dt, count in only_right_in_overlap[10:]:
                     html += f'                                            <tr><td style="padding:2px; font-size:10px; color:#c62828;">{dt}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">{count:,}</td><td style="padding:2px; font-size:10px;">+{count:,}</td></tr>\n'
                 html += '                                            </table></details></td></tr>\n'
-            # Outside-overlap: 1 gray row + summary
             if only_right_outside:
                 dt0, c0 = only_right_outside[0]
                 html += f'                                            <tr style="color:#999;"><td style="padding:2px; font-size:10px;">{dt0}</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">{c0:,}</td><td style="padding:2px; font-size:10px;">+{c0:,}</td></tr>\n'
@@ -298,7 +254,6 @@ def generate_row_count_html(
 '''
 
     return html
-
 
 def generate_column_stats_html(
     pair_name: str,
@@ -337,7 +292,6 @@ def generate_column_stats_html(
     Returns:
         HTML string with table rows
     """
-    # Organize data by vintage and column
     vintages_data = {}
     all_dates = set()
 
@@ -351,7 +305,6 @@ def generate_column_stats_html(
 
     sorted_dates = sorted(all_dates, key=lambda d: d[:10] if len(d) > 10 else d, reverse=True)
 
-    # Count columns with differences
     cols_with_diffs = set()
     for col, comparisons in comparison.items():
         for comp in comparisons:
@@ -362,13 +315,11 @@ def generate_column_stats_html(
     n_diff = len(cols_with_diffs)
     n_match = n_cols - n_diff
 
-    # Format column list with truncation
     if len(cols_with_diffs) > 4:
         cols_display = ', '.join(sorted(list(cols_with_diffs)[:4])) + ', ...'
     else:
         cols_display = ', '.join(sorted(cols_with_diffs)) if cols_with_diffs else 'None'
 
-    # Build banner text
     label = description or pair_name
     banner_text = label
     if left_cfg and right_cfg:
@@ -378,7 +329,6 @@ def generate_column_stats_html(
         conn_r = right_cfg.get('conn_macro', '').upper()
         banner_text = f'{label} | <b>{tbl_l}</b>{f" ({conn_l})" if conn_l else ""} | <b>{tbl_r}</b>{f" ({conn_r})" if conn_r else ""}'
 
-    # Generate HTML rows
     html = f'''
             <!-- {pair_name} -->
             <tr>
@@ -388,12 +338,10 @@ def generate_column_stats_html(
             </tr>
 '''
 
-    # Data rows - show overlap period (dates in common)
     min_date = sorted_dates[-1] if sorted_dates else '—'
     max_date = sorted_dates[0] if sorted_dates else '—'
     n_vintages = len(sorted_dates)
 
-    # Get date columns from metadata (with vintage suffix)
     date_col_left = (metadata_left.get('date_var') or '—') if metadata_left else '—'
     date_col_right = (metadata_right.get('date_var') or '—') if metadata_right else '—'
     vintage_left = metadata_left.get('vintage', '') if metadata_left else ''
@@ -409,7 +357,6 @@ def generate_column_stats_html(
         time_left = _fmt_time(time_map.get(source_left, time_map.get('left', '—')))
         time_right = _fmt_time(time_map.get(source_right, time_map.get('right', '—')))
 
-    # Blue overlap boundary styling for min/max dates
     overlap_style = 'border:1px solid #ccc; padding:8px; color:#1565c0; font-weight:600;'
     cell = 'border:1px solid #ccc; padding:8px;'
 
@@ -433,7 +380,6 @@ def generate_column_stats_html(
             </tr>
 '''
 
-    # Details row with summary stats
     diff_style = 'color:#c62828; font-weight:600;' if n_diff > 0 else 'color:green;'
     summary_text = f'{n_cols} columns: <span style="color:green;">{n_match} match</span>, <span style="{diff_style}">{n_diff} diff</span> ({cols_display})'
     attach_icon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9e9e9e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px; margin-left:8px;"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>'
@@ -447,12 +393,10 @@ def generate_column_stats_html(
                         <div style="padding:8px; font-size:12px;">
 '''
 
-    # If no diffs, show message
     if n_diff == 0:
         html += '                            <p style="margin:8px 0; color:green;">✓ All columns match across all vintages!</p>\n'
     else:
-        # Group diffs by column (compact format)
-        col_diffs = {}  # {col: [(vintage, stat, left, right, diff), ...]}
+        col_diffs = {}
 
         for dt in sorted_dates:
             vintage_data = vintages_data.get(dt, {})
@@ -483,12 +427,10 @@ def generate_column_stats_html(
                             (vlabel, _stat, comp.get(f'{_stat}_left'),
                              comp.get(f'{_stat}_right'), None))
 
-        # Prepare column details for 3-column layout
         col_details_list = []
         for col in sorted(col_diffs.keys()):
             diffs = col_diffs[col]
 
-            # Get column type and display name
             first_comp = None
             for dt in sorted_dates:
                 if col in vintages_data.get(dt, {}):
@@ -499,18 +441,16 @@ def generate_column_stats_html(
             right_col = first_comp['right_col'] if first_comp else col
             col_display = f'{col} → {right_col}' if col != right_col else col
 
-            # Build column detail HTML
             col_html = f'<p style="margin:4px 0 2px 0; font-weight:600; color:#1f2933; font-size:11px;">{col_display} ({col_type}) - {len(set(d[0] for d in diffs))} diffs:</p>\n'
             col_html += '<div style="margin-left:12px; font-size:10px; line-height:1.5;">\n'
 
-            # Group by vintage
             vintage_diffs = {}
             for dt, stat, left, right, diff in diffs:
                 if dt not in vintage_diffs:
                     vintage_diffs[dt] = []
                 vintage_diffs[dt].append((stat, left, right, diff))
 
-            for dt in sorted(vintage_diffs.keys(), reverse=True)[:3]:  # Show max 3 vintages per column
+            for dt in sorted(vintage_diffs.keys(), reverse=True)[:3]:
                 stats_list = vintage_diffs[dt]
                 stats_display = []
                 for stat, left, right, diff in stats_list:
@@ -532,13 +472,11 @@ def generate_column_stats_html(
 
             col_details_list.append(col_html)
 
-        # Display in 3-column grid
         html += '                            <table style="width:100%; border:none;">\n'
         html += '                                <tr style="vertical-align:top;">\n'
 
-        # Distribute columns into 3 groups
         num_cols = len(col_details_list)
-        cols_per_group = (num_cols + 2) // 3  # Ceiling division
+        cols_per_group = (num_cols + 2) // 3
 
         for i in range(3):
             html += '                                    <td style="width:33%; padding-right:10px; border:none;">\n'
@@ -563,15 +501,13 @@ def generate_column_stats_html(
 
     return html
 
-
 # >>> mirrors compare._has_col_differences; accepts optional field filter <<< #
 def _has_differences(comp: Dict, compare_fields=None) -> bool:
     from .compare import _has_col_differences as _hcd
     return _hcd(comp, compare_fields=compare_fields)
 
-
+# >>> Get the stat with the worst difference <<< #
 def _get_worst_stat(comp: Dict) -> str:
-    """Get the stat with the worst difference"""
     if comp.get('n_total_diff', 0) != 0:
         pct = abs(comp['n_total_diff'] / comp['n_total_left'] * 100) if comp['n_total_left'] > 0 else 0
         return f'n_total {pct:.1f}%'
@@ -584,9 +520,8 @@ def _get_worst_stat(comp: Dict) -> str:
 
     return 'other'
 
-
+# >>> Generate detail table for numeric column <<< #
 def _generate_numeric_detail_table(comp: Dict, source_left: str, source_right: str) -> str:
-    """Generate detail table for numeric column"""
     from .constants import STAT_ROUND_DECIMALS
 
     def _is_mismatch(stat_name, lv, rv):
@@ -630,10 +565,6 @@ def _generate_numeric_detail_table(comp: Dict, source_left: str, source_right: s
         ('min', comp.get('min_left'), comp.get('min_right')),
         ('max', comp.get('max_left'), comp.get('max_right')),
     ]
-    # Drop coarse-empty rows so mean/std (uncomputed in coarse extraction)
-    # don't show up as either red diffs or "matching" stats. Treating them
-    # as "matching" would falsely imply the values agree when neither side
-    # ever computed one.
     stats = [(n, lv, rv) for n, lv, rv in stats
              if (lv is not None and lv != '') or (rv is not None and rv != '')]
 
@@ -659,9 +590,8 @@ def _generate_numeric_detail_table(comp: Dict, source_left: str, source_right: s
 
     return html
 
-
+# >>> Generate detail table for categorical column <<< #
 def _generate_categorical_detail_table(comp: Dict, source_left: str, source_right: str) -> str:
-    """Generate detail table for categorical column"""
     import json
 
     html = '                        <table class="stat-table">\n'
@@ -683,7 +613,6 @@ def _generate_categorical_detail_table(comp: Dict, source_left: str, source_righ
     html += '                            </tbody>\n'
     html += '                        </table>\n'
 
-    # Show top_10 changes if different
     top10_left = comp.get('top_10_left')
     top10_right = comp.get('top_10_right')
 
@@ -692,7 +621,6 @@ def _generate_categorical_detail_table(comp: Dict, source_left: str, source_righ
             left_dict = json.loads(top10_left) if isinstance(top10_left, str) else top10_left
             right_dict = json.loads(top10_right) if isinstance(top10_right, str) else top10_right
 
-            # Find values that changed
             all_values = set(left_dict.keys()) | set(right_dict.keys())
             changes = []
 
@@ -706,7 +634,7 @@ def _generate_categorical_detail_table(comp: Dict, source_left: str, source_righ
             if changes:
                 html += '                        <div class="top10-changes">\n'
                 html += '                            <strong>top_10 changes:</strong><br>\n'
-                for val, left_count, right_count, diff in changes[:5]:  # Show top 5 changes
+                for val, left_count, right_count, diff in changes[:5]:
                     sign = '+' if diff > 0 else ''
                     html += f'                            {val}: {source_left} {left_count:,} → {source_right} {right_count:,} ({sign}{diff:,})<br>\n'
                 html += '                        </div>\n'
@@ -715,17 +643,8 @@ def _generate_categorical_detail_table(comp: Dict, source_left: str, source_righ
 
     return html
 
-
+# >>> Wrap row count comparison rows in a single table <<< #
 def create_row_count_table(row_sections: List[str]) -> str:
-    """
-    Wrap row count comparison rows in a single table.
-
-    Args:
-        row_sections: List of HTML row strings from generate_row_count_html()
-
-    Returns:
-        Complete HTML table string
-    """
     html = '''
     <table style="border-collapse:collapse; width:100%; font-family:Segoe UI, Arial, sans-serif; font-size:12.5px; table-layout:fixed;">
         <colgroup>
@@ -760,19 +679,8 @@ def create_row_count_table(row_sections: List[str]) -> str:
 
     return html
 
-
+# >>> Wrap column stats comparison rows in a single table <<< #
 def create_column_stats_table(row_sections: List[str], vintage: str = 'month') -> str:
-    """
-    Wrap column stats comparison rows in a single table.
-
-    Args:
-        row_sections: List of HTML row strings from generate_column_stats_html()
-        vintage: Vintage type (day/week/month/quarter/year) for header label
-
-    Returns:
-        Complete HTML table string
-    """
-    # Map vintage to plural label
     vintage_labels = {
         'day': '# days',
         'week': '# weeks',
@@ -818,23 +726,12 @@ def create_column_stats_table(row_sections: List[str], vintage: str = 'month') -
 
     return html
 
-
+# >>> Wrap HTML sections in a complete HTML document <<< #
 def wrap_html_document(
     title: str,
     sections: List[str],
     subtitle: Optional[str] = None,
 ) -> str:
-    """
-    Wrap HTML sections in a complete HTML document.
-
-    Args:
-        title: Document title
-        sections: List of HTML section strings
-        subtitle: Optional subtitle text
-
-    Returns:
-        Complete HTML document string
-    """
     now = datetime.now().strftime('%b %d, %Y')
 
     css = '''
@@ -909,7 +806,6 @@ def wrap_html_document(
 
 '''
 
-    # Join all sections into the body
     for section in sections:
         html += section
 

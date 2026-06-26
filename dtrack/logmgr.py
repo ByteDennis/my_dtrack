@@ -1,11 +1,9 @@
-"""Unified logging: web API + CLI + full pipeline detail -> one rotating log file."""
 
 import logging
 import os
 from logging.handlers import RotatingFileHandler
 
 _logger = None
-
 
 # >>> single log path; override with DTRACK_LOG, default <cwd>/output/run.log <<< #
 def log_path():
@@ -14,12 +12,10 @@ def log_path():
         return os.path.expanduser(p)
     return os.path.join(os.getcwd(), "output", "run.log")
 
-
 # >>> file log level; DTRACK_LOG_LEVEL overrides, default DEBUG (capture everything) <<< #
 def _level():
     name = os.environ.get("DTRACK_LOG_LEVEL", "DEBUG").upper()
     return getattr(logging, name, logging.DEBUG)
-
 
 # >>> shared 'dtrack' logger writing the single log file; idempotent <<< #
 def get_logger():
@@ -43,7 +39,6 @@ def get_logger():
             pass
     _logger = lg
     return lg
-
 
 # >>> also echo the shared logger to stderr at INFO (used by the web server) <<< #
 def enable_console():

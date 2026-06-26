@@ -1,27 +1,17 @@
-"""JSON configuration parsing for table pairs (unified format only)."""
 
 import json
 import re
 from pathlib import Path
 
-
+# >>> Derive a safe identifier for a side from its `table` field <<< #
 def _derive_side_name(side_cfg, pair_name):
-    """Derive a SAS-safe identifier for a side from its `table` field.
-
-    Two sides of one pair often reference different physical tables (e.g.
-    left=v_xxxx, right=xxxx) — using pair_name for both would collide on
-    qualified_name() and overwrite the SAS get_colstats_{sn} macro.
-
-    Falls back to pair_name when `table` is missing.
-    """
     tbl = (side_cfg.get("table") or "").strip()
     if not tbl:
         return pair_name
     return re.sub(r"[^a-z0-9_]+", "_", tbl.lower()).strip("_") or pair_name
 
-
+# >>> Validate a single pair in unified config format <<< #
 def validate_unified_pair(pair_name, pair_config):
-    """Validate a single pair in unified config format."""
     if "left" not in pair_config:
         raise ValueError(f"Pair '{pair_name}' must have 'left' table configuration")
     if "right" not in pair_config:
@@ -34,7 +24,6 @@ def validate_unified_pair(pair_name, pair_config):
         if "source" not in tbl:
             raise ValueError(f"Pair '{pair_name}': {side} table must have 'source' field")
 
-    # Validate HITL fields if present
     if "ignore_rows" in pair_config:
         if not isinstance(pair_config["ignore_rows"], list):
             raise ValueError(f"Pair '{pair_name}': 'ignore_rows' must be a list")
@@ -45,13 +34,8 @@ def validate_unified_pair(pair_name, pair_config):
         if not isinstance(pair_config["col_type_overrides"], dict):
             raise ValueError(f"Pair '{pair_name}': 'col_type_overrides' must be a dict")
 
-
+# >>> Validate the optional date_types configuration block <<< #
 def validate_date_types(date_types):
-    """Validate the optional date_types configuration block.
-
-    Each custom type must have: label (string), category (date|number|string),
-    format (string). Optional: date_transform, parse_to_date (SQL with {col}).
-    """
     if not isinstance(date_types, dict):
         raise ValueError("'date_types' must be a dictionary")
     valid_categories = ("date", "number", "string")
@@ -67,14 +51,12 @@ def validate_date_types(date_types):
             )
         if "format" not in type_cfg or not isinstance(type_cfg["format"], str):
             raise ValueError(f"date_types['{type_key}'] must have a string 'format'")
-        # Optional SQL expression fields
         for opt_key in ("date_transform", "parse_to_date"):
             if opt_key in type_cfg and not isinstance(type_cfg[opt_key], str):
                 raise ValueError(f"date_types['{type_key}'].{opt_key} must be a string")
 
-
+# >>> Validate unified configuration format <<< #
 def validate_unified_config(config):
-    """Validate unified configuration format."""
     if "pairs" not in config:
         raise ValueError("Configuration must have 'pairs' key")
 
@@ -85,16 +67,11 @@ def validate_unified_config(config):
     for pair_name, pair_config in pairs.items():
         validate_unified_pair(pair_name, pair_config)
 
-    # Validate optional date_types block
     if "date_types" in config:
         validate_date_types(config["date_types"])
 
-
+# >>> Load unified configuration from JSON file <<< #
 def load_unified_config(config_path):
-    """Load unified configuration from JSON file.
-
-    Auto-injects 'name' = pair_name into left/right if not set.
-    """
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
@@ -104,8 +81,6 @@ def load_unified_config(config_path):
 
     validate_unified_config(config)
 
-    # Auto-derive name from each side's `table` so left and right stay
-    # distinct identifiers even when they sit in the same pair.
     for pair_name, pair_cfg in config.get("pairs", {}).items():
         for side in ("left", "right"):
             side_cfg = pair_cfg.get(side, {})
@@ -114,13 +89,8 @@ def load_unified_config(config_path):
 
     return config
 
-
+# >>> Save unified configuration to JSON file <<< #
 def save_unified_config(config, config_path):
-    """Save unified configuration to JSON file.
-
-    Strips 'name' from left/right since it's auto-derived from pair_name on load.
-    Preserves top-level keys like date_types, settings, metadata.
-    """
     import copy
     out = copy.deepcopy(config)
     # >>> strip a side's name only when it matches the table-derived one, so divergent names survive reload <<< #
@@ -133,13 +103,8 @@ def save_unified_config(config, config_path):
     with open(config_path, 'w') as f:
         json.dump(out, f, indent=2)
 
-
+# >>> Extract all unique tables from unified config for extraction <<< #
 def get_all_tables_from_unified(config):
-    """Extract all unique tables from unified config for extraction.
-
-    Returns list of table configs tagged with pair membership.
-    Respects skip and ignore settings.
-    """
     tables = []
     seen = set()
 
@@ -151,8 +116,6 @@ def get_all_tables_from_unified(config):
         col_filter = pair_config.get("col_filter") or {}
         cf_has_patterns = bool(col_filter.get("include") or col_filter.get("exclude"))
 
-        # Resolve the pair's effective (left, right) col pairs after applying
-        # include/exclude patterns. Falls back to all of col_map if no filter.
         selected_left, selected_right = [], []
         if col_map:
             from .compare import resolve_col_filter
@@ -164,24 +127,13 @@ def get_all_tables_from_unified(config):
             selected_left  = [l for l, _ in resolved["pairs"]]
             selected_right = [r for _, r in resolved["pairs"]]
 
-        # Pair-level approx_distinct (true/false). Propagates to both sides
-        # under the internal `_pair_approx_distinct` key so per-side configs
-        # carrying their own `approx_distinct` still win.
         pair_approx = pair_config.get("approx_distinct")
 
         for side in ["left", "right"]:
             table_cfg = pair_config[side].copy()
 
-            # Tag the table with which side of the pair it came from.
-            # Used by the csv-source generator to route extract_*.sql to
-            # the LEFT or RIGHT outdir based on which side the CSV
-            # belongs to (so a pair like Oracle/left + CSV/right still
-            # writes each side's SQL file to the matching outdir, and
-            # the runner button knows which one to execute).
             table_cfg.setdefault("_side", side)
 
-            # Pair-level vintage propagates to both sides; per-side override wins
-            # only if the per-side dict already specifies one (legacy configs).
             if pair_vintage and not table_cfg.get("vintage"):
                 table_cfg["vintage"] = pair_vintage
 
@@ -196,9 +148,6 @@ def get_all_tables_from_unified(config):
                     table_cfg["_col_map_columns"] = set(col_map.values())
                     table_cfg["_selected_cols"] = selected_right
             elif cf_has_patterns:
-                # No col_map yet, but the user has saved a col_filter on the
-                # pair -- stash the include/exclude patterns so extraction
-                # can apply them against each table's full column list.
                 table_cfg["_col_filter_patterns"] = {
                     "include": list(col_filter.get("include") or []),
                     "exclude": list(col_filter.get("exclude") or []),
@@ -219,9 +168,6 @@ def get_all_tables_from_unified(config):
                         existing = t.get("_col_map_columns", set())
                         existing.update(table_cfg.get("_col_map_columns", set()))
                         t["_col_map_columns"] = existing
-                        # Union selected_cols across pairs that share the
-                        # same physical table so the single extraction covers
-                        # every pair's subset.
                         new_sel = table_cfg.get("_selected_cols") or []
                         if new_sel:
                             cur = list(t.get("_selected_cols") or [])
@@ -231,12 +177,8 @@ def get_all_tables_from_unified(config):
                                     cur.append(c)
                                     seen_cols.add(c.lower())
                             t["_selected_cols"] = cur
-                        # If a later pair specifies a finer vintage for the same
-                        # table, prefer it (otherwise first-pair vintage wins).
                         if pair_vintage and not t.get("vintage"):
                             t["vintage"] = pair_vintage
-                        # Merge col_filter patterns across pairs sharing this
-                        # physical table (union of include, union of exclude).
                         new_cf = table_cfg.get("_col_filter_patterns")
                         if new_cf:
                             cur_cf = t.get("_col_filter_patterns") or {
@@ -253,18 +195,12 @@ def get_all_tables_from_unified(config):
 
     return tables
 
-
-# ============================================================================
-# Pair field accessors
-# ============================================================================
-
+# >>> Get where_map for a specific pair <<< #
 def get_pair_where_map(config, pair_name):
-    """Get where_map for a specific pair."""
     return config.get("pairs", {}).get(pair_name, {}).get("where_map")
 
-
+# >>> Set where_map for a specific pair. Modifies config in place <<< #
 def set_pair_where_map(config, pair_name, where_left, where_right):
-    """Set where_map for a specific pair. Modifies config in place."""
     if pair_name not in config.get("pairs", {}):
         raise ValueError(f"Pair '{pair_name}' not found in config")
     config["pairs"][pair_name]["where_map"] = {
@@ -272,32 +208,24 @@ def set_pair_where_map(config, pair_name, where_left, where_right):
         "right": where_right
     }
 
-
+# >>> Get col_map for a specific pair <<< #
 def get_pair_col_map(config, pair_name):
-    """Get col_map for a specific pair."""
     return config.get("pairs", {}).get(pair_name, {}).get("col_map", {})
 
-
+# >>> Set col_map for a specific pair. Modifies config in place <<< #
 def set_pair_col_map(config, pair_name, col_map):
-    """Set col_map for a specific pair. Modifies config in place."""
     if pair_name not in config.get("pairs", {}):
         raise ValueError(f"Pair '{pair_name}' not found in config")
     config["pairs"][pair_name]["col_map"] = col_map
 
-
-# ============================================================================
-# HITL write-back functions
-# ============================================================================
-
+# >>> Mark a pair as skipped. Persists HITL decision <<< #
 def mark_pair_skipped(config, pair_name, skipped=True):
-    """Mark a pair as skipped. Persists HITL decision."""
     if pair_name not in config.get("pairs", {}):
         raise ValueError(f"Pair '{pair_name}' not found in config")
     config["pairs"][pair_name]["skip"] = skipped
 
-
+# >>> Add dates to the ignore_rows list for a pair <<< #
 def add_ignored_rows(config, pair_name, dates):
-    """Add dates to the ignore_rows list for a pair."""
     if pair_name not in config.get("pairs", {}):
         raise ValueError(f"Pair '{pair_name}' not found in config")
     pair = config["pairs"][pair_name]
@@ -305,9 +233,8 @@ def add_ignored_rows(config, pair_name, dates):
     existing.update(dates)
     pair["ignore_rows"] = sorted(existing)
 
-
+# >>> Add columns to the ignore_columns list for a pair <<< #
 def add_ignored_columns(config, pair_name, columns):
-    """Add columns to the ignore_columns list for a pair."""
     if pair_name not in config.get("pairs", {}):
         raise ValueError(f"Pair '{pair_name}' not found in config")
     pair = config["pairs"][pair_name]
@@ -315,9 +242,8 @@ def add_ignored_columns(config, pair_name, columns):
     existing.update(columns)
     pair["ignore_columns"] = sorted(existing)
 
-
+# >>> Set a column type override for a pair <<< #
 def set_col_type_override(config, pair_name, col_name, col_type):
-    """Set a column type override for a pair."""
     if pair_name not in config.get("pairs", {}):
         raise ValueError(f"Pair '{pair_name}' not found in config")
     pair = config["pairs"][pair_name]
@@ -325,24 +251,20 @@ def set_col_type_override(config, pair_name, col_name, col_type):
         pair["col_type_overrides"] = {}
     pair["col_type_overrides"][col_name] = col_type
 
-
+# >>> Get the ignore_rows list for a pair <<< #
 def get_ignored_rows(config, pair_name):
-    """Get the ignore_rows list for a pair."""
     return config.get("pairs", {}).get(pair_name, {}).get("ignore_rows", [])
 
-
+# >>> Get the ignore_columns list for a pair <<< #
 def get_ignored_columns(config, pair_name):
-    """Get the ignore_columns list for a pair."""
     return config.get("pairs", {}).get(pair_name, {}).get("ignore_columns", [])
 
-
+# >>> Get col_type_overrides dict for a pair <<< #
 def get_col_type_overrides(config, pair_name):
-    """Get col_type_overrides dict for a pair."""
     return config.get("pairs", {}).get(pair_name, {}).get("col_type_overrides", {})
 
-
+# >>> Ensure a pair has all default sub-keys (time_map, comment_map, diff_map) <<< #
 def ensure_pair_defaults(config, pair_name):
-    """Ensure a pair has all default sub-keys (time_map, comment_map, diff_map)."""
     if pair_name not in config.get("pairs", {}):
         return
     pair = config["pairs"][pair_name]

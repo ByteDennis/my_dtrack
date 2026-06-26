@@ -91,7 +91,7 @@ def test_generate_writes_csv_extract_sql(app_client):
     _seed_csv_pair(ctx)
     resp = client.post("/api/generate", json={
         "type": "row",
-        "sas_outdir": ctx["sas_outdir"],
+        "left_outdir": ctx["sas_outdir"],
         "aws_outdir": ctx["aws_outdir"],
     })
     assert resp.status_code == 200, resp.text
@@ -109,7 +109,7 @@ def test_generate_then_run_csv_produces_row_csv(app_client):
     _seed_csv_pair(ctx)
     gen = client.post("/api/generate", json={
         "type": "row",
-        "sas_outdir": ctx["sas_outdir"],
+        "left_outdir": ctx["sas_outdir"],
         "aws_outdir": ctx["aws_outdir"],
     })
     assert gen.status_code == 200, gen.text

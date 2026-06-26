@@ -3,7 +3,7 @@
 These tests exercise the HTTP layer end-to-end through Starlette's
 TestClient. The non-trivial routes (`/api/extract`, `/api/playground/run`,
 `/api/compare/*`, etc.) ultimately reach out to Oracle / Athena / Hadoop /
-SAS / CSV backends, so they only work on a host where those connections
+CSV backends, so they only work on a host where those connections
 are configured via a `.env` file (the same one the /playground page reads).
 
 Until the Linux dev box has that wiring, the whole `tests/api/` package is
@@ -37,7 +37,7 @@ import pytest
 
 _NOT_WINDOWS_REASON = (
     "tests/api/ needs live backend connections "
-    "(oracle / athena / hadoop / sas / csv) configured via .env -- "
+    "(oracle / athena / hadoop / csv) configured via .env -- "
     "only available on the Windows dev box. Skipping on this host."
 )
 

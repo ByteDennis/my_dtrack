@@ -2,7 +2,7 @@
 
 The categorical extraction emits three coarse drift signals — `length_avg`,
 `length_max`, `hash_sum` — that must agree across Oracle, Athena/Trino, and
-Hadoop/SAS on identical data. The signals are how the Phase-1 compare
+Hadoop on identical data. The signals are how the Phase-1 compare
 detects "values shifted" without re-pulling the freq table; if the recipe
 diverges between engines, a cross-engine diff falsely flags drift.
 
@@ -16,7 +16,7 @@ contains the right primitives so the two paths can't drift apart silently.
 Engine env requirements the recipe assumes (documented here as well):
   - Oracle: NLS_CHARACTERSET=AL32UTF8 (or call the SQL on a UTF-8 column)
   - Athena/Trino: VARCHAR (always UTF-8 in Trino)
-  - SAS / Hadoop: ENCODING=UTF8
+  - Hadoop: ENCODING=UTF8
 If any engine runs in a non-UTF-8 session, the MD5 input bytes diverge and
 this whole parity story breaks.
 """
@@ -80,7 +80,7 @@ def test_hash16_preserves_non_ascii_whitespace():
 
 def test_hash16_uses_utf8_bytes_for_non_ascii():
     """Non-ASCII chars are hashed as UTF-8 bytes (so 'café' hashes the
-    same on Oracle UTF-8, Athena/Trino, and Hadoop UTF-8 SAS)."""
+    same on Oracle UTF-8, Athena/Trino, and Hadoop UTF-8)."""
     cafe = 'café'  # 'café'
     expected = int(hashlib.md5(cafe.encode('utf-8')).hexdigest()[:4], 16)
     assert categorical_hash16(cafe) == expected
@@ -128,9 +128,9 @@ def test_length_null_returns_none():
 # ---------------------------------------------------------------------------
 
 def test_truncate_caps_at_200_chars():
-    """All three engines (Hadoop SAS / Oracle / Athena) truncate p_col to
-    P_COL_MAX_LEN before hashing/measuring. Set to 200 to match Hadoop's
-    column_hadoop.sas, the engine that's most expensive to re-extract."""
+    """All three engines (Hadoop / Oracle / Athena) truncate p_col to
+    P_COL_MAX_LEN before hashing/measuring, the engine that's most expensive
+    to re-extract."""
     assert P_COL_MAX_LEN == 200
     long_value = 'X' * 1000
     assert len(categorical_truncate(long_value)) == 200
@@ -248,7 +248,7 @@ def test_oracle_categorical_sql_has_coarse_signals():
 
 def test_oracle_categorical_sql_truncates_at_200():
     """Oracle categorical SQL truncates p_col to P_COL_MAX_LEN (200) so it
-    hashes/measures the same prefix Hadoop SAS sees."""
+    hashes/measures the same prefix Hadoop sees."""
     from dtrack.platforms.oracle import _build_col_sql_oracle
     tbl_cfg = {'date_col': 'DT', 'name': 't', 'where': '', 'columns': {'C': 'VARCHAR2'}}
     sql, _ = _build_col_sql_oracle(
@@ -316,19 +316,3 @@ def test_oracle_and_athena_hash_recipe_align():
     assert 'MD5' in ath
 
 
-# ---------------------------------------------------------------------------
-# Documented engine assumptions (regression alerts if anyone changes them)
-# ---------------------------------------------------------------------------
-
-def test_p_col_max_len_matches_hadoop_sas():
-    """P_COL_MAX_LEN must equal the 200-char cap in column_hadoop.sas;
-    otherwise hash/length divergence between Hadoop and Oracle/Athena."""
-    import os
-    sas_path = os.path.join(
-        os.path.dirname(__file__), '..', 'dtrack', 'platforms',
-        'templates', 'column_hadoop.sas')
-    with open(sas_path) as f:
-        sas = f.read()
-    assert ', 1, 200)' in sas, (
-        f"Hadoop SAS no longer caps p_col at 200 chars; update "
-        f"P_COL_MAX_LEN in base.py to match or all three engines diverge")

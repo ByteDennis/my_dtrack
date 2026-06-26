@@ -1,4 +1,3 @@
-"""Statistics computation for column-level analysis"""
 
 import json
 from collections import Counter
@@ -6,32 +5,16 @@ from statistics import mean, stdev
 from typing import List, Dict, Optional
 import pandas as pd
 
-
+# >>> Normalize a string value for consistent comparison <<< #
 def normalize_value(value: str) -> str:
-    """
-    Normalize a string value for consistent comparison.
-
-    Handles:
-    - Whitespace trimming: "xxx " → "xxx"
-    - Date normalization: "04MAR2026:00:00:00" → "2026-03-04"
-    - Numeric normalization: "0.440" → "0.44"
-
-    Args:
-        value: String value to normalize
-
-    Returns:
-        Normalized string
-    """
     if value is None or value == '':
         return ''
 
-    # Strip whitespace first
     value = str(value).strip()
 
     if not value:
         return ''
 
-    # Try to parse as date
     try:
         from .date_utils import parse_date
         normalized_date = parse_date(value)
@@ -39,16 +22,12 @@ def normalize_value(value: str) -> str:
     except:
         pass
 
-    # Try to parse as number and normalize
     try:
         num = float(value)
-        # Format to remove trailing zeros
         if '.' in str(value) or 'e' in str(value).lower():
-            # Convert to float and format
             formatted = f'{num:.10f}'.rstrip('0').rstrip('.')
             return formatted
         else:
-            # Integer-like, but might have been "5.0"
             if num == int(num):
                 return str(int(num))
             else:
@@ -56,22 +35,10 @@ def normalize_value(value: str) -> str:
     except:
         pass
 
-    # Return trimmed string
     return value
 
-
+# >>> Detect if a column is numeric or categorical <<< #
 def detect_column_type(values: List[str]) -> str:
-    """
-    Detect if a column is numeric or categorical.
-
-    A column is numeric if >90% of non-missing values can be parsed as numbers.
-
-    Args:
-        values: List of string values (may contain None or empty strings)
-
-    Returns:
-        "numeric" or "categorical"
-    """
     non_missing = [v for v in values if v and str(v).strip()]
 
     if not non_missing:
@@ -91,20 +58,10 @@ def detect_column_type(values: List[str]) -> str:
     else:
         return "categorical"
 
-
+# >>> Compute statistics for a numeric column <<< #
 def compute_numeric_stats(values: List[str]) -> Dict:
-    """
-    Compute statistics for a numeric column.
-
-    Args:
-        values: List of string values
-
-    Returns:
-        Dictionary with statistics: n_total, n_missing, n_unique, mean, std, min_val, max_val
-    """
     n_total = len(values)
 
-    # Filter missing values
     non_missing = []
     for v in values:
         if v is None or (isinstance(v, str) and not v.strip()):
@@ -139,23 +96,8 @@ def compute_numeric_stats(values: List[str]) -> Dict:
         "top_10": None,
     }
 
-
+# >>> Compute statistics for a categorical column with normalization <<< #
 def compute_categorical_stats(values: List[str]) -> Dict:
-    """
-    Compute statistics for a categorical column with normalization.
-
-    mean/std/min/max are computed in a *category-aware* way to defeat the
-    permutation pitfall: any reordering of counts across categories must
-    produce different stats.
-
-    For each (cat, count) pair, sort by UPPER(cat) and assign ranks 1..k.
-    Then with weights = counts:
-        mean = SUM(count_i * rank_i) / SUM(count_i)
-        std  = SQRT( SUM(count_i*(rank_i - mean)^2) / SUM(count_i) )
-        min  = "{cat_at_rank_1}={count_at_rank_1}"
-        max  = "{cat_at_rank_k}={count_at_rank_k}"
-    The UPPER ordering matches the SQL builders for cross-engine consistency.
-    """
     n_total = len(values)
 
     non_missing_raw = [v for v in values if v and str(v).strip()]
@@ -166,7 +108,6 @@ def compute_categorical_stats(values: List[str]) -> Dict:
 
     if non_missing:
         counter = Counter(non_missing)
-        # Sort by UPPER for cross-engine consistency; raw value tie-breaks.
         sorted_pairs = sorted(counter.items(), key=lambda kv: (kv[0].upper(), kv[0]))
         counts = [c for _, c in sorted_pairs]
         ranks = list(range(1, len(sorted_pairs) + 1))
@@ -205,45 +146,29 @@ def compute_categorical_stats(values: List[str]) -> Dict:
         "top_10": top_10_json,
     }
 
-
+# >>> Compute statistics for columns in a dataframe, grouped by date <<< #
 def compute_column_stats(
     df: pd.DataFrame,
     source_table: str,
     date_col: str,
     columns: Optional[List[str]] = None
 ) -> List[Dict]:
-    """
-    Compute statistics for columns in a dataframe, grouped by date.
-
-    Args:
-        df: Pandas dataframe with data
-        source_table: Name of the source table
-        date_col: Name of the date column
-        columns: List of columns to analyze (default: all except date_col)
-
-    Returns:
-        List of stat dictionaries suitable for insert_col_stats
-    """
     if columns is None:
         columns = [col for col in df.columns if col != date_col]
 
     stats_list = []
 
-    # Group by date
     for dt, group in df.groupby(date_col):
         for col in columns:
             values = group[col].astype(str).tolist()
 
-            # Detect column type
             col_type = detect_column_type(values)
 
-            # Compute stats based on type
             if col_type == "numeric":
                 stats = compute_numeric_stats(values)
             else:
                 stats = compute_categorical_stats(values)
 
-            # Add metadata
             stats["source_table"] = source_table
             stats["column_name"] = col
             stats["dt"] = str(dt)

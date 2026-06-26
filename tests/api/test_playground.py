@@ -2,7 +2,6 @@
     POST   /api/playground/run                  (requires backend)
     POST   /api/playground/cancel_running       (always safe)
     POST   /api/playground/cancel/{run_id}      (404 path tested)
-    POST   /api/playground/sas                  (pure string templating)
     GET    /api/playground/history
     PUT    /api/playground/history/{run_id}
     DELETE /api/playground/history/{run_id}
@@ -19,8 +18,7 @@ def seed_history(api_workdir):
     endpoints have something to work with."""
     ids = []
     for engine, sql in (("athena", "SELECT 1"),
-                        ("oracle", "SELECT * FROM dual"),
-                        ("sas", "proc print data=foo;")):
+                        ("oracle", "SELECT * FROM dual")):
         rid = insert_playground_run(
             api_workdir["db"],
             engine=engine, conn="cx",
@@ -78,21 +76,6 @@ def test_cancel_unknown_run_id_returns_404(client):
     resp = client.post("/api/playground/cancel/999999")
     assert resp.status_code == 404
     assert "not currently running" in resp.json()["error"]
-
-
-def test_playground_sas_oracle_libname(client):
-    resp = client.post("/api/playground/sas", json={
-        "kind": "oracle",
-        "method": "libname",
-        "sql": "select count(*) from cust_daily;",
-        "conn_macro": "pb23",
-    })
-    assert resp.status_code in (200, 400), resp.text
-    if resp.status_code == 200:
-        body = resp.json()
-        assert body["ok"] is True
-        assert body["content"]
-        assert body["filename"].endswith(".sas")
 
 
 def test_playground_run_reaches_backend_or_errors_cleanly(client):

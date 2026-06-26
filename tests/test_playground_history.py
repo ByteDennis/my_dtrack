@@ -76,7 +76,7 @@ def test_update_note_returns_false_for_missing(fresh_db):
 
 
 def test_delete(fresh_db):
-    rid = insert_playground_run(fresh_db, engine="sas", conn="both",
+    rid = insert_playground_run(fresh_db, engine="oracle", conn="both",
                                 sql="gen", elapsed_sec=None, n_rows=None,
                                 status="ok")
     assert delete_playground_run(fresh_db, rid) is True

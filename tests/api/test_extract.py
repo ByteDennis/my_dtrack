@@ -5,7 +5,7 @@
     POST /api/extract/cancel/{run_id}
 
 The happy path of these endpoints requires live Oracle / Athena / Hadoop /
-SAS / CSV connections (set up via .env on the Windows dev box). Here we
+CSV connections (set up via .env on the Windows dev box). Here we
 focus on:
   * 404 / 400 paths that don't need a backend
   * /api/extract/cancel error path (unknown run_id)
@@ -30,9 +30,7 @@ def test_extract_aws_routing_shape(client, api_workdir):
 
 
 def test_extract_unknown_platform_rejected(client, api_workdir):
-    # There is no silent default: an unrecognised platform is a 400. It used to
-    # fall through to gen_sas, which is wrong now that source=hadoop runs
-    # directly via hadoop_connect rather than through the SAS generator.
+    # There is no silent default: an unrecognised platform is a 400.
     resp = client.post("/api/extract", json={
         "platform": "totally-made-up", "type": "row",
         "outdir": api_workdir["aws_outdir"],

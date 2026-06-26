@@ -176,12 +176,12 @@ def test_athena_default_coarse_still_uses_freq_table():
 
 # ---------------------------------------------------------------------------
 # /api/extract/run-sql outdir routing — Oracle/Hadoop cache must land in
-# sas_outdir/.cache.db, not aws_outdir/.cache.db, when the body omits
+# left_outdir/.cache.db, not aws_outdir/.cache.db, when the body omits
 # outdir. Tests exercise the helper directly (no FastAPI client needed).
 # ---------------------------------------------------------------------------
 
-def test_side_outdir_left_platforms_use_sas_outdir(tmp_path, monkeypatch):
-    """oracle / hadoop / sas resolve to settings.sas_outdir."""
+def test_side_outdir_left_platforms_use_left_outdir(tmp_path, monkeypatch):
+    """oracle / hadoop resolve to settings.left_outdir."""
     import json
     from dtrack.web import app as webapp
 
@@ -189,17 +189,17 @@ def test_side_outdir_left_platforms_use_sas_outdir(tmp_path, monkeypatch):
     db.write_text("")
     cfg = tmp_path / "dtrack.json"
     cfg.write_text(json.dumps({
-        "settings": {"sas_outdir": "./LEFT/", "aws_outdir": "./RIGHT/"},
+        "settings": {"left_outdir": "./LEFT/", "aws_outdir": "./RIGHT/"},
         "pairs": {},
     }))
     monkeypatch.setattr(webapp, "_db_path", str(db))
     monkeypatch.setattr(webapp, "_db_dir", str(tmp_path))
     monkeypatch.setattr(webapp, "_config_path", str(cfg))
 
-    for platform in ("oracle", "hadoop", "sas"):
+    for platform in ("oracle", "hadoop"):
         got = webapp._side_outdir(platform)
         assert got.endswith("LEFT"), (
-            f"{platform}: expected sas_outdir (LEFT), got {got!r}"
+            f"{platform}: expected left_outdir (LEFT), got {got!r}"
         )
 
 
@@ -212,7 +212,7 @@ def test_side_outdir_right_platforms_use_aws_outdir(tmp_path, monkeypatch):
     db.write_text("")
     cfg = tmp_path / "dtrack.json"
     cfg.write_text(json.dumps({
-        "settings": {"sas_outdir": "./LEFT/", "aws_outdir": "./RIGHT/"},
+        "settings": {"left_outdir": "./LEFT/", "aws_outdir": "./RIGHT/"},
         "pairs": {},
     }))
     monkeypatch.setattr(webapp, "_db_path", str(db))
@@ -227,7 +227,7 @@ def test_side_outdir_right_platforms_use_aws_outdir(tmp_path, monkeypatch):
 
 
 def test_side_outdir_falls_back_when_settings_missing(tmp_path, monkeypatch):
-    """No saved settings → './sas/' for left and './csv/' for right.
+    """No saved settings → './out/' for left and './csv/' for right.
     Guards against an unsaved-config user run silently picking the wrong
     side and contaminating the other directory's .cache.db."""
     import json
@@ -241,6 +241,6 @@ def test_side_outdir_falls_back_when_settings_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp, "_db_dir", str(tmp_path))
     monkeypatch.setattr(webapp, "_config_path", str(cfg))
 
-    assert webapp._side_outdir("oracle").endswith("sas")
-    assert webapp._side_outdir("hadoop").endswith("sas")
+    assert webapp._side_outdir("oracle").endswith("out")
+    assert webapp._side_outdir("hadoop").endswith("out")
     assert webapp._side_outdir("aws").endswith("csv")

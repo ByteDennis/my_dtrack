@@ -1,7 +1,5 @@
-"""Comparison functionality for row counts and column statistics."""
 
 import json
-import os
 import re
 from fnmatch import fnmatch
 from .db import (get_row_counts, get_col_stats, get_table_pair, list_table_pairs,
@@ -14,7 +12,6 @@ from .platforms.base import (quote_ident, resolve_table, qualified_name,
 
 _DATE_SENTINELS = frozenset({'all', 'sample'})
 
-
 # >>> normalize a col_type label (raw DB type or dtrack tag) to numeric/date/categorical <<< #
 def _col_family(t):
     if _is_numeric_col_type(t):
@@ -23,20 +20,8 @@ def _col_family(t):
         return 'date'
     return 'categorical'
 
-
+# >>> Apply include/exclude glob patterns against col_map keys <<< #
 def resolve_col_filter(col_map, include_patterns=None, exclude_patterns=None):
-    """Apply include/exclude glob patterns against col_map keys.
-
-    Patterns match LEFT column names only. Comparison is case-insensitive.
-    Include empty → all mapped pairs. Exclude is applied after include.
-    Patterns that match left names NOT present in col_map are surfaced
-    separately so the UI can warn about them.
-
-    Returns dict:
-        pairs:            [(left, right), ...] — effective (left, right) tuples
-        total_mapped:     len(col_map)
-        unmapped_matches: [left_name, ...] — patterns hit non-mapped left cols
-    """
     include_patterns = [p.strip() for p in (include_patterns or []) if p and p.strip()]
     exclude_patterns = [p.strip() for p in (exclude_patterns or []) if p and p.strip()]
 
@@ -62,14 +47,8 @@ def resolve_col_filter(col_map, include_patterns=None, exclude_patterns=None):
     kept = sorted(kept_lower.values(), key=str.lower)
     pairs = [(l, col_map[l]) for l in kept]
 
-    # "Unmapped matches" — user's include pattern hit something, but it's not
-    # in col_map. Only meaningful when include patterns were given; otherwise
-    # nothing is "matched" explicitly.
     unmapped_matches = []
     if include_patterns:
-        all_left_cols = set()  # caller may pass a wider set via kwarg if desired
-        # We can only know mapped cols here; the caller (API endpoint) is
-        # responsible for comparing patterns against _column_meta too.
         unmapped_matches = []
 
     return {
@@ -79,56 +58,25 @@ def resolve_col_filter(col_map, include_patterns=None, exclude_patterns=None):
         "unmapped_matches": unmapped_matches,
     }
 
-
+# >>> Parse a value to int, returning 0 for empty/None <<< #
 def _safe_int(val):
-    """Parse a value to int, returning 0 for empty/None."""
     if val is None or val == '':
         return 0
     return int(float(str(val)))
 
-
+# >>> Parse a value to float, returning None for empty/None <<< #
 def _safe_float(val):
-    """Parse a value to float, returning None for empty/None."""
     if val is None or val == '':
         return None
     return float(str(val))
 
-
+# >>> Build a string match key for mean/std/min/max <<< #
 def _stat_match_key(val, prefix, ndigits=STAT_ROUND_DECIMALS):
-    """Build a string match key for mean/std/min/max.
-
-    Equality is a string compare with float-drift handled via rounding to
-    STAT_ROUND_DECIMALS. Returns None for missing values.
-
-    For min/max specifically, three extra normalizations:
-      - strip the "cat=count" suffix (SAS fine path) so it agrees with the
-        plain "cat" form (Athena coarse path) when the alpha-first /
-        alpha-last value matches but the trailing count doesn't carry.
-      - numeric mins/maxes like "0" vs "0.00" round to the same key.
-      - date-shaped strings (Oracle TIMESTAMP "01-MAR-26 07.04.04.000000",
-        ISO "2026-03-01 07:04:04", SAS "01MAR2026:07:04:04", numeric
-        YYYYMMDD, etc.) canonicalize to YYYY-MM-DD before comparison so
-        the same instant printed by Oracle vs Athena vs Hadoop hashes to
-        the same key. Hour / minute / second / fractional seconds are
-        intentionally discarded -- min/max at the column level is a
-        date-of-first / date-of-last signal, not a precise timestamp.
-    """
     if val is None or val == '':
         return None
     s = str(val).strip()
     if prefix in ("mn", "mx") and "=" in s:
-        # Strip "=count" first; numeric round below sees just the value.
         s = s.rsplit("=", 1)[0].strip()
-    # Date canonicalization runs BEFORE the numeric path, but only when the
-    # string contains a non-numeric character. Pure-numeric strings like
-    # "20260301" stay numeric (they may be IDs or YYYYMMDD-typed columns
-    # whose min/max should compare as integers regardless of dialect).
-    # Strings with letters / dashes / slashes / spaces / colons are
-    # candidates for date parsing -- this is what makes Oracle's
-    # "01-MAR-26 07.04.04.000000" match Athena's "2026-03-01" on the
-    # same date column. parse_date returns YYYY-MM-DD; on failure
-    # (genuine non-date string like a status code "ACCEPTED") it raises
-    # ValueError and we fall through to numeric / raw-string compare.
     looks_date = any(c.isalpha() or c in '-/: ' for c in s)
     if looks_date:
         try:
@@ -142,9 +90,8 @@ def _stat_match_key(val, prefix, ndigits=STAT_ROUND_DECIMALS):
         pass
     return f"{prefix}_{s}"
 
-
+# >>> Parse top_10 string (semicolon or JSON format) into {value: count} dict <<< #
 def _parse_top10(s):
-    """Parse top_10 string (semicolon or JSON format) into {value: count} dict."""
     if not s or s == '[]':
         return {}
     s = str(s).strip()
@@ -166,16 +113,14 @@ def _parse_top10(s):
             result[val] = cnt
     return result
 
-
+# >>> Compare two top_10 strings. Returns True if different <<< #
 def _compare_top10(left_str, right_str):
-    """Compare two top_10 strings. Returns True if different."""
     left = _parse_top10(left_str)
     right = _parse_top10(right_str)
     return left != right
 
-
+# >>> Parse column mapping string like "AMT=amount,STATUS=status" into dict <<< #
 def parse_col_map_string(col_map_str):
-    """Parse column mapping string like "AMT=amount,STATUS=status" into dict."""
     if not col_map_str:
         return {}
     mappings = {}
@@ -187,12 +132,8 @@ def parse_col_map_string(col_map_str):
         mappings[left.strip()] = right.strip()
     return mappings
 
-
+# >>> Get column mapping between two tables <<< #
 def get_column_mapping(db_path, table_left, table_right, pair_name=None, col_map_override=None):
-    """Get column mapping between two tables.
-
-    Priority: col_map_override > pair_name lookup > auto-detect > empty dict.
-    """
     if col_map_override is not None:
         return col_map_override
 
@@ -211,12 +152,8 @@ def get_column_mapping(db_path, table_left, table_right, pair_name=None, col_map
 
     return {}
 
-
+# >>> Compare row counts between two tables <<< #
 def compare_row_counts(db_path, table_left, table_right, from_date=None, to_date=None):
-    """Compare row counts between two tables.
-
-    Returns dict with only_left, only_right, matching, mismatched, summary.
-    """
     rows_left = get_row_counts(db_path, table_left, from_date, to_date)
     rows_right = get_row_counts(db_path, table_right, from_date, to_date)
 
@@ -280,32 +217,14 @@ def compare_row_counts(db_path, table_left, table_right, from_date=None, to_date
         "summary": summary,
     }
 
-
-# ============================================================================
-# Column type resolution
-# ============================================================================
-
+# >>> Resolve column types to a normalized family (numeric/date/categorical) <<< #
 def resolve_col_type(left_type, right_type, overrides=None, col_name=None):
-    """Resolve column types to a normalized family (numeric/date/categorical).
-
-    Both sides are mapped to a family first, so BIGINT vs DOUBLE (both
-    numeric) resolve to 'numeric' instead of being treated as a mismatch.
-    Differing families fall back to categorical, the safe default for
-    stat comparison.
-
-    >>> resolve_col_type("categorical", "numeric")
-    'categorical'
-    >>> resolve_col_type("numeric", "numeric")
-    'numeric'
-    >>> resolve_col_type("BIGINT", "DOUBLE")
-    'numeric'
-    """
     if overrides and col_name and col_name in overrides:
         return overrides[col_name]
     lf, rf = _col_family(left_type), _col_family(right_type)
     return lf if lf == rf else "categorical"
 
-
+# >>> Compare column statistics between two tables <<< #
 def compare_column_stats(
     db_path, table_left, table_right,
     columns=None, col_mappings=None,
@@ -314,13 +233,6 @@ def compare_column_stats(
     col_type_overrides=None,
     level="fine",
 ):
-    """Compare column statistics between two tables.
-
-    All loaded _col_stats rows are considered -- callers pick which stat
-    fields they care about via the col_compare UI's Compare-fields
-    selector (or its export equivalent). Resolves col_type disagreements
-    using resolve_col_type().
-    """
     stats_left = get_col_stats(
         db_path, table_left, from_date=from_date, to_date=to_date)
     stats_right = get_col_stats(
@@ -331,11 +243,6 @@ def compare_column_stats(
         for stat in stats:
             col = stat['column_name']
             raw = stat['dt']
-            # Try to canonicalize to YYYY-MM-DD, but pass through sentinel
-            # labels ('all', 'sample') and vintage bucket keys (e.g. week /
-            # month tags) that parse_date doesn't recognize. Both sides agree
-            # on the same label per bucket, so equality-keyed grouping still
-            # works for the comparison join.
             if raw:
                 try:
                     dt = parse_date(raw)
@@ -380,7 +287,6 @@ def compare_column_stats(
             left_stat = left_dates[dt]
             right_stat = right_dates[dt]
 
-            # Resolve column type
             left_type = left_stat["col_type"]
             right_type = right_stat["col_type"]
             resolved_type = resolve_col_type(left_type, right_type, col_type_overrides, left_col)
@@ -411,14 +317,6 @@ def compare_column_stats(
                 "n_unique_diff": r_unique - l_unique,
             }
 
-            # min/max are emitted as "val=cnt" on every coarse-and-fine path
-            # now (SAS Oracle/Hadoop categorical + Athena categorical), and
-            # as plain numeric scalars for numeric columns. The match key
-            # strips the "=cnt" suffix before comparing so older extractions
-            # (or any platform that drops the suffix) still compare equal on
-            # the value alone. For display we only strip whitespace — the
-            # trailing "=cnt" is useful information about which value
-            # actually anchors the alpha-min / alpha-max.
             def _norm_min_max(v):
                 if v is None:
                     return ""
@@ -489,9 +387,6 @@ def compare_column_stats(
                 comparison[f"{field}_match"] = match
 
             if level == "fine":
-                # Fine-only fields: rank-weighted mean/std for categorical,
-                # arithmetic mean/std for numeric, plus top_10. Same match-key
-                # logic as before so float-formatted values normalize cleanly.
                 l_mean_key = _stat_match_key(left_stat["mean"], "m")
                 r_mean_key = _stat_match_key(right_stat["mean"], "m")
                 l_std_key = _stat_match_key(left_stat["std"], "s")
@@ -517,7 +412,6 @@ def compare_column_stats(
 
     return result
 
-
 # >>> field-key → diff predicate; single source of truth across helpers <<< #
 _DIFF_PREDICATES = {
     'n_total':    lambda c: c.get('n_total_diff', 0) != 0,
@@ -532,16 +426,8 @@ _DIFF_PREDICATES = {
     'hash_sum':   lambda c: c.get('hash_sum_match') is False,
 }
 
-
+# >>> Check if a column comparison has any statistical differences <<< #
 def _has_col_differences(comp, compare_fields=None):
-    """Check if a column comparison has any statistical differences.
-
-    `compare_fields` (iterable of field keys) restricts the check to that
-    subset; None means "check every supported field" (the historical
-    behaviour). Fields absent from the comparison (match=None / diff=0)
-    don't contribute -- a coarse comparison still works without false
-    diffs on fine-only fields, and vice versa.
-    """
     if compare_fields is None:
         keys = _DIFF_PREDICATES.keys()
     else:
@@ -552,9 +438,8 @@ def _has_col_differences(comp, compare_fields=None):
             return True
     return False
 
-
+# >>> Compare two column dictionaries and match by case-insensitive name <<< #
 def match_columns_from_dicts(left_cols, right_cols, left_label="left", right_label="right", outfile=None):
-    """Compare two column dictionaries and match by case-insensitive name."""
     left_lower = {k.lower(): k for k in left_cols}
     right_lower = {k.lower(): k for k in right_cols}
 
@@ -587,7 +472,6 @@ def match_columns_from_dicts(left_cols, right_cols, left_label="left", right_lab
 
     return result
 
-
 # >>> transform value via a wildcard rule: `*` capture and paired (a|b)->(A|B) alternation <<< #
 def _wildcard_transform(value, pat_from, pat_to):
     has_star = '*' in pat_from
@@ -595,8 +479,6 @@ def _wildcard_transform(value, pat_from, pat_to):
     if not has_star and not has_alt:
         return pat_to if value == pat_from else None
 
-    # Paired alternation: the first (a|b) on the left maps positionally to the
-    # first (A|B) on the right; an optional `*` is captured as group 2.
     if has_alt:
         lm = re.search(r'\(([^)]+)\)', pat_from)
         rm = re.search(r'\(([^)]+)\)', pat_to)
@@ -624,27 +506,14 @@ def _wildcard_transform(value, pat_from, pat_to):
         return None
     return pat_to.replace('*', m.group(1))
 
-
 # >>> accept JS-style $1 / $<name> backrefs in a regex replacement template <<< #
 def _to_py_backrefs(template):
     template = re.sub(r'\$(\d+)', r'\\\1', template)
     template = re.sub(r'\$<([^>]+)>', r'\\g<\1>', template)
     return template
 
-
+# >>> Evaluate wildcard/regex rules against unmatched columns <<< #
 def apply_column_rules(rules, unmatched_left, unmatched_right):
-    """Evaluate wildcard/regex rules against unmatched columns.
-
-    Args:
-        rules: list of rule dicts with pattern_left, pattern_right, type
-        unmatched_left: list of column name strings
-        unmatched_right: list of column name strings
-
-    Returns:
-        (new_mappings, rule_sources) where:
-        - new_mappings: {left_col: right_col} for matched columns
-        - rule_sources: {left_col: "rule:N"} indicating which rule matched
-    """
     new_mappings = {}
     rule_sources = {}
     right_set = set(unmatched_right)
@@ -678,15 +547,12 @@ def apply_column_rules(rules, unmatched_left, unmatched_right):
 
     return new_mappings, rule_sources
 
-
 _SUPPORTED = ("aws", "oracle", "databricks", "csv")
-
 
 # >>> source -> SQL dialect string used by quote_ident / hash16 exprs <<< #
 def _dialect(source):
     return {"aws": "athena", "csv": "duckdb", "oracle": "oracle",
             "databricks": "databricks"}.get((source or "").lower())
-
 
 # >>> per-value 16-bit MD5 hash expression matching each platform's col extraction <<< #
 def _hash16_expr(source, col_q):
@@ -705,7 +571,6 @@ def _hash16_expr(source, col_q):
                 f"1, 4)) AS INTEGER)")
     return "NULL"
 
-
 # >>> (from_ref, cte_prefix) for a table, honoring processed CTEs where supported <<< #
 def _full_table_and_cte(tbl):
     src = (tbl.get("source") or "").lower()
@@ -718,7 +583,6 @@ def _full_table_and_cte(tbl):
     if src == "aws":
         return resolve_table(tbl, f"{tbl.get('conn_macro','')}.{tbl.get('table','')}")
     return resolve_table(tbl)
-
 
 # >>> run a SELECT against the table's backend; return list[dict] (lowercase cols) <<< #
 def _run_query(tbl, sql):
@@ -751,10 +615,8 @@ def _run_query(tbl, sql):
     raise ValueError(f"sample-hash: unsupported source {src!r} "
                      f"(supported: {', '.join(_SUPPORTED)})")
 
-
 def _limit(source, n):
     return f"FETCH FIRST {n} ROWS ONLY" if (source or "").lower() == "oracle" else f"LIMIT {n}"
-
 
 def _lit(v):
     if v is None:
@@ -764,7 +626,6 @@ def _lit(v):
     if isinstance(v, (int, float)):
         return repr(v)
     return "'" + str(v).replace("'", "''") + "'"
-
 
 # >>> sample up to n distinct key tuples from the left side <<< #
 def _sample_keys(tbl, key_cols, n):
@@ -782,7 +643,6 @@ def _sample_keys(tbl, key_cols, n):
         out.append(tuple(r[k.lower()] for k in key_cols))
     return out
 
-
 # >>> deterministic hash-spread sample of up to n distinct key tuples from the left (for col-sample) <<< #
 def sample_keys_hashed(tbl, key_cols, n):
     src = tbl.get("source", "")
@@ -799,7 +659,6 @@ def sample_keys_hashed(tbl, key_cols, n):
     rows = _run_query(tbl, sql)
     return [tuple(r[k.lower()] for k in key_cols) for r in rows]
 
-
 def _key_in_clause(key_cols_q, key_tuples):
     if not key_tuples:
         return "1=0"
@@ -811,7 +670,6 @@ def _key_in_clause(key_cols_q, key_tuples):
         ands = " AND ".join(f"{kq} = {_lit(v)}" for kq, v in zip(key_cols_q, t))
         ors.append(f"({ands})")
     return "(" + " OR ".join(ors) + ")"
-
 
 # >>> fetch value + hash16 for each (key, column) on one side; keyed by key tuple <<< #
 def _fetch_side(tbl, key_cols, value_cols, key_tuples):
@@ -836,7 +694,6 @@ def _fetch_side(tbl, key_cols, value_cols, key_tuples):
         by_key[tuple(str(x) for x in k)] = r
     return by_key
 
-
 # >>> case-insensitive set of columns recorded for a table in _column_meta (empty if none) <<< #
 def _present_cols(project_db, tbl):
     try:
@@ -844,7 +701,6 @@ def _present_cols(project_db, tbl):
     except Exception:
         meta = []
     return {m["column_name"].lower() for m in meta if m.get("column_name")}
-
 
 # >>> sample-hash one pair: returns (header, rows) for the Excel sheet <<< #
 def _sample_pair(project_db, pair_name, pair_cfg, key_cols, n):
@@ -916,10 +772,8 @@ def _sample_pair(project_db, pair_name, pair_cfg, key_cols, n):
         rows.append(out)
     return cols_hdr, rows
 
-
 def _disp(v):
     return "" if v is None else str(v)
-
 
 # >>> write one sheet per pair; highlight DIFF rows; bold header <<< #
 def _write_excel(out_path, sheets):
@@ -946,7 +800,6 @@ def _write_excel(out_path, sheets):
                     r[mc].fill = bad_fill
     wb.save(out_path)
     return out_path
-
 
 # >>> CLI entry: sample N keys/pair, dump per-column value+backend hash16 to Excel <<< #
 def sample_hash(project_db, config_path, key, pair=None, n=20, out=None):

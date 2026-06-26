@@ -30,16 +30,10 @@ def _seed_loaded_rows(workdir, run_cli):
                 type="row", workers=None, db_path=workdir["db"],
                 vintage=None, force=False, from_date=None, to_date=None,
                 preset=None, stats_override=None)
-    run_cli("gen-sas",
-            config=workdir["config"], outdir=workdir["sas_outdir"],
-            type="row", db_path=workdir["db"],
-            vintage=None, from_date=None, to_date=None,
-            preset=None, stats_override=None)
-    for folder in (workdir["csv_outdir"], workdir["sas_outdir"]):
-        run_cli("load-row",
-                project_db=workdir["db"], folder=folder,
-                config=workdir["config"], mode="upsert",
-                db=None, date_var=None)
+    run_cli("load-row",
+            project_db=workdir["db"], folder=workdir["csv_outdir"],
+            config=workdir["config"], mode="upsert",
+            db=None, date_var=None)
 
 
 def test_compare_row_persists_row_comparison_and_html(
@@ -54,7 +48,7 @@ def test_compare_row_persists_row_comparison_and_html(
             html=html_path, title=None, subtitle=None)
 
     # Both pairs should have _row_comparison rows
-    for pair in (wd["pair_oracle_aws"], wd["pair_sas_aws"]):
+    for pair in (wd["pair_oracle_aws"], wd["pair_databricks"]):
         rows = db_rows(
             wd["db"],
             "SELECT matching_dates, overlap_start, overlap_end "
@@ -76,7 +70,7 @@ def test_compare_row_persists_row_comparison_and_html(
     body = Path(html_path).read_text()
     assert len(body) > 1000, "HTML report suspiciously small"
     # Pair names should appear in the rendered report
-    assert wd["pair_oracle_aws"] in body or wd["pair_sas_aws"] in body
+    assert wd["pair_oracle_aws"] in body or wd["pair_databricks"] in body
 
 
 def test_compare_row_writes_where_map_back_to_config(
@@ -95,7 +89,7 @@ def test_compare_row_writes_where_map_back_to_config(
             html=html_path, title=None, subtitle=None)
 
     cfg = json.loads(Path(wd["config"]).read_text())
-    for pair in (wd["pair_oracle_aws"], wd["pair_sas_aws"]):
+    for pair in (wd["pair_oracle_aws"], wd["pair_databricks"]):
         wm = cfg["pairs"][pair].get("where_map", {})
         # where_map should exist; sides can be empty strings if dates
         # had no overlap but the keys must be present.
@@ -121,7 +115,7 @@ def test_compare_row_yes_mode_is_idempotent(initialized_db, run_cli, db_rows):
         wd["db"],
         "SELECT COUNT(*) AS n FROM _row_comparison",
     )
-    # Exactly one row per pair (3 pairs, all sides loaded).
-    assert rows[0]["n"] == 3, (
-        f"expected 3 _row_comparison rows after 2x compare-row; "
+    # Exactly one row per pair (2 pairs, all sides loaded).
+    assert rows[0]["n"] == 2, (
+        f"expected 2 _row_comparison rows after 2x compare-row; "
         f"got {rows[0]['n']}")

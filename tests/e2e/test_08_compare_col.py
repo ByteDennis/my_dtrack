@@ -66,8 +66,6 @@ def _seed_pipeline_to_col(workdir, run_cli):
     _row_count_csv(csv_outdir / "aws_pos_snapshot_row.csv")
     _row_count_csv(csv_outdir / "oracle_pos_daily_row.csv")
 
-    # SAS-side pair isn't needed for the col diff; skip its load-row to
-    # save time.
     run_cli("load-row",
             project_db=workdir["db"], folder=workdir["csv_outdir"],
             config=workdir["config"], mode="upsert",

@@ -1,6 +1,6 @@
 """Fixtures for the CSV-source reconciliation suite.
 
-Unlike tests/api/ and tests/e2e/ (which need live Oracle/Athena/Hadoop/SAS
+Unlike tests/api/ and tests/e2e/ (which need live Oracle/Athena/Hadoop
 backends and are skipped off the Windows dev box), everything here runs on
 ANY host: a `source=csv` pair is powered by in-process DuckDB, so the full
 generate → run → load → compare pipeline executes with zero external engines.

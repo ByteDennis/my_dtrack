@@ -1,18 +1,13 @@
-"""AthenaBuilder: direct AWS Athena extraction platform."""
 
 import csv
 import json
 import os
 import threading
 
-# `aws_creds_renew()` POSTs/GETs to the corporate auth endpoint with
-# verify=False (proxy + self-signed certs). Suppress the per-call warning
-# urllib3 emits in that case so it doesn't clutter the dtrack logs.
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from .base import (
-    PlatformBuilder,
     qualified_name,
     is_numeric_type,
     resolve_table,
@@ -34,17 +29,9 @@ from .base import (
     _mask_stats_in_rows,
 )
 
-
-# Back-compat aliases — external callers may have imported these from athena.
-# Cache helpers live in base.py now; keep the old names working.
 set_athena_cache = set_cache_db
 _cache_get = cache_get
 _cache_put = cache_put
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 _VINTAGE_ATHENA = {
     'day': 'day', 'week': 'week', 'month': 'month',
@@ -76,24 +63,8 @@ _aws_creds_lock = threading.Lock()
 _sql_log_file = None
 _sql_log_lock = threading.Lock()
 
-
-# ---------------------------------------------------------------------------
-# AWS credential management
-# ---------------------------------------------------------------------------
-
+# >>> Renew AWS credentials via proxied token-based auth (Windows only) <<< #
 def aws_creds_renew(ttl_minutes=50, retries=3, retry_delay=10):
-    """Renew AWS credentials via proxied token-based auth (Windows only).
-
-    Reads AWS_USR / AWS_PWD / AWS_HOST and routes traffic through
-    http://{usr}:{pwd}@{host}:8080. POSTs username+password to AWS_TOKEN_URL
-    to get a bearer token, then GETs AWS_ARN_URL for temporary credentials.
-    On success, sets AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
-    AWS_SESSION_TOKEN and refreshes any open s3fs filesystem.
-
-    On Linux/containers credentials come from IAM roles or env vars, so this
-    is a no-op. Thread-safe via _aws_creds_lock; skips renewal if last
-    refresh was within ttl_minutes.
-    """
     global _aws_creds_expires
 
     if os.name != 'nt':
@@ -113,7 +84,6 @@ def aws_creds_renew(ttl_minutes=50, retries=3, retry_delay=10):
     os.environ['HTTPS_PROXY'] = f'http://{usr}:{pwd}@{host}:8080'
 
     with _aws_creds_lock:
-        # Double-check after acquiring lock (another thread may have renewed)
         now = time.time()
         if _aws_creds_expires and now < _aws_creds_expires:
             return
@@ -160,21 +130,9 @@ def aws_creds_renew(ttl_minutes=50, retries=3, retry_delay=10):
                 else:
                     print(f"Warning: AWS credential renewal failed after {retries} attempts: {e}")
 
-
-# ---------------------------------------------------------------------------
-# Athena connection
-# ---------------------------------------------------------------------------
-
+# >>> Connect to AWS Athena <<< #
 def athena_connect(data_base=None, *, region=None, work_group=None,
                    staging_dir=None):
-    """Connect to AWS Athena.
-
-    Each connection param falls back to env when not passed:
-      region      <- AWS_DEFAULT_REGION
-      work_group  <- AWS_S3_WORK_GROUP
-      staging_dir <- AWS_S3_STAGING_DIR
-    None values are omitted so pyathena can fall back to its own defaults.
-    """
     from pyathena import connect as athena_connect_raw
 
     kwargs = {
@@ -185,24 +143,12 @@ def athena_connect(data_base=None, *, region=None, work_group=None,
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     return athena_connect_raw(schema_name=data_base, **kwargs)
 
-
-# ---------------------------------------------------------------------------
-# Date casting and vintage bucketing
-# ---------------------------------------------------------------------------
-
+# >>> Wrap date_expr with appropriate cast for Athena based on column type <<< #
 def _athena_date_cast(date_expr, date_dtype, date_format=None):
-    """Wrap date_expr with appropriate cast for Athena based on column type.
-
-    - date/timestamp columns: use as-is (already date-compatible)
-    - varchar/string columns: parse with date_parse using date_format label
-    - number columns: cast to varchar first, then date_parse
-    - date_format: format label from _metadata (e.g. 'YYYYMMDD', 'DD-MON-YYYY')
-    """
     dtype = (date_dtype or '').lower()
     if 'date' in dtype or 'timestamp' in dtype:
         return date_expr
 
-    # Resolve Athena date_parse pattern from format label (default to %Y%m%d)
     athena_fmt = _ATHENA_DATE_PARSE.get(date_format, '%Y%m%d') if date_format else '%Y%m%d'
 
     if dtype in ('int', 'integer', 'bigint', 'smallint', 'tinyint', 'number'):
@@ -211,14 +157,8 @@ def _athena_date_cast(date_expr, date_dtype, date_format=None):
         return f"date_parse({date_expr}, '{athena_fmt}')"
     return date_expr
 
-
+# >>> Wrap date_expr with Athena date_trunc for vintage bucketing <<< #
 def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None, date_dtype=None, date_format=None):
-    """Wrap date_expr with Athena date_trunc for vintage bucketing.
-
-    If vintage_transform is provided (from config JSON), use it directly.
-    Otherwise fall back to date_trunc('unit', date_expr).
-    Uses date_dtype to CAST string/number columns to date before date_trunc.
-    """
     if vintage_transform:
         return vintage_transform.replace("{col}", date_expr)
     if vintage == 'all':
@@ -231,9 +171,8 @@ def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None, date_d
     cast_expr = _athena_date_cast(date_expr, date_dtype, date_format)
     return f"date_trunc('{unit}', {cast_expr})"
 
-
+# >>> Format a YYYY-MM-DD date as the correct Athena SQL literal <<< #
 def _format_athena_date_bound(date_str, date_type, is_upper=False):
-    """Format a YYYY-MM-DD date as the correct Athena SQL literal."""
     dtype = date_type.lower() if date_type else ""
     time_part = "23:59:59" if is_upper else "00:00:00"
 
@@ -251,13 +190,8 @@ def _format_athena_date_bound(date_str, date_type, is_upper=False):
         return f"DATE '{date_str}'"
     return f"'{date_str}'"
 
-
-# ---------------------------------------------------------------------------
-# Column discovery
-# ---------------------------------------------------------------------------
-
+# >>> Discover columns from information_schema <<< #
 def _discover_columns_athena(cursor, database, table):
-    """Discover columns from information_schema."""
     sql = f"""
         SELECT column_name, data_type
         FROM information_schema.columns
@@ -267,21 +201,8 @@ def _discover_columns_athena(cursor, database, table):
     cursor.execute(sql)
     return {row[0]: row[1] for row in cursor.fetchall()}
 
-
-# ---------------------------------------------------------------------------
-# Query helpers
-# ---------------------------------------------------------------------------
-
+# >>> Execute SQL on Athena via pandas read_sql_query with fresh connection <<< #
 def _query_athena(sql, data_base=None):
-    """Execute SQL on Athena via pandas read_sql_query with fresh connection.
-
-    Renews credentials if needed, opens a new connection, runs the query,
-    and returns a DataFrame with lowercase column names.
-
-    Consults the Athena cache (if enabled via set_athena_cache) before
-    submitting; a hit returns the cached DataFrame and skips the network
-    round-trip entirely.
-    """
     import pandas.io.sql as psql
     import warnings
 
@@ -302,33 +223,16 @@ def _query_athena(sql, data_base=None):
     _cache_put(sql, data_base, df, row_count=len(df))
     return df
 
-
+# >>> Append SQL to log file (thread-safe). No console output <<< #
 def _log_sql(col, sql):
-    """Append SQL to log file (thread-safe). No console output."""
     if _sql_log_file:
         with _sql_log_lock:
             with open(_sql_log_file, 'a') as f:
                 f.write(f"-- [{col}]\n{sql.strip()}\n;\n\n")
 
-
-# ---------------------------------------------------------------------------
-# Column extraction
-# ---------------------------------------------------------------------------
-
+# >>> Extract stats for a single column from Athena <<< #
 def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database=None, vintage=None, date_dtype=None, date_format=None, dt_label=None):
-    """Extract stats for a single column from Athena.
-
-    Numeric columns: direct aggregation (no top-10).
-    Categorical columns: single CTE query computing all stats server-side.
-
-    When vintage is not 'all' and dt_label is None, uses SQL-side GROUP BY
-    with _vintage_date_expr_athena to bucket all dates in one query per column.
-    When dt_label is set, uses it as a literal dt value (no GROUP BY).
-    """
     date_col = tbl_cfg['date_col']
-    # Quote identifiers when bare form is invalid (digit-leading, hyphenated,
-    # etc.). Mirrors the file-gen path in _write_combined_sql so direct
-    # extraction works for the same columns the SQL files do.
     col_q = quote_ident(col, "athena")
     date_col_q = quote_ident(date_col, "athena")
     where = tbl_cfg.get('where', '')
@@ -338,16 +242,13 @@ def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database
 
     wc = where.strip() if where else "(1=1)"
 
-    # Build date expression and GROUP BY
     if dt_label is not None:
-        # Python-computed bucket: use literal label, no GROUP BY
         dt_select = f"'{dt_label}' AS dt"
         group_by = ""
     elif vintage == 'all':
-        dt_select = f"'all' AS dt"
+        dt_select = "'all' AS dt"
         group_by = ""
     else:
-        # Legacy path: SQL-side vintage bucketing (kept for backward compat)
         vintage_transform = tbl_cfg.get('vintage_transform', None)
         dt_expr = _vintage_date_expr_athena(date_col_q, vintage, vintage_transform, date_dtype=date_dtype, date_format=date_format)
         dt_select = f"CAST({dt_expr} AS VARCHAR) AS dt"
@@ -355,9 +256,6 @@ def _extract_col_athena(tbl_cfg, col, dtype, full_table, cte_prefix="", database
 
     if numeric:
         from .base import apply_null_sentinels
-        # Pass raw dtype so NUMBER / DECIMAL get numeric sentinels (matches
-        # the high-level 'numeric' tag here, but stays consistent if a
-        # caller ever passes a more specific type label).
         col_expr = apply_null_sentinels(col_q, dtype or "numeric", "athena")
         sql = f"""{cte_prefix}
 SELECT
@@ -377,9 +275,6 @@ FROM {full_table} WHERE {wc}{group_by}"""
         results = []
         for _, rd in df.iterrows():
             rd = rd.to_dict()
-            # length_avg/length_max/hash_sum left empty for numeric -- matches
-            # the cross-engine convention (number formatting diverges between
-            # engines and would generate false drift hits).
             results.append({
                 'dt': str(rd.get('dt', 'all')),
                 'column_name': col,
@@ -398,10 +293,6 @@ FROM {full_table} WHERE {wc}{group_by}"""
             })
         return results
 
-    # Categorical: single unified CTE query that emits everything in one
-    # roundtrip -- n_total/n_missing/n_unique, alpha-rank-weighted mean/std,
-    # alpha-bound "{cat}={count}" min/max, and top_10. Algorithm matches
-    # _col_categorical_freq (Hadoop SAS) so values agree across engines.
     if dt_label is not None:
         freq_dt_select = f"'{dt_label}'"
         freq_dt_group = ""
@@ -415,17 +306,7 @@ FROM {full_table} WHERE {wc}{group_by}"""
         freq_dt_group = f", {dt_expr}"
 
     from .base import apply_null_sentinels
-    # Pass the raw dtype (e.g. 'timestamp(3)') so DATE / TIMESTAMP columns
-    # get DATE sentinels instead of string sentinels. The high-level
-    # 'categorical' tag collapses DATE, VARCHAR, etc. into one bucket and
-    # would emit `IN ('NA', ...)` even for a timestamp column -- Athena
-    # then rejects the SQL at compile time with TYPE_MISMATCH.
     col_expr_cat = apply_null_sentinels(col_q, dtype or "categorical", "athena")
-    # SUBSTR(..., 1, P_COL_MAX_LEN) caps the freq-table key at 4000 chars
-    # so very long strings are aggregated the same way Oracle handles them
-    # (Oracle's VARCHAR2(4000) limit). Both engines now bin by the same
-    # truncated string, so length_avg / hash_sum stay aligned on the
-    # edge case of >4000-char values.
     from .base import P_COL_MAX_LEN
     p_col_expr = f"SUBSTR(CAST({col_expr_cat} AS VARCHAR), 1, {P_COL_MAX_LEN})"
     sql = f"""{cte_prefix}
@@ -532,35 +413,25 @@ ORDER BY t.dt"""
         })
     return results
 
-
-# ---------------------------------------------------------------------------
-# Mock extraction
-# ---------------------------------------------------------------------------
-
+# >>> Legacy mock entry — called when WHERE hasn't been injected yet <<< #
 def _extract_aws_mock(config_path, outdir, types, db_path, mock_dir):
-    """Legacy mock entry — called when WHERE hasn't been injected yet."""
     from .base import _extract_mock
     _extract_mock(config_path, outdir, types, db_path, mock_dir, ('aws',))
 
-
+# >>> Mock extraction with WHERE-injected tables — writes CSVs + combined .sql file <<< #
 def _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir):
-    """Mock extraction with WHERE-injected tables — writes CSVs + combined .sql file."""
     from .base import _extract_mock_tables
     _extract_mock_tables(aws_tables, outdir, types, mock_dir)
 
-    # Write single combined .sql file for verification
     if "row" in (types or ["row"]):
         _write_combined_sql(aws_tables, outdir, "row")
 
-
+# >>> Same .cache.db Athena query-result caching uses; one artifact per outdir <<< #
 def _id_card_cache_path(outdir):
-    """Same .cache.db Athena query-result caching uses; one artifact per outdir."""
     return os.path.join(outdir, ".cache.db") if outdir else None
 
-
+# >>> Cache hit returns (n_total, payload_dict) where payload is {col: approx_distinct} <<< #
 def _read_id_card_cache(cache_db_path, qname, ttl_days):
-    """Cache hit returns (n_total, payload_dict) where payload is {col: approx_distinct}.
-    Miss / expired / corrupt → None. All-or-nothing per qname."""
     if not cache_db_path or not os.path.exists(cache_db_path):
         return None
     import sqlite3, json
@@ -597,10 +468,8 @@ def _read_id_card_cache(cache_db_path, qname, ttl_days):
         return None
     return n_total, payload
 
-
+# >>> Upsert one row in _id_card. Best-effort; silent on failure (writes are <<< #
 def _write_id_card_cache(cache_db_path, qname, n_total, payload):
-    """Upsert one row in _id_card. Best-effort; silent on failure (writes are
-    optional — a write failure just means the next run re-probes)."""
     if not cache_db_path:
         return
     import sqlite3, json
@@ -623,38 +492,15 @@ def _write_id_card_cache(cache_db_path, qname, n_total, payload):
     except Exception as e:
         print(f"  [id-cache] write failed for {qname}: {e}")
 
-
+# >>> One-shot Athena probe — classify which cols are "ID-like" (cardinality <<< #
 def _probe_id_cols_athena(full_table, cte_prefix, where, col_list, threshold,
                           database=None, qname=None, cache_db_path=None,
                           ttl_days=1.0):
-    """One-shot Athena probe — classify which cols are "ID-like" (cardinality
-    ≥ threshold) so we can emit a lite SQL block (no GROUP BY p_col) for them
-    instead of the full freq aggregation.
-
-    Builds a single batch query over the table:
-
-        SELECT COUNT(*) AS n_total,
-               APPROX_DISTINCT(<col_0>) AS u_0,
-               APPROX_DISTINCT(<col_1>) AS u_1, ...
-        FROM <table> WHERE <where>
-
-    Athena's Parquet column-pruning means this scans only the probed columns
-    once — same column footprint the per-col extraction would scan one by one,
-    just folded into a single round-trip.
-
-    Returns: set of col names where APPROX_DISTINCT(col)/COUNT(*) ≥ threshold.
-    Empty set on any failure (no AWS creds, query error, empty table) so the
-    caller falls back to emitting full SQL for every column. Set
-    `DTRACK_ID_DETECTION=0` to skip probing entirely.
-    """
     if not col_list:
         return set()
     if os.environ.get('DTRACK_ID_DETECTION', '1') == '0':
         return set()
 
-    # Cache lookup: all-or-nothing per qname, TTL configurable
-    # (DTRACK_ID_CACHE_TTL_DAYS, default 1.0). Cached payload = {col: u}, so
-    # threshold can change without invalidating cache.
     if cache_db_path and qname:
         cached = _read_id_card_cache(cache_db_path, qname, ttl_days)
         if cached is not None:
@@ -669,9 +515,7 @@ def _probe_id_cols_athena(full_table, cte_prefix, where, col_list, threshold,
     parts = ["COUNT(*) AS n_total"]
     for i, (col, _) in enumerate(col_list):
         col_q = quote_ident(col, "athena")
-        # Suffix _i (positional) instead of _<colname> to dodge identifier
-        # issues when col names contain hyphens, dots, or start with a digit.
-        parts.append(f"APPROX_DISTINCT({col_q}) AS u_{i}")
+        parts.append(f"COUNT(DISTINCT {col_q}) AS u_{i}")
     cols_part = ",\n    ".join(parts)
     where_clause = where.strip() or "1=1"
     sql = f"""{cte_prefix}SELECT
@@ -709,7 +553,6 @@ WHERE {where_clause}"""
         if (u / n_total) >= threshold:
             id_cols.add(col)
 
-    # Persist to cache so the next gen within TTL skips the probe.
     if cache_db_path and qname:
         _write_id_card_cache(cache_db_path, qname, n_total, payload)
 
@@ -718,95 +561,18 @@ WHERE {where_clause}"""
               f"(threshold={threshold}, cached for {ttl_days}d): {sorted(id_cols)}")
     return id_cols
 
-
+# >>> Athena/Trino expression: 16-bit unsigned bigint MD5 hash of `value_sql` <<< #
 def _athena_portable_hash16(value_sql):
-    """Athena/Trino expression: 16-bit unsigned bigint MD5 hash of `value_sql`.
-
-    Recipe matches the SAS-side `input(substr(put(md5(...), $hex32.), 1, 4),
-    hex4.)` form so cross-platform SUM(cnt * hash) AGREES on identical data
-    -- which is the whole point of hash_sum as a drift-detection signal on
-    Hadoop ↔ AWS pairs.
-
-      1. TRIM the value so 'SF' and 'SF ' don't diverge from padding
-         (padding is a storage artifact, not data drift).
-      2. MD5 -> 16-byte VARBINARY -> TO_HEX -> 32-char hex string.
-      3. Take the FIRST 4 hex chars (16 bits) and from_base(.., 16) into
-         a bigint in [0, 65535].
-
-    Why 16 bits, not 32 or 64
-    -------------------------
-    Trino's SUM over a freq-table column is computed in DOUBLE. DOUBLE
-    has a 53-bit mantissa, so integer arithmetic is exact only up to
-    2^53 ≈ 9e15. The per-row term in this hash is cnt * hash, and the
-    final SUM is dominated by N_total * max(hash) where N_total is the
-    table row count.
-
-      hash bits | max(hash)  | N_total exact-safe in DOUBLE
-      ---------+------------+----------------------------------------
-        16     |   65,535   | ~1.4e11   (140 billion rows)
-        32     |   4.3e9    | ~2.1e6    (~2 million rows!)
-        64     |   9.2e18   | overflow at the first row
-
-    32-bit hashes silently lose precision past a few million rows --
-    cross-platform sums then disagree from summation-order differences
-    in DOUBLE, not from data drift. 16-bit stays exact at billion-row
-    scale on both engines.
-
-    Collision concern: K distinct categorical values have ~K^2/2^17
-    chance of birthday-paradox collisions. Collisions DO NOT silence
-    drift detection -- drift shifts the cnt distribution, which moves
-    the weighted sum regardless of which buckets the affected values
-    occupy. The only silent-drift case is value A replaced by value B
-    where hash16(A) == hash16(B) AND cnt is preserved -- ~1/65536 per
-    affected pair, well below other Phase-1 signal noise.
-
-    Numeric-column note: callers gate this expression on col_type;
-    numerics emit empty hash_sum because CAST(0 AS VARCHAR) yields '0'
-    on Hive but '0.0' on Athena DOUBLE, and the MD5 diverges purely
-    from formatting.
-    """
     return (
         f"CAST(from_base(SUBSTR(LOWER(TO_HEX(MD5("
         f"TO_UTF8(TRIM({value_sql}))))), 1, 4), 16) AS BIGINT)"
     )
 
-
+# >>> Coarse col-stats SQL — cheap aggregates for Phase-1 rough drift detection <<< #
 def _build_coarse_sql(col_name, col_q, col_type, dt_select, group_by,
                       full_table, wc, cte_prefix, col_dtype=None,
                       preset=None, stats_override=None):
-    """Coarse col-stats SQL — cheap aggregates for Phase-1 rough drift detection.
-
-    Emits the 14-column row schema (dt, column_name, col_type, n_total,
-    n_missing, n_unique, mean, std, min_val, max_val, top_10, length_avg,
-    length_max, hash_sum). The "fine-only" fields (mean/std/top_10) come
-    back empty in coarse mode; the loader's level="coarse" path preserves
-    any prior fine values for those rather than overwriting with empty.
-
-    `preset` selects the stat subset (matches constants.STATS_PRESETS):
-
-      - 'quick' — flat aggregates only. No freq table, no COUNT(DISTINCT),
-        no md5/hash_sum, no top_10. Mirrors base.build_col_sql's quick
-        path on Oracle/Hadoop/CSV so all four engines emit the same
-        cheap shape. Use this on heavy / partitioned tables where the
-        WITH-chain would otherwise spill or scan twice.
-      - None / 'detailed' (legacy "coarse" mode) — full WITH-chain with
-        n_unique from the freq table and a `_coarse_lenhash` CTE that
-        produces real length_avg/length_max/hash_sum signals.
-
-    Sentinel translation: every reference to `col_q` is replaced by an
-    expression that maps configured sentinel values (-999, 'NA',
-    '9999-12-31', etc., per constants.NULL_SENTINELS["aws"]) to NULL
-    first. That keeps min/max/n_unique/n_missing/length_* aligned with
-    the Oracle / Hadoop side, which applies the same translation in its
-    SAS templates.
-    """
     from .base import apply_null_sentinels
-    # Prefer the raw DB dtype over the high-level tag so apply_null_sentinels
-    # can pick the right sentinel family: DATE sentinels (DATE '9999-12-31',
-    # ...) for DATE / TIMESTAMP columns instead of string sentinels ('NA',
-    # 'N/A', ...). Without this, Athena raises TYPE_MISMATCH on a categorical-
-    # tagged timestamp(3) column because `IN ('NA', ...)` can't coerce to
-    # timestamp; Oracle raises ORA-01858 trying to TO_DATE('NA').
     effective_type = col_dtype or col_type
     col_expr = apply_null_sentinels(col_q, effective_type, "athena")
     is_categorical = (col_type or "").lower() == "categorical"
@@ -869,13 +635,6 @@ FROM {full_table}
 WHERE {wc}{group_by};"""
 
     if not is_categorical:
-        # ---- NUMERIC branch: single-pass, no freq table. ----
-        # hash_sum left empty on numeric: CAST(0 AS VARCHAR) yields "0"
-        # on a Hive BIGINT but "0.0" on an Athena DOUBLE, so MD5 of the
-        # cast diverges purely from storage-type formatting and would
-        # flag every numeric column for spurious drift. Numeric Phase-1
-        # cross-platform compares stay carried by n_total / n_missing /
-        # n_unique / min / max -- all storage-form-independent.
         return f"""{cte_prefix}SELECT
     {dt_select},
     '{col_name}' AS column_name,
@@ -894,18 +653,11 @@ WHERE {wc}{group_by};"""
 FROM {full_table}
 WHERE {wc}{group_by};"""
 
-    # ---- CATEGORICAL branch: freq-table form, val=cnt min/max. ----
-    # Pull the bare dt expression out of dt_select (callers always pass
-    # "<expr> AS dt") so we can use it both in the SELECT (constant or
-    # column) and to compose the GROUP BY for the freq CTE.
     dt_select_clean = dt_select.strip()
     if dt_select_clean.lower().endswith(" as dt"):
         dt_expr_only = dt_select_clean[:-len(" AS dt")].strip()
     else:
         dt_expr_only = dt_select_clean
-    # When the caller asked for GROUP BY <dt_expr>, the freq CTE has to
-    # GROUP BY (dt_expr, col_expr). When dt is a constant literal the
-    # GROUP BY only needs col_expr (every row gets the same dt).
     dt_group_expr = ""
     if group_by.strip():
         dt_group_expr = group_by.strip().replace("GROUP BY", "", 1).strip()
@@ -968,25 +720,10 @@ LEFT JOIN _coarse_minmax  mm ON t.dt = mm.dt
 LEFT JOIN _coarse_lenhash lh ON t.dt = lh.dt
 ORDER BY t.dt;"""
 
-
+# >>> Resource-exhaustion fallback for Athena: same per-col SQL shape but <<< #
 def _build_lifeboat_col_sql_athena(col_name, col_q, col_dtype, is_numeric,
                                     dt_select, group_by, full_table, wc,
                                     cte_prefix):
-    """Resource-exhaustion fallback for Athena: same per-col SQL shape but
-    only the streaming aggregates that never spill memory.
-
-    Drops COUNT(DISTINCT) (n_unique → NULL), MIN/MAX (NULL), and the entire
-    freq-table pipeline used for rank-weighted mean/std and top_10 (NULL/'').
-    What survives: n_total, n_missing — both single-pass. Emitted alongside
-    every full col SQL in `_write_combined_sql` so run_sql_file can swap
-    to it on EXCEEDED_MEMORY_LIMIT / EXCEEDED_LOCAL_LIMIT / "exhausted
-    resources" without losing the entire (col, vintage) cell.
-
-    Column list matches the 11 Athena per-block columns; the additional
-    coarse-only columns (length_avg/length_max/hash_sum) come back empty
-    via the runner's dict.get path on _COL_HEADERS — same as the normal
-    Athena col SQL today.
-    """
     from .base import apply_null_sentinels as _apply_null_sentinels
     col_expr = _apply_null_sentinels(
         col_q, col_dtype or ("numeric" if is_numeric else "categorical"),
@@ -1007,23 +744,12 @@ def _build_lifeboat_col_sql_athena(col_name, col_q, col_dtype, is_numeric,
 FROM {full_table}
 WHERE {wc}{group_by}"""
 
-
+# >>> Append a col-block emission (header + SQL + spacer) consistently <<< #
 def _emit_col_block(blocks, header, sql):
-    """Append a col-block emission (header + SQL + spacer) consistently.
-
-    No /* @degrade_sql ... @end_degrade */ block: lifeboat emission was
-    removed to match the clean layout of oracle.py / hadoop.py
-    extract_col.sql. The Quick/Standard presets use flat single-pass
-    aggregates that almost never trip Trino's EXCEEDED_*_MEMORY_LIMIT,
-    so the fallback added churn without paying for itself. The builder
-    (_build_lifeboat_col_sql_athena) is kept defined for a possible
-    sidecar file in the future.
-    """
     blocks.append(header)
     blocks.append(sql.strip())
     blocks.append(";")
     blocks.append("")
-
 
 # >>> standalone Athena row SQL builder (extracted so the web /api/preview can call the same code path as the runner) <<< #
 def _build_row_sql_athena(tbl_cfg):
@@ -1049,29 +775,9 @@ def _build_row_sql_athena(tbl_cfg):
         f"GROUP BY {date_col_q}"
     ).strip()
 
-
+# >>> Write a single combined .sql file with all AWS table queries <<< #
 def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                         coarse=False, preset=None, stats_override=None):
-    """Write a single combined .sql file with all AWS table queries.
-
-    `coarse=True` emits the cheap-aggregate "coarse" SQL for every column —
-    no GROUP BY p_col, no freq table, no rank-weighted mean/std, no top_10.
-    Output schema is the same 14 columns; the fine-only fields come back
-    empty. The loader writes coarse rows with `level="coarse"`, which
-    preserves any prior fine values for those rows on the same (col, dt).
-
-    `coarse=False` (default) is the existing fine path: full freq aggregation,
-    with the ID-skip auto-emitting coarse blocks for columns the probe
-    flagged as near-unique.
-
-    `preset` ('quick' / 'standard' / 'detailed', per constants.STATS_PRESETS)
-    refines the coarse path further: 'quick' drops the freq-table CTE
-    chain entirely and emits a flat SELECT — no COUNT(DISTINCT), no
-    md5/hash_sum, no top_10 — matching base.build_col_sql's quick branch
-    on Oracle/Hadoop/CSV. 'detailed' / None preserves the existing
-    coarse-with-WITH-chain shape (back-compat with callers that pass
-    only `coarse=True`).
-    """
     from datetime import datetime
     label = "coarse" if (coarse and extract_type == "col") else extract_type
     blocks = [f"-- dtrack AWS {label} extraction queries",
@@ -1082,9 +788,6 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
         database = tbl.get('conn_macro', '')
         table = tbl.get('table', '')
         date_col = tbl.get('date_col', '')
-        # Athena identifier wrapping: only kicks in when the bare form is
-        # invalid (digit-leading, hyphens, dots, etc.). Valid names pass
-        # through unchanged so case-insensitive resolution still works.
         date_col_q = quote_ident(date_col, "athena")
         raw_full = f"{database}.{table}"
         full_table, cte_prefix = resolve_table(tbl, raw_full)
@@ -1101,13 +804,6 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
             col_list = [(c, d) for c, d in columns.items()
                         if c.lower() != date_col.lower()]
 
-            # Restrict to pair-level col_filter selection, if set. Distinguish:
-            #   None  = no filter set         → keep all non-date cols.
-            #   []    = filter set, matched 0 → extract nothing.
-            #   [...] = filter set, matched N → extract only those.
-            # The earlier `if selected:` collapsed the second case into the
-            # first, so a col_filter that matched 0 of N cols silently fell
-            # through to "all cols".
             selected = tbl.get('_selected_cols')
             if selected is not None:
                 if not selected:
@@ -1116,9 +812,6 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                 wanted = {c.lower() for c in selected}
                 col_list = [(c, d) for c, d in col_list if c.lower() in wanted]
 
-            # Fine-cell filter: when the user asked to drill into specific
-            # (col, vintage) cells, drop everything else from this table's
-            # col_list. The vintage filter is applied per-bucket below.
             fine_cells = tbl.get('_fine_cells')
             if fine_cells:
                 wanted_cols = {c.lower() for c in fine_cells.keys()}
@@ -1131,7 +824,6 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                 blocks.append("")
                 continue
 
-            # Compute vintage-based date filter (same as SAS path)
             vintage = tbl.get('vintage', 'all') or 'all'
             date_filter = compute_date_filter(tbl, db_path, vintage) if db_path else {
                 'vintage': vintage, 'filter_type': 'none', 'dates': [],
@@ -1139,11 +831,8 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
             }
             effective_vintage = date_filter['vintage']
 
-            # Ensure date_format is set from config date_type
             resolve_date_format(date_filter, tbl)
 
-            # Build exclude dates NOT IN clause (per-pair, from config)
-            # Uses build_date_in_clause to format dates correctly for the column type
             exclude_dates = tbl.get('_exclude_dates', [])
             exclude_clause = ""
             if exclude_dates:
@@ -1153,15 +842,9 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                     date_col_q, exclude_dates, date_dtype,
                     date_format=date_format,
                 )
-                # Negate: IN → NOT IN
                 exclude_clause = f"NOT ({in_clause})"
                 print(f"  {qname}: excluding {len(exclude_dates)} dates")
 
-            # Determine SQL generation mode:
-            #   'bucket'   — matching dates exist, one query per bucket (synthetic dt)
-            #   'trunc'    — no matching dates but vintage != 'all', use DATE_TRUNC + GROUP BY
-            #   'all'      — vintage='all', aggregate everything, dt='all'
-            #   'sample'   — sample@N dates, aggregate with dt='sample'
             _TRUNC_MAP = {'day': 'day', 'week': 'week', 'month': 'month',
                           'quarter': 'quarter', 'year': 'year'}
 
@@ -1191,15 +874,8 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                 sql_mode = 'sample'
                 print(f"  {qname}: vintage={vintage}, sample {len(date_filter['dates'])} dates")
             elif vintage in _TRUNC_MAP:
-                # Vintage set but no matching_dates from row-compare. Use
-                # DATE_TRUNC in SELECT/GROUP BY to produce all buckets in ONE
-                # scan per column — drastically fewer queries than emitting
-                # per-bucket BETWEEN blocks. WHERE stays bare so partition
-                # pruning still works.
                 vintage_specs = []
                 sql_mode = 'trunc'
-                # Bare BETWEEN on WHERE when from/to set, so the one-shot
-                # scan is still bounded to the user's range.
                 trunc_range_where = None
                 if tbl.get('_from_date') and tbl.get('_to_date'):
                     trunc_range_where = build_date_between_clause(
@@ -1210,24 +886,17 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                 print(f"  {qname}: vintage={vintage}, trunc mode "
                       f"(1 query per col, all buckets in one scan)")
             else:
-                # vintage='all' or no from/to bounds: aggregate everything
                 vintage_specs = [('all', None)]
                 sql_mode = 'all'
                 trunc_range_where = None
                 print(f"  {qname}: vintage={vintage}, no date filter")
 
-            # Summarize what we're emitting so the running-log line matches
-            # the SAS "cols x buckets = runs" format.
             _buckets_count = 1 if sql_mode == 'trunc' else len(vintage_specs)
             _runs = len(col_list) * _buckets_count
             print(f"[AWS col] {qname}: {len(col_list)} cols x {_buckets_count} "
                   f"{'bucketed query' if sql_mode == 'trunc' else 'buckets'} "
                   f"= {_runs} runs")
 
-            # Generate per-column SQL blocks
-            # Build base WHERE: table where + exclude dates. When there's no
-            # BETWEEN/IN from date_filter (sql_mode='all'), layer _date_bounds
-            # so --from/--to still bound the scan.
             wc_parts = []
             if where.strip():
                 wc_parts.append(where.strip())
@@ -1236,14 +905,8 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
             date_bounds = tbl.get('_date_bounds', '')
             if sql_mode == 'all' and date_bounds:
                 wc_parts.append(date_bounds)
-            wc_base = " AND ".join(f"({p})" for p in wc_parts) if wc_parts else "1=1"
+            " AND ".join(f"({p})" for p in wc_parts) if wc_parts else "1=1"
 
-            # Auto-detect ID-like columns (cardinality / row-count >= threshold)
-            # via one batched APPROX_DISTINCT probe over the table. ID-like
-            # cols get a lite SQL block (no GROUP BY p_col) — saves a heavy
-            # freq aggregation per col. Probe WHERE matches the broadest
-            # table-level filter so the cardinality classification reflects
-            # what the col SQL would actually scan.
             if coarse or preset in ('quick', 'standard'):
                 id_cols = set(c for c, _ in col_list)
             else:
@@ -1266,21 +929,13 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                     ttl_days=ttl_days,
                 )
 
-            # 'trunc' mode: ONE SQL per column, with DATE_TRUNC in SELECT/
-            # GROUP BY to produce all buckets in a single scan. WHERE stays
-            # bare so partition pruning still kicks in. This is the fast
-            # default when vintage is set but no row-compare data exists.
             if sql_mode == 'trunc':
-                unit = _TRUNC_MAP[vintage]
                 trunc_col = _vintage_date_expr_athena(
                     date_col_q, vintage,
                     date_dtype=date_filter.get('date_dtype'),
                     date_format=date_filter.get('date_format'),
                 )
                 trunc_expr = f"CAST({trunc_col} AS VARCHAR)"
-                # Base WHERE: user's WHERE + optional from/to bound. The
-                # date column is NEVER wrapped in WHERE so Athena can
-                # partition-prune. exclude_dates appended if set.
                 wc_parts_t = []
                 if where.strip():
                     wc_parts_t.append(where.strip())
@@ -1292,15 +947,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
 
                 for col_name, col_dtype in col_list:
                     is_num = is_numeric_type(col_dtype, is_oracle=False)
-                    # Quote col_name as an identifier when bare form is invalid
-                    # (e.g. starts with a digit). The string-literal occurrence
-                    # `'{col_name}' AS column_name` keeps the raw name so the
-                    # downstream loader still maps results back by original name.
                     col_q = quote_ident(col_name, "athena")
-                    # Per-col fine-cell vintage filter: when the user picked
-                    # specific vintage labels for this col on /col_compare,
-                    # add an IN clause on trunc_expr so only those buckets
-                    # come back. NULL/missing → emit all buckets (default).
                     fine_vintages = (fine_cells or {}).get(col_name) if fine_cells else None
                     wc_t_col = wc_t
                     if fine_vintages:
@@ -1404,30 +1051,18 @@ LEFT JOIN sstats ss ON s.dt = ss.dt
 LEFT JOIN minmax mm ON s.dt = mm.dt
 LEFT JOIN top_n t ON s.dt = t.dt
 ORDER BY s.dt;"""
-                    # Header name must be space-free so parse_sql_file picks
-                    # it up as a block marker. `_all` suffix conveys that this
-                    # block covers every bucket in one scan.
                     _emit_col_block(
                         blocks, f"-- {qname}/{col_name}/_all", sql)
-                continue  # next table; don't fall through to per-bucket loop
+                continue
 
-            # bucket / sample / all modes: one block per (column, vintage bucket).
-            # dt_label is emitted as a SQL string literal; WHERE stays bare.
-            # wc_parts already covers user where + exclude_dates + (in 'all'
-            # mode) the --from/--to date_bounds; the per-bucket date_where (if
-            # any) layers a BETWEEN/IN on top.
             for col_name, col_dtype in col_list:
                 is_num = is_numeric_type(col_dtype, is_oracle=False)
-                # Same identifier-quoting rule as the trunc path above:
-                # col_q is the SQL-safe ref, '{col_name}' stays the raw label.
                 col_q = quote_ident(col_name, "athena")
                 is_id_like = col_name in id_cols
                 fine_vintages = (fine_cells or {}).get(col_name) if fine_cells else None
 
                 for dt_label, date_where in vintage_specs:
                     if fine_vintages and dt_label not in fine_vintages:
-                        # User selected specific vintages for this col;
-                        # skip non-selected buckets.
                         continue
                     parts = list(wc_parts)
                     if date_where:
@@ -1528,22 +1163,9 @@ SELECT
         f.write('\n'.join(blocks))
     print(f"  SQL: {sql_path}")
 
-
-# ---------------------------------------------------------------------------
-# Per-table column extraction helper
-# ---------------------------------------------------------------------------
-
+# >>> Extract column stats for one AWS table -> {qname}_col.csv <<< #
 def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vintage=None,
                             preset=None, stats_override=None):
-    """Extract column stats for one AWS table -> {qname}_col.csv.
-
-    Returns a timing dict on success, or None if skipped.
-
-    `preset` / `stats_override` mask disabled stat fields in the emitted
-    CSV. The SQL still runs full breadth (Athena cursor path uses a
-    hand-rolled unified query); the mask only blanks fields in the output
-    rows so the 14-column schema stays stable.
-    """
     import time
     from datetime import datetime
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1565,14 +1187,11 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
 
     non_date_cols = [(c, d) for c, d in columns.items() if c.lower() != date_col.lower()]
 
-    # Compute unified date filter from database matching dates
     table_vintage = tbl_cfg.get('vintage', vintage)
     date_filter = compute_date_filter(tbl_cfg, db_path, table_vintage)
 
-    # Ensure date_format is set from config date_type
     resolve_date_format(date_filter, tbl_cfg)
 
-    # Set up SQL log file
     global _sql_log_file
     qname = qualified_name(tbl_cfg)
     log_path = os.path.join(outdir, f"{qname}_col.sql")
@@ -1580,8 +1199,6 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
         f.write(f"-- SQL queries for {qname} col extraction\n-- {datetime.now().isoformat()}\n\n")
     _sql_log_file = log_path
 
-    # Enable per-outdir Athena query cache. Hits skip the network round-trip;
-    # misses store the result for future runs. Delete .cache.db to invalidate.
     set_athena_cache(os.path.join(outdir, ".cache.db"))
 
     col_start_time = time.time()
@@ -1594,12 +1211,6 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
     except ImportError:
         tqdm = None
 
-    # Build WHERE clause and vintage parameters for _extract_col_athena.
-    # When date_filter emits a BETWEEN/IN clause (matching_dates present), it
-    # already covers the full from/to range, so _date_bounds must NOT be
-    # layered on top -- that produced `col >= X AND col <= Y AND col BETWEEN
-    # X AND Y` duplication. Only fall back to _date_bounds when no
-    # matching-date filter is active.
     extract_cfg = dict(tbl_cfg)
     orig_where = tbl_cfg.get('where', '')
     date_bounds = tbl_cfg.get('_date_bounds', '')
@@ -1630,11 +1241,9 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
     bucket_desc = 'sample' if date_filter['filter_type'] == 'in_list' else effective_vintage
     dt_label = 'sample' if date_filter['filter_type'] == 'in_list' else None
 
-    # Summary instead of full SQL preview
     where_summary = extract_cfg.get('where', '(none)').strip() or '(none)'
     print(f"  {len(non_date_cols)} columns, WHERE: {where_summary}")
 
-    # Run extraction
     all_stats = []
 
     if _max_workers <= 1:
@@ -1687,12 +1296,8 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
     if not all_stats:
         return None
 
-    # Apply preset/stats_override by blanking disabled stat columns. SQL
-    # already ran; this only changes what lands in the CSV so the 14-col
-    # schema stays stable while honoring the user's selection.
     _mask_stats_in_rows(all_stats, preset, stats_override)
 
-    # Write CSV (14-field schema mirrors Oracle/Hadoop for cross-engine compare)
     csv_path = os.path.join(outdir, f"{qname}_col.csv")
     fieldnames = [
         'column_name', 'dt', 'col_type', 'n_total', 'n_missing',
@@ -1705,7 +1310,6 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
         for stat in sorted(all_stats, key=lambda x: (x['column_name'], x['dt'])):
             writer.writerow({k: stat.get(k, '') for k in fieldnames})
 
-    # Compute total sampled records
     first_col = all_stats[0]['column_name']
     total_records = 0
     for s in all_stats:
@@ -1723,37 +1327,14 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
         'elapsed_sec': col_elapsed,
     }
 
-
-# ---------------------------------------------------------------------------
-# Main extraction entry point
-# ---------------------------------------------------------------------------
-
+# >>> Extract data directly from AWS Athena <<< #
 def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None, vintage=None, force=False,
                 from_date=None, to_date=None, preset=None, stats_override=None, gen_only=False):
-    """
-    Extract data directly from AWS Athena.
-
-    Args:
-        config_path: Path to extraction config JSON
-        outdir: Directory to write CSV files
-        types: List of types ("row", "col"). Default: both.
-        max_workers: Max parallel workers for column extraction
-        db_path: Optional database path to save discovered columns to _column_meta
-        vintage: Date bucketing granularity (day, week, month, quarter, year)
-        force: Unused (kept for backward compatibility)
-        from_date: Start date for incremental extraction (YYYY-MM-DD)
-        to_date: End date for incremental extraction (YYYY-MM-DD)
-    """
     if types is None:
         types = ["row", "col"]
 
     mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ATHENA_MOCK')
 
-    # Use load_unified_config so each side gets `name` auto-derived, and
-    # hydrate col_map + col_filter from _table_pairs (where the UI persists
-    # them). Without this, get_all_tables_from_unified sees empty col_map
-    # and col_filter can't produce _selected_cols — CLI runs would emit all
-    # columns even when the DB has include/exclude saved.
     from ..config import load_unified_config
     config = load_unified_config(config_path)
     if db_path:
@@ -1785,10 +1366,6 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
             tbl['vintage'] = 'all'
     inject_where_from_config(aws_tables, config)
 
-    # Stash --from-date / --to-date bounds separately so the col path can skip
-    # them when it already emits a BETWEEN/IN filter from matching_dates
-    # (otherwise we'd get `col >= X AND col <= Y AND col BETWEEN X AND Y`
-    # redundancy, matching the oracle/hadoop fix).
     if from_date or to_date:
         for tbl in aws_tables:
             date_col = tbl.get('date_col', '')
@@ -1821,7 +1398,6 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
             tag_generated_sql(outdir, "col", "aws")
         print(f"[gen-only] wrote Athena extract SQL to {outdir} (no extraction)")
         return
-    # Mock mode: copy CSVs + write SQL files, then return
     if mock_dir:
         _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir)
         return
@@ -1836,10 +1412,8 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
     if db_path and "col" in types:
         fill_columns_from_meta(aws_tables, db_path)
 
-    # Track timing for all extractions
     timing_records = []
 
-    # --- Row extraction: write SQL file then run it ---
     if "row" in types:
         _write_combined_sql(aws_tables, outdir, "row",
                             preset=preset, stats_override=stats_override)
@@ -1852,7 +1426,6 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
                 'elapsed_sec': r['elapsed'],
             })
 
-    # --- Col extraction: needs per-column logic, uses cursor directly ---
     if "col" in types:
         aws_creds_renew()
         conn = athena_connect(data_base=aws_tables[0].get('conn_macro'))
@@ -1867,7 +1440,7 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
                     timing_records.append(result)
             except Exception as e:
                 print(f"  ERROR extracting columns for {tbl_cfg['name']}: {e}")
-                print(f"  Skipping to next table...")
+                print("  Skipping to next table...")
                 timing_records.append({
                     'table': tbl_cfg['name'], 'step': 'col',
                     'start': '', 'end': '',
@@ -1882,25 +1455,8 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
 
     print(f"\nExtraction complete. Output in: {outdir}")
 
-
-# ---------------------------------------------------------------------------
-# SQL-file-based extraction (parse → run)
-# ---------------------------------------------------------------------------
-
+# >>> Parse a combined SQL file into named query blocks <<< #
 def parse_sql_file(sql_path):
-    """Parse a combined SQL file into named query blocks.
-
-    Returns list of dicts: [{"name": "aws_cust_daily", "sql": "SELECT ..."}]
-
-    The file format uses '-- {qname}' as block markers. Everything between
-    two markers (or between a marker and EOF) is one query. Header lines
-    (starting with '-- dtrack' or '-- Generated') are skipped.
-
-    Older extract_col.sql files written before the lifeboat cleanup may
-    still contain a `/* @degrade_sql ... @end_degrade */` block. Trino
-    treats `/* ... */` as a comment, so they pass through harmlessly --
-    we don't parse them out separately anymore.
-    """
     with open(sql_path, 'r', encoding='utf-8') as f:
         text = f.read()
 
@@ -1916,15 +1472,11 @@ def parse_sql_file(sql_path):
 
     for line in text.split('\n'):
         stripped = line.strip()
-        # Skip header comments
         if stripped.startswith('-- dtrack') or stripped.startswith('-- Generated'):
             continue
-        # Block marker: "-- some_name" (single token after --)
         if stripped.startswith('-- ') and not stripped.startswith('-- ['):
             marker = stripped[3:].strip()
-            # Only treat as a block marker if it looks like a qname (no spaces)
             if marker and ' ' not in marker:
-                # Save previous block
                 if current_name is not None:
                     _save(current_name, current_lines)
                 current_name = marker
@@ -1932,32 +1484,14 @@ def parse_sql_file(sql_path):
                 continue
         current_lines.append(line)
 
-    # Save last block
     if current_name is not None:
         _save(current_name, current_lines)
 
     return blocks
 
-
+# >>> Read extract_{type}.sql, parse into blocks, and execute each via Athena <<< #
 def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                  on_progress=None, resume=False, cancel_event=None):
-    """Read extract_{type}.sql, parse into blocks, and execute each via Athena.
-
-    Writes per-table CSVs:
-      row type: {outdir}/{qname}_row.csv  (date_value, row_count)
-      col type: {outdir}/{qname}_col.csv  (dt, column_name, col_type, n_total, ...)
-
-    Supports parallel execution via ThreadPoolExecutor.
-
-    Args:
-        on_progress: Optional callback(result_dict) called after each query
-                     completes. Useful for streaming progress to web/terminal.
-        resume: If True (col mode only), skip blocks whose output is already
-                present in the existing {qname}_col.csv. Preloaded rows are
-                merged with newly-extracted rows on flush.
-
-    Returns list of result dicts with timing info.
-    """
     import sys
     import time
     from datetime import datetime
@@ -1968,12 +1502,8 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         print(f"No query blocks found in {sql_path}")
         return []
 
-    # Enable per-outdir Athena cache. Located alongside the .sql file so
-    # repeat runs of the same extract_*.sql replay locally instead of
-    # re-submitting expensive scans. Delete .cache.db to invalidate.
     set_athena_cache(os.path.join(outdir, ".cache.db"))
 
-    # Detect type from filename: extract_col.sql → col, else row
     basename = os.path.basename(sql_path)
     is_col = "extract_col" in basename
     file_suffix = "_col.csv" if is_col else "_row.csv"
@@ -1982,8 +1512,7 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
     os.makedirs(outdir, exist_ok=True)
     _max_workers = max_workers or int(os.environ.get('MAX_WORKERS', '4'))
 
-    # Group blocks by table (qname) for per-table progress
-    table_blocks = {}  # qname -> [block, ...]
+    table_blocks = {}
     for block in blocks:
         qname = block['name'].split('/')[0] if '/' in block['name'] else block['name']
         table_blocks.setdefault(qname, []).append(block)
@@ -1994,20 +1523,13 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         'length_avg', 'length_max', 'hash_sum',
     ]
 
-    # For col mode, collect rows per table (blocks named "qname/col_name")
     _col_rows_lock = threading.Lock()
-    _col_rows_by_table = {}  # qname -> list of row dicts
+    _col_rows_by_table = {}
 
-    # Resume: preload existing rows from prior successful runs, filter blocks.
-    # A block "qname/col_name[/dt_label]" is skipped if the existing CSV has
-    # >=1 row for that (column_name[, dt]) pair. The dt=='_all' suffix is a
-    # trunc-mode placeholder (one query covers all buckets) — treat the block
-    # as done if ANY row exists for col_name, since partial trunc output
-    # cannot be distinguished from a clean run.
     n_skipped = 0
     if resume and is_col:
-        preload_rows = {}  # qname -> list of row lists
-        preload_seen = {}  # qname -> set of (col_name, dt)
+        preload_rows = {}
+        preload_seen = {}
         for qname in table_blocks:
             csv_path = os.path.join(outdir, f"{qname}_col.csv")
             if not os.path.exists(csv_path):
@@ -2026,7 +1548,7 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                         if len(row) < 2:
                             continue
                         rows.append(row)
-                        seen.add((row[1], row[0]))  # (column_name, dt)
+                        seen.add((row[1], row[0]))
             except Exception as e:
                 print(f"  [resume] failed to read {csv_path}: {e}", file=sys.stderr)
                 continue
@@ -2044,8 +1566,6 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                 return False
             if dt_hint and dt_hint != '_all':
                 return (col_name, dt_hint) in seen
-            # '_all' (trunc) or single-bucket/'all'/'sample': treat col as
-            # done if any row for col_name exists.
             return any(c == col_name for c, _ in seen)
 
         filtered = {}
@@ -2060,13 +1580,11 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                       f"already-done queries", file=sys.stderr)
         table_blocks = filtered
         blocks = [b for tbl_blocks in table_blocks.values() for b in tbl_blocks]
-        # Seed the in-memory buffer with existing rows so the final CSV flush
-        # merges preloaded + newly-extracted rows.
         for qname, rows in preload_rows.items():
             _col_rows_by_table[qname] = list(rows)
 
         if not blocks:
-            print(f"  [resume] nothing to re-run — all queries already completed",
+            print("  [resume] nothing to re-run — all queries already completed",
                   file=sys.stderr)
             return []
 
@@ -2078,17 +1596,13 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
     print(msg, file=sys.stderr)
 
     results = []
-    _done_count = [0]  # mutable counter for threads
-    _table_done = {}  # qname -> {done: int, total: int}
+    _done_count = [0]
+    _table_done = {}
     _table_lock = threading.Lock()
-    # In-flight counter for start/progress events ("running=N" badge).
     _running_count = [0]
     _running_lock = threading.Lock()
-    # Wall-clock anchor for ETA. Set on the FIRST start event so the
-    # estimate reflects actual extraction time, not setup overhead.
     _run_start = [None]
 
-    # Init per-table counters
     for qname, tbl_blocks in table_blocks.items():
         _table_done[qname] = {"done": 0, "total": len(tbl_blocks)}
 
@@ -2097,7 +1611,6 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
     except ImportError:
         _tqdm = None
 
-    # Console tqdm bars per table (stderr)
     _tqdm_bars = {}
     if _tqdm and sys.stderr.isatty():
         for i, (qname, tbl_blocks) in enumerate(table_blocks.items()):
@@ -2112,7 +1625,6 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         start_time = time.time()
         start_ts = datetime.now().isoformat()
 
-        # Queue-time short-circuit on cancel.
         if cancel_event is not None and cancel_event.is_set():
             result = {"name": block_name, "ok": False, "error": "cancelled",
                       "elapsed": 0.0, "start": start_ts, "cancelled": True}
@@ -2124,7 +1636,6 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                 on_progress(result)
             return result
 
-        # Start event: announce this block is occupying a worker slot.
         with _running_lock:
             _running_count[0] += 1
             running_now = _running_count[0]
@@ -2161,12 +1672,6 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
             elapsed = time.time() - start_time
 
             if is_col:
-                # Lowercase result-column names so per-row dict lookups match
-                # _COL_HEADERS regardless of how pyathena/Athena cases the
-                # SELECT-list alias in cursor.description. _query_athena does
-                # the same on the pandas path; this aligns the gen-and-run
-                # path with it. Without this, a single mismatched alias makes
-                # the loaded CSV have an empty column → 0 after _safe_int.
                 col_names_lc = [c.lower() for c in col_names]
                 parsed_rows = []
                 for row in rows:
@@ -2176,9 +1681,6 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                     _col_rows_by_table.setdefault(qname, []).extend(parsed_rows)
             else:
                 csv_path = os.path.join(outdir, f"{block_name}{file_suffix}")
-                # Row SQL has no server-side ORDER BY (resource-exhaustion
-                # avoidance); sort client-side so the CSV reads in date
-                # order for human inspection.
                 sorted_rows = sorted(rows, key=lambda r: str(r[0]) if r else '')
                 with open(csv_path, 'w', newline='') as f:
                     writer = csv.writer(f)
@@ -2199,7 +1701,6 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                 _running_count[0] -= 1
                 running_after = _running_count[0]
 
-        # Update counters
         _done_count[0] += 1
         table_just_finished = False
         with _table_lock:
@@ -2211,17 +1712,12 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
 
         n = _done_count[0]
         total = len(blocks)
-        # ETA from empirical rate. Whole-batch estimate (handles parallelism
-        # via observed throughput, no need to model worker count).
         eta_sec = None
         if _run_start[0]:
             elapsed_wall = time.time() - _run_start[0]
             if n > 0:
                 eta_sec = elapsed_wall * (total - n) / n
 
-        # Flush this table's CSV as soon as its last query completes —
-        # downstream Load Col can start picking up finished tables while
-        # other tables are still being extracted.
         if table_just_finished:
             with _col_rows_lock:
                 rows_for_qname = _col_rows_by_table.pop(qname, [])
@@ -2234,16 +1730,13 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
             print(f"  Wrote {len(rows_for_qname)} rows to {csv_path}",
                   file=sys.stderr)
 
-        # Console tqdm update
         if qname in _tqdm_bars:
             _tqdm_bars[qname].update(1)
         elif not _tqdm_bars:
-            # No tqdm — plain stderr
             status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
             print(f"  [{n}/{total} | running={running_after}] "
                   f"{block_name}: {status} ({elapsed:.1f}s)", file=sys.stderr)
 
-        # Web progress callback — include per-table progress
         if on_progress:
             result["done"] = n
             result["total"] = total
@@ -2266,14 +1759,9 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
             for fut in as_completed(futures):
                 results.append(fut.result())
 
-    # Close tqdm bars
     for bar in _tqdm_bars.values():
         bar.close()
 
-    # For col mode the per-table CSVs are written as each table finishes
-    # (see table_just_finished block above). Anything left in the buffer
-    # here means its last query failed or the counters drifted — flush
-    # whatever we have so the user isn't left with an empty CSV.
     if is_col and _col_rows_by_table:
         for qname, row_data in _col_rows_by_table.items():
             csv_path = os.path.join(outdir, f"{qname}_col.csv")
@@ -2287,7 +1775,6 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
 
     results.sort(key=lambda r: r['name'])
 
-    # Write timing log
     timing_path = os.path.join(outdir, '_timing.csv')
     with open(timing_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=['table', 'step', 'start', 'elapsed_sec', 'status'])
@@ -2312,20 +1799,8 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
 
     return results
 
-
-# ---------------------------------------------------------------------------
-# Column discovery entry point
-# ---------------------------------------------------------------------------
-
+# >>> Discover column metadata from AWS Athena tables (columns only, no data) <<< #
 def discover_aws_columns(config_path, outdir, db_path=None):
-    """
-    Discover column metadata from AWS Athena tables (columns only, no data).
-
-    Args:
-        config_path: Path to extraction config JSON (supports both old and unified formats)
-        outdir: Directory to write column CSV files
-        db_path: Optional database path to save columns to _column_meta
-    """
     with open(config_path, 'r') as f:
         config = json.load(f)
 
@@ -2339,11 +1814,9 @@ def discover_aws_columns(config_path, outdir, db_path=None):
         print("No AWS tables found in config")
         return
 
-    # Mock mode: read from pre-built CSVs
     mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ATHENA_MOCK')
     if mock_dir:
         _extract_aws_mock(config_path, outdir, [], db_path, mock_dir)
-        # discover-only just needs columns
         for tbl_cfg in aws_tables:
             name = tbl_cfg['name']
             qname = qualified_name(tbl_cfg)
@@ -2358,7 +1831,6 @@ def discover_aws_columns(config_path, outdir, db_path=None):
                     with open(cols_src, 'r', newline='') as f:
                         reader = csv.DictReader(f)
                         for row in reader:
-                            # Strip whitespace from keys to handle \r\n line endings
                             row = {k.strip(): v for k, v in row.items()}
                             col_name = row.get('column_name') or row.get('COLUMN_NAME', '')
                             col_type = row.get('data_type') or row.get('DATA_TYPE', '')
@@ -2404,63 +1876,12 @@ def discover_aws_columns(config_path, outdir, db_path=None):
     conn.close()
     print(f"\nDiscovery complete. Output in: {outdir}")
 
-
-# ---------------------------------------------------------------------------
-# Convenience SQL builders
-# ---------------------------------------------------------------------------
-
 def build_continuous_sql_athena(table, col, date_col, where=""):
     return build_stats_sql(table, col, date_col, where, "numeric", "athena")
-
 
 def build_categorical_sql_athena(table, col, date_col, where=""):
     return build_stats_sql(table, col, date_col, where, "categorical", "athena")
 
-
 def build_top10_sql_athena(table, col, date_col, where=""):
     return build_top10_sql(table, col, date_col, where, "athena")
 
-
-# ---------------------------------------------------------------------------
-# AthenaBuilder class
-# ---------------------------------------------------------------------------
-
-class AthenaBuilder(PlatformBuilder):
-    """Platform builder for direct AWS Athena queries."""
-
-    def __init__(self, tbl_cfg, db_path=None):
-        super().__init__(tbl_cfg, db_path)
-        self.database = tbl_cfg.get('conn_macro', '')
-
-    def build_row_sql(self, date_filter):
-        """Build row count SQL for Athena."""
-        raw_full_table = f"{self.database}.{self.table}"
-        full_table, cte_prefix = resolve_table(self.tbl_cfg, raw_full_table)
-        date_expr = self.date_col
-        where = self.tbl_cfg.get('where', '')
-        where_clause = f"WHERE {where}" if where else ""
-
-        sql = f"""{cte_prefix}
-SELECT {date_expr} AS date_value, COUNT(*) AS row_count
-FROM {full_table}
-{where_clause}
-GROUP BY {date_expr}"""
-        return sql
-
-    def build_continuous_sql(self, col, col_type, where):
-        return build_continuous_sql_athena(self.table, col, self.date_col, where)
-
-    def build_categorical_sql(self, col, col_type, where, top_n=10):
-        return build_categorical_sql_athena(self.table, col, self.date_col, where)
-
-    def generate_extraction(self, outdir, extract_type, **kw):
-        """Generate Athena extraction (delegates to extract_aws)."""
-        return extract_aws(
-            config_path=kw.get('config_path'),
-            outdir=outdir,
-            types=[extract_type] if isinstance(extract_type, str) else extract_type,
-            max_workers=kw.get('max_workers'),
-            db_path=self.db_path,
-            vintage=kw.get('vintage'),
-            force=kw.get('force', False),
-        )

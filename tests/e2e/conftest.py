@@ -2,7 +2,7 @@
 
 One test_{NN}_{step}.py per ONE-SHOT step in manuscript.txt section 4:
     01 init           02 load-columns    03 match-columns
-    04 gen-{aws,oracle,sas}                05 load-row
+    04 gen-{aws,oracle}                    05 load-row
     06 load-col       07 compare-row     08 compare-col
     09 run            (full pipeline)
 
@@ -12,7 +12,7 @@ state matches what the equivalent FastAPI route would have produced. This
 gives confidence the CLI is a first-class peer to the web UI.
 
 WINDOWS-ONLY: same gate as tests/api/conftest.py -- the full mock pipeline
-depends on .env wiring (SAS_LIB, AWS_DEFAULT_REGION, ORACLE_MAX_WORKERS,
+depends on .env wiring (AWS_DEFAULT_REGION, ORACLE_MAX_WORKERS,
 etc.) that's only set up on the Windows dev box. On any other host the
 whole tests/e2e/ tree is collected but skipped.
 """
@@ -35,7 +35,7 @@ import pytest
 # ---------------------------------------------------------------------------
 _NOT_WINDOWS_REASON = (
     "tests/e2e/ exercises the full CLI pipeline via DTRACK_MOCK fixtures; "
-    "supporting env wiring (oracle / athena / hadoop / sas) only lives on "
+    "supporting env wiring (oracle / athena / hadoop) only lives on "
     "the Windows dev box. Skipping on this host."
 )
 
@@ -112,24 +112,6 @@ _E2E_PAIRS = {
         "fromDate": "",
         "toDate": "",
     },
-    "sas_dt_vs_aws_compact": {
-        # sas source (gen_sas), aws right side. Mock CSVs:
-        #   sas_acct_snap_row.csv  +  aws_acct_snap_aws_row.csv.
-        "description": "e2e: sas datetime vs AWS compact",
-        "left": {
-            "name": "acct_snap", "table": "ACCT_SNAP",
-            "source": "sas", "conn_macro": "",
-            "date_col": "ACCT_DTTM", "date_type": "sas_datetime",
-        },
-        "right": {
-            "name": "acct_snap_aws", "table": "acct_snap",
-            "source": "aws", "conn_macro": "analytics_db",
-            "date_col": "snap_dt", "date_type": "string_compact",
-        },
-        "mode": "incremental",
-        "fromDate": "",
-        "toDate": "",
-    },
 }
 
 
@@ -155,14 +137,14 @@ def workdir(tmp_path: Path, monkeypatch) -> dict:
         tmp_path/
             project.db          (created by test_01_init or pre-seeded)
             pairs.json          (the _E2E_PAIRS subset above)
-            csv/                (aws/oracle extract output)
-            sas/                (sas extract output)
+            csv/                (aws extract output)
+            sas/                (oracle/hadoop extract output)
             output/             (html reports)
             mock/               (copy of testing/mock so the test can
                                  mutate / add new fixtures without touching
                                  the repo)
 
-    DTRACK_MOCK is set so extract_aws / extract_oracle / gen_sas copy
+    DTRACK_MOCK is set so extract_aws / extract_oracle copy
     fixture CSVs instead of hitting backends. Restored by monkeypatch.
     """
     db_path = tmp_path / "project.db"
@@ -201,7 +183,6 @@ def workdir(tmp_path: Path, monkeypatch) -> dict:
         "output_dir": str(output_dir),
         "mock": str(mock_local),
         "pair_oracle_aws": "oracle_date_vs_aws_int",
-        "pair_sas_aws": "sas_dt_vs_aws_compact",
         "pair_databricks": "aws_vs_databricks",
     }
 

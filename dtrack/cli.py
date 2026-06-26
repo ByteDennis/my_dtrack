@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Command-line interface for dtrack (config-driven only)."""
 
 import argparse
 import json
@@ -10,9 +9,7 @@ import sys
 from .db import (
     init_database,
     get_row_counts,
-    get_col_stats,
     get_metadata,
-    get_table_pair,
     register_table_pair,
     insert_column_meta,
     get_column_meta,
@@ -21,17 +18,11 @@ from .db import (
     patch_metadata,
     save_col_comparison,
     sync_config_to_db,
-    generic_upsert,
-    generic_update,
-    generic_delete,
-    parse_where_clause,
 )
-from .loader import load_row_counts, load_column_data, load_precomputed_col_stats
+from .loader import load_row_counts, load_precomputed_col_stats
 from .compare import (
     compare_row_counts,
     compare_column_stats,
-    get_column_mapping,
-    parse_col_map_string,
     match_columns_from_dicts,
     apply_column_rules,
     _has_col_differences,
@@ -45,26 +36,18 @@ from .config import (
     ensure_pair_defaults,
     mark_pair_skipped,
     add_ignored_rows,
-    add_ignored_columns,
-    get_ignored_rows,
     get_ignored_columns,
     get_col_type_overrides,
 )
-from .platforms.base import qualified_name, is_sas_table, is_numeric_type
-from .interact import prompt_skip_pair, prompt_ignore_items, confirm, save_and_pause
+from .platforms.base import qualified_name, is_numeric_type
+from .interact import prompt_skip_pair, prompt_ignore_items, save_and_pause
 
-
-# ============================================================================
-# Helper: load config + tables
-# ============================================================================
-
+# >>> Load and return (config, config_path) <<< #
 def _load_config(config_path):
-    """Load and return (config, config_path)."""
     if not os.path.exists(config_path):
         print(f"Error: Config file not found: {config_path}")
         sys.exit(1)
     return load_unified_config(config_path)
-
 
 # >>> parse comma-separated "n_unique=on,hash_sum=off" → {'n_unique': True, ...} <<< #
 def _parse_stats_override(spec):
@@ -94,32 +77,22 @@ def _parse_stats_override(spec):
             sys.exit(1)
     return out or None
 
-
+# >>> Exit if db doesn't exist <<< #
 def _require_db(db_path):
-    """Exit if db doesn't exist."""
     if not os.path.exists(db_path):
         print(f"Error: Database not found: {db_path}")
         print(f"Run: dtrack init {db_path}")
         sys.exit(1)
 
-
-# ============================================================================
-# Commands
-# ============================================================================
-
+# >>> Initialize a new dtrack database <<< #
 def cmd_init(args):
-    """Initialize a new dtrack database."""
     db_path = args.project_db
-    # --migrate is an alias for --refresh; both run a data-preserving
-    # schema reconciliation via db.refresh_database.
     if args.refresh or getattr(args, "migrate", False):
         if not os.path.exists(db_path):
             print(f"Error: Database not found: {db_path}")
             sys.exit(1)
         from .db import refresh_database, ensure_col_filter_columns
         actions = refresh_database(db_path)
-        # Ensure the new col_include / col_exclude columns exist even if
-        # refresh_database didn't notice a schema diff.
         ensure_col_filter_columns(db_path)
         verb = "Migrated" if getattr(args, "migrate", False) else "Refreshed"
         print(f"{verb} database: {db_path}")
@@ -136,9 +109,6 @@ def cmd_init(args):
     init_database(db_path)
     print(f"Initialized database: {db_path}")
 
-    # Also create a starter pairs.json next to the db (or wherever --config
-    # points). Defaults to pairs.json in the db's directory. Skipped if the
-    # file already exists, so reruns with --force don't blow away config.
     config_path = args.config or os.path.join(os.path.dirname(os.path.abspath(db_path)) or '.', 'pairs.json')
     if os.path.exists(config_path):
         print(f"Config exists, leaving as-is: {config_path}")
@@ -149,9 +119,8 @@ def cmd_init(args):
             _json.dump({"pairs": {}, "metadata": {}}, f, indent=2)
         print(f"Initialized config: {config_path}")
 
-
+# >>> Load row count data from CSV <<< #
 def cmd_load_row(args):
-    """Load row count data from CSV."""
     _require_db(args.project_db)
     config = _load_config(args.config)
     tables = get_all_tables_from_unified(config)
@@ -178,9 +147,8 @@ def cmd_load_row(args):
         total = sum(count for _, count in rows)
         print(f"  Loaded {len(rows)} date buckets, total: {total:,}")
 
-
+# >>> Load column statistics from CSV <<< #
 def cmd_load_col(args):
-    """Load column statistics from CSV."""
     _require_db(args.project_db)
     config = _load_config(args.config)
     tables = get_all_tables_from_unified(config)
@@ -207,9 +175,8 @@ def cmd_load_col(args):
         )
         print(f"  Loaded {count} stat rows")
 
-
+# >>> Load column metadata from CSV or live discovery <<< #
 def cmd_load_columns(args):
-    """Load column metadata from CSV or live discovery."""
     _require_db(args.project_db)
     config = _load_config(args.config)
     tables = get_all_tables_from_unified(config)
@@ -225,7 +192,6 @@ def cmd_load_columns(args):
             with open(csv_path, 'r', newline='') as f:
                 reader = csv_mod.DictReader(f)
                 for row in reader:
-                    # Strip whitespace from keys to handle \r\n line endings
                     row = {k.strip(): v for k, v in row.items()}
                     src = row.get('source') or row.get('SOURCE', '')
                     tbl = row.get('table') or row.get('TABLE', '')
@@ -253,8 +219,6 @@ def cmd_load_columns(args):
             print(f"{qname}: loaded {count} columns from CSV")
             continue
 
-        # Prefer a user-provided {qname}_columns.csv sidecar over live
-        # discovery, so hand-edited types (column -> datatype) are honored.
         existing = _read_sidecar_columns(cols_dir, qname)
         if existing:
             count = insert_column_meta(args.project_db, qname, existing, source=source)
@@ -262,9 +226,6 @@ def cmd_load_columns(args):
                   f"{qname}_columns.csv (discovery skipped)")
             continue
 
-        # A 'processed' CTE joins multiple tables, so it has no single physical
-        # table to DESCRIBE. Never live-discover it; read the user-supplied
-        # {qname}_columns.csv (variable -> data_type) instead.
         if tbl.get('processed'):
             columns = _read_sidecar_columns(cols_dir, qname)
             if columns:
@@ -315,7 +276,6 @@ def cmd_load_columns(args):
                     w.writerow([m['column_name'], m.get('data_type', '')])
             print(f"Wrote column metadata: {col_csv}")
 
-
 # >>> read a user-supplied {qname}_columns.csv (column_name/variable -> data_type) <<< #
 def _read_sidecar_columns(columns_dir, qname):
     from .loader import read_columns_sidecar
@@ -324,9 +284,8 @@ def _read_sidecar_columns(columns_dir, qname):
     cols = read_columns_sidecar(os.path.join(columns_dir, f"{qname}_columns.csv"))
     return cols or None
 
-
+# >>> Discover and load columns for one table entry <<< #
 def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
-    """Discover and load columns for one table entry."""
     import csv as csv_mod
 
     if conn_macro and source.lower() == 'aws':
@@ -340,7 +299,6 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
             with open(mock_csv, 'r', newline='') as f:
                 reader = csv_mod.DictReader(f)
                 for row in reader:
-                    # Strip whitespace from keys to handle \r\n line endings
                     row = {k.strip(): v for k, v in row.items()}
                     name = row.get('column_name') or row.get('COLUMN_NAME', '')
                     dtype = row.get('data_type') or row.get('DATA_TYPE', '')
@@ -412,11 +370,10 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
     count = insert_column_meta(project_db, store_name, columns, source=source)
     print(f"Loaded {count} columns into _column_meta for table: {store_name}")
 
-
+# >>> Run and print row count comparison for a single pair <<< #
 def _print_row_comparison(db_path, table_left, table_right, source_left, source_right,
                           from_date=None, to_date=None, pair_name=None,
                           date_col_left=None, date_col_right=None):
-    """Run and print row count comparison for a single pair."""
     source_left = source_left or "left"
     source_right = source_right or "right"
 
@@ -447,7 +404,6 @@ def _print_row_comparison(db_path, table_left, table_right, source_left, source_
     print(f"\n{source_left}: {dr_left[0]} to {dr_left[1]} | {summary['count_left']} dates | total: {summary['total_left']:,}")
     print(f"{source_right}: {dr_right[0]} to {dr_right[1]} | {summary['count_right']} dates | total: {summary['total_right']:,}")
 
-    # Overlap
     has_overlap = dr_left[0] and dr_right[0]
     overlap_start = overlap_end = None
     if has_overlap:
@@ -469,7 +425,7 @@ def _print_row_comparison(db_path, table_left, table_right, source_left, source_
         for dt, cl, cr in result["mismatched"]:
             print(f"  {dt}: {source_left}={cl:,}, {source_right}={cr:,}, diff={cr-cl:+,}")
     else:
-        print(f"\nMismatched: (none)")
+        print("\nMismatched: (none)")
 
     if misload_left or misload_right:
         print(f"\nMisload ({len(misload_left) + len(misload_right)} dates):")
@@ -490,11 +446,9 @@ def _print_row_comparison(db_path, table_left, table_right, source_left, source_
 
     return result
 
-
+# >>> Build WHERE clause from matching and excluded dates <<< #
 def _build_where_from_dates(table_cfg, matching_dates, excluded_dates, db_path=None):
-    """Build WHERE clause from matching and excluded dates."""
     date_col = table_cfg.get('date_col', 'dt')
-    is_sas = is_sas_table(table_cfg)
 
     date_dtype = ''
     date_format = ''
@@ -513,15 +467,7 @@ def _build_where_from_dates(table_cfg, matching_dates, excluded_dates, db_path=N
     source = (table_cfg.get('source') or '').lower()
 
     if is_datetime:
-        if is_sas:
-            col_expr = f"datepart({date_col})"
-            def fmt_date(d):
-                from datetime import datetime as _dt
-                if re.match(r'^\d{6}$', str(d)):
-                    return f"'{d}'"
-                dt_obj = _dt.strptime(str(d), "%Y-%m-%d")
-                return f"'{dt_obj.strftime('%d%b%Y').upper()}'d"
-        elif source == 'aws':
+        if source == 'aws':
             col_expr = f"CAST({date_col} AS DATE)"
             def fmt_date(d):
                 return f"'{d}'" if re.match(r'^\d{6}$', str(d)) else f"DATE '{str(d).split()[0]}'"
@@ -560,9 +506,8 @@ def _build_where_from_dates(table_cfg, matching_dates, excluded_dates, db_path=N
             parts.append(f"{col_expr} NOT IN ({', '.join(fmt_date(d) for d in excluded_dates)})")
     return " AND ".join(parts) if parts else ""
 
-
+# >>> Compare row counts between paired tables <<< #
 def cmd_compare_row(args):
-    """Compare row counts between paired tables."""
     _require_db(args.project_db)
     config = _load_config(args.config)
     yes = getattr(args, 'yes', False)
@@ -609,7 +554,6 @@ def cmd_compare_row(args):
         if result is None:
             continue
 
-        # HITL: skip/ignore prompt
         if not yes:
             n_mismatch = len(result['mismatched']) + len(result['only_left']) + len(result['only_right'])
             if n_mismatch > 0:
@@ -629,7 +573,6 @@ def cmd_compare_row(args):
 
         html_entries.append((pair_name, source_left, source_right, table_left, table_right, result, {}))
 
-    # Save where_map to config
     for pair_name, sl, sr, tl, tr, result, _ in html_entries:
         comp = get_row_comparison(args.project_db, pair_name)
         if comp:
@@ -645,7 +588,7 @@ def cmd_compare_row(args):
     if not yes:
         config = save_and_pause(config, args.config, [
             "Review where_map",
-            "Add time_map values (check ./sas/_timing.csv and ./csv/_timing.csv)",
+            "Add time_map values (check ./csv/_timing.csv)",
             "Add comment_map notes (shown as tooltips in HTML)",
         ])
     else:
@@ -654,7 +597,6 @@ def cmd_compare_row(args):
     sync_config_to_db(args.project_db, config)
     print(f"Synced to database: {args.project_db}")
 
-    # HTML report
     if html_path and html_entries:
         from .html_export import generate_row_count_html, create_row_count_table, wrap_html_document
         row_sections = []
@@ -692,13 +634,11 @@ def cmd_compare_row(args):
         wb.save(excel_path)
         print(f"Excel report: {excel_path}")
 
-
+# >>> Compare column statistics between paired tables <<< #
 def cmd_compare_col(args):
-    """Compare column statistics between paired tables."""
     _require_db(args.project_db)
     config = _load_config(args.config)
     html_path = getattr(args, 'html', None)
-    yes = getattr(args, 'yes', False)
 
     if not html_path:
         output_dir = os.path.join(os.getcwd(), 'output')
@@ -780,7 +720,6 @@ def cmd_compare_col(args):
                 comparison_details=result,
             )
 
-            # Build diff_map
             diff_map = {}
             for col_name, comparisons in result.items():
                 for comp in comparisons:
@@ -807,7 +746,6 @@ def cmd_compare_col(args):
         else:
             print("  No matching columns found")
 
-    # HTML
     if html_path and html_entries:
         from .html_export import generate_column_stats_html, create_column_stats_table, wrap_html_document
         col_sections = []
@@ -853,27 +791,8 @@ def cmd_compare_col(args):
     except Exception as e:
         print(f"Warning: Could not save config: {e}")
 
-
-def cmd_gen_sas(args):
-    """Generate SAS extraction files from config."""
-    from .platforms.hadoop import gen_sas
-    if not os.path.exists(args.config):
-        print(f"Error: Config file not found: {args.config}")
-        sys.exit(1)
-    types = [args.type] if args.type != "both" else ["row", "col"]
-    db_path = getattr(args, 'db_path', None)
-    vintage = getattr(args, 'vintage', None)
-    from_date = getattr(args, 'from_date', None)
-    to_date = getattr(args, 'to_date', None)
-    preset = getattr(args, 'preset', None)
-    stats_override = _parse_stats_override(getattr(args, 'stats_override', None))
-    gen_sas(args.config, args.outdir, types=types, db_path=db_path, vintage=vintage,
-            from_date=from_date, to_date=to_date,
-            preset=preset, stats_override=stats_override)
-
-
+# >>> Extract data from AWS Athena <<< #
 def cmd_gen_aws(args):
-    """Extract data from AWS Athena."""
     from .platforms.athena import extract_aws
     if not os.path.exists(args.config):
         print(f"Error: Config file not found: {args.config}")
@@ -891,9 +810,8 @@ def cmd_gen_aws(args):
                 from_date=from_date, to_date=to_date,
                 preset=preset, stats_override=stats_override)
 
-
+# >>> Extract data from Databricks SQL (Python-direct via databricks-sql) <<< #
 def cmd_gen_databricks(args):
-    """Extract data from Databricks SQL (Python-direct via databricks-sql)."""
     from .platforms.databricks import extract_databricks
     if not os.path.exists(args.config):
         print(f"Error: Config file not found: {args.config}")
@@ -911,9 +829,8 @@ def cmd_gen_databricks(args):
                        from_date=from_date, to_date=to_date,
                        preset=preset, stats_override=stats_override)
 
-
+# >>> Extract data from Oracle via oracledb (Python-direct) <<< #
 def cmd_gen_oracle(args):
-    """Extract data from Oracle via oracledb (Python-direct)."""
     from .platforms.oracle import extract_oracle
     if not os.path.exists(args.config):
         print(f"Error: Config file not found: {args.config}")
@@ -931,9 +848,8 @@ def cmd_gen_oracle(args):
                    from_date=from_date, to_date=to_date,
                    preset=preset, stats_override=stats_override)
 
-
+# >>> Match columns between paired tables <<< #
 def cmd_match_columns(args):
-    """Match columns between paired tables."""
     _require_db(args.project_db)
     config = _load_config(args.config)
 
@@ -996,8 +912,6 @@ def cmd_match_columns(args):
             left_only = result.get(f'{left_table}_only', [])
             right_only = result.get(f'{right_table}_only', [])
 
-        # Apply saved wildcard/regex col_rules to the still-unmatched columns,
-        # mirroring the web UI (same compare.apply_column_rules engine).
         rule_list = (pair_config.get('col_rules') or {}).get('rules') or []
         if rule_list:
             rule_maps, _ = apply_column_rules(
@@ -1051,7 +965,6 @@ def cmd_match_columns(args):
         sync_config_to_db(args.project_db, config)
         print(f"Synced to database: {args.project_db}")
 
-
 # >>> classify config tables by source and run each platform's extractor <<< #
 def cmd_extract(args):
     from .extract import extract_all
@@ -1062,7 +975,6 @@ def cmd_extract(args):
     extract_all(
         config_path=args.config,
         outdir=getattr(args, 'outdir', None),
-        sas_outdir=getattr(args, 'sas_outdir', None),
         csv_outdir=getattr(args, 'csv_outdir', None),
         types=[args.type] if args.type != "both" else ["row", "col"],
         max_workers=getattr(args, 'workers', None),
@@ -1074,7 +986,6 @@ def cmd_extract(args):
         preset=getattr(args, 'preset', None),
         stats_override=_parse_stats_override(getattr(args, 'stats_override', None)),
     )
-
 
 # >>> sample N rows by key from both sides; dump value + backend hash16 to Excel <<< #
 def cmd_sample_hash(args):
@@ -1088,7 +999,6 @@ def cmd_sample_hash(args):
         n=getattr(args, 'sample_n', 20),
         out=getattr(args, 'out', None),
     )
-
 
 # >>> parse --keys / --keys-file into an ordered unique list of key values <<< #
 def _col_sample_key_values(args):
@@ -1106,7 +1016,6 @@ def _col_sample_key_values(args):
             out.append(v)
     return out
 
-
 # >>> coerce a CLI key string to int/float when numeric so SQL literals stay unquoted <<< #
 def _col_sample_coerce(v):
     try:
@@ -1118,10 +1027,8 @@ def _col_sample_coerce(v):
     except ValueError:
         return v
 
-
 _COLSAMPLE_OPEN = "/*COLSAMPLE_START*/"
 _COLSAMPLE_CLOSE = "/*COLSAMPLE_END*/"
-
 
 # >>> strip a prior col-sample key filter from a where clause so re-runs don't stack <<< #
 def _col_sample_strip(where):
@@ -1133,7 +1040,6 @@ def _col_sample_strip(where):
     w = re.sub(pat, "", w, flags=re.S)
     return w.strip()
 
-
 # >>> case-insensitive col_map lookup; fall back to the same name on the other side <<< #
 def _col_sample_map_lookup(col_map, key):
     if key in col_map:
@@ -1144,11 +1050,9 @@ def _col_sample_map_lookup(col_map, key):
             return v
     return key
 
-
 # >>> col-sample: deterministic-sample keys, persist key IN (...) into where_map, generate col SQL <<< #
 def cmd_col_sample(args):
     _require_db(args.project_db)
-    import json
     import random
     import tempfile
     from .extract import extract_all
@@ -1254,7 +1158,6 @@ def cmd_col_sample(args):
     print("[col-sample] generated extract_col.<platform>.sql. "
           "Execute: dtrack run-sql --type col  (or `just force=1 e2e col-run`)")
 
-
 # >>> execute already-generated extract_{row,col}.<platform>.sql via each platform's runner (mirrors web run-sql) <<< #
 def cmd_run_sql(args):
     from .extract import run_sql_all
@@ -1265,14 +1168,12 @@ def cmd_run_sql(args):
     run_sql_all(
         config_path=args.config,
         outdir=getattr(args, 'outdir', None),
-        sas_outdir=getattr(args, 'sas_outdir', None),
         csv_outdir=getattr(args, 'csv_outdir', None),
         types=[args.type] if args.type != "both" else ["row", "col"],
         db_path=args.project_db,
         max_workers=getattr(args, 'workers', None),
         resume=getattr(args, 'resume', False),
     )
-
 
 # >>> write extract_{row,col} SQL/SAS for every platform WITHOUT running (review before extract) <<< #
 def cmd_generate(args):
@@ -1284,7 +1185,6 @@ def cmd_generate(args):
     extract_all(
         config_path=args.config,
         outdir=getattr(args, 'outdir', None),
-        sas_outdir=getattr(args, 'sas_outdir', None),
         csv_outdir=getattr(args, 'csv_outdir', None),
         types=[args.type] if args.type != "both" else ["row", "col"],
         db_path=args.project_db,
@@ -1296,17 +1196,14 @@ def cmd_generate(args):
         gen_only=True,
     )
 
-
+# >>> Start the dtrack web UI <<< #
 def cmd_serve(args):
-    """Start the dtrack web UI."""
     _require_db(args.project_db)
 
-    # Create a temporary config if none provided
     config_path = args.config
     if not config_path:
         import tempfile
         import json
-        # Create a temporary config with empty pairs
         temp_config = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
         json.dump({"pairs": {}, "metadata": {}}, temp_config)
         temp_config.close()
@@ -1320,9 +1217,8 @@ def cmd_serve(args):
     serve(db_path=args.project_db, config_path=config_path,
           port=args.port, host=args.host)
 
-
+# >>> Run a SQL query against the database <<< #
 def cmd_query(args):
-    """Run a SQL query against the database."""
     import sqlite3
     _require_db(args.project_db)
     sql = args.sql.strip()
@@ -1368,9 +1264,8 @@ def cmd_query(args):
     print(f"\n({len(rows)} row{'s' if len(rows) != 1 else ''})")
     conn.close()
 
-
+# >>> Print where env was loaded from and which Oracle/AWS/SAS settings resolve <<< #
 def cmd_doctor(args):
-    """Print where env was loaded from and which Oracle/AWS/SAS settings resolve."""
     from .db import MACRO2SVC, _load_macro_overrides
 
     env_loaded = os.environ.get('DTRACK_ENV_FILE_LOADED', '<none found>')
@@ -1385,8 +1280,8 @@ def cmd_doctor(args):
         if shadowed:
             print(f"  NOTE: only the file above is loaded; these are IGNORED: "
                   f"{', '.join(shadowed)}")
-            print(f"        (put HADOOP_DSN/PCDS_USR/etc. in the loaded file, "
-                  f"or a shell-exported var will also override it)")
+            print("        (put HADOOP_DSN/PCDS_USR/etc. in the loaded file, "
+                  "or a shell-exported var will also override it)")
     except Exception:
         pass
     print()
@@ -1423,13 +1318,6 @@ def cmd_doctor(args):
     print(f"  {'AWS_PWD':24s} = {aws_pwd}")
     print()
 
-    print("SAS env:")
-    for var in ('SAS_LIB', 'OUT_DIR', 'EMAIL_TO',
-                'SAS_CACHE_DIR', 'SAS_ROW_REDO', 'SAS_COL_REDO'):
-        val = os.environ.get(var)
-        print(f"  {var:24s} = {val if val else '<unset>'}")
-    print()
-
     print("Hadoop / Hive (ODBC) env:")
     hdsn = os.environ.get('HADOOP_DSN')
     print(f"  {'HADOOP_DSN':24s} = {hdsn if hdsn else '<unset, default Hive_Prod>'}")
@@ -1438,13 +1326,8 @@ def cmd_doctor(args):
         val = os.environ.get(var)
         print(f"  {var:24s} = {val if val else '<unset>'}")
 
-
-# ============================================================================
-# Main
-# ============================================================================
-
+# >>> Main CLI entry point <<< #
 def main():
-    """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         description="dtrack - Data tracking CLI for row counts and column statistics",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1454,7 +1337,6 @@ def main():
 
     sub = parser.add_subparsers(dest='command', help='Available commands')
 
-    # init
     p = sub.add_parser('init', help='Initialize database (and starter pairs.json)')
     p.add_argument('project_db')
     p.add_argument('--config', default=None,
@@ -1469,7 +1351,6 @@ def main():
                         'schema upgrade (adds new columns introduced by a '
                         'newer dtrack, keeps existing data).')
 
-    # load-row
     p = sub.add_parser('load-row', help='Load row counts from CSV folder')
     p.add_argument('project_db')
     p.add_argument('folder', help='Folder with {qname}_row.csv files')
@@ -1478,14 +1359,12 @@ def main():
     p.add_argument('--db', help='Database name')
     p.add_argument('--date-var', help='Date column name')
 
-    # load-col
     p = sub.add_parser('load-col', help='Load column stats from CSV folder')
     p.add_argument('project_db')
     p.add_argument('folder', help='Folder with {qname}_col.csv files')
     p.add_argument('--config', required=True, help='Unified config JSON')
     p.add_argument('--mode', default='upsert', choices=['upsert', 'replace'])
 
-    # load-columns
     p = sub.add_parser('load-columns', help='Load column metadata')
     p.add_argument('project_db')
     p.add_argument('--config', required=True, help='Unified config JSON')
@@ -1494,7 +1373,6 @@ def main():
     p.add_argument('--columns-dir', dest='columns_dir',
                    help='Dump per-table {qname}_columns.csv (COLUMN_NAME,DATA_TYPE) into this dir')
 
-    # compare-row
     p = sub.add_parser('compare-row', help='Compare row counts')
     p.add_argument('project_db')
     p.add_argument('--config', required=True)
@@ -1505,7 +1383,6 @@ def main():
     p.add_argument('--title')
     p.add_argument('--subtitle')
 
-    # compare-col
     p = sub.add_parser('compare-col', help='Compare column statistics')
     p.add_argument('project_db')
     p.add_argument('--config', required=True)
@@ -1526,21 +1403,6 @@ def main():
                            "hash_sum, top_10. Example: "
                            "--stats-override n_unique=on,hash_sum=off")
 
-    # gen-sas
-    p = sub.add_parser('gen-sas', help='Generate SAS extraction files')
-    p.add_argument('config')
-    p.add_argument('--outdir', default='./sas/')
-    p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
-    p.add_argument('--db', dest='db_path')
-    p.add_argument('--vintage')
-    p.add_argument('--from-date', help='Start date for incremental extraction')
-    p.add_argument('--to-date', help='End date for incremental extraction')
-    p.add_argument('--preset', choices=['quick', 'standard', 'detailed'],
-                   help=_PRESET_HELP)
-    p.add_argument('--stats-override', dest='stats_override',
-                   help=_STATS_OVERRIDE_HELP)
-
-    # gen-aws
     p = sub.add_parser('gen-aws', help='Extract data from AWS Athena')
     p.add_argument('config')
     p.add_argument('--outdir', default='./csv/')
@@ -1556,7 +1418,6 @@ def main():
     p.add_argument('--stats-override', dest='stats_override',
                    help=_STATS_OVERRIDE_HELP)
 
-    # gen-databricks
     p = sub.add_parser('gen-databricks',
                        help='Extract data from Databricks SQL (Python-direct via databricks-sql)')
     p.add_argument('config')
@@ -1574,7 +1435,6 @@ def main():
     p.add_argument('--stats-override', dest='stats_override',
                    help=_STATS_OVERRIDE_HELP)
 
-    # gen-oracle
     p = sub.add_parser('gen-oracle', help='Extract data from Oracle (Python-direct via oracledb)')
     p.add_argument('config')
     p.add_argument('--outdir', default='./csv/')
@@ -1591,7 +1451,6 @@ def main():
     p.add_argument('--stats-override', dest='stats_override',
                    help=_STATS_OVERRIDE_HELP)
 
-    # match-columns
     p = sub.add_parser('match-columns', help='Match columns between paired tables')
     p.add_argument('project_db')
     p.add_argument('--config', required=True)
@@ -1601,7 +1460,6 @@ def main():
     p.add_argument('--yes', action='store_true',
                    help='non-interactive: keep auto-matches, skip the manual mapping prompt')
 
-    # sample-hash (sample N rows by key from both sides; dump value+hash16 to Excel)
     p = sub.add_parser('sample-hash',
                        help='Sample N rows by key from both sides; dump value + backend hash16 to Excel (debug hash_sum)')
     p.add_argument('project_db')
@@ -1613,12 +1471,10 @@ def main():
                    help='Number of rows to sample per pair (default 20)')
     p.add_argument('--out', help='Output .xlsx path (default sample_hash.xlsx)')
 
-    # extract (classify config tables by source, run each platform extractor)
     p = sub.add_parser('extract', help='Extract row/col CSVs for all platforms in the config')
     p.add_argument('project_db')
     p.add_argument('--config', required=True)
-    p.add_argument('--outdir', help='Base output directory (csv/ + sas/ derived from it)')
-    p.add_argument('--sas-outdir', help='SAS output directory')
+    p.add_argument('--outdir', help='Base output directory (csv/ derived from it)')
     p.add_argument('--csv-outdir', help='CSV output directory')
     p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
     p.add_argument('--vintage')
@@ -1631,25 +1487,21 @@ def main():
     p.add_argument('--stats-override', dest='stats_override',
                    help=_STATS_OVERRIDE_HELP)
 
-    # run-sql (execute already-generated extract_{row,col}.<platform>.sql files)
     p = sub.add_parser('run-sql',
                        help='Run already-generated extract_{row,col}.<platform>.sql files (see `dtrack generate`)')
     p.add_argument('project_db')
     p.add_argument('--config', required=True)
-    p.add_argument('--outdir', help='Base output directory (csv/ + sas/ derived from it)')
-    p.add_argument('--sas-outdir', help='SAS output directory')
+    p.add_argument('--outdir', help='Base output directory (csv/ derived from it)')
     p.add_argument('--csv-outdir', help='CSV output directory')
     p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
     p.add_argument('--workers', type=int)
     p.add_argument('--resume', action='store_true', help='Skip blocks whose output CSV already exists')
 
-    # generate (write extract_{row,col} SQL/SAS only; no extraction)
     p = sub.add_parser('generate',
                        help='Write extract_{row,col} SQL/SAS for all platforms WITHOUT running')
     p.add_argument('project_db')
     p.add_argument('--config', required=True)
-    p.add_argument('--outdir', help='Base output directory (csv/ + sas/ derived from it)')
-    p.add_argument('--sas-outdir', help='SAS output directory')
+    p.add_argument('--outdir', help='Base output directory (csv/ derived from it)')
     p.add_argument('--csv-outdir', help='CSV output directory')
     p.add_argument('--type', default='both', choices=['row', 'col', 'both'])
     p.add_argument('--vintage')
@@ -1660,7 +1512,6 @@ def main():
     p.add_argument('--stats-override', dest='stats_override',
                    help=_STATS_OVERRIDE_HELP)
 
-    # col-sample (deterministic-sample rows by key + columns, write key IN (...) to where_map, generate col SQL)
     p = sub.add_parser('col-sample',
                        help='Sample rows by key (deterministic) + columns, write key IN (...) into where_map, '
                             'and generate col SQL (then run-sql --type col)')
@@ -1684,20 +1535,17 @@ def main():
     p.add_argument('--preset', choices=['quick', 'standard', 'detailed'], help=_PRESET_HELP)
     p.add_argument('--stats-override', dest='stats_override', help=_STATS_OVERRIDE_HELP)
 
-    # serve
     p = sub.add_parser('serve', help='Start web UI')
     p.add_argument('project_db')
     p.add_argument('--config', default=None, help='Unified config JSON (optional)')
     p.add_argument('--port', type=int, default=8080)
     p.add_argument('--host', default='0.0.0.0')
 
-    # query
     p = sub.add_parser('query', help='Run SQL query')
     p.add_argument('project_db')
     p.add_argument('sql')
     p.add_argument('--write', action='store_true')
 
-    # doctor
     p = sub.add_parser('doctor', help='Show resolved env-file, Oracle macros, AWS env vars')
 
     args = parser.parse_args()
@@ -1720,11 +1568,6 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    # Load env. Search order:
-    #   1. --env CLI flag
-    #   2. DTRACK_ENV_FILE env var
-    #   3. dtrack.conf / .env / dtrack.env walking up from cwd
-    #   4. ~/.dtrack/dtrack.conf, /etc/dtrack/dtrack.conf
     env_file = getattr(args, 'env_file', None) or os.environ.get('DTRACK_ENV_FILE')
     if not env_file:
         from dotenv import find_dotenv
@@ -1763,7 +1606,6 @@ def main():
         'load-columns': cmd_load_columns,
         'compare-row': cmd_compare_row,
         'compare-col': cmd_compare_col,
-        'gen-sas': cmd_gen_sas,
         'gen-aws': cmd_gen_aws,
         'gen-databricks': cmd_gen_databricks,
         'gen-oracle': cmd_gen_oracle,
@@ -1801,7 +1643,6 @@ def main():
     else:
         print(f"Unknown command: {args.command}")
         sys.exit(1)
-
 
 if __name__ == '__main__':
     main()

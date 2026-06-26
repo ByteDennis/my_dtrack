@@ -1,14 +1,7 @@
-"""Reusable interactive prompt functions for CLI workflows."""
 
 
+# >>> Prompt user to pick from choices. Returns selected key <<< #
 def prompt_choice(message, choices, default=None):
-    """Prompt user to pick from choices. Returns selected key.
-
-    Args:
-        message: Prompt message
-        choices: Dict of {key: description}
-        default: Default key if user presses Enter
-    """
     choice_str = "/".join(
         f"[{k}]{v[1:]}" if len(v) > 1 else f"[{k}]"
         for k, v in choices.items()
@@ -27,18 +20,13 @@ def prompt_choice(message, choices, default=None):
             return default
         if resp in choices:
             return resp
-        # Try matching first char
         for k in choices:
             if resp == k[0]:
                 return k
         print(f"  Invalid choice. Options: {', '.join(choices.keys())}")
 
-
+# >>> Ask user whether to skip, continue, or ignore specific items <<< #
 def prompt_skip_pair(pair_name, summary_text):
-    """Ask user whether to skip, continue, or ignore specific items.
-
-    Returns: 'continue' | 'skip' | 'ignore'
-    """
     print(f"\n{pair_name}: {summary_text}")
     return prompt_choice(
         "Action?",
@@ -46,9 +34,8 @@ def prompt_skip_pair(pair_name, summary_text):
         default="c"
     )
 
-
+# >>> Show items, let user select which to ignore. Returns selected list <<< #
 def prompt_ignore_items(items, item_type="rows"):
-    """Show items, let user select which to ignore. Returns selected list."""
     if not items:
         return []
 
@@ -56,7 +43,7 @@ def prompt_ignore_items(items, item_type="rows"):
     for i, item in enumerate(items, 1):
         print(f"    {i}. {item}")
 
-    print(f"\n  Enter numbers to ignore (comma-separated), 'all', or empty to skip:")
+    print("\n  Enter numbers to ignore (comma-separated), 'all', or empty to skip:")
     try:
         resp = input("  > ").strip()
     except EOFError:
@@ -78,9 +65,8 @@ def prompt_ignore_items(items, item_type="rows"):
             pass
     return selected
 
-
+# >>> Ask user to resolve mismatched column types <<< #
 def prompt_col_type_override(col_name, left_type, right_type):
-    """Ask user to resolve mismatched column types."""
     print(f"\n  Column {col_name}: type mismatch (left: {left_type}, right: {right_type})")
     return prompt_choice(
         "  Use",
@@ -88,12 +74,8 @@ def prompt_col_type_override(col_name, left_type, right_type):
         default="c"
     )
 
-
+# >>> Save config, show edit hints, pause for manual editing, reload <<< #
 def save_and_pause(config, config_path, edit_hints=None):
-    """Save config, show edit hints, pause for manual editing, reload.
-
-    Returns reloaded config dict.
-    """
     import json
     from .config import save_unified_config
 
@@ -114,9 +96,8 @@ def save_and_pause(config, config_path, edit_hints=None):
     with open(config_path, 'r') as f:
         return json.load(f)
 
-
+# >>> Ask user for confirmation. Returns True if confirmed <<< #
 def confirm(prompt_text="Proceed? [y/N] "):
-    """Ask user for confirmation. Returns True if confirmed."""
     try:
         resp = input(prompt_text).strip().lower()
     except EOFError:

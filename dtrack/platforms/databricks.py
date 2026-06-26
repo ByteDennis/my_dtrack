@@ -1,28 +1,3 @@
-"""Databricks SQL extraction platform.
-
-Mirrors the shape of athena.py: row + col extraction into per-qname CSV
-files matching the 14-field schema, with mock-mode fallback via
-_extract_mock_tables. The conn_macro slot holds the catalog.schema pair
-(dot-separated); the per-table `table` field is the unqualified leaf,
-giving `{conn_macro}.{table}` as the full reference. When conn_macro
-omits the dot (just a schema), the DB_DEFAULT_CATALOG env var is
-prepended so `{DB_DEFAULT_CATALOG}.{conn_macro}.{table}` is what hits
-Databricks. An empty/missing conn_macro falls through to the
-warehouse's default catalog.schema.
-
-Real-mode auth is OAuth via databricks.sdk Config + the DB_PROFILE /
-DB_HTTPS env vars (loaded from .env). The workspace sits behind the same
-corporate proxy as Athena, so databricks_connect sets HTTPS_PROXY from
-AWS_USR / AWS_PWD / AWS_HOST -- but it does NOT run the full
-aws_creds_renew() AWS token dance, which Databricks doesn't need and whose
-TTL-gated proxy mutation otherwise made runs flaky.
-
-Col extraction defers to the Athena SQL builder (Spark SQL on Databricks
-shares enough of Trino's dialect -- date_parse/date_trunc/SUBSTR/
-approx_count_distinct -- that the same per-column template runs without
-edits). If a dialect-specific divergence shows up, override the SQL by
-passing a vintage_transform on the pair.
-"""
 
 import csv
 import os
@@ -45,14 +20,12 @@ from .base import (
     _mask_stats_in_rows,
 )
 
-
 # >>> Spark-SQL flavor of athena._athena_portable_hash16 (same 16-bit MD5 recipe, Databricks dialect) <<< #
 def _databricks_portable_hash16(value_sql):
     return (
         f"CAST(conv(SUBSTR(LOWER(md5(TRIM({value_sql}))), 1, 4), "
         f"16, 10) AS BIGINT)"
     )
-
 
 # >>> normalize a conn_macro into "catalog.schema" using DB_DEFAULT_CATALOG when only schema is given <<< #
 def _resolve_catalog_schema(conn_macro):
@@ -68,7 +41,6 @@ def _resolve_catalog_schema(conn_macro):
         return f"{default_catalog}.{cm}"
     return cm
 
-
 # >>> open a Databricks SQL connection via OAuth + databricks-sdk Config <<< #
 def databricks_connect(catalog_schema=None):
     try:
@@ -80,14 +52,6 @@ def databricks_connect(catalog_schema=None):
             "pip install 'dtrack[databricks]'"
         ) from e
 
-    # Databricks needs only two things from the environment: DB_PROFILE +
-    # DB_HTTPS (loaded from .env), and the corporate HTTPS proxy. It does NOT
-    # need the AWS token renewal that aws_creds_renew() performs — only the
-    # proxy that function also sets. Calling the full aws_creds_renew() routed
-    # Databricks through the AWS token dance and (intermittently, because it's
-    # TTL-gated) was the reason a chunk could run in the playground yet fail
-    # from the col_gen runner. So set just the proxy here, the same way
-    # aws_creds_renew() does, from AWS_USR / AWS_PWD / AWS_HOST when present.
     _usr = os.environ.get("AWS_USR")
     _pwd = os.environ.get("AWS_PWD")
     _host = os.environ.get("AWS_HOST")
@@ -115,22 +79,14 @@ def databricks_connect(catalog_schema=None):
         kwargs["catalog"], kwargs["schema"] = resolved.split(".", 1)
     return dbx_sql.connect(**kwargs)
 
-
 # >>> run one SQL block and return rows of dicts keyed by lowercase column name <<< #
 def _query_databricks(sql, catalog_schema=None):
-    # Consult the shared SQL-result cache first (set by run_databricks_sql_file)
-    # so re-running the same extract_*.sql skips blocks that already succeeded
-    # — mirrors the Oracle / Hadoop runners' resume behavior.
     cached = cache_get(sql, catalog_schema)
     if cached is not None:
         return cached
     conn = databricks_connect(catalog_schema)
     try:
         cur = conn.cursor()
-        # Blocks are multi-statement (USE CATALOG; USE SCHEMA; SELECT ...) so
-        # the leading session statements run on the same cursor before the
-        # query. Split on ';' (generated SQL never embeds ';' in a literal);
-        # keep the rows from the last statement that returns a result set.
         out = []
         for stmt in (s.strip() for s in sql.split(";")):
             if not stmt:
@@ -148,25 +104,18 @@ def _query_databricks(sql, catalog_schema=None):
         except Exception:
             pass
 
-
 # >>> discover column_name + data_type via DESCRIBE catalog.schema.table (col 0 = name, col 1 = type) <<< #
 def _discover_columns_databricks(cursor, catalog, schema, table):
-    # Backtick-quote each part: Spark identifiers can't start with a digit
-    # (e.g. "062108..._catalog") and DESCRIBE needs a valid 3-part reference.
     parts = [p for p in (catalog, schema, table) if p]
     full = ".".join(f"`{p}`" for p in parts)
     cursor.execute(f"DESCRIBE {full}")
     cols = {}
     for row in cursor.fetchall():
         name = (row[0] or "").strip() if row[0] is not None else ""
-        # Spark's DESCRIBE appends a blank row then a "# Partition Information"
-        # / "# col_name" section for partitioned tables -- stop at the first
-        # blank or comment marker so partition keys aren't double-counted.
         if not name or name.startswith("#"):
             break
         cols[name] = (row[1] or "").strip() if len(row) > 1 and row[1] is not None else ""
     return cols
-
 
 # >>> resolve "schema.table" (catalog is set per-block via USE CATALOG, not qualified inline) <<< #
 def _full_table(tbl_cfg):
@@ -181,7 +130,6 @@ def _full_table(tbl_cfg):
         out.append(quote_ident(table, "databricks"))
     return ".".join(out)
 
-
 # >>> "USE CATALOG `cat`;\nUSE SCHEMA `sch`;" prefix from conn_macro (catalog always backticked) <<< #
 def _use_catalog_prefix(conn_macro):
     cs = _resolve_catalog_schema(conn_macro)
@@ -194,7 +142,6 @@ def _use_catalog_prefix(conn_macro):
     elif len(parts) == 1:
         lines.append(f"USE SCHEMA {quote_ident(parts[0], 'databricks')};")
     return ("\n".join(lines) + "\n") if lines else ""
-
 
 # >>> build per-table row-count SQL block <<< #
 def _build_row_sql_databricks(tbl_cfg):
@@ -216,7 +163,6 @@ def _build_row_sql_databricks(tbl_cfg):
         f"GROUP BY {date_col_q}\n"
         f"ORDER BY {date_col_q}"
     )
-
 
 # >>> aggregate extract_row.sql for every Databricks table — mirrors the Athena/Hadoop shape so previewed = saved <<< #
 def _write_combined_row_sql_databricks(databricks_tables, outdir):
@@ -247,7 +193,6 @@ def _write_combined_row_sql_databricks(databricks_tables, outdir):
         f.write("\n".join(blocks))
     return sql_path
 
-
 # >>> compose WHERE + base.build_col_sql dt params (dt_label/vintage) for a table's col window <<< #
 def _col_where_and_label_databricks(tbl_cfg, db_path, vintage):
     table_vintage = tbl_cfg.get("vintage", vintage)
@@ -276,7 +221,6 @@ def _col_where_and_label_databricks(tbl_cfg, db_path, vintage):
         where = orig_where
         dt_label, ret_vintage = (None, table_vintage) if buckets else ("all", "all")
     return where, dt_label, ret_vintage, eff_dtype, eff_fmt
-
 
 # >>> aggregate extract_col.sql for every Databricks table — one block per (table, column) <<< #
 def _write_combined_col_sql_databricks(databricks_tables, outdir, db_path=None,
@@ -335,7 +279,6 @@ def _write_combined_col_sql_databricks(databricks_tables, outdir, db_path=None,
         f.write("\n".join(blocks))
     return sql_path
 
-
 # >>> parse + execute extract_{row,col}.sql via databricks_connect (gen-then-run, mirrors run_hadoop_sql_file) <<< #
 def run_databricks_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                             on_progress=None, resume=False, cancel_event=None,
@@ -360,7 +303,6 @@ def run_databricks_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         )
     finally:
         set_cache_db(None)
-
 
 # >>> discover columns (DESCRIBE) for any databricks table missing them; seed _column_meta + columns.csv <<< #
 def _ensure_columns_databricks(databricks_tables, outdir, db_path):
@@ -407,7 +349,6 @@ def _ensure_columns_databricks(databricks_tables, outdir, db_path):
                 conn.close()
             except Exception:
                 pass
-
 
 # >>> top-level entry: extract row + col CSVs for every databricks-source table <<< #
 def extract_databricks(config_path, outdir, types=None, max_workers=None,
@@ -490,10 +431,6 @@ def extract_databricks(config_path, outdir, types=None, max_workers=None,
         _extract_mock_tables(dbx_tables, outdir, types, mock_dir)
         return
 
-    # Gen-then-run: write the same aggregate extract_{row,col}.sql the other
-    # platforms produce, then execute the saved file block-by-block. This makes
-    # what's previewed == what's saved == what's run (no in-memory rebuild),
-    # matching Athena / Hadoop / Oracle.
     if "col" in types:
         if db_path:
             fill_columns_from_meta(dbx_tables, db_path)

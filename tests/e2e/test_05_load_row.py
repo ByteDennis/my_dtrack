@@ -21,7 +21,7 @@ from pathlib import Path
 
 
 def _seed_aws_csvs(workdir, run_cli):
-    """Common setup: run gen-aws + gen-oracle + gen-sas in mock mode so
+    """Common setup: run gen-aws + gen-oracle in mock mode so
     the outdirs are filled with per-pair {qname}_row.csv files.
     """
     for sub, outkey in (
@@ -33,11 +33,6 @@ def _seed_aws_csvs(workdir, run_cli):
                 type="row", workers=None, db_path=workdir["db"],
                 vintage=None, force=False, from_date=None, to_date=None,
                 preset=None, stats_override=None)
-    run_cli("gen-sas",
-            config=workdir["config"], outdir=workdir["sas_outdir"],
-            type="row", db_path=workdir["db"],
-            vintage=None, from_date=None, to_date=None,
-            preset=None, stats_override=None)
 
 
 def test_load_row_populates_row_counts_for_all_sides(
@@ -45,17 +40,14 @@ def test_load_row_populates_row_counts_for_all_sides(
     wd = initialized_db
     _seed_aws_csvs(wd, run_cli)
 
-    # Load from BOTH outdirs (aws/oracle from csv/, sas from sas/).
-    for folder in (wd["csv_outdir"], wd["sas_outdir"]):
-        run_cli("load-row",
-                project_db=wd["db"], folder=folder, config=wd["config"],
-                mode="upsert", db=None, date_var=None)
+    run_cli("load-row",
+            project_db=wd["db"], folder=wd["csv_outdir"], config=wd["config"],
+            mode="upsert", db=None, date_var=None)
 
     # Every qname referenced by _E2E_PAIRS should now have rows in
     # _row_counts. Mock CSVs cover history dates 2024-10-01 .. 2024-12-31.
     expected = {
         "aws_pos_snapshot", "oracle_pos_daily",
-        "aws_acct_snap_aws", "sas_acct_snap",
     }
     for qname in expected:
         rows = db_rows(

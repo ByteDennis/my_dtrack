@@ -1,8 +1,3 @@
-"""Excel workbook builders shared by the web export endpoints and the CLI.
-
-Keeps the column-comparison .xlsx identical whether produced from the web
-(/api/compare/col/export/excel) or from `dtrack compare-col --excel`.
-"""
 
 
 # >>> build the row-comparison workbook (one sheet per pair) — see web /api/compare/row/export/excel-all <<< #
@@ -102,7 +97,6 @@ def build_row_comparison_workbook(db_path, config_path, from_date=None, to_date=
             row_num += 1
 
     return wb
-
 
 # >>> build the col-comparison workbook (one sheet per pair, transposed) — see web /api/compare/col/export/excel <<< #
 def build_col_comparison_workbook(db_path, config_path, from_date=None,

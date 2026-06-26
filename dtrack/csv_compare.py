@@ -1,26 +1,9 @@
-"""String-exact CSV-to-CSV comparison by primary key.
-
-Both CSVs are read with `dtype=str, keep_default_na=False` so empty cells stay
-as `""` rather than NaN, and `"10"` is not equal to `"10.0"`. Rows are merged
-on a user-supplied primary key (one or more columns), then each user-supplied
-compare column is checked for equality on the inner join. Per-column counts
-plus the first N example mismatches are returned.
-
-PK columns can have different names on the two sides (`pk_cols_right`) and
-may contain the "same" date in different formats (e.g. Oracle date
-'2025-01-15' vs SAS string '15JAN2025'). The PK normalizer auto-detects
-common date formats and rewrites both sides to ISO YYYY-MM-DD before merging.
-"""
 
 from datetime import datetime
 import re
 from typing import List, Dict, Any, Tuple
 import pandas as pd
 
-
-# Date format patterns the auto-normalizer tries (in order). Each is
-# (regex screen, strptime fmt). Regex is a quick gate so non-date columns
-# don't pay the strptime cost.
 _DATE_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"^\d{4}-\d{2}-\d{2}$"),                                 "%Y-%m-%d"),
     (re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}"),             "%Y-%m-%d %H:%M:%S"),
@@ -31,9 +14,8 @@ _DATE_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$"),                             "%m/%d/%Y"),
 ]
 
-
+# >>> Return the strptime format that parses every non-empty sample, or "" <<< #
 def _detect_date_format(samples: List[str]) -> str:
-    """Return the strptime format that parses every non-empty sample, or ""."""
     non_empty = [s for s in samples if s.strip()]
     if not non_empty:
         return ""
@@ -49,13 +31,8 @@ def _detect_date_format(samples: List[str]) -> str:
             continue
     return ""
 
-
+# >>> Parse `series` with strptime(`fmt`) and rewrite to ISO YYYY-MM-DD <<< #
 def _normalize_dates(series: pd.Series, fmt: str) -> pd.Series:
-    """Parse `series` with strptime(`fmt`) and rewrite to ISO YYYY-MM-DD.
-
-    Empty strings stay empty. Unparseable cells stay unchanged so a bad row
-    is still visible in the diff rather than silently swallowed.
-    """
     def _norm(s: str) -> str:
         if not s.strip():
             return s
@@ -67,59 +44,31 @@ def _normalize_dates(series: pd.Series, fmt: str) -> pd.Series:
             return s
     return series.map(_norm)
 
-
+# >>> Auto-normalize two PK series to ISO if both look like dates <<< #
 def _maybe_normalize_pk_pair(left: pd.Series,
                              right: pd.Series) -> Tuple[pd.Series, pd.Series, str]:
-    """Auto-normalize two PK series to ISO if both look like dates.
-
-    Returns `(left_norm, right_norm, label)`. `label` is empty when no
-    normalization was applied; otherwise describes the format pair detected.
-    """
     sample_n = 50
     lfmt = _detect_date_format(left.head(sample_n).tolist())
     rfmt = _detect_date_format(right.head(sample_n).tolist())
     if not lfmt or not rfmt:
         return left, right, ""
     if lfmt == "%Y-%m-%d" and rfmt == "%Y-%m-%d":
-        return left, right, ""  # already canonical
+        return left, right, ""
     return (_normalize_dates(left, lfmt),
             _normalize_dates(right, rfmt),
             f"date: left {lfmt!r}, right {rfmt!r} → ISO")
 
-
+# >>> Read a CSV with all values as strings (no NaN, no type inference) <<< #
 def read_csv_as_str(path_or_buf) -> pd.DataFrame:
-    """Read a CSV with all values as strings (no NaN, no type inference)."""
     return pd.read_csv(path_or_buf, dtype=str, keep_default_na=False)
 
-
+# >>> Compare two DataFrames by primary key, return summary + per-column diffs <<< #
 def compare_csvs(left_df: pd.DataFrame, right_df: pd.DataFrame,
                  pk_cols: List[str], compare_cols: List[str],
                  n_examples: int = 10, *,
                  pk_cols_right: List[str] = None,
                  compare_cols_right: List[str] = None,
                  on_log=None) -> Dict[str, Any]:
-    """Compare two DataFrames by primary key, return summary + per-column diffs.
-
-    All values are coerced to str via .astype(str). PK column names may differ
-    between sides — pass `pk_cols_right` parallel to `pk_cols` to map them.
-    Same for compare columns via `compare_cols_right`. When the right list is
-    omitted, we assume identical names on both sides (the common case).
-
-    Output uses LEFT-side names as canonical (so reports are stable across
-    renamings). compare_cols missing on either side are reported as skipped.
-
-    Returns:
-        {
-          "summary": {matched, only_left, only_right, total_mismatches, cols_with_mismatches},
-          "only_left_examples":  [{pk: {...}}],
-          "only_right_examples": [{pk: {...}}],
-          "columns": [
-            {"name": str, "skipped": bool, "reason"?: str, "n_unmatched": int,
-             "examples": [{"pk": {...}, "left": str, "right": str}, ...]},
-            ...
-          ],
-        }
-    """
     log = on_log or (lambda *_a, **_kw: None)
     log(f"left:  {len(left_df):,} rows × {len(left_df.columns)} cols")
     log(f"right: {len(right_df):,} rows × {len(right_df.columns)} cols")
@@ -156,9 +105,6 @@ def compare_csvs(left_df: pd.DataFrame, right_df: pd.DataFrame,
     for col in right.columns:
         right[col] = right[col].astype(str)
 
-    # Rename right-side columns (PK + compare) to their left counterparts.
-    # Left names are canonical from this point on. Skip identity renames so
-    # we don't accidentally collide with already-correct names.
     rename = {}
     for l, r in zip(pk_cols, pk_cols_right):
         if l != r:
@@ -170,10 +116,6 @@ def compare_csvs(left_df: pd.DataFrame, right_df: pd.DataFrame,
         right = right.rename(columns=rename)
         log(f"renamed right-side columns: {rename}")
 
-    # Auto-normalize PK columns whose values look like dates in different
-    # formats (e.g. Oracle '2025-01-15' vs SAS '15JAN2025'). After this
-    # block, both sides hold ISO YYYY-MM-DD for any PK column where the
-    # normalizer could detect a parseable date format on both sides.
     pk_normalizations: List[Dict[str, str]] = []
     for col in pk_cols:
         l_norm, r_norm, label = _maybe_normalize_pk_pair(left[col], right[col])
@@ -223,8 +165,6 @@ def compare_csvs(left_df: pd.DataFrame, right_df: pd.DataFrame,
                                 "reason": "is a primary key", "n_unmatched": 0,
                                 "examples": []})
             continue
-        # Names are canonicalized to LEFT after the rename above.  Use the
-        # working frames (`left`, `right`) so post-rename names are reflected.
         in_left  = col in left.columns
         in_right = col in right.columns
         if not in_left and not in_right:

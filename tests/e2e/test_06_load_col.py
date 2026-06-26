@@ -4,8 +4,8 @@ Parity with web/FastAPI:
     - POST /api/load/col-stats/upload + /api/load/col-stats/path both call
       loader.load_precomputed_col_stats(). The CLI step iterates pairs
       and calls the same helper for each side.
-    - The 14-field CSV schema MUST match what gen-aws / gen-oracle /
-      gen-sas emit (column_name, dt, col_type, n_total, n_missing,
+    - The 14-field CSV schema MUST match what gen-aws / gen-oracle
+      emit (column_name, dt, col_type, n_total, n_missing,
       n_unique, mean, std, min_val, max_val, top_10, length_avg,
       length_max, hash_sum).
 
@@ -44,17 +44,14 @@ def _write_col_csv(path: Path, rows):
 
 
 def _seed_col_csvs(workdir):
-    """Drop synthetic col CSVs for the two AWS sides + the oracle side
-    into csv_outdir. The (sas_acct_snap) sas side lands in sas_outdir.
+    """Drop synthetic col CSVs for the AWS side + the oracle side
+    into csv_outdir.
     """
     csv_outdir = Path(workdir["csv_outdir"])
-    sas_outdir = Path(workdir["sas_outdir"])
 
     for qname, target in (
             ("aws_pos_snapshot", csv_outdir),
             ("oracle_pos_daily", csv_outdir),
-            ("aws_acct_snap_aws", csv_outdir),
-            ("sas_acct_snap", sas_outdir),
     ):
         _write_col_csv(target / f"{qname}_col.csv", [
             {"column_name": "id", "dt": "2024-10-01", "col_type": "numeric",
@@ -79,13 +76,11 @@ def test_load_col_populates_col_stats(initialized_db, run_cli, db_rows):
     wd = initialized_db
     _seed_col_csvs(wd)
 
-    for folder in (wd["csv_outdir"], wd["sas_outdir"]):
-        run_cli("load-col",
-                project_db=wd["db"], folder=folder, config=wd["config"],
-                mode="upsert")
+    run_cli("load-col",
+            project_db=wd["db"], folder=wd["csv_outdir"], config=wd["config"],
+            mode="upsert")
 
-    for qname in ("aws_pos_snapshot", "oracle_pos_daily",
-                  "aws_acct_snap_aws", "sas_acct_snap"):
+    for qname in ("aws_pos_snapshot", "oracle_pos_daily"):
         rows = db_rows(
             wd["db"],
             "SELECT COUNT(*) AS n FROM _col_stats WHERE source_table=?",

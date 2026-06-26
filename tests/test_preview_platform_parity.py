@@ -3,8 +3,7 @@
 Verify that:
   1. The preview SQL for every supported source contains dialect markers that
      match what the matching extractor would actually run.
-  2. The output_file extension is `.sql` for SQL platforms and `.sas` only for
-     SAS PROC-SQL wrappers.
+  2. The output_file extension is `.sql` for SQL platforms.
   3. Unsupported sources surface a clear error string, not silent Oracle SQL.
 
 These tests do not hit a real backend — they call `_build_preview_sql` directly
@@ -31,7 +30,6 @@ def _side_cfg(source, **overrides):
             "hadoop":     "hive_prod",
             "databricks": "main.warehouse",
             "csv":        "./csv/",
-            "sas":        "WORK",
         }.get(source, ""),
         "where":      "",
     }
@@ -72,12 +70,6 @@ PLATFORM_CASES = [
         ["SELECT", "FROM", "ROW_COUNT", "trades"],
         ["connect to oracle", "proc sql"],
         id="oracle-direct",
-    ),
-    pytest.param(
-        "sas", ".sas",
-        ["proc sql", "work.", "select", "count(*)"],
-        [],
-        id="sas-local",
     ),
 ]
 
@@ -134,7 +126,6 @@ PAIRS = [
     ("oracle",     "aws"),
     ("hadoop",     "aws"),
     ("oracle",     "databricks"),
-    ("sas",        "aws"),
     ("csv",        "csv"),
 ]
 
@@ -155,34 +146,6 @@ def test_pair_preview_emits_distinct_sql(left_src, right_src):
             f"{left_src} vs {right_src}: previews must differ "
             "(if identical, one side fell through to the wrong dialect)"
         )
-
-
-# ----- log-line consistency for /api/generate --------------------------------
-# These check that the source classification used by /api/generate does NOT
-# put hadoop into both sas_hadoop_tables and hadoop_tables paths twice.
-
-def test_generate_classification_no_hadoop_double_discovery():
-    """Regression for the 'hadoop column metadata printed twice' bug. The
-    /api/generate hadoop branch must NOT call _discover_and_write_columns
-    again — gen_sas already discovered hadoop tables via sas_hadoop_tables.
-    """
-    import inspect
-    import re
-    from dtrack.web import app as web_app
-
-    src = inspect.getsource(web_app.api_generate_files)
-    # Find the hadoop_tables branch.
-    m = re.search(r"hadoop_tables\s*=\s*\[.*?\n(.*?)# Discover", src, re.S)
-    if not m:
-        # The branch exists but the "# Discover" comment may have moved.
-        m = re.search(r"if hadoop_tables:(.*?)(?:databricks_tables|# Generate SQL file)",
-                      src, re.S)
-    assert m, "could not locate hadoop_tables branch in api_generate_files"
-    hadoop_block = m.group(1)
-    assert "_discover_and_write_columns(hadoop_tables" not in hadoop_block, (
-        "regression: hadoop_tables branch must not re-discover columns; "
-        "gen_sas already discovered them via sas_hadoop_tables."
-    )
 
 
 def test_generate_has_databricks_branch():

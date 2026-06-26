@@ -1,50 +1,23 @@
-"""Base class and shared helpers for platform builders."""
 
 import os
 import re
 import threading
-from abc import ABC, abstractmethod
-
-
-# ---------------------------------------------------------------------------
-# Query result cache (shared across platforms).
-#
-# When _cache_db is set to a SQLite path, query runners on Athena/Oracle/...
-# consult the file before submitting to the backend and write results back on
-# success. Cache key = SHA256(normalized SQL + scope), where scope is the
-# Athena database or Oracle conn_macro -- whatever distinguishes the backend
-# the SQL was issued against.
-#
-# Disable via env var DTRACK_QUERY_CACHE=0 (or legacy DTRACK_ATHENA_CACHE=0).
-# Invalidate by deleting the .cache.db file in the outdir.
-# ---------------------------------------------------------------------------
 
 _cache_db = None
 _cache_lock = threading.Lock()
 _cache_hits = 0
 _cache_misses = 0
-# When True, cache_get returns None unconditionally (forcing re-execution),
-# but cache_put still writes -- so the stale entry gets overwritten by the
-# fresh result. Toggled per-run from the web layer via set_cache_overwrite.
 _cache_overwrite = False
 
-
+# >>> Force cache misses (re-execute and overwrite) while still persisting <<< #
 def set_cache_overwrite(flag):
-    """Force cache misses (re-execute and overwrite) while still persisting
-    fresh results. Returns the previous value so callers can restore it.
-    """
     global _cache_overwrite
     prev = _cache_overwrite
     _cache_overwrite = bool(flag)
     return prev
 
-
+# >>> Enable per-process query caching at the given .cache.db path <<< #
 def set_cache_db(path):
-    """Enable per-process query caching at the given .cache.db path.
-
-    Creates the SQLite schema if missing. Subsequent cache_get/cache_put
-    calls consult this file. Pass None to disable.
-    """
     global _cache_db, _cache_hits, _cache_misses
     if (os.environ.get('DTRACK_QUERY_CACHE') == '0'
             or os.environ.get('DTRACK_ATHENA_CACHE') == '0'):
@@ -74,11 +47,9 @@ def set_cache_db(path):
     finally:
         conn.close()
 
-
+# >>> Return (hits, misses) since the most recent set_cache_db call <<< #
 def cache_stats():
-    """Return (hits, misses) since the most recent set_cache_db call."""
     return _cache_hits, _cache_misses
-
 
 def _cache_key(sql, scope):
     import hashlib
@@ -86,13 +57,8 @@ def _cache_key(sql, scope):
     raw = f"{norm}::{scope or ''}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
-
+# >>> Return the cached payload (whatever was stored) or None <<< #
 def cache_get(sql, scope):
-    """Return the cached payload (whatever was stored) or None.
-
-    `scope` is the backend identifier (Athena database, Oracle conn_macro,
-    etc.) -- keeps entries from different backends from colliding.
-    """
     global _cache_hits, _cache_misses
     if not _cache_db:
         return None
@@ -122,9 +88,8 @@ def cache_get(sql, scope):
     except Exception:
         return None
 
-
+# >>> Store value (pickled) under the (SQL, scope) key <<< #
 def cache_put(sql, scope, value, row_count=None):
-    """Store value (pickled) under the (SQL, scope) key."""
     if not _cache_db:
         return
     import sqlite3
@@ -145,38 +110,20 @@ def cache_put(sql, scope, value, row_count=None):
         finally:
             conn.close()
 
-# Oracle numeric types
 ORACLE_NUMERIC_TYPES = {
     'NUMBER', 'FLOAT', 'BINARY_FLOAT', 'BINARY_DOUBLE',
     'INTEGER', 'INT', 'SMALLINT', 'DECIMAL', 'NUMERIC', 'DEC',
 }
 
-# Athena numeric types
 ATHENA_NUMERIC_TYPES = {
     'int', 'integer', 'bigint', 'smallint', 'tinyint',
     'double', 'float', 'decimal', 'real',
 }
 
-# Date-type registry lives in constants.py (single source of truth for
-# date_type -> format and date_type -> canonical dtype). Imported here
-# so resolve_date_format() can apply both mappings to date_filter.
 from ..constants import DATE_TYPE_FORMATS, DATE_TYPE_TO_CANONICAL_DTYPE
 
-
+# >>> Ensure date_filter has date_format AND date_dtype set <<< #
 def resolve_date_format(date_filter, tbl_cfg):
-    """Ensure date_filter has date_format AND date_dtype set.
-
-    Two-step resolution, both honoring the user's tbl_cfg.date_type:
-      1. date_format: only filled when missing (a value already set by
-         load-columns wins). Falls back to DATE_TYPE_FORMATS[date_type].
-      2. date_dtype: when tbl_cfg.date_type is provided, ALWAYS overrides
-         the metadata-derived value. The user's explicit semantic config
-         is authoritative -- this prevents Oracle ORA-01858 ("non-numeric
-         character was found...") when the column is actually NUMBER /
-         VARCHAR2 / YYYYMMDD but the metadata happens to say DATE.
-
-    Call after compute_date_filter() and before building any SQL clause.
-    """
     cfg_date_type = (tbl_cfg.get('date_type') or '').lower()
     if not date_filter.get('date_format'):
         if cfg_date_type in DATE_TYPE_FORMATS:
@@ -184,76 +131,38 @@ def resolve_date_format(date_filter, tbl_cfg):
     if cfg_date_type in DATE_TYPE_TO_CANONICAL_DTYPE:
         date_filter['date_dtype'] = DATE_TYPE_TO_CANONICAL_DTYPE[cfg_date_type]
 
-
 _NUMERIC_TYPE_SET = {t.upper() for t in ORACLE_NUMERIC_TYPES} | {
     t.upper() for t in ATHENA_NUMERIC_TYPES
 }
 
-
+# >>> Check if a data type string represents a numeric column <<< #
 def is_numeric_type(data_type, is_oracle=True):
-    """Check if a data type string represents a numeric column.
-
-    Unions Oracle and Hive/Athena numeric type names so this works regardless
-    of which system produced the type label. Hadoop-source tables frequently
-    carry Oracle-style labels like 'NUMBER' (because SAS proc contents over
-    a Hive passthrough emits SAS type codes), and Oracle tables occasionally
-    show 'BIGINT' via third-party meta loaders -- the union handles both.
-    The is_oracle flag is kept for backwards compatibility and is no longer
-    needed for correctness.
-    """
     if not data_type:
         return False
     dt_upper = data_type.upper().split('(')[0].strip()
     return dt_upper in _NUMERIC_TYPE_SET
 
-
 _BARE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-
+# >>> Wrap a SQL identifier in the dialect's quote char ONLY when the bare <<< #
 def quote_ident(name, dialect="oracle"):
-    """Wrap a SQL identifier in the dialect's quote char ONLY when the bare
-    form is invalid (starts with a digit, contains spaces / hyphens / dots).
-
-    - Athena / Trino / Oracle:        ANSI double quotes  →  "123col"
-    - Hive / Hadoop / Databricks/Spark: backticks         →  `123col`
-    - SAS:                            no change            (caller handles via macro var)
-
-    Databricks/Spark uses backticks like Hive — ANSI double quotes are STRING
-    literals there, so a digit-leading column like `2_amt` double-quoted would
-    silently become the constant '2_amt' (and error in ANSI type checks).
-
-    Conservative: leaves valid bare names unchanged so existing extractions
-    keep their case-insensitive resolution against Oracle/Hive tables. Quoted
-    identifiers are case-sensitive in Oracle and case-preserving in Athena —
-    blindly quoting every column would break configs that store columns in
-    one case and reference them in another.
-    """
     if not name or _BARE_IDENT_RE.match(name):
         return name
     if dialect in ("hadoop", "hive", "databricks", "spark"):
         return f"`{name}`"
     return f'"{name}"'
 
-
+# >>> Map SQL dialect string to NULL_SENTINELS top-level key <<< #
 def _sentinel_dialect_key(dialect):
-    """Map SQL dialect string to NULL_SENTINELS top-level key."""
     d = (dialect or "").lower()
     if d in ("athena", "trino", "aws", "databricks", "spark"):
         return "aws"
     if d in ("hadoop", "hive"):
         return "hadoop"
-    if d == "sas":
-        return "sas"
     return "oracle"
 
-
+# >>> True if col_type label looks numeric (NUMBER/DOUBLE/INT/...) <<< #
 def _is_numeric_col_type(col_type):
-    """True if col_type label looks numeric (NUMBER/DOUBLE/INT/...).
-
-    Accepts both the high-level dtrack tag ('numeric' / 'categorical') and
-    raw DB type strings. Used by apply_null_sentinels() to pick the right
-    sentinel list.
-    """
     if not col_type:
         return False
     t = str(col_type).strip().lower()
@@ -263,33 +172,22 @@ def _is_numeric_col_type(col_type):
         return False
     return is_numeric_type(t)
 
-
+# >>> True if col_type label looks like a date/timestamp <<< #
 def _is_date_col_type(col_type):
-    """True if col_type label looks like a date/timestamp."""
     if not col_type:
         return False
     t = str(col_type).strip().lower()
     return "date" in t or "time" in t
 
-
+# >>> Render a sentinel value as a SQL literal for the given dialect <<< #
 def _format_sentinel_literal(val, kind, dialect):
-    """Render a sentinel value as a SQL literal for the given dialect.
-
-    - numeric: bare number (no quotes)
-    - string:  single-quoted, with embedded quotes doubled
-    - date:    DATE 'YYYY-MM-DD' on Oracle/Hadoop/Athena; SAS uses 'YYYY-MM-DD'd
-    """
     if kind == "numeric":
         return str(val)
     if kind == "string":
         esc = str(val).replace("'", "''")
         return f"'{esc}'"
-    # date
     s = str(val)
-    if dialect == "sas":
-        return f"'{s}'d"
     return f"DATE '{s}'"
-
 
 # >>> stat-key → emitted CSV fields, used by _mask_stats_in_rows <<< #
 _STAT_KEY_FIELDS = {
@@ -301,7 +199,6 @@ _STAT_KEY_FIELDS = {
     'hash_sum':  ('hash_sum',),
     'top_10':    ('top_10',),
 }
-
 
 # >>> blank stat fields that preset/stats_override disabled <<< #
 def _mask_stats_in_rows(rows, preset=None, stats_override=None):
@@ -321,35 +218,9 @@ def _mask_stats_in_rows(rows, preset=None, stats_override=None):
             if f in row:
                 row[f] = ''
 
-
+# >>> Wrap a SQL column reference with sentinel-to-NULL translation <<< #
 def apply_null_sentinels(col_ref, col_type, dialect, sentinels=None,
                          include_blank=True):
-    """Wrap a SQL column reference with sentinel-to-NULL translation.
-
-    Returns a SQL expression equivalent to:
-        CASE WHEN col IN (<sentinels>) [OR TRIM(col)='']
-             THEN NULL ELSE col END
-
-    The wrapped expression is what stats SQL should feed to MIN/MAX/AVG/
-    COUNT(DISTINCT)/LENGTH/etc. so sentinel rows (-999 for missing, 9999-12-31
-    for "infinity", etc.) collapse into NULL and don't skew the result.
-
-    Args:
-        col_ref: the dialect-quoted column reference, e.g. `"col_name"` or
-            `&_col_name` for SAS-templated SQL.
-        col_type: tag indicating numeric / categorical / date so we pick the
-            right sentinel list. Accepts dtrack tags ('numeric',
-            'categorical') or raw DB types ('NUMBER', 'VARCHAR2', 'DATE').
-        dialect: 'oracle', 'hadoop' (Hive), 'athena', 'sas'. Selects literal
-            formatting + sentinel set.
-        sentinels: optional explicit sentinel list; when None, falls back to
-            constants.NULL_SENTINELS for the dialect/type combo.
-        include_blank: also map empty / whitespace-only strings to NULL on
-            string columns. Aligned with SAS "is missing" semantics on
-            Athena/Hive where '' isn't equivalent to NULL.
-
-    No-ops (returns col_ref unchanged) when no sentinels apply.
-    """
     from ..constants import NULL_SENTINELS
 
     is_numeric = _is_numeric_col_type(col_type)
@@ -366,9 +237,6 @@ def apply_null_sentinels(col_ref, col_type, dialect, sentinels=None,
     if literals:
         conds.append(f"{col_ref} IN ({', '.join(literals)})")
     if include_blank and kind == "string" and dialect != "oracle":
-        # Oracle collapses '' to NULL natively, so the IS NULL check the
-        # caller emits already covers blank. Athena/Hive/SAS distinguish
-        # '' from NULL and need the TRIM check to align.
         conds.append(f"TRIM({col_ref}) = ''")
 
     if not conds:
@@ -376,76 +244,26 @@ def apply_null_sentinels(col_ref, col_type, dialect, sentinels=None,
 
     return f"CASE WHEN {' OR '.join(conds)} THEN NULL ELSE {col_ref} END"
 
-
+# >>> Derive storage/file name: {source}_{name} <<< #
 def qualified_name(tbl_cfg):
-    """Derive storage/file name: {source}_{name}."""
     source = tbl_cfg.get('source', '')
     name = tbl_cfg['name']
     return f"{source}_{name}" if source else name
 
-
-def sas_safe_name(name, max_len=18):
-    """Make `name` safe for use as a SAS identifier (dataset / variable name).
-
-    SAS identifier rules:
-      - max 32 characters (callers may pass smaller max to leave room for a
-        prefix like 'cache._cs_');
-      - must start with a letter or underscore;
-      - body may contain letters, digits, underscores only.
-
-    Non-conforming characters are replaced with '_' and a leading digit
-    gets an underscore prefix. After sanitization the name is truncated.
-    Without this, SAS raises "invalid data set name" at runtime for any
-    qname that happened to contain '.', '-', or other special characters,
-    or for a qname that sits right at the length boundary.
-    """
-    if not name:
-        return '_'
-    safe = re.sub(r'[^A-Za-z0-9_]', '_', str(name))
-    if safe[0].isdigit():
-        safe = '_' + safe
-    return safe[:max_len]
-
-
+# >>> Resolve table reference, wrapping with CTE if 'processed' is configured <<< #
 def resolve_table(tbl_cfg, full_table=None):
-    """Resolve table reference, wrapping with CTE if 'processed' is configured.
-
-    For SAS tables (source=sas), processed is setup statements, not a CTE.
-    Returns (table_ref, cte_prefix).
-    """
-    if is_sas_table(tbl_cfg):
-        # SAS: table = conn_macro.table, no CTE
-        conn = tbl_cfg.get('conn_macro', '')
-        table = tbl_cfg.get('table', '')
-        return f"{conn}.{table}" if conn else table, ""
-
     processed = tbl_cfg.get('processed')
     table = full_table or tbl_cfg['table']
     if not processed:
         return table, ""
     if isinstance(processed, list):
         processed = "\n".join(processed)
-    # Prefix the CTE alias so it can't collide with the real table name.
-    # When `processed` references the base table (common pattern:
-    # `SELECT * FROM T WHERE eff_dt = (SELECT MAX(eff_dt) FROM T)`) and the
-    # CTE is named `T`, Oracle reads the inner `FROM T` as a self-reference
-    # and fails with ORA-32039 (recursive WITH requires column alias list).
     alias = f"cte_{tbl_cfg['name']}"
     cte = f"WITH {alias} AS (\n{processed}\n)\n"
     return alias, cte
 
-
-def is_sas_table(tbl_cfg):
-    """Check if table config is a local SAS dataset (source=sas)."""
-    return tbl_cfg.get('source', '').lower() == 'sas'
-
-
+# >>> Reformat a YYYY-MM-DD date string to the target date_format <<< #
 def reformat_date(d, date_format):
-    """Reformat a YYYY-MM-DD date string to the target date_format.
-
-    Step 2 of adding a new date format: add a strftime pattern to fmt_map below.
-    See DATE_TYPE_FORMATS comment block above for full instructions.
-    """
     from datetime import datetime as _dt
     if not date_format or date_format == 'YYYY-MM-DD':
         return str(d)
@@ -453,32 +271,24 @@ def reformat_date(d, date_format):
         dt_obj = _dt.strptime(str(d), "%Y-%m-%d")
     except ValueError:
         return str(d)
-    # Format label → Python strftime pattern
-    # To add a new format: add 'LABEL': '%pattern' here
     fmt_map = {
-        'YYYYMMDD':    '%Y%m%d',       # 20260115
-        'DDMONYYYY':   '%d%b%Y',       # 15JAN2026
-        'DD-MON-YYYY': '%d-%b-%Y',     # 15-JAN-2026
-        'MM/DD/YYYY':  '%m/%d/%Y',     # 01/15/2026
-        'YYYYMM':      '%Y%m',         # 202601
+        'YYYYMMDD':    '%Y%m%d',
+        'DDMONYYYY':   '%d%b%Y',
+        'DD-MON-YYYY': '%d-%b-%Y',
+        'MM/DD/YYYY':  '%m/%d/%Y',
+        'YYYYMM':      '%Y%m',
     }
     py_fmt = fmt_map.get(date_format)
     if py_fmt:
         return dt_obj.strftime(py_fmt).upper() if 'MON' in date_format else dt_obj.strftime(py_fmt)
     return str(d)
 
-
+# >>> Build WHERE fragment for date IN (...) based on column type <<< #
 def build_date_in_clause(date_col, dates, date_dtype, is_sas=False, date_format=None,
                          custom_date_types=None):
-    """Build WHERE fragment for date IN (...) based on column type.
-
-    Splits into multiple IN groups for Oracle's 1000-item limit.
-    Accepts optional custom_date_types dict for extensible type handling.
-    """
     dtype = (date_dtype or '').upper()
     is_string = dtype.startswith(('CHAR', 'VARCHAR', 'STRING', 'TEXT'))
 
-    # Check custom date types first
     if custom_date_types and date_dtype and date_dtype.lower() in custom_date_types:
         custom = custom_date_types[date_dtype.lower()]
         cat = custom.get('category', 'string')
@@ -487,14 +297,10 @@ def build_date_in_clause(date_col, dates, date_dtype, is_sas=False, date_format=
             formatted = [reformat_date(d, fmt) for d in dates]
         elif cat == 'date':
             formatted = [f"DATE '{d}'" for d in dates]
-        else:  # string
+        else:
             formatted = [f"'{reformat_date(d, fmt)}'" for d in dates]
         col_expr = date_col
     elif dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
-        # Reformat to the column's integer storage format (e.g. YYYYMMDD)
-        # so the IN list emits as `col IN (20260505, 20260506, ...)` not
-        # `col IN (2026-05-05, ...)` -- the bare-string fallback was
-        # silently invalid SQL on NUMBER columns.
         formatted = [reformat_date(d, date_format) if date_format else str(d)
                      for d in dates]
         col_expr = date_col
@@ -517,13 +323,6 @@ def build_date_in_clause(date_col, dates, date_dtype, is_sas=False, date_format=
             formatted = [f"DATE '{d}'" for d in dates]
             col_expr = f"TRUNC({date_col})" if is_datetime else date_col
     else:
-        # Unknown / empty dtype — happens when _column_meta hasn't been
-        # populated for this table yet. Bare-string literals here triggered
-        # ORA-01861 ("literal does not match format string") on Oracle when
-        # the session NLS_DATE_FORMAT differs from YYYY-MM-DD. Emit an ISO
-        # DATE literal for the non-SAS path (Oracle) so it parses regardless
-        # of session NLS; for SAS-source, fall back to plain strings since
-        # SAS evaluates the comparison locally against its own typed date.
         if is_sas:
             formatted = [f"'{reformat_date(d, date_format)}'" for d in dates]
         else:
@@ -536,17 +335,12 @@ def build_date_in_clause(date_col, dates, date_dtype, is_sas=False, date_format=
         return parts[0]
     return "(" + " OR ".join(parts) + ")"
 
-
+# >>> Build WHERE fragment using BETWEEN based on column type <<< #
 def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=False, date_format=None,
                               custom_date_types=None):
-    """Build WHERE fragment using BETWEEN based on column type.
-
-    Accepts optional custom_date_types dict for extensible type handling.
-    """
     dtype = (date_dtype or '').upper()
     is_string = dtype.startswith(('CHAR', 'VARCHAR', 'STRING', 'TEXT'))
 
-    # Check custom date types first
     if custom_date_types and date_dtype and date_dtype.lower() in custom_date_types:
         custom = custom_date_types[date_dtype.lower()]
         cat = custom.get('category', 'string')
@@ -557,18 +351,12 @@ def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=F
             return f"{date_col} BETWEEN {fmt_min} AND {fmt_max}"
         elif cat == 'date':
             return f"{date_col} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
-        else:  # string
+        else:
             fmt_min = reformat_date(min_date, fmt)
             fmt_max = reformat_date(max_date, fmt)
             return f"{date_col} BETWEEN '{fmt_min}' AND '{fmt_max}'"
 
     if dtype in ('NUMBER', 'INTEGER', 'INT', 'BIGINT', 'SMALLINT'):
-        # Reformat min/max from canonical YYYY-MM-DD to the column's
-        # stored integer format (e.g. YYYYMMDD -> 20260505, YYYYMM ->
-        # 202605). Without this, the bare string '2026-05-05' would be
-        # spliced as `col BETWEEN 2026-05-05 AND ...` -- invalid SQL
-        # (Oracle tries to parse it as numeric arithmetic and raises
-        # ORA-01858).
         fmt_min = reformat_date(min_date, date_format) if date_format else str(min_date)
         fmt_max = reformat_date(max_date, date_format) if date_format else str(max_date)
         return f"{date_col} BETWEEN {fmt_min} AND {fmt_max}"
@@ -589,25 +377,6 @@ def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=F
                 return f"{col_expr} BETWEEN {sas_min} AND {sas_max}"
             except ValueError:
                 return f"{date_col} BETWEEN '{min_date}' AND '{max_date}'"
-        # Non-SAS path. For datetime/timestamp columns we want to capture
-        # every row that falls on any day in [min, max], including rows
-        # with non-zero time parts on the upper day. Two ways to write
-        # that:
-        #   (a) TRUNC(col) BETWEEN DATE 'min' AND DATE 'max'
-        #   (b) col >= DATE 'min' AND col < DATE 'max+1day'
-        # We use (b). Reasons:
-        #   - (a) wraps the column in a function (TRUNC), which prevents
-        #     the optimizer from using an index on `col`. (b) keeps the
-        #     column bare on the LHS, transformation lives entirely on
-        #     the RHS literal.
-        #   - TRUNC() is Oracle-specific; Athena/Trino doesn't have it
-        #     (would need date_trunc('day', col)). (b) is portable.
-        #   - (a) at upper bound = DATE 'max' = max 00:00:00, so rows
-        #     after midnight on the upper day still pass via TRUNC --
-        #     but (b)'s `< max+1day` captures them too, including
-        #     anything in the last sub-second.
-        # For plain DATE columns (no time, e.g. Athena DATE), the
-        # half-open range still works identically.
         if is_datetime:
             from datetime import datetime as _dt, timedelta as _td
             try:
@@ -616,31 +385,18 @@ def build_date_between_clause(date_col, min_date, max_date, date_dtype, is_sas=F
                 return (f"{date_col} >= DATE '{min_date}' "
                         f"AND {date_col} < DATE '{max_next}'")
             except ValueError:
-                # Fall back to inclusive BETWEEN if max_date isn't ISO --
-                # the date helper upstream should canonicalize, but stay
-                # defensive.
                 return f"{date_col} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
         return f"{date_col} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
     else:
-        # Unknown / empty dtype — usually means _column_meta isn't loaded
-        # for this table. Bare-string literals here triggered ORA-01861
-        # ("literal does not match format string") on Oracle when the
-        # session NLS_DATE_FORMAT differs from YYYY-MM-DD. Emit ISO DATE
-        # literals for the non-SAS path so it parses regardless of NLS.
         if is_sas:
             fmt_min = reformat_date(min_date, date_format)
             fmt_max = reformat_date(max_date, date_format)
             return f"{date_col} BETWEEN '{fmt_min}' AND '{fmt_max}'"
         return f"{date_col} BETWEEN DATE '{min_date}' AND DATE '{max_date}'"
 
-
+# >>> Return (from_lit, to_lit): the platform-formatted date literals that <<< #
 def format_date_bounds_literals(min_date, max_date, date_dtype, is_sas=False,
                                 date_format=None, custom_date_types=None):
-    """Return (from_lit, to_lit): the platform-formatted date literals that
-    build_date_between_clause would splice into a BETWEEN. Exposed so driver
-    datasets can carry the raw literal strings for inspection (useful when
-    cross-checking Oracle/Hadoop/SAS date formatting before running).
-    """
     dtype = (date_dtype or '').upper()
     is_string = dtype.startswith(('CHAR', 'VARCHAR', 'STRING', 'TEXT'))
 
@@ -675,24 +431,14 @@ def format_date_bounds_literals(min_date, max_date, date_dtype, is_sas=False,
         if is_datetime:
             return f"DATE '{min_date}'", f"DATE '{max_date}'"
         return f"DATE '{min_date}'", f"DATE '{max_date}'"
-    # Unknown / empty dtype — emit ISO DATE literal for non-SAS so Oracle
-    # doesn't try to implicit-convert a bare string against NLS_DATE_FORMAT.
     if is_sas:
         return (f"'{reformat_date(min_date, date_format)}'",
                 f"'{reformat_date(max_date, date_format)}'")
     return f"DATE '{min_date}'", f"DATE '{max_date}'"
 
-
+# >>> Build a BETWEEN clause covering [min(matching_dates), max(matching_dates)] <<< #
 def build_date_range_with_gaps(date_col, matching_dates, date_dtype,
                                is_sas=False, date_format=None, custom_date_types=None):
-    """Build a BETWEEN clause covering [min(matching_dates), max(matching_dates)].
-
-    User-typed excludes go through a separate `_exclude_dates` /
-    `exclude_clause` plumbed by the per-platform col-gen drivers, not through
-    here. Row_comparison-derived auto-excludes were removed: they conflated
-    both-zero days with real diffs and bloated NOT IN lists; the user-typed
-    field is now the only source of NOT IN exclusions.
-    """
     bmin, bmax = min(matching_dates), max(matching_dates)
     return build_date_between_clause(
         date_col, bmin, bmax, date_dtype,
@@ -700,12 +446,8 @@ def build_date_range_with_gaps(date_col, matching_dates, date_dtype,
         custom_date_types=custom_date_types,
     )
 
-
+# >>> Compute date filter once in Python for both SAS and Athena paths <<< #
 def compute_date_filter(tbl_cfg, db_path, vintage):
-    """Compute date filter once in Python for both SAS and Athena paths.
-
-    Returns dict with vintage, filter_type, min_date, max_date, dates, etc.
-    """
     qname = qualified_name(tbl_cfg)
 
     result = {
@@ -720,14 +462,6 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
         'date_format': None,
     }
 
-    # Always read the date column's dtype + format from the DB if we can —
-    # downstream WHERE-clause builders need it to emit the right literal
-    # form (DATE 'yyyy-mm-dd' vs '20260401' vs an integer). Previously this
-    # was skipped when vintage='all' (the early-return), which made
-    # build_date_between_clause fall through to the bare-string fallback
-    # and triggered ORA-01861 on Oracle when the session NLS_DATE_FORMAT
-    # didn't accept ISO. Only the matching-dates lookup needs to skip when
-    # vintage='all', since 'all' means "no per-bucket filter".
     if db_path:
         from ..db import get_column_meta, get_metadata
         date_col = tbl_cfg.get('date_col', '')
@@ -737,13 +471,13 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
                     result['date_dtype'] = (cm.get('data_type') or '').upper() or None
                     break
         except Exception:
-            pass  # _column_meta absent / read failed — leave date_dtype None
+            pass
         try:
             meta = get_metadata(db_path, qname)
             if meta:
                 result['date_format'] = meta.get('date_format')
         except Exception:
-            pass  # _metadata absent — leave date_format None
+            pass
 
     if vintage == 'all' or not db_path:
         print(f"  [date filter] vintage: {vintage} | no date filter applied "
@@ -756,7 +490,6 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
 
     from ..db import list_table_pairs, get_row_comparison, get_column_meta, get_metadata
 
-    # Look up matching dates
     pairs = list_table_pairs(db_path)
     pair_name = next(
         (p['pair_name'] for p in pairs
@@ -769,22 +502,9 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
         if comp:
             if comp.get('matching_dates'):
                 matching_dates = comp['matching_dates']
-            # Carry the row_comparison overlap window for callers that want
-            # it for display/diagnostics. The row-compare-derived
-            # `excluded_dates` is intentionally NOT propagated here -- the
-            # only NOT IN source is the user-typed `_exclude_dates` from
-            # the pair card, plumbed by each platform's col-gen driver.
             result['overlap_start'] = comp.get('overlap_start')
             result['overlap_end']   = comp.get('overlap_end')
 
-    # Intersect matching_dates with the user's from/to window. The web
-    # layer stashes the resolved per-pair (or global fallback) from/to as
-    # `_from_date` / `_to_date`. Without this clip, the bucket emission
-    # covers every historical matching_date saved in `_row_comparison`
-    # (which can span years) instead of the requested window. Symptom:
-    # user sets from=2026-05-01 to=2026-05-09 expecting ~2 weekly buckets
-    # but the col gen produces 181 (every week from 2022 to 2026 because
-    # row-compare was last run over the full overlap range).
     from_date = tbl_cfg.get('_from_date')
     to_date   = tbl_cfg.get('_to_date')
     if matching_dates and (from_date or to_date):
@@ -799,7 +519,6 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
                   f"[{from_date or 'min'}..{to_date or 'max'}] -> {len(clipped)} dates")
         matching_dates = clipped
 
-    # Sample dates if sample@N vintage
     if is_sample and matching_dates:
         matching_dates = _sample_matching_dates(db_path, tbl_cfg, matching_dates, n_sample)
         result['filter_type'] = 'in_list'
@@ -811,7 +530,6 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
         print(f"  [date filter] {vintage} | {len(matching_dates)} sampled dates | range: {result['min_date']} to {result['max_date']}")
         return result
 
-    # Table has a WHERE clause (from where_map or direct config "where")
     has_where = tbl_cfg.get('_where_from_config') or bool(tbl_cfg.get('where', '').strip())
 
     if has_where or matching_dates:
@@ -850,9 +568,8 @@ def compute_date_filter(tbl_cfg, db_path, vintage):
     print(f"  [date filter] vintage: {vintage} | range: {result['min_date']} to {result['max_date']} | {len(matching_dates)} dates -> {len(buckets)} buckets")
     return result
 
-
+# >>> Parse 'sample@N' into (is_sample, n_sample) <<< #
 def _parse_sample_vintage(vintage_str):
-    """Parse 'sample@N' into (is_sample, n_sample)."""
     if not vintage_str or not vintage_str.startswith('sample@'):
         return False, 0
     try:
@@ -860,9 +577,8 @@ def _parse_sample_vintage(vintage_str):
     except ValueError:
         return False, 0
 
-
+# >>> Sample N dates from matching_dates with reproducible seed <<< #
 def _sample_matching_dates(db_path, tbl_cfg, matching_dates, n_sample=100):
-    """Sample N dates from matching_dates with reproducible seed."""
     import random
     from ..db import get_sampled_dates, save_sampled_dates, list_table_pairs
 
@@ -897,14 +613,8 @@ def _sample_matching_dates(db_path, tbl_cfg, matching_dates, n_sample=100):
     save_sampled_dates(db_path, pair_name, qname, new_samples)
     return new_samples
 
-
+# >>> Splice extra CTEs onto an existing 'WITH ... ' prefix (or start one) <<< #
 def _merge_cte_chain(cte_prefix, new_ctes):
-    """Splice extra CTEs onto an existing 'WITH ... ' prefix (or start one).
-
-    new_ctes is a list of (alias, body_sql) tuples. body_sql is the inner
-    select (no surrounding parens). Returns a 'WITH ... ' string that can
-    be prefixed directly to a SELECT.
-    """
     new_clauses = [f"{name} AS (\n{body.strip()}\n)" for name, body in new_ctes]
     if not cte_prefix.strip():
         return "WITH " + ",\n".join(new_clauses) + "\n"
@@ -913,35 +623,15 @@ def _merge_cte_chain(cte_prefix, new_ctes):
         return existing + ",\n" + ",\n".join(new_clauses) + "\n"
     return existing + "\nWITH " + ",\n".join(new_clauses) + "\n"
 
-
+# >>> Build column statistics SQL for Oracle or Athena <<< #
 def build_stats_sql(table, col, date_col, where="", col_type="numeric", dialect="oracle", cte_prefix=""):
-    # NOTE: Uses explicit column references — never SELECT *
-    """Build column statistics SQL for Oracle or Athena.
-
-    For categorical, mean/std/min/max are *category-aware* (rank-weighted by
-    UPPER(cat) ordering) so any permutation of counts across categories
-    produces different stats. min_val/max_val are formatted "{cat}={count}".
-
-    Identifiers (col / date_col) are auto-quoted via `quote_ident` only when
-    the bare form is invalid SQL (e.g. starts with a digit). The literal
-    column-name string baked into the SELECT (`'{col}' AS column_name`)
-    keeps the unquoted name — it's the output value, not a reference.
-    """
     where_clause = f"AND {where}" if where else ""
     is_athena = dialect == "athena"
-    # Reference forms (used in COUNT/AVG/etc.). Original `col` / `date_col`
-    # stay as-is for the output-name literal in the SELECT.
     col_ref = quote_ident(col, dialect)
     date_col_ref = quote_ident(date_col, dialect)
-    # Wrap the column reference with the sentinel-to-NULL translation so
-    # missing-value sentinels (-999, '9999-12-31', 'NA', ...) collapse to
-    # NULL before any aggregate sees them. After this wrap n_missing /
-    # n_unique / min / max / mean / std all agree across platforms even
-    # when one side persists sentinels and the other uses real NULLs.
     col_expr = apply_null_sentinels(col_ref, col_type, dialect)
 
     if col_type == "numeric":
-        # Numeric n_missing = total - non-null after sentinel translation.
         missing = f"COUNT(*) - COUNT({col_expr})"
         avg_expr = f"AVG(CAST({col_expr} AS DOUBLE))" if is_athena else f"AVG({col_expr})"
         std_expr = f"STDDEV(CAST({col_expr} AS DOUBLE))" if is_athena else f"STDDEV({col_expr})"
@@ -954,17 +644,9 @@ FROM {table}
 WHERE 1=1 {where_clause}
 GROUP BY {date_col_ref}""".strip()
 
-    # Categorical branch: rank-weighted stats based on alpha (UPPER) ordering.
-    # col_expr already wraps the column with sentinel-to-NULL translation,
-    # so 'NA' / '#N/A' / '.' etc. collapse before the freq table groups them.
     cast_expr = f"CAST({col_expr} AS VARCHAR)" if is_athena else f"TO_CHAR({col_expr})"
     cnt_to_str = "CAST(cnt AS VARCHAR)" if is_athena else "cnt"
-    # Use DOUBLE on Athena to avoid BIGINT overflow on cnt*rnk*rnk.
     cnt_num = "CAST(cnt AS DOUBLE)" if is_athena else "cnt"
-    # Missing semantics, post-sentinel: count NULL on every platform. We
-    # also fold blank/whitespace strings into "missing" on engines that
-    # distinguish '' from NULL (Athena/Hive/SAS) — Oracle collapses '' to
-    # NULL natively so the extra TRIM check is a no-op there.
     if is_athena:
         present_cond = "p_col IS NOT NULL AND TRIM(p_col) <> ''"
         missing_cond = "p_col IS NULL OR TRIM(p_col) = ''"
@@ -998,8 +680,6 @@ GROUP BY {date_col_ref}""".strip()
                              * (sum_cnt_rnk * 1.0 / sum_cnt), 0))
            END AS std_v
     FROM _dt_agg"""),
-        # min_v = alpha-first p_col, max_v = alpha-last p_col, encoded as
-        # "p_col=cnt". Sorted by val (alphabetically); freq is just for display.
         ("_dt_minmax", f"""
     SELECT dt,
            MAX(CASE WHEN rnk = 1 THEN p_col || '=' || {cnt_to_str} END) AS min_v,
@@ -1023,21 +703,12 @@ FROM _dt_totals t
 LEFT JOIN _dt_stats s ON s.dt = t.dt
 LEFT JOIN _dt_minmax m ON m.dt = t.dt""".rstrip()
 
-
+# >>> Build top 10 frequency SQL for Oracle or Athena <<< #
 def build_top10_sql(table, col, date_col, where="", dialect="oracle"):
-    # NOTE: Uses explicit column references — never SELECT *
-    """Build top 10 frequency SQL for Oracle or Athena.
-
-    Auto-quotes col / date_col when the bare name is invalid SQL (e.g. a
-    column starting with a digit). See `quote_ident` for the rules.
-    """
     where_clause = f"AND {where}" if where else ""
     alias = " t" if dialect == "athena" else ""
     col_ref = quote_ident(col, dialect)
     date_col_ref = quote_ident(date_col, dialect)
-    # Sentinel-translated column reference — keeps sentinel rows out of
-    # the top-10. Type defaults to 'categorical' since top-10 only ever
-    # runs on categorical columns; the string sentinel set is correct.
     col_expr = apply_null_sentinels(col_ref, "categorical", dialect)
     return f"""
 SELECT dt, val, cnt FROM (
@@ -1048,9 +719,8 @@ SELECT dt, val, cnt FROM (
     GROUP BY {date_col_ref}, {col_expr}
 ){alias} WHERE rn <= 10""".strip()
 
-
+# >>> Normalize a query result row to standard dict format (all strings) <<< #
 def parse_stats_row(row):
-    """Normalize a query result row to standard dict format (all strings)."""
     return {
         'dt': str(row['dt']),
         'column_name': row['column_name'],
@@ -1064,24 +734,8 @@ def parse_stats_row(row):
         'max_val': str(row['max_val']) if row['max_val'] is not None else '',
     }
 
-
+# >>> Read cardinality from _col_stats and return the set of cols whose <<< #
 def read_id_cols_from_col_stats(db_path, table_name, threshold=0.99, ttl_days=1.0):
-    """Read cardinality from _col_stats and return the set of cols whose
-    mean(n_unique/n_total) across dts >= threshold.
-
-    Used by gen-sas to auto-skip ID-like columns on subsequent runs without
-    needing to query Oracle/Hadoop directly. Cache freshness is gated on
-    `_metadata.last_loaded` for the table — older than ttl_days → returns
-    empty set (treated as "no cache").
-
-    First-run behaviour: _col_stats is empty for a never-extracted table, so
-    this returns empty set and gen-sas emits the full per-col extraction
-    (current behaviour). After the first successful load-col, subsequent
-    gen-sas calls skip ID cols.
-
-    Returns set() (never None) so callers can `tbl.get('_id_cols_to_skip', set())`.
-    Set DTRACK_ID_DETECTION=0 to disable entirely.
-    """
     import os as _os
     if _os.environ.get('DTRACK_ID_DETECTION', '1') == '0':
         return set()
@@ -1092,9 +746,6 @@ def read_id_cols_from_col_stats(db_path, table_name, threshold=0.99, ttl_days=1.
     try:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
-        # TTL gate via _metadata.last_loaded — same column dtrack already
-        # stamps when load-col / load-row writes data. ttl_days=0 means
-        # "always treat as expired"; pass None to skip the gate entirely.
         if ttl_days is not None:
             try:
                 cur.execute(
@@ -1111,7 +762,7 @@ def read_id_cols_from_col_stats(db_path, table_name, threshold=0.99, ttl_days=1.
                         conn.close()
                         return set()
             except sqlite3.OperationalError:
-                pass  # _metadata may lack last_loaded on older DBs
+                pass
         cur.execute(
             "SELECT column_name, n_total, n_unique FROM _col_stats "
             "WHERE source_table = ? "
@@ -1138,99 +789,37 @@ def read_id_cols_from_col_stats(db_path, table_name, threshold=0.99, ttl_days=1.
     return {col for col, rs in by_col.items()
             if rs and (sum(rs) / len(rs)) >= threshold}
 
-
-# ---------------------------------------------------------------------------
-# Cross-engine categorical hash / length helpers
-#
-# These are the Python reference implementations of the categorical-coarse
-# signals (length_avg, length_max, hash_sum). The Oracle and Athena SQL
-# builders emit expressions that reproduce these formulas on each engine.
-# Tests assert that the SQL strings call the right primitives so the two
-# engines produce identical output on identical data.
-#
-# Recipe (must match across engines):
-#   trim    = strip ASCII space only (the SQL TRIM default; non-ASCII
-#             whitespace stays in the value on both engines)
-#   utf8    = encode as UTF-8 bytes
-#   md5     = MD5 of the UTF-8 bytes (32 hex chars)
-#   hash16  = int(md5[:4], 16)   in [0, 65535]
-#   length  = number of Unicode characters in the trimmed value
-#             (NOT bytes -- both engines must count characters)
-# ---------------------------------------------------------------------------
-
-# Max-length cap applied by ALL engines to the freq table's p_col before
-# computing length_avg / length_max / hash_sum / min_val / max_val. Picked
-# to match Hadoop's `column_hadoop.sas` which truncates via
-# `SUBSTR(CAST(col AS STRING), 1, 200)` -- the value SAS already produces
-# in shipped data. Oracle (`SUBSTR(TO_CHAR(col), 1, 200)`) and Athena
-# (`SUBSTR(CAST(col AS VARCHAR), 1, 200)`) apply the same cap so all three
-# engines hash/measure the same truncated bytes.
-#
-# Why 200: keeps cross-engine compares meaningful on long-text columns
-# while matching the existing Hadoop output. p_col is just the key for
-# freq bucketing -- 200 chars is plenty to distinguish categorical values
-# in practice; pathological >200-char values land in a single
-# truncation-collision bucket on every engine.
 P_COL_MAX_LEN = 200
 
-
+# >>> Apply the shared p_col truncation (matches SUBSTR(..., 1, 4000)) <<< #
 def categorical_truncate(value):
-    """Apply the shared p_col truncation (matches SUBSTR(..., 1, 4000))."""
     if value is None:
         return None
     s = str(value)
     return s[:P_COL_MAX_LEN]
 
-
+# >>> ASCII-space TRIM matching SQL TRIM(value) default <<< #
 def categorical_trim(value):
-    """ASCII-space TRIM matching SQL TRIM(value) default.
-
-    NB: both Oracle TRIM and Trino/Athena TRIM default to ASCII space only.
-    Non-ASCII whitespace (NBSP \\u00a0, tab, etc.) is intentionally left in
-    place by both engines, so this helper does the same.
-    """
     if value is None:
         return None
     return str(value).strip(' ')
 
-
+# >>> Character length of the trimmed value, or None if value is None <<< #
 def categorical_length(value):
-    """Character length of the trimmed value, or None if value is None.
-
-    Counts Unicode code points -- matches Trino LENGTH() and Oracle
-    LENGTH() on a UTF-8 database (NLS_CHARACTERSET=AL32UTF8). Both
-    engines therefore report the same number for 'café' (= 4), '🎉' (= 1),
-    etc., regardless of underlying byte width.
-    """
     if value is None:
         return None
     return len(categorical_trim(value))
 
-
+# >>> 16-bit categorical hash matching the cross-engine SQL recipe <<< #
 def categorical_hash16(value):
-    """16-bit categorical hash matching the cross-engine SQL recipe.
-
-    Engine SQL emits the equivalent of int(md5(utf8(trim(v)))[:4], 16) so
-    SUM(cnt * hash16) is comparable across Oracle / Athena / Hadoop on the
-    same data. Returns None for NULL input.
-    """
     import hashlib
     if value is None:
         return None
     raw = categorical_trim(value).encode('utf-8')
     return int(hashlib.md5(raw).hexdigest()[:4], 16)
 
-
+# >>> Compute length_avg / length_max / hash_sum for a list of (p_col, cnt) <<< #
 def categorical_aggregates(freq_rows):
-    """Compute length_avg / length_max / hash_sum for a list of (p_col, cnt).
-
-    The reference implementation the SQL builders are tested against.
-    Mirrors the SQL behavior of the categorical CTE chain:
-      - SUBSTR(..., 1, P_COL_MAX_LEN) truncation before measurement / hashing
-      - NULL p_col rows excluded from length and hash (they only count
-        toward n_missing)
-      - SUM(cnt * X) with cnt-weighting
-    """
     truncated = [(categorical_truncate(p), c) for p, c in freq_rows]
     non_null = [(p, c) for p, c in truncated if p is not None]
     if not non_null:
@@ -1245,21 +834,12 @@ def categorical_aggregates(freq_rows):
         'hash_sum': sum_hash,
     }
 
-
+# >>> Return mock directory from DTRACK_MOCK (preferred) or legacy env vars <<< #
 def get_mock_dir():
-    """Return mock directory from DTRACK_MOCK (preferred) or legacy env vars."""
     return os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ORACLE_MOCK')
 
-
+# >>> Extract from mock CSV files instead of real database <<< #
 def _extract_mock(config_path, outdir, types, db_path, mock_dir, source_filter):
-    """Extract from mock CSV files instead of real database.
-
-    Mock directory uses flat layout: {qname}_row.csv, {qname}_col.csv
-    where qname = {source}_{name} (from qualified_name()).
-
-    Args:
-        source_filter: Source type(s) to filter, e.g. ('oracle', 'sas') or ('aws',)
-    """
     import json
     import shutil
 
@@ -1295,7 +875,6 @@ def _extract_mock(config_path, outdir, types, db_path, mock_dir, source_filter):
                 print(f"  [mock] File not found: {src}")
 
     print(f"\n[mock] Extraction complete. Output in: {outdir}")
-
 
 # >>> copy mock CSVs for a pre-built list of table configs (+ per-table timing) <<< #
 def _extract_mock_tables(tables, outdir, types, mock_dir):
@@ -1337,7 +916,6 @@ def _extract_mock_tables(tables, outdir, types, mock_dir):
     write_timing_csv(outdir, timing_records, tables)
     print(f"\n[mock] Extraction complete. Output in: {outdir}")
 
-
 # >>> rename a just-generated extract_{type}.sql to extract_{type}.{platform}.sql so platforms sharing one dir don't clobber (review only) <<< #
 def tag_generated_sql(outdir, extract_type, platform):
     src = os.path.join(outdir, f"extract_{extract_type}.sql")
@@ -1347,7 +925,6 @@ def tag_generated_sql(outdir, extract_type, platform):
     os.replace(src, dst)
     print(f"[gen-only] {dst}")
     return dst
-
 
 # >>> append timing rows to per-table {outdir}/{qname}_timing.csv (row + col logs accumulate) <<< #
 def write_timing_csv(outdir, records, tables=None):
@@ -1374,17 +951,15 @@ def write_timing_csv(outdir, records, tables=None):
         written.append(timing_path)
     return written
 
-
+# >>> Load tables from config (unified format only) <<< #
 def load_tables_from_config(config):
-    """Load tables from config (unified format only)."""
     if "pairs" in config and isinstance(config["pairs"], dict):
         from ..config import get_all_tables_from_unified
         return get_all_tables_from_unified(config)
     return config.get('tables', [])
 
-
+# >>> Fill in columns from _column_meta for tables missing columns <<< #
 def fill_columns_from_meta(tables, db_path):
-    """Fill in columns from _column_meta for tables missing columns."""
     from ..db import get_column_meta
     for tbl in tables:
         if tbl.get('columns'):
@@ -1405,9 +980,8 @@ def fill_columns_from_meta(tables, db_path):
                 tbl['columns'] = all_cols
                 print(f"  {tbl['name']}: loaded {len(all_cols)} columns from _column_meta")
 
-
+# >>> Inject where_map filters from pair config into table configs <<< #
 def inject_where_from_config(tables, config):
-    """Inject where_map filters from pair config into table configs."""
     if "pairs" not in config:
         return
     for tbl in tables:
@@ -1425,9 +999,8 @@ def inject_where_from_config(tables, config):
                 print(f"  {qualified_name(tbl)}: using where_map[{side}] from config")
                 break
 
-
+# >>> Compare two column dictionaries and match by case-insensitive name <<< #
 def match_columns_from_dicts(left_cols, right_cols, left_label="left", right_label="right", outfile=None):
-    """Compare two column dictionaries and match by case-insensitive name."""
     import json
 
     left_lower = {k.lower(): k for k in left_cols}
@@ -1462,35 +1035,9 @@ def match_columns_from_dicts(left_cols, right_cols, left_label="left", right_lab
 
     return result
 
-
-# ---------------------------------------------------------------------------
-# Shared extract-SQL utilities. The block-file format and the manual-exclude
-# AND'ing pattern are identical across Oracle / Hadoop / (and the gen-first
-# Athena path), so the parser and the helper live here once.
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Dialect-parameterized column-stats SQL builders. The categorical CTE chain
-# (freq → ranked → totals → agg → sstats → minmax → top_n → lenhash) is
-# structurally identical across dialects; only a small set of fragments
-# differ (string concat operator, cast-to-string syntax, listagg-equivalent,
-# NVL/COALESCE, hash function, NULL cast literals). Each dialect supplies
-# those fragments via _col_sql_dialect_ops; the rest of the SQL is composed
-# in build_col_sql / build_lifeboat_col_sql.
-#
-# The two Oracle and Hadoop per-platform builders that used to live in
-# their respective modules are now thin wrappers calling these helpers.
-# ---------------------------------------------------------------------------
-
+# >>> Returns a dict of dialect-specific SQL fragments used by build_col_sql <<< #
 def _col_sql_dialect_ops(dialect):
-    """Returns a dict of dialect-specific SQL fragments used by build_col_sql.
-
-    To add a new dialect: provide all the same keys. Helpers that take or
-    return SQL fragments are callables so the caller can compose them.
-    """
     if dialect == 'oracle':
-        # Imports inside the branch so base.py doesn't depend on oracle.py
-        # at import time (oracle.py imports from base.py).
         from .oracle import _vintage_date_expr_oracle, _oracle_portable_hash16
         return {
             'wc_empty':           '(1=1)',
@@ -1503,9 +1050,6 @@ def _col_sql_dialect_ops(dialect):
             'mean_outer':         lambda x: x,
             'std_outer':          lambda x: x,
             'minmax_strcast':     lambda x: f'TO_CHAR({x})',
-            # Lifeboat NULL casts. Oracle: NUMBER for n_unique/mean/std,
-            # VARCHAR2(1) for min/max. Hadoop has different per-field types
-            # (see hadoop branch). Three keys map cleanly.
             'lifeboat_null_count':    'CAST(NULL AS NUMBER)',
             'lifeboat_null_meanstd':  'CAST(NULL AS NUMBER)',
             'lifeboat_null_minmax':   'CAST(NULL AS VARCHAR2(1))',
@@ -1535,26 +1079,12 @@ def _col_sql_dialect_ops(dialect):
             'mean_outer':         lambda x: f'CAST({x} AS STRING)',
             'std_outer':          lambda x: f'CAST({x} AS STRING)',
             'minmax_strcast':     lambda x: f'CAST({x} AS STRING)',
-            # Hadoop: BIGINT for n_unique only; mean/std/min/max all STRING.
             'lifeboat_null_count':    'CAST(NULL AS BIGINT)',
             'lifeboat_null_meanstd':  'CAST(NULL AS STRING)',
             'lifeboat_null_minmax':   'CAST(NULL AS STRING)',
             'top10_listagg':      lambda item: (
                 f"concat_ws('; ', collect_list({item}))"
             ),
-            # Cross-engine-portable hash16: int(md5(utf8(trim(v)))[:4], 16),
-            # same formula as Oracle's _oracle_portable_hash16 and Athena's
-            # _athena_portable_hash16, so SUM(cnt * hash16) is comparable
-            # byte-for-byte across all three engines on identical data.
-            # An earlier version of this file left hash_sum as ''; that
-            # was the right call for Hive's built-in HASH() (which uses
-            # Java's hashCode and never agrees cross-engine) but wrong for
-            # the portable md5 formula. The legacy SAS template pulled the
-            # freq table and computed hash16 SAS-side via the exact same
-            # Python function (base.categorical_hash16) — this puts the
-            # computation back on the engine where it scales.
-            # CAST(cnt AS DOUBLE) prevents BIGINT overflow on the product
-            # for very-high-cardinality columns (matches Athena's choice).
             'hash_sum_expr':      lambda p_col: (
                 f"SUM(CAST(cnt AS DOUBLE) * "
                 f"CAST(conv(substr(md5(trim({p_col})), 1, 4), 16, 10) AS DOUBLE))"
@@ -1563,38 +1093,12 @@ def _col_sql_dialect_ops(dialect):
             'cat_missing':        "p_col IS NULL OR TRIM(p_col) = ''",
             'final_order_by':     '',
             'vintage_expr':       lambda tbl_cfg, date_col_q, vintage, date_dtype, date_format: (
-                # Hadoop's vintage helper takes tbl_cfg + raw date_col, not
-                # the quoted form, and ignores date_dtype / date_format
-                # (it inspects tbl_cfg.date_type instead).
                 _hadoop_vintage_expr(tbl_cfg, tbl_cfg['date_col'], vintage)
             ),
-            # Hadoop's vintage_expr already returns a string-shaped
-            # expression (concat/substr or date_format), so no outer wrap.
             'dt_select_wrap':     lambda dt_expr: dt_expr,
         }
-        # Databricks/Spark shares Hive's cast/concat/hash fragments (above)
-        # AND Hive's vintage bucketing: _hadoop_vintage_expr builds buckets
-        # from substr/concat/date_format/next_day/to_date and deliberately
-        # avoids date_trunc() and date_parse() -- both of which are absent or
-        # invalid in Spark SQL (date_parse is Trino-only; older runtimes
-        # reject date_trunc). The earlier Athena override emitted
-        # date_parse(CAST(col AS VARCHAR), ...), which fails on Spark with
-        # "no function date_parse" / bare-VARCHAR primitive-type errors, so
-        # databricks now uses the hadoop branch unchanged.
         return ops
     if dialect == 'duckdb':
-        # DuckDB powers the csv-source path (platforms/csv_duckdb.py).
-        # SQL flavor is closest to Postgres / standard SQL with most
-        # Hive built-ins also present, so this dialect borrows from
-        # both. Notable deviations:
-        #   - no `conv(hex, 16, 10)` -> hex parsing for hash16 uses
-        #     `('0x' || hex_str)::INTEGER` which DuckDB accepts.
-        #   - LISTAGG-equivalent is `string_agg(expr, ', ' ORDER BY ...)`
-        #     which DuckDB supports natively (better than Hive's
-        #     non-deterministic collect_list).
-        #   - date_trunc is standard SQL.
-        #   - is_oracle_typed=False (uses the same Hive-style numeric
-        #     dtype catalog).
         return {
             'wc_empty':           '1=1',
             'is_oracle_typed':    False,
@@ -1609,14 +1113,9 @@ def _col_sql_dialect_ops(dialect):
             'lifeboat_null_count':    'CAST(NULL AS BIGINT)',
             'lifeboat_null_meanstd':  'CAST(NULL AS VARCHAR)',
             'lifeboat_null_minmax':   'CAST(NULL AS VARCHAR)',
-            # DuckDB's string_agg honors ORDER BY -- gives a deterministic
-            # top_10 (unlike Hive's collect_list).
             'top10_listagg':      lambda item: (
                 f"string_agg({item}, '; ' ORDER BY cnt DESC, p_col ASC)"
             ),
-            # Portable hash16: same MD5-truncated-to-16-bit recipe as the
-            # other dialects. DuckDB has md5() returning lowercase hex,
-            # plus '0x'-prefixed hex literals are castable to INTEGER.
             'hash_sum_expr':      lambda p_col: (
                 f"SUM(CAST(cnt AS DOUBLE) * "
                 f"CAST(('0x' || substr(md5(trim({p_col})), 1, 4))::INTEGER AS DOUBLE))"
@@ -1631,20 +1130,9 @@ def _col_sql_dialect_ops(dialect):
         }
     raise ValueError(f"unknown dialect {dialect!r} for col SQL builder")
 
-
+# >>> DuckDB expression that buckets `date_col` to the configured vintage <<< #
 def _duckdb_vintage_expr(tbl_cfg, date_col, vintage):
-    """DuckDB expression that buckets `date_col` to the configured vintage.
-
-    Returns a string-typed expression that downstream GROUP BY / dt_select
-    can use directly. DuckDB has standard `date_trunc('week', ...)` plus
-    full ISO date parsing for string columns, so this is shorter than
-    the Hive equivalent.
-    """
     date_type = (tbl_cfg.get('date_type') or 'string_dash').lower()
-    # Coerce to DATE. CAST(... AS VARCHAR) first so strptime works whether
-    # read_csv_auto inferred the column as VARCHAR, DATE, or BIGINT (a YYYYMMDD
-    # int still casts to its digit string). For dash/ISO dates CAST(... AS DATE)
-    # parses both a 'YYYY-MM-DD' string and an already-DATE column.
     if date_type in ('string_compact', 'num'):
         parsed = f"strptime(CAST({date_col} AS VARCHAR), '%Y%m%d')::DATE"
     elif date_type in ('string_dash', 'string'):
@@ -1664,20 +1152,8 @@ def _duckdb_vintage_expr(tbl_cfg, date_col, vintage):
         return f"strftime({parsed}, '%Y-%m-%d')"
     return f"strftime(date_trunc('{unit}', {parsed}), '%Y-%m-%d')"
 
-
+# >>> Single-row hash16 expression for the Quick/Standard flat SQL paths <<< #
 def _hash16_flat_expr(dialect, col_expr):
-    """Single-row hash16 expression for the Quick/Standard flat SQL paths.
-
-    The freq-table-based hash_sum is SUM(cnt * hash16(p_col)). Mathematically
-    equivalent to SUM(hash16(col)) over every row (because hash16 is a pure
-    function, hashing each of N rows of the same value yields N times the
-    same hash16 value, identical to cnt × hash16(value)). The flat form
-    saves a GROUP BY <col_expr> and lets the Quick/Standard paths stay
-    single-pass.
-
-    Returns the SUM(...) expression directly so the caller drops it into
-    the top-level SELECT alongside the other flat aggregates.
-    """
     if dialect == 'oracle':
         from .oracle import _oracle_portable_hash16
         return f"SUM(NVL({_oracle_portable_hash16(col_expr)}, 0))"
@@ -1687,53 +1163,17 @@ def _hash16_flat_expr(dialect, col_expr):
             f"16, 10) AS DOUBLE))"
         )
     if dialect == 'duckdb':
-        # DuckDB lacks `conv()` but accepts hex literals via '0x' prefix
-        # cast to INTEGER. Same SUM(hash16) semantics as the other
-        # dialects -- byte-identical answer on identical data.
         return (
             f"SUM(CAST(('0x' || substr(md5(trim(CAST({col_expr} AS VARCHAR))), 1, 4))"
             f"::INTEGER AS DOUBLE))"
         )
     raise ValueError(f"unknown dialect {dialect!r} for hash16 flat expr")
 
-
+# >>> Build per-column stats SQL for any supported dialect <<< #
 def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
                    vintage=None, date_dtype=None, date_format=None,
                    dt_label=None, coarse=False, preset=None,
                    stats_override=None):
-    """Build per-column stats SQL for any supported dialect.
-
-    Returns (sql, is_numeric). The output schema is the canonical 14-field
-    col CSV row (dt, column_name, col_type, n_total, n_missing, n_unique,
-    mean, std, min_val, max_val, top_10, length_avg, length_max, hash_sum)
-    for both numeric and categorical branches, so the downstream loader
-    sees the same shape regardless of platform.
-
-    `preset` selects which stats to compute (see constants.STATS_PRESETS):
-
-      - 'quick' (default for the col_gen_rough page): flat SELECT, no
-        freq table. n_total / n_missing / scalar MIN/MAX / single-pass
-        length stats. Categorical n_unique / hash_sum / top_10 are ''.
-        Cheapest path — partition-pruning friendly on Hive.
-
-      - 'standard': flat SELECT + n_unique (COUNT DISTINCT) + hash_sum
-        (SUM of single-row hash16, mathematically equivalent to the
-        freq-weighted SUM(cnt * hash16(p_col))). Still no freq table.
-
-      - 'detailed' (default for the col_gen page): full WITH-chain with
-        top_10 + alpha-rank-weighted min/max in `val=cnt` form. Only
-        path that does GROUP BY <col_expr>.
-
-    Mean/std (rank-weighted from the freq table) are dropped from every
-    preset — empirically poor signal and doubled the cost. Emitted as
-    '' to keep the CSV schema stable.
-
-    `coarse=True` is back-compat for legacy callers — aliases to
-    preset='quick' when preset is None. New code should pass preset=
-    explicitly.
-
-    See _col_sql_dialect_ops for the per-dialect SQL fragments.
-    """
     from ..constants import STATS_PRESETS
     if preset is None:
         preset = 'quick' if coarse else 'detailed'
@@ -1741,11 +1181,6 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
         raise ValueError(f"unknown preset {preset!r}; expected one of "
                          f"{list(STATS_PRESETS.keys())}")
     if stats_override is not None:
-        # Custom flag set wins: every key in the canonical preset shape
-        # is taken from `stats_override` if present, else falls back to
-        # the named preset's value. This lets col_gen's Custom radio
-        # turn OFF a stat the preset would have turned on (e.g. tick
-        # n_unique while keeping hash_sum disabled).
         base_stats = STATS_PRESETS[preset]
         stats = {k: bool(stats_override.get(k, base_stats[k])) for k in base_stats}
     else:
@@ -1779,11 +1214,6 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
         freq_dt_select = wrapped
         freq_dt_group = f", {dt_expr}"
 
-    # Quick / Standard share the flat-aggregate path: one SELECT, no WITH
-    # chain, GROUP BY dt only (or no GROUP BY when dt is a literal).
-    # Detailed uses the freq-table WITH chain. The branch decision is
-    # `stats['top_10']` -- only Detailed wants the freq table for top_10
-    # plus the val=cnt min/max form.
     if not stats['top_10']:
         col_expr = apply_null_sentinels(
             col_q, dtype or ("numeric" if numeric else "categorical"), dialect)
@@ -1796,9 +1226,6 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
         max_sql = (
             ops['minmax_strcast'](f'MAX({col_expr})') if stats['min_max'] else "''"
         )
-        # Length stats only meaningful on categorical -- numeric LENGTH
-        # is dominated by display format (BIGINT "0" = 1 char, DOUBLE
-        # "0.0" = 3 chars), so kept '' on numeric even when stats['length'].
         if stats['length'] and not numeric:
             len_avg_sql = (
                 ops['cast_str'](f"SUM(LENGTH(TRIM(CAST({col_expr} AS "
@@ -1812,9 +1239,6 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
         else:
             len_avg_sql = "''"
             len_max_sql = "''"
-        # Hash_sum is supported on Hadoop only when stats requests it
-        # (Standard / Detailed). On numeric it stays '' because hashing
-        # a number's string representation is storage-format-dependent.
         if stats['hash_sum'] and not numeric:
             hash_sum_sql = ops['cast_str'](_hash16_flat_expr(dialect, col_expr))
         else:
@@ -1839,8 +1263,6 @@ SELECT
 FROM {full_table} WHERE {wc}{group_by}"""
         return sql, numeric
 
-    # Detailed-only: full WITH-chain path for the rest of the function.
-    # The pre-existing code below handles this (kept verbatim).
     if numeric:
         col_expr = apply_null_sentinels(col_q, dtype or "numeric", dialect)
         mean_sql = ops['mean_outer'](ops['mean_inner'](col_expr))
@@ -1866,25 +1288,12 @@ SELECT
 FROM {full_table} WHERE {wc}{group_by}"""
         return sql, True
 
-    # Categorical: WITH-chain. Per-dialect deltas:
-    #   - SUBSTR(<cast_str>(col_expr_cat), 1, 200) for the freq grouping key
-    #   - present/missing CASE conditions (Hive treats '' as distinct from NULL)
-    #   - minmax concat: `||` (Oracle) vs concat() (Hive)
-    #   - top_n listagg: LISTAGG WITHIN GROUP (Oracle) vs concat_ws+collect_list (Hive)
-    #   - hash_sum: real portable hash (Oracle) vs '' placeholder (Hive)
-    #   - outer NVL/COALESCE for top_10
-    #   - outer cast for mean_v/std_v/length_avg/length_max/hash_sum
-    #   - trailing ORDER BY t.dt (Oracle only)
     col_expr_cat = apply_null_sentinels(col_q, dtype or "categorical", dialect)
     p_col_substr = f"SUBSTR({ops['cast_str'](col_expr_cat)}, 1, 200)"
     minmax_concat_min = ops['concat']("TRIM(p_col)", "'='", ops['cast_str']("cnt"))
-    minmax_concat_max = minmax_concat_min  # same shape; rnk_alpha decides which row
+    minmax_concat_max = minmax_concat_min
 
     if coarse:
-        # Coarse categorical: drop agg/sstats (no rank-weighted mean/std),
-        # drop top_n (no top_10). Keep freq/ranked/totals/minmax/lenhash so
-        # min/max + length/hash signals stay populated for cross-platform
-        # Phase-1 drift detection. Mirrors Athena's _build_coarse_sql shape.
         sql = f"""{cte_prefix}
 WITH freq AS (
     SELECT {freq_dt_select} AS dt,
@@ -2012,16 +1421,10 @@ LEFT JOIN top_n   tn ON t.dt = tn.dt
 LEFT JOIN lenhash lh ON t.dt = lh.dt{ops['final_order_by']}"""
     return sql, False
 
-
+# >>> Streaming-aggregate fallback. Same row schema as the full per-column <<< #
 def build_lifeboat_col_sql(dialect, tbl_cfg, col, dtype, full_table,
                             cte_prefix="", vintage=None,
                             date_dtype=None, date_format=None, dt_label=None):
-    """Streaming-aggregate fallback. Same row schema as the full per-column
-    query, but only computes single-pass aggregates (n_total, n_missing).
-    Everything that needs the freq table (n_unique, mean/std, min/max,
-    top_10, length, hash) is NULL/empty. Used by the runner when the full
-    SQL hits a resource exhaustion error (Oracle ORA-01652/ORA-04030,
-    Hive OOM)."""
     ops = _col_sql_dialect_ops(dialect)
     date_col = tbl_cfg['date_col']
     col_q = quote_ident(col, dialect)
@@ -2065,28 +1468,8 @@ SELECT
     '' AS hash_sum
 FROM {full_table} WHERE {wc}{group_by}"""
 
-
+# >>> Parse an extract_{row,col}.sql block file written by any platform's <<< #
 def parse_extract_sql_file(sql_path):
-    """Parse an extract_{row,col}.sql block file written by any platform's
-    gen-first writer. Returns list[dict] with keys:
-        name        — block name (e.g. "qname" for row, "qname/col/bucket" for col)
-        sql         — the SQL body, conn_macro marker preserved inline
-        conn_macro  — the value extracted from /* @conn_macro=X */, or None
-        degrade_sql — the body inside /* @degrade_sql ... @end_degrade */, or None
-
-    Block format:
-        -- {block_name}
-        /* @conn_macro=X */
-        <SQL>
-        ;
-        /* @degrade_sql
-        <fallback SQL>
-        @end_degrade */
-
-    The leading "-- dtrack ..." / "-- Generated: ..." header lines and any
-    "-- [foo]" status comments are skipped; only "-- name" (a bare token,
-    no spaces) starts a new block.
-    """
     import re
     from ..constants import (SQL_MARKER_CONN_MACRO, SQL_MARKER_DEGRADE_SQL,
                               SQL_MARKER_END_DEGRADE)
@@ -2136,17 +1519,8 @@ def parse_extract_sql_file(sql_path):
     _flush()
     return blocks
 
-
+# >>> AND-combine WHERE fragments, dropping empty / 1=1 placeholders <<< #
 def and_clauses(*parts):
-    """AND-combine WHERE fragments, dropping empty / 1=1 placeholders.
-
-    Used by every platform's col-gen writer to layer optional bucket
-    BETWEEN, manual-exclude NOT IN, base table WHERE, etc. without
-    emitting `... AND 1=1` or stray leading/trailing AND.
-
-    Returns '1=1' if all parts are empty -- the universal pass-through
-    so callers don't need to special-case "no filter".
-    """
     cleaned = []
     for p in parts:
         if not p:
@@ -2159,7 +1533,7 @@ def and_clauses(*parts):
         return '1=1'
     return ' AND '.join(cleaned)
 
-
+# >>> Generic runner for extract_{row,col}.sql block files <<< #
 def run_extract_sql_file(sql_path, outdir, *,
                           query_fn,
                           platform,
@@ -2167,30 +1541,6 @@ def run_extract_sql_file(sql_path, outdir, *,
                           on_progress=None,
                           cancel_event=None,
                           row_csv_writer=None):
-    """Generic runner for extract_{row,col}.sql block files.
-
-    Parses the file via parse_extract_sql_file, dispatches blocks across a
-    ThreadPoolExecutor capped by `<platform>_MAX_WORKERS` env var (or the
-    PLATFORM_RUNNER default), and writes per-qname _row.csv / _col.csv.
-    Block format and bookkeeping are platform-agnostic; the only deltas
-    are wired through:
-
-        query_fn(sql, conn_macro) -> list[dict]
-            Executes one block and returns rows as list[dict] with
-            lowercased column names. Raises on engine error.
-        platform: 'oracle' | 'hadoop' | 'athena' (key into PLATFORM_RUNNER
-            for worker_env, worker_default, degraded_label, lifeboat_errors).
-        row_csv_writer: optional callable(rows, csv_path) for row-mode CSV
-            output. Defaults to a sorted dt-then-row_count writer matching
-            both Oracle and Hadoop's existing behavior.
-
-    Returns list[result_dict] -- one per block. Each result has at minimum
-    {name, ok, elapsed, start}; ok-rows also carry rows count and (for row
-    mode) csv_path; failed rows carry error.
-
-    Mirrors the threading / cancel / per-table CSV-flush semantics of the
-    original Oracle and Hadoop runners byte-for-byte.
-    """
     import csv
     import sys
     import threading
@@ -2200,7 +1550,7 @@ def run_extract_sql_file(sql_path, outdir, *,
     from ..constants import COL_CSV_HEADERS, ROW_CSV_HEADERS, PLATFORM_RUNNER
 
     cfg = PLATFORM_RUNNER[platform]
-    label = platform.capitalize()
+    platform.capitalize()
 
     blocks = parse_extract_sql_file(sql_path)
     if not blocks:
@@ -2217,7 +1567,6 @@ def run_extract_sql_file(sql_path, outdir, *,
         int(env_workers) if env_workers else cfg['worker_default'])
     _max_workers = max(1, min(_max_workers, len(blocks)))
 
-    # Block names are "qname/col_name[/bucket]" for col mode, "qname" for row.
     table_blocks = {}
     for block in blocks:
         qname = block['name'].split('/')[0] if '/' in block['name'] else block['name']
@@ -2229,9 +1578,6 @@ def run_extract_sql_file(sql_path, outdir, *,
           f"from {sql_path}, workers={_max_workers}", file=sys.stderr)
 
     def _default_row_writer(rows, csv_path):
-        # Server-side ORDER BY was dropped from the row SQL (forces a
-        # single-coordinator funnel). Sort here so the CSV reads in date
-        # order for human inspection.
         sorted_rows = sorted(rows, key=lambda r: str(r.get('dt', '')))
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -2312,7 +1658,6 @@ def run_extract_sql_file(sql_path, outdir, *,
                 _running_count[0] -= 1
                 running_after = _running_count[0]
 
-        # Per-table CSV flush when the last block of this qname finishes.
         table_just_finished = False
         table_csv_path = None
         with _table_lock:
@@ -2367,9 +1712,6 @@ def run_extract_sql_file(sql_path, outdir, *,
             for fut in as_completed(futures):
                 results.append(fut.result())
 
-    # Partial-failure flush for col mode: any qname that didn't reach
-    # 'all blocks done' still gets whatever rows came back, so the user
-    # isn't left with an empty CSV.
     if is_col and _col_rows_by_table:
         for qname, row_data in _col_rows_by_table.items():
             csv_path = os.path.join(outdir, f"{qname}_col.csv")
@@ -2382,38 +1724,3 @@ def run_extract_sql_file(sql_path, outdir, *,
                   f"(partial -- table had failures)", file=sys.stderr)
 
     return results
-
-
-class PlatformBuilder(ABC):
-    """Base for platform SQL/code generation."""
-
-    def __init__(self, tbl_cfg, db_path=None):
-        self.tbl_cfg = tbl_cfg
-        self.db_path = db_path
-        self.name = tbl_cfg['name']
-        self.table = tbl_cfg['table']
-        self.date_col = tbl_cfg.get('date_col', '')
-        self.qname = qualified_name(tbl_cfg)
-
-    @abstractmethod
-    def build_row_sql(self, date_filter):
-        """Build SQL for row count extraction."""
-        ...
-
-    @abstractmethod
-    def build_continuous_sql(self, col, col_type, where):
-        """Build continuous/numeric stats SQL."""
-        ...
-
-    @abstractmethod
-    def build_categorical_sql(self, col, col_type, where, top_n=10):
-        """Build categorical stats SQL."""
-        ...
-
-    @abstractmethod
-    def generate_extraction(self, outdir, extract_type, **kw):
-        """Generate extraction artifacts (SAS files or direct queries).
-
-        Returns list of output file paths.
-        """
-        ...

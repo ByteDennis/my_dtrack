@@ -1,16 +1,13 @@
-"""FastAPI web UI for dtrack — all routes in one file."""
 
 import io
 import json
 import os
 import sqlite3
-import sys
 import time
 from contextlib import redirect_stdout, redirect_stderr
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
-import glob
 
 from fastapi import FastAPI, Request, Query, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
@@ -19,17 +16,12 @@ from fastapi.templating import Jinja2Templates
 
 from ..logmgr import get_logger, enable_console
 
-# ---------------------------------------------------------------------------
-# App setup
-# ---------------------------------------------------------------------------
-
 app = FastAPI(title="dtrack")
 enable_console()  # >>> shared dtrack logger -> file + this terminal <<< #
 
 _dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=_dir / "static"), name="static")
 templates = Jinja2Templates(directory=_dir / "templates")
-
 
 # >>> pure-ASGI access log; drains+replays body so SSE handlers keep working <<< #
 class _APILogMiddleware:
@@ -110,48 +102,28 @@ class _APILogMiddleware:
             ms = (time.perf_counter() - t0) * 1000
             log.info(f"[api] << {method} {full_path} -> {status['code']} ({ms:.0f}ms)")
 
-
 app.add_middleware(_APILogMiddleware)
 
-# These are set by serve() before uvicorn.run()
 _db_path: str = ""
-_db_dir: str = ""  # directory containing the database — all relative paths resolve from here
+_db_dir: str = ""
 _config_path: str = ""
-_original_config_path: str = ""  # saved when switching to testing mode
+_original_config_path: str = ""
 _testing_mode: bool = False
 
-
+# >>> Resolve a path relative to the database directory <<< #
 def _resolve(rel_path: str) -> str:
-    """Resolve a path relative to the database directory."""
     p = os.path.join(_db_dir, rel_path)
     return os.path.normpath(p)
-
 
 def _cfg():
     from ..config import load_unified_config
     return load_unified_config(_config_path)
 
-
-# Platforms that conventionally extract into the LEFT side's output dir.
-# AWS/Athena is the only RIGHT-side platform today; CSV-source tables live
-# on whichever side the pair config places them, so callers must pass
-# `outdir` explicitly for csv (the col_gen / pairs JS already does).
-_LEFT_PLATFORMS = {"oracle", "hadoop", "sas"}
+_LEFT_PLATFORMS = {"oracle", "hadoop"}
 _RIGHT_PLATFORMS = {"aws", "athena", "databricks"}
 
-
+# >>> Resolve the saved global outdir for `platform`'s side <<< #
 def _side_outdir(platform: str) -> str:
-    """Resolve the saved global outdir for `platform`'s side.
-
-    Reads `settings.sas_outdir` (left) or `settings.aws_outdir` (right)
-    from dtrack.json so the cache (.cache.db) and extract_*.sql files
-    land in the directory the user picked on the global settings panel.
-    Falls back to './sas/' or './csv/' if the setting was never saved.
-
-    Returns an absolute path resolved against the DB dir (matches
-    `_resolve` semantics so the body-supplied outdir and this fallback
-    are interchangeable).
-    """
     try:
         settings = (_cfg().get("settings") or {})
     except Exception:
@@ -160,13 +132,8 @@ def _side_outdir(platform: str) -> str:
     if plat in _RIGHT_PLATFORMS:
         rel = settings.get("aws_outdir") or "./csv/"
     else:
-        rel = settings.get("sas_outdir") or "./sas/"
+        rel = settings.get("left_outdir") or "./out/"
     return _resolve(rel)
-
-
-# ---------------------------------------------------------------------------
-# Pages
-# ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -188,14 +155,9 @@ async def row_compare_page(request: Request):
 async def col_mapping_page(request: Request):
     return templates.TemplateResponse(request, "col_mapping.html")
 
+# >>> Legacy /col_gen_rough -> redirect to /col_gen?preset=quick <<< #
 @app.get("/col_gen_rough")
 async def col_gen_rough_page():
-    """Legacy /col_gen_rough -> redirect to /col_gen?preset=quick.
-    The two pages were merged: one /col_gen template now hosts a preset
-    radio (Quick / Standard / Detailed / Custom) and the right defaults
-    depending on the ?preset= query param. Older bookmarks land on the
-    Quick preset, matching the old Stage 1 behavior.
-    """
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/col_gen?preset=quick", status_code=302)
 
@@ -223,20 +185,9 @@ async def csv_compare_page(request: Request):
 async def s3_page(request: Request):
     return templates.TemplateResponse(request, "s3.html")
 
-
-# ---------------------------------------------------------------------------
-# API routes
-# ---------------------------------------------------------------------------
-
+# >>> Return pairs + metadata + date ranges <<< #
 @app.get("/api/status")
 async def api_status():
-    """Return pairs + metadata + date ranges.
-
-    Pair list is sourced from pairs.json (config). DB is consulted only
-    for derived metadata (loaded date range, row counts, column lists)
-    per side. A pair in pairs.json that hasn't been registered in the DB
-    yet still shows up — its metadata fields just come back empty.
-    """
     from ..db import get_metadata, get_column_meta
     from ..config import load_unified_config
     from ..platforms.base import qualified_name
@@ -283,10 +234,9 @@ async def api_status():
 
     return {"pairs": result, "db_path": _db_path, "config_path": _config_path}
 
-
+# >>> Initialize or refresh the database <<< #
 @app.post("/api/init")
 async def api_init():
-    """Initialize or refresh the database."""
     from ..db import init_database, refresh_database, refresh_metadata_from_data
 
     if os.path.exists(_db_path):
@@ -297,10 +247,9 @@ async def api_init():
         init_database(_db_path)
         return {"action": "created", "db_path": _db_path}
 
-
+# >>> Recompute NULL metadata fields from actual data in _row_counts and _col_stats <<< #
 @app.post("/api/refresh-metadata")
 async def api_refresh_metadata():
-    """Recompute NULL metadata fields from actual data in _row_counts and _col_stats."""
     from ..db import refresh_metadata_from_data
     try:
         n = refresh_metadata_from_data(_db_path)
@@ -308,48 +257,30 @@ async def api_refresh_metadata():
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Return supported date_type values and their SQL format examples <<< #
 @app.get("/api/date-types")
 async def api_date_types():
-    """Return supported date_type values and their SQL format examples."""
     from ..platforms.base import DATE_TYPE_FORMATS
     return {"date_types": DATE_TYPE_FORMATS}
 
-
+# >>> Return UI constants defined once in dtrack/constants.py so the JS <<< #
 @app.get("/api/constants")
 async def api_constants():
-    """Return UI constants defined once in dtrack/constants.py so the JS
-    side doesn't need to keep a parallel copy."""
     from .. import constants as C
     return {
         "DATA_SOURCES": C.DATA_SOURCES,
         "CONNECTION_MACROS": C.CONNECTION_MACROS,
         "DATE_COLUMN_TYPES": C.DATE_COLUMN_TYPES,
-        "HADOOP_LIBNAME_PROFILES": getattr(C, "HADOOP_LIBNAME_PROFILES", {}),
-        "HADOOP_PROCSQL_PROFILES": getattr(C, "HADOOP_PROCSQL_PROFILES", {}),
     }
 
-
+# >>> Run a platform extraction directly (not the streaming run-sql path) <<< #
 @app.post("/api/extract")
 async def api_extract(request: Request):
-    """Run a platform extraction directly (not the streaming run-sql path).
-
-    platform:
-      - 'aws'        -> athena.extract_aws (pyathena)
-      - 'oracle'     -> oracle.extract_oracle (oracledb)
-      - 'databricks' -> databricks.extract_databricks (gen-then-run)
-      - 'hadoop'     -> hadoop.extract_hadoop (direct hadoop_connect, gen-then-run)
-      - 'sas' / 'hadoop_sas' -> hadoop.gen_sas (SAS code generation)
-    Any other value is rejected with 400 -- there is no silent default.
-    """
     body = await request.json()
     platform = (body.get("platform") or "aws").lower()
     extract_type = body.get("type", "row")
     from_date = body.get("from_date")
     to_date = body.get("to_date")
-    # When the body specifies outdir, honor it. Otherwise resolve from
-    # saved global settings keyed by platform side so Oracle/Hadoop
-    # cache lands in sas_outdir/.cache.db, not aws_outdir/.cache.db.
     body_outdir = body.get("outdir")
     outdir = _resolve(body_outdir) if body_outdir else _side_outdir(platform)
     max_workers = body.get("max_workers")
@@ -360,9 +291,6 @@ async def api_extract(request: Request):
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
-            # source=hadoop runs directly through hadoop_connect (.sql); sas /
-            # hadoop_sas go through gen_sas (no max_workers). The dispatch +
-            # signature handling lives in extract.extract_one.
             from ..extract import extract_one
             ok = extract_one(platform, _config_path, outdir, types=[extract_type],
                              db_path=_db_path, from_date=from_date, to_date=to_date,
@@ -371,7 +299,7 @@ async def api_extract(request: Request):
                 return JSONResponse(status_code=400, content={
                     "ok": False,
                     "error": (f"unknown platform {platform!r}; expected one of "
-                              "aws / oracle / databricks / hadoop / sas / hadoop_sas"),
+                              "aws / oracle / databricks / hadoop / csv"),
                 })
         return {"ok": True, "output": buf.getvalue()}
     except Exception as e:
@@ -381,21 +309,13 @@ async def api_extract(request: Request):
     finally:
         set_cache_overwrite(prev_overwrite)
 
-
-# Active-run registry. Each in-flight extraction is keyed by a uuid the
-# client gets via the first SSE event ({"_run_id": "..."}). POST to
-# /api/extract/cancel/{run_id} sets the corresponding event so workers
-# that haven't yet hit cursor.execute() exit without submitting. In-flight
-# queries can't be killed mid-execution (pyathena/oracledb don't expose a
-# cheap interrupt), but the queue stops draining immediately.
 import threading as _threading_mod
-_active_runs = {}            # run_id -> threading.Event
+_active_runs = {}
 _active_runs_lock = _threading_mod.Lock()
 
-
+# >>> Signal cancel for an in-flight /api/extract/run-sql call <<< #
 @app.post("/api/extract/cancel/{run_id}")
 async def api_cancel_extract(run_id: str):
-    """Signal cancel for an in-flight /api/extract/run-sql call."""
     with _active_runs_lock:
         event = _active_runs.get(run_id)
     if event is None:
@@ -405,20 +325,9 @@ async def api_cancel_extract(run_id: str):
     event.set()
     return {"ok": True, "run_id": run_id}
 
-
+# >>> Execute the FIRST query from extract_{row,col}.sql without touching <<< #
 @app.post("/api/extract/dry-run")
 async def api_dry_run_sql(request: Request):
-    """Execute the FIRST query from extract_{row,col}.sql without touching
-    the on-disk cache (.cache.db). Returns the rowset so the caller can
-    sanity-check the query (column shape, sample values, runtime) before
-    kicking off the full queue.
-
-    Body: {platform, type, outdir?, max_rows?}
-        platform: 'oracle' | 'hadoop' | 'aws' | 'athena' | 'csv'
-        type:     'row' | 'col' (default 'col')
-        outdir:   override the platform-side outdir
-        max_rows: cap rows in the response (default 100)
-    """
     import time as _time
     body = await request.json()
     platform = (body.get("platform") or "").lower()
@@ -446,9 +355,6 @@ async def api_dry_run_sql(request: Request):
     conn_macro = block.get("conn_macro")
     block_name = block["name"]
 
-    # Bypass the on-disk query cache so dry-run never reads stale rows and
-    # never persists a new entry. set_cache_db is process-global so we
-    # snapshot the current path, swap to None for the call, then restore.
     from ..platforms import base as _base
     prev_cache = _base._cache_db
     _base._cache_db = None
@@ -466,7 +372,6 @@ async def api_dry_run_sql(request: Request):
         elif platform == "aws":
             from ..platforms.athena import _query_athena
             df = _query_athena(sql, data_base=conn_macro)
-            # _query_athena returns a DataFrame; normalize to list[dict].
             try:
                 rows = df.to_dict(orient="records")
             except Exception:
@@ -485,7 +390,6 @@ async def api_dry_run_sql(request: Request):
 
     elapsed_ms = int((_time.time() - t0) * 1000)
 
-    # Normalize values for JSON (Decimal, datetime, etc.).
     def _jsonable(v):
         if v is None or isinstance(v, (str, int, float, bool)):
             return v
@@ -514,19 +418,9 @@ async def api_dry_run_sql(request: Request):
         "elapsed_ms": elapsed_ms,
     }
 
-
+# >>> Execute queries from extract_{row,col}.sql in parallel <<< #
 @app.post("/api/extract/run-sql")
 async def api_run_sql_file(request: Request):
-    """Execute queries from extract_{row,col}.sql in parallel.
-
-    Streams progress as Server-Sent Events (SSE). The FIRST event is
-    `{"_run_id": "<uuid>"}` so the client can hit
-    /api/extract/cancel/{run_id} to stop dispatching queued work. Each
-    completed query emits a 'progress' event; final message is a 'done'
-    event with summary.
-
-    Body: {outdir, max_workers, type, platform, resume}
-    """
     import queue
     import threading
     import uuid
@@ -534,10 +428,6 @@ async def api_run_sql_file(request: Request):
     body = await request.json()
     extract_type = body.get("type", "row")
     platform = (body.get("platform") or "aws").lower()
-    # Body-supplied outdir wins (col_gen/pairs JS always passes the
-    # right-side-aware value). Bare callers fall back to the saved
-    # global setting for the platform's side, so Oracle/Hadoop never
-    # silently write .cache.db into the AWS folder.
     body_outdir = body.get("outdir")
     outdir = _resolve(body_outdir) if body_outdir else _side_outdir(platform)
     max_workers = body.get("max_workers")
@@ -562,10 +452,6 @@ async def api_run_sql_file(request: Request):
         progress_q.put(result)
 
     def _run():
-        # Overwrite-cache toggle: cache_get returns None (forces re-execute)
-        # but cache_put still persists, so the stale entry is replaced by
-        # fresh rows. Each runner sets/clears _cache_db itself, so apply the
-        # flag inside the thread and clear in finally.
         from ..platforms.base import set_cache_overwrite
         prev_overwrite = set_cache_overwrite(overwrite_cache)
         try:
@@ -600,9 +486,6 @@ async def api_run_sql_file(request: Request):
                     cancel_event=cancel_event,
                 )
             elif platform == "databricks":
-                # Gen-then-run: execute the saved extract_*.sql block-by-block
-                # through databricks_connect, same as oracle/hadoop/csv. Real
-                # per-block progress + cancel via base.run_extract_sql_file.
                 from ..platforms.databricks import run_databricks_sql_file
                 results = run_databricks_sql_file(
                     sql_path, outdir,
@@ -639,7 +522,6 @@ async def api_run_sql_file(request: Request):
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
         while True:
-            # Poll the queue (non-blocking in async context)
             import asyncio
             try:
                 msg = progress_q.get_nowait()
@@ -652,14 +534,8 @@ async def api_run_sql_file(request: Request):
                 yield f"event: done\ndata: {json.dumps(msg)}\n\n"
                 break
             elif "_run_id" in msg:
-                # First event: tell the client what run_id to POST against
-                # /api/extract/cancel to stop dispatching.
                 yield f"event: run_id\ndata: {json.dumps({'run_id': msg['_run_id']})}\n\n"
             elif msg.get("_event") == "start":
-                # Per-block start event so the UI can render "running=N"
-                # immediately when a worker picks up the next block (rather
-                # than only on completion, which makes parallelism look
-                # sequential when batches finish together).
                 msg.pop("_event")
                 yield f"event: start\ndata: {json.dumps(msg)}\n\n"
             elif msg.get("_event") == "log":
@@ -670,17 +546,10 @@ async def api_run_sql_file(request: Request):
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
-
+# >>> Emit a per-pair PASS/WARNING line confirming that left and right <<< #
 def _check_pair_buckets(filtered_config, pair_names, from_date, to_date):
-    """Emit a per-pair PASS/WARNING line confirming that left and right
-    will be queried with the SAME vintage bucket boundaries.
-
-    The log lines start with `[BUCKET CHECK]` so the col_gen UI can
-    highlight them green (PASS) or amber (WARNING).
-    """
     from ..date_utils import vintage_bucket_spans, bucket_date
     from ..db import get_row_comparison
-    from ..platforms.base import qualified_name
     from ..config import _derive_side_name
 
     for pname in pair_names:
@@ -698,7 +567,6 @@ def _check_pair_buckets(filtered_config, pair_names, from_date, to_date):
         left_cfg["name"] = _derive_side_name(left_cfg, pname)
         right_cfg["name"] = _derive_side_name(right_cfg, pname)
 
-        # Prefer real row-compare matching dates; fall back to from/to spans.
         comp = get_row_comparison(_db_path, pname)
         matching = (comp or {}).get("matching_dates") or []
 
@@ -724,7 +592,6 @@ def _check_pair_buckets(filtered_config, pair_names, from_date, to_date):
                   f"{len(left_keys)} buckets ({left_keys[0]} .. {left_keys[-1]}) "
                   f"identical on LEFT and RIGHT | source: {source} | PASS")
         else:
-            # Find first divergence for the message
             diff_idx = next(
                 (i for i, (a, b) in enumerate(zip(left_keys, right_keys)) if a != b),
                 min(len(left_keys), len(right_keys)),
@@ -732,7 +599,6 @@ def _check_pair_buckets(filtered_config, pair_names, from_date, to_date):
             print(f"[BUCKET CHECK] pair={pname} vintage={vintage} | "
                   f"L={len(left_keys)} R={len(right_keys)} buckets | "
                   f"first divergence at index {diff_idx} | source: {source} | WARNING")
-
 
 def _discover_databricks_columns_for_preview(databricks_tables, outdir, db_path):
     # >>> mirror _discover_and_write_columns but for Databricks (information_schema.columns) <<< #
@@ -782,25 +648,16 @@ def _discover_databricks_columns_for_preview(databricks_tables, outdir, db_path)
             except Exception:
                 pass
 
-
+# >>> Generate SQL files without running extraction <<< #
 @app.post("/api/generate")
 async def api_generate_files(request: Request):
-    """Generate SAS and SQL files without running extraction.
-
-    Writes extract_row.sas (for Oracle/SAS tables) and extract_row.sql
-    (for AWS tables) to their respective output directories.
-    """
     body = await request.json()
     extract_type = body.get("type", "row")
     from_date = body.get("from_date")
     to_date = body.get("to_date")
-    sas_outdir = _resolve(body.get("sas_outdir", "./sas/"))
+    left_outdir = _resolve(body.get("left_outdir", "./out/"))
     aws_outdir = _resolve(body.get("aws_outdir", "./csv/"))
-    pair_names = body.get("pair_names")  # None = all pairs
-    # Preset selection (constants.STATS_PRESETS keys) — chooses which
-    # stats the col SQL builder emits. Default 'quick' for col extracts,
-    # ignored for type=row. Legacy `level=coarse|fine` aliases to
-    # quick|detailed for back-compat with older /api/generate callers.
+    pair_names = body.get("pair_names")
     preset = body.get("preset", "") or ""
     level = (body.get("level") or "fine").lower()
     if level not in ("fine", "coarse"):
@@ -811,9 +668,6 @@ async def api_generate_files(request: Request):
         return JSONResponse(status_code=400, content={
             "error": f"Unknown preset '{preset}'; expected 'quick'/'standard'/'detailed'."
         })
-    # Resolve effective preset: explicit body.preset wins; else derive
-    # from level (legacy callers); col_gen page already sends preset=
-    # directly.
     if not preset:
         preset = 'quick' if level == 'coarse' else 'detailed'
     coarse = (extract_type == "col" and preset == 'quick')
@@ -821,12 +675,8 @@ async def api_generate_files(request: Request):
     if stats_override is not None and not isinstance(stats_override, dict):
         stats_override = None
 
-    # cells: optional list of {pair, col, vintage} the col-compare UI sends
-    # when the user has selected specific (column, vintage_label) cells for
-    # fine drill-down. When present, the AWS / SAS generators emit SQL only
-    # for those (table_qname, mapped_col, vintage) combinations.
     cells = body.get("cells")
-    cells_filter = None  # {qname: {col_name: set(vintage_labels)}}
+    cells_filter = None
     if cells and extract_type == "col":
         from ..db import get_table_pair, get_pair_col_map_from_db
         cells_filter = {}
@@ -840,7 +690,6 @@ async def api_generate_files(request: Request):
             if not pair:
                 continue
             col_map = get_pair_col_map_from_db(_db_path, pair_name) or {}
-            # left_col is what the user clicked; right_col via col_map.
             left_col = col_name
             right_col = col_map.get(left_col, left_col)
             for qname, side_col in (
@@ -848,12 +697,11 @@ async def api_generate_files(request: Request):
                 (pair["table_right"], right_col),
             ):
                 cells_filter.setdefault(qname, {}).setdefault(side_col, set()).add(vintage)
-        # Convert vintage sets to sorted lists for JSON / passing around.
         cells_filter = {q: {c: sorted(vs) for c, vs in m.items()}
                         for q, m in cells_filter.items()}
 
     buf = io.StringIO()
-    results = {"sas_file": None, "sql_file": None}
+    results = {"sql_file": None}
 
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
@@ -862,7 +710,6 @@ async def api_generate_files(request: Request):
 
             config = load_unified_config(_config_path)
 
-            # Filter config to selected pairs before loading tables
             if pair_names:
                 filtered_config = dict(config)
                 filtered_config["pairs"] = {
@@ -872,9 +719,6 @@ async def api_generate_files(request: Request):
             else:
                 filtered_config = config
 
-            # col_map and col_filter live in _table_pairs, not dtrack.json.
-            # Hydrate them into the in-memory config so get_all_tables_from_unified
-            # can resolve include/exclude patterns and produce _selected_cols.
             from ..db import get_pair_col_map_from_db, get_pair_col_filter
             for pname, pcfg in filtered_config.get("pairs", {}).items():
                 if not pcfg.get("col_map"):
@@ -892,7 +736,6 @@ async def api_generate_files(request: Request):
             all_tables = load_tables_from_config(filtered_config)
             inject_where_from_config(all_tables, filtered_config)
 
-            # Inject excludeDates from pair config into table configs
             for tbl in all_tables:
                 for pair_name in tbl.get('_pairs', []):
                     pair_cfg = filtered_config.get('pairs', {}).get(pair_name, {})
@@ -901,16 +744,10 @@ async def api_generate_files(request: Request):
                         tbl['_exclude_dates'] = exc
                         break
 
-            # Inject date bounds. Per-pair fromDate/toDate (set on the card)
-            # overrides the request-level globals; when a pair has neither
-            # its own nor a global value, the table skips the bound.
             for tbl in all_tables:
                 date_col = tbl.get('date_col', '')
                 if not date_col:
                     continue
-                # Resolve per-pair dates from the first pair this table
-                # belongs to. In multi-pair-per-table cases the first
-                # pair's dates win (same behavior as col_filter dedup).
                 pair_from, pair_to = None, None
                 for pn in tbl.get('_pairs', []):
                     pc = filtered_config.get('pairs', {}).get(pn, {})
@@ -935,73 +772,23 @@ async def api_generate_files(request: Request):
                     if eff_to:
                         bounds.append(f"{date_col_q} <= {_format_athena_date_bound(eff_to, date_type, is_upper=True)}")
                 else:
-                    from ..platforms.hadoop import _format_date_bound, is_sas_table
-                    is_sas = is_sas_table(tbl)
+                    from ..platforms.hadoop import _format_date_bound
                     if eff_from:
-                        bounds.append(f"{date_col} >= {_format_date_bound(eff_from, date_type, is_sas, is_upper=False)}")
+                        bounds.append(f"{date_col} >= {_format_date_bound(eff_from, date_type, False, is_upper=False)}")
                     if eff_to:
-                        bounds.append(f"{date_col} <= {_format_date_bound(eff_to, date_type, is_sas, is_upper=True)}")
+                        bounds.append(f"{date_col} <= {_format_date_bound(eff_to, date_type, False, is_upper=True)}")
                 if bounds:
                     extra = " AND ".join(bounds)
                     if source in ('aws', 'oracle', 'hadoop', 'databricks'):
-                        # Gen-first platforms (AWS / Oracle / Hadoop) all run
-                        # through builders that compose their own per-bucket
-                        # BETWEEN from the row_comparison's matching_dates.
-                        # Stashing the from/to bound separately as
-                        # `_date_bounds` lets the col gen skip merging it
-                        # into the WHERE when a bucket BETWEEN already
-                        # covers (or is tighter than) the range -- prevents
-                        # `col >= X AND col <= Y AND col BETWEEN A AND B`
-                        # producing an empty result set when the global
-                        # from/to and the saved row_comparison's matching
-                        # dates don't overlap (e.g. user changes from/to
-                        # without re-running row-compare).
                         tbl['_date_bounds'] = extra
                     else:
-                        # SAS / libname paths still want the bound merged
-                        # into WHERE because the SAS template's
-                        # &_where_clause is the only filter knob it sees.
                         existing = tbl.get('where', '').strip()
                         tbl['where'] = f"({existing}) AND {extra}" if existing else extra
-                # Stash the resolved from/to so col-stats can synthesize
-                # vintage buckets when no row-compare data is loaded yet.
                 tbl['_from_date'] = eff_from
                 tbl['_to_date'] = eff_to
                 print(f"[date bounds] {tbl['name']}: from={eff_from} to={eff_to} "
                       f"(source: {'pair' if (pair_from or pair_to) else 'global'})")
 
-            # Generate SAS file (SAS-local + hadoop_sas only). `source=hadoop`
-            # runs directly through hadoop_connect (.sql, below); only
-            # `source=hadoop_sas` is extracted through SAS (extract_*.sas).
-            # Oracle has its own Python-direct path. Use filtered config if
-            # pairs selected.
-            sas_hadoop_tables = [t for t in all_tables
-                                 if t.get('source', '').lower() in ('sas', 'hadoop_sas')]
-            if sas_hadoop_tables:
-                from ..platforms.hadoop import gen_sas
-                if pair_names:
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
-                        json.dump(filtered_config, tmp, indent=2)
-                        tmp_path = tmp.name
-                    try:
-                        gen_sas(tmp_path, sas_outdir, types=[extract_type],
-                                db_path=_db_path, from_date=from_date, to_date=to_date,
-                                cells_filter=cells_filter, coarse=coarse)
-                    finally:
-                        os.unlink(tmp_path)
-                else:
-                    gen_sas(_config_path, sas_outdir, types=[extract_type],
-                            db_path=_db_path, from_date=from_date, to_date=to_date,
-                            cells_filter=cells_filter, coarse=coarse)
-                results["sas_file"] = os.path.join(sas_outdir, f"extract_{extract_type}.sas")
-
-            # Generate Oracle SQL file. Oracle writes to the LEFT output dir
-            # (the input historically labeled "SAS Output Dir"; relabeled
-            # "Left Output Dir" in the UI). Athena writes its `extract_*.sql`
-            # to the RIGHT output dir, so the same filename can be reused on
-            # both sides without collision. Pair convention: left side is
-            # SAS / Hadoop / Oracle; right side is AWS / Athena.
             oracle_tables = [t for t in all_tables
                              if t.get('source', '').lower() == 'oracle']
             if oracle_tables:
@@ -1011,31 +798,23 @@ async def api_generate_files(request: Request):
                 )
                 from ..platforms.base import fill_columns_from_meta
                 from ..platforms.hadoop import _discover_and_write_columns
-                os.makedirs(sas_outdir, exist_ok=True)
+                os.makedirs(left_outdir, exist_ok=True)
 
-                # Discover columns (writes {qname}_columns.csv and seeds
-                # _column_meta). Hadoop's helper now handles source=oracle
-                # via db.discover_columns; SAS/Hadoop continue to discover
-                # at SAS-extract time.
-                _discover_and_write_columns(oracle_tables, sas_outdir, _db_path)
+                _discover_and_write_columns(oracle_tables, left_outdir, _db_path)
 
                 if extract_type == "row":
                     oracle_sql_path = _write_combined_row_sql_oracle(
-                        oracle_tables, sas_outdir,
+                        oracle_tables, left_outdir,
                         db_path=_db_path, vintage=None)
                 else:
-                    # Col SQL needs columns hydrated from _column_meta so the
-                    # per-(table, column) blocks can be emitted.
                     fill_columns_from_meta(oracle_tables, _db_path)
                     oracle_sql_path = _write_combined_col_sql_oracle(
-                        oracle_tables, sas_outdir,
+                        oracle_tables, left_outdir,
                         db_path=_db_path, vintage=None,
                         coarse=coarse, preset=preset,
                         stats_override=stats_override)
                 results["oracle_sql_file"] = oracle_sql_path
 
-            # Generate Hadoop SQL file (gen-first plain Hive SQL, parallels
-            # Oracle). Hadoop tables also write to the left outdir.
             hadoop_tables = [t for t in all_tables
                              if t.get('source', '').lower() == 'hadoop']
             if hadoop_tables:
@@ -1045,29 +824,21 @@ async def api_generate_files(request: Request):
                     _discover_and_write_columns,
                 )
                 from ..platforms.base import fill_columns_from_meta
-                os.makedirs(sas_outdir, exist_ok=True)
-                # >>> source=hadoop runs only through hadoop_connect — discover its
-                #     columns here (gen_sas no longer handles plain hadoop) <<< #
-                _discover_and_write_columns(hadoop_tables, sas_outdir, _db_path)
+                os.makedirs(left_outdir, exist_ok=True)
+                _discover_and_write_columns(hadoop_tables, left_outdir, _db_path)
                 if extract_type == "row":
                     hadoop_sql_path = _write_combined_row_sql_hadoop(
-                        hadoop_tables, sas_outdir,
+                        hadoop_tables, left_outdir,
                         db_path=_db_path, vintage=None)
                 else:
                     fill_columns_from_meta(hadoop_tables, _db_path)
                     hadoop_sql_path = _write_combined_col_sql_hadoop(
-                        hadoop_tables, sas_outdir,
+                        hadoop_tables, left_outdir,
                         db_path=_db_path, vintage=None,
                         coarse=coarse, preset=preset,
                         stats_override=stats_override)
                 results["hadoop_sql_file"] = hadoop_sql_path
 
-            # Generate CSV SQL files. Each csv-source table writes to
-            # the outdir matching its pair side: left-side csv -> sas_outdir,
-            # right-side csv -> aws_outdir. This preserves the "left/right
-            # outdir" mental model when pairs mix engines (e.g. Oracle on
-            # left + CSV on right) and lets the runner button decide
-            # which outdir's extract_*.sql to execute.
             csv_tables_left = [t for t in all_tables
                                if t.get('source', '').lower() == 'csv'
                                and t.get('_side', 'left') == 'left']
@@ -1083,7 +854,7 @@ async def api_generate_files(request: Request):
                 from ..platforms.base import fill_columns_from_meta
                 csv_paths = {}
                 for side_label, side_tables, side_outdir in (
-                    ('left', csv_tables_left, sas_outdir),
+                    ('left', csv_tables_left, left_outdir),
                     ('right', csv_tables_right, aws_outdir),
                 ):
                     if not side_tables:
@@ -1104,9 +875,6 @@ async def api_generate_files(request: Request):
                     csv_paths[f"csv_sql_file_{side_label}"] = p
                 results.update(csv_paths)
 
-            # Discover Databricks columns and write the same shape extract_*.sql
-            # the other gen-first platforms produce — one aggregate file per
-            # outdir (not one per pair / table), so preview == saved file.
             databricks_tables = [t for t in all_tables
                                  if t.get('source', '').lower() == 'databricks']
             if databricks_tables:
@@ -1133,26 +901,20 @@ async def api_generate_files(request: Request):
                 results["databricks_sql_file"] = dbx_sql_path
                 print(f"  SQL: {dbx_sql_path}")
 
-            # Generate SQL file
             aws_tables = [t for t in all_tables
                           if t.get('source', '').lower() == 'aws']
             if aws_tables:
                 from ..platforms.athena import _write_combined_sql
                 os.makedirs(aws_outdir, exist_ok=True)
 
-                # Discover columns for AWS tables (needed for col stats SQL)
                 from ..platforms.hadoop import _discover_and_write_columns
                 _discover_and_write_columns(aws_tables, aws_outdir, _db_path)
 
-                # Fill columns from _column_meta into table configs for col SQL gen
                 if extract_type == "col":
                     from ..platforms.base import fill_columns_from_meta
                     fill_columns_from_meta(aws_tables, _db_path)
 
                 if cells_filter and extract_type == "col":
-                    # Annotate tables with their per-pair fine-cell selection
-                    # so the SQL generator can drop unselected (col, vintage)
-                    # entries.
                     for tbl in aws_tables:
                         from ..platforms.base import qualified_name as _qn
                         sel = cells_filter.get(_qn(tbl), {})
@@ -1164,21 +926,15 @@ async def api_generate_files(request: Request):
                                     stats_override=stats_override)
                 results["sql_file"] = os.path.join(aws_outdir, f"extract_{extract_type}.sql")
 
-            # Cross-side bucket equality check (col extraction only — per-pair
-            # vintage must produce the same bucket boundaries on left & right
-            # so the downstream column comparison stays apples-to-apples).
             if extract_type == "col" and pair_names:
                 _check_pair_buckets(filtered_config, pair_names, from_date, to_date)
 
-            # >>> unified per-platform summary so the log shows every source, not just oracle/sas/hadoop <<< #
             _counts = {
                 "oracle":     len(oracle_tables),
                 "hadoop":     len(hadoop_tables),
                 "aws":        len(aws_tables),
                 "databricks": len(databricks_tables),
                 "csv":        len(csv_tables_left) + len(csv_tables_right),
-                "sas":        sum(1 for t in all_tables
-                                  if (t.get('source') or '').lower() == 'sas'),
             }
             _summary = ", ".join(f"{k}={v}" for k, v in _counts.items())
             print(f"All platforms: {sum(_counts.values())} table(s) ({_summary})")
@@ -1189,16 +945,12 @@ async def api_generate_files(request: Request):
             "ok": False, "error": str(e), "output": buf.getvalue()
         })
 
-
+# >>> Run load-row or load-col <<< #
 @app.post("/api/load")
 async def api_load(request: Request):
-    """Run load-row or load-col."""
     body = await request.json()
-    load_type = body.get("type", "row")  # "row" or "col"
+    load_type = body.get("type", "row")
     folder = _resolve(body.get("folder", "./csv/"))
-    # level: forwarded to load_precomputed_col_stats. "coarse" merges only
-    # the coarse signals (preserves any prior fine values); "fine" full
-    # upsert. Ignored for type=row.
     level = (body.get("level") or "fine").lower()
     if level not in ("fine", "coarse"):
         return JSONResponse(status_code=400, content={
@@ -1231,14 +983,12 @@ async def api_load(request: Request):
                     rows = get_row_counts(_db_path, qname)
                     print(f"{qname}: {len(rows)} date buckets loaded")
 
-                    # Also load column metadata if available
                     col_csv = os.path.join(folder, f"{qname}_columns.csv")
                     if os.path.exists(col_csv):
                         columns = {}
                         with open(col_csv, 'r', newline='') as f:
                             reader = csv_mod.DictReader(f)
                             for row in reader:
-                                # Strip whitespace from keys to handle \r\n line endings
                                 row = {k.strip(): v for k, v in row.items()}
                                 col_name = row.get('column_name') or row.get('COLUMN_NAME', '')
                                 dtype = row.get('data_type') or row.get('DATA_TYPE', '')
@@ -1273,10 +1023,9 @@ async def api_load(request: Request):
             "ok": False, "error": str(e), "output": buf.getvalue()
         })
 
-
+# >>> Run compare-row and return results <<< #
 @app.post("/api/compare/row")
 async def api_compare_row(request: Request):
-    """Run compare-row and return results."""
     body = await request.json()
     from_date = body.get("from_date")
     to_date = body.get("to_date")
@@ -1298,10 +1047,9 @@ async def api_compare_row(request: Request):
             "ok": False, "error": str(e), "output": buf.getvalue()
         })
 
-
+# >>> Run compare-col and return results <<< #
 @app.post("/api/compare/col")
 async def api_compare_col(request: Request):
-    """Run compare-col and return results."""
     body = await request.json()
     from_date = body.get("from_date")
     to_date = body.get("to_date")
@@ -1324,10 +1072,9 @@ async def api_compare_col(request: Request):
             "ok": False, "error": str(e), "output": buf.getvalue()
         })
 
-
+# >>> Run a SQL query against the database (read + write) <<< #
 @app.post("/api/query")
 async def api_query(request: Request):
-    """Run a SQL query against the database (read + write)."""
     body = await request.json()
     sql = body.get("sql", "").strip()
 
@@ -1358,10 +1105,9 @@ async def api_query(request: Request):
     except sqlite3.Error as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-
+# >>> Serve generated HTML report <<< #
 @app.get("/api/report/{report_type}")
 async def api_report(report_type: str):
-    """Serve generated HTML report."""
     output_dir = _resolve("output")
     filename = f"compare_{report_type}.html"
     path = os.path.join(output_dir, filename)
@@ -1369,29 +1115,9 @@ async def api_report(report_type: str):
         return FileResponse(path, media_type="text/html")
     return JSONResponse(status_code=404, content={"error": f"Report not found: {filename}"})
 
-
-# ---------------------------------------------------------------------------
-# Config management
-# ---------------------------------------------------------------------------
-
+# >>> Reconcile _table_pairs / _column_meta / _col_stats / _row_counts / <<< #
 @app.post("/api/migrate/qnames")
 async def api_migrate_qnames():
-    """Reconcile _table_pairs / _column_meta / _col_stats / _row_counts /
-    _metadata / _sample_date with the per-side qnames derived from the
-    current config.
-
-    Prior to the per-side `name` derivation fix, pairs whose left.table !=
-    right.table == pair_name collapsed both sides to `{source}_{pair_name}`,
-    losing one side's stored rows. This endpoint:
-      1. Recomputes the correct (table_left, table_right) for every pair
-         from the config using _derive_side_name.
-      2. Updates _table_pairs to point at the new qnames.
-      3. For each qname table (_column_meta, _col_stats, _row_counts,
-         _metadata, _sample_date), renames rows from the old qname to the
-         new one when the new qname is otherwise empty (never overwrites).
-      4. Returns a per-pair report so the user knows which sides still
-         need a fresh extract.
-    """
     import sqlite3
     try:
         from ..config import load_unified_config, _derive_side_name
@@ -1401,7 +1127,6 @@ async def api_migrate_qnames():
         conn = sqlite3.connect(_db_path)
         cursor = conn.cursor()
 
-        # Tables keyed on a single qname column
         qname_tables = [
             ("_column_meta", "source_table"),
             ("_col_stats", "source_table"),
@@ -1482,38 +1207,30 @@ async def api_migrate_qnames():
     except Exception as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
-
+# >>> Return the current config JSON <<< #
 @app.get("/api/config")
 async def api_get_config():
-    """Return the current config JSON."""
     try:
         with open(_config_path, 'r') as f:
             return json.load(f)
     except FileNotFoundError:
         return JSONResponse(status_code=404, content={"error": "Config not found"})
 
-
+# >>> Upload and replace the config JSON file <<< #
 @app.post("/api/config/upload")
 async def api_upload_config(file: UploadFile = File(...)):
-    """Upload and replace the config JSON file.
-
-    Also registers pairs and metadata into the database.
-    """
     try:
         content = await file.read()
         config = json.loads(content)
 
-        # Validate it has a pairs section
         if "pairs" not in config:
             return JSONResponse(status_code=400, content={
                 "error": "Invalid config: missing 'pairs' key"
             })
 
-        # Write to disk
         with open(_config_path, 'w') as f:
             json.dump(config, f, indent=2)
 
-        # Register pairs into the database
         registered = _sync_config_pairs(config)
 
         return {"ok": True, "pairs": len(config["pairs"]), "registered": registered}
@@ -1522,16 +1239,14 @@ async def api_upload_config(file: UploadFile = File(...)):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Partial update to config (merge into existing) <<< #
 @app.put("/api/config")
 async def api_update_config(request: Request):
-    """Partial update to config (merge into existing)."""
     body = await request.json()
     try:
         from ..config import load_unified_config, save_unified_config
         config = load_unified_config(_config_path)
 
-        # Merge pairs
         if "pairs" in body:
             for pname, pcfg in body["pairs"].items():
                 if pname in config["pairs"]:
@@ -1539,7 +1254,6 @@ async def api_update_config(request: Request):
                 else:
                     config["pairs"][pname] = pcfg
 
-        # Merge top-level metadata, settings, and date_types
         if "metadata" in body:
             config.setdefault("metadata", {}).update(body["metadata"])
         if "settings" in body:
@@ -1554,23 +1268,15 @@ async def api_update_config(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-# ---------------------------------------------------------------------------
-# Pair management (new UI)
-# ---------------------------------------------------------------------------
-
+# >>> Wipe all pairs and reload from the current config JSON on disk <<< #
 @app.post("/api/pairs/reload")
 async def api_reload_pairs():
-    """Wipe all pairs and reload from the current config JSON on disk."""
     try:
         from ..config import load_unified_config
         config = load_unified_config(_config_path)
 
-        # Wipe existing pairs in config, then re-read from file
-        # (this forces a clean slate from whatever config file is active)
         n_pairs = len(config.get("pairs", {}))
 
-        # Re-sync into database
         registered = _sync_config_pairs(config)
 
         return {"ok": True, "pairs": n_pairs, "registered": registered,
@@ -1578,29 +1284,20 @@ async def api_reload_pairs():
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> List all pairs with their full configuration <<< #
 @app.get("/api/pairs/list")
 async def api_list_pairs():
-    """List all pairs with their full configuration."""
     try:
         from ..config import load_unified_config
         config = load_unified_config(_config_path)
 
         pairs_list = []
         for pair_name, pair_cfg in config.get("pairs", {}).items():
-            # Normalize processed: list → newline-joined string for web UI
             for side in ("left", "right"):
                 side_cfg = pair_cfg.get(side, {})
                 p = side_cfg.get("processed", "")
                 if isinstance(p, list):
                     side_cfg["processed"] = "\n".join(p)
-            # col_filter is dual-written: the canonical store is the DB
-            # (_table_pairs, written by /api/pairs/{name} PUT), but users
-            # can also edit dtrack.json directly. When the JSON has a
-            # col_filter entry, treat that as authoritative for this read
-            # -- otherwise an edit to dtrack.json would silently fail to
-            # surface in col_gen because we'd only see the (possibly
-            # stale or empty) DB row.
             from ..db import get_pair_col_filter
             json_cf = pair_cfg.get("col_filter") or {}
             if json_cf.get("include") or json_cf.get("exclude"):
@@ -1634,25 +1331,15 @@ async def api_list_pairs():
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Toggle the persisted `skip` flag for one or more pairs <<< #
 @app.post("/api/pairs/skip")
 async def api_set_pair_skip(request: Request):
-    """Toggle the persisted `skip` flag for one or more pairs.
-
-    Body shapes:
-      {"pair_name": "P1", "skip": true}            -- single pair
-      {"pairs": {"P1": false, "P2": true}}         -- bulk
-    A pair with skip=true is hidden from /load_row, /row_compare,
-    /load_col, /col_compare, /col_mapping. The pairs page is the only
-    place to toggle it back on.
-    """
     body = await request.json()
     try:
         from ..config import load_unified_config, save_unified_config
         config = load_unified_config(_config_path)
         pairs_cfg = config.setdefault("pairs", {})
 
-        # Normalize input to a {name: bool} dict.
         if "pairs" in body and isinstance(body["pairs"], dict):
             updates = {k: bool(v) for k, v in body["pairs"].items()}
         elif "pair_name" in body and "skip" in body:
@@ -1668,7 +1355,6 @@ async def api_set_pair_skip(request: Request):
             if skip:
                 pairs_cfg[name]["skip"] = True
             else:
-                # Drop the key entirely when re-enabling, to keep dtrack.json clean.
                 pairs_cfg[name].pop("skip", None)
 
         save_unified_config(config, _config_path)
@@ -1676,10 +1362,9 @@ async def api_set_pair_skip(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Update an existing pair configuration <<< #
 @app.put("/api/pairs/{pair_name}")
 async def api_update_pair(pair_name: str, request: Request):
-    """Update an existing pair configuration."""
     body = await request.json()
 
     try:
@@ -1693,11 +1378,6 @@ async def api_update_pair(pair_name: str, request: Request):
 
         pair_cfg = config["pairs"][pair_name]
 
-        # Update only valid pair-config keys (not frontend-only fields like pair_name).
-        # col_filter is dual-written: the canonical store is _table_pairs in the DB
-        # (see below), but we also persist a copy in dtrack.json so the config file
-        # reflects exactly what the UI sees -- otherwise users edit include/exclude
-        # in col_gen, save, and wonder why the json doesn't change.
         _PAIR_KEYS = {"left", "right", "col_map", "col_filter", "description", "mode",
                        "vintage", "approx_distinct",
                        "fromDate", "toDate", "dateRangeMode", "overlap",
@@ -1706,9 +1386,6 @@ async def api_update_pair(pair_name: str, request: Request):
                        "comment_map", "diff_map", "excludeDates"}
         for key in _PAIR_KEYS:
             if key in body:
-                # Normalize null into absence (keeps json clean and lets
-                # `approx_distinct=null` mean "inherit global"). Same for
-                # col_filter — explicit null clears it.
                 if key in ("col_filter", "approx_distinct") and body[key] is None:
                     pair_cfg.pop(key, None)
                 else:
@@ -1720,9 +1397,6 @@ async def api_update_pair(pair_name: str, request: Request):
 
         save_unified_config(config, _config_path)
 
-        # Inject name for DB registration (auto-derived, not persisted).
-        # Each side derives its own name from `table` so left/right qnames
-        # don't collide when both sides share a source.
         from ..config import _derive_side_name
         left = pair_cfg.get("left", {})
         right = pair_cfg.get("right", {})
@@ -1740,7 +1414,6 @@ async def api_update_pair(pair_name: str, request: Request):
             pair_vintage = pair_cfg.get("vintage", "")
             for tbl_cfg in [left, right]:
                 qname = qualified_name(tbl_cfg)
-                # Use patch to avoid wiping existing fields (min/max dates, etc.)
                 from ..db import patch_metadata, get_metadata as _get_meta
                 existing = _get_meta(_db_path, qname)
                 if existing:
@@ -1765,9 +1438,6 @@ async def api_update_pair(pair_name: str, request: Request):
                         "data_type": "row",
                     })
 
-        # Save col_filter AFTER register_table_pair — so even if that path
-        # somehow wipes the columns again, our write is the last one and
-        # persists. Surface errors to the frontend instead of swallowing.
         if "col_filter" in body:
             from ..db import save_pair_col_filter
             cf = body.get("col_filter") or {}
@@ -1782,10 +1452,9 @@ async def api_update_pair(pair_name: str, request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Scan directory for CSV files <<< #
 @app.get("/api/scan/csv")
 async def api_scan_csv(dir: str = "./output/", type: str = "row"):
-    """Scan directory for CSV files."""
     try:
         from pathlib import Path
 
@@ -1800,16 +1469,14 @@ async def api_scan_csv(dir: str = "./output/", type: str = "row"):
             stats = csv_file.stat()
             parts = csv_file.stem.split('_')
 
-            # Parse filename: "customer_daily_left_row.csv"
             side = 'left' if 'left' in parts else 'right' if 'right' in parts else 'unknown'
             pair = '_'.join(p for p in parts if p not in ['left', 'right', 'row', 'col'])
 
-            # Count rows and dates (basic check)
             try:
                 with open(csv_file) as f:
                     lines = f.readlines()
-                    rows = len(lines) - 1  # minus header
-                    dates = rows  # Approximate for now
+                    rows = len(lines) - 1
+                    dates = rows
             except:
                 rows = 0
                 dates = 0
@@ -1841,10 +1508,9 @@ async def api_scan_csv(dir: str = "./output/", type: str = "row"):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Load row CSV files into database <<< #
 @app.post("/api/load/row")
 async def api_load_row_files(request: Request):
-    """Load row CSV files into database."""
     body = await request.json()
     files = body.get("files", [])
     mode = body.get("mode", "upsert")
@@ -1858,14 +1524,11 @@ async def api_load_row_files(request: Request):
         loaded = 0
 
         for file_path in files:
-            # Infer table info from filename
             filename = Path(file_path).stem
 
-            # Skip non-row CSV files (columns, col, etc.)
             if not filename.lower().endswith('_row'):
                 continue
 
-            # Find matching table in config
             for tbl in get_all_tables_from_unified(config):
                 qname = qualified_name(tbl)
                 if qname.lower() in filename.lower():
@@ -1884,27 +1547,19 @@ async def api_load_row_files(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Upload a CSV file and load row counts into a specific table <<< #
 @app.post("/api/load/row/upload")
 async def api_load_row_upload(
     file: UploadFile = File(...),
     table_name: str = Form(""),
     mode: str = Form("upsert"),
 ):
-    """Upload a CSV file and load row counts into a specific table.
-
-    Accepts multipart form data with:
-      - file: the CSV file
-      - table_name: target table name (e.g. 'oracle_cust_daily')
-      - mode: 'upsert' (default) or 'replace'
-    """
     import tempfile
 
     if not table_name:
         return JSONResponse(status_code=400, content={"error": "table_name is required"})
 
     try:
-        # Write uploaded file to temp location
         content = await file.read()
         with tempfile.NamedTemporaryFile(
             mode='wb', suffix='.csv', delete=False
@@ -1912,16 +1567,14 @@ async def api_load_row_upload(
             tmp.write(content)
             tmp_path = tmp.name
 
-        # Count existing rows for this table to compute new vs updated
-        from ..db import get_row_counts, get_metadata
+        from ..db import get_row_counts
         existing_rows = {}
         try:
             for dt, count in get_row_counts(_db_path, table_name):
                 existing_rows[dt] = count
         except Exception:
-            pass  # table may not exist yet
+            pass
 
-        # Find table config for metadata
         from ..config import load_unified_config, get_all_tables_from_unified
         from ..platforms.base import qualified_name
 
@@ -1933,8 +1586,6 @@ async def api_load_row_upload(
                 break
 
         from ..loader import load_row_counts
-        # date_col=None lets the CSV parser auto-detect (date_value, dt, date, etc.)
-        # date_var_override stores the source DB column name in metadata
         load_row_counts(
             db_path=_db_path,
             file_or_folder=tmp_path,
@@ -1945,7 +1596,6 @@ async def api_load_row_upload(
             date_var_override=tbl_cfg.get("date_col") if tbl_cfg else None,
         )
 
-        # Compute new vs updated dates
         new_rows = {}
         try:
             for dt, count in get_row_counts(_db_path, table_name):
@@ -1956,7 +1606,6 @@ async def api_load_row_upload(
         new_dates = len(set(new_rows.keys()) - set(existing_rows.keys()))
         updated_dates = len(set(new_rows.keys()) & set(existing_rows.keys()))
 
-        # Clean up temp file
         os.unlink(tmp_path)
 
         return {
@@ -1966,23 +1615,18 @@ async def api_load_row_upload(
             "updated_dates": updated_dates,
         }
     except Exception as e:
-        import traceback
         return JSONResponse(status_code=500, content={
             "ok": False,
             "error": f"{type(e).__name__}: {e}",
         })
 
-
+# >>> Upload a column metadata CSV and load into _column_meta <<< #
 @app.post("/api/load/columns/upload")
 async def api_load_columns_upload(
     file: UploadFile = File(...),
     table_name: str = Form(""),
     source: str = Form(""),
 ):
-    """Upload a column metadata CSV and load into _column_meta.
-
-    CSV should have headers: COLUMN_NAME, DATA_TYPE (or column_name, data_type).
-    """
     import csv as csv_mod
 
     if not table_name:
@@ -1996,7 +1640,6 @@ async def api_load_columns_upload(
         reader = csv_mod.DictReader(io.StringIO(text))
         columns = {}
         for row in reader:
-            # Strip whitespace from keys to handle \r\n line endings
             row = {k.strip(): v for k, v in row.items()}
             col_name = row.get('column_name') or row.get('COLUMN_NAME', '')
             dtype = row.get('data_type') or row.get('DATA_TYPE', '')
@@ -2011,13 +1654,9 @@ async def api_load_columns_upload(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Load a server-side column metadata CSV by path <<< #
 @app.post("/api/load/columns/path")
 async def api_load_columns_path(request: Request):
-    """Load a server-side column metadata CSV by path.
-
-    Body: {path, table_name, source}
-    """
     import csv as csv_mod
 
     body = await request.json()
@@ -2053,13 +1692,9 @@ async def api_load_columns_path(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Load a server-side CSV file by path into a specific table <<< #
 @app.post("/api/load/row/path")
 async def api_load_row_path(request: Request):
-    """Load a server-side CSV file by path into a specific table.
-
-    Body: {path, table_name, mode}
-    """
     body = await request.json()
     csv_path = body.get("path", "")
     if csv_path and not os.path.isabs(csv_path):
@@ -2082,7 +1717,6 @@ async def api_load_row_path(request: Request):
         from ..config import load_unified_config, get_all_tables_from_unified
         from ..platforms.base import qualified_name
 
-        # Count existing rows
         existing_rows = {}
         try:
             for dt, count in get_row_counts(_db_path, table_name):
@@ -2090,7 +1724,6 @@ async def api_load_row_path(request: Request):
         except Exception:
             pass
 
-        # Find table config
         config = load_unified_config(_config_path)
         tbl_cfg = None
         for tbl in get_all_tables_from_unified(config):
@@ -2099,7 +1732,6 @@ async def api_load_row_path(request: Request):
                 break
 
         from ..loader import load_row_counts
-        # date_col=None lets the CSV parser auto-detect (date_value, dt, date, etc.)
         load_row_counts(
             db_path=_db_path,
             file_or_folder=csv_path,
@@ -2110,7 +1742,6 @@ async def api_load_row_path(request: Request):
             date_var_override=tbl_cfg.get("date_col") if tbl_cfg else None,
         )
 
-        # Compute new vs updated
         new_rows = {}
         try:
             for dt, count in get_row_counts(_db_path, table_name):
@@ -2130,10 +1761,9 @@ async def api_load_row_path(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
-
+# >>> Scan a server-side folder for CSV files and return file info <<< #
 @app.get("/api/scan/folder")
 async def api_scan_folder(dir: str = "./csv/"):
-    """Scan a server-side folder for CSV files and return file info."""
     try:
         dir_path = Path(_resolve(dir))
         if not dir_path.exists():
@@ -2143,7 +1773,6 @@ async def api_scan_folder(dir: str = "./csv/"):
 
         files = []
         for csv_file in sorted(dir_path.glob("*.csv")):
-            # Read first few lines for row count and date range
             rows = 0
             min_date = ''
             max_date = ''
@@ -2185,11 +1814,7 @@ async def api_scan_folder(dir: str = "./csv/"):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-# ---------------------------------------------------------------------------
-# Col Stats Load API
-# ---------------------------------------------------------------------------
-
+# >>> Upload pre-computed column stats CSV <<< #
 @app.post("/api/load/col-stats/upload")
 async def api_load_col_stats_upload(
     file: UploadFile = File(...),
@@ -2197,18 +1822,6 @@ async def api_load_col_stats_upload(
     mode: str = Form("upsert"),
     preset: str = Form(""),
 ):
-    """Upload pre-computed column stats CSV.
-
-    CSV should have: column_name, dt, col_type, n_total, n_missing, n_unique,
-    mean, std, min_val, max_val, top_10
-
-    `preset` (optional, 'quick'/'standard'/'detailed') tags every loaded
-    _col_stats row so col_compare can later filter by preset. Empty
-    defers to the CSV's own `preset` column, falling back to 'detailed'
-    for legacy CSVs without one. Composite PK is (source_table,
-    column_name, dt) -- loading the same (col, dt) under a different
-    preset overwrites the prior row.
-    """
     import tempfile
 
     if not table_name:
@@ -2230,7 +1843,6 @@ async def api_load_col_stats_upload(
         from ..config import load_unified_config, get_all_tables_from_unified
         from ..platforms.base import qualified_name
 
-        # Find table config for vintage info
         config = load_unified_config(_config_path)
         tbl_cfg = None
         for tbl in get_all_tables_from_unified(config):
@@ -2264,13 +1876,9 @@ async def api_load_col_stats_upload(
             "ok": False, "error": f"{type(e).__name__}: {e}",
         })
 
-
+# >>> Load col stats from server-side path <<< #
 @app.post("/api/load/col-stats/path")
 async def api_load_col_stats_path(request: Request):
-    """Load col stats from server-side path.
-
-    Body: {path, table_name, mode}
-    """
     body = await request.json()
     csv_path = body.get("path", "")
     if csv_path and not os.path.isabs(csv_path):
@@ -2322,10 +1930,9 @@ async def api_load_col_stats_path(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
-
+# >>> Return col stats summary per table (count, date range, distinct dates) <<< #
 @app.get("/api/status/col")
 async def api_status_col():
-    """Return col stats summary per table (count, date range, distinct dates)."""
     from ..date_utils import parse_date
     try:
         conn = sqlite3.connect(_db_path)
@@ -2334,14 +1941,12 @@ async def api_status_col():
 
         status = {}
         try:
-            # Get count per table
             cursor.execute(
                 "SELECT source_table, COUNT(*) as cnt FROM _col_stats GROUP BY source_table"
             )
             for row in cursor.fetchall():
                 status[row["source_table"]] = {"count": row["cnt"]}
 
-            # Get all distinct dates per table for full history
             cursor.execute(
                 "SELECT source_table, dt FROM _col_stats GROUP BY source_table, dt"
             )
@@ -2364,21 +1969,16 @@ async def api_status_col():
                     status[tbl]["max_date"] = dates[-1] if dates else None
 
         except sqlite3.OperationalError:
-            pass  # _col_stats may not exist
+            pass
 
         conn.close()
         return {"status": status}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-# ---------------------------------------------------------------------------
-# Col Compare API
-# ---------------------------------------------------------------------------
-
+# >>> Save col comparison state to _col_comparison <<< #
 @app.put("/api/compare/col/{pair_name}")
 async def api_save_col_comparison(pair_name: str, request: Request):
-    """Save col comparison state to _col_comparison."""
     body = await request.json()
     try:
         from ..db import save_col_comparison
@@ -2392,15 +1992,10 @@ async def api_save_col_comparison(pair_name: str, request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Compare col stats for a single pair — returns per-vintage comparisons <<< #
 @app.get("/api/compare/col/{pair_name}")
 async def api_compare_col_pair(pair_name: str, from_date: str = "",
                                to_date: str = "", level: str = "fine"):
-    """Compare col stats for a single pair — returns per-vintage comparisons.
-
-    `level=coarse` returns the cheap-aggregate signals only; `level=fine`
-    (default) returns the full row including mean/std/top_10.
-    """
     if level not in ("coarse", "fine"):
         return JSONResponse(status_code=400, content={
             "error": f"Unknown level '{level}'; expected 'coarse' or 'fine'."
@@ -2411,8 +2006,7 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
             get_column_meta, get_metadata,
         )
         from ..config import load_unified_config, get_col_type_overrides
-        from ..compare import compare_column_stats, resolve_col_type, _has_col_differences
-        from ..date_utils import parse_date
+        from ..compare import compare_column_stats, _has_col_differences
 
         pair = get_table_pair(_db_path, pair_name)
         if not pair:
@@ -2424,7 +2018,6 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
         config = load_unified_config(_config_path)
         col_type_overrides = get_col_type_overrides(config, pair_name)
 
-        # Col mappings
         col_mappings = get_pair_col_map_from_db(_db_path, pair_name)
         if not col_mappings:
             left_meta = get_column_meta(_db_path, table_left)
@@ -2454,11 +2047,9 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
         mapped_left = set(col_mappings.keys())
         mapped_right = set(col_mappings.values())
 
-        # Organize by vintage: {vintage_label: {col_name: comparison_entry}}
-        vintages = {}  # ordered list of {label, dt, columns: [...]}
-        vintage_order = []  # maintain order by dt
+        vintages = {}
+        vintage_order = []
 
-        # Collect all vintages and per-vintage column comparisons
         n_diff_cols = 0
         n_type_mismatch = 0
         diff_col_names = set()
@@ -2510,9 +2101,6 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
                     "max_match": comp.get("max_match"),
                     "top_10_left": comp.get("top_10_left", ""),
                     "top_10_right": comp.get("top_10_right", ""),
-                    # Coarse signals — emitted by every fine SQL too. Empty
-                    # cells (legacy rows pre-dating these fields) get
-                    # match=None so they don't paint as a diff.
                     "length_avg_left": comp.get("length_avg_left", ""),
                     "length_avg_right": comp.get("length_avg_right", ""),
                     "length_avg_match": comp.get("length_avg_match"),
@@ -2527,10 +2115,8 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
 
         n_diff_cols = len(diff_col_names)
 
-        # Build vintage list in date order
         vintage_list = [vintages[vl] for vl in vintage_order]
 
-        # Left-only and right-only columns (from latest stats)
         def _latest(stats_list):
             by_col = {}
             for s in stats_list:
@@ -2555,12 +2141,9 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
             for c in sorted(all_right_cols - mapped_right) if c in right_agg
         ]
 
-        # Metadata
         meta_left = get_metadata(_db_path, table_left) or {}
         meta_right = get_metadata(_db_path, table_right) or {}
 
-        # Annotations (col scope) — surfaced for the per-pair edit UI on
-        # /col_compare. Persisted via PUT /api/pairs/{name}/annotations.
         pair_cfg = config.get("pairs", {}).get(pair_name, {})
         col_comment_map = pair_cfg.get("comment_map", {}).get("col", {}) or {}
         col_time_map = pair_cfg.get("time_map", {}).get("col", {}) or {}
@@ -2601,16 +2184,9 @@ async def api_compare_col_pair(pair_name: str, from_date: str = "",
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Generate full HTML report for col comparison (like CLI compare-col) <<< #
 @app.post("/api/compare/col/export/html")
 async def api_compare_col_export_html(request: Request):
-    """Generate full HTML report for col comparison (like CLI compare-col).
-
-    Honors `preset` body param (one of 'quick'/'standard'/'detailed' or
-    empty for all). Per-pair empty-side errors are rendered as a stub
-    section in the report so the user sees which pair needs re-extracting
-    rather than getting a 500 for the whole batch.
-    """
     body = await request.json()
     from_date = body.get("from_date", "")
     to_date = body.get("to_date", "")
@@ -2622,7 +2198,7 @@ async def api_compare_col_export_html(request: Request):
     live_pairs = body.get("pairs", {}) or {}
 
     try:
-        from ..db import list_table_pairs, get_metadata, get_row_comparison
+        from ..db import list_table_pairs, get_metadata
         from ..config import load_unified_config, get_col_type_overrides
         from ..compare import compare_column_stats
         from ..html_export import generate_column_stats_html, create_column_stats_table, wrap_html_document
@@ -2649,11 +2225,6 @@ async def api_compare_col_export_html(request: Request):
                 auto = match_columns_from_dicts(left_cols, right_cols)
                 col_mappings = auto.get("matched", {})
 
-            # No matched_dates filter -- exports show every (col, dt) the col
-            # stats have, just like the col_compare page itself. Filtering by
-            # row-compare's matching_dates would silently empty the export
-            # when the date formats don't line up between row counts and col
-            # stats (vintage-bucketed col stats vs raw row dates, etc.).
             comparison = compare_column_stats(
                 _db_path, pair["table_left"], pair["table_right"],
                 columns=list(col_mappings.keys()) if col_mappings else None,
@@ -2665,12 +2236,8 @@ async def api_compare_col_export_html(request: Request):
 
             meta_left = get_metadata(_db_path, pair["table_left"]) or {}
             meta_right = get_metadata(_db_path, pair["table_right"]) or {}
-            vintage = meta_left.get("vintage") or meta_right.get("vintage") or "day"
+            meta_left.get("vintage") or meta_right.get("vintage") or "day"
 
-            # Live UI state wins over saved config so edits show up in the
-            # downloaded HTML even before the user blurs the input. The
-            # frontend posts {pairs: {<pname>: {time_left, time_right,
-            # comment_left, comment_right}}} alongside from_date/to_date.
             live = live_pairs.get(pname) or {}
             saved_comment = pair_cfg.get("comment_map", {}).get("col", {}) or {}
             saved_time = pair_cfg.get("time_map", {}).get("col", {}) or {}
@@ -2715,13 +2282,9 @@ async def api_compare_col_export_html(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Generate compact comparison log and save to {outdir}/{pair}_col.log files <<< #
 @app.post("/api/compare/col/export/log")
 async def api_compare_col_export_log(request: Request):
-    """Generate compact comparison log and save to {outdir}/{pair}_col.log files.
-
-    Returns the combined log text.
-    """
     body = await request.json()
     from_date = body.get("from_date", "")
     to_date = body.get("to_date", "")
@@ -2730,9 +2293,9 @@ async def api_compare_col_export_log(request: Request):
         compare_fields = None
 
     try:
-        from ..db import list_table_pairs, get_metadata, get_row_comparison
+        from ..db import list_table_pairs, get_metadata
         from ..config import load_unified_config, get_col_type_overrides
-        from ..compare import compare_column_stats, _has_col_differences
+        from ..compare import compare_column_stats
         from ..db import get_pair_col_map_from_db, get_column_meta
 
         config = load_unified_config(_config_path)
@@ -2776,7 +2339,6 @@ async def api_compare_col_export_log(request: Request):
                 pname, pair, comparison, vintage, col_mappings,
                 compare_fields=compare_fields)
 
-            # Write per-pair log file
             log_path = os.path.join(outdir, f"{pname}_col.log")
             with open(log_path, 'w', encoding='utf-8') as f:
                 f.write(log)
@@ -2788,15 +2350,9 @@ async def api_compare_col_export_log(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Format compact comparison log with diffs and top_10 <<< #
 def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mappings,
                                 compare_fields=None):
-    """Format compact comparison log with diffs and top_10.
-
-    `compare_fields` (optional list of field keys) narrows what counts as
-    a diff AND which per-field detail lines get emitted, matching the
-    col_compare UI's Compare-fields selector.
-    """
     from ..compare import _has_col_differences
     from ..constants import STAT_ROUND_DECIMALS
     cf = set(compare_fields) if compare_fields is not None else None
@@ -2815,8 +2371,6 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
         if not t:
             return ""
         s = str(t)
-        # JSON-style top_10 from compute_categorical_stats — unwrap to the
-        # human-readable "value(count); ..." shape used elsewhere.
         if s.startswith('['):
             try:
                 import json as _json
@@ -2829,8 +2383,7 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
     lines = []
     lines.append(f"=== {pair_name} ({pair['table_left']} vs {pair['table_right']}) ===")
 
-    # Organize by vintage
-    vintages = {}  # vintage_label -> {col: comp}
+    vintages = {}
     for col_name, comps in comparison.items():
         for comp in comps:
             vl = comp.get("vintage_label") or comp.get("dt", "")
@@ -2893,7 +2446,6 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
             detail = "  ".join(parts) if parts else "values differ"
             lines.append(f"    {col:<20s} {detail}")
 
-            # Diff-only top_10 dump
             t10_l = _fmt_top10(c.get("top_10_left", ""))
             t10_r = _fmt_top10(c.get("top_10_right", ""))
             if t10_l or t10_r:
@@ -2903,8 +2455,6 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
                 else:
                     lines.append(f"      top_10:   {t10_l[:200]}")
 
-        # First vintage: emit top_10 for EVERY column (matched and diff),
-        # so the user can eyeball the actual category distributions once.
         if is_first:
             lines.append(f"    --- top_10 dump ({vl}) ---")
             for col in sorted(col_comps.keys()):
@@ -2923,22 +2473,10 @@ def _format_col_comparison_log(pair_name, pair, comparison, vintage, col_mapping
 
     return "\n".join(lines)
 
-
-# ---------------------------------------------------------------------------
-# Col Compare Excel Export
-# ---------------------------------------------------------------------------
-
+# >>> Generate Excel workbook for col comparison — one sheet per pair, transposed layout <<< #
 @app.get("/api/compare/col/export/excel")
 async def api_compare_col_export_excel(from_date: str = "", to_date: str = "",
                                          compare_fields: str = ""):
-    """Generate Excel workbook for col comparison — one sheet per pair, transposed layout.
-
-    `compare_fields` (comma-separated keys) restricts the visible stat
-    rows AND the per-vintage diff flag to that subset; empty = include
-    every supported field (n_total/n_missing/n_unique/min/max/length_*/
-    hash_sum). The `_filter_active_stats` helper additionally drops any
-    stat row that's universally empty across the loaded comparisons.
-    """
     cf = None
     if compare_fields:
         cf = {k.strip() for k in compare_fields.split(",") if k.strip()}
@@ -2958,14 +2496,9 @@ async def api_compare_col_export_excel(from_date: str = "", to_date: str = "",
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-# ---------------------------------------------------------------------------
-# Row Compare Excel Export (all pairs)
-# ---------------------------------------------------------------------------
-
+# >>> Generate Excel with one worksheet per pair for row comparison <<< #
 @app.get("/api/compare/row/export/excel-all")
 async def api_compare_row_export_excel_all(from_date: str = "", to_date: str = ""):
-    """Generate Excel with one worksheet per pair for row comparison."""
     try:
         import io
         from ..excel import build_row_comparison_workbook
@@ -2982,32 +2515,9 @@ async def api_compare_row_export_excel_all(from_date: str = "", to_date: str = "
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-# ---------------------------------------------------------------------------
-# Row Compare API
-# ---------------------------------------------------------------------------
-
-# NOTE: Export routes must be defined BEFORE {pair_name} routes to avoid
-# FastAPI matching "export" as a pair_name parameter.
-
+# >>> Generate full HTML report for all pairs <<< #
 @app.post("/api/compare/row/export/html")
 async def api_compare_row_export_html(request: Request):
-    """Generate full HTML report for all pairs.
-
-    Body (optional): {
-        "from_date": "", "to_date": "",
-        "pairs": {
-            "pair_name": {
-                "excluded_dates": [...],
-                "comment_left": "", "comment_right": "",
-                "time_left": "", "time_right": ""
-            }, ...
-        }
-    }
-
-    When pairs dict is provided, uses live UI state for exclusions/annotations.
-    Otherwise falls back to saved DB/config state.
-    """
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     from_date = body.get("from_date", "")
     to_date = body.get("to_date", "")
@@ -3036,7 +2546,6 @@ async def api_compare_row_export_html(request: Request):
                 from_date=from_date or None, to_date=to_date or None,
             )
 
-            # Use live UI state if provided, otherwise fall back to saved
             live = live_pairs.get(pname, {})
             if live.get("excluded_dates") is not None:
                 excluded = set(live["excluded_dates"])
@@ -3053,7 +2562,6 @@ async def api_compare_row_export_html(request: Request):
             meta_left = get_metadata(_db_path, pair["table_left"])
             meta_right = get_metadata(_db_path, pair["table_right"])
 
-            # Annotations: prefer live UI state, fall back to config
             if live:
                 comment_left = live.get("comment_left", "")
                 comment_right = live.get("comment_right", "")
@@ -3091,10 +2599,9 @@ async def api_compare_row_export_html(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Generate CSV export for one pair's row comparison <<< #
 @app.get("/api/compare/row/export/csv/{pair_name}")
 async def api_compare_row_export_csv(pair_name: str, from_date: str = "", to_date: str = ""):
-    """Generate CSV export for one pair's row comparison."""
     import csv as csv_mod
 
     try:
@@ -3154,17 +2661,12 @@ async def api_compare_row_export_csv(pair_name: str, from_date: str = "", to_dat
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Generate a single-side count CSV: DATE_COL (SOURCE), COUNT (SOURCE) <<< #
 @app.get("/api/compare/row/export/count-csv/{pair_name}")
 async def api_compare_row_export_count_csv(
     pair_name: str, side: str = "left", from_date: str = "", to_date: str = "",
     common_only: bool = True,
 ):
-    """Generate a single-side count CSV: DATE_COL (SOURCE), COUNT (SOURCE).
-
-    When common_only=True (default), only dates within the overlap range of
-    both sides are included.
-    """
     import csv as csv_mod
 
     try:
@@ -3183,7 +2685,6 @@ async def api_compare_row_export_count_csv(
             from_date=from_date or None, to_date=to_date or None,
         )
 
-        # Compute overlap range
         overlap_start = overlap_end = None
         if common_only:
             summary = comparison["summary"]
@@ -3200,14 +2701,12 @@ async def api_compare_row_export_count_csv(
                 return True
             return overlap_start <= dt <= overlap_end
 
-        # Determine column header names
         tbl_key = "table_left" if side == "left" else "table_right"
         src_key = "source_left" if side == "left" else "source_right"
         meta = get_metadata(_db_path, pair[tbl_key]) or {}
         date_var = (meta.get("date_var") or "DT").upper()
         source = (pair.get(src_key) or side).upper()
 
-        # Collect (date, count) rows for the requested side — common range only
         rows = []
         for dt, count in comparison["matching"]:
             if _in_range(dt):
@@ -3242,17 +2741,12 @@ async def api_compare_row_export_count_csv(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Generate Excel with two sheets (left counts, right counts) for one pair <<< #
 @app.get("/api/compare/row/export/excel/{pair_name}")
 async def api_compare_row_export_excel(
     pair_name: str, from_date: str = "", to_date: str = "",
     common_only: bool = True,
 ):
-    """Generate Excel with two sheets (left counts, right counts) for one pair.
-
-    When common_only=True (default), only dates within the overlap range of
-    both sides are included.
-    """
     try:
         from openpyxl import Workbook
         from ..db import get_table_pair, get_metadata
@@ -3267,7 +2761,6 @@ async def api_compare_row_export_excel(
             from_date=from_date or None, to_date=to_date or None,
         )
 
-        # Compute overlap range
         overlap_start = overlap_end = None
         if common_only:
             summary = comparison["summary"]
@@ -3334,10 +2827,9 @@ async def api_compare_row_export_excel(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Run row comparison for a single pair and return structured JSON <<< #
 @app.get("/api/compare/row/{pair_name}")
 async def api_compare_row_pair(pair_name: str, from_date: str = "", to_date: str = ""):
-    """Run row comparison for a single pair and return structured JSON."""
     try:
         from ..db import get_table_pair, get_metadata, get_row_comparison
         from ..compare import compare_row_counts
@@ -3355,21 +2847,17 @@ async def api_compare_row_pair(pair_name: str, from_date: str = "", to_date: str
         meta_left = get_metadata(_db_path, pair["table_left"]) or {}
         meta_right = get_metadata(_db_path, pair["table_right"]) or {}
 
-        # Load saved comparison state
         saved = get_row_comparison(_db_path, pair_name)
 
-        # Load annotations from config
         config = load_unified_config(_config_path)
         pair_cfg = config.get("pairs", {}).get(pair_name, {})
         comment_map = pair_cfg.get("comment_map", {}).get("row", {})
         time_map = pair_cfg.get("time_map", {}).get("row", {})
 
-        # Build date rows
         summary = comparison["summary"]
         left_min, left_max = summary["date_range_left"]
         right_min, right_max = summary["date_range_right"]
 
-        # Calculate overlap
         overlap_start = overlap_end = None
         if left_min and right_min and left_max and right_max:
             overlap_start = max(left_min, right_min)
@@ -3436,10 +2924,9 @@ async def api_compare_row_pair(pair_name: str, from_date: str = "", to_date: str
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Save row comparison state: excluded dates, comments, times <<< #
 @app.put("/api/compare/row/{pair_name}")
 async def api_save_row_comparison(pair_name: str, request: Request):
-    """Save row comparison state: excluded dates, comments, times."""
     body = await request.json()
     try:
         from ..db import save_row_comparison, get_table_pair
@@ -3457,8 +2944,6 @@ async def api_save_row_comparison(pair_name: str, request: Request):
         time_left = body.get("time_left", "")
         time_right = body.get("time_right", "")
 
-        # Compute overlap from matching + non-matching dates (full overlap range)
-        # Filter out None/empty values that could cause min/max to fail
         all_overlap_dates = [d for d in matching_dates + non_matching_dates if d]
         overlap_start = min(all_overlap_dates) if all_overlap_dates else None
         overlap_end = max(all_overlap_dates) if all_overlap_dates else None
@@ -3472,7 +2957,6 @@ async def api_save_row_comparison(pair_name: str, request: Request):
             non_matching_dates=non_matching_dates,
         )
 
-        # Save annotations to config
         config = load_unified_config(_config_path)
         pair_cfg = config.get("pairs", {}).get(pair_name, {})
         if pair_cfg:
@@ -3488,10 +2972,9 @@ async def api_save_row_comparison(pair_name: str, request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Generate HTML preview for one pair's row comparison <<< #
 @app.post("/api/compare/row/{pair_name}/preview")
 async def api_compare_row_preview(pair_name: str, request: Request):
-    """Generate HTML preview for one pair's row comparison."""
     body = await request.json()
     try:
         from ..db import get_table_pair, get_metadata
@@ -3512,7 +2995,6 @@ async def api_compare_row_preview(pair_name: str, request: Request):
             from_date=from_date, to_date=to_date,
         )
 
-        # Filter out excluded dates from all categories
         if excluded_dates:
             comparison["matching"] = [(dt, c) for dt, c in comparison["matching"] if dt not in excluded_dates]
             comparison["mismatched"] = [(dt, l, r) for dt, l, r in comparison["mismatched"] if dt not in excluded_dates]
@@ -3526,7 +3008,7 @@ async def api_compare_row_preview(pair_name: str, request: Request):
         pair_cfg = config.get("pairs", {}).get(pair_name, {})
 
         time_map = {}
-        tm = body.get("time_left") or body.get("time_right")
+        body.get("time_left") or body.get("time_right")
         if body.get("time_left") or body.get("time_right"):
             time_map = {"left": body.get("time_left", ""), "right": body.get("time_right", "")}
 
@@ -3547,7 +3029,6 @@ async def api_compare_row_preview(pair_name: str, request: Request):
             description=pair_cfg.get("description", ""),
         )
 
-        # Wrap in a minimal table
         from ..html_export import create_row_count_table
         table_html = create_row_count_table([html])
 
@@ -3555,10 +3036,9 @@ async def api_compare_row_preview(pair_name: str, request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Get row count loading status <<< #
 @app.get("/api/status/row")
 async def api_status_row():
-    """Get row count loading status."""
     try:
         from ..db import list_table_pairs, get_metadata
 
@@ -3582,10 +3062,9 @@ async def api_status_row():
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Clear all row count data <<< #
 @app.post("/api/clear/row")
 async def api_clear_row():
-    """Clear all row count data."""
     try:
         conn = sqlite3.connect(_db_path)
         conn.execute("DELETE FROM _row_counts")
@@ -3597,22 +3076,9 @@ async def api_clear_row():
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-# ---------------------------------------------------------------------------
-# Pair management (legacy - keep for compatibility)
-# ---------------------------------------------------------------------------
-
+# >>> Add a new pair to the config and register in DB <<< #
 @app.post("/api/pairs")
 async def api_add_pair(request: Request):
-    """Add a new pair to the config and register in DB.
-
-    Body: {
-        "pair_name": "cust_daily",
-        "left": {"source": "oracle", "table": "CUST_DAILY", "conn_macro": "pb23", "date_col": "RPT_DT"},
-        "right": {"source": "aws", "table": "cust_daily", "conn_macro": "mydb", "date_col": "rpt_dt"},
-        "col_map": {}
-    }
-    """
     body = await request.json()
     pair_name = body.get("pair_name", "").strip()
     if not pair_name:
@@ -3635,7 +3101,6 @@ async def api_add_pair(request: Request):
         _prepare_side(left)
         _prepare_side(right)
 
-        # Build pair config — only persist valid pair-config keys
         pair_cfg = {
             "left": left,
             "right": right,
@@ -3648,9 +3113,6 @@ async def api_add_pair(request: Request):
         config.setdefault("pairs", {})[pair_name] = pair_cfg
         save_unified_config(config, _config_path)
 
-        # Inject name for DB registration (auto-derived, not persisted).
-        # Each side derives its own name from `table` so left/right qnames
-        # don't collide when both sides share a source.
         from ..config import _derive_side_name
         left["name"] = _derive_side_name(left, pair_name)
         right["name"] = _derive_side_name(right, pair_name)
@@ -3663,7 +3125,6 @@ async def api_add_pair(request: Request):
             col_mappings=body.get("col_map") or None,
         )
 
-        # Create metadata stubs so they show up in status
         for tbl_cfg in [left, right]:
             qname = qualified_name(tbl_cfg)
             update_metadata(_db_path, {
@@ -3679,10 +3140,9 @@ async def api_add_pair(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Remove a pair from config. With purge=1, also remove all DB data <<< #
 @app.delete("/api/pairs/{pair_name}")
 async def api_delete_pair(pair_name: str, purge: int = Query(0)):
-    """Remove a pair from config. With purge=1, also remove all DB data."""
     try:
         from ..config import load_unified_config
         config = load_unified_config(_config_path)
@@ -3701,7 +3161,7 @@ async def api_delete_pair(pair_name: str, purge: int = Query(0)):
                 delete_pair(_db_path, pair_name)
                 found_in_db = True
             except ValueError:
-                pass  # pair may not be registered in DB
+                pass
 
         if not found_in_config and not found_in_db:
             return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
@@ -3710,29 +3170,17 @@ async def api_delete_pair(pair_name: str, purge: int = Query(0)):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Prepare a left/right config for saving <<< #
 def _prepare_side(tbl_cfg):
-    """Prepare a left/right config for saving.
-
-    - Strips 'name' (auto-derived from pair_name on load)
-    - Converts processed string to list for readable JSON
-    """
     tbl_cfg.pop("name", None)
-    # Store processed as list for readable JSON
     p = tbl_cfg.get("processed", "")
     if isinstance(p, str) and p.strip():
         tbl_cfg["processed"] = [line for line in p.split("\n") if line.strip()]
     elif not p:
         tbl_cfg.pop("processed", None)
 
-
+# >>> Register all pairs from config into the database <<< #
 def _sync_config_pairs(config):
-    """Register all pairs from config into the database.
-
-    Uses patch_metadata for existing rows to avoid wiping data-derived fields.
-    Then calls refresh_metadata_from_data to recompute from _row_counts/_col_stats.
-    Returns count of pairs synced.
-    """
     from ..platforms.base import qualified_name
     from ..db import (
         register_table_pair, update_metadata, patch_metadata,
@@ -3748,7 +3196,6 @@ def _sync_config_pairs(config):
         if not left.get("source") or not right.get("source"):
             continue
 
-        # Auto-derive name from pair_name (may not be set if config was loaded raw)
         left.setdefault("name", pair_name)
         right.setdefault("name", pair_name)
 
@@ -3765,7 +3212,6 @@ def _sync_config_pairs(config):
             qname = qualified_name(tbl_cfg)
             existing = get_metadata(_db_path, qname)
 
-            # Config-derived fields
             cfg_fields = {
                 "source": tbl_cfg.get("source"),
                 "source_table": tbl_cfg.get("table"),
@@ -3773,14 +3219,12 @@ def _sync_config_pairs(config):
             }
             if tbl_cfg.get("vintage"):
                 cfg_fields["vintage"] = tbl_cfg["vintage"]
-            # Derive date_format from config date_type
             from ..platforms.base import DATE_TYPE_FORMATS
             cfg_date_type = (tbl_cfg.get("date_type") or "").lower()
             if cfg_date_type in DATE_TYPE_FORMATS:
                 cfg_fields["date_format"] = DATE_TYPE_FORMATS[cfg_date_type]
 
             if existing:
-                # Patch without wiping data-derived fields
                 patch_metadata(_db_path, qname, **cfg_fields)
             else:
                 cfg_fields["table_name"] = qname
@@ -3788,20 +3232,13 @@ def _sync_config_pairs(config):
 
         count += 1
 
-    # Recompute data-derived fields (min/max dates, row_count_total, date_format)
-    # from actual _row_counts and _col_stats data
     refresh_metadata_from_data(_db_path)
 
     return count
 
-
-# ---------------------------------------------------------------------------
-# HITL annotation routes (where_map, time_map, comment_map)
-# ---------------------------------------------------------------------------
-
+# >>> Get where_map, time_map, comment_map for a pair <<< #
 @app.get("/api/pairs/{pair_name}/annotations")
 async def api_get_annotations(pair_name: str):
-    """Get where_map, time_map, comment_map for a pair."""
     try:
         from ..config import load_unified_config
         config = load_unified_config(_config_path)
@@ -3825,18 +3262,9 @@ async def api_get_annotations(pair_name: str):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Update where_map, time_map, comment_map for a pair <<< #
 @app.put("/api/pairs/{pair_name}/annotations")
 async def api_update_annotations(pair_name: str, request: Request):
-    """Update where_map, time_map, comment_map for a pair.
-
-    Body (all fields optional):
-    {
-        "where_map": {"left": "...", "right": "..."},
-        "time_map": {"row": {"left": "42s", "right": "112s"}, "col": {...}},
-        "comment_map": {"row": {"left": "note", "right": ""}, "col": {...}}
-    }
-    """
     body = await request.json()
     try:
         from ..config import load_unified_config, save_unified_config
@@ -3856,7 +3284,6 @@ async def api_update_annotations(pair_name: str, request: Request):
 
         save_unified_config(config, _config_path)
 
-        # Sync where_map to database
         if "where_map" in body:
             from ..db import sync_config_to_db
             sync_config_to_db(_db_path, config)
@@ -3865,18 +3292,9 @@ async def api_update_annotations(pair_name: str, request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-# ---------------------------------------------------------------------------
-# Query preview
-# ---------------------------------------------------------------------------
-
+# >>> Generate preview SQL for a pair's left and right sides <<< #
 @app.post("/api/preview")
 async def api_preview(request: Request):
-    """Generate preview SQL for a pair's left and right sides.
-
-    Body: {pair_name, left: {...}, right: {...}, fromDate, toDate}
-    Returns: {left: {sql, output_file}, right: {sql, output_file}}
-    """
     body = await request.json()
     pair_name = body.get("pair_name", "pair")
     from_date = body.get("fromDate", "")
@@ -3896,7 +3314,6 @@ async def api_preview(request: Request):
 
     return result
 
-
 def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
     # >>> delegate to the real per-platform row-SQL builder so preview == actual execution <<< #
     from ..platforms.base import qualified_name
@@ -3907,25 +3324,11 @@ def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
     table = cfg.get("table", "")
     conn_macro = cfg.get("conn_macro", "")
 
-    # Compute qname so the displayed filename matches what the extractor
-    # actually writes — `{qname}_row.csv` is the per-table result for every
-    # platform, and databricks also writes `{qname}_row.sql`.
     try:
         qname = qualified_name(cfg)
     except Exception:
         qname = f"{conn_macro}.{table}" if conn_macro else (table or f"{pair_name}_{side}")
 
-    # SAS / Oracle-via-SAS keep the legacy PROC-SQL wrapper because that is what
-    # gen_sas actually emits (an .sas program the user submits in SAS Studio).
-    if source == "sas":
-        return _build_preview_sas_sas(cfg, from_date, to_date, qname, parallel)
-    if source == "oracle" and (cfg.get("via_sas") or cfg.get("processed", "").startswith("$")):
-        # Oracle through SAS PROC SQL CONNECT — the gen_sas path.
-        return _build_preview_sas_oracle(cfg, from_date, to_date, qname, parallel)
-
-    # Build a `tbl_cfg` shape the per-platform helpers understand, then call
-    # the same `_build_row_sql_*` function the runner uses. Date bounds get
-    # rendered into `_date_bounds` so the builder ANDs them into the WHERE.
     tbl_cfg = dict(cfg)
     tbl_cfg.setdefault("table", table)
     tbl_cfg.setdefault("date_col", date_col)
@@ -3937,10 +3340,6 @@ def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
         date_col, date_type, from_date, to_date, source
     )
 
-    # Filename convention shared by every platform: the result CSV is
-    # `{qname}_row.csv`. The SQL source file is `extract_row.sql` for the
-    # aggregator platforms (aws/hadoop/oracle/csv) and `{qname}_row.sql` for
-    # databricks (per-table, no aggregator).
     csv_out = f"{qname}_row.csv"
 
     if source == "aws":
@@ -3954,15 +3353,6 @@ def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
         from ..platforms.hadoop import _build_row_sql_hadoop
         sql = _build_row_sql_hadoop(tbl_cfg)
         return {"sql": sql, "output_file": "extract_row.sql", "result_csv": csv_out}
-
-    if source == "hadoop_sas":
-        # hadoop_sas is extracted through SAS (gen_sas -> extract_row.sas); the
-        # inner Hive query SAS passes through is the same hadoop row SQL.
-        from ..platforms.hadoop import _build_row_sql_hadoop
-        inner = _build_row_sql_hadoop(tbl_cfg)
-        sql = ("/* hadoop_sas: written into extract_row.sas; SAS runs this via\n"
-               "   PROC SQL CONNECT TO HADOOP passthrough */\n" + inner)
-        return {"sql": sql, "output_file": "extract_row.sas", "result_csv": csv_out}
 
     if source == "databricks":
         from ..platforms.databricks import _build_row_sql_databricks
@@ -3981,17 +3371,14 @@ def _build_preview_sql(pair_name, side, cfg, from_date, to_date, parallel=0):
             sql = sql.replace("SELECT", f"SELECT /*+ PARALLEL({int(parallel)}) */", 1)
         return {"sql": sql, "output_file": "extract_row.sql", "result_csv": csv_out}
 
-    # Unknown source — surface a clear error instead of silently emitting Oracle.
     return {"sql": f"-- unsupported source: {source!r}",
             "output_file": "extract_row.sql", "result_csv": csv_out}
-
 
 def _preview_date_bounds(date_col, date_type, from_date, to_date, source):
     # >>> render a WHERE-fragment like "date_col >= X AND date_col <= Y" in the column's stored shape <<< #
     if not (from_date or to_date):
         return ""
-    is_sas = source == "sas"
-    _lit = lambda d: _preview_date_literal(d, date_type, is_sas, source)
+    _lit = lambda d: _preview_date_literal(d, date_type, source)
     parts = []
     if from_date:
         parts.append(f"{date_col} >= {_lit(from_date)}")
@@ -3999,102 +3386,13 @@ def _preview_date_bounds(date_col, date_type, from_date, to_date, source):
         parts.append(f"{date_col} <= {_lit(to_date)}")
     return " AND ".join(parts)
 
-
-def _build_preview_sas_sas(cfg, from_date, to_date, qname, parallel):
-    # >>> preview the SAS-local proc sql shape gen_sas would emit <<< #
-    output_base = qname
-    date_col = cfg.get("date_col", "")
-    date_type = (cfg.get("date_type") or "").lower()
-    table = cfg.get("table", "")
-    conn_macro = cfg.get("conn_macro", "")
-    where_clause = cfg.get("where", "")
-    processed = cfg.get("processed", "")
-    select_expr = _preview_select_expr(date_col, date_type, "sas")
-    query_table = f"{conn_macro}.{table}" if conn_macro else table
-    _lit = lambda d: _preview_date_literal(d, date_type, True, "sas")
-    conds = []
-    if from_date and to_date:
-        conds.append(f"{date_col} between {_lit(from_date)} and {_lit(to_date)}")
-    elif from_date:
-        conds.append(f"{date_col} >= {_lit(from_date)}")
-    elif to_date:
-        conds.append(f"{date_col} <= {_lit(to_date)}")
-    if where_clause:
-        conds.append(f"({where_clause})")
-    where_str = ("    where " + "\n      and ".join(conds)) if conds else ""
-    setup = f"{processed}\n\n" if processed else ""
-    sql = (
-        f"{setup}proc sql;\n"
-        f"  create table work.{output_base} as\n"
-        f"  select {select_expr} as date_value, count(*) as row_count\n"
-        f"  from {query_table}\n"
-        f"{where_str}\n"
-        f"  group by {select_expr};\n"
-        f"quit;"
-    ).strip()
-    return {"sql": sql, "output_file": "extract_row.sas", "result_csv": f"{qname}_row.csv"}
-
-
-def _build_preview_sas_oracle(cfg, from_date, to_date, qname, parallel):
-    # >>> preview the SAS PROC SQL CONNECT TO ORACLE wrapper <<< #
-    output_base = qname
-    date_col = cfg.get("date_col", "")
-    date_type = (cfg.get("date_type") or "").lower()
-    table = cfg.get("table", "")
-    conn_macro = cfg.get("conn_macro", "")
-    where_clause = cfg.get("where", "")
-    processed = cfg.get("processed", "")
-    select_expr = _preview_select_expr(date_col, date_type, "oracle")
-    query_table = table
-    cte_prefix = ""
-    if processed:
-        alias = cfg.get("name", f"{output_base}_cte")
-        cte_prefix = f"WITH {alias} AS ({processed}) "
-        query_table = alias
-    _lit = lambda d: _preview_date_literal(d, date_type, False, "oracle")
-    conds = []
-    if from_date and to_date:
-        conds.append(f"{date_col} BETWEEN {_lit(from_date)} AND {_lit(to_date)}")
-    elif from_date:
-        conds.append(f"{date_col} >= {_lit(from_date)}")
-    elif to_date:
-        conds.append(f"{date_col} <= {_lit(to_date)}")
-    if where_clause:
-        conds.append(f"({where_clause})")
-    where_str = ("    WHERE " + "\n      AND ".join(conds)) if conds else ""
-    parallel_int = int(parallel) if parallel else 0
-    ora_hint = f" /*+ PARALLEL({parallel_int}) */" if parallel_int > 1 else ""
-    inner = (
-        f"{cte_prefix}SELECT{ora_hint}\n"
-        f"      {select_expr} AS date_value, COUNT(*) AS row_count\n"
-        f"    FROM {query_table}\n"
-        f"{where_str}\n"
-        f"    GROUP BY {select_expr}"
-    )
-    sql = (
-        f"proc sql;\n"
-        f"  %{conn_macro}\n"
-        f"  create table work.{output_base} as\n"
-        f"  select * from connection to oracle (\n"
-        f"    {inner.strip()}\n"
-        f"  );\n"
-        f"  disconnect from oracle;\n"
-        f"quit;"
-    ).strip()
-    return {"sql": sql, "output_file": "extract_row.sas", "result_csv": f"{qname}_row.csv"}
-
-
+# >>> Build the date expression for SELECT/GROUP BY (bucketing to day level) <<< #
 def _preview_select_expr(date_col, date_type, source):
-    """Build the date expression for SELECT/GROUP BY (bucketing to day level)."""
     dtype = date_type.lower() if date_type else ""
 
     if source == "oracle":
         if dtype == "timestamp":
             return f"TRUNC({date_col})"
-        return date_col
-    elif source == "sas":
-        if dtype in ("datetime", "timestamp"):
-            return f"datepart({date_col})"
         return date_col
     elif source == "aws":
         if dtype in ("timestamp", "datetime"):
@@ -4102,13 +3400,8 @@ def _preview_select_expr(date_col, date_type, source):
         return date_col
     return date_col
 
-
-def _preview_date_literal(date_str, date_type, is_sas=False, source=""):
-    """Format a YYYY-MM-DD date string as the correct SQL literal for the date type.
-
-    For timestamp columns, uses TIMESTAMP literals so the raw column can be
-    compared without wrapping in TRUNC (preserves index usage).
-    """
+# >>> Format a YYYY-MM-DD date string as the correct SQL literal for the date type <<< #
+def _preview_date_literal(date_str, date_type, source=""):
     if not date_str:
         return "''"
     dtype = date_type.lower() if date_type else ""
@@ -4125,42 +3418,19 @@ def _preview_date_literal(date_str, date_type, is_sas=False, source=""):
     if dtype in ("string_dash", "string"):
         return f"'{date_str}'"
 
-    if is_sas and dtype in ("datetime", "date", "timestamp"):
-        # SAS date literal: '01JAN2024'd
-        try:
-            from datetime import datetime as _dt
-            d = _dt.strptime(date_str, "%Y-%m-%d")
-            if dtype in ("datetime", "timestamp"):
-                return f"'{d.strftime('%d%b%Y').upper()}:00:00:00'dt"
-            return f"'{d.strftime('%d%b%Y').upper()}'d"
-        except ValueError:
-            return f"'{date_str}'"
-
-    # Oracle/Athena timestamp: use TIMESTAMP literal
     if dtype == "timestamp" and source == "oracle":
         return f"TIMESTAMP '{date_str} 00:00:00'"
     if dtype in ("timestamp", "datetime") and source == "aws":
         return f"TIMESTAMP '{date_str} 00:00:00'"
 
-    # Oracle/Athena date: DATE literal
     if dtype in ("date",):
         return f"DATE '{date_str}'"
 
     return f"'{date_str}'"
 
-
-# ---------------------------------------------------------------------------
-# Column Mapping API
-# ---------------------------------------------------------------------------
-
+# >>> Resolve include/exclude patterns against the pair's col_map and return <<< #
 @app.post("/api/pairs/{pair_name}/col_filter/preview")
 async def api_col_filter_preview(pair_name: str, request: Request):
-    """Resolve include/exclude patterns against the pair's col_map and return
-    the effective (left → right) pairs plus a warning for patterns that hit
-    left columns not in col_map.
-
-    Body: {"include": ["CUST_*", ...], "exclude": ["*_AUDIT*", ...]}
-    """
     from fnmatch import fnmatch
 
     body = await request.json()
@@ -4176,16 +3446,11 @@ async def api_col_filter_preview(pair_name: str, request: Request):
         if not pair_cfg:
             return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
 
-        # Prefer DB-stored col_map (col_mapping page writes there), fall back
-        # to the one in the JSON config if it exists.
         col_map = get_pair_col_map_from_db(_db_path, pair_name) or pair_cfg.get("col_map") or {}
 
         resolved = resolve_col_filter(col_map, include, exclude)
         pairs = resolved["pairs"]
 
-        # Patterns can also name left cols that aren't in col_map — e.g. the
-        # user picked a column that hasn't been mapped. Surface that so the
-        # card can warn explicitly.
         unmapped_matches = []
         if include:
             pair = get_table_pair(_db_path, pair_name)
@@ -4198,7 +3463,6 @@ async def api_col_filter_preview(pair_name: str, request: Request):
                 if cnl in mapped_left_lower:
                     continue
                 if any(fnmatch(cnl, p) for p in include_lower):
-                    # But if also in exclude, skip
                     if any(fnmatch(cnl, p.lower()) for p in exclude):
                         continue
                     unmapped_matches.append(cn)
@@ -4213,16 +3477,9 @@ async def api_col_filter_preview(pair_name: str, request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Return left/right columns, current col_mappings, col_rules, and auto-match results <<< #
 @app.get("/api/pairs/{pair_name}/columns")
 async def api_get_pair_columns(pair_name: str):
-    """Return left/right columns, current col_mappings, col_rules, and auto-match results.
-
-    Auto-match suppresses any (left, right) tuple in `col_rejected` so a
-    pair the user explicitly trashed in the col_mapping UI never gets
-    re-suggested on page reload. Returns `col_type_overrides` so the UI
-    can pre-populate the per-row datatype dropdowns.
-    """
     try:
         from ..db import (
             get_table_pair, get_column_meta, get_pair_col_map_from_db,
@@ -4238,31 +3495,23 @@ async def api_get_pair_columns(pair_name: str):
 
         ensure_col_rules_column(_db_path)
 
-        # Get column metadata for both sides
         left_meta = get_column_meta(_db_path, pair["table_left"])
         right_meta = get_column_meta(_db_path, pair["table_right"])
 
         left_cols = {c["column_name"]: c.get("data_type", "") for c in left_meta}
         right_cols = {c["column_name"]: c.get("data_type", "") for c in right_meta}
 
-        # Get existing mappings, rules, rejected list, and type overrides
         col_mappings = get_pair_col_map_from_db(_db_path, pair_name)
         col_rules_data = get_pair_col_rules(_db_path, pair_name)
         col_rejected = get_pair_col_rejected(_db_path, pair_name)
         col_type_overrides = get_pair_col_type_overrides(_db_path, pair_name)
         col_type_overrides_right = get_pair_col_type_overrides_right(_db_path, pair_name)
 
-        # Determine unmapped columns
         mapped_left = set(col_mappings.keys())
         mapped_right = set(col_mappings.values())
         unmapped_left = {k: v for k, v in left_cols.items() if k not in mapped_left}
         unmapped_right = {k: v for k, v in right_cols.items() if k not in mapped_right}
 
-        # Auto-match unmapped columns, suppressing rejected pairs.
-        # match_columns_from_dicts matches by case-insensitive name; we
-        # filter its output to drop any (left, right) the user already
-        # rejected. Case-insensitive comparison so 'STATUS_CD' rejected
-        # also suppresses re-match of 'Status_Cd'.
         rejected_set = {(l.lower(), r.lower()) for l, r in col_rejected}
         auto_result = match_columns_from_dicts(
             unmapped_left, unmapped_right,
@@ -4292,13 +3541,9 @@ async def api_get_pair_columns(pair_name: str):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Replace the col_rejected list for the pair <<< #
 @app.post("/api/pairs/{pair_name}/col_rejected")
 async def api_save_pair_col_rejected(pair_name: str, request: Request):
-    """Replace the col_rejected list for the pair.
-
-    Body: {"rejected": [[left_col, right_col], ...]}
-    """
     try:
         from ..db import save_pair_col_rejected, get_table_pair
         if not get_table_pair(_db_path, pair_name):
@@ -4307,7 +3552,6 @@ async def api_save_pair_col_rejected(pair_name: str, request: Request):
         rejected = body.get("rejected", []) or []
         if not isinstance(rejected, list):
             return JSONResponse(status_code=400, content={"error": "rejected must be a list"})
-        # Normalize: each entry must be a 2-element [left, right] list.
         clean = []
         for entry in rejected:
             if isinstance(entry, list) and len(entry) == 2:
@@ -4317,13 +3561,9 @@ async def api_save_pair_col_rejected(pair_name: str, request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Replace the LEFT-side per-column type overrides for the pair <<< #
 @app.post("/api/pairs/{pair_name}/col_type_overrides")
 async def api_save_pair_col_type_overrides(pair_name: str, request: Request):
-    """Replace the LEFT-side per-column type overrides for the pair.
-
-    Body: {"overrides": {"LEFT_COL": "VARCHAR2(10)", ...}}
-    """
     try:
         from ..db import save_pair_col_type_overrides, get_table_pair
         if not get_table_pair(_db_path, pair_name):
@@ -4338,15 +3578,9 @@ async def api_save_pair_col_type_overrides(pair_name: str, request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Replace the RIGHT-side per-column type overrides for the pair <<< #
 @app.post("/api/pairs/{pair_name}/col_type_overrides_right")
 async def api_save_pair_col_type_overrides_right(pair_name: str, request: Request):
-    """Replace the RIGHT-side per-column type overrides for the pair.
-
-    Body: {"overrides": {"LEFT_COL": "varchar(20)", ...}} -- keyed by
-    LEFT col name (the join key) so the row is identifiable across
-    both overrides without an extra mapping lookup.
-    """
     try:
         from ..db import save_pair_col_type_overrides_right, get_table_pair
         if not get_table_pair(_db_path, pair_name):
@@ -4361,13 +3595,9 @@ async def api_save_pair_col_type_overrides_right(pair_name: str, request: Reques
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Generate a column metadata CSV for one side of a pair <<< #
 @app.get("/api/pairs/{pair_name}/columns/csv")
 async def api_get_pair_columns_csv(pair_name: str, side: str = "left"):
-    """Generate a column metadata CSV for one side of a pair.
-
-    Columns: TABLE_NAME, COLUMN_NAME, DATA_TYPE, DATA_TYPE_EXTENDED, MANDATORY
-    """
     import csv as csv_mod
 
     try:
@@ -4409,10 +3639,9 @@ async def api_get_pair_columns_csv(pair_name: str, side: str = "left"):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Generate Excel with two sheets (left columns, right columns) for one pair <<< #
 @app.get("/api/pairs/{pair_name}/columns/excel")
 async def api_get_pair_columns_excel(pair_name: str):
-    """Generate Excel with two sheets (left columns, right columns) for one pair."""
     try:
         from openpyxl import Workbook
         from ..db import get_table_pair, get_column_meta
@@ -4451,10 +3680,9 @@ async def api_get_pair_columns_excel(pair_name: str):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Get column type overrides for a pair <<< #
 @app.get("/api/pairs/{pair_name}/col-type-overrides")
 async def api_get_col_type_overrides(pair_name: str):
-    """Get column type overrides for a pair."""
     try:
         from ..config import load_unified_config, get_col_type_overrides
         config = load_unified_config(_config_path)
@@ -4463,23 +3691,18 @@ async def api_get_col_type_overrides(pair_name: str):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Save column type overrides for a pair <<< #
 @app.put("/api/pairs/{pair_name}/col-type-overrides")
 async def api_save_col_type_overrides(pair_name: str, request: Request):
-    """Save column type overrides for a pair.
-
-    Body: {overrides: {col_name: "numeric"|"categorical", ...}}
-    """
     body = await request.json()
     try:
-        from ..config import load_unified_config, save_unified_config, set_col_type_override
+        from ..config import load_unified_config, save_unified_config
 
         config = load_unified_config(_config_path)
         if pair_name not in config.get("pairs", {}):
             return JSONResponse(status_code=404, content={"error": f"Pair '{pair_name}' not found"})
 
         overrides = body.get("overrides", {})
-        # Replace the entire overrides dict
         config["pairs"][pair_name]["col_type_overrides"] = overrides
         save_unified_config(config, _config_path)
 
@@ -4487,16 +3710,9 @@ async def api_save_col_type_overrides(pair_name: str, request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Save flat mappings + rules + sources <<< #
 @app.put("/api/pairs/{pair_name}/col-mappings")
 async def api_save_col_mappings(pair_name: str, request: Request):
-    """Save flat mappings + rules + sources.
-
-    Persists to *both* the SQLite `_table_pairs` table (used by the runtime
-    extraction path) and `pairs.json` under `pair.col_map` (so the JSON file
-    visibly reflects what the UI just saved, and CLI tooling that reads the
-    config picks it up). Mirrors the applyGlobalSettings fix.
-    """
     body = await request.json()
     try:
         from ..db import (
@@ -4517,9 +3733,6 @@ async def api_save_col_mappings(pair_name: str, request: Request):
         update_pair_col_map(_db_path, pair_name, mappings)
         update_pair_col_rules(_db_path, pair_name, rules_data)
 
-        # Mirror to pairs.json so the file reflects the UI state and any
-        # downstream tooling (gen-sas, gen-aws CLI, etc.) reads the same
-        # mapping. Empty mapping clears the key entirely.
         json_synced = False
         try:
             config = load_unified_config(_config_path)
@@ -4529,8 +3742,6 @@ async def api_save_col_mappings(pair_name: str, request: Request):
                     pairs_cfg[pair_name]["col_map"] = mappings
                 else:
                     pairs_cfg[pair_name].pop("col_map", None)
-                # Mirror col_rules too so `dtrack match-columns` can re-apply
-                # the same wildcard/regex rules (compare.apply_column_rules).
                 if rules_data and rules_data.get("rules"):
                     pairs_cfg[pair_name]["col_rules"] = rules_data
                 else:
@@ -4538,8 +3749,6 @@ async def api_save_col_mappings(pair_name: str, request: Request):
                 save_unified_config(config, _config_path)
                 json_synced = True
         except Exception as e:
-            # JSON sync failure shouldn't fail the save — DB write already
-            # succeeded. Surface the error so the UI can flag it.
             return {"ok": True, "mapped": len(mappings),
                     "json_synced": False, "json_error": str(e)}
 
@@ -4547,10 +3756,9 @@ async def api_save_col_mappings(pair_name: str, request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
+# >>> Download CSV with columns: status, left_column, left_type, right_column, right_type <<< #
 @app.get("/api/pairs/{pair_name}/col-mappings/csv")
 async def api_col_mappings_csv(pair_name: str):
-    """Download CSV with columns: status, left_column, left_type, right_column, right_type."""
     import csv as csv_mod
 
     try:
@@ -4574,7 +3782,6 @@ async def api_col_mappings_csv(pair_name: str):
         writer = csv_mod.writer(buf)
         writer.writerow(["status", "left_column", "left_type", "right_column", "right_type"])
 
-        # Mapped columns
         for left_col, right_col in sorted(col_mappings.items()):
             writer.writerow([
                 "matched",
@@ -4584,7 +3791,6 @@ async def api_col_mappings_csv(pair_name: str):
                 right_types.get(right_col, ""),
             ])
 
-        # Left-only
         mapped_left = set(col_mappings.keys())
         for col in sorted(left_types.keys()):
             if col not in mapped_left:
@@ -4596,7 +3802,6 @@ async def api_col_mappings_csv(pair_name: str):
                     "",
                 ])
 
-        # Right-only
         mapped_right = set(col_mappings.values())
         for col in sorted(right_types.keys()):
             if col not in mapped_right:
@@ -4617,24 +3822,14 @@ async def api_col_mappings_csv(pair_name: str):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-# ---------------------------------------------------------------------------
-# Testing mode
-# ---------------------------------------------------------------------------
-
+# >>> Return current testing mode state <<< #
 @app.get("/api/testing")
 async def api_testing_status():
-    """Return current testing mode state."""
     return {"testing": _testing_mode, "config_path": _config_path}
 
-
+# >>> Toggle testing mode on/off <<< #
 @app.post("/api/testing")
 async def api_testing_toggle(request: Request):
-    """Toggle testing mode on/off.
-
-    When enabled: sets DTRACK_MOCK env var, swaps config to testing/config.json.
-    When disabled: restores original config, unsets DTRACK_MOCK.
-    """
     global _config_path, _original_config_path, _testing_mode
 
     body = await request.json()
@@ -4668,19 +3863,13 @@ async def api_testing_toggle(request: Request):
         _testing_mode = False
         return {"ok": True, "testing": False, "config_path": _config_path}
 
-
-# ---------------------------------------------------------------------------
-# Playground: ad-hoc SAS / Athena / Oracle queries with timing + history
-# ---------------------------------------------------------------------------
-
+# >>> Coerce a DB row into a list of n_cols string values <<< #
 def _row_to_strs(row, n_cols):
-    """Coerce a DB row into a list of n_cols string values."""
     out = []
     for i in range(n_cols):
         v = row[i] if i < len(row) else None
         out.append('' if v is None else str(v))
     return out
-
 
 # >>> split ;-separated SQL into statements, respecting quotes and comments <<< #
 def _split_sql_statements(sql):
@@ -4730,7 +3919,6 @@ def _split_sql_statements(sql):
         stmts.append(stmt)
     return stmts
 
-
 # >>> run all but the last statement on `cur`, execute+return (columns, rows) of the last <<< #
 def _run_multi_sql(cur, sql):
     stmts = _split_sql_statements(sql)
@@ -4743,11 +3931,6 @@ def _run_multi_sql(cur, sql):
     fetched = cur.fetchall() or []
     return columns, fetched
 
-
-# Registry of currently-running playground queries: history_id → handle dict.
-# Populated when a query starts, popped when it ends (whether ok / error /
-# cancelled). The cancel endpoint looks up the handle and calls .cancel()
-# on the cursor / connection without blocking the running thread.
 _PLAYGROUND_RUNNING: dict = {}
 
 # >>> in-memory LRU of completed playground results, keyed by sha256(engine|conn|sql) <<< #
@@ -4756,11 +3939,9 @@ from collections import OrderedDict as _PgOrderedDict
 _PLAYGROUND_CACHE: "_PgOrderedDict[str, dict]" = _PgOrderedDict()
 _PLAYGROUND_CACHE_MAX = 10
 
-
 def _pg_cache_key(engine: str, conn: str, sql: str) -> str:
     raw = f"{engine}|{conn}|{sql}".encode("utf-8")
     return _pg_hashlib.sha256(raw).hexdigest()
-
 
 def _pg_cache_put(key: str, entry: dict) -> None:
     _PLAYGROUND_CACHE[key] = entry
@@ -4768,27 +3949,15 @@ def _pg_cache_put(key: str, entry: dict) -> None:
     while len(_PLAYGROUND_CACHE) > _PLAYGROUND_CACHE_MAX:
         _PLAYGROUND_CACHE.popitem(last=False)
 
-
 def _pg_cache_get(key: str) -> Optional[dict]:
     entry = _PLAYGROUND_CACHE.get(key)
     if entry is not None:
         _PLAYGROUND_CACHE.move_to_end(key)
     return entry
 
-
+# >>> Run an ad-hoc SQL query against Athena or Oracle and time it <<< #
 @app.post("/api/playground/run")
 async def api_playground_run(request: Request):
-    """Run an ad-hoc SQL query against Athena or Oracle and time it.
-
-    Body: {engine: 'athena'|'oracle', sql, conn?, row_cap?}
-    Returns the first `row_cap` rows; the full count is in n_rows_total.
-
-    The query runs in a worker thread (via asyncio.to_thread) so that
-    /api/playground/cancel/{id} from another request can call
-    cursor.cancel() / conn.cancel() while execute() is still blocking.
-    Start / done / error / cancel events also print to stdout so they
-    show up in the `dtrack serve` console.
-    """
     import asyncio
     import time
     from ..db import insert_playground_run, update_playground_run
@@ -4829,9 +3998,6 @@ async def api_playground_run(request: Request):
                 "history_id": hit.get("history_id"),
             }
 
-    # Insert the history row up front in 'running' status so the cancel
-    # endpoint has an id to look up. We update with elapsed/status/n_rows
-    # at the end — no second insert.
     history_id = insert_playground_run(
         _db_path,
         engine=engine,
@@ -4863,9 +4029,8 @@ async def api_playground_run(request: Request):
     err: Optional[str] = None
     cancelled = False
 
+    # >>> Runs in a worker thread. Stashes cur/conn into `handle` so the <<< #
     def _execute():
-        """Runs in a worker thread. Stashes cur/conn into `handle` so the
-        cancel endpoint can interrupt us. Returns (cols, rows, stats)."""
         nonlocal columns, rows, all_rows, n_rows_total, engine_sec, total_sec
         nonlocal data_scanned, query_id
 
@@ -4909,9 +4074,6 @@ async def api_playground_run(request: Request):
                 pass
         elif engine == "hadoop":
             from ..platforms.hadoop import hadoop_connect
-            # Empty conn → hadoop_connect picks HADOOP_DSN env or
-            # 'Hive_Prod'. SSL_CERT_FILE and DSN-not-found diagnostics
-            # are owned by hadoop_connect so all callers benefit.
             conn = hadoop_connect(conn_id or None)
             if conn is None:
                 raise RuntimeError("hadoop_connect returned None (mock mode?)")
@@ -5038,7 +4200,6 @@ async def api_playground_run(request: Request):
         "history_id": history_id,
     }
 
-
 @app.get("/api/playground/download/{cache_key}")
 async def api_playground_download(cache_key: str):
     # >>> stream full cached result as CSV so the browser never holds it in memory <<< #
@@ -5069,13 +4230,9 @@ async def api_playground_download(cache_key: str):
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
-
+# >>> Cancel every currently-running playground query. The Cancel button <<< #
 @app.post("/api/playground/cancel_running")
 async def api_playground_cancel_running():
-    """Cancel every currently-running playground query. The Cancel button
-    in the UI calls this — easier than threading the history_id back to
-    the browser as soon as the query is registered. Returns the list of
-    ids that were signalled."""
     ids = list(_PLAYGROUND_RUNNING.keys())
     cancelled_ids = []
     for run_id in ids:
@@ -5096,19 +4253,9 @@ async def api_playground_cancel_running():
         print(f"[playground #{run_id}] cancel requested (UI)", flush=True)
     return {"ok": True, "cancelled_ids": cancelled_ids}
 
-
+# >>> Cancel a running playground query by history_id <<< #
 @app.post("/api/playground/cancel/{run_id}")
 async def api_playground_cancel(run_id: int):
-    """Cancel a running playground query by history_id.
-
-    Looks up the cursor / connection from the in-memory registry and calls
-    the engine-specific cancel method (pyathena cursor.cancel(),
-    oracledb conn.cancel()). The waiting `await asyncio.to_thread(...)` in
-    /api/playground/run sees an exception and returns with status=cancelled.
-
-    Curl-friendly so you can kill from the same terminal as `dtrack serve`:
-        curl -X POST http://localhost:8080/api/playground/cancel/42
-    """
     handle = _PLAYGROUND_RUNNING.get(run_id)
     if not handle:
         return JSONResponse(status_code=404, content={
@@ -5133,94 +4280,10 @@ async def api_playground_cancel(run_id: int):
     print(f"[playground #{run_id}] cancel requested ({'; '.join(msgs)})", flush=True)
     return {"ok": True, "run_id": run_id, "actions": msgs}
 
-
-@app.post("/api/playground/sas")
-async def api_playground_sas(request: Request):
-    """Wrap a user-supplied SAS body with libname / PROC SQL CONNECT scaffold.
-
-    Body: {kind: 'oracle'|'hadoop', method: 'libname'|'procsql',
-           sql?: str,             # the editor body — wrapped between scaffold lines
-           # oracle only:
-           conn_macro?: str,
-           # hadoop only:
-           server?: str, host?: str, schema?: str, port?: int}
-    Returns: {ok, filename, content, history_id}.
-    Also records a history row (engine='sas', sql=editor body, status='ok'/'error').
-    """
-    from ..platforms.sas_test import gen_sas_script
-    from ..db import insert_playground_run, resolve_oracle_macro
-
-    body = await request.json()
-    kind = (body.get("kind") or "").lower()
-    method = (body.get("method") or "").lower()
-    user_sql = body.get("sql") or ""
-    conn_macro = (body.get("conn_macro") or "").strip()
-
-    err: Optional[str] = None
-    content: str = ""
-    try:
-        if kind == "oracle":
-            svc = resolve_oracle_macro(conn_macro) if conn_macro else None
-            if not svc:
-                raise ValueError(
-                    f"Unknown conn_macro {conn_macro!r}. "
-                    f"Set DTRACK_ORACLE_MACROS or use a builtin (pb23, pb30)."
-                )
-            # Same env vars oracle_connect uses, baked into the script so the
-            # user doesn't need to fill in YOUR_USER / YOUR_PASSWORD by hand.
-            ora_user = os.environ.get('PCDS_USR')
-            ora_pwd = os.environ.get(f'{conn_macro}_pwd')
-            content = gen_sas_script(kind, method, body=user_sql, svc=svc,
-                                     conn_macro=conn_macro,
-                                     user=ora_user, password=ora_pwd)
-        elif kind == "hadoop":
-            content = gen_sas_script(
-                kind, method, body=user_sql,
-                server=(body.get("server") or "").strip(),
-                host=(body.get("host") or "").strip(),
-                schema=(body.get("schema") or "").strip(),
-                port=int(body.get("port") or 10000),
-                truststore=body.get("truststore") or None,
-                jar_path=body.get("jar_path") or None,
-                config_path=body.get("config_path") or None,
-            )
-        else:
-            raise ValueError(f"Unsupported kind: {kind!r}")
-    except ValueError as e:
-        err = str(e)
-
-    conn_label = (
-        conn_macro if kind == "oracle" else f"{body.get('server','')}/{body.get('schema','')}"
-    )
-    history_id = insert_playground_run(
-        _db_path,
-        engine='sas',
-        conn=f"{kind}/{method}/{conn_label}",
-        sql=user_sql or "(empty body)",
-        elapsed_sec=None,
-        n_rows=None,
-        status='ok' if err is None else 'error',
-        error_msg=err,
-    )
-
-    if err:
-        return JSONResponse(status_code=400, content={
-            "ok": False, "error": err, "history_id": history_id,
-        })
-
-    return {
-        "ok": True,
-        "filename": f"playground_{kind}_{method}.sas",
-        "content": content,
-        "history_id": history_id,
-    }
-
-
 @app.get("/api/playground/history")
 async def api_playground_history():
     from ..db import list_playground_runs
     return {"runs": list_playground_runs(_db_path, limit=200)}
-
 
 @app.put("/api/playground/history/{run_id}")
 async def api_playground_history_update(run_id: int, request: Request):
@@ -5232,7 +4295,6 @@ async def api_playground_history_update(run_id: int, request: Request):
         return JSONResponse(status_code=404, content={"error": "run not found"})
     return {"ok": True}
 
-
 @app.delete("/api/playground/history/{run_id}")
 async def api_playground_history_delete(run_id: int):
     from ..db import delete_playground_run
@@ -5241,14 +4303,12 @@ async def api_playground_history_delete(run_id: int):
         return JSONResponse(status_code=404, content={"error": "run not found"})
     return {"ok": True}
 
-
 @app.post("/api/playground/history/clear")
 async def api_playground_history_clear():
     # >>> wipe every row from _playground_history <<< #
     from ..db import clear_playground_history
     n = clear_playground_history(_db_path)
     return {"ok": True, "deleted": n}
-
 
 @app.post("/api/playground/cache/clear")
 async def api_playground_cache_clear():
@@ -5257,14 +4317,10 @@ async def api_playground_cache_clear():
     _PLAYGROUND_CACHE.clear()
     return {"ok": True, "cleared": n}
 
-
 @app.post("/api/playground/cache/clear-extraction")
 async def api_playground_cache_clear_extraction():
     # >>> delete .cache.db files under known outdirs; forces extractors to re-execute <<< #
-    import glob as _glob
     deleted = []
-    # Pick up the side-outdirs that the global-settings store has remembered;
-    # fall back to common defaults so first-run users aren't no-op'd.
     candidates = set()
     for plat in ("aws", "athena", "databricks", "oracle", "hadoop", "csv"):
         try:
@@ -5273,7 +4329,7 @@ async def api_playground_cache_clear_extraction():
                 candidates.add(d)
         except Exception:
             pass
-    candidates.update(["./csv/", "./sas/"])
+    candidates.update(["./csv/", "./out/"])
     for outdir in candidates:
         cache = os.path.join(outdir, ".cache.db")
         if os.path.exists(cache):
@@ -5284,14 +4340,6 @@ async def api_playground_cache_clear_extraction():
                 print(f"[cache clear] failed to remove {cache}: {e}", flush=True)
     return {"ok": True, "deleted": deleted}
 
-
-# ---------------------------------------------------------------------------
-# S3 Browser: list / upload / download / delete inside an S3 bucket. Reuses
-# the existing aws_creds_renew() pipeline so credentials are refreshed on the
-# fly. boto3 picks up AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
-# AWS_SESSION_TOKEN automatically. The page lives at /s3.
-# ---------------------------------------------------------------------------
-
 def _s3_get_client():
     from ..platforms.athena import aws_creds_renew  # type: ignore
     aws_creds_renew()
@@ -5300,7 +4348,6 @@ def _s3_get_client():
     except ImportError:
         raise RuntimeError("boto3 not installed — pip install boto3")
     return boto3.client("s3")
-
 
 def _s3_creds_status():
     from ..platforms.athena import _aws_creds_expires  # type: ignore
@@ -5312,7 +4359,6 @@ def _s3_creds_status():
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or ""
     return {"has_keys": has_keys, "ttl_seconds": remaining, "region": region}
 
-
 @app.get("/api/s3/creds")
 async def api_s3_creds():
     try:
@@ -5321,7 +4367,6 @@ async def api_s3_creds():
     except Exception as e:
         return {"ok": False, "error": str(e), **_s3_creds_status()}
     return {"ok": True, **_s3_creds_status()}
-
 
 @app.get("/api/s3/list")
 async def api_s3_list(bucket: str = "", prefix: str = ""):
@@ -5344,7 +4389,6 @@ async def api_s3_list(bucket: str = "", prefix: str = ""):
             for cp in page.get("CommonPrefixes", []) or []:
                 folders.append({"key": cp["Prefix"]})
             for obj in page.get("Contents", []) or []:
-                # Skip the "folder placeholder" object that matches the prefix exactly.
                 if obj["Key"] == prefix:
                     continue
                 objects.append({
@@ -5369,7 +4413,6 @@ async def api_s3_list(bucket: str = "", prefix: str = ""):
         "total_size": total_size,
         "object_count": len(objects),
     }
-
 
 @app.get("/api/s3/download")
 async def api_s3_download(bucket: str, key: str):
@@ -5403,7 +4446,6 @@ async def api_s3_download(bucket: str, key: str):
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
-
 @app.post("/api/s3/upload")
 async def api_s3_upload(
     bucket: str = Form(...),
@@ -5427,14 +4469,13 @@ async def api_s3_upload(
     results = []
     for f in files:
         key = prefix + f.filename
-        # Existence check (cheap HeadObject) when overwrite=false.
         if not overwrite_bool:
             try:
                 s3.head_object(Bucket=bucket, Key=key)
                 results.append({"ok": False, "key": key, "error": "exists (overwrite=false)"})
                 continue
             except Exception:
-                pass  # 404 means safe to upload
+                pass
         try:
             s3.upload_fileobj(f.file, bucket, key)
             results.append({"ok": True, "key": key})
@@ -5442,7 +4483,6 @@ async def api_s3_upload(
             results.append({"ok": False, "key": key, "error": f"{type(e).__name__}: {e}"})
 
     return {"ok": all(r["ok"] for r in results), "results": results}
-
 
 @app.delete("/api/s3/delete")
 async def api_s3_delete(request: Request):
@@ -5456,7 +4496,6 @@ async def api_s3_delete(request: Request):
         return JSONResponse(status_code=400, content={"error": "bucket and keys required"})
     try:
         s3 = _s3_get_client()
-        # delete_objects caps at 1000 per call.
         deleted, errors = [], []
         for i in range(0, len(keys), 1000):
             chunk = keys[i:i + 1000]
@@ -5471,7 +4510,6 @@ async def api_s3_delete(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"{type(e).__name__}: {e}"})
     return {"ok": not errors, "deleted": deleted, "errors": errors}
-
 
 @app.post("/api/s3/new-folder")
 async def api_s3_new_folder(request: Request):
@@ -5492,15 +4530,10 @@ async def api_s3_new_folder(request: Request):
         return JSONResponse(status_code=500, content={"error": f"{type(e).__name__}: {e}"})
     return {"ok": True, "key": key}
 
-
-# ---------------------------------------------------------------------------
-# CSV Compare: string-exact diff between two uploaded CSVs by primary key
-# ---------------------------------------------------------------------------
-
+# >>> Read column lists + row counts from two uploaded CSVs <<< #
 @app.post("/api/csv_compare/inspect")
 async def api_csv_compare_inspect(left: UploadFile = File(...),
                                   right: UploadFile = File(...)):
-    """Read column lists + row counts from two uploaded CSVs."""
     from ..csv_compare import read_csv_as_str
 
     try:
@@ -5514,7 +4547,7 @@ async def api_csv_compare_inspect(left: UploadFile = File(...),
         "right": {"filename": right.filename, "columns": list(right_df.columns), "n_rows": int(len(right_df))},
     }
 
-
+# >>> Compare two uploaded CSVs by primary key, string-exact, return diffs <<< #
 @app.post("/api/csv_compare/run")
 async def api_csv_compare_run(
     left: UploadFile = File(...),
@@ -5525,13 +4558,6 @@ async def api_csv_compare_run(
     compare_cols_right: str = Form(""),
     n_examples: int = Form(10),
 ):
-    """Compare two uploaded CSVs by primary key, string-exact, return diffs.
-
-    PK and compare columns can have different names per side via the
-    `*_right` parallel lists; when omitted, same-name lookup is assumed.
-    PK values are auto-normalized when both sides look like dates in
-    different formats (e.g. Oracle date vs SAS string_mon).
-    """
     from ..csv_compare import read_csv_as_str, compare_csvs
 
     def _parse(s):
@@ -5555,7 +4581,7 @@ async def api_csv_compare_run(
     logs: list = []
     def _log(msg):
         logs.append(msg)
-        print(f"[csv_compare] {msg}")  # also visible in `dtrack serve` stdout
+        print(f"[csv_compare] {msg}")
 
     try:
         result = compare_csvs(
@@ -5570,35 +4596,22 @@ async def api_csv_compare_run(
     result["logs"] = logs
     return result
 
-
-# ---------------------------------------------------------------------------
-# Sync inspector: diff dtrack.json vs SQLite per pair for col_map /
-# col_filter / where_map, plus push-either-direction. Helps when the two
-# storage layers drift (UI saves vs hand-edits to the json).
-# ---------------------------------------------------------------------------
-
-# Fields that live in BOTH the json and the db. These are the only fields
-# the inspector compares — others (vintage, fromDate, structural shape,
-# extracted row/col stats) live in only one place and aren't comparable.
 _SYNC_FIELDS = ("col_map", "col_filter", "where_map")
 
-
+# >>> Normalize for diff: dict ordering shouldn't matter; empty == None <<< #
 def _norm(v):
-    """Normalize for diff: dict ordering shouldn't matter; empty == None."""
     if v is None or v == {} or v == []:
         return None
     if isinstance(v, dict):
         return {k: _norm(vv) for k, vv in v.items()}
     return v
 
-
+# >>> Pull `field` out of the in-memory config's pair dict <<< #
 def _read_pair_field_from_json(pair_cfg, field):
-    """Pull `field` out of the in-memory config's pair dict."""
     if field == "col_map":
         return pair_cfg.get("col_map") or {}
     if field == "col_filter":
         cf = pair_cfg.get("col_filter") or {}
-        # Normalize: only `include` / `exclude` lists matter for the diff.
         return {
             "include": list(cf.get("include") or []),
             "exclude": list(cf.get("exclude") or []),
@@ -5607,9 +4620,8 @@ def _read_pair_field_from_json(pair_cfg, field):
         return pair_cfg.get("where_map") or {}
     return None
 
-
+# >>> Pull `field` for a pair from SQLite via the existing helpers <<< #
 def _read_pair_field_from_db(db_path, pair_name, field):
-    """Pull `field` for a pair from SQLite via the existing helpers."""
     from ..db import (get_pair_col_map_from_db, get_pair_col_filter,
                       get_pair_where_map_from_db)
     if field == "col_map":
@@ -5624,21 +4636,13 @@ def _read_pair_field_from_db(db_path, pair_name, field):
         return get_pair_where_map_from_db(db_path, pair_name) or {}
     return None
 
-
 @app.get("/sync", response_class=HTMLResponse)
 async def sync_page(request: Request):
     return templates.TemplateResponse(request, "sync.html")
 
-
+# >>> Per-pair diff of `col_map`, `col_filter`, `where_map` between the <<< #
 @app.get("/api/sync/inspect")
 async def api_sync_inspect():
-    """Per-pair diff of `col_map`, `col_filter`, `where_map` between the
-    in-memory config (loaded from dtrack.json) and the SQLite DB.
-
-    Each field gets a status: `match` (values agree), `differ` (both have
-    something, but they don't match), `json_only`, `db_only`, or `empty`
-    (neither side has anything).
-    """
     from ..config import load_unified_config
 
     config = load_unified_config(_config_path)
@@ -5670,16 +4674,9 @@ async def api_sync_inspect():
 
     return {"pairs": out, "config_path": _config_path, "db_path": _db_path}
 
-
+# >>> Copy one direction for a single pair/field <<< #
 @app.post("/api/sync/push")
 async def api_sync_push(request: Request):
-    """Copy one direction for a single pair/field.
-
-    Body: {pair: str, field: str, direction: 'json_to_db' | 'db_to_json'}.
-    On success, writes through to whichever store is the destination
-    (dtrack.json on disk for `db_to_json`; SQLite via existing helpers for
-    `json_to_db`) and returns the new diff status.
-    """
     from ..config import load_unified_config, save_unified_config
     from ..db import (update_pair_col_map, update_pair_col_rules)
 
@@ -5702,18 +4699,14 @@ async def api_sync_push(request: Request):
         if field == "col_map":
             update_pair_col_map(_db_path, pair, src or {})
         elif field == "col_filter":
-            # update_pair_col_rules expects a payload of {include, exclude} lists.
             update_pair_col_rules(_db_path, pair, src or {"include": [], "exclude": []})
         elif field == "where_map":
-            # No first-class db field; where_map is reconstructed at gen-time
-            # from _row_comparison. Block the push with a clear message.
             return JSONResponse(status_code=400, content={
                 "error": "where_map is computed from _row_comparison at extract time; cannot push from json to db. "
                          "Re-run compare-row to refresh, or push the other direction."
             })
         return {"ok": True, "pair": pair, "field": field, "direction": direction}
 
-    # db_to_json
     src = _read_pair_field_from_db(_db_path, pair, field)
     if field == "col_map":
         pairs[pair]["col_map"] = src or {}
@@ -5724,17 +4717,9 @@ async def api_sync_push(request: Request):
     save_unified_config(config, _config_path)
     return {"ok": True, "pair": pair, "field": field, "direction": direction}
 
-
+# >>> Return the subset of dtrack.json `metadata` that the UI exposes as <<< #
 @app.get("/api/global_settings")
 async def api_get_global_settings():
-    """Return the subset of dtrack.json `metadata` that the UI exposes as
-    global toggles:
-      - approx_distinct: default global for n_unique computation
-      - ora_retry_count / ora_retry_sleep: Oracle col-pull connection
-        retry knobs (transient 'couldn't open client transport' or
-        network blips). count=3, sleep=30s defaults if absent.
-      - hdp_retry_count / hdp_retry_sleep: Hadoop/Hive equivalent.
-    """
     from ..config import load_unified_config
     config = load_unified_config(_config_path)
     meta = config.get("metadata") or {}
@@ -5746,13 +4731,9 @@ async def api_get_global_settings():
         "hdp_retry_sleep":  meta.get("hdp_retry_sleep"),
     }
 
-
+# >>> Update dtrack.json `metadata` global toggles. Sending a key with <<< #
 @app.post("/api/global_settings")
 async def api_set_global_settings(request: Request):
-    """Update dtrack.json `metadata` global toggles. Sending a key with
-    null (or omitting it) clears the entry so the UI's "use default"
-    radio writes through cleanly.
-    """
     from ..config import load_unified_config, save_unified_config
     body = await request.json()
     config = load_unified_config(_config_path)
@@ -5763,8 +4744,6 @@ async def api_set_global_settings(request: Request):
             meta.pop("approx_distinct", None)
         else:
             meta["approx_distinct"] = bool(v)
-    # Retry knobs -- numeric, clear on null. Coerce to int when present
-    # so dtrack.json holds a clean integer (not e.g. "3").
     for k in ("ora_retry_count", "ora_retry_sleep",
               "hdp_retry_count", "hdp_retry_sleep"):
         if k in body:
@@ -5775,7 +4754,7 @@ async def api_set_global_settings(request: Request):
                 try:
                     meta[k] = int(v)
                 except (ValueError, TypeError):
-                    pass  # ignore garbage, keep existing
+                    pass
     save_unified_config(config, _config_path)
     return {
         "ok": True,
@@ -5786,32 +4765,24 @@ async def api_set_global_settings(request: Request):
         "hdp_retry_sleep":  meta.get("hdp_retry_sleep"),
     }
 
-
+# >>> Re-read dtrack.json from disk into the in-memory config so manual <<< #
 @app.post("/api/sync/reload_json")
 async def api_sync_reload_json():
-    """Re-read dtrack.json from disk into the in-memory config so manual
-    edits to the file show up without a server restart. Idempotent."""
     from ..config import load_unified_config
     try:
-        load_unified_config(_config_path)  # validates parses
+        load_unified_config(_config_path)
         return {"ok": True, "config_path": _config_path}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-
-# ---------------------------------------------------------------------------
-# Server entry point
-# ---------------------------------------------------------------------------
-
+# >>> Start the dtrack web server <<< #
 def serve(db_path: str, config_path: str, port: int = 8080, host: str = "0.0.0.0"):
-    """Start the dtrack web server."""
     global _db_path, _db_dir, _config_path, _original_config_path
     _db_path = os.path.abspath(db_path)
     _db_dir = os.path.dirname(_db_path)
     _config_path = os.path.abspath(config_path)
     _original_config_path = _config_path
 
-    # Sync config pairs into DB on startup
     try:
         from ..config import load_unified_config
         config = load_unified_config(_config_path)
@@ -5821,7 +4792,7 @@ def serve(db_path: str, config_path: str, port: int = 8080, host: str = "0.0.0.0
         print(f"  Warning: could not sync pairs: {e}")
 
     import uvicorn
-    print(f"dtrack web UI")
+    print("dtrack web UI")
     print(f"  Database:  {_db_path}")
     print(f"  Config:    {_config_path}")
     print(f"  Base dir:  {_db_dir}")

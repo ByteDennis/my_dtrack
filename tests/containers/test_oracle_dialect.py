@@ -1,0 +1,38 @@
+from dtrack.platforms.base import build_col_sql, resolve_table
+from dtrack.platforms.oracle import _build_row_sql_oracle
+
+
+# >>> dtrack's Oracle row SQL executes on real Oracle and counts per date <<< #
+def test_oracle_row_sql_counts(oracle_cursor):
+    cur = oracle_cursor
+    cur.execute("CREATE TABLE dt_row (rpt_dt DATE, amt NUMBER)")
+    cur.executemany(
+        "INSERT INTO dt_row (rpt_dt, amt) VALUES (TO_DATE(:1,'YYYY-MM-DD'), :2)",
+        [("2024-01-01", 10), ("2024-01-01", 20), ("2024-01-02", 30)])
+    cur.connection.commit()
+
+    cfg = {"name": "dt_row", "table": "dt_row", "source": "oracle",
+           "date_col": "rpt_dt", "date_type": "date"}
+    cur.execute(_build_row_sql_oracle(cfg))
+    counts = {r[0].strftime("%Y-%m-%d"): r[1] for r in cur.fetchall()}
+    assert counts == {"2024-01-01": 2, "2024-01-02": 1}
+
+
+# >>> dtrack's Oracle col-stats SQL (via _col_sql_dialect_ops) executes on real Oracle <<< #
+def test_oracle_col_sql_executes(oracle_cursor):
+    cur = oracle_cursor
+    cur.execute("CREATE TABLE dt_col (rpt_dt DATE, amt NUMBER)")
+    cur.executemany(
+        "INSERT INTO dt_col (rpt_dt, amt) VALUES (TO_DATE(:1,'YYYY-MM-DD'), :2)",
+        [("2024-01-01", 10), ("2024-01-01", 20), ("2024-01-02", 30)])
+    cur.connection.commit()
+
+    cfg = {"name": "dt_col", "table": "dt_col", "source": "oracle",
+           "date_col": "rpt_dt", "date_type": "date"}
+    full_table, cte = resolve_table(cfg, "dt_col")
+    sql, is_numeric = build_col_sql("oracle", cfg, "amt", "NUMBER", full_table,
+                                    cte_prefix=cte, vintage="all")
+    assert is_numeric
+    cur.execute(sql)
+    rows = cur.fetchall()
+    assert len(rows) == 1

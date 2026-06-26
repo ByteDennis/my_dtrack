@@ -39,7 +39,7 @@ def pytest_configure(config):
             break
 ```
 
-随时用 `dtrack doctor` 查看实际解析到的 env-file、Oracle macro、AWS / SAS 变量。
+随时用 `dtrack doctor` 查看实际解析到的 env-file、Oracle macro、AWS 变量。
 
 ## 各后端需要的环境变量(live 模式)
 
@@ -69,10 +69,9 @@ def pytest_configure(config):
 | `DB_DEFAULT_CATALOG` | `conn_macro` 只有 schema 时前置成 `catalog.schema` |
 | `AWS_USR`、`AWS_PWD`、`AWS_HOST` | 复用作 HTTPS 代理 |
 
-### SAS / Hadoop(`source: sas` / `hadoop`)
+### Hadoop(`source: hadoop`)
 | 变量 | 用途 |
 |------|------|
-| `SAS_LIB` | SAS libref(如 `WORK`) |
 | `OUT_DIR`、`SEED`、`EMAIL_TO` | 输出目录、采样种子、通知邮箱 |
 | `HADOOP_DSN` | Hive / Hadoop ODBC DSN |
 | `ODBCINI`、`ODBCSYSINI` | ODBC 配置文件位置 |
@@ -128,7 +127,7 @@ python -c "from databricks.sdk.core import Config; c=Config(profile='myprofile')
 
 4. **运行**:加 `--run-live`(warehouse 能连后再加 `--run-databricks`,它冷启动慢)。
 
-> **hadoop 走直连 ODBC**(`source: hadoop`,经 `extract_hadoop` / pyodbc),不是 SAS;没有独立的 `gen-hadoop` 命令,测试直接调 `extract_hadoop`。
+> **hadoop 走直连 ODBC**(`source: hadoop`,经 `extract_hadoop` / pyodbc);没有独立的 `gen-hadoop` 命令,测试直接调 `extract_hadoop`。
 >
 > **不要**改 `_E2E_PAIRS`(e2e)或 `_seed_pairs`(api)来"转 live":e2e 强制 `DTRACK_MOCK` 且断言 fixture 行数,api 又容忍 `200`/`500`。用这个 integration 文件。
 

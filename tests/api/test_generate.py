@@ -1,7 +1,7 @@
-"""Tests for /api/generate -- SQL/SAS file generation.
+"""Tests for /api/generate -- SQL file generation.
 
 Generation itself doesn't query backends; it just writes extract_*.sql
-and extract_*.sas files to the configured outdirs. These tests are the
+files to the configured outdirs. These tests are the
 cheapest API-level checks of the most complex endpoint.
 """
 

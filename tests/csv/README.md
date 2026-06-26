@@ -4,7 +4,7 @@ A `source=csv` pair is powered by **in-process DuckDB**, so the entire
 reconciliation pipeline — generate SQL → run → load → compare — executes with
 **no external database engine**. That makes CSV↔CSV the one place we can test
 the whole flow on any host (Linux/Mac/CI), unlike `tests/api/` and
-`tests/e2e/`, which need live Oracle/Athena/Hadoop/SAS connections and are
+`tests/e2e/`, which need live Oracle/Athena/Hadoop connections and are
 skipped off the Windows dev box.
 
 This suite also **simulates CSV extracts "obtained from" other engines**
