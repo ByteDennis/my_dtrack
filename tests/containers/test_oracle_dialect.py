@@ -44,3 +44,27 @@ def test_oracle_col_sql_executes(oracle_cursor):
     assert float(rec["mean"]) == 20.0
     assert float(rec["min_val"]) == 10.0
     assert float(rec["max_val"]) == 30.0
+
+
+# >>> STRICT (LOWER/TRIM/COMPOSE) collapses case+whitespace drift on real Oracle <<< #
+def test_oracle_strict_normalization(oracle_cursor):
+    cur = oracle_cursor
+    cur.execute("CREATE TABLE dt_strict (rpt_dt DATE, ccy VARCHAR2(20))")
+    cur.executemany(
+        "INSERT INTO dt_strict (rpt_dt, ccy) VALUES (TO_DATE(:1,'YYYY-MM-DD'), :2)",
+        [("2024-01-01", "USD"), ("2024-01-01", "usd"), ("2024-01-01", "USD ")])
+    cur.connection.commit()
+
+    cfg = {"name": "dt_strict", "table": "dt_strict", "source": "oracle",
+           "date_col": "rpt_dt", "date_type": "date"}
+    full_table, cte = resolve_table(cfg, "dt_strict")
+
+    def n_unique(strict):
+        sql, _ = build_col_sql("oracle", cfg, "ccy", "VARCHAR2", full_table,
+                               cte_prefix=cte, vintage="all", strict=strict)
+        cur.execute(sql)
+        cols = [d[0].lower() for d in cur.description]
+        return int(dict(zip(cols, cur.fetchall()[0]))["n_unique"])
+
+    assert n_unique(False) == 3
+    assert n_unique(True) == 1

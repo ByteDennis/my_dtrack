@@ -39,3 +39,22 @@ def test_databricks_col_sql_executes(spark):
     assert float(rec["mean"]) == 20.0
     assert float(rec["min_val"]) == 10.0
     assert float(rec["max_val"]) == 30.0
+
+
+# >>> STRICT (lower/trim) collapses case+whitespace drift on real Spark <<< #
+def test_databricks_strict_normalization(spark):
+    df = spark.createDataFrame(
+        [("2024-01-01", "USD"), ("2024-01-01", "usd"), ("2024-01-01", "USD ")],
+        ["rpt_dt", "ccy"])
+    df.createOrReplaceTempView("dt_strict")
+    cfg = {"name": "dt_strict", "table": "dt_strict", "source": "databricks",
+           "conn_macro": "", "date_col": "rpt_dt", "date_type": "string_dash"}
+    full_table = quote_ident("dt_strict", "databricks")
+
+    def n_unique(strict):
+        sql, _ = build_col_sql("databricks", cfg, "ccy", "STRING", full_table,
+                               vintage="all", strict=strict)
+        return int(spark.sql(sql).collect()[0].asDict()["n_unique"])
+
+    assert n_unique(False) == 3
+    assert n_unique(True) == 1

@@ -1205,11 +1205,69 @@ def _hash16_flat_expr(dialect, col_expr):
         return f"SUM(CAST({_athena_portable_hash16(col_expr)} AS DOUBLE))"
     raise ValueError(f"unknown dialect {dialect!r} for hash16 flat expr")
 
+# >>> resolve STRICT mode: explicit arg > per-pair config > DTRACK_STRICT env <<< #
+def _resolve_strict(tbl_cfg, strict=None):
+    if strict is not None:
+        return bool(strict)
+    v = (tbl_cfg or {}).get('strict')
+    if v is not None:
+        return bool(v)
+    import os
+    return os.environ.get('DTRACK_STRICT', '') not in ('', '0', 'false', 'False', 'no')
+
+# >>> STRICT value family derived from dtype: date | numeric | string <<< #
+def _strict_family(dtype, numeric):
+    d = (dtype or '').upper()
+    if any(k in d for k in ('DATE', 'TIMESTAMP', 'DATETIME')):
+        return 'date'
+    if numeric:
+        return 'numeric'
+    return 'string'
+
+# >>> STRICT canonical string form of `expr` per dialect/family (extract-time) <<< #
+def _strict_normalize(dialect, expr, family):
+    if dialect in ('hadoop', 'databricks'):
+        s = f'CAST({expr} AS STRING)'
+        if family == 'date':
+            return ("regexp_replace(date_format(CAST(" + expr +
+                    " AS TIMESTAMP), 'yyyy-MM-dd HH:mm:ss'), ' 00:00:00$', '')")
+        if family == 'numeric':
+            return (f"regexp_replace(regexp_replace({s}, "
+                    f"'(\\\\.[0-9]*[1-9])0+$', '$1'), '\\\\.0+$', '')")
+        return f"lower(trim({s}))"
+    if dialect == 'duckdb':
+        s = f'CAST({expr} AS VARCHAR)'
+        if family == 'date':
+            return ("regexp_replace(strftime(CAST(" + expr +
+                    " AS TIMESTAMP), '%Y-%m-%d %H:%M:%S'), ' 00:00:00$', '')")
+        if family == 'numeric':
+            return (f"regexp_replace(regexp_replace({s}, "
+                    f"'(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')")
+        return f"lower(trim(nfc_normalize({s})))"
+    if dialect == 'oracle':
+        s = f'TO_CHAR({expr})'
+        if family == 'date':
+            return f"TO_CHAR(CAST({expr} AS TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS')"
+        if family == 'numeric':
+            return (f"REGEXP_REPLACE(REGEXP_REPLACE({s}, "
+                    f"'(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')")
+        return f"LOWER(TRIM(COMPOSE({s})))"
+    if dialect in ('athena', 'trino', 'aws'):
+        s = f'CAST({expr} AS VARCHAR)'
+        if family == 'date':
+            return ("regexp_replace(date_format(CAST(" + expr +
+                    " AS TIMESTAMP), '%Y-%m-%d %H:%i:%s'), ' 00:00:00$', '')")
+        if family == 'numeric':
+            return (f"regexp_replace(regexp_replace({s}, "
+                    f"'(\\.[0-9]*[1-9])0+$', '$1'), '\\.0+$', '')")
+        return f"lower(trim(normalize({s}, NFC)))"
+    return expr
+
 # >>> Build per-column stats SQL for any supported dialect <<< #
 def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
                    vintage=None, date_dtype=None, date_format=None,
                    dt_label=None, coarse=False, preset=None,
-                   stats_override=None):
+                   stats_override=None, strict=None):
     from ..constants import STATS_PRESETS
     if preset is None:
         preset = 'quick' if coarse else 'detailed'
@@ -1230,6 +1288,8 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
     if not vintage:
         vintage = tbl_cfg.get('vintage', 'all') or 'all'
     numeric = is_numeric_type(dtype, is_oracle=ops['is_oracle_typed'])
+    strict = _resolve_strict(tbl_cfg, strict)
+    family = _strict_family(dtype, numeric)
     wc = where.strip() if where else ops['wc_empty']
 
     if dt_label is not None:
@@ -1253,6 +1313,8 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
     if not stats['top_10']:
         col_expr = apply_null_sentinels(
             col_q, dtype or ("numeric" if numeric else "categorical"), dialect)
+        if strict and not numeric:
+            col_expr = _strict_normalize(dialect, col_expr, family)
         n_unique_sql = (
             f"COUNT(DISTINCT {col_expr})" if stats['n_unique'] else "0"
         )
@@ -1325,6 +1387,8 @@ FROM {full_table} WHERE {wc}{group_by}"""
         return sql, True
 
     col_expr_cat = apply_null_sentinels(col_q, dtype or "categorical", dialect)
+    if strict:
+        col_expr_cat = _strict_normalize(dialect, col_expr_cat, family)
     p_col_substr = f"SUBSTR({ops['cast_str'](col_expr_cat)}, 1, 200)"
     minmax_concat_min = ops['concat']("TRIM(p_col)", "'='", ops['cast_str']("cnt"))
     minmax_concat_max = minmax_concat_min

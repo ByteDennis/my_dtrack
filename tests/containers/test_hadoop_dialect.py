@@ -42,3 +42,25 @@ def test_hadoop_col_sql_executes(hive_cursor):
     assert float(rec["mean"]) == 20.0
     assert float(rec["min_val"]) == 10.0
     assert float(rec["max_val"]) == 30.0
+
+
+# >>> STRICT (lower/trim) collapses case+whitespace drift on real Hive <<< #
+def test_hadoop_strict_normalization(hive_cursor):
+    cur = hive_cursor
+    cur.execute("DROP TABLE IF EXISTS dt_strict")
+    cur.execute("CREATE TABLE dt_strict (rpt_dt STRING, ccy STRING)")
+    cur.execute("INSERT INTO dt_strict VALUES "
+                "('2024-01-01','USD'), ('2024-01-01','usd'), ('2024-01-01','USD ')")
+    cfg = {"name": "dt_strict", "table": "dt_strict", "source": "hadoop",
+           "conn_macro": "", "date_col": "rpt_dt", "date_type": "string_dash"}
+    full_table = quote_ident("dt_strict", "hadoop")
+
+    def n_unique(strict):
+        sql, _ = build_col_sql("hadoop", cfg, "ccy", "STRING", full_table,
+                               vintage="all", strict=strict)
+        cur.execute(sql)
+        cols = [d[0].split('.')[-1].lower() for d in cur.description]
+        return int(dict(zip(cols, cur.fetchall()[0]))["n_unique"])
+
+    assert n_unique(False) == 3
+    assert n_unique(True) == 1

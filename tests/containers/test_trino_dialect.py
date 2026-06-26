@@ -112,3 +112,29 @@ def test_trino_gen_col_sql_executes(trino_cursor):
     assert int(seen["amt"]["n_unique"]) == 3
     assert int(seen["ccy"]["n_unique"]) == 2
     assert float(seen["ccy"]["hash_sum"]) != 0.0
+
+
+# >>> STRICT reconciles case/whitespace drift on real Trino (hash + n_unique) <<< #
+def test_trino_strict_normalization(trino_cursor):
+    cur = trino_cursor
+    _run(cur, "DROP TABLE IF EXISTS memory.default.dt_l")
+    _run(cur, "DROP TABLE IF EXISTS memory.default.dt_r")
+    _run(cur, "CREATE TABLE memory.default.dt_l (rpt_dt varchar, ccy varchar)")
+    _run(cur, "CREATE TABLE memory.default.dt_r (rpt_dt varchar, ccy varchar)")
+    _run(cur, "INSERT INTO memory.default.dt_l VALUES "
+              "('2024-01-01','USD'), ('2024-01-01','usd'), ('2024-01-02','EUR')")
+    _run(cur, "INSERT INTO memory.default.dt_r VALUES "
+              "('2024-01-01','usd  '), ('2024-01-01','USD'), ('2024-01-02','eur')")
+
+    def stats(table, strict):
+        cfg = {"date_col": "rpt_dt"}
+        sql, _ = build_col_sql("athena", cfg, "ccy", "varchar",
+                               f"memory.default.{table}", vintage="all",
+                               strict=strict)
+        rec = _col_row(cur, sql)
+        return (int(rec["n_unique"]), float(rec["hash_sum"]))
+
+    assert stats("dt_l", False) != stats("dt_r", False)
+    sl, sr = stats("dt_l", True), stats("dt_r", True)
+    assert sl == sr
+    assert sl[0] == 2
