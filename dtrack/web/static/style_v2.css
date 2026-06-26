@@ -443,20 +443,6 @@ input[type="checkbox"] {
     gap: var(--jp-space-xl);
 }
 
-.setting-group {
-    display: flex;
-    flex-direction: column;
-    gap: var(--jp-space-sm);
-}
-
-.setting-group label {
-    font-size: var(--jp-ui-font-size1);
-    font-weight: 600;
-    color: var(--jp-ui-font-color1);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
 .settings-label {
     font-size: var(--jp-ui-font-size0);
     font-weight: 700;
@@ -499,13 +485,6 @@ input[type="checkbox"] {
 .quick-dates button {
     padding: 4px 10px;
     font-size: var(--jp-ui-font-size1);
-}
-
-.help-text {
-    font-size: var(--jp-ui-font-size0);
-    color: var(--jp-ui-font-color3);
-    font-style: italic;
-    margin-top: var(--jp-space-xs);
 }
 
 /* ========================================================================
@@ -672,19 +651,6 @@ input[type="checkbox"] {
     overflow-y: auto;
 }
 
-.log-command {
-    background: var(--jp-layout-color0);
-    border: 1px solid var(--jp-border-color0);
-    border-radius: 4px;
-    padding: 8px 12px;
-    margin: 4px 0;
-    font-family: var(--jp-code-font-family);
-    font-size: 12px;
-    color: var(--jp-ui-font-color1);
-    white-space: pre-wrap;
-    word-break: break-all;
-}
-
 /* ========================================================================
    EMPTY STATE
    ======================================================================== */
@@ -846,17 +812,6 @@ input[type="checkbox"] {
     width: 100%;
 }
 
-.preset-buttons {
-    display: flex;
-    gap: var(--jp-space-xs);
-    margin-top: var(--jp-space-xs);
-}
-
-.preset-buttons button {
-    padding: 4px 8px;
-    font-size: var(--jp-ui-font-size0);
-}
-
 .form-section {
     margin: var(--jp-space-xl) 0;
     padding: var(--jp-space-lg);
@@ -910,26 +865,6 @@ input[type="checkbox"] {
     font-size: var(--jp-ui-font-size1);
     color: var(--jp-ui-font-color1);
     margin-top: var(--jp-space-sm);
-}
-
-.help-box {
-    margin-top: var(--jp-space-lg);
-    padding: var(--jp-space-md);
-    background: #E3F2FD;
-    border-left: 3px solid var(--jp-brand-color0);
-    border-radius: var(--jp-border-radius);
-    font-size: var(--jp-ui-font-size1);
-    line-height: 1.6;
-    color: var(--jp-ui-font-color1);
-}
-
-.help-box code {
-    background: var(--jp-layout-color0);
-    padding: 2px 6px;
-    border-radius: var(--jp-border-radius-sm);
-    font-family: var(--jp-code-font-family);
-    font-size: var(--jp-ui-font-size0);
-    color: var(--jp-brand-color1);
 }
 
 /* ========================================================================
@@ -1032,43 +967,6 @@ input[type="checkbox"] {
    VALIDATION BOX
    ======================================================================== */
 
-.validation-box {
-    background: var(--jp-layout-color1);
-    border: 1px solid var(--jp-border-color0);
-    border-radius: var(--jp-border-radius);
-    padding: var(--jp-space-md) var(--jp-space-lg);
-    margin-bottom: var(--jp-space-lg);
-}
-
-.validation-item {
-    display: flex;
-    align-items: center;
-    gap: var(--jp-space-sm);
-    margin-bottom: var(--jp-space-sm);
-    font-size: var(--jp-ui-font-size2);
-}
-
-.validation-item:last-child {
-    margin-bottom: 0;
-}
-
-.validation-icon {
-    font-size: 16px;
-    font-weight: bold;
-}
-
-.validation-success {
-    color: var(--jp-success-color0);
-}
-
-.validation-warning {
-    color: var(--jp-warn-color0);
-}
-
-.validation-error {
-    color: var(--jp-error-color0);
-}
-
 /* ========================================================================
    SUBSECTION TITLE
    ======================================================================== */
@@ -1090,15 +988,6 @@ input[type="checkbox"] {
     gap: var(--jp-space-sm);
     font-size: var(--jp-ui-font-size1);
     color: var(--jp-ui-font-color2);
-}
-
-.auto-checkbox {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--jp-ui-font-size1);
-    color: var(--jp-ui-font-color2);
-    cursor: pointer;
 }
 
 .last-load {
@@ -1419,38 +1308,6 @@ input[type="checkbox"] {
     background: rgba(255, 152, 0, 0.06);
 }
 
-.type-override-select {
-    font-size: 11px;
-    padding: 2px 4px;
-    border: 1px solid var(--jp-border-color1);
-    border-radius: 3px;
-    background: var(--jp-layout-color0);
-    color: var(--jp-ui-font-color0);
-    cursor: pointer;
-}
-
-.type-override-select:focus {
-    outline: 2px solid var(--jp-brand-color1);
-    outline-offset: -1px;
-}
-
-.type-detail {
-    font-size: 10px;
-    color: var(--jp-ui-font-color2);
-    margin-top: 2px;
-}
-
-.override-badge {
-    font-size: 9px;
-    padding: 1px 4px;
-    border-radius: 3px;
-    background: var(--jp-brand-color1);
-    color: white;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
 /* Annotations */
 .rc-annotations {
     background: var(--jp-layout-color1);
@@ -1715,3 +1572,14 @@ input[type="checkbox"] {
     padding: 4px 8px;
 }
 
+
+
+/* ---- transient corner toasts (common.js showSuccess/showError) ---- */
+.dtrack-toast { position: fixed; top: 20px; right: 20px; z-index: 2000; padding: 12px 20px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); font-size: 13px; }
+.dtrack-toast.success { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
+.dtrack-toast.error { background: #fbe9e7; color: #c62828; border: 1px solid #ef9a9a; }
+
+/* ---- API log dock (common.js _ensureLogPanel / apiLog) ---- */
+.api-log-tab { position: fixed; bottom: 0; right: 16px; z-index: 1001; background: var(--jp-layout-color2); border: 1px solid var(--jp-border-color0); border-bottom: none; border-radius: 6px 6px 0 0; padding: 3px 10px; cursor: pointer; font-size: 11px; color: var(--jp-ui-font-color2); user-select: none; }
+.api-log-panel { position: fixed; bottom: 0; left: 0; right: 0; z-index: 1000; max-height: 35vh; display: none; flex-direction: column; margin: 0; border-radius: 8px 8px 0 0; box-shadow: 0 -2px 12px rgba(0,0,0,0.2); }
+.api-log-entry { padding: 2px 0; border-bottom: 1px solid var(--jp-border-color0); }

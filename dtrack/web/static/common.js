@@ -244,14 +244,13 @@ function _ensureLogPanel() {
     // Small toggle tab at bottom-right corner
     const tab = document.createElement('div');
     tab.id = 'api-log-tab';
-    tab.style.cssText = 'position:fixed; bottom:0; right:16px; z-index:1001; background:var(--jp-layout-color2); border:1px solid var(--jp-border-color0); border-bottom:none; border-radius:6px 6px 0 0; padding:3px 10px; cursor:pointer; font-size:11px; color:var(--jp-ui-font-color2); user-select:none;';
+    tab.className = 'api-log-tab';
     tab.textContent = 'API Log';
     tab.onclick = () => { _logVisible = !_logVisible; _logPanel.style.display = _logVisible ? '' : 'none'; };
     document.body.appendChild(tab);
 
     _logPanel = document.createElement('section');
-    _logPanel.className = 'card';
-    _logPanel.style.cssText = 'position:fixed; bottom:0; left:0; right:0; z-index:1000; max-height:35vh; display:none; flex-direction:column; margin:0; border-radius:8px 8px 0 0; box-shadow:0 -2px 12px rgba(0,0,0,0.2);';
+    _logPanel.className = 'card api-log-panel';
     _logPanel.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 12px; border-bottom:1px solid var(--jp-border-color0);">
             <span style="font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px;">API Log</span>
@@ -285,7 +284,8 @@ function apiLog(message, type = 'info') {
                   type === 'success' ? 'var(--jp-success-color0)' :
                   'var(--jp-ui-font-color1)';
     const entry = document.createElement('div');
-    entry.style.cssText = `padding:2px 0; border-bottom:1px solid var(--jp-border-color0); color:${color};`;
+    entry.className = 'api-log-entry';
+    entry.style.color = color;
     entry.innerHTML = `<span style="color:var(--jp-ui-font-color2);">${time}</span> ${_escHtml(message)}`;
     _logBody.appendChild(entry);
     _logBody.scrollTop = _logBody.scrollHeight;
@@ -398,7 +398,7 @@ window.fetch = async function(url, options = {}) {
 // >>> top-right transient success/error toasts <<< //
 function showSuccess(message) {
     const notification = document.createElement('div');
-    notification.style.cssText = `position: fixed; top: 20px; right: 20px; z-index: 2000; background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; padding: 12px 20px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); font-size: 13px;`;
+    notification.className = 'dtrack-toast success';
     notification.textContent = message;
     document.body.appendChild(notification);
     setTimeout(() => notification.remove(), 3000);
@@ -406,7 +406,7 @@ function showSuccess(message) {
 
 function showError(message) {
     const notification = document.createElement('div');
-    notification.style.cssText = `position: fixed; top: 20px; right: 20px; z-index: 2000; background: #fbe9e7; color: #c62828; border: 1px solid #ef9a9a; padding: 12px 20px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); font-size: 13px;`;
+    notification.className = 'dtrack-toast error';
     notification.textContent = message;
     document.body.appendChild(notification);
     setTimeout(() => notification.remove(), 5000);
