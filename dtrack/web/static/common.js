@@ -471,6 +471,34 @@ function syncSelectAllCheckbox() {
     cb.indeterminate = someSelected && !allSelected;
 }
 
+// >>> known tables for the loaders' auto-match: /api/status + config pairs <<< //
+// Shared by Load Row + Load Col; callers apply their own post-filtering.
+async function buildKnownTables() {
+    const resp = await fetch('/api/status');
+    const data = await resp.json();
+    const tables = (data.pairs || []).filter(p => !p.skip).map(p => ({
+        pair_name: p.pair_name,
+        table_left: p.table_left, table_right: p.table_right,
+        source_left: p.source_left || '', source_right: p.source_right || '',
+    }));
+    const cfgResp = await fetch('/api/pairs/list');
+    const cfgData = await cfgResp.json();
+    const existing = new Set(tables.map(t => t.pair_name));
+    for (const p of (cfgData.pairs || [])) {
+        if (p.skip) continue;
+        if (existing.has(p.name)) continue;
+        const leftSource = p.left?.source || '';
+        const rightSource = p.right?.source || '';
+        tables.push({
+            pair_name: p.name,
+            table_left: leftSource ? `${leftSource}_${p.name}` : p.name,
+            table_right: rightSource ? `${rightSource}_${p.name}` : p.name,
+            source_left: leftSource, source_right: rightSource,
+        });
+    }
+    return tables;
+}
+
 // >>> trigger a client-side file download from in-memory content <<< //
 function downloadBlob(content, filename, mime) {
     const blob = new Blob([content], {type: mime || 'application/octet-stream'});

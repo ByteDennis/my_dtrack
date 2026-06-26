@@ -16,32 +16,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 // ─────────────────────────────────────────────────────────────────────
 async function loadKnownTables() {
     try {
-        const resp = await fetch('/api/status');
-        const data = await resp.json();
-        // Hide pairs toggled off on /pairs (skip=true).
-        const tables = (data.pairs || []).filter(p => !p.skip).map(p => ({
-            pair_name: p.pair_name,
-            table_left: p.table_left, table_right: p.table_right,
-            source_left: p.source_left || '', source_right: p.source_right || '',
-        }));
-
-        // Also include pairs in config that aren't registered in the DB yet
-        const cfgResp = await fetch('/api/pairs/list');
-        const cfgData = await cfgResp.json();
-        const existing = new Set(tables.map(t => t.pair_name));
-        for (const p of (cfgData.pairs || [])) {
-            if (p.skip) continue;
-            if (existing.has(p.name)) continue;
-            const leftSource = p.left?.source || '';
-            const rightSource = p.right?.source || '';
-            tables.push({
-                pair_name: p.name,
-                table_left: leftSource ? `${leftSource}_${p.name}` : p.name,
-                table_right: rightSource ? `${rightSource}_${p.name}` : p.name,
-                source_left: leftSource, source_right: rightSource,
-            });
-        }
-        knownTablesRef.current = tables;
+        knownTablesRef.current = await buildKnownTables();
     } catch (e) { console.error('Failed to load tables:', e); }
 }
 
