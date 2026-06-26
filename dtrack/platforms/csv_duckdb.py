@@ -73,8 +73,17 @@ def _query_duckdb(sql, conn_macro):
     cache_put(sql, conn_macro, result, row_count=len(result))
     return result
 
+# >>> read_csv(...) expr for DESCRIBE, honoring a custom quote/escape <<< #
+def _csv_describe_from(csv_path, quote='"', escape=''):
+    if (quote or '"') == '"' and not escape:
+        return f"read_csv_auto('{csv_path}', header=True)"
+    opts = ["header=true", f"quote={_csv_str_literal(quote or chr(34))}"]
+    if escape:
+        opts.append(f"escape={_csv_str_literal(escape)}")
+    return f"read_csv('{csv_path}', {', '.join(opts)})"
+
 # >>> Read the CSV header + a sample of rows, return {col_name: dtype} <<< #
-def discover_csv_columns(csv_path):
+def discover_csv_columns(csv_path, quote='"', escape=''):
     if not (os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_CSV_MOCK')):
         try:
             import duckdb  # noqa: F401
@@ -82,7 +91,7 @@ def discover_csv_columns(csv_path):
             if conn is not None:
                 try:
                     cur = conn.execute(
-                        f"DESCRIBE SELECT * FROM read_csv_auto('{csv_path}', header=True) LIMIT 0"
+                        f"DESCRIBE SELECT * FROM {_csv_describe_from(csv_path, quote, escape)} LIMIT 0"
                     )
                     out = {}
                     for row in cur.fetchall():
@@ -153,16 +162,35 @@ def _resolve_csv_types(inferred, declared):
             effective[col] = inf
     return effective, overrides
 
+# >>> emit a DuckDB single-quoted string literal, doubling embedded quotes <<< #
+def _csv_str_literal(s):
+    return "'" + str(s).replace("'", "''") + "'"
+
+# >>> resolve per-source quote char (default ") and optional escape <<< #
+def _csv_quote_escape(tbl_cfg):
+    quote = tbl_cfg.get('quote')
+    if quote is None or quote == '':
+        quote = '"'
+    escape = tbl_cfg.get('escape') or ''
+    return quote, escape
+
 # >>> Return the FROM-clause table reference for a csv-source pair <<< #
 def _csv_from_clause(tbl_cfg):
     path = tbl_cfg.get('conn_macro', '') or ''
-    if path:
-        types = tbl_cfg.get('_read_types') or {}
-        if types:
-            type_map = ", ".join(f"'{c}': '{t}'" for c, t in types.items())
-            return f"read_csv('{path}', header=true, types={{{type_map}}})"
+    if not path:
+        return tbl_cfg.get('table', '') or tbl_cfg.get('name', 'unknown')
+    types = tbl_cfg.get('_read_types') or {}
+    quote, escape = _csv_quote_escape(tbl_cfg)
+    if not types and quote == '"' and not escape:
         return f"'{path}'"
-    return tbl_cfg.get('table', '') or tbl_cfg.get('name', 'unknown')
+    opts = ["header=true"]
+    if types:
+        type_map = ", ".join(f"'{c}': '{t}'" for c, t in types.items())
+        opts.append(f"types={{{type_map}}}")
+    opts.append(f"quote={_csv_str_literal(quote)}")
+    if escape:
+        opts.append(f"escape={_csv_str_literal(escape)}")
+    return f"read_csv('{path}', {', '.join(opts)})"
 
 # >>> format a canonical YYYY-MM-DD as a DuckDB literal matching the date column's stored type <<< #
 def _csv_date_bound_literal(canon_date, dtype, date_type):
@@ -380,7 +408,8 @@ def _discover_and_write_csv_columns(csv_tables, outdir, db_path):
                   f"({path!r}); skipping discovery")
             continue
         qname = qualified_name(tbl)
-        inferred = discover_csv_columns(path)
+        q, esc = _csv_quote_escape(tbl)
+        inferred = discover_csv_columns(path, q, esc)
         if not inferred:
             print(f"  {qname}: DuckDB returned no columns for {path}")
             continue
@@ -449,7 +478,8 @@ def extract_csv(config_path, outdir, types=None, max_workers=None, db_path=None,
             path = tbl.get('conn_macro', '') or ''
             dtype = ''
             if path and os.path.exists(path):
-                cols = discover_csv_columns(path)
+                q, esc = _csv_quote_escape(tbl)
+                cols = discover_csv_columns(path, q, esc)
                 dtype = next((v for k, v in cols.items()
                               if k.lower() == date_col.lower()), '')
             date_type = tbl.get('date_type')
