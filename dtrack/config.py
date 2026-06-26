@@ -23,6 +23,10 @@ def validate_unified_pair(pair_name, pair_config):
             raise ValueError(f"Pair '{pair_name}': '{side}' must be a dictionary")
         if "source" not in tbl:
             raise ValueError(f"Pair '{pair_name}': {side} table must have 'source' field")
+        if (tbl.get("source") or "").lower() == "csv" and not (tbl.get("conn_macro") or "").strip():
+            raise ValueError(
+                f"Pair '{pair_name}': {side} table source='csv' requires 'conn_macro' "
+                f"(the CSV file path); csv uses conn_macro, not a 'csv_path' field")
 
     if "ignore_rows" in pair_config:
         if not isinstance(pair_config["ignore_rows"], list):

@@ -3969,7 +3969,7 @@ async def api_playground_run(request: Request):
     row_cap = int(body.get("row_cap") or 20)
     use_cache = bool(body.get("use_cache") or False)
 
-    if engine not in ("athena", "oracle", "hadoop", "databricks"):
+    if engine not in ("athena", "oracle", "hadoop", "databricks", "csv"):
         return JSONResponse(status_code=400, content={"error": f"Unsupported engine: {engine!r}"})
     if not sql:
         return JSONResponse(status_code=400, content={"error": "SQL is required"})
