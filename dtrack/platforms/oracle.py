@@ -9,6 +9,7 @@ from .base import (
     qualified_name,
     resolve_table,
     build_date_in_clause,
+    format_date_bound_literal,
     build_date_range_with_gaps,
     resolve_date_format,
     compute_date_filter,
@@ -20,11 +21,10 @@ from .base import (
     quote_ident,
     apply_pair_date_bounds,
     set_cache_db,
+    cache_db_path,
     cache_stats,
     cache_get,
     cache_put,
-    get_mock_dir,
-    _extract_mock_tables,
     _mask_stats_in_rows,
 )
 
@@ -257,16 +257,16 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None,
                 dw = build_date_range_with_gaps(
                     date_col, bucket_dates, date_dtype,
                     date_format=date_format)
-                bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
+                bucket_where = f"{dw} AND ({orig_where})" if orig_where else dw
                 work_units.append((bucket_key, _and_exclude(bucket_where), bucket_key))
         elif date_filter['filter_type'] == 'in_list':
             dw = build_date_in_clause(
                 date_col, date_filter['dates'], date_dtype,
                 date_format=date_format)
-            bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
+            bucket_where = f"{dw} AND ({orig_where})" if orig_where else dw
             work_units.append(('sample', _and_exclude(bucket_where), 'sample'))
         elif date_bounds:
-            bw = f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds
+            bw = f"{date_bounds} AND ({orig_where})" if orig_where else date_bounds
             work_units.append(('all', _and_exclude(bw), 'all'))
         else:
             work_units.append(('all', _and_exclude(orig_where), 'all'))
@@ -335,7 +335,7 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
                 f"-- {datetime.now().isoformat()}\n\n")
     _sql_log_file = log_path
 
-    set_cache_db(os.path.join(outdir, ".cache.db"))
+    set_cache_db(cache_db_path(outdir))
 
     col_start_time = time.time()
     col_start_ts = datetime.now().isoformat()
@@ -369,18 +369,18 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
         dw = build_date_range_with_gaps(
             date_col, date_filter['dates'],
             extract_date_dtype, date_format=date_filter.get('date_format'))
-        extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
+        extract_cfg['where'] = f"{dw} AND ({orig_where})" if orig_where else dw
         print(f"  {len(buckets)} vintage buckets ({effective_vintage}) -- GROUP BY")
     elif date_filter['filter_type'] == 'in_list':
         dw = build_date_in_clause(
             date_col, date_filter['dates'], extract_date_dtype,
             date_format=date_filter.get('date_format'))
-        extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
+        extract_cfg['where'] = f"{dw} AND ({orig_where})" if orig_where else dw
         effective_vintage = 'all'
         extract_date_dtype = None
     elif date_bounds:
         extract_cfg['where'] = (
-            f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds)
+            f"{date_bounds} AND ({orig_where})" if orig_where else date_bounds)
 
     if exclude_clause:
         wc = extract_cfg.get('where', '') or ''
@@ -438,7 +438,7 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
     hits, misses = cache_stats()
     if hits or misses:
         print(f"  Oracle cache: {hits} hit / {misses} miss "
-              f"({os.path.join(outdir, '.cache.db')})")
+              f"({cache_db_path(outdir)})")
     set_cache_db(None)
     print(f"  SQL log: {log_path}")
     col_elapsed = time.time() - col_start_time
@@ -488,10 +488,10 @@ def _build_row_sql_oracle(tbl_cfg, db_path=None, vintage=None):
     parts = []
     base_where = tbl_cfg.get('where', '').strip()
     date_bounds = tbl_cfg.get('_date_bounds', '').strip()
-    if base_where:
-        parts.append(base_where)
     if date_bounds:
         parts.append(date_bounds)
+    if base_where:
+        parts.append(base_where)
     wc = " AND ".join(f"({p})" for p in parts) if parts else "(1=1)"
 
     if transform and "{col}" in transform:
@@ -551,7 +551,7 @@ def parse_oracle_sql_file(sql_path):
 def run_oracle_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                        on_progress=None, resume=False, cancel_event=None):
     from .base import run_extract_sql_file
-    set_cache_db(os.path.join(outdir, ".cache.db"))
+    set_cache_db(cache_db_path(outdir))
     try:
         return run_extract_sql_file(
             sql_path, outdir,
@@ -570,8 +570,6 @@ def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=No
                    preset=None, stats_override=None, gen_only=False):
     if types is None:
         types = ["row", "col"]
-
-    mock_dir = get_mock_dir()
 
     from ..config import load_unified_config
     config = load_unified_config(config_path)
@@ -606,11 +604,15 @@ def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=No
 
     def _oracle_bounds(tbl, date_col, eff_from, eff_to):
         date_col_q = quote_ident(date_col, "oracle")
+        date_type = tbl.get('date_type')
+        custom = config.get('date_types')
         bounds = []
         if eff_from:
-            bounds.append(f"{date_col_q} >= DATE '{eff_from}'")
+            bounds.append(f"{date_col_q} >= "
+                          f"{format_date_bound_literal(eff_from, date_type, is_upper=False, custom_date_types=custom)}")
         if eff_to:
-            bounds.append(f"{date_col_q} <= DATE '{eff_to}'")
+            bounds.append(f"{date_col_q} <= "
+                          f"{format_date_bound_literal(eff_to, date_type, is_upper=True, custom_date_types=custom)}")
         return " AND ".join(bounds)
     apply_pair_date_bounds(oracle_tables, config, from_date, to_date, _oracle_bounds)
 
@@ -628,10 +630,6 @@ def extract_oracle(config_path, outdir, types=None, max_workers=None, db_path=No
                                            preset=preset, stats_override=stats_override)
             tag_generated_sql(outdir, "col", "oracle")
         print(f"[gen-only] wrote Oracle extract SQL to {outdir} (no extraction)")
-        return
-
-    if mock_dir:
-        _extract_mock_tables(oracle_tables, outdir, types, mock_dir)
         return
 
     try:

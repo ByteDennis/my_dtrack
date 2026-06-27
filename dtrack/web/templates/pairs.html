@@ -238,7 +238,7 @@
                 <button class="modal-close" onclick="closeSettingsModal()">&times;</button>
             </div>
             <div class="modal-body" style="padding:16px 20px;">
-                <!-- Row 1: Mode + Testing side by side -->
+                <!-- Row 1: Mode -->
                 <div style="display:flex; gap:24px; margin-bottom:16px;">
                     <div style="flex:1;">
                         <label class="settings-label">Mode</label>
@@ -246,14 +246,6 @@
                             <label><input type="radio" name="global-mode" value="incremental" checked> Incremental</label>
                             <label><input type="radio" name="global-mode" value="full"> Full</label>
                         </div>
-                    </div>
-                    <div style="flex:1;">
-                        <label class="settings-label">Environment</label>
-                        <label class="checkbox-inline" style="margin-top:6px;">
-                            <input type="checkbox" id="testing-mode" onchange="toggleTestingMode(this.checked)">
-                            Testing Mode
-                        </label>
-                        <div id="testing-status" style="font-size:10px; margin-top:2px; display:none;"></div>
                     </div>
                 </div>
 

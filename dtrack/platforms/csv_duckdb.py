@@ -12,21 +12,35 @@ from .base import (
     apply_pair_date_bounds,
     compute_date_filter,
     set_cache_db,
+    cache_db_path,
     cache_get,
     cache_put,
     load_tables_from_config,
     fill_columns_from_meta,
+    resolve_config_columns,
     inject_where_from_config,
-    get_mock_dir,
-    _extract_mock_tables,
     tag_generated_sql,
 )
+from ..logmgr import get_logger, log_exc
+
+# >>> persistent DuckDB file holding CREATE TABLE materializations of each CSV <<< #
+_CSV_DUCKDB_FILE = None
+
+# >>> point the runtime at a persistent DuckDB db file (or None for in-memory) <<< #
+def set_csv_duckdb(path):
+    global _CSV_DUCKDB_FILE
+    _CSV_DUCKDB_FILE = path if (path and os.path.exists(path)) else None
+
+# >>> regenerable cache/state dir for a csv outdir (materialized db, query cache) <<< #
+def csv_state_dir(outdir):
+    return os.path.join(outdir, ".state")
+
+# >>> default location of the materialized CSV database (under the state dir) <<< #
+def csv_duckdb_path(outdir):
+    return os.path.join(csv_state_dir(outdir), "csv.duckdb")
 
 # >>> Return an in-memory DuckDB connection. Raises a helpful error when <<< #
 def duckdb_connect():
-    if os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_CSV_MOCK'):
-        print("[mock] Skipping DuckDB connection")
-        return None
     try:
         import duckdb
     except ImportError as exc:
@@ -52,15 +66,23 @@ def _rewrite_csv_from_clauses(sql):
 
 # >>> Execute SQL against DuckDB; return list[dict] (lowercased cols) <<< #
 def _query_duckdb(sql, conn_macro):
+    log = get_logger()
     cached = cache_get(sql, conn_macro)
     if cached is not None:
         return cached
 
-    conn = duckdb_connect()
-    if conn is None:
-        return []
-    try:
+    if _CSV_DUCKDB_FILE:
+        import duckdb
+        log.info("csv: live read from materialized DB %s", _CSV_DUCKDB_FILE)
+        conn = duckdb.connect(database=_CSV_DUCKDB_FILE, read_only=True)
+        effective_sql = sql
+    else:
+        conn = duckdb_connect()
+        if conn is None:
+            return []
+        log.info("csv: live read (in-memory read_csv)")
         effective_sql = _rewrite_csv_from_clauses(sql)
+    try:
         cur = conn.execute(effective_sql)
         cols = [d[0].lower() for d in cur.description] if cur.description else []
         rows = cur.fetchall() or []
@@ -68,8 +90,8 @@ def _query_duckdb(sql, conn_macro):
     finally:
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log_exc("duckdb conn close", e, level="debug")
 
     cache_put(sql, conn_macro, result, row_count=len(result))
     return result
@@ -85,24 +107,25 @@ def _csv_describe_from(csv_path, quote='"', escape=''):
 
 # >>> Read the CSV header + a sample of rows, return {col_name: dtype} <<< #
 def discover_csv_columns(csv_path, quote='"', escape=''):
-    if not (os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_CSV_MOCK')):
-        try:
-            import duckdb  # noqa: F401
-            conn = duckdb_connect()
-            if conn is not None:
+    try:
+        import duckdb  # noqa: F401
+        conn = duckdb_connect()
+        if conn is not None:
+            try:
+                cur = conn.execute(
+                    f"DESCRIBE SELECT * FROM {_csv_describe_from(csv_path, quote, escape)} LIMIT 0"
+                )
+                out = {}
+                for row in cur.fetchall():
+                    out[row[0]] = row[1]
+                return out
+            finally:
                 try:
-                    cur = conn.execute(
-                        f"DESCRIBE SELECT * FROM {_csv_describe_from(csv_path, quote, escape)} LIMIT 0"
-                    )
-                    out = {}
-                    for row in cur.fetchall():
-                        out[row[0]] = row[1]
-                    return out
-                finally:
-                    try: conn.close()
-                    except Exception: pass
-        except ImportError:
-            pass
+                    conn.close()
+                except Exception as e:
+                    log_exc("duckdb conn close", e, level="debug")
+    except ImportError:
+        pass
 
     try:
         import pandas as pd
@@ -175,8 +198,16 @@ def _csv_quote_escape(tbl_cfg):
     escape = tbl_cfg.get('escape') or ''
     return quote, escape
 
+# >>> sanitized DuckDB table name for a csv-source table (materialized form) <<< #
+def _csv_table_name(tbl_cfg):
+    import re as _re
+    return "t_" + _re.sub(r'[^0-9a-zA-Z]+', '_', qualified_name(tbl_cfg)).strip('_').lower()
+
 # >>> Return the FROM-clause table reference for a csv-source pair <<< #
 def _csv_from_clause(tbl_cfg):
+    materialized = tbl_cfg.get('_csv_table')
+    if materialized:
+        return materialized
     path = tbl_cfg.get('conn_macro', '') or ''
     if not path:
         return tbl_cfg.get('table', '') or tbl_cfg.get('name', 'unknown')
@@ -194,16 +225,16 @@ def _csv_from_clause(tbl_cfg):
     return f"read_csv('{path}', {', '.join(opts)})"
 
 # >>> format a canonical YYYY-MM-DD as a DuckDB literal matching the date column's stored type <<< #
-def _csv_date_bound_literal(canon_date, dtype, date_type):
-    ymd = canon_date.replace('-', '')
+def _csv_date_bound_literal(canon_date, dtype, date_type, custom_date_types=None):
     dt = (dtype or '').upper()
     if dt.startswith(('BIGINT', 'INT', 'HUGEINT', 'DECIMAL', 'DOUBLE', 'FLOAT', 'NUMERIC', 'NUMBER')):
-        return ymd
+        return canon_date.replace('-', '')
     if dt.startswith(('DATE', 'TIMESTAMP')):
         return f"DATE '{canon_date}'"
-    if (date_type or '').lower() == 'string_compact':
-        return f"'{ymd}'"
-    return f"'{canon_date}'"
+    if not (date_type or '').strip():
+        return f"'{canon_date}'"
+    from .base import format_date_bound_literal
+    return format_date_bound_literal(canon_date, date_type, custom_date_types=custom_date_types)
 
 # >>> DuckDB row-count SQL for one csv-source table <<< #
 def _build_row_sql_csv(tbl_cfg, db_path=None, vintage=None):
@@ -214,10 +245,10 @@ def _build_row_sql_csv(tbl_cfg, db_path=None, vintage=None):
     parts = []
     base_where = '' if tbl_cfg.get('_where_from_config') else (tbl_cfg.get('where', '') or '').strip()
     date_bounds = (tbl_cfg.get('_date_bounds', '') or '').strip()
-    if base_where:
-        parts.append(base_where)
     if date_bounds:
         parts.append(date_bounds)
+    if base_where:
+        parts.append(base_where)
     wc = ' AND '.join(f"({p})" for p in parts) if parts else '1=1'
 
     if transform and '{col}' in transform:
@@ -330,7 +361,7 @@ def _write_combined_col_sql_csv(csv_tables, outdir, db_path=None,
             dates = date_filter['dates']
             full_range = build_date_range_with_gaps(
                 date_col, dates, date_dtype, date_format=date_format)
-            bucket_where = f"({orig_where}) AND {full_range}" if orig_where else full_range
+            bucket_where = f"{full_range} AND ({orig_where})" if orig_where else full_range
             per_col_where = _and_exclude(bucket_where)
             per_col_vintage = effective_vintage
             per_col_dt_label = None
@@ -338,12 +369,12 @@ def _write_combined_col_sql_csv(csv_tables, outdir, db_path=None,
             dw = build_date_in_clause(
                 date_col, date_filter['dates'], date_dtype,
                 date_format=date_format)
-            bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
+            bucket_where = f"{dw} AND ({orig_where})" if orig_where else dw
             per_col_where = _and_exclude(bucket_where)
             per_col_vintage = 'all'
             per_col_dt_label = 'sample'
         elif date_bounds:
-            bw = f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds
+            bw = f"{date_bounds} AND ({orig_where})" if orig_where else date_bounds
             per_col_where = _and_exclude(bw)
             per_col_vintage = 'all'
             per_col_dt_label = 'all'
@@ -385,7 +416,8 @@ def parse_csv_sql_file(sql_path):
 def run_csv_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                      on_progress=None, resume=False, cancel_event=None):
     from .base import run_extract_sql_file
-    set_cache_db(os.path.join(outdir, ".cache.db"))
+    set_cache_db(cache_db_path(outdir))
+    set_csv_duckdb(csv_duckdb_path(outdir))
     try:
         return run_extract_sql_file(
             sql_path, outdir,
@@ -397,42 +429,85 @@ def run_csv_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         )
     finally:
         set_cache_db(None)
+        set_csv_duckdb(None)
 
-# >>> For each csv-source table, run DESCRIBE against the CSV via <<< #
-def _discover_and_write_csv_columns(csv_tables, outdir, db_path):
+# >>> Resolve the full {col: duckdb_type} map for one csv table. Config-defined <<< #
+# >>> columns (inline or columns_file) win wholesale and skip DESCRIBE. <<< #
+def _resolve_full_csv_types(tbl, outdir):
+    cfg = resolve_config_columns(tbl)
+    if cfg:
+        return {c: _duckdb_type(t) for c, t in cfg.items()}, True
+    path = tbl.get('conn_macro', '')
+    q, esc = _csv_quote_escape(tbl)
+    inferred = discover_csv_columns(path, q, esc)
+    if not inferred:
+        return {}, False
+    from ..loader import read_columns_sidecar
+    sidecar = read_columns_sidecar(os.path.join(outdir, f"{qualified_name(tbl)}_columns.csv"))
+    declared = {**sidecar, **(tbl.get('columns') or {})}
+    cols, _ = _resolve_csv_types(inferred, declared)
+    return cols, bool(sidecar)
+
+# >>> Materialize every csv-source table as a typed CREATE TABLE in a single <<< #
+# >>> DuckDB file so queries read `FROM <table>` (consistent types, short SQL). <<< #
+def build_csv_duckdb(csv_tables, outdir, db_path=None):
     from ..db import insert_column_meta
+    log = get_logger()
     os.makedirs(outdir, exist_ok=True)
-    for tbl in csv_tables:
-        path = tbl.get('conn_macro', '')
-        if not path or not os.path.exists(path):
-            print(f"  {qualified_name(tbl)}: conn_macro (csv path) missing or not found "
-                  f"({path!r}); skipping discovery")
-            continue
-        qname = qualified_name(tbl)
-        q, esc = _csv_quote_escape(tbl)
-        inferred = discover_csv_columns(path, q, esc)
-        if not inferred:
-            print(f"  {qname}: DuckDB returned no columns for {path}")
-            continue
-        from ..loader import read_columns_sidecar
-        col_csv = os.path.join(outdir, f"{qname}_columns.csv")
-        sidecar = read_columns_sidecar(col_csv)
-        declared = {**sidecar, **(tbl.get('columns') or {})}
-        cols, overrides = _resolve_csv_types(inferred, declared)
-        if overrides:
-            tbl['_read_types'] = overrides
-        if db_path:
-            insert_column_meta(db_path, qname, cols, source='csv')
-        if os.path.exists(col_csv):
-            print(f"  {qname}: kept existing {qname}_columns.csv "
-                  f"({len(sidecar)} types) -> not overwritten")
-            continue
-        with open(col_csv, 'w', newline='') as f:
-            w = csv.writer(f)
-            w.writerow(['column_name', 'data_type'])
-            for name, dt in cols.items():
-                w.writerow([name, dt])
-        print(f"  {qname}: discovered {len(cols)} columns -> {col_csv}")
+
+    try:
+        import duckdb
+    except ImportError as e:
+        log_exc("csv: DuckDB unavailable — skipping materialization", e)
+        return None
+
+    db_file = csv_duckdb_path(outdir)
+    os.makedirs(os.path.dirname(db_file), exist_ok=True)
+    conn = duckdb.connect(database=db_file)
+    try:
+        for tbl in csv_tables:
+            qname = qualified_name(tbl)
+            path = tbl.get('conn_macro', '')
+            if not path or not os.path.exists(path):
+                log.warning("%s: conn_macro (csv path) missing or not found (%r); "
+                            "skipping materialization", qname, path)
+                continue
+            types, from_def = _resolve_full_csv_types(tbl, outdir)
+            if not types:
+                log.warning("%s: no columns resolved for %s", qname, path)
+                continue
+            tname = _csv_table_name(tbl)
+            quote, escape = _csv_quote_escape(tbl)
+            type_map = ", ".join(f"'{c}': '{t}'" for c, t in types.items())
+            opts = ["header=true", f"types={{{type_map}}}",
+                    f"quote={_csv_str_literal(quote)}"]
+            if escape:
+                opts.append(f"escape={_csv_str_literal(escape)}")
+            read_expr = f"read_csv('{path}', {', '.join(opts)})"
+            try:
+                conn.execute(f"CREATE OR REPLACE TABLE {tname} AS SELECT * FROM {read_expr}")
+            except Exception as e:
+                log_exc(f"{qname}: CREATE TABLE from {path} failed", e)
+                continue
+            tbl['_csv_table'] = tname
+            tbl['columns'] = types
+            if db_path:
+                insert_column_meta(db_path, qname, types, source='csv')
+            col_csv = os.path.join(outdir, f"{qname}_columns.csv")
+            if os.path.exists(col_csv):
+                log.info("%s: materialized %s (%d cols); kept existing %s_columns.csv",
+                         qname, tname, len(types), qname)
+            else:
+                with open(col_csv, 'w', newline='') as f:
+                    w = csv.writer(f)
+                    w.writerow(['column_name', 'data_type'])
+                    for name, dt in types.items():
+                        w.writerow([name, dt])
+                log.info("%s: materialized %s (%d cols, %s) -> %s", qname, tname,
+                         len(types), "config-defined" if from_def else "discovered", col_csv)
+    finally:
+        conn.close()
+    return db_file
 
 # >>> CLI entrypoint: discover -> write extract_{type}.csv.sql -> (optionally) run via DuckDB <<< #
 def extract_csv(config_path, outdir, types=None, max_workers=None, db_path=None,
@@ -471,25 +546,29 @@ def extract_csv(config_path, outdir, types=None, max_workers=None, db_path=None,
             tbl['vintage'] = 'all'
     inject_where_from_config(csv_tables, config)
 
+    build_csv_duckdb(csv_tables, outdir, db_path)
+
     def _csv_bounds(tbl, date_col, eff_from, eff_to):
-        path = tbl.get('conn_macro', '') or ''
-        dtype = ''
-        if path and os.path.exists(path):
-            q, esc = _csv_quote_escape(tbl)
-            cols = discover_csv_columns(path, q, esc)
-            dtype = next((v for k, v in cols.items()
-                          if k.lower() == date_col.lower()), '')
+        cols = tbl.get('columns') or {}
+        dtype = next((v for k, v in cols.items()
+                      if k.lower() == date_col.lower()), '')
+        if not dtype:
+            path = tbl.get('conn_macro', '') or ''
+            if path and os.path.exists(path):
+                q, esc = _csv_quote_escape(tbl)
+                disc = discover_csv_columns(path, q, esc)
+                dtype = next((v for k, v in disc.items()
+                              if k.lower() == date_col.lower()), '')
         date_type = tbl.get('date_type')
+        custom = config.get('date_types')
         date_col_q = quote_ident(date_col, "duckdb")
         bounds = []
         if eff_from:
-            bounds.append(f"{date_col_q} >= {_csv_date_bound_literal(eff_from, dtype, date_type)}")
+            bounds.append(f"{date_col_q} >= {_csv_date_bound_literal(eff_from, dtype, date_type, custom)}")
         if eff_to:
-            bounds.append(f"{date_col_q} <= {_csv_date_bound_literal(eff_to, dtype, date_type)}")
+            bounds.append(f"{date_col_q} <= {_csv_date_bound_literal(eff_to, dtype, date_type, custom)}")
         return " AND ".join(bounds)
     apply_pair_date_bounds(csv_tables, config, from_date, to_date, _csv_bounds)
-
-    _discover_and_write_csv_columns(csv_tables, outdir, db_path)
 
     def _gen(t):
         if t == "row":
@@ -507,11 +586,6 @@ def extract_csv(config_path, outdir, types=None, max_workers=None, db_path=None,
             _gen(t)
             tag_generated_sql(outdir, t, "csv")
         print(f"[gen-only] wrote CSV extract SQL to {outdir} (no extraction)")
-        return
-
-    mock_dir = get_mock_dir()
-    if mock_dir:
-        _extract_mock_tables(csv_tables, outdir, types, mock_dir)
         return
 
     for t in types:

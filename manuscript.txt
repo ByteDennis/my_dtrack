@@ -3,9 +3,16 @@
 ================================================================================
 
 Author:  Dennis
-Updated: 2026-05-18
+Updated: 2026-06-27
 Goal:    Reproduce the entire web-UI workflow from bash. Every step the web
-         wizard does is a single CLI command. `dtrack serve` is never required.
+         wizard does is one or more CLI commands. `dtrack serve` is optional.
+
+The pipeline is GENERATE → RUN → LOAD → COMPARE:
+    generate   write extract_{row,col}.<platform>.sql (NO backend hit)
+    run-sql    execute that SQL against each backend -> {qname}_{row,col}.csv
+    load-*     CSV -> SQLite project.db (_row_counts / _col_stats)
+    compare-*  diff left vs right -> _row_comparison / _col_comparison + HTML
+`dtrack extract` = generate + run-sql in one shot. There is NO `dtrack run`.
 
 
 ================================================================================
@@ -13,7 +20,8 @@ Goal:    Reproduce the entire web-UI workflow from bash. Every step the web
 ================================================================================
 
 Install (editable, with platform extras as needed):
-    uv pip install -e '.[oracle,aws]'              # or: pip install -e ...
+    uv pip install -e '.[oracle,aws,csv]'          # or: pip install -e ...
+    # csv source needs duckdb; databricks/hadoop pull their own driver extras.
 
 Resolve env (looked up in this order, first hit wins):
     1) --env <path>
@@ -25,294 +33,301 @@ Inspect what got picked up:
     dtrack doctor
 
 Required vars (by platform):
-    Oracle : PCDS_USR, <macro>_pwd  (one per service in MACRO2SVC + overrides),
-             optional LDAP_DSN with '{service}' placeholder
-    AWS    : AWS_DEFAULT_REGION, AWS_S3_WORK_GROUP, AWS_S3_STAGING_DIR,
-             AWS_TOKEN_URL, AWS_ARN_URL, AWS_USR, AWS_HOST, AWS_PWD
-    SAS    : SAS_LIB, OUT_DIR, EMAIL_TO, SAS_CACHE_DIR
+    Oracle     : PCDS_USR, <macro>_pwd (one per service in MACRO2SVC +
+                 DTRACK_ORACLE_MACROS), optional LDAP_DSN with '{service}'
+    AWS/Athena : AWS_DEFAULT_REGION, AWS_S3_WORK_GROUP, AWS_S3_STAGING_DIR,
+                 AWS_TOKEN_URL, AWS_ARN_URL, AWS_USR, AWS_HOST, AWS_PWD
+    Hadoop/Hive: a working ODBC DSN (HADOOP_DSN, default 'Hive_Prod')
+    Databricks : per the databricks driver env (catalog.schema in conn_macro)
+    CSV        : no creds — read in-process via DuckDB
 
 
 ================================================================================
- 2. ONE-SHOT END-TO-END
+ 2. SUPPORTED SOURCES
 ================================================================================
 
-    dtrack run project.db --config pairs.json \
-        --outdir ./out --type both --vintage day -y \
-        --html-row ./out/output/compare_row.html \
-        --html-col ./out/output/compare_col.html
+    source       engine / driver         conn_macro means
+    -----------  ----------------------  --------------------------------------
+    oracle       oracledb (direct)       Oracle service macro (pb23, pb30, ...)
+    hadoop       pyodbc / Hive           Hive database name
+    aws          pyathena (Athena)       Athena database name
+    databricks   databricks sql          "catalog.schema"
+    csv          DuckDB (in-process)     filesystem path to the .csv file
 
-`dtrack run` does: init → extract (per platform) → load → compare → HTML.
-`-y` skips every HITL prompt. Drop it to get interactive skip/ignore
-prompts on mismatched dates and column mappings.
-
-Per-stat control (passed through to gen-aws/gen-oracle):
-    --preset quick|standard|detailed
-    --stats-override n_unique=on,hash_sum=off,top_10=on,...
-
-Stat keys (see dtrack/constants.py STATS_PRESETS):
-    n_total, n_missing, n_unique, min_max, length, hash_sum, top_10
-The CSV always emits the 14-col schema; disabled stats land as empty
-strings. preset is the SQL pathway; stats_override is authoritative.
+A pair can mix sources (e.g. left=oracle, right=aws). Generate/run each
+platform that has at least one table; load both result folders.
+(SAS support has been removed.)
 
 
 ================================================================================
- 3. THE 8 STEPS — UI PAGE → CLI EQUIVALENT
+ 3. ONE COMPARISON, END-TO-END (bash)
 ================================================================================
-
-Each web wizard step maps 1-to-1 to a CLI command.
-
-    UI page          CLI command                                    Notes
-    ---------------  ---------------------------------------------  ----------------------------
-    /pairs           edit pairs.json directly OR `dtrack init`      No CLI form-builder; the
-                                                                    JSON is the source of truth.
-    /load_row        dtrack load-row <db> <folder> --config         CSV → _row_counts
-    /row_compare     dtrack compare-row <db> --config --html        also writes _row_comparison
-    /col_mapping     dtrack match-columns <db> --config             auto-match + interactive
-    /col_gen         dtrack gen-aws|gen-oracle|gen-sas              emits SQL/SAS + runs Athena/Oracle
-    /load_col        dtrack load-col <db> <folder> --config         CSV → _col_stats
-    /col_compare     dtrack compare-col <db> --config --html        per-col diffs + HTML
-    /benchmark       (no CLI; web-only)                             not part of e2e compare
-
-
-================================================================================
- 4. BASH-SCRIPT TEMPLATE FOR ONE COMPARISON
-================================================================================
-
-Drop this in run.sh, edit paths, then `bash run.sh`.
 
     #!/usr/bin/env bash
     set -euo pipefail
-
     DB=./project.db
     CFG=./pairs.json
-    CSV=./csv     # AWS / Oracle CSV output
-    SAS=./sas     # SAS script output
-    OUT=./output  # HTML reports
+    BASE=./out                 # csv/ is derived as $BASE/csv
 
-    mkdir -p "$CSV" "$SAS" "$OUT"
-
-    # 1. init DB (idempotent; --migrate to upgrade schema in place)
+    # 1. init DB (idempotent; --migrate upgrades schema in place)
     [ -f "$DB" ] || dtrack init "$DB" --config "$CFG"
 
-    # 2. discover columns (live or from CSV metadata dump)
-    dtrack load-columns "$DB" --config "$CFG"
-    # or: dtrack load-columns "$DB" --config "$CFG" --csv meta.csv
+    # 2. columns: load defs (inline `columns` / `columns_file` in pairs.json
+    #    win and skip live discovery; otherwise discovered from the backend)
+    dtrack load-columns "$DB" --config "$CFG" --columns-dir "$BASE/csv"
 
-    # 3. auto-match column names between left/right
-    dtrack match-columns "$DB" --config "$CFG" --mode merge
+    # 3. auto-match column names left<->right (writes col_map)
+    dtrack match-columns "$DB" --config "$CFG" --yes      # --map-csv optional
 
-    # 4. extract per platform (parallel-safe; run only those you need)
-    dtrack gen-aws    "$CFG" --outdir "$CSV" --type both --db "$DB" \
-                      --preset standard
-    dtrack gen-oracle "$CFG" --outdir "$CSV" --type both --db "$DB" \
-                      --preset standard
-    dtrack gen-sas    "$CFG" --outdir "$SAS" --type both --db "$DB"
-    # If you ran gen-sas you still have to execute the .sas files in a
-    # SAS session yourself; they write CSVs into $SAS.
+    # 4a. ROW: generate -> run -> load -> compare
+    dtrack generate "$DB" --config "$CFG" --outdir "$BASE" --type row
+    dtrack run-sql  "$DB" --config "$CFG" --outdir "$BASE" --type row
+    dtrack load-row "$DB" "$BASE/csv" --config "$CFG"
+    dtrack compare-row "$DB" --config "$CFG" -y --html "$BASE/output/compare_row.html"
 
-    # 5. load extracted CSVs back into the SQLite project DB
-    dtrack load-row "$DB" "$CSV" --config "$CFG"
-    dtrack load-col "$DB" "$CSV" --config "$CFG"
-    # (re-run with --folder "$SAS" for SAS-side outputs)
+    # 4b. COL: must run AFTER compare-row (col SQL is scoped to matching dates)
+    dtrack generate "$DB" --config "$CFG" --outdir "$BASE" --type col \
+                    --preset standard
+    dtrack run-sql  "$DB" --config "$CFG" --outdir "$BASE" --type col
+    dtrack load-col "$DB" "$BASE/csv" --config "$CFG"
+    dtrack compare-col "$DB" --config "$CFG" -y --html "$BASE/output/compare_col.html"
 
-    # 6. compare + emit HTML reports (-y for non-interactive)
-    dtrack compare-row "$DB" --config "$CFG" -y \
-                       --html "$OUT/compare_row.html"
-    dtrack compare-col "$DB" --config "$CFG" -y \
-                       --html "$OUT/compare_col.html"
+Shortcut: `dtrack extract "$DB" --config "$CFG" --outdir "$BASE" --type both`
+runs generate+run-sql together. Per-platform one-shots also exist:
+gen-aws / gen-oracle / gen-databricks (<config> --outdir --db --type ...).
+
+ORDER MATTERS: row-compare must precede col generate/extract — column stats
+are only computed on the dates where row counts agreed (matching_dates in
+_row_comparison). Running col first yields no/!wrong date scope.
 
 
 ================================================================================
- 5. pairs.json STRUCTURE (the source of truth)
+ 4. THE `just` E2E PIPELINE (recommended driver)
 ================================================================================
 
-Everything the web UI persists ends up here. Hand-edit or generate. The
-DB caches a copy in _table_pairs; sync via `compare-row`/`compare-col`
-(both call sync_config_to_db) or `dtrack run`.
+The justfile wraps the whole flow with skip-caching and one run.log.
+
+    just e2e row                 # generate+run row -> discover -> load -> compare
+    just e2e col-gen             # match-columns -> generate col SQL (NO run)
+    just e2e col-run             # run col SQL -> load-col -> compare-col
+    just e2e col                 # col-gen then col-run
+    just e2e all                 # row, then col   (default)
+
+Forwarded extract/generate flags:
+    --vintage day|week|month|quarter|year|all
+    --preset quick|standard|detailed
+    --stats-override n_unique=on,hash_sum=off,...
+    --from-date / --to-date YYYY-MM-DD
+    --clean[=reports|rebuild|all]    run e2e-clean first (default rebuild)
+
+Variables: pair=NAME (use testing/NAME.json), force=1 (ignore skip-cache),
+resultdir=DIR, config=PATH, db=PATH.
+
+CLEAN TIERS (also `just e2e-clean <level>`), by distance from the backend —
+each tier a superset of the one above:
+    reports  rm compare_*.{html,xlsx}         -> re-compare (instant)
+    rebuild  + project.db* + .state sentinels  -> re-load + re-compare; KEEPS
+             csv/ extracts & caches -> NO backend hit  (default)
+    all      + csv/ (extracts + cached query db + materialized csv.duckdb)
+             -> full re-extract (HITS backend)
+    Always kept: pairs.json, output/run.log
+
+
+================================================================================
+ 5. CSV SOURCE (DuckDB, in-process)
+================================================================================
+
+For source=csv, dtrack materializes each CSV ONCE into a typed DuckDB table
+so every query is `FROM <table>` (short SQL, parse-once, consistent typing):
+
+    <outdir>/csv/.state/csv.duckdb     CREATE TABLE t_<qname> per CSV
+    <outdir>/csv/.state/.cache.db      query-result cache (all sources)
+
+Column types (numeric vs categorical etc.) come from the SAME explicit types
+used to build the table, so stats can't disagree with the read. Type source,
+in precedence order:
+    1) inline `columns` in the pair side config  (config wins, skips DESCRIBE)
+    2) `columns_file` path in the pair side config (variable,data_type CSV)
+    3) {qname}_columns.csv sidecar in the csv outdir
+    4) DuckDB DESCRIBE inference (only if none of the above)
+A hand-edited {qname}_columns.csv is never overwritten.
+
+
+================================================================================
+ 6. COLUMN DEFINITIONS (avoid live discovery)
+================================================================================
+
+Discovery (DESCRIBE / information_schema / ALL_TAB_COLUMNS) is skipped whenever
+a definition is already present, for ALL sources:
+    - inline `columns: {VAR: TYPE}` under pairs.<p>.<side>
+    - `columns_file: <path>` under pairs.<p>.<side>  (variable,data_type CSV)
+    - a {qname}_columns.csv sidecar (load via `dtrack load-columns`)
+Discovery results are written to {qname}_columns.csv and _column_meta so the
+next run is offline.
+
+
+================================================================================
+ 7. pairs.json STRUCTURE (the source of truth)
+================================================================================
 
     {
       "pairs": {
         "loans": {
           "left":  { "source": "oracle", "table": "SCHEMA.LOANS",
-                     "conn_macro": "pb23", "date_col": "RPG_DT",
-                     "date_type": "date",  "vintage": "day",
-                     "where": "" },
-          "right": { "source": "aws",    "table": "db.loans",
-                     "conn_macro": "loans_db", "date_col": "rpg_dt",
-                     "date_type": "date",  "vintage": "day",
-                     "where": "" },
-          "skip": false,
-          "description": "Loan portfolio daily comparison",
-          "col_map":           { "ACCT_ID": "acct_id" },
+                     "conn_macro": "pb23", "date_col": "RPT_DT",
+                     "date_type": "date", "vintage": "day", "where": "",
+                     "columns": { "ACCT_ID": "VARCHAR2", "BAL": "NUMBER" } },
+          "right": { "source": "csv", "table": "loans",
+                     "conn_macro": "/data/loans.csv", "date_col": "rpt_dt",
+                     "date_type": "string_dash",
+                     "columns_file": "/data/loans_cols.csv" },
+          "fromDate": "2026-01-01", "toDate": "2026-04-30",
+          "strict": false, "skip": false,
+          "col_map": { "ACCT_ID": "acct_id" },
+          "col_filter": { "include": [], "exclude": [] },
           "col_type_overrides": {},
-          "ignore_rows":    [],
-          "ignore_columns": [],
-          "where_map":   { "left": "", "right": "" },
-          "comment_map": { "row": {"left":"","right":""},
-                            "col": {"left":"","right":""} },
-          "time_map":    { "row": {"left":"","right":""},
-                            "col": {"left":"","right":""} }
+          "ignore_rows": [], "ignore_columns": [],
+          "where_map": { "left": "", "right": "" }
         }
       },
+      "date_types": { },                 // optional custom date_type registry
       "metadata": { "title": "...", "subtitle": "..." }
     }
 
+date_type values (constants.DATE_COLUMN_TYPES): date, timestamp, datetime,
+num (YYYYMMDD), num_yyyymm, string_dash (YYYY-MM-DD), string_compact
+(YYYYMMDD), string_mon (DDMONYYYY), string_mon_dash (DD-MON-YYYY),
+string_us (MM/DD/YYYY). pair fromDate/toDate are rendered into each WHERE in
+the column's stored shape (e.g. string_compact 2026-05-02 -> '20260502') and
+the date-bounds clause is emitted FIRST, then the table's `where`.
+
 Notes:
-- The qualified table name `{source}_{pair_name}` is the key for
-  _row_counts / _col_stats / _metadata. Built by platforms.base.qualified_name.
-- `where_map` is rebuilt automatically by `compare-row` from
-  matching/excluded dates; you don't normally edit it.
-- `ignore_rows` / `ignore_columns` are how non-interactive runs persist
-  HITL decisions across invocations.
+- Qualified table name = "{source}_{name}" (platforms.base.qualified_name);
+  it keys _row_counts / _col_stats / _metadata / _column_meta.
+- where_map is rebuilt by compare-row from matching/excluded dates.
+- ignore_rows / ignore_columns persist non-interactive (-y) HITL decisions.
+- vintage / strict can be set per-pair or per-side.
 
 
 ================================================================================
- 6. DATA THAT FLOWS BETWEEN STEPS
+ 8. PRESET / STATS_OVERRIDE
 ================================================================================
 
-    SQLite tables (in <project_db>):
-      _metadata        per-table source, date_var, vintage, date range
-      _row_counts      (source_table, dt) → row_count
-      _col_stats       (source_table, column, dt) → 14-field stat row
-      _column_meta     (source_table, column, data_type, source)
-      _table_pairs     pair_name → left/right tables + col_mappings (JSON)
-      _row_comparison  pair_name → overlap, matching/excluded dates (JSON)
-      _col_comparison  pair_name → columns_compared, diff_columns, details
-
-    Inspect anytime:
-      dtrack query <db> "SELECT * FROM _row_comparison LIMIT 5"
-      dtrack query <db> "SELECT * FROM _col_stats WHERE source_table='aws_loans' LIMIT 5"
-
-The matching_dates list in _row_comparison is what makes col extraction
-meaningful: gen-aws/gen-oracle filter their col SQL to those dates only,
-so column stats are always compared on dates where row counts agreed.
+Stat keys (constants.STATS_PRESETS):
+    n_total, n_missing, n_unique, min_max, length, hash_sum, top_10
+Presets:
+    quick     fastest; no n_unique / hash_sum / top_10
+    standard  + n_unique + hash_sum
+    detailed  + top_10 (full)
+--stats-override n_unique=on,hash_sum=off,... is authoritative: it can blank a
+stat the preset computed AND (in the override path) toggle individual stats.
+The 14-col CSV schema is always emitted; disabled stats land as ''.
+hash_sum is an exact 16-bit MD5-based categorical hash; n_unique is exact
+COUNT(DISTINCT) (APPROX_* is never emitted).
 
 
 ================================================================================
- 7. PRESET / STATS_OVERRIDE — WHAT IT ACTUALLY CONTROLS
+ 9. DATA THAT FLOWS BETWEEN STEPS (SQLite tables in <project_db>)
 ================================================================================
 
-Preset selects the SQL generation pathway (quick = single-pass aggregates,
-detailed = freq-table-derived top_10, etc.). stats_override is applied
-on top — it can blank an individual stat the preset would have computed,
-but it cannot enable a stat the preset's SQL didn't compute.
+    _metadata        per-table source, date_var, vintage, date range
+    _row_counts      (source_table, dt) -> row_count
+    _col_stats       (source_table, column, dt) -> 14-field stat row
+    _column_meta     (source_table, column, data_type, source)
+    _table_pairs     pair_name -> left/right + col_mappings/filters (JSON)
+    _row_comparison  pair_name -> overlap, matching/excluded dates (JSON)
+    _col_comparison  pair_name -> columns_compared, diff_columns, details
 
-Effective rule for the 14-col CSV:
-    output[stat] = '' if stats_override.get(stat) is False else preset_default
-
-In practice:
-    --preset quick                              → fastest, no n_unique/hash/top_10
-    --preset standard                           → +n_unique +hash_sum
-    --preset detailed                           → +top_10 (full)
-    --preset standard --stats-override hash_sum=off
-                                                → standard SQL, but hash_sum blanked
-
-Platform coverage:
-    gen-oracle   honored at SQL-gen time (build_col_sql) AND output mask
-    gen-aws      honored at SQL-gen time for file path; live cursor path
-                 still issues full SQL but blanks disabled fields in CSV
-    gen-sas      preset='quick' aliases to coarse=True. stats_override is
-                 not honored on the SAS template; CLI warns if passed.
-
-
-================================================================================
- 8. INCREMENTAL & DEBUGGING
-================================================================================
-
-Incremental date window (every extract command + run):
-    --from-date 2026-01-01 --to-date 2026-04-30
-
-Only re-run a slice of the pipeline:
-    dtrack run ... --skip-extract               (re-load + compare only)
-    dtrack run ... --skip-load                  (re-compare only)
-    dtrack run ... --skip-compare               (just refresh CSVs + DB)
-
-Mock mode (no network, fixtures-driven dev):
-    DTRACK_MOCK=./fixtures dtrack gen-aws    ...
-    DTRACK_ATHENA_MOCK=...  dtrack gen-aws   ...   (athena-only)
-    DTRACK_ORACLE_MOCK=...  dtrack gen-oracle ...  (oracle-only)
-The mock directory must contain `{qname}_row.csv` / `{qname}_col.csv` /
-`{qname}_columns.csv` matching what extraction would normally produce.
-
-Schema upgrade after a dtrack version bump (data-preserving):
-    dtrack init <db> --migrate
-
-Ad-hoc SQL against the project DB:
-    dtrack query <db> "SELECT pair_name, matching_dates FROM _row_comparison"
+    dtrack query <db> "SELECT * FROM _row_comparison LIMIT 5"
     dtrack query <db> --write "DELETE FROM _row_counts WHERE source_table='...'"
 
-Debug breakpoints:
-    dtrack --debug ipdb run ...                 (drop into ipdb on crash)
-    dtrack --debug attach run ...               (debugpy on 0.0.0.0:5678)
+
+================================================================================
+10. LOGGING (output/run.log)
+================================================================================
+
+DTRACK_LOG sets the path (justfile points it at <e2edir>/output/run.log).
+    - Each CLI command opens with a thick ==== banner, so recipe calls are
+      clearly separated.
+    - Every query logs whether it was served from cache or the live backend:
+        "query: CACHE HIT (N rows) scope=..."
+        "query: LIVE DB read -> cached (N rows) scope=..."
+        csv also logs "live read from materialized DB <path>".
+    - DTRACK_LOG_LEVEL (default DEBUG) controls file verbosity.
 
 
 ================================================================================
- 9. PLATFORMS — WHO RUNS WHAT
+11. INCREMENTAL, CACHE & DEBUGGING
 ================================================================================
 
-    Source ↓        Command          What it produces
-    oracle          gen-oracle       runs SQL via oracledb;
-                                     writes {qname}_row.csv, {qname}_col.csv
-    aws             gen-aws          runs SQL via pyathena;
-                                     writes {qname}_row.csv, {qname}_col.csv
-                                     plus extract_row.sql / extract_col.sql
-                                     so the same SQL can be replayed
-    sas / hadoop    gen-sas          writes ONE combined .sas file. You
-                                     execute it in a SAS session; it writes
-                                     {qname}_row.csv / {qname}_col.csv into
-                                     --outdir.
+Incremental window (generate / run-sql / extract / gen-* / compare-*):
+    --from-date 2026-01-01 --to-date 2026-04-30
 
-A pair can mix sources (e.g., left=oracle, right=aws). Run all the
-extractors that have at least one table on their side, then load both
-folders.
+Query cache: results cached in <outdir>/csv/.state/.cache.db. Disable with
+DTRACK_QUERY_CACHE=0. `run-sql --resume` skips blocks whose CSV already exists.
+`force=1` (justfile) ignores the .state skip-cache sentinels.
 
+Testing against real backends (mock mode has been removed entirely):
+    pytest tests/containers --run-containers
+spins up dockerized Oracle / Trino / Hive / Spark via testcontainers, seeds
+synthetic data, and runs the full pipeline (incl. test_e2e_pipeline.py:
+init -> load -> compare). tests/integration/ runs the same flow against real
+remote tables (`--run-live`).
 
-================================================================================
-10. WHERE TO LOOK WHEN SOMETHING BREAKS
-================================================================================
+Schema upgrade after a version bump (data-preserving):
+    dtrack init <db> --migrate
 
-    Symptom                                   Investigate
-    ----------------------------------------  ----------------------------------
-    "Database not found"                      run `dtrack init <db>` first
-    "Config file not found"                   pass --config <path>
-    "Pair not found"                          pairs.json doesn't list the pair,
-                                              or compare-row never ran to sync
-                                              it into _table_pairs
-    "No columns specified for ..."            run `dtrack load-columns` first
-    "No matching dates"                       run compare-row before compare-col
-    Dates parsed wrong                        python -c "from dtrack.date_utils \
-                                              import parse_date; print(parse_date('YOUR'))"
-    Athena auth fails                         dtrack doctor → check AWS_* + AWS_PWD
-    Oracle auth fails                         dtrack doctor → check <macro>_pwd
-    SAS .sas script wrong                     check `date_type` per side; SAS
-                                              wants 'DDMONYYYY'd, Oracle/Athena
-                                              want DATE 'YYYY-MM-DD'
-    Tests                                     pytest tests/ -x -q     (must stay green)
+Debug:
+    dtrack --debug ipdb <cmd> ...      (drop into ipdb on crash)
+    dtrack --debug attach <cmd> ...    (debugpy on 0.0.0.0:5678)
 
 
 ================================================================================
-11. FILE LAYOUT (just enough to navigate)
+12. WHERE TO LOOK WHEN SOMETHING BREAKS
+================================================================================
+
+    Symptom                              Investigate
+    -----------------------------------  ----------------------------------
+    "Database not found"                 dtrack init <db> first
+    "Pair not found"                     pairs.json missing the pair, or
+                                         compare-row never synced _table_pairs
+    "No columns specified for ..."       load-columns, or set columns /
+                                         columns_file in pairs.json
+    "No matching dates"                  run compare-row before col gen/compare
+    wrong date literal in WHERE          check date_type per side (sec. 7)
+    csv types look wrong                 check the materialized csv.duckdb:
+                                         DESCRIBE t_<qname>; fix `columns`
+    Athena/Oracle auth fails             dtrack doctor -> AWS_* / <macro>_pwd
+    stale JS in web UI                   hard-reload; assets are revalidated
+    anything                             tail output/run.log (sec. 10)
+    Tests                                pytest tests/ -x -q   (must stay green)
+                                         real backends: pytest --run-containers
+
+
+================================================================================
+13. FILE LAYOUT (just enough to navigate)
 ================================================================================
 
     dtrack/
-      cli.py              argparse entry; one cmd_* per subcommand
-      pipeline.py         `dtrack run` orchestrator
-      db.py               every SQLite read/write
-      compare.py          pure compare_row_counts / compare_column_stats
-      config.py           load/save pairs.json + HITL helpers
-      constants.py        STATS_PRESETS, MACRO2SVC, date format table
-      loader.py           CSV → _row_counts / _col_stats
-      html_export.py      stand-alone HTML reports
-      stats.py            in-Python column stats (raw-data load path)
-      date_utils.py       parse_date, vintage bucketing
-      interact.py         CLI prompts (drop with -y)
+      cli.py          argparse entry; one cmd_* per subcommand + run.log banner
+      extract.py      extract_all / run_sql_all / extract_one (per-platform fan-out)
+      db.py           every SQLite read/write; discover_columns_oracle
+      compare.py      pure compare_row_counts / compare_column_stats
+      csv_compare.py  csv-specific compare helpers
+      config.py       load/save pairs.json; get_all_tables_from_unified
+      constants.py    STATS_PRESETS, DATE_COLUMN_TYPES, VINTAGE_PRESETS, macros
+      loader.py       CSV -> _row_counts / _col_stats; read_columns_sidecar
+      logmgr.py       shared logger, banner(), log_exc()
+      html_export.py / excel.py   HTML + Excel reports
+      stats.py / date_utils.py / interact.py
       platforms/
-        base.py           build_col_sql, _mask_stats_in_rows, qualified_name
-        oracle.py         extract_oracle, _extract_col_oracle, SQL helpers
-        athena.py         extract_aws, _extract_col_athena, run_sql_file
-        hadoop.py         re-exports gen_sas; Hive col SQL builders
-        hadoop_sas.py     gen_sas (combined .sas emission)
-        csv_duckdb.py     CSV-source path via DuckDB (in-process)
-      web/                FastAPI app. Optional. NOT needed for CLI flow.
+        base.py        build_col_sql, date-bound literals, cache_db_path,
+                       discover_and_write_columns, format_date_bound_literal
+        oracle.py      extract_oracle, _query_oracle
+        athena.py      extract_aws, _query_athena, _format_athena_date_bound
+        hadoop.py      extract_hadoop, Hive SQL builders
+        databricks.py  extract_databricks
+        csv_duckdb.py  CSV source: build_csv_duckdb, materialized-table queries
+      web/             FastAPI app. Optional. NOT needed for the CLI flow.
 
 End of manuscript.

@@ -286,56 +286,22 @@ def _read_sidecar_columns(columns_dir, qname):
 
 # >>> Discover and load columns for one table entry <<< #
 def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
-    import csv as csv_mod
-
     if conn_macro and source.lower() == 'aws':
-        mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ATHENA_MOCK')
-        if mock_dir:
-            mock_csv = os.path.join(mock_dir, f"{store_name}_columns.csv")
-            if not os.path.exists(mock_csv):
-                print(f"WARNING: [mock] File not found: {mock_csv}, skipping {store_name}")
-                return
-            columns = {}
-            with open(mock_csv, 'r', newline='') as f:
-                reader = csv_mod.DictReader(f)
-                for row in reader:
-                    row = {k.strip(): v for k, v in row.items()}
-                    name = row.get('column_name') or row.get('COLUMN_NAME', '')
-                    dtype = row.get('data_type') or row.get('DATA_TYPE', '')
-                    if name:
-                        columns[name] = dtype
-            print(f"[mock] Loaded {len(columns)} columns from {mock_csv}")
-        else:
-            from .platforms.athena import _discover_columns_athena, athena_connect, aws_creds_renew
-            print(f"Connecting to Athena ({conn_macro})...")
-            aws_creds_renew()
-            conn = athena_connect(data_base=conn_macro)
-            cursor = conn.cursor()
-            print(f"Discovering columns for: {conn_macro}.{raw_table}")
-            columns = _discover_columns_athena(cursor, conn_macro, raw_table)
-            cursor.close()
-            conn.close()
+        from .platforms.athena import _discover_columns_athena, athena_connect, aws_creds_renew
+        print(f"Connecting to Athena ({conn_macro})...")
+        aws_creds_renew()
+        conn = athena_connect(data_base=conn_macro)
+        cursor = conn.cursor()
+        print(f"Discovering columns for: {conn_macro}.{raw_table}")
+        columns = _discover_columns_athena(cursor, conn_macro, raw_table)
+        cursor.close()
+        conn.close()
 
         if not columns:
             print(f"WARNING: No columns found for {conn_macro}.{raw_table}")
             return
     elif source.lower() == 'databricks':
-        mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_DATABRICKS_MOCK')
-        if mock_dir:
-            mock_csv = os.path.join(mock_dir, f"{store_name}_columns.csv")
-            if not os.path.exists(mock_csv):
-                print(f"WARNING: [mock] File not found: {mock_csv}, skipping {store_name}")
-                return
-            columns = {}
-            with open(mock_csv, 'r', newline='') as f:
-                for row in csv_mod.DictReader(f):
-                    row = {k.strip(): v for k, v in row.items()}
-                    name = row.get('column_name') or row.get('COLUMN_NAME', '')
-                    dtype = row.get('data_type') or row.get('DATA_TYPE', '')
-                    if name:
-                        columns[name] = dtype
-            print(f"[mock] Loaded {len(columns)} columns from {mock_csv}")
-        elif conn_macro and '.' in conn_macro:
+        if conn_macro and '.' in conn_macro:
             from .platforms.databricks import databricks_connect, _discover_columns_databricks
             catalog, schema = conn_macro.split('.', 1)
             print(f"Connecting to Databricks ({conn_macro})...")
@@ -352,11 +318,11 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
             print(f"WARNING: No columns found for {conn_macro}.{raw_table}")
             return
     elif conn_macro:
-        from .db import oracle_connect, discover_columns
+        from .db import oracle_connect, discover_columns_oracle
         print(f"Connecting to Oracle via '{conn_macro}'...")
         conn = oracle_connect(conn_macro)
         print(f"Discovering columns for: {raw_table}")
-        columns = discover_columns(conn, raw_table)
+        columns = discover_columns_oracle(conn, raw_table)
         if conn is not None:
             conn.close()
         if not columns:
@@ -1587,18 +1553,10 @@ def main():
 
     if env_file:
         from dotenv import dotenv_values
-        env_dir = os.path.dirname(os.path.abspath(env_file))
         for key, val in dotenv_values(env_file).items():
             if val is not None:
                 os.environ.setdefault(key, val)
         os.environ.setdefault('DTRACK_ENV_FILE_LOADED', env_file)
-    else:
-        env_dir = os.getcwd()
-
-    for mock_var in ('DTRACK_MOCK', 'DTRACK_ORACLE_MOCK', 'DTRACK_ATHENA_MOCK'):
-        mock_dir = os.environ.get(mock_var)
-        if mock_dir and not os.path.isabs(mock_dir):
-            os.environ[mock_var] = os.path.join(env_dir, mock_dir)
 
     commands = {
         'init': cmd_init,
@@ -1623,10 +1581,10 @@ def main():
 
     handler = commands.get(args.command)
     if handler:
-        from .logmgr import get_logger
+        from .logmgr import get_logger, banner
         import shlex
         log = get_logger()
-        log.info("[cli] $ %s", shlex.join(['dtrack', *sys.argv[1:]]))
+        banner(f"dtrack {args.command}  |  {shlex.join(sys.argv[1:])}")
         log.info("[cli] %s %s", args.command,
                  {k: v for k, v in vars(args).items()
                   if v not in (None, False) and k not in ('command', 'debug')})

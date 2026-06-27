@@ -16,6 +16,14 @@ def set_cache_overwrite(flag):
     _cache_overwrite = bool(flag)
     return prev
 
+# >>> regenerable cache/state dir for an outdir (query cache, materialized csv db) <<< #
+def state_dir(outdir):
+    return os.path.join(outdir, ".state")
+
+# >>> canonical query-cache sqlite path for an outdir (under the state dir) <<< #
+def cache_db_path(outdir):
+    return os.path.join(state_dir(outdir), ".cache.db")
+
 # >>> Enable per-process query caching at the given .cache.db path <<< #
 def set_cache_db(path):
     global _cache_db, _cache_hits, _cache_misses
@@ -26,6 +34,7 @@ def set_cache_db(path):
     if path is None:
         _cache_db = None
         return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     _cache_db = path
     _cache_hits = 0
     _cache_misses = 0
@@ -84,8 +93,14 @@ def cache_get(sql, scope):
     with _cache_lock:
         _cache_hits += 1
     try:
-        return pickle.loads(row[0])
-    except Exception:
+        payload = pickle.loads(row[0])
+        from ..logmgr import get_logger
+        n = len(payload) if hasattr(payload, '__len__') else '?'
+        get_logger().info("query: CACHE HIT (%s rows) scope=%s", n, scope or '')
+        return payload
+    except Exception as e:
+        from ..logmgr import log_exc
+        log_exc(f"cache unpickle failed (scope={scope})", e)
         return None
 
 # >>> Store value (pickled) under the (SQL, scope) key <<< #
@@ -109,6 +124,9 @@ def cache_put(sql, scope, value, row_count=None):
             conn.commit()
         finally:
             conn.close()
+    from ..logmgr import get_logger
+    get_logger().info("query: LIVE DB read -> cached (%s rows) scope=%s",
+                      row_count if row_count is not None else '?', scope or '')
 
 ORACLE_NUMERIC_TYPES = {
     'NUMBER', 'FLOAT', 'BINARY_FLOAT', 'BINARY_DOUBLE',
@@ -282,6 +300,32 @@ def reformat_date(d, date_format):
     if py_fmt:
         return dt_obj.strftime(py_fmt).upper() if 'MON' in date_format else dt_obj.strftime(py_fmt)
     return str(d)
+
+# >>> date_type-aware literal for one date bound; complete across every date_type <<< #
+def format_date_bound_literal(date_str, date_type, is_upper=False, custom_date_types=None):
+    dt = (date_type or '').lower()
+    time_part = "23:59:59" if is_upper else "00:00:00"
+    if custom_date_types and dt in custom_date_types:
+        custom = custom_date_types[dt]
+        cat = custom.get('category', 'string')
+        fmt = custom.get('format')
+        if cat == 'number':
+            return reformat_date(date_str, fmt)
+        if cat == 'date':
+            return f"DATE '{date_str}'"
+        return f"'{reformat_date(date_str, fmt)}'"
+    if dt in ('timestamp', 'datetime'):
+        return f"TIMESTAMP '{date_str} {time_part}'"
+    if dt == 'date':
+        return f"DATE '{date_str}'"
+    from ..constants import DATE_TYPE_FORMATS, DATE_TYPE_TO_CANONICAL_DTYPE
+    canon = DATE_TYPE_TO_CANONICAL_DTYPE.get(dt, 'DATE')
+    fmt = DATE_TYPE_FORMATS.get(dt, 'YYYY-MM-DD')
+    if canon == 'NUMBER':
+        return reformat_date(date_str, fmt)
+    if canon == 'VARCHAR2':
+        return f"'{reformat_date(date_str, fmt)}'"
+    return f"DATE '{date_str}'"
 
 # >>> Build WHERE fragment for date IN (...) based on column type <<< #
 def build_date_in_clause(date_col, dates, date_dtype, is_sas=False, date_format=None,
@@ -888,88 +932,6 @@ def categorical_aggregates(freq_rows):
         'hash_sum': sum_hash,
     }
 
-# >>> Return mock directory from DTRACK_MOCK (preferred) or legacy env vars <<< #
-def get_mock_dir():
-    return os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ORACLE_MOCK')
-
-# >>> Extract from mock CSV files instead of real database <<< #
-def _extract_mock(config_path, outdir, types, db_path, mock_dir, source_filter):
-    import json
-    import shutil
-
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-
-    os.makedirs(outdir, exist_ok=True)
-    all_tables = load_tables_from_config(config)
-    tables = [t for t in all_tables if t.get('source', '').lower() in source_filter]
-    if not tables:
-        print(f"No {'/'.join(source_filter)} tables found in config")
-        return
-
-    for tbl_cfg in tables:
-        qname = qualified_name(tbl_cfg)
-        source = tbl_cfg.get('source', '')
-        table = tbl_cfg['table']
-        print(f"\n[mock] Extracting: {qname} ({source}/{table})")
-
-        for typ in ("row", "col"):
-            if typ not in types:
-                continue
-            src = os.path.join(mock_dir, f"{qname}_{typ}.csv")
-            dst = os.path.join(outdir, f"{qname}_{typ}.csv")
-            if os.path.exists(src):
-                shutil.copy2(src, dst)
-                with open(dst) as f:
-                    n_rows = sum(1 for _ in f) - 1
-                label_str = "Row counts" if typ == "row" else "Column stats"
-                unit = "dates" if typ == "row" else "rows"
-                print(f"  [mock] {label_str}: {dst} ({n_rows} {unit})")
-            else:
-                print(f"  [mock] File not found: {src}")
-
-    print(f"\n[mock] Extraction complete. Output in: {outdir}")
-
-# >>> copy mock CSVs for a pre-built list of table configs (+ per-table timing) <<< #
-def _extract_mock_tables(tables, outdir, types, mock_dir):
-    import shutil
-    from datetime import datetime
-    os.makedirs(outdir, exist_ok=True)
-
-    timing_records = []
-    for tbl_cfg in tables:
-        qname = qualified_name(tbl_cfg)
-        source = tbl_cfg.get('source', '')
-        table = tbl_cfg['table']
-        print(f"\n[mock] Extracting: {qname} ({source}/{table})")
-
-        for typ in ("row", "col"):
-            if typ not in types:
-                continue
-            src = os.path.join(mock_dir, f"{qname}_{typ}.csv")
-            dst = os.path.join(outdir, f"{qname}_{typ}.csv")
-            start = datetime.now()
-            if os.path.exists(src):
-                shutil.copy2(src, dst)
-                with open(dst) as f:
-                    n_rows = sum(1 for _ in f) - 1
-                label_str = "Row counts" if typ == "row" else "Column stats"
-                unit = "dates" if typ == "row" else "rows"
-                print(f"  [mock] {label_str}: {dst} ({n_rows} {unit})")
-                status = ''
-            else:
-                print(f"  [mock] File not found: {src}")
-                status = 'mock file not found'
-            timing_records.append({
-                'table': tbl_cfg.get('name', qname), 'step': typ,
-                'start': start.strftime('%Y-%m-%d %H:%M:%S'), 'end': '',
-                'elapsed_sec': round((datetime.now() - start).total_seconds(), 3),
-                'status': status,
-            })
-
-    write_timing_csv(outdir, timing_records, tables)
-    print(f"\n[mock] Extraction complete. Output in: {outdir}")
-
 # >>> rename a just-generated extract_{type}.sql to extract_{type}.{platform}.sql so platforms sharing one dir don't clobber (review only) <<< #
 def tag_generated_sql(outdir, extract_type, platform):
     src = os.path.join(outdir, f"extract_{extract_type}.sql")
@@ -1033,6 +995,131 @@ def fill_columns_from_meta(tables, db_path):
             else:
                 tbl['columns'] = all_cols
                 print(f"  {tbl['name']}: loaded {len(all_cols)} columns from _column_meta")
+
+# >>> Resolve a table's columns from config: inline `columns` or a `columns_file` <<< #
+def resolve_config_columns(tbl):
+    if tbl.get('columns'):
+        return dict(tbl['columns'])
+    path = tbl.get('columns_file')
+    if path:
+        from ..loader import read_columns_sidecar
+        cols = read_columns_sidecar(os.path.expanduser(path))
+        if cols:
+            tbl['columns'] = cols
+            return dict(cols)
+        from ..logmgr import get_logger
+        get_logger().warning("%s: columns_file %r yielded no columns",
+                             qualified_name(tbl), path)
+    return {}
+
+# >>> Discover columns per source and write {qname}_columns.csv + _column_meta. <<< #
+# >>> Honors config-defined columns / columns_file (skips live discovery). <<< #
+def discover_and_write_columns(all_tables, outdir, db_path):
+    import csv as csv_mod
+    from ..db import insert_column_meta, get_column_meta
+    from ..logmgr import get_logger, log_exc
+
+    log = get_logger()
+    os.makedirs(outdir, exist_ok=True)
+    aws_cursors = {}
+    oracle_conns = {}
+
+    for tbl in all_tables:
+        source = (tbl.get('source') or '').lower()
+        qname = qualified_name(tbl)
+        raw_table = tbl.get('table', '') or ''
+        conn_macro = tbl.get('conn_macro', '')
+        columns = None
+
+        cfg_cols = resolve_config_columns(tbl)
+        if cfg_cols:
+            columns = cfg_cols
+            if db_path:
+                insert_column_meta(db_path, qname, columns, source=source)
+            log.info("%s: using %d config-defined columns (discovery skipped)",
+                     qname, len(columns))
+        else:
+            existing = get_column_meta(db_path, qname)
+            if existing:
+                columns = {c["column_name"]: c.get("data_type", "") for c in existing}
+                log.info("%s: found %d columns in _column_meta", qname, len(columns))
+            elif tbl.get('processed'):
+                log.info("%s: 'processed' CTE — discovery skipped; load "
+                         "%s_columns.csv via `dtrack load-columns` first", qname, qname)
+                continue
+            elif source == 'aws':
+                try:
+                    database = conn_macro or tbl.get('database', '')
+                    if database not in aws_cursors:
+                        from ..platforms.athena import athena_connect, aws_creds_renew
+                        log.info("%s: connecting to Athena (%s)...", qname, database)
+                        aws_creds_renew()
+                        conn = athena_connect(data_base=database)
+                        aws_cursors[database] = conn.cursor()
+                    from ..platforms.athena import _discover_columns_athena
+                    columns = _discover_columns_athena(aws_cursors[database], database, raw_table)
+                    if columns:
+                        insert_column_meta(db_path, qname, columns, source=source)
+                        log.info("%s: discovered %d columns from Athena", qname, len(columns))
+                    else:
+                        log.warning("%s: no columns found in Athena", qname)
+                except Exception as e:
+                    log_exc(f"{qname}: Athena column discovery failed", e)
+            elif source == 'oracle':
+                try:
+                    if conn_macro not in oracle_conns:
+                        from ..db import oracle_connect
+                        log.info("%s: connecting to Oracle (%s)...", qname, conn_macro)
+                        oracle_conns[conn_macro] = oracle_connect(conn_macro)
+                    conn = oracle_conns[conn_macro]
+                    if conn is None:
+                        log.warning("%s: Oracle connection unavailable", qname)
+                    else:
+                        from ..db import discover_columns_oracle
+                        columns = discover_columns_oracle(conn, raw_table)
+                        if columns:
+                            insert_column_meta(db_path, qname, columns, source=source)
+                            log.info("%s: discovered %d columns from Oracle", qname, len(columns))
+                        else:
+                            log.warning("%s: no columns found in Oracle", qname)
+                except Exception as e:
+                    log_exc(f"{qname}: Oracle column discovery failed", e)
+            elif source == 'hadoop':
+                try:
+                    from ..platforms.hadoop import _discover_columns_hadoop
+                    columns = _discover_columns_hadoop(conn_macro, raw_table)
+                    if columns:
+                        insert_column_meta(db_path, qname, columns, source=source)
+                        log.info("%s: discovered %d columns from Hadoop", qname, len(columns))
+                    else:
+                        log.warning("%s: no columns found in Hadoop", qname)
+                except Exception as e:
+                    log_exc(f"{qname}: Hadoop column discovery failed", e)
+            else:
+                log.warning("%s: unsupported source %r; column discovery skipped",
+                            qname, source)
+                continue
+
+        if columns:
+            col_csv = os.path.join(outdir, f"{qname}_columns.csv")
+            with open(col_csv, 'w', newline='') as f:
+                writer = csv_mod.writer(f)
+                writer.writerow(['COLUMN_NAME', 'DATA_TYPE'])
+                for col_name, col_type in sorted(columns.items()):
+                    writer.writerow([col_name, col_type])
+            log.info("%s: wrote %d columns to %s", qname, len(columns), col_csv)
+
+    for cursor in aws_cursors.values():
+        try:
+            cursor.close()
+        except Exception as e:
+            log_exc("athena cursor close", e, level="debug")
+    for conn in oracle_conns.values():
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception as e:
+            log_exc("oracle conn close", e, level="debug")
 
 # >>> Inject where_map filters from pair config into table configs <<< #
 def inject_where_from_config(tables, config):

@@ -40,6 +40,19 @@ def get_logger():
     _logger = lg
     return lg
 
+# >>> write a thick separator + title marking a new major call/recipe step <<< #
+def banner(title):
+    lg = get_logger()
+    bar = "=" * 78
+    lg.info(bar)
+    lg.info("==== %s", title)
+    lg.info(bar)
+
+# >>> log a swallowed exception with context so try/except blocks stay traceable <<< #
+def log_exc(context, exc, level="warning"):
+    lg = get_logger()
+    getattr(lg, level, lg.warning)("%s: %s: %s", context, type(exc).__name__, exc)
+
 # >>> also echo the shared logger to stderr at INFO (used by the web server) <<< #
 def enable_console():
     lg = get_logger()

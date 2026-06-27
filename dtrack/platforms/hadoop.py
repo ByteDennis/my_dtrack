@@ -8,10 +8,6 @@ _HADOOP_CONNECT_LOCK = threading.Lock()
 # >>> Connect to Hadoop / Hive via pyodbc <<< #
 def hadoop_connect(dsn: Optional[str] = None, *,
                    autocommit: bool = True):
-    if os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_HADOOP_MOCK'):
-        print(f"[mock] Skipping Hadoop connection for DSN '{dsn or '?'}'")
-        return None
-
     import pyodbc
 
     dsn = dsn or os.environ.get('HADOOP_DSN') or 'Hive_Prod'
@@ -75,7 +71,7 @@ from .base import (
     qualified_name,
     resolve_table,
     apply_null_sentinels,
-    build_date_bounds_clause,
+    format_date_bound_literal,
     apply_pair_date_bounds,
     build_date_in_clause,
     build_date_range_with_gaps,
@@ -83,12 +79,12 @@ from .base import (
     compute_date_filter,
     load_tables_from_config,
     fill_columns_from_meta,
+    discover_and_write_columns,
     inject_where_from_config,
     build_stats_sql,
     build_top10_sql,
-    get_mock_dir,
-    _extract_mock_tables,
     set_cache_db,
+    cache_db_path,
     cache_get,
     cache_put,
 )
@@ -297,102 +293,6 @@ def _apply_col_filter(col_list, tbl_cfg):
         col_list = [(c, d) for c, d in col_list if c.lower() in wanted]
     return col_list
 
-# >>> Discover columns and write {qname}_columns.csv files <<< #
-def _discover_and_write_columns(all_tables, outdir, db_path):
-    import csv as csv_mod
-    from ..db import insert_column_meta, get_column_meta
-
-    os.makedirs(outdir, exist_ok=True)
-    aws_cursors = {}
-    oracle_conns = {}
-
-    for tbl in all_tables:
-        source = (tbl.get('source') or '').lower()
-        qname = qualified_name(tbl)
-        raw_table = tbl.get('table', '') or ''
-        conn_macro = tbl.get('conn_macro', '')
-        columns = None
-
-        existing = get_column_meta(db_path, qname)
-        if existing:
-            columns = {c["column_name"]: c.get("data_type", "") for c in existing}
-            print(f"  {qname}: found {len(columns)} columns in _column_meta")
-        elif tbl.get('processed'):
-            print(f"  {qname}: 'processed' CTE — discovery skipped; "
-                  f"load {qname}_columns.csv via `dtrack load-columns` first")
-            continue
-        elif source == 'aws':
-            try:
-                database = conn_macro or tbl.get('database', '')
-                if database not in aws_cursors:
-                    from ..platforms.athena import athena_connect, aws_creds_renew
-                    print(f"  {qname}: connecting to Athena ({database})...")
-                    aws_creds_renew()
-                    conn = athena_connect(data_base=database)
-                    aws_cursors[database] = conn.cursor()
-                from ..platforms.athena import _discover_columns_athena
-                columns = _discover_columns_athena(aws_cursors[database], database, raw_table)
-                if columns:
-                    insert_column_meta(db_path, qname, columns, source=source)
-                    print(f"  {qname}: discovered {len(columns)} columns from Athena")
-                else:
-                    print(f"  {qname}: no columns found in Athena")
-            except Exception as e:
-                print(f"  {qname}: Athena column discovery failed ({e})")
-        elif source == 'oracle':
-            try:
-                if conn_macro not in oracle_conns:
-                    from ..db import oracle_connect
-                    print(f"  {qname}: connecting to Oracle ({conn_macro})...")
-                    oracle_conns[conn_macro] = oracle_connect(conn_macro)
-                conn = oracle_conns[conn_macro]
-                if conn is None:
-                    print(f"  {qname}: Oracle connection skipped (mock mode)")
-                else:
-                    from ..db import discover_columns
-                    columns = discover_columns(conn, raw_table)
-                    if columns:
-                        insert_column_meta(db_path, qname, columns, source=source)
-                        print(f"  {qname}: discovered {len(columns)} columns from Oracle")
-                    else:
-                        print(f"  {qname}: no columns found in Oracle")
-            except Exception as e:
-                print(f"  {qname}: Oracle column discovery failed ({e})")
-        elif source == 'hadoop':
-            try:
-                columns = _discover_columns_hadoop(conn_macro, raw_table)
-                if columns:
-                    insert_column_meta(db_path, qname, columns, source=source)
-                    print(f"  {qname}: discovered {len(columns)} columns from Hadoop")
-                else:
-                    print(f"  {qname}: no columns found in Hadoop")
-            except Exception as e:
-                print(f"  {qname}: Hadoop column discovery failed ({e})")
-        else:
-            print(f"  {qname}: unsupported source {source!r}; column discovery skipped")
-            continue
-
-        if columns:
-            col_csv = os.path.join(outdir, f"{qname}_columns.csv")
-            with open(col_csv, 'w', newline='') as f:
-                writer = csv_mod.writer(f)
-                writer.writerow(['COLUMN_NAME', 'DATA_TYPE'])
-                for col_name, col_type in sorted(columns.items()):
-                    writer.writerow([col_name, col_type])
-            print(f"  {qname}: wrote {len(columns)} columns to {col_csv}")
-
-    for cursor in aws_cursors.values():
-        try:
-            cursor.close()
-        except Exception:
-            pass
-    for conn in oracle_conns.values():
-        try:
-            if conn is not None:
-                conn.close()
-        except Exception:
-            pass
-
 def build_continuous_sql_oracle(table, col, date_col, where=""):
     return build_stats_sql(table, col, date_col, where, "numeric", "oracle")
 
@@ -442,10 +342,10 @@ def _build_row_sql_hadoop(tbl_cfg, db_path=None, vintage=None):
     parts = []
     base_where = tbl_cfg.get('where', '').strip()
     date_bounds = tbl_cfg.get('_date_bounds', '').strip()
-    if base_where:
-        parts.append(base_where)
     if date_bounds:
         parts.append(date_bounds)
+    if base_where:
+        parts.append(base_where)
     wc = " AND ".join(f"({p})" for p in parts) if parts else "1=1"
 
     dt_expr = _oracle_date_transform(date_col, transform) if transform else date_col
@@ -549,7 +449,7 @@ def _write_combined_col_sql_hadoop(hadoop_tables, outdir, db_path=None,
             dates = date_filter['dates']
             full_range = build_date_range_with_gaps(
                 date_col, dates, date_dtype, date_format=date_format)
-            bucket_where = f"({orig_where}) AND {full_range}" if orig_where else full_range
+            bucket_where = f"{full_range} AND ({orig_where})" if orig_where else full_range
             per_col_where = _and_exclude(bucket_where)
             per_col_vintage = effective_vintage
             per_col_dt_label = None
@@ -560,12 +460,12 @@ def _write_combined_col_sql_hadoop(hadoop_tables, outdir, db_path=None,
             dw = build_date_in_clause(
                 date_col, date_filter['dates'], date_dtype,
                 date_format=date_format)
-            bucket_where = f"({orig_where}) AND {dw}" if orig_where else dw
+            bucket_where = f"{dw} AND ({orig_where})" if orig_where else dw
             per_col_where = _and_exclude(bucket_where)
             per_col_vintage = 'all'
             per_col_dt_label = 'sample'
         elif date_bounds:
-            bw = f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds
+            bw = f"{date_bounds} AND ({orig_where})" if orig_where else date_bounds
             per_col_where = _and_exclude(bw)
             per_col_vintage = 'all'
             per_col_dt_label = 'all'
@@ -658,7 +558,7 @@ def _discover_columns_hadoop(conn_macro, table):
 def run_hadoop_sql_file(sql_path, outdir, max_workers=None, db_path=None,
                         on_progress=None, resume=False, cancel_event=None):
     from .base import run_extract_sql_file
-    set_cache_db(os.path.join(outdir, ".cache.db"))
+    set_cache_db(cache_db_path(outdir))
     try:
         return run_extract_sql_file(
             sql_path, outdir,
@@ -707,9 +607,18 @@ def extract_hadoop(config_path, outdir, types=None, max_workers=None, db_path=No
             tbl['vintage'] = 'all'
     inject_where_from_config(hadoop_tables, config)
 
-    apply_pair_date_bounds(
-        hadoop_tables, config, from_date, to_date,
-        lambda tbl, dc, f, t: build_date_bounds_clause(dc, f, t, tbl.get('date_type')))
+    def _hadoop_bounds(tbl, date_col, eff_from, eff_to):
+        date_type = tbl.get('date_type')
+        custom = config.get('date_types')
+        bounds = []
+        if eff_from:
+            bounds.append(f"{date_col} >= "
+                          f"{format_date_bound_literal(eff_from, date_type, is_upper=False, custom_date_types=custom)}")
+        if eff_to:
+            bounds.append(f"{date_col} <= "
+                          f"{format_date_bound_literal(eff_to, date_type, is_upper=True, custom_date_types=custom)}")
+        return " AND ".join(bounds)
+    apply_pair_date_bounds(hadoop_tables, config, from_date, to_date, _hadoop_bounds)
 
     if gen_only:
         from .base import tag_generated_sql
@@ -727,13 +636,8 @@ def extract_hadoop(config_path, outdir, types=None, max_workers=None, db_path=No
         print(f"[gen-only] wrote Hadoop extract SQL to {outdir} (no extraction)")
         return
 
-    mock_dir = get_mock_dir()
-    if mock_dir:
-        _extract_mock_tables(hadoop_tables, outdir, types, mock_dir)
-        return
-
     if "col" in types:
-        _discover_and_write_columns(hadoop_tables, outdir, db_path)
+        discover_and_write_columns(hadoop_tables, outdir, db_path)
         if db_path:
             fill_columns_from_meta(hadoop_tables, db_path)
 

@@ -25,6 +25,7 @@ from .base import (
     build_col_sql,
     quote_ident,
     set_cache_db,
+    cache_db_path,
     cache_stats,
     cache_get,
     cache_put,
@@ -174,23 +175,10 @@ def _vintage_date_expr_athena(date_expr, vintage, vintage_transform=None, date_d
     return f"date_trunc('{unit}', {cast_expr})"
 
 # >>> Format a YYYY-MM-DD date as the correct Athena SQL literal <<< #
-def _format_athena_date_bound(date_str, date_type, is_upper=False):
-    dtype = date_type.lower() if date_type else ""
-    time_part = "23:59:59" if is_upper else "00:00:00"
-
-    if dtype == 'num_yyyymm':
-        return date_str[:4] + date_str[5:7]
-    if dtype in ('num', 'integer', 'int', 'number'):
-        return date_str.replace('-', '')
-    if dtype == 'string_compact':
-        return f"'{date_str.replace('-', '')}'"
-    if dtype in ('string_dash', 'string'):
-        return f"'{date_str}'"
-    if dtype in ('timestamp', 'datetime'):
-        return f"TIMESTAMP '{date_str} {time_part}'"
-    if dtype == 'date':
-        return f"DATE '{date_str}'"
-    return f"'{date_str}'"
+def _format_athena_date_bound(date_str, date_type, is_upper=False, custom_date_types=None):
+    from .base import format_date_bound_literal
+    return format_date_bound_literal(date_str, date_type, is_upper=is_upper,
+                                     custom_date_types=custom_date_types)
 
 # >>> Discover columns from information_schema <<< #
 def _discover_columns_athena(cursor, database, table):
@@ -415,22 +403,9 @@ ORDER BY t.dt"""
         })
     return results
 
-# >>> Legacy mock entry — called when WHERE hasn't been injected yet <<< #
-def _extract_aws_mock(config_path, outdir, types, db_path, mock_dir):
-    from .base import _extract_mock
-    _extract_mock(config_path, outdir, types, db_path, mock_dir, ('aws',))
-
-# >>> Mock extraction with WHERE-injected tables — writes CSVs + combined .sql file <<< #
-def _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir):
-    from .base import _extract_mock_tables
-    _extract_mock_tables(aws_tables, outdir, types, mock_dir)
-
-    if "row" in (types or ["row"]):
-        _write_combined_sql(aws_tables, outdir, "row")
-
 # >>> Same .cache.db Athena query-result caching uses; one artifact per outdir <<< #
 def _id_card_cache_path(outdir):
-    return os.path.join(outdir, ".cache.db") if outdir else None
+    return cache_db_path(outdir) if outdir else None
 
 # >>> Cache hit returns (n_total, payload_dict) where payload is {col: approx_distinct} <<< #
 def _read_id_card_cache(cache_db_path, qname, ttl_days):
@@ -764,10 +739,10 @@ def _build_row_sql_athena(tbl_cfg):
     where = tbl_cfg.get("where", "")
     date_bounds = tbl_cfg.get("_date_bounds", "")
     wc_parts = []
-    if where and where.strip():
-        wc_parts.append(where.strip())
     if date_bounds and date_bounds.strip():
         wc_parts.append(date_bounds.strip())
+    if where and where.strip():
+        wc_parts.append(where.strip())
     full_where = " AND ".join(f"({p})" for p in wc_parts) if wc_parts else ""
     where_clause = f"WHERE {full_where}" if full_where else ""
     return (
@@ -899,26 +874,26 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                   f"{'bucketed query' if sql_mode == 'trunc' else 'buckets'} "
                   f"= {_runs} runs")
 
+            date_bounds = tbl.get('_date_bounds', '')
             wc_parts = []
+            if sql_mode == 'all' and date_bounds:
+                wc_parts.append(date_bounds)
             if where.strip():
                 wc_parts.append(where.strip())
             if exclude_clause:
                 wc_parts.append(exclude_clause)
-            date_bounds = tbl.get('_date_bounds', '')
-            if sql_mode == 'all' and date_bounds:
-                wc_parts.append(date_bounds)
             " AND ".join(f"({p})" for p in wc_parts) if wc_parts else "1=1"
 
             if coarse or preset in ('quick', 'standard'):
                 id_cols = set(c for c, _ in col_list)
             else:
                 probe_wc_parts = []
+                if date_bounds:
+                    probe_wc_parts.append(date_bounds)
                 if where.strip():
                     probe_wc_parts.append(where.strip())
                 if exclude_clause:
                     probe_wc_parts.append(exclude_clause)
-                if date_bounds:
-                    probe_wc_parts.append(date_bounds)
                 probe_wc = " AND ".join(f"({p})" for p in probe_wc_parts) if probe_wc_parts else "1=1"
                 id_threshold = float(os.environ.get('DTRACK_ID_THRESHOLD', '0.99'))
                 ttl_days = float(os.environ.get('DTRACK_ID_CACHE_TTL_DAYS', '1.0'))
@@ -1075,7 +1050,7 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
         f.write(f"-- SQL queries for {qname} col extraction\n-- {datetime.now().isoformat()}\n\n")
     _sql_log_file = log_path
 
-    set_athena_cache(os.path.join(outdir, ".cache.db"))
+    set_athena_cache(cache_db_path(outdir))
 
     col_start_time = time.time()
     col_start_ts = datetime.now().isoformat()
@@ -1102,17 +1077,17 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
         dw = build_date_range_with_gaps(
             date_col, date_filter['dates'],
             extract_date_dtype, date_format=date_filter.get('date_format'))
-        extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
+        extract_cfg['where'] = f"{dw} AND ({orig_where})" if orig_where else dw
         print(f"  {len(buckets)} vintage buckets ({effective_vintage}) -- GROUP BY")
     elif date_filter['filter_type'] == 'in_list':
         dw = build_date_in_clause(
             date_col, date_filter['dates'], extract_date_dtype,
             date_format=date_filter.get('date_format'))
-        extract_cfg['where'] = f"({orig_where}) AND {dw}" if orig_where else dw
+        extract_cfg['where'] = f"{dw} AND ({orig_where})" if orig_where else dw
         effective_vintage = 'all'
         extract_date_dtype = None
     elif date_bounds:
-        extract_cfg['where'] = f"({orig_where}) AND {date_bounds}" if orig_where else date_bounds
+        extract_cfg['where'] = f"{date_bounds} AND ({orig_where})" if orig_where else date_bounds
 
     bucket_desc = 'sample' if date_filter['filter_type'] == 'in_list' else effective_vintage
     dt_label = 'sample' if date_filter['filter_type'] == 'in_list' else None
@@ -1163,7 +1138,7 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
     hits, misses = cache_stats()
     if hits or misses:
         print(f"  Athena cache: {hits} hit / {misses} miss "
-              f"({os.path.join(outdir, '.cache.db')})")
+              f"({cache_db_path(outdir)})")
     set_athena_cache(None)
     print(f"  SQL log: {log_path}")
     col_elapsed = time.time() - col_start_time
@@ -1209,8 +1184,6 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
     if types is None:
         types = ["row", "col"]
 
-    mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ATHENA_MOCK')
-
     from ..config import load_unified_config
     config = load_unified_config(config_path)
     if db_path:
@@ -1245,13 +1218,14 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
     def _athena_bounds(tbl, date_col, eff_from, eff_to):
         date_col_q = quote_ident(date_col, "athena")
         date_type = (tbl.get('date_type') or '').lower()
+        custom = config.get('date_types')
         bounds = []
         if eff_from:
             bounds.append(f"{date_col_q} >= "
-                          f"{_format_athena_date_bound(eff_from, date_type, is_upper=False)}")
+                          f"{_format_athena_date_bound(eff_from, date_type, is_upper=False, custom_date_types=custom)}")
         if eff_to:
             bounds.append(f"{date_col_q} <= "
-                          f"{_format_athena_date_bound(eff_to, date_type, is_upper=True)}")
+                          f"{_format_athena_date_bound(eff_to, date_type, is_upper=True, custom_date_types=custom)}")
         return " AND ".join(bounds)
     apply_pair_date_bounds(aws_tables, config, from_date, to_date, _athena_bounds)
     if gen_only:
@@ -1267,9 +1241,6 @@ def extract_aws(config_path, outdir, types=None, max_workers=None, db_path=None,
                                 preset=preset, stats_override=stats_override)
             tag_generated_sql(outdir, "col", "aws")
         print(f"[gen-only] wrote Athena extract SQL to {outdir} (no extraction)")
-        return
-    if mock_dir:
-        _extract_aws_mock_with_where(aws_tables, outdir, types, db_path, mock_dir)
         return
 
     try:
@@ -1372,7 +1343,7 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
         print(f"No query blocks found in {sql_path}")
         return []
 
-    set_athena_cache(os.path.join(outdir, ".cache.db"))
+    set_athena_cache(cache_db_path(outdir))
 
     basename = os.path.basename(sql_path)
     is_col = "extract_col" in basename
@@ -1664,7 +1635,7 @@ def run_sql_file(sql_path, outdir, max_workers=None, db_path=None,
     hits, misses = cache_stats()
     if hits or misses:
         print(f"Athena cache: {hits} hit / {misses} miss "
-              f"({os.path.join(outdir, '.cache.db')})")
+              f"({cache_db_path(outdir)})")
     set_athena_cache(None)
 
     return results
@@ -1682,37 +1653,6 @@ def discover_aws_columns(config_path, outdir, db_path=None):
 
     if not aws_tables:
         print("No AWS tables found in config")
-        return
-
-    mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ATHENA_MOCK')
-    if mock_dir:
-        _extract_aws_mock(config_path, outdir, [], db_path, mock_dir)
-        for tbl_cfg in aws_tables:
-            name = tbl_cfg['name']
-            qname = qualified_name(tbl_cfg)
-            cols_src = os.path.join(mock_dir, f"{qname}_columns.csv")
-            if os.path.exists(cols_src):
-                import shutil
-                cols_dst = os.path.join(outdir, f"{qname}_columns.csv")
-                shutil.copy2(cols_src, cols_dst)
-                print(f"  [mock] Column metadata: {cols_dst}")
-                if db_path:
-                    columns = {}
-                    with open(cols_src, 'r', newline='') as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            row = {k.strip(): v for k, v in row.items()}
-                            col_name = row.get('column_name') or row.get('COLUMN_NAME', '')
-                            col_type = row.get('data_type') or row.get('DATA_TYPE', '')
-                            if col_name:
-                                columns[col_name] = col_type
-                    if columns:
-                        from ..db import insert_column_meta
-                        insert_column_meta(db_path, qname, columns, source='aws')
-                        print(f"  [mock] Saved to _column_meta in {db_path}")
-            else:
-                print(f"  [mock] File not found: {cols_src}")
-        print(f"\n[mock] Discovery complete. Output in: {outdir}")
         return
 
     aws_creds_renew()

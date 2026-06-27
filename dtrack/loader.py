@@ -167,7 +167,9 @@ def read_columns_sidecar(path):
                 dt = row.get('data_type') or row.get('type') or ''
                 if col:
                     out[col] = dt
-    except Exception:
+    except Exception as e:
+        from .logmgr import log_exc
+        log_exc(f"read_columns_sidecar({path})", e)
         return {}
     return out
 

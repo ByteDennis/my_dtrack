@@ -116,7 +116,6 @@ _db_path: str = ""
 _db_dir: str = ""
 _config_path: str = ""
 _original_config_path: str = ""
-_testing_mode: bool = False
 
 # >>> Resolve a path relative to the database directory <<< #
 def _resolve(rel_path: str) -> str:
@@ -804,11 +803,12 @@ async def api_generate_files(request: Request):
                     _write_combined_row_sql_oracle,
                     _write_combined_col_sql_oracle,
                 )
-                from ..platforms.base import fill_columns_from_meta
-                from ..platforms.hadoop import _discover_and_write_columns
+                from ..platforms.base import (
+                    fill_columns_from_meta, discover_and_write_columns,
+                )
                 os.makedirs(left_outdir, exist_ok=True)
 
-                _discover_and_write_columns(oracle_tables, left_outdir, _db_path)
+                discover_and_write_columns(oracle_tables, left_outdir, _db_path)
 
                 if extract_type == "row":
                     oracle_sql_path = _write_combined_row_sql_oracle(
@@ -829,11 +829,12 @@ async def api_generate_files(request: Request):
                 from ..platforms.hadoop import (
                     _write_combined_row_sql_hadoop,
                     _write_combined_col_sql_hadoop,
-                    _discover_and_write_columns,
                 )
-                from ..platforms.base import fill_columns_from_meta
+                from ..platforms.base import (
+                    fill_columns_from_meta, discover_and_write_columns,
+                )
                 os.makedirs(left_outdir, exist_ok=True)
-                _discover_and_write_columns(hadoop_tables, left_outdir, _db_path)
+                discover_and_write_columns(hadoop_tables, left_outdir, _db_path)
                 if extract_type == "row":
                     hadoop_sql_path = _write_combined_row_sql_hadoop(
                         hadoop_tables, left_outdir,
@@ -857,7 +858,7 @@ async def api_generate_files(request: Request):
                 from ..platforms.csv_duckdb import (
                     _write_combined_row_sql_csv,
                     _write_combined_col_sql_csv,
-                    _discover_and_write_csv_columns,
+                    build_csv_duckdb,
                 )
                 from ..platforms.base import fill_columns_from_meta
                 csv_paths = {}
@@ -868,7 +869,7 @@ async def api_generate_files(request: Request):
                     if not side_tables:
                         continue
                     os.makedirs(side_outdir, exist_ok=True)
-                    _discover_and_write_csv_columns(side_tables, side_outdir, _db_path)
+                    build_csv_duckdb(side_tables, side_outdir, _db_path)
                     if extract_type == "row":
                         p = _write_combined_row_sql_csv(
                             side_tables, side_outdir,
@@ -915,8 +916,8 @@ async def api_generate_files(request: Request):
                 from ..platforms.athena import _write_combined_sql
                 os.makedirs(aws_outdir, exist_ok=True)
 
-                from ..platforms.hadoop import _discover_and_write_columns
-                _discover_and_write_columns(aws_tables, aws_outdir, _db_path)
+                from ..platforms.base import discover_and_write_columns
+                discover_and_write_columns(aws_tables, aws_outdir, _db_path)
 
                 if extract_type == "col":
                     from ..platforms.base import fill_columns_from_meta
@@ -3056,12 +3057,12 @@ def _preview_date_bounds(date_col, date_type, from_date, to_date, source):
     # >>> render a WHERE-fragment like "date_col >= X AND date_col <= Y" in the column's stored shape <<< #
     if not (from_date or to_date):
         return ""
-    _lit = lambda d: _preview_date_literal(d, date_type, source)
+    from ..platforms.base import format_date_bound_literal
     parts = []
     if from_date:
-        parts.append(f"{date_col} >= {_lit(from_date)}")
+        parts.append(f"{date_col} >= {format_date_bound_literal(from_date, date_type, is_upper=False)}")
     if to_date:
-        parts.append(f"{date_col} <= {_lit(to_date)}")
+        parts.append(f"{date_col} <= {format_date_bound_literal(to_date, date_type, is_upper=True)}")
     return " AND ".join(parts)
 
 # >>> Build the date expression for SELECT/GROUP BY (bucketing to day level) <<< #
@@ -3082,29 +3083,8 @@ def _preview_select_expr(date_col, date_type, source):
 def _preview_date_literal(date_str, date_type, source=""):
     if not date_str:
         return "''"
-    dtype = date_type.lower() if date_type else ""
-
-    if dtype == "num_yyyymm":
-        return date_str.replace("-", "")[:6]
-
-    if dtype in ("num", "integer", "int", "number"):
-        return date_str.replace("-", "")
-
-    if dtype == "string_compact":
-        return f"'{date_str.replace('-', '')}'"
-
-    if dtype in ("string_dash", "string"):
-        return f"'{date_str}'"
-
-    if dtype == "timestamp" and source == "oracle":
-        return f"TIMESTAMP '{date_str} 00:00:00'"
-    if dtype in ("timestamp", "datetime") and source == "aws":
-        return f"TIMESTAMP '{date_str} 00:00:00'"
-
-    if dtype in ("date",):
-        return f"DATE '{date_str}'"
-
-    return f"'{date_str}'"
+    from ..platforms.base import format_date_bound_literal
+    return format_date_bound_literal(date_str, date_type)
 
 # >>> Resolve include/exclude patterns against the pair's col_map and return <<< #
 @app.post("/api/pairs/{pair_name}/col_filter/preview")
@@ -3500,46 +3480,6 @@ async def api_col_mappings_csv(pair_name: str):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-# >>> Return current testing mode state <<< #
-@app.get("/api/testing")
-async def api_testing_status():
-    return {"testing": _testing_mode, "config_path": _config_path}
-
-# >>> Toggle testing mode on/off <<< #
-@app.post("/api/testing")
-async def api_testing_toggle(request: Request):
-    global _config_path, _original_config_path, _testing_mode
-
-    body = await request.json()
-    enable = body.get("enabled", False)
-
-    testing_dir = Path(__file__).parent.parent.parent / "testing"
-    mock_dir = testing_dir / "mock"
-    test_config = testing_dir / "config.json"
-
-    if enable:
-        if not test_config.exists():
-            return JSONResponse(status_code=404, content={
-                "error": f"Testing config not found: {test_config}"
-            })
-        if not mock_dir.exists():
-            return JSONResponse(status_code=404, content={
-                "error": f"Mock data not found: {mock_dir}"
-            })
-        _original_config_path = _config_path
-        _config_path = str(test_config.resolve())
-        os.environ["DTRACK_MOCK"] = str(mock_dir.resolve())
-        _testing_mode = True
-        return {"ok": True, "testing": True,
-                "config_path": _config_path,
-                "mock_dir": str(mock_dir.resolve())}
-    else:
-        if _original_config_path:
-            _config_path = _original_config_path
-            _original_config_path = ""
-        os.environ.pop("DTRACK_MOCK", None)
-        _testing_mode = False
-        return {"ok": True, "testing": False, "config_path": _config_path}
 
 # >>> Coerce a DB row into a list of n_cols string values <<< #
 def _row_to_strs(row, n_cols):
@@ -3737,7 +3677,7 @@ async def api_playground_run(request: Request):
                 raise ValueError("Oracle requires a connection macro (conn).")
             conn = oracle_connect(conn_id)
             if conn is None:
-                raise RuntimeError("oracle_connect returned None (mock mode?)")
+                raise RuntimeError("oracle_connect returned None")
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn
@@ -3754,7 +3694,7 @@ async def api_playground_run(request: Request):
             from ..platforms.hadoop import hadoop_connect
             conn = hadoop_connect(conn_id or None)
             if conn is None:
-                raise RuntimeError("hadoop_connect returned None (mock mode?)")
+                raise RuntimeError("hadoop_connect returned None")
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn

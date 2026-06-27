@@ -944,10 +944,6 @@ def oracle_connect(conn_macro: str, *, user: Optional[str] = None,
                    password: Optional[str] = None,
                    service: Optional[str] = None,
                    ldap_dsn: Optional[str] = None):
-    if os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ORACLE_MOCK'):
-        print(f"[mock] Skipping Oracle connection for '{conn_macro}'")
-        return None
-
     import oracledb
 
     svc = service or resolve_oracle_macro(conn_macro)
@@ -981,26 +977,7 @@ def oracle_connect(conn_macro: str, *, user: Optional[str] = None,
     return oracledb.connect(user=user, password=password, dsn=dsn)
 
 # >>> Discover column metadata from Oracle ALL_TAB_COLUMNS <<< #
-def discover_columns(conn, table_name: str) -> Dict[str, str]:
-    import csv
-
-    mock_dir = os.environ.get('DTRACK_MOCK') or os.environ.get('DTRACK_ORACLE_MOCK')
-    if mock_dir:
-        csv_path = os.path.join(mock_dir, f"{table_name}_columns.csv")
-        if not os.path.exists(csv_path):
-            print(f"[mock] File not found: {csv_path}")
-            return {}
-        columns = {}
-        with open(csv_path, 'r', newline='') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                name = row.get('COLUMN_NAME') or row.get('column_name', '')
-                dtype = row.get('DATA_TYPE') or row.get('data_type', '')
-                if name:
-                    columns[name] = dtype
-        print(f"[mock] Loaded {len(columns)} columns from {csv_path}")
-        return columns
-
+def discover_columns_oracle(conn, table_name: str) -> Dict[str, str]:
     cursor = conn.cursor()
     cursor.execute(
         "SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, "

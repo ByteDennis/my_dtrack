@@ -34,7 +34,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     initModalHandlers();
     initDropHandlers();
     initSourceDropdowns();
-    initTestingMode();
 });
 
 // Cached retry settings per source -- shows the user's saved value when
@@ -84,54 +83,6 @@ function onRetrySourceChanged() {
 
 function closeSettingsModal() {
     document.getElementById('settings-modal').classList.remove('active');
-}
-
-// Testing Mode
-async function initTestingMode() {
-    try {
-        const resp = await fetch('/api/testing');
-        const data = await resp.json();
-        const cb = document.getElementById('testing-mode');
-        if (cb) cb.checked = data.testing;
-        updateTestingStatus(data.testing, data.config_path);
-    } catch (e) {
-        // ignore — testing API may not exist in older versions
-    }
-}
-
-async function toggleTestingMode(enabled) {
-    try {
-        const resp = await fetch('/api/testing', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({enabled}),
-        });
-        const data = await resp.json();
-        if (resp.ok && data.ok) {
-            updateTestingStatus(data.testing, data.config_path);
-            await loadPairs();
-            showSuccess(enabled ? 'Testing mode enabled — using mock data' : 'Testing mode disabled — using real config');
-        } else {
-            document.getElementById('testing-mode').checked = !enabled;
-            const reason = data.error || data.detail || `HTTP ${resp.status}`;
-            showError(`Testing mode failed: ${reason}`);
-        }
-    } catch (e) {
-        document.getElementById('testing-mode').checked = !enabled;
-        showError(`Testing mode failed: ${e.message}`);
-    }
-}
-
-function updateTestingStatus(testing, configPath) {
-    const statusDiv = document.getElementById('testing-status');
-    if (!statusDiv) return;
-    if (testing) {
-        statusDiv.style.display = 'block';
-        statusDiv.style.color = '#2e7d32';
-        statusDiv.textContent = `Active — config: ${configPath}`;
-    } else {
-        statusDiv.style.display = 'none';
-    }
 }
 
 async function applyGlobalSettings() {

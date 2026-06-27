@@ -104,13 +104,13 @@ def extract_all(config_path, outdir=None, csv_outdir=None,
                     from_date=from_date, to_date=to_date,
                     preset=preset, stats_override=stats_override, gen_only=gen_only)
 
-# >>> platform string -> (runner, mock-env-var) for run_sql_all <<< #
+# >>> platform string -> (module, runner-fn) for run_sql_all <<< #
 _RUNNERS = {
-    "aws": ("dtrack.platforms.athena", "run_sql_file", "DTRACK_ATHENA_MOCK"),
-    "oracle": ("dtrack.platforms.oracle", "run_oracle_sql_file", "DTRACK_ORACLE_MOCK"),
-    "hadoop": ("dtrack.platforms.hadoop", "run_hadoop_sql_file", "DTRACK_HADOOP_MOCK"),
-    "databricks": ("dtrack.platforms.databricks", "run_databricks_sql_file", "DTRACK_DATABRICKS_MOCK"),
-    "csv": ("dtrack.platforms.csv_duckdb", "run_csv_sql_file", "DTRACK_CSV_MOCK"),
+    "aws": ("dtrack.platforms.athena", "run_sql_file"),
+    "oracle": ("dtrack.platforms.oracle", "run_oracle_sql_file"),
+    "hadoop": ("dtrack.platforms.hadoop", "run_hadoop_sql_file"),
+    "databricks": ("dtrack.platforms.databricks", "run_databricks_sql_file"),
+    "csv": ("dtrack.platforms.csv_duckdb", "run_csv_sql_file"),
 }
 
 # >>> execute already-generated extract_{type}.<platform>.sql via each platform's runner (mirrors web /api/extract/run-sql) <<< #
@@ -135,13 +135,7 @@ def run_sql_all(config_path, outdir=None, csv_outdir=None,
         tbls = groups.get(platform) or []
         if not tbls:
             continue
-        mock_dir = os.environ.get("DTRACK_MOCK") or os.environ.get(_RUNNERS[platform][2])
-        if mock_dir:
-            from .platforms.base import _extract_mock_tables
-            print(f"\n--- [run-sql] {platform}: mock copy ({len(tbls)} tables) ---")
-            _extract_mock_tables(tbls, csv_outdir, types, mock_dir)
-            continue
-        mod_name, fn_name, _ = _RUNNERS[platform]
+        mod_name, fn_name = _RUNNERS[platform]
         runner = getattr(importlib.import_module(mod_name), fn_name)
         for t in types:
             sql_path = os.path.join(csv_outdir, f"extract_{t}.{platform}.sql")

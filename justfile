@@ -23,11 +23,6 @@ workdir := "testing"
 db := workdir + "/project.db"
 port := "8080"
 
-# Where the e2e mock fixtures live. Override per machine:
-#   just mockdir=example/testing/mock test-e2e
-mockdir := "testing/mock"
-export DTRACK_E2E_MOCK_DIR := mockdir
-
 # Base dir for the live e2e pipeline; outputs land in {{e2edir}}/{csv,sas,output}
 e2edir := workdir
 
@@ -86,7 +81,10 @@ help topic="":
         echo "    --preset quick|standard|detailed            col-stats depth"
         echo "    --stats-override ...                        per-stat override"
         echo "    --from-date / --to-date YYYY-MM-DD          incremental window"
+        echo "    --clean[=reports|rebuild|all]               run e2e-clean first (default rebuild)"
         echo "    e.g.  just pair=month e2e col-gen --vintage month --preset detailed"
+        echo "    e.g.  just e2e all --clean        # re-load+compare, no backend (rebuild)"
+        echo "    e.g.  just e2e all --clean=all    # wipe extracts+caches, full re-extract"
         echo "  pair=NAME            use {{configdir}}/NAME.json; HTML + .state namespaced _NAME"
         echo "  resultdir=DIR        where reports land (default {{e2edir}}/output; separate from web)"
         echo "  force=1              ignore skip-cache; re-run row/discover/col extract"
@@ -131,10 +129,6 @@ init *args:
 # diagnose env-file + Oracle macros + AWS vars resolution
 doctor *args:
     dtrack doctor {{args}}
-
-# generate SAS extraction scripts
-gen-sas outdir="./sas/" *args:
-    dtrack gen-sas {{config}} --outdir {{outdir}} --db {{db}} {{args}}
 
 # generate AWS/Athena extraction scripts
 gen-aws outdir="./sql/" *args:
@@ -200,7 +194,7 @@ e2e type="all" *flags:
     set -euo pipefail
     case "{{type}}" in row|col-gen|col-run|col|all) ;; *) echo "usage: just [pair=NAME] e2e [row|col-gen|col-run|col|all]   (details: just help e2e)" >&2; exit 2 ;; esac
     [ -f "{{config}}" ] || { echo "config not found: {{config}} (pair='{{pair}}')" >&2; exit 2; }
-    ext=""; cmprow=""; cmpcol=""
+    ext=""; cmprow=""; cmpcol=""; clean_level=""
     set -- {{flags}}
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -210,9 +204,15 @@ e2e type="all" *flags:
             --stats-override) ext="$ext --stats-override $2"; shift 2 ;;
             --from-date)      ext="$ext --from-date $2"; cmprow="$cmprow --from-date $2"; cmpcol="$cmpcol --from-date $2"; shift 2 ;;
             --to-date)        ext="$ext --to-date $2"; cmprow="$cmprow --to-date $2"; cmpcol="$cmpcol --to-date $2"; shift 2 ;;
+            --clean)          clean_level="rebuild"; shift ;;
+            --clean=*)        clean_level="${1#*=}"; shift ;;
             *)                ext="$ext $1"; shift ;;
         esac
     done
+    if [ -n "$clean_level" ]; then
+        echo ">>> clean: e2e-clean $clean_level (requested via --clean)"
+        just e2edir="{{e2edir}}" config="{{config}}" db="{{db}}" e2e-clean "$clean_level"
+    fi
     out="{{resultdir}}"; state="{{e2edir}}/.state{{suffix}}"
     logf="${DTRACK_LOG:-{{e2edir}}/output/run.log}"
     mkdir -p "$state" "$out" "$(dirname "$logf")"
@@ -229,7 +229,7 @@ e2e type="all" *flags:
         if is_done row.run; then say "[row] run-sql: cached (skip-cache)"; else
             say "[row] generate extract_row.<platform>.sql$ext (NO run)"
             dtrack generate {{db}} --config {{config}} --outdir {{e2edir}} --type row $ext
-            say "[row] run-sql (execute the generated extract_row.<platform>.sql; mock-copies fixtures)"
+            say "[row] run-sql (execute the generated extract_row.<platform>.sql)"
             dtrack run-sql {{db}} --config {{config}} --outdir {{e2edir}} --type row
             mark_done row.run
         fi
@@ -250,7 +250,7 @@ e2e type="all" *flags:
     }
     do_col_run() {
         if is_done col.run; then say "[col] run-sql: cached (skip-cache)"; else
-            say "[col] run-sql (execute the reviewed extract_col.<platform>.sql; mock-copies fixtures)"
+            say "[col] run-sql (execute the reviewed extract_col.<platform>.sql)"
             dtrack run-sql {{db}} --config {{config}} --outdir {{e2edir}} --type col
             mark_done col.run
         fi
@@ -267,22 +267,28 @@ e2e type="all" *flags:
         all)     do_row; do_col_gen; do_col_run ;;
     esac
 
-# clean e2e generated artifacts under {{e2edir}}. level: state | data | all
-#   state (default) = skip-cache sentinels (.state) only; cheap steps re-run, data kept
-#   data            = .state + csv + sas; forces re-extraction from the backend
-#   all             = + output + project db; keeps pairs.json, mock/, generate_mock_data.py
-e2e-clean level="state":
+# clean e2e artifacts under {{e2edir}}, by distance from the backend. Each tier
+# is a superset of the one above. level: reports | rebuild | all (default rebuild)
+#   reports = compare_*.{html,xlsx} only       -> re-compare (instant, reads project.db)
+#   rebuild = + project.db* + .state sentinels  -> re-load+compare; KEEPS csv/ extracts
+#                                                  & caches (csv/.state) -> NO backend hit
+#   all     = + csv/ (extracts + cached query db + materialized csv.duckdb)
+#                                               -> full re-extract (HITS backend)
+#   kept always: pairs.json, output/run.log
+e2e-clean level="rebuild":
     #!/usr/bin/env bash
     set -euo pipefail
+    rm_reports() { rm -f "{{e2edir}}/output"/compare_*.html "{{e2edir}}/output"/compare_*.xlsx; }
     case "{{level}}" in
-        state) rm -rf "{{e2edir}}"/.state*
-               echo "cleaned: .state* (skip-cache, all pair sets)" ;;
-        data)  rm -rf "{{e2edir}}"/.state* "{{e2edir}}/csv" "{{e2edir}}/sas"
-               echo "cleaned: .state* + csv + sas (forces re-extract)" ;;
-        all)   rm -rf "{{e2edir}}"/.state* "{{e2edir}}/csv" "{{e2edir}}/sas" \
-                      "{{e2edir}}/output" "{{db}}" "{{db}}-shm" "{{db}}-wal"
-               echo "cleaned: all generated artifacts (kept pairs.json, mock/, generate_mock_data.py)" ;;
-        *) echo "usage: just e2e-clean [state|data|all]" >&2; exit 2 ;;
+        reports) rm_reports
+                 echo "cleaned: compare reports (re-compare to rebuild)" ;;
+        rebuild) rm_reports
+                 rm -rf "{{e2edir}}"/.state* "{{db}}" "{{db}}-shm" "{{db}}-wal"
+                 echo "cleaned: reports + project.db + .state sentinels (csv/ extracts & caches kept; no backend on rerun)" ;;
+        all)     rm_reports
+                 rm -rf "{{e2edir}}"/.state* "{{db}}" "{{db}}-shm" "{{db}}-wal" "{{e2edir}}/csv"
+                 echo "cleaned: + csv/ extracts & caches (full re-extract; kept pairs.json, run.log)" ;;
+        *) echo "usage: just e2e-clean [reports|rebuild|all]" >&2; exit 2 ;;
     esac
 
 # sample N rows by key from both sides -> value + backend hash16 to excel (debug hash_sum)
@@ -318,9 +324,9 @@ test *args:
 test-cov *args:
     pytest --cov=dtrack --cov-report=term-missing {{args}}
 
-# (re)generate e2e mock fixtures into {{mockdir}} (pass --seed N, or --out to override)
-gen-mock *args:
-    python testing/generate_mock_data.py --out {{mockdir}} {{args}}
+# container-backed test suite (real Oracle/Trino/Hive/Spark via testcontainers)
+test-containers *args:
+    pytest tests/containers --run-containers {{args}}
 
 # lint check (if ruff is available)
 lint:

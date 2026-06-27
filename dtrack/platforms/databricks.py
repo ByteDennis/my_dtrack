@@ -16,6 +16,7 @@ from .base import (
     quote_ident,
     apply_pair_date_bounds,
     set_cache_db,
+    cache_db_path,
     cache_get,
     cache_put,
     _mask_stats_in_rows,
@@ -152,10 +153,10 @@ def _build_row_sql_databricks(tbl_cfg):
     where = (tbl_cfg.get("where") or "").strip()
     bounds = (tbl_cfg.get("_date_bounds") or "").strip()
     parts = []
-    if where:
-        parts.append(f"({where})")
     if bounds:
         parts.append(bounds)
+    if where:
+        parts.append(f"({where})")
     wc = " AND ".join(parts) if parts else "1=1"
     return (
         f"SELECT {date_col_q} AS dt, COUNT(*) AS row_count\n"
@@ -208,15 +209,15 @@ def _col_where_and_label_databricks(tbl_cfg, db_path, vintage):
     if date_filter["filter_type"] == "between":
         dw = build_date_range_with_gaps(
             date_col, date_filter["dates"], eff_dtype, date_format=eff_fmt)
-        where = f"({orig_where}) AND {dw}" if orig_where else dw
+        where = f"{dw} AND ({orig_where})" if orig_where else dw
         dt_label, ret_vintage = (None, table_vintage) if buckets else ("all", "all")
     elif date_filter["filter_type"] == "in_list":
         dw = build_date_in_clause(
             date_col, date_filter["dates"], eff_dtype, date_format=eff_fmt)
-        where = f"({orig_where}) AND {dw}" if orig_where else dw
+        where = f"{dw} AND ({orig_where})" if orig_where else dw
         dt_label, ret_vintage = "sample", "all"
     elif bounds:
-        where = f"({orig_where}) AND {bounds}" if orig_where else bounds
+        where = f"{bounds} AND ({orig_where})" if orig_where else bounds
         dt_label, ret_vintage = (None, table_vintage) if buckets else ("all", "all")
     else:
         where = orig_where
@@ -292,7 +293,7 @@ def run_databricks_sql_file(sql_path, outdir, max_workers=None, db_path=None,
             _mask_stats_in_rows(rows, preset, stats_override)
         return rows
 
-    set_cache_db(os.path.join(outdir, ".cache.db"))
+    set_cache_db(cache_db_path(outdir))
     try:
         return run_extract_sql_file(
             sql_path, outdir,
@@ -359,9 +360,6 @@ def extract_databricks(config_path, outdir, types=None, max_workers=None,
     if types is None:
         types = ["row", "col"]
 
-    mock_dir = (os.environ.get("DTRACK_MOCK")
-                or os.environ.get("DTRACK_DATABRICKS_MOCK"))
-
     from ..config import load_unified_config
     config = load_unified_config(config_path)
     if db_path:
@@ -395,14 +393,15 @@ def extract_databricks(config_path, outdir, types=None, max_workers=None,
     def _dbx_bounds(tbl, date_col, eff_from, eff_to):
         date_col_q = quote_ident(date_col, "databricks")
         date_type = (tbl.get("date_type") or "").lower()
+        custom = config.get('date_types')
         from .athena import _format_athena_date_bound
         bounds = []
         if eff_from:
             bounds.append(f"{date_col_q} >= "
-                          f"{_format_athena_date_bound(eff_from, date_type, False)}")
+                          f"{_format_athena_date_bound(eff_from, date_type, False, custom_date_types=custom)}")
         if eff_to:
             bounds.append(f"{date_col_q} <= "
-                          f"{_format_athena_date_bound(eff_to, date_type, True)}")
+                          f"{_format_athena_date_bound(eff_to, date_type, True, custom_date_types=custom)}")
         return " AND ".join(bounds)
     apply_pair_date_bounds(dbx_tables, config, from_date, to_date, _dbx_bounds)
 
@@ -419,11 +418,6 @@ def extract_databricks(config_path, outdir, types=None, max_workers=None,
                                                stats_override=stats_override)
             tag_generated_sql(outdir, "col", "databricks")
         print(f"[gen-only] wrote Databricks extract SQL to {outdir} (no extraction)")
-        return
-
-    if mock_dir:
-        from .base import _extract_mock_tables
-        _extract_mock_tables(dbx_tables, outdir, types, mock_dir)
         return
 
     if "col" in types:
