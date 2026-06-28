@@ -142,7 +142,15 @@ def get_all_tables_from_unified(config):
                 table_cfg["vintage"] = pair_vintage
 
             if pair_strict is not None and table_cfg.get("strict") is None:
-                table_cfg["strict"] = pair_strict
+                if isinstance(pair_strict, (list, tuple)):
+                    # strict list is given in LEFT column names; map to the right
+                    # side's columns so the same logical column is strict on both
+                    if side == "right" and col_map:
+                        table_cfg["strict"] = [col_map.get(c, c) for c in pair_strict]
+                    else:
+                        table_cfg["strict"] = list(pair_strict)
+                else:
+                    table_cfg["strict"] = pair_strict
 
             if col_map:
                 if side == "left":

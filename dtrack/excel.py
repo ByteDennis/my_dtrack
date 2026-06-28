@@ -189,6 +189,13 @@ def build_col_comparison_workbook(db_path, config_path, from_date=None,
         table_left = meta_left.get("source_table") or pair["table_left"]
         table_right = meta_right.get("source_table") or pair["table_right"]
 
+        # original per-side column types (verbatim from columns_file / discovery,
+        # e.g. athena 'varchar', hadoop 'string', oracle 'NUMBER') for the Type row
+        left_type_map = {c["column_name"]: c.get("data_type", "")
+                         for c in (get_column_meta(db_path, pair["table_left"]) or [])}
+        right_type_map = {c["column_name"]: c.get("data_type", "")
+                          for c in (get_column_meta(db_path, pair["table_right"]) or [])}
+
         vintages = {}
         for col_name, comps in comparison.items():
             for comp in comps:
@@ -247,12 +254,17 @@ def build_col_comparison_workbook(db_path, config_path, from_date=None,
             for si, (stat_label, stat_key) in enumerate(zip(stat_rows, stat_keys_l)):
                 ws.cell(row=row_num, column=1, value=stat_label).font = bold
                 for ci, comp in enumerate(comps):
-                    val = comp.get(stat_key, "")
-                    if val is not None and val != "":
-                        try:
-                            val = float(val)
-                        except (ValueError, TypeError):
-                            pass
+                    if stat_label == "Type":
+                        lc = comp.get("left_col", "")
+                        val = (left_type_map.get(lc) or comp.get("col_type_left")
+                               or comp.get("col_type", ""))
+                    else:
+                        val = comp.get(stat_key, "")
+                        if val is not None and val != "":
+                            try:
+                                val = float(val)
+                            except (ValueError, TypeError):
+                                pass
                     cell = ws.cell(row=row_num, column=ci + 2, value=val if val != "" else None)
                     if (ci, si) in diff_cells:
                         cell.fill = red_fill
@@ -271,12 +283,17 @@ def build_col_comparison_workbook(db_path, config_path, from_date=None,
             for si, (stat_label, stat_key) in enumerate(zip(stat_rows, stat_keys_r)):
                 ws.cell(row=row_num, column=1, value=stat_label).font = bold
                 for ci, comp in enumerate(comps):
-                    val = comp.get(stat_key, "")
-                    if val is not None and val != "":
-                        try:
-                            val = float(val)
-                        except (ValueError, TypeError):
-                            pass
+                    if stat_label == "Type":
+                        rc = comp.get("right_col", "") or comp.get("left_col", "")
+                        val = (right_type_map.get(rc) or comp.get("col_type_right")
+                               or comp.get("col_type", ""))
+                    else:
+                        val = comp.get(stat_key, "")
+                        if val is not None and val != "":
+                            try:
+                                val = float(val)
+                            except (ValueError, TypeError):
+                                pass
                     cell = ws.cell(row=row_num, column=ci + 2, value=val if val != "" else None)
                     if (ci, si) in diff_cells:
                         cell.fill = red_fill

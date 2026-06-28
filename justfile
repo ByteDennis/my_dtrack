@@ -217,47 +217,60 @@ e2e type="all" *flags:
     logf="${DTRACK_LOG:-{{e2edir}}/output/run.log}"
     mkdir -p "$state" "$out" "$(dirname "$logf")"
     say() { echo ">>> $1"; printf '%s INFO [justfile.e2e] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$logf"; }
+    # announce a subcommand, run it, and log wall-clock elapsed to run.log
+    step() {
+        local label="$1"; shift
+        say "$label"
+        local t0 t1 dt rc=0
+        t0=$(date +%s.%N)
+        "$@" || rc=$?
+        t1=$(date +%s.%N)
+        dt=$(awk "BEGIN{printf \"%.1f\", $t1-$t0}")
+        printf '%s INFO [justfile.e2e] %s: done in %ss\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$label" "$dt" >> "$logf"
+        echo ">>> (${dt}s) $label"
+        return $rc
+    }
     is_done()   { [ -z "{{force}}" ] && [ -f "$state/$1.done" ]; }
     mark_done() { touch "$state/$1.done"; }
     do_discover() {
         if is_done discover; then say "discover columns: cached (skip-cache)"; return 0; fi
-        say "discover columns (load-columns -> _column_meta + csv/{qname}_columns.csv)"
-        dtrack load-columns {{db}} --config {{config}} --columns-dir "{{e2edir}}/csv"
+        step "discover columns (load-columns -> _column_meta + csv/{qname}_columns.csv)" \
+            dtrack load-columns {{db}} --config {{config}} --columns-dir "{{e2edir}}/csv"
         mark_done discover
     }
     do_row() {
         if is_done row.run; then say "[row] run-sql: cached (skip-cache)"; else
-            say "[row] generate extract_row.<platform>.sql$ext (NO run)"
-            dtrack generate {{db}} --config {{config}} --outdir {{e2edir}} --type row $ext
-            say "[row] run-sql (execute the generated extract_row.<platform>.sql)"
-            dtrack run-sql {{db}} --config {{config}} --outdir {{e2edir}} --type row
+            step "[row] generate extract_row.<platform>.sql (NO run)" \
+                dtrack generate {{db}} --config {{config}} --outdir {{e2edir}} --type row $ext
+            step "[row] run-sql (execute the generated extract_row.<platform>.sql)" \
+                dtrack run-sql {{db}} --config {{config}} --outdir {{e2edir}} --type row
             mark_done row.run
         fi
         do_discover
-        say "[row] load"
-        dtrack load-row {{db}} {{e2edir}}/csv --config {{config}}
-        say "[row] compare$cmprow"
-        dtrack compare-row {{db}} --config {{config}} --html "$out/compare_row{{suffix}}.html" -y $cmprow
+        step "[row] load" \
+            dtrack load-row {{db}} {{e2edir}}/csv --config {{config}}
+        step "[row] compare" \
+            dtrack compare-row {{db}} --config {{config}} --html "$out/compare_row{{suffix}}.html" -y $cmprow
     }
     do_col_gen() {
         do_discover
-        say "[col] match-columns (auto; col_map in config is kept; mapcsv: {{mapcsv}})"
-        dtrack match-columns {{db}} --config {{config}} --map-csv "{{mapcsv}}" --yes
-        say "[col] generate csv/extract_col.<platform>.sql$ext (scoped to matched cols + matching dates; NO run)"
-        dtrack generate {{db}} --config {{config}} --outdir {{e2edir}} --type col $ext
+        step "[col] match-columns (auto; col_map in config is kept; mapcsv: {{mapcsv}})" \
+            dtrack match-columns {{db}} --config {{config}} --map-csv "{{mapcsv}}" --yes
+        step "[col] generate csv/extract_col.<platform>.sql (scoped to matched cols + matching dates; NO run)" \
+            dtrack generate {{db}} --config {{config}} --outdir {{e2edir}} --type col $ext
         pa=""; [ -n "{{pair}}" ] && pa="pair={{pair}} "
         say "[col-gen] review {{e2edir}}/csv/extract_col.*.sql, then run: just ${pa}e2e col-run"
     }
     do_col_run() {
         if is_done col.run; then say "[col] run-sql: cached (skip-cache)"; else
-            say "[col] run-sql (execute the reviewed extract_col.<platform>.sql)"
-            dtrack run-sql {{db}} --config {{config}} --outdir {{e2edir}} --type col
+            step "[col] run-sql (execute the reviewed extract_col.<platform>.sql)" \
+                dtrack run-sql {{db}} --config {{config}} --outdir {{e2edir}} --type col
             mark_done col.run
         fi
-        say "[col] load"
-        dtrack load-col {{db}} {{e2edir}}/csv --config {{config}}
-        say "[col] compare$cmpcol"
-        dtrack compare-col {{db}} --config {{config}} --html "$out/compare_col{{suffix}}.html" -y $cmpcol
+        step "[col] load" \
+            dtrack load-col {{db}} {{e2edir}}/csv --config {{config}}
+        step "[col] compare" \
+            dtrack compare-col {{db}} --config {{config}} --html "$out/compare_col{{suffix}}.html" -y $cmpcol
     }
     case "{{type}}" in
         row)     do_row ;;
@@ -270,9 +283,10 @@ e2e type="all" *flags:
 # clean e2e artifacts under {{e2edir}}, by distance from the backend. Each tier
 # is a superset of the one above. level: reports | rebuild | all (default rebuild)
 #   reports = compare_*.{html,xlsx} only       -> re-compare (instant, reads project.db)
-#   rebuild = + project.db* + .state sentinels  -> re-load+compare; KEEPS csv/ extracts
-#                                                  & caches (csv/.state) -> NO backend hit
-#   all     = + csv/ (extracts + cached query db + materialized csv.duckdb)
+#   rebuild = + project.db* + .state/*.done     -> re-load+compare; KEEPS csv/ extracts
+#             sentinels                            & .state caches (query db + csv.duckdb)
+#                                                  -> NO backend hit
+#   all     = + .state (cached query db + materialized csv.duckdb) + csv/ extracts
 #                                               -> full re-extract (HITS backend)
 #   kept always: pairs.json, output/run.log
 e2e-clean level="rebuild":
@@ -283,11 +297,11 @@ e2e-clean level="rebuild":
         reports) rm_reports
                  echo "cleaned: compare reports (re-compare to rebuild)" ;;
         rebuild) rm_reports
-                 rm -rf "{{e2edir}}"/.state* "{{db}}" "{{db}}-shm" "{{db}}-wal"
-                 echo "cleaned: reports + project.db + .state sentinels (csv/ extracts & caches kept; no backend on rerun)" ;;
+                 rm -f "{{e2edir}}"/.state*/*.done "{{db}}" "{{db}}-shm" "{{db}}-wal"
+                 echo "cleaned: reports + project.db + .state/*.done sentinels (csv/ extracts & .state caches kept; no backend on rerun)" ;;
         all)     rm_reports
                  rm -rf "{{e2edir}}"/.state* "{{db}}" "{{db}}-shm" "{{db}}-wal" "{{e2edir}}/csv"
-                 echo "cleaned: + csv/ extracts & caches (full re-extract; kept pairs.json, run.log)" ;;
+                 echo "cleaned: + .state caches + csv/ extracts (full re-extract; kept pairs.json, run.log)" ;;
         *) echo "usage: just e2e-clean [reports|rebuild|all]" >&2; exit 2 ;;
     esac
 

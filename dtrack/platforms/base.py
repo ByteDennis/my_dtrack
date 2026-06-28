@@ -16,9 +16,12 @@ def set_cache_overwrite(flag):
     _cache_overwrite = bool(flag)
     return prev
 
-# >>> regenerable cache/state dir for an outdir (query cache, materialized csv db) <<< #
+# >>> regenerable cache/state dir for an outdir; a csv/ leaf anchors .state as its sibling <<< #
 def state_dir(outdir):
-    return os.path.join(outdir, ".state")
+    base = os.path.normpath(outdir)
+    if os.path.basename(base) == "csv":
+        base = os.path.dirname(base) or "."
+    return os.path.join(base, ".state")
 
 # >>> canonical query-cache sqlite path for an outdir (under the state dir) <<< #
 def cache_db_path(outdir):
@@ -1183,6 +1186,7 @@ def _col_sql_dialect_ops(dialect):
         return {
             'wc_empty':           '(1=1)',
             'is_oracle_typed':    True,
+            'nullif':             lambda x: f'NULLIF({x}, 0)',
             'cast_str':           lambda x: f'TO_CHAR({x})',
             'concat':             lambda *parts: ' || '.join(parts),
             'top10_coalesce':     lambda x, d: f'NVL({x}, {d})',
@@ -1238,11 +1242,15 @@ def _col_sql_dialect_ops(dialect):
             ),
             'dt_select_wrap':     lambda dt_expr: dt_expr,
         }
+        # Hive lacks NULLIF on some distros (SemanticException 10011); use CASE WHEN.
+        ops['nullif'] = ((lambda x: f'CASE WHEN ({x}) = 0 THEN NULL ELSE ({x}) END')
+                         if dialect == 'hadoop' else (lambda x: f'NULLIF({x}, 0)'))
         return ops
     if dialect == 'duckdb':
         return {
             'wc_empty':           '1=1',
             'is_oracle_typed':    False,
+            'nullif':             lambda x: f'NULLIF({x}, 0)',
             'cast_str':           lambda x: f'CAST({x} AS VARCHAR)',
             'concat':             lambda *parts: f'concat({", ".join(parts)})',
             'top10_coalesce':     lambda x, d: f'COALESCE({x}, {d})',
@@ -1274,6 +1282,7 @@ def _col_sql_dialect_ops(dialect):
         return {
             'wc_empty':           '(1=1)',
             'is_oracle_typed':    False,
+            'nullif':             lambda x: f'NULLIF({x}, 0)',
             'cast_str':           lambda x: f'CAST({x} AS VARCHAR)',
             'concat':             lambda *parts: f'concat({", ".join(parts)})',
             'top10_coalesce':     lambda x, d: f'COALESCE({x}, {d})',
@@ -1347,10 +1356,13 @@ def _hash16_flat_expr(dialect, col_expr):
     raise ValueError(f"unknown dialect {dialect!r} for hash16 flat expr")
 
 # >>> resolve STRICT mode: explicit arg > per-pair config > DTRACK_STRICT env <<< #
-def _resolve_strict(tbl_cfg, strict=None):
-    if strict is not None:
-        return bool(strict)
-    v = (tbl_cfg or {}).get('strict')
+def _resolve_strict(tbl_cfg, strict=None, col=None):
+    v = strict if strict is not None else (tbl_cfg or {}).get('strict')
+    if isinstance(v, (list, tuple, set)):
+        cols = {str(c).strip().lower() for c in v}
+        if col is None:
+            return bool(cols)
+        return (col or '').strip().lower() in cols
     if v is not None:
         return bool(v)
     import os
@@ -1430,7 +1442,7 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
     if not vintage:
         vintage = tbl_cfg.get('vintage', 'all') or 'all'
     numeric = is_numeric_type(dtype, is_oracle=ops['is_oracle_typed'])
-    strict = _resolve_strict(tbl_cfg, strict)
+    strict = _resolve_strict(tbl_cfg, strict, col=col)
     family = _strict_family(dtype, numeric)
     wc = where.strip() if where else ops['wc_empty']
 
@@ -1470,7 +1482,7 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
             len_avg_sql = (
                 ops['cast_str'](f"SUM(LENGTH(TRIM(CAST({col_expr} AS "
                                 f"{'VARCHAR2(4000)' if dialect=='oracle' else 'STRING'})))) "
-                                f"/ NULLIF(COUNT({col_expr}), 0)")
+                                f"/ {ops['nullif'](f'COUNT({col_expr})')}")
             )
             len_max_sql = ops['cast_str'](
                 f"MAX(LENGTH(TRIM(CAST({col_expr} AS "
@@ -1565,7 +1577,7 @@ minmax AS (
 ),
 lenhash AS (
     SELECT dt,
-           SUM(cnt * LENGTH(TRIM(p_col))) / NULLIF(SUM(cnt), 0) AS length_avg,
+           SUM(cnt * LENGTH(TRIM(p_col))) / {ops['nullif']('SUM(cnt)')} AS length_avg,
            MAX(LENGTH(TRIM(p_col))) AS length_max,
            {ops['hash_sum_expr']("p_col")} AS hash_sum
     FROM ranked GROUP BY dt
@@ -1620,11 +1632,11 @@ agg AS (
 ),
 sstats AS (
     SELECT dt,
-           sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0) AS mean_v,
+           sum_cnt_rnk * 1.0 / {ops['nullif']('sum_cnt')} AS mean_v,
            SQRT(GREATEST(
-               sum_cnt_rnk2 * 1.0 / NULLIF(sum_cnt, 0)
-               - (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0))
-               * (sum_cnt_rnk * 1.0 / NULLIF(sum_cnt, 0)), 0)) AS std_v
+               sum_cnt_rnk2 * 1.0 / {ops['nullif']('sum_cnt')}
+               - (sum_cnt_rnk * 1.0 / {ops['nullif']('sum_cnt')})
+               * (sum_cnt_rnk * 1.0 / {ops['nullif']('sum_cnt')}), 0)) AS std_v
     FROM agg
 ),
 minmax AS (
@@ -1641,7 +1653,7 @@ top_n AS (
 ),
 lenhash AS (
     SELECT dt,
-           SUM(cnt * LENGTH(TRIM(p_col))) / NULLIF(SUM(cnt), 0) AS length_avg,
+           SUM(cnt * LENGTH(TRIM(p_col))) / {ops['nullif']('SUM(cnt)')} AS length_avg,
            MAX(LENGTH(TRIM(p_col))) AS length_max,
            {hash_sum_expr} AS hash_sum
     FROM ranked GROUP BY dt
@@ -1742,6 +1754,8 @@ def parse_extract_sql_file(sql_path):
             return
         m = conn_re.search(sql)
         conn_macro = m.group(1) if m else None
+        if m:
+            sql = conn_re.sub('', sql).strip()
         blocks.append({"name": current_name, "sql": sql,
                        "conn_macro": conn_macro,
                        "degrade_sql": degrade_sql})
@@ -1790,6 +1804,7 @@ def run_extract_sql_file(sql_path, outdir, *,
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from datetime import datetime
     from ..constants import COL_CSV_HEADERS, ROW_CSV_HEADERS, PLATFORM_RUNNER
+    from ..logmgr import get_logger
 
     cfg = PLATFORM_RUNNER[platform]
     platform.capitalize()
@@ -1930,6 +1945,9 @@ def run_extract_sql_file(sql_path, outdir, *,
         status = "ok" if result["ok"] else f"FAIL: {result.get('error', '')}"
         print(f"  [{n}/{total} | running={running_after}] {block_name}: "
               f"{status} ({elapsed:.1f}s)", file=sys.stderr)
+        get_logger().info("query %s [%s]: %s (%s rows, %.1fs) [%d/%d]",
+                          block_name, qname, "ok" if result["ok"] else "FAIL",
+                          result.get("rows", 0), elapsed, n, total)
 
         if on_progress:
             result["done"] = n

@@ -4,6 +4,7 @@ import csv
 from datetime import datetime
 
 from .base import (
+    state_dir,
     qualified_name,
     quote_ident,
     build_date_in_clause,
@@ -33,7 +34,7 @@ def set_csv_duckdb(path):
 
 # >>> regenerable cache/state dir for a csv outdir (materialized db, query cache) <<< #
 def csv_state_dir(outdir):
-    return os.path.join(outdir, ".state")
+    return state_dir(outdir)
 
 # >>> default location of the materialized CSV database (under the state dir) <<< #
 def csv_duckdb_path(outdir):
@@ -436,17 +437,17 @@ def run_csv_sql_file(sql_path, outdir, max_workers=None, db_path=None,
 def _resolve_full_csv_types(tbl, outdir):
     cfg = resolve_config_columns(tbl)
     if cfg:
-        return {c: _duckdb_type(t) for c, t in cfg.items()}, True
+        return {c: _duckdb_type(t) for c, t in cfg.items()}, True, dict(cfg)
     path = tbl.get('conn_macro', '')
     q, esc = _csv_quote_escape(tbl)
     inferred = discover_csv_columns(path, q, esc)
     if not inferred:
-        return {}, False
+        return {}, False, {}
     from ..loader import read_columns_sidecar
     sidecar = read_columns_sidecar(os.path.join(outdir, f"{qualified_name(tbl)}_columns.csv"))
     declared = {**sidecar, **(tbl.get('columns') or {})}
     cols, _ = _resolve_csv_types(inferred, declared)
-    return cols, bool(sidecar)
+    return cols, bool(sidecar), dict(cols)
 
 # >>> Materialize every csv-source table as a typed CREATE TABLE in a single <<< #
 # >>> DuckDB file so queries read `FROM <table>` (consistent types, short SQL). <<< #
@@ -472,7 +473,7 @@ def build_csv_duckdb(csv_tables, outdir, db_path=None):
                 log.warning("%s: conn_macro (csv path) missing or not found (%r); "
                             "skipping materialization", qname, path)
                 continue
-            types, from_def = _resolve_full_csv_types(tbl, outdir)
+            types, from_def, original = _resolve_full_csv_types(tbl, outdir)
             if not types:
                 log.warning("%s: no columns resolved for %s", qname, path)
                 continue
@@ -491,20 +492,25 @@ def build_csv_duckdb(csv_tables, outdir, db_path=None):
                 continue
             tbl['_csv_table'] = tname
             tbl['columns'] = types
+            meta_types = original or types
             if db_path:
-                insert_column_meta(db_path, qname, types, source='csv')
-            col_csv = os.path.join(outdir, f"{qname}_columns.csv")
-            if os.path.exists(col_csv):
-                log.info("%s: materialized %s (%d cols); kept existing %s_columns.csv",
+                insert_column_meta(db_path, qname, meta_types, source='csv')
+            if tbl.get('columns_file'):
+                log.info("%s: materialized %s (%d cols, columns_file); skipped %s_columns.csv",
                          qname, tname, len(types), qname)
             else:
-                with open(col_csv, 'w', newline='') as f:
-                    w = csv.writer(f)
-                    w.writerow(['column_name', 'data_type'])
-                    for name, dt in types.items():
-                        w.writerow([name, dt])
-                log.info("%s: materialized %s (%d cols, %s) -> %s", qname, tname,
-                         len(types), "config-defined" if from_def else "discovered", col_csv)
+                col_csv = os.path.join(outdir, f"{qname}_columns.csv")
+                if os.path.exists(col_csv):
+                    log.info("%s: materialized %s (%d cols); kept existing %s_columns.csv",
+                             qname, tname, len(types), qname)
+                else:
+                    with open(col_csv, 'w', newline='') as f:
+                        w = csv.writer(f)
+                        w.writerow(['column_name', 'data_type'])
+                        for cname, dt in meta_types.items():
+                            w.writerow([cname, dt])
+                    log.info("%s: materialized %s (%d cols, %s) -> %s", qname, tname,
+                             len(types), "config-defined" if from_def else "discovered", col_csv)
     finally:
         conn.close()
     return db_file

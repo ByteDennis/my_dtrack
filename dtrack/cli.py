@@ -202,6 +202,8 @@ def cmd_load_columns(args):
                         csv_lookup.setdefault(key, {})[col] = dt
 
     cols_dir = getattr(args, 'columns_dir', None)
+    from .platforms.base import resolve_config_columns
+    columns_file_qnames = set()
 
     for tbl in tables:
         source = tbl.get('source', '')
@@ -217,6 +219,15 @@ def cmd_load_columns(args):
             columns = csv_lookup[matched_key]
             count = insert_column_meta(args.project_db, qname, columns, source=source)
             print(f"{qname}: loaded {count} columns from CSV")
+            continue
+
+        cfg_cols = resolve_config_columns(tbl)
+        if cfg_cols:
+            count = insert_column_meta(args.project_db, qname, cfg_cols, source=source)
+            origin = 'columns_file' if tbl.get('columns_file') else 'inline columns'
+            print(f"{qname}: loaded {count} columns from config ({origin})")
+            if tbl.get('columns_file'):
+                columns_file_qnames.add(qname)
             continue
 
         existing = _read_sidecar_columns(cols_dir, qname)
@@ -261,6 +272,9 @@ def cmd_load_columns(args):
         os.makedirs(out_dir, exist_ok=True)
         for tbl in tables:
             qname = qualified_name(tbl)
+            if qname in columns_file_qnames:
+                print(f"{qname}: columns_file defined; skipping {qname}_columns.csv")
+                continue
             meta = sorted(get_column_meta(args.project_db, qname) or [],
                           key=lambda m: m['column_name'])
             if not meta:
@@ -314,6 +328,13 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
         else:
             print(f"WARNING: {store_name}: databricks conn_macro must be catalog.schema, got '{conn_macro}'")
             return
+        if not columns:
+            print(f"WARNING: No columns found for {conn_macro}.{raw_table}")
+            return
+    elif source.lower() == 'hadoop':
+        from .platforms.hadoop import _discover_columns_hadoop
+        print(f"Discovering Hadoop columns for: {conn_macro}.{raw_table}")
+        columns = _discover_columns_hadoop(conn_macro, raw_table)
         if not columns:
             print(f"WARNING: No columns found for {conn_macro}.{raw_table}")
             return
@@ -938,6 +959,8 @@ def cmd_extract(args):
     if not os.path.exists(args.project_db):
         init_database(args.project_db)
         print(f"Initialized database: {args.project_db}")
+    if args.type in ("col", "both"):
+        _log_strict_summary(args.config)
     extract_all(
         config_path=args.config,
         outdir=getattr(args, 'outdir', None),
@@ -1141,6 +1164,33 @@ def cmd_run_sql(args):
         resume=getattr(args, 'resume', False),
     )
 
+# >>> log per-pair STRICT mode (all | off | specific left columns) to the running log <<< #
+def _log_strict_summary(config_path):
+    import sys
+    from .config import load_unified_config
+    from .logmgr import get_logger
+    try:
+        config = load_unified_config(config_path)
+    except Exception:
+        return
+    env_on = os.environ.get('DTRACK_STRICT', '') not in ('', '0', 'false', 'False', 'no')
+    log = get_logger()
+    for pname, pcfg in (config.get("pairs") or {}).items():
+        if pcfg.get("skip"):
+            continue
+        s = pcfg.get("strict")
+        if isinstance(s, (list, tuple)):
+            desc = f"left cols [{', '.join(map(str, s))}]"
+        elif s is True:
+            desc = "ALL columns"
+        elif s is False:
+            desc = "off (pair)"
+        else:
+            desc = "ALL columns (DTRACK_STRICT)" if env_on else "off"
+        msg = f"STRICT [{pname}]: {desc}"
+        print(f">>> {msg}", file=sys.stderr)
+        log.info(msg)
+
 # >>> write extract_{row,col} SQL/SAS for every platform WITHOUT running (review before extract) <<< #
 def cmd_generate(args):
     from .extract import extract_all
@@ -1148,6 +1198,8 @@ def cmd_generate(args):
     if not os.path.exists(args.project_db):
         init_database(args.project_db)
         print(f"Initialized database: {args.project_db}")
+    if args.type in ("col", "both"):
+        _log_strict_summary(args.config)
     extract_all(
         config_path=args.config,
         outdir=getattr(args, 'outdir', None),

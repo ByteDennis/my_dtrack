@@ -44,6 +44,20 @@ def extract_one(platform, config_path, outdir, types=None, db_path=None,
     return True
 
 # >>> classify config tables and run every platform extractor that has tables <<< #
+# >>> njobs for a platform: CLI --workers > config settings.max_workers > env/default <<< #
+# settings.max_workers may be an int (all platforms) or a dict {platform: n}.
+def _cfg_max_workers(config, platform, override):
+    if override is not None:
+        return override
+    mw = (config.get("settings") or {}).get("max_workers")
+    if isinstance(mw, dict):
+        v = mw.get(platform)
+        return int(v) if v is not None else None
+    if mw is not None:
+        return int(mw)
+    return None
+
+
 def extract_all(config_path, outdir=None, csv_outdir=None,
                 types=None, max_workers=None, db_path=None, vintage=None,
                 force=False, from_date=None, to_date=None,
@@ -67,7 +81,8 @@ def extract_all(config_path, outdir=None, csv_outdir=None,
     if groups["oracle"]:
         print(f"\n--- {verb} from Oracle ({len(groups['oracle'])} tables) ---")
         from .platforms.oracle import extract_oracle
-        extract_oracle(config_path, csv_outdir, types=types, max_workers=max_workers,
+        extract_oracle(config_path, csv_outdir, types=types,
+                       max_workers=_cfg_max_workers(config, "oracle", max_workers),
                        db_path=db_path, vintage=vintage, force=force,
                        from_date=from_date, to_date=to_date,
                        preset=preset, stats_override=stats_override, gen_only=gen_only)
@@ -75,7 +90,8 @@ def extract_all(config_path, outdir=None, csv_outdir=None,
     if groups["aws"]:
         print(f"\n--- {verb} from Athena ({len(groups['aws'])} tables) ---")
         from .platforms.athena import extract_aws
-        extract_aws(config_path, csv_outdir, types=types, max_workers=max_workers,
+        extract_aws(config_path, csv_outdir, types=types,
+                    max_workers=_cfg_max_workers(config, "aws", max_workers),
                     db_path=db_path, vintage=vintage, force=force,
                     from_date=from_date, to_date=to_date,
                     preset=preset, stats_override=stats_override, gen_only=gen_only)
@@ -83,7 +99,8 @@ def extract_all(config_path, outdir=None, csv_outdir=None,
     if groups["hadoop"]:
         print(f"\n--- {verb} from Hadoop ({len(groups['hadoop'])} tables) ---")
         from .platforms.hadoop import extract_hadoop
-        extract_hadoop(config_path, csv_outdir, types=types, max_workers=max_workers,
+        extract_hadoop(config_path, csv_outdir, types=types,
+                       max_workers=_cfg_max_workers(config, "hadoop", max_workers),
                        db_path=db_path, vintage=vintage, force=force,
                        from_date=from_date, to_date=to_date,
                        preset=preset, stats_override=stats_override, gen_only=gen_only)
@@ -91,7 +108,8 @@ def extract_all(config_path, outdir=None, csv_outdir=None,
     if groups["databricks"]:
         print(f"\n--- {verb} from Databricks ({len(groups['databricks'])} tables) ---")
         from .platforms.databricks import extract_databricks
-        extract_databricks(config_path, csv_outdir, types=types, max_workers=max_workers,
+        extract_databricks(config_path, csv_outdir, types=types,
+                           max_workers=_cfg_max_workers(config, "databricks", max_workers),
                            db_path=db_path, vintage=vintage, force=force,
                            from_date=from_date, to_date=to_date,
                            preset=preset, stats_override=stats_override, gen_only=gen_only)
@@ -99,7 +117,8 @@ def extract_all(config_path, outdir=None, csv_outdir=None,
     if groups["csv"]:
         print(f"\n--- {verb} from CSV/DuckDB ({len(groups['csv'])} tables) ---")
         from .platforms.csv_duckdb import extract_csv
-        extract_csv(config_path, csv_outdir, types=types, max_workers=max_workers,
+        extract_csv(config_path, csv_outdir, types=types,
+                    max_workers=_cfg_max_workers(config, "csv", max_workers),
                     db_path=db_path, vintage=vintage, force=force,
                     from_date=from_date, to_date=to_date,
                     preset=preset, stats_override=stats_override, gen_only=gen_only)
@@ -144,7 +163,8 @@ def run_sql_all(config_path, outdir=None, csv_outdir=None,
                       f"(run `dtrack generate --type {t}` first)")
                 continue
             print(f"\n--- [run-sql] {platform} {t}: {sql_path} ---")
-            res = runner(sql_path, csv_outdir, max_workers=max_workers,
+            res = runner(sql_path, csv_outdir,
+                         max_workers=_cfg_max_workers(config, platform, max_workers),
                          db_path=db_path, resume=resume) or []
             failed = [r for r in res if not r.get("ok")]
             ok = len(res) - len(failed)
