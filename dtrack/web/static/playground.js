@@ -149,12 +149,13 @@ function pgEngineChanged() {
                 "\n-- Connects via pyodbc.connect('DSN=<name>', autocommit=True).\n" +
                 "-- SSL_CERT_FILE is temporarily unset around the connect call.";
         } else if (eng === 'csv') {
-            label.textContent = 'CSV file path (conn_macro)';
-            conn.placeholder = '/path/to/file.csv';
-            sqlBox.placeholder = "SELECT COUNT(*) FROM data WHERE amt > 0\n" +
-                "\n-- DuckDB runs in-process on the SERVER. The CSV path above is\n" +
-                "-- registered as the view `data`; you can also write\n" +
-                "--   SELECT * FROM '/path/to/file.csv'  (read_csv_auto).\n" +
+            label.textContent = 'DuckDB / CSV path (conn_macro)';
+            conn.placeholder = '/path/to/data.duckdb  (or /path/to/file.csv)';
+            sqlBox.placeholder = "SELECT table_name FROM information_schema.tables ORDER BY table_name\n" +
+                "\n-- Point conn_macro at a .duckdb database (tables already saved) and\n" +
+                "-- query its tables directly; the query above lists every table.\n" +
+                "-- A .csv path still works: it is registered as the view `data`,\n" +
+                "-- or write  SELECT * FROM '/path/to/file.csv'  (read_csv_auto).\n" +
                 "-- Only the capped result rows reach the browser (no in-browser load).";
         } else {
             label.textContent = 'Oracle macro (e.g. pb23)';

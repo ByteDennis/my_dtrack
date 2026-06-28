@@ -340,6 +340,7 @@ def _write_combined_col_sql_csv(csv_tables, outdir, db_path=None,
         date_dtype = date_filter.get('date_dtype')
         date_format = date_filter.get('date_format')
         orig_where = tbl.get('where', '') or ''
+        base_where = tbl.get('_base_where', orig_where)
         date_bounds = tbl.get('_date_bounds', '') or ''
 
         exclude_dates = tbl.get('_exclude_dates', []) or []
@@ -362,7 +363,7 @@ def _write_combined_col_sql_csv(csv_tables, outdir, db_path=None,
             dates = date_filter['dates']
             full_range = build_date_range_with_gaps(
                 date_col, dates, date_dtype, date_format=date_format)
-            bucket_where = f"{full_range} AND ({orig_where})" if orig_where else full_range
+            bucket_where = f"{full_range} AND ({base_where})" if base_where else full_range
             per_col_where = _and_exclude(bucket_where)
             per_col_vintage = effective_vintage
             per_col_dt_label = None
@@ -370,7 +371,7 @@ def _write_combined_col_sql_csv(csv_tables, outdir, db_path=None,
             dw = build_date_in_clause(
                 date_col, date_filter['dates'], date_dtype,
                 date_format=date_format)
-            bucket_where = f"{dw} AND ({orig_where})" if orig_where else dw
+            bucket_where = f"{dw} AND ({base_where})" if base_where else dw
             per_col_where = _and_exclude(bucket_where)
             per_col_vintage = 'all'
             per_col_dt_label = 'sample'

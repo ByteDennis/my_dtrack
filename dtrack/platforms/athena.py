@@ -769,6 +769,7 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
         raw_full = f"{database}.{table}"
         full_table, cte_prefix = resolve_table(tbl, raw_full)
         where = tbl.get('where', '')
+        base_where = tbl.get('_base_where', where)
 
         if extract_type == "col":
             columns = tbl.get('columns', {})
@@ -875,11 +876,14 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                   f"= {_runs} runs")
 
             date_bounds = tbl.get('_date_bounds', '')
+            # bucket/sample modes already scope dates via vintage_specs; use the
+            # config base WHERE there so the matching-date filter isn't duplicated
+            eff_where = base_where if sql_mode in ('bucket', 'sample') else where
             wc_parts = []
             if sql_mode == 'all' and date_bounds:
                 wc_parts.append(date_bounds)
-            if where.strip():
-                wc_parts.append(where.strip())
+            if eff_where.strip():
+                wc_parts.append(eff_where.strip())
             if exclude_clause:
                 wc_parts.append(exclude_clause)
             " AND ".join(f"({p})" for p in wc_parts) if wc_parts else "1=1"
@@ -890,8 +894,8 @@ def _write_combined_sql(aws_tables, outdir, extract_type, db_path=None,
                 probe_wc_parts = []
                 if date_bounds:
                     probe_wc_parts.append(date_bounds)
-                if where.strip():
-                    probe_wc_parts.append(where.strip())
+                if eff_where.strip():
+                    probe_wc_parts.append(eff_where.strip())
                 if exclude_clause:
                     probe_wc_parts.append(exclude_clause)
                 probe_wc = " AND ".join(f"({p})" for p in probe_wc_parts) if probe_wc_parts else "1=1"
@@ -1064,6 +1068,7 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
 
     extract_cfg = dict(tbl_cfg)
     orig_where = tbl_cfg.get('where', '')
+    base_where = tbl_cfg.get('_base_where', orig_where)
     date_bounds = tbl_cfg.get('_date_bounds', '')
     effective_vintage = date_filter.get('vintage', 'all')
     extract_date_dtype = date_filter.get('date_dtype')
@@ -1077,13 +1082,13 @@ def _extract_cols_for_table(tbl_cfg, outdir, max_workers=None, db_path=None, vin
         dw = build_date_range_with_gaps(
             date_col, date_filter['dates'],
             extract_date_dtype, date_format=date_filter.get('date_format'))
-        extract_cfg['where'] = f"{dw} AND ({orig_where})" if orig_where else dw
+        extract_cfg['where'] = f"{dw} AND ({base_where})" if base_where else dw
         print(f"  {len(buckets)} vintage buckets ({effective_vintage}) -- GROUP BY")
     elif date_filter['filter_type'] == 'in_list':
         dw = build_date_in_clause(
             date_col, date_filter['dates'], extract_date_dtype,
             date_format=date_filter.get('date_format'))
-        extract_cfg['where'] = f"{dw} AND ({orig_where})" if orig_where else dw
+        extract_cfg['where'] = f"{dw} AND ({base_where})" if base_where else dw
         effective_vintage = 'all'
         extract_date_dtype = None
     elif date_bounds:

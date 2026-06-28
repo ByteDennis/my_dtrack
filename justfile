@@ -150,6 +150,15 @@ compare-row *args:
 compare-col *args:
     dtrack compare-col {{db}} --config {{config}} --html {{e2edir}}/output/compare_col.html -y {{args}}
 
+# incremental col-stats compare: per vintage window, pull each side -> tmp CSV ->
+# local DuckDB stats -> upsert _col_stats + compare (bounded memory). Self-contained:
+# discovers dates via its own per-date COUNT(*) (reuses _row_counts if loaded) and
+# compares col stats on COUNT-MATCH dates only. No prior row-compare needed.
+#   just compare-csv --vintage month            # all pairs, monthly windows
+#   just pair=tableA compare-csv --resume        # skip windows already loaded
+compare-csv *args:
+    dtrack compare-csv {{db}} --config {{config}} {{ if pair == "" { "" } else { "--pair " + pair } }} {{args}}
+
 # --- live e2e pipeline: real backends -> HTML -----------------------------
 # Single entry point. type = row | col-gen | col-run | col | all. Outputs land
 # in {{e2edir}}/output/compare_{row,col}[_<pair>].html. Override the backend
@@ -318,6 +327,14 @@ sample-hash *args:
 # then execute the generated SQL:  just force=1 [pair=NAME] e2e col-run
 col-sample *args:
     dtrack col-sample {{db}} --config {{config}} --key {{key}} {{ if pair == "" { "" } else { "--pair " + pair } }} --outdir {{e2edir}} {{args}}
+
+# sample-key: unified composite-key sampler (supersedes sample-hash + col-sample)
+#   just key=acct,sub sample-key                     # value+hash16 dump (default)
+#   just key=acct,sub sample-key -n -1               # key anti-join report
+#   just key=acct,sub sample-key --gen-col           # where_map + col SQL only
+#   just key=acct,sub sample-key --gen-col --out {{e2edir}}/output/sk.xlsx   # both
+sample-key *args:
+    dtrack sample-key {{db}} --config {{config}} --key {{key}} {{ if pair == "" { "" } else { "--pair " + pair } }} --outdir {{e2edir}} {{args}}
 
 # run a SQL query against the database
 query sql *args:

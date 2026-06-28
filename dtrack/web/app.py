@@ -1145,8 +1145,8 @@ async def api_upload_config(file: UploadFile = File(...)):
                 "error": "Invalid config: missing 'pairs' key"
             })
 
-        with open(_config_path, 'w') as f:
-            json.dump(config, f, indent=2)
+        from ..config import save_unified_config
+        save_unified_config(config, _config_path)
 
         registered = _sync_config_pairs(config)
 
@@ -2823,15 +2823,14 @@ async def api_add_pair(request: Request):
 @app.delete("/api/pairs/{pair_name}")
 async def api_delete_pair(pair_name: str, purge: int = Query(0)):
     try:
-        from ..config import load_unified_config
+        from ..config import load_unified_config, save_unified_config
         config = load_unified_config(_config_path)
 
         found_in_config = pair_name in config.get("pairs", {})
 
         if found_in_config:
             del config["pairs"][pair_name]
-            with open(_config_path, 'w') as f:
-                json.dump(config, f, indent=2)
+            save_unified_config(config, _config_path)
 
         found_in_db = False
         if purge:
@@ -3709,15 +3708,23 @@ async def api_playground_run(request: Request):
                 pass
         elif engine == "csv":
             from ..platforms.csv_duckdb import duckdb_connect, _rewrite_csv_from_clauses
-            conn = duckdb_connect()
-            if conn is None:
-                raise RuntimeError("DuckDB unavailable (install 'dtrack[csv]').")
-            handle["conn"] = conn
-            if conn_id and os.path.exists(conn_id):
-                conn.execute(
-                    "CREATE OR REPLACE VIEW data AS "
-                    f"SELECT * FROM read_csv_auto('{conn_id}', header=true)")
-            res = conn.execute(_rewrite_csv_from_clauses(sql))
+            if conn_id and conn_id.lower().endswith(".duckdb") and os.path.exists(conn_id):
+                # conn_macro is a materialized DuckDB database — query its saved
+                # tables directly (read-only); no CSV view / FROM-rewrite needed.
+                import duckdb as _ddb
+                conn = _ddb.connect(conn_id, read_only=True)
+                handle["conn"] = conn
+                res = conn.execute(sql)
+            else:
+                conn = duckdb_connect()
+                if conn is None:
+                    raise RuntimeError("DuckDB unavailable (install 'dtrack[csv]').")
+                handle["conn"] = conn
+                if conn_id and os.path.exists(conn_id):
+                    conn.execute(
+                        "CREATE OR REPLACE VIEW data AS "
+                        f"SELECT * FROM read_csv_auto('{conn_id}', header=true)")
+                res = conn.execute(_rewrite_csv_from_clauses(sql))
             columns = [d[0] for d in (res.description or [])]
             fetched = res.fetchall()
             n_rows_total = len(fetched)

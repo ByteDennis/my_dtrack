@@ -228,6 +228,7 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None,
         date_dtype = date_filter.get('date_dtype')
         date_format = date_filter.get('date_format')
         orig_where = tbl.get('where', '')
+        base_where = tbl.get('_base_where', orig_where)
         date_bounds = tbl.get('_date_bounds', '')
 
         exclude_dates = tbl.get('_exclude_dates', []) or []
@@ -257,13 +258,13 @@ def _write_combined_col_sql_oracle(oracle_tables, outdir, db_path=None,
                 dw = build_date_range_with_gaps(
                     date_col, bucket_dates, date_dtype,
                     date_format=date_format)
-                bucket_where = f"{dw} AND ({orig_where})" if orig_where else dw
+                bucket_where = f"{dw} AND ({base_where})" if base_where else dw
                 work_units.append((bucket_key, _and_exclude(bucket_where), bucket_key))
         elif date_filter['filter_type'] == 'in_list':
             dw = build_date_in_clause(
                 date_col, date_filter['dates'], date_dtype,
                 date_format=date_format)
-            bucket_where = f"{dw} AND ({orig_where})" if orig_where else dw
+            bucket_where = f"{dw} AND ({base_where})" if base_where else dw
             work_units.append(('sample', _and_exclude(bucket_where), 'sample'))
         elif date_bounds:
             bw = f"{date_bounds} AND ({orig_where})" if orig_where else date_bounds
@@ -347,6 +348,7 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
 
     extract_cfg = dict(tbl_cfg)
     orig_where = tbl_cfg.get('where', '')
+    base_where = tbl_cfg.get('_base_where', orig_where)
     date_bounds = tbl_cfg.get('_date_bounds', '')
     effective_vintage = date_filter.get('vintage', 'all')
     extract_date_dtype = date_filter.get('date_dtype')
@@ -369,13 +371,13 @@ def _extract_cols_for_table_oracle(tbl_cfg, outdir, max_workers=None,
         dw = build_date_range_with_gaps(
             date_col, date_filter['dates'],
             extract_date_dtype, date_format=date_filter.get('date_format'))
-        extract_cfg['where'] = f"{dw} AND ({orig_where})" if orig_where else dw
+        extract_cfg['where'] = f"{dw} AND ({base_where})" if base_where else dw
         print(f"  {len(buckets)} vintage buckets ({effective_vintage}) -- GROUP BY")
     elif date_filter['filter_type'] == 'in_list':
         dw = build_date_in_clause(
             date_col, date_filter['dates'], extract_date_dtype,
             date_format=date_filter.get('date_format'))
-        extract_cfg['where'] = f"{dw} AND ({orig_where})" if orig_where else dw
+        extract_cfg['where'] = f"{dw} AND ({base_where})" if base_where else dw
         effective_vintage = 'all'
         extract_date_dtype = None
     elif date_bounds:

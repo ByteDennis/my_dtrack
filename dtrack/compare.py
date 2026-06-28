@@ -552,7 +552,7 @@ _SUPPORTED = ("aws", "oracle", "databricks", "csv")
 # >>> source -> SQL dialect string used by quote_ident / hash16 exprs <<< #
 def _dialect(source):
     return {"aws": "athena", "csv": "duckdb", "oracle": "oracle",
-            "databricks": "databricks"}.get((source or "").lower())
+            "databricks": "databricks", "hadoop": "hadoop"}.get((source or "").lower())
 
 # >>> per-value 16-bit MD5 hash expression matching each platform's col extraction <<< #
 def _hash16_expr(source, col_q):
@@ -580,7 +580,7 @@ def _full_table_and_cte(tbl):
     if src == "csv":
         cp = tbl.get("conn_macro", "") or ""
         return resolve_table(tbl, f"'{cp}'" if cp else tbl.get("table", ""))
-    if src == "aws":
+    if src in ("aws", "hadoop"):
         return resolve_table(tbl, f"{tbl.get('conn_macro','')}.{tbl.get('table','')}")
     return resolve_table(tbl)
 
@@ -598,6 +598,9 @@ def _run_query(tbl, sql):
     if src == "csv":
         from .platforms.csv_duckdb import _query_duckdb
         return _query_duckdb(sql, cm)
+    if src == "hadoop":
+        from .platforms.hadoop import _query_hadoop
+        return _query_hadoop(sql, cm)
     if src == "oracle":
         from .db import oracle_connect
         conn = oracle_connect(cm)

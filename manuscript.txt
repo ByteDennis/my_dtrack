@@ -3,7 +3,7 @@
 ================================================================================
 
 Author:  Dennis
-Updated: 2026-06-27
+Updated: 2026-06-28
 Goal:    Reproduce the entire web-UI workflow from bash. Every step the web
          wizard does is one or more CLI commands. `dtrack serve` is optional.
 
@@ -125,10 +125,11 @@ resultdir=DIR, config=PATH, db=PATH.
 
 CLEAN TIERS (also `just e2e-clean <level>`), by distance from the backend —
 each tier a superset of the one above:
-    reports  rm compare_*.{html,xlsx}         -> re-compare (instant)
-    rebuild  + project.db* + .state sentinels  -> re-load + re-compare; KEEPS
-             csv/ extracts & caches -> NO backend hit  (default)
-    all      + csv/ (extracts + cached query db + materialized csv.duckdb)
+    reports  rm compare_*.{html,xlsx}          -> re-compare (instant)
+    rebuild  + project.db* + .state/*.done      -> re-load + re-compare; KEEPS
+             sentinels                            csv/ extracts & .state caches
+                                                  -> NO backend hit  (default)
+    all      + .state (query cache + csv.duckdb) + csv/ extracts
              -> full re-extract (HITS backend)
     Always kept: pairs.json, output/run.log
 
@@ -140,8 +141,10 @@ each tier a superset of the one above:
 For source=csv, dtrack materializes each CSV ONCE into a typed DuckDB table
 so every query is `FROM <table>` (short SQL, parse-once, consistent typing):
 
-    <outdir>/csv/.state/csv.duckdb     CREATE TABLE t_<qname> per CSV
-    <outdir>/csv/.state/.cache.db      query-result cache (all sources)
+    <outdir>/.state/csv.duckdb     CREATE TABLE t_<qname> per CSV
+    <outdir>/.state/.cache.db      query-result cache (all sources)
+.state sits BESIDE csv/ (a sibling), not inside it, alongside the justfile
+.done sentinels — so `rebuild` clean keeps it (no backend hit).
 
 Column types (numeric vs categorical etc.) come from the SAME explicit types
 used to build the table, so stats can't disagree with the read. Type source,
@@ -150,7 +153,11 @@ in precedence order:
     2) `columns_file` path in the pair side config (variable,data_type CSV)
     3) {qname}_columns.csv sidecar in the csv outdir
     4) DuckDB DESCRIBE inference (only if none of the above)
-A hand-edited {qname}_columns.csv is never overwritten.
+The ORIGINAL declared type is stored verbatim in _column_meta (e.g. oracle
+NUMBER, athena varchar, hadoop string) and shown in the report "Type" row;
+the DuckDB-mapped type is used only to build the table. With `columns_file`
+set, NO {qname}_columns.csv sidecar is written (the file is the source of
+truth); a hand-edited {qname}_columns.csv is otherwise never overwritten.
 
 
 ================================================================================
@@ -183,7 +190,8 @@ next run is offline.
                      "columns_file": "/data/loans_cols.csv" },
           "fromDate": "2026-01-01", "toDate": "2026-04-30",
           "strict": false, "skip": false,
-          "col_map": { "ACCT_ID": "acct_id" },
+          // col_map now lives in column_mapping.csv beside the config (see Notes);
+          // an inline "col_map" here still wins as a back-compat override
           "col_filter": { "include": [], "exclude": [] },
           "col_type_overrides": {},
           "ignore_rows": [], "ignore_columns": [],
@@ -202,11 +210,24 @@ the column's stored shape (e.g. string_compact 2026-05-02 -> '20260502') and
 the date-bounds clause is emitted FIRST, then the table's `where`.
 
 Notes:
+- col_map is stored in column_mapping.csv (one file beside the config; header
+  `pair,left,right`, one row per mapped column) — NOT inline in pairs.json.
+  load_unified_config injects it transparently so every reader still sees
+  pcfg["col_map"]; save_unified_config writes the CSV and strips col_map from
+  the JSON. Precedence: an inline "col_map" in pairs.json > column_mapping.csv >
+  _table_pairs in the db. match-columns / the web col_mapping page / sample-key
+  all round-trip through save_unified_config, so the CSV stays the source.
 - Qualified table name = "{source}_{name}" (platforms.base.qualified_name);
   it keys _row_counts / _col_stats / _metadata / _column_meta.
-- where_map is rebuilt by compare-row from matching/excluded dates.
+- where_map is rebuilt by compare-row from matching/excluded dates. The col
+  writer scopes dates from _row_comparison directly (the BETWEEN), so for
+  bucketed/sample vintages it ANDs only the config base `where` (not the full
+  where_map) — the matching-date window is not duplicated in the SQL.
 - ignore_rows / ignore_columns persist non-interactive (-y) HITL decisions.
-- vintage / strict can be set per-pair or per-side.
+- vintage / strict can be set per-pair or per-side. strict may be
+  true | false | a list of LEFT column names ["ccy","amt"] — only those
+  columns get in-SQL normalization (auto-mapped to the right via col_map).
+  generate/extract --type col logs the effective mode: "STRICT [pair]: ...".
 
 
 ================================================================================
@@ -253,6 +274,10 @@ DTRACK_LOG sets the path (justfile points it at <e2edir>/output/run.log).
         "query: CACHE HIT (N rows) scope=..."
         "query: LIVE DB read -> cached (N rows) scope=..."
         csv also logs "live read from materialized DB <path>".
+    - Each query block logs its rows + wall-clock when it finishes:
+        "query <block> [<table>]: ok (N rows, 0.9s) [k/total]".
+    - The justfile e2e wrapper times every subcommand: "<step>: done in Xs".
+    - generate/extract --type col logs the per-pair STRICT mode.
     - DTRACK_LOG_LEVEL (default DEBUG) controls file verbosity.
 
 
@@ -263,9 +288,14 @@ DTRACK_LOG sets the path (justfile points it at <e2edir>/output/run.log).
 Incremental window (generate / run-sql / extract / gen-* / compare-*):
     --from-date 2026-01-01 --to-date 2026-04-30
 
-Query cache: results cached in <outdir>/csv/.state/.cache.db. Disable with
+Query cache: results cached in <outdir>/.state/.cache.db. Disable with
 DTRACK_QUERY_CACHE=0. `run-sql --resume` skips blocks whose CSV already exists.
 `force=1` (justfile) ignores the .state skip-cache sentinels.
+
+Concurrency (njobs) — precedence: CLI --workers N > config settings.max_workers
+> env <PLATFORM>_MAX_WORKERS > platform default. settings.max_workers is an int
+(all platforms) or a per-platform dict, e.g.:
+    "settings": { "max_workers": { "hadoop": 1, "aws": 8 } }
 
 Testing against real backends (mock mode has been removed entirely):
     pytest tests/containers --run-containers
@@ -297,6 +327,8 @@ Debug:
     wrong date literal in WHERE          check date_type per side (sec. 7)
     csv types look wrong                 check the materialized csv.duckdb:
                                          DESCRIBE t_<qname>; fix `columns`
+    Hadoop "Invalid function NULLIF"     old Hive (<2.3) lacks it; dtrack emits
+                                         CASE WHEN for hadoop — pull latest
     Athena/Oracle auth fails             dtrack doctor -> AWS_* / <macro>_pwd
     stale JS in web UI                   hard-reload; assets are revalidated
     anything                             tail output/run.log (sec. 10)
@@ -312,9 +344,11 @@ Debug:
       cli.py          argparse entry; one cmd_* per subcommand + run.log banner
       extract.py      extract_all / run_sql_all / extract_one (per-platform fan-out)
       db.py           every SQLite read/write; discover_columns_oracle
-      compare.py      pure compare_row_counts / compare_column_stats
+      compare.py      pure compare_row_counts / compare_column_stats; sample_hash
+      compare_csv.py  compare-csv: per-vintage-window backend pull -> tmp CSV ->
+                      local DuckDB col stats -> upsert _col_stats + compare
       csv_compare.py  csv-specific compare helpers
-      config.py       load/save pairs.json; get_all_tables_from_unified
+      config.py       load/save pairs.json + column_mapping.csv; get_all_tables_from_unified
       constants.py    STATS_PRESETS, DATE_COLUMN_TYPES, VINTAGE_PRESETS, macros
       loader.py       CSV -> _row_counts / _col_stats; read_columns_sidecar
       logmgr.py       shared logger, banner(), log_exc()
@@ -329,5 +363,71 @@ Debug:
         databricks.py  extract_databricks
         csv_duckdb.py  CSV source: build_csv_duckdb, materialized-table queries
       web/             FastAPI app. Optional. NOT needed for the CLI flow.
+
+
+================================================================================
+14. JUSTFILE RECIPES (quick reference)
+================================================================================
+
+`just --list` shows all; `just help e2e` documents the e2e subcommands. Shared
+vars: db=, config=, pair=, port=, e2edir=, resultdir=, force=1, key=.
+
+  SETUP
+    just pipx                  editable pipx install (live edits)
+    just pipx-prod             frozen pipx install
+    just pipx-reinstall        rebuild venv (deps changed)
+    just install               uv editable install + [dev,debug] extras
+    just doctor                show resolved env-file + macros + AWS vars
+
+  WEB
+    just serve                 web UI on :8080 (db + config)
+    just serve-reload          uvicorn --reload (auto-restart on .py edits)
+
+  DB / PIPELINE (manual step-by-step; see sec. 3-4 for the wrapped flow)
+    just init [--force]        create / refresh project.db
+    just gen-aws [outdir]      write AWS/Athena extract scripts
+    just load-row [folder]     load {qname}_row.csv -> _row_counts
+    just load-col [folder]     load {qname}_col.csv -> _col_stats
+    just compare-row           -> output/compare_row.html
+    just compare-col           -> output/compare_col.html
+    just compare-csv [--vintage day|week|month] [--resume] [--keep-csv]
+                               incremental alt to compare-col: per vintage window
+                               pull each side -> tmp CSV -> local DuckDB col stats
+                               -> upsert _col_stats + compare. Bounded memory /
+                               resumable; avoids one huge backend col scan (slow/
+                               hangs on Athena/Hadoop/Databricks). Self-contained:
+                               finds dates via its own per-date COUNT(*) (reuses
+                               _row_counts if loaded) and compares col stats on
+                               COUNT-MATCH dates only -- no prior row-compare step
+    just e2e [row|col|all]      full driver w/ skip-cache + run.log (sec. 4)
+    just e2e-clean [level]      reports | rebuild | all   (sec. 4)
+
+  DEBUG TOOLS
+    just key=a[,b] sample-key   unified composite-key sampler (supersedes
+                               sample-hash + col-sample); --key takes a comma-
+                               separated composite key, right side via col_map:
+                                 (default/--out)  value + backend hash16 -> xlsx
+                                                  (chase a hash_sum mismatch to
+                                                  the offending rows/cols)
+                                 -n -1            key anti-join: combos on one
+                                                  side but not the other
+                                 --gen-col        deterministic key sample ->
+                                                  where_map + col SQL (then
+                                                  `just force=1 e2e col-run`)
+                                 --gen-col --out  do both in one pass
+    just key=cust_id sample-hash [-n 50]   (alias: sample-key value dump)
+    just key=cust_id col-sample [-n 50]    (alias: sample-key --gen-col)
+    just query "<SQL>" [--write]
+                               run SQL against project.db (e.g. inspect
+                               _row_comparison / patch _row_counts)
+    just logs                  tail -f output/run.log
+    just doctor                env / macro / AWS resolution
+
+  TESTS / LINT
+    just test [args]           pytest
+    just test-cov [args]       pytest with coverage
+    just test-containers       real Oracle/Trino/Hive/Spark (--run-containers)
+    just lint  /  just fmt     ruff check / format
+    just clean                 rm generated sql/ csv/ caches
 
 End of manuscript.

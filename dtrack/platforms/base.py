@@ -257,8 +257,11 @@ def apply_null_sentinels(col_ref, col_type, dialect, sentinels=None,
     conds = []
     if literals:
         conds.append(f"{col_ref} IN ({', '.join(literals)})")
-    if include_blank and kind == "string" and dialect != "oracle":
-        conds.append(f"TRIM({col_ref}) = ''")
+    if include_blank and kind == "string":
+        # blank/whitespace-only -> NULL. Oracle TRIM('   ') is NULL (empty == NULL),
+        # so use IS NULL there; other engines compare to '' after TRIM.
+        conds.append(f"TRIM({col_ref}) IS NULL" if dialect == "oracle"
+                     else f"TRIM({col_ref}) = ''")
 
     if not conds:
         return col_ref
@@ -1138,6 +1141,9 @@ def inject_where_from_config(tables, config):
             side = 'left' if pair_cfg.get('left', {}).get('table') == tbl_table else 'right'
             where_clause = where_map.get(side, '')
             if where_clause:
+                # preserve the config base WHERE (no date range): col writers use it
+                # for date-scoped branches so the matching-date filter isn't duplicated
+                tbl['_base_where'] = (pair_cfg.get(side, {}).get('where', '') or '').strip()
                 tbl['where'] = where_clause
                 tbl['_where_from_config'] = True
                 print(f"  {qualified_name(tbl)}: using where_map[{side}] from config")
@@ -1377,6 +1383,13 @@ def _strict_family(dtype, numeric):
         return 'numeric'
     return 'string'
 
+# >>> wrap a normalized string expr so blank/whitespace collapses to ONE token <<< #
+# Both sides bucket empties identically (counted, not engine-dependent NULL),
+# so n_unique / hash agree regardless of how each engine trims/treats ''/NULL.
+# CASE WHEN (not NULLIF/COALESCE) so it runs on Hive < 2.3 too.
+def _strict_blank_token(inner):
+    return f"CASE WHEN ({inner}) IS NULL OR ({inner}) = '' THEN '<<NULL>>' ELSE ({inner}) END"
+
 # >>> STRICT canonical string form of `expr` per dialect/family (extract-time) <<< #
 def _strict_normalize(dialect, expr, family):
     if dialect in ('hadoop', 'databricks'):
@@ -1387,7 +1400,7 @@ def _strict_normalize(dialect, expr, family):
         if family == 'numeric':
             return (f"regexp_replace(regexp_replace({s}, "
                     f"'(\\\\.[0-9]*[1-9])0+$', '$1'), '\\\\.0+$', '')")
-        return f"lower(trim({s}))"
+        return _strict_blank_token(f"lower(trim({s}))")
     if dialect == 'duckdb':
         s = f'CAST({expr} AS VARCHAR)'
         if family == 'date':
@@ -1396,7 +1409,7 @@ def _strict_normalize(dialect, expr, family):
         if family == 'numeric':
             return (f"regexp_replace(regexp_replace({s}, "
                     f"'(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')")
-        return f"lower(trim(nfc_normalize({s})))"
+        return _strict_blank_token(f"lower(trim(nfc_normalize({s})))")
     if dialect == 'oracle':
         s = f'TO_CHAR({expr})'
         if family == 'date':
@@ -1405,7 +1418,7 @@ def _strict_normalize(dialect, expr, family):
         if family == 'numeric':
             return (f"REGEXP_REPLACE(REGEXP_REPLACE({s}, "
                     f"'(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')")
-        return f"LOWER(TRIM(COMPOSE({s})))"
+        return _strict_blank_token(f"LOWER(TRIM(COMPOSE({s})))")
     if dialect in ('athena', 'trino', 'aws'):
         s = f'CAST({expr} AS VARCHAR)'
         if family == 'date':
@@ -1414,7 +1427,7 @@ def _strict_normalize(dialect, expr, family):
         if family == 'numeric':
             return (f"regexp_replace(regexp_replace({s}, "
                     f"'(\\.[0-9]*[1-9])0+$', '$1'), '\\.0+$', '')")
-        return f"lower(trim(normalize({s}, NFC)))"
+        return _strict_blank_token(f"lower(trim(normalize({s}, NFC)))")
     return expr
 
 # >>> Build per-column stats SQL for any supported dialect <<< #
@@ -1481,7 +1494,7 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
         if stats['length'] and not numeric:
             len_avg_sql = (
                 ops['cast_str'](f"SUM(LENGTH(TRIM(CAST({col_expr} AS "
-                                f"{'VARCHAR2(4000)' if dialect=='oracle' else 'STRING'})))) "
+                                f"{'VARCHAR2(4000)' if dialect=='oracle' else 'STRING'})))) * 1.0 "
                                 f"/ {ops['nullif'](f'COUNT({col_expr})')}")
             )
             len_max_sql = ops['cast_str'](
@@ -1577,7 +1590,7 @@ minmax AS (
 ),
 lenhash AS (
     SELECT dt,
-           SUM(cnt * LENGTH(TRIM(p_col))) / {ops['nullif']('SUM(cnt)')} AS length_avg,
+           SUM(cnt * LENGTH(TRIM(p_col))) * 1.0 / {ops['nullif']('SUM(cnt)')} AS length_avg,
            MAX(LENGTH(TRIM(p_col))) AS length_max,
            {ops['hash_sum_expr']("p_col")} AS hash_sum
     FROM ranked GROUP BY dt
@@ -1653,7 +1666,7 @@ top_n AS (
 ),
 lenhash AS (
     SELECT dt,
-           SUM(cnt * LENGTH(TRIM(p_col))) / {ops['nullif']('SUM(cnt)')} AS length_avg,
+           SUM(cnt * LENGTH(TRIM(p_col))) * 1.0 / {ops['nullif']('SUM(cnt)')} AS length_avg,
            MAX(LENGTH(TRIM(p_col))) AS length_max,
            {hash_sum_expr} AS hash_sum
     FROM ranked GROUP BY dt

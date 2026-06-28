@@ -1049,8 +1049,7 @@ def cmd_col_sample(args):
     from .compare import sample_keys_hashed, _key_in_clause, _dialect
     from .platforms.base import quote_ident
 
-    with open(args.config) as f:
-        config = json.load(f)
+    config = load_unified_config(args.config)
     pairs = config.get("pairs", {})
     if not pairs:
         print("No pairs in config")
@@ -1066,6 +1065,7 @@ def cmd_col_sample(args):
 
     manual = _col_sample_key_values(args)
     n = getattr(args, 'sample_n', 20)
+    key_cols = [k.strip() for k in str(args.key).split(",") if k.strip()]
     sampled = []
 
     for pname in targets:
@@ -1074,7 +1074,7 @@ def cmd_col_sample(args):
         right = pcfg.get("right", {})
         col_map = pcfg.get("col_map") or get_pair_col_map_from_db(args.project_db, pname) or {}
         pcfg["col_map"] = col_map
-        right_key = _col_sample_map_lookup(col_map, args.key)
+        right_keys = [_col_sample_map_lookup(col_map, k) for k in key_cols]
         ld = _dialect(left.get("source", ""))
         rd = _dialect(right.get("source", ""))
 
@@ -1083,30 +1083,34 @@ def cmd_col_sample(args):
         base_right = _col_sample_strip(wm.get("right", ""))
 
         if manual:
+            if len(key_cols) != 1:
+                print(f"[col-sample] {pname}: --keys/--keys-file only support a "
+                      f"single key column; got composite {key_cols}. Skipping.")
+                continue
             key_tuples = [(_col_sample_coerce(v),) for v in manual]
         else:
             probe = dict(left)
             probe["where"] = base_left
-            key_tuples = sample_keys_hashed(probe, [args.key], n)
+            key_tuples = sample_keys_hashed(probe, key_cols, n)
         if not key_tuples:
             print(f"[col-sample] {pname}: no keys found; skipping")
             continue
 
-        left_in = _key_in_clause([quote_ident(args.key, ld)], key_tuples)
-        right_in = _key_in_clause([quote_ident(right_key, rd)], key_tuples)
+        left_in = _key_in_clause([quote_ident(k, ld) for k in key_cols], key_tuples)
+        right_in = _key_in_clause([quote_ident(rk, rd) for rk in right_keys], key_tuples)
         wm["left"] = (f"({base_left}) AND " if base_left else "") + \
             f"{_COLSAMPLE_OPEN}{left_in}{_COLSAMPLE_CLOSE}"
         wm["right"] = (f"({base_right}) AND " if base_right else "") + \
             f"{_COLSAMPLE_OPEN}{right_in}{_COLSAMPLE_CLOSE}"
         sampled.append(pname)
-        print(f"[col-sample] {pname}: {len(key_tuples)} keys on {args.key}/{right_key} -> where_map")
+        print(f"[col-sample] {pname}: {len(key_tuples)} keys on "
+              f"{'+'.join(key_cols)}/{'+'.join(right_keys)} -> where_map")
 
     if not sampled:
         print("[col-sample] nothing sampled; no SQL written")
         return
 
-    with open(args.config, "w") as f:
-        json.dump(config, f, indent=2)
+    save_unified_config(config, args.config)
     print(f"[col-sample] persisted key filter into {args.config} (where_map, AND-merged)")
 
     for pname in sampled:
@@ -1115,8 +1119,9 @@ def cmd_col_sample(args):
             inc = [c.strip() for c in args.cols.split(",") if c.strip()]
         elif getattr(args, 'sample_cols', None):
             dcol = (pcfg.get("left", {}).get("date_col", "") or "").lower()
+            _excl = {dcol} | {k.lower() for k in key_cols}
             pool = [c for c in (pcfg.get("col_map") or {}).keys()
-                    if c.lower() not in (dcol, args.key.lower())]
+                    if c.lower() not in _excl]
             inc = random.sample(pool, min(args.sample_cols, len(pool))) if pool else []
             print(f"[col-sample] {pname}: random {len(inc)} of {len(pool)} value cols -> {inc}")
         else:
@@ -1146,6 +1151,32 @@ def cmd_col_sample(args):
         os.unlink(tmp.name)
     print("[col-sample] generated extract_col.<platform>.sql. "
           "Execute: dtrack run-sql --type col  (or `just force=1 e2e col-run`)")
+
+# >>> compare-csv: per-vintage-window backend pull -> local DuckDB col stats -> upsert + compare <<< #
+def cmd_compare_csv(args):
+    _require_db(args.project_db)
+    from .compare_csv import run_compare_csv
+    run_compare_csv(
+        project_db=args.project_db,
+        config_path=args.config,
+        pair=getattr(args, 'pair', None),
+        vintage=getattr(args, 'vintage', 'day'),
+        from_date=getattr(args, 'from_date', None),
+        to_date=getattr(args, 'to_date', None),
+        preset=getattr(args, 'preset', None),
+        stats_override=_parse_stats_override(getattr(args, 'stats_override', None)),
+        keep_csv=getattr(args, 'keep_csv', False),
+        resume=getattr(args, 'resume', False),
+    )
+
+# >>> sample-key: composite-key value+hash dump (--out/default) and/or col-sample gen (--gen-col) <<< #
+def cmd_sample_key(args):
+    do_gen = bool(getattr(args, 'gen_col', False))
+    do_dump = bool(getattr(args, 'out', None)) or not do_gen
+    if do_dump:
+        cmd_sample_hash(args)
+    if do_gen:
+        cmd_col_sample(args)
 
 # >>> execute already-generated extract_{row,col}.<platform>.sql via each platform's runner (mirrors web run-sql) <<< #
 def cmd_run_sql(args):
@@ -1421,6 +1452,27 @@ def main():
                            "hash_sum, top_10. Example: "
                            "--stats-override n_unique=on,hash_sum=off")
 
+    p = sub.add_parser('compare-csv',
+                       help='Incremental col-stats compare: per vintage window, pull each '
+                            'side to a tmp CSV, compute stats locally in DuckDB, upsert + compare '
+                            '(bounded memory; avoids one huge backend col scan). Self-contained: '
+                            'discovers count-match dates itself (reuses _row_counts if loaded); '
+                            'no prior row-compare needed')
+    p.add_argument('project_db')
+    p.add_argument('--config', required=True)
+    p.add_argument('--pair', help='Restrict to one pair (default: all non-skipped pairs)')
+    p.add_argument('--vintage', default='day',
+                   choices=['day', 'week', 'month', 'quarter', 'year'],
+                   help='One pull window per vintage bucket (default day)')
+    p.add_argument('--from-date')
+    p.add_argument('--to-date')
+    p.add_argument('--preset', choices=['quick', 'standard', 'detailed'], help=_PRESET_HELP)
+    p.add_argument('--stats-override', dest='stats_override', help=_STATS_OVERRIDE_HELP)
+    p.add_argument('--keep-csv', dest='keep_csv', action='store_true',
+                   help='Keep the per-window tmp CSV/config dirs (else removed after each window)')
+    p.add_argument('--resume', action='store_true',
+                   help='Skip vintage windows already present in _col_stats for both sides')
+
     p = sub.add_parser('gen-aws', help='Extract data from AWS Athena')
     p.add_argument('config')
     p.add_argument('--outdir', default='./csv/')
@@ -1554,6 +1606,35 @@ def main():
     p.add_argument('--preset', choices=['quick', 'standard', 'detailed'], help=_PRESET_HELP)
     p.add_argument('--stats-override', dest='stats_override', help=_STATS_OVERRIDE_HELP)
 
+    p = sub.add_parser('sample-key',
+                       help='Composite-key sampler: value+hash16 Excel dump (default/--out), '
+                            'key anti-join (-n -1), and/or where_map+col SQL gen (--gen-col)')
+    p.add_argument('project_db')
+    p.add_argument('--config', required=True)
+    p.add_argument('--key', required=True,
+                   help='Left key column(s), comma-separated for a composite key (right resolved via col_map)')
+    p.add_argument('--pair', help='Restrict to one pair (default: all non-skipped pairs)')
+    p.add_argument('-n', '--sample', dest='sample_n', type=int, default=20,
+                   help='Keys to sample per pair (default 20). -1 = report KEY combinations '
+                        'unmatched across sides (anti-join); value dump only')
+    p.add_argument('--out', help='Value+hash16 Excel path (default sample_hash.xlsx). '
+                                 'Runs the dump even alongside --gen-col')
+    p.add_argument('--gen-col', dest='gen_col', action='store_true',
+                   help='Persist the sampled key IN (...) into where_map and generate col SQL '
+                        '(col-sample behavior). Combine with --out to also dump values')
+    p.add_argument('--keys', help='(--gen-col) Explicit key values (comma) instead of sampling; single key only')
+    p.add_argument('--keys-file', dest='keys_file',
+                   help='(--gen-col) File of key values (one per line) instead of sampling; single key only')
+    p.add_argument('--cols', help='(--gen-col) Columns to compare (comma, left names); else all mapped')
+    p.add_argument('--sample-cols', dest='sample_cols', type=int,
+                   help='(--gen-col) Randomly sample N columns from col_map')
+    p.add_argument('--outdir', help='(--gen-col) Base output directory (csv/ derived from it)')
+    p.add_argument('--vintage')
+    p.add_argument('--from-date')
+    p.add_argument('--to-date')
+    p.add_argument('--preset', choices=['quick', 'standard', 'detailed'], help=_PRESET_HELP)
+    p.add_argument('--stats-override', dest='stats_override', help=_STATS_OVERRIDE_HELP)
+
     p = sub.add_parser('serve', help='Start web UI')
     p.add_argument('project_db')
     p.add_argument('--config', default=None, help='Unified config JSON (optional)')
@@ -1617,6 +1698,7 @@ def main():
         'load-columns': cmd_load_columns,
         'compare-row': cmd_compare_row,
         'compare-col': cmd_compare_col,
+        'compare-csv': cmd_compare_csv,
         'gen-aws': cmd_gen_aws,
         'gen-databricks': cmd_gen_databricks,
         'gen-oracle': cmd_gen_oracle,
@@ -1626,6 +1708,7 @@ def main():
         'run-sql': cmd_run_sql,
         'sample-hash': cmd_sample_hash,
         'col-sample': cmd_col_sample,
+        'sample-key': cmd_sample_key,
         'serve': cmd_serve,
         'query': cmd_query,
         'doctor': cmd_doctor,

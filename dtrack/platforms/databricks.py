@@ -1,6 +1,7 @@
 
 import csv
 import os
+import threading
 from datetime import datetime
 
 from .base import (
@@ -43,68 +44,140 @@ def _resolve_catalog_schema(conn_macro):
         return f"{default_catalog}.{cm}"
     return cm
 
+_DBX_AUTH_LOCK = threading.Lock()
+_DBX_AUTH = None  # cached (server_hostname, http_path, token); set once, thread-safe
+
+# >>> authenticate ONCE (proxy env + OAuth token); cached + locked so concurrent <<< #
+# >>> col workers don't race on os.environ / cfg.authenticate() (which can hang) <<< #
+def _databricks_auth():
+    global _DBX_AUTH
+    with _DBX_AUTH_LOCK:
+        if _DBX_AUTH is not None:
+            return _DBX_AUTH
+        from databricks.sdk.core import Config
+        _usr = os.environ.get("AWS_USR")
+        _pwd = os.environ.get("AWS_PWD")
+        _host = os.environ.get("AWS_HOST")
+        if _usr and _pwd and _host:
+            os.environ["HTTPS_PROXY"] = f"http://{_usr}:{_pwd}@{_host}:8080"
+        profile = os.environ.get("DB_PROFILE")
+        http_path = os.environ.get("DB_HTTPS")
+        if not profile or not http_path:
+            raise RuntimeError(
+                "Databricks requires DB_PROFILE and DB_HTTPS env vars "
+                "(see .env / `dtrack doctor`)."
+            )
+        cfg = Config(profile=profile)
+        token = cfg.authenticate()["Authorization"].replace("Bearer ", "")
+        server_hostname = cfg.host.replace("https://", "").rstrip("/")
+        _DBX_AUTH = (server_hostname, http_path, token)
+        return _DBX_AUTH
+
 # >>> open a Databricks SQL connection via OAuth + databricks-sdk Config <<< #
 def databricks_connect(catalog_schema=None):
     try:
         from databricks import sql as dbx_sql
-        from databricks.sdk.core import Config
     except ImportError as e:
         raise ImportError(
             "databricks-sql-connector + databricks-sdk required: "
             "pip install 'dtrack[databricks]'"
         ) from e
 
-    _usr = os.environ.get("AWS_USR")
-    _pwd = os.environ.get("AWS_PWD")
-    _host = os.environ.get("AWS_HOST")
-    if _usr and _pwd and _host:
-        os.environ["HTTPS_PROXY"] = f"http://{_usr}:{_pwd}@{_host}:8080"
-
-    profile = os.environ.get("DB_PROFILE")
-    http_path = os.environ.get("DB_HTTPS")
-    if not profile or not http_path:
-        raise RuntimeError(
-            "Databricks requires DB_PROFILE and DB_HTTPS env vars "
-            "(see .env / `dtrack doctor`)."
-        )
-    cfg = Config(profile=profile)
-    token = cfg.authenticate()["Authorization"].replace("Bearer ", "")
-    server_hostname = cfg.host.replace("https://", "").rstrip("/")
-
+    server_hostname, http_path, token = _databricks_auth()
     kwargs = {
         "server_hostname": server_hostname,
         "http_path": http_path,
         "access_token": token,
     }
+    # socket timeout so a submitted statement whose poll stops responding
+    # raises instead of hanging forever (the run can then reconnect/retry).
+    try:
+        sock = int(os.environ.get("DTRACK_DATABRICKS_SOCKET_TIMEOUT", "600"))
+    except ValueError:
+        sock = 600
+    if sock > 0:
+        kwargs["_socket_timeout"] = sock
     resolved = _resolve_catalog_schema(catalog_schema)
     if resolved and "." in resolved:
         kwargs["catalog"], kwargs["schema"] = resolved.split(".", 1)
-    return dbx_sql.connect(**kwargs)
+    conn = dbx_sql.connect(**kwargs)
+    # server-side query timeout so a long/stuck statement fails instead of
+    # hanging the run forever. DTRACK_DATABRICKS_TIMEOUT seconds (0 disables).
+    try:
+        secs = int(os.environ.get("DTRACK_DATABRICKS_TIMEOUT", "1800"))
+    except ValueError:
+        secs = 1800
+    if secs > 0:
+        try:
+            c = conn.cursor()
+            c.execute(f"SET STATEMENT_TIMEOUT = {secs}")
+            c.close()
+        except Exception as e:
+            from ..logmgr import log_exc
+            log_exc("databricks: SET STATEMENT_TIMEOUT failed", e, level="debug")
+    return conn
 
 # >>> run one SQL block and return rows of dicts keyed by lowercase column name <<< #
+# >>> split on ';' but NOT inside single-quoted string literals (top_10 uses '; ') <<< #
+def _split_statements(sql):
+    out, buf, in_str = [], [], False
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "'":
+            buf.append(ch)
+            if in_str and i + 1 < n and sql[i + 1] == "'":
+                buf.append(sql[i + 1])
+                i += 2
+                continue
+            in_str = not in_str
+        elif ch == ";" and not in_str:
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    if buf:
+        out.append("".join(buf))
+    return [s.strip() for s in out if s.strip()]
+
+
 def _query_databricks(sql, catalog_schema=None):
     cached = cache_get(sql, catalog_schema)
     if cached is not None:
         return cached
-    conn = databricks_connect(catalog_schema)
     try:
-        cur = conn.cursor()
-        out = []
-        for stmt in (s.strip() for s in sql.split(";")):
-            if not stmt:
-                continue
-            cur.execute(stmt)
-            if cur.description:
-                cols = [d[0].lower() for d in cur.description]
-                out = [dict(zip(cols, row)) for row in cur.fetchall()]
-        cur.close()
-        cache_put(sql, catalog_schema, out, row_count=len(out))
-        return out
-    finally:
+        retries = int(os.environ.get("DTRACK_DATABRICKS_RETRIES", "2"))
+    except ValueError:
+        retries = 2
+    last_err = None
+    for attempt in range(retries + 1):
+        conn = databricks_connect(catalog_schema)
         try:
-            conn.close()
-        except Exception:
-            pass
+            cur = conn.cursor()
+            out = []
+            for stmt in _split_statements(sql):
+                if not stmt:
+                    continue
+                cur.execute(stmt)
+                if cur.description:
+                    cols = [d[0].lower() for d in cur.description]
+                    out = [dict(zip(cols, row)) for row in cur.fetchall()]
+            cur.close()
+            cache_put(sql, catalog_schema, out, row_count=len(out))
+            return out
+        except Exception as e:
+            # a socket-timeout / dropped poll surfaces here: reconnect + retry
+            last_err = e
+            from ..logmgr import log_exc
+            log_exc(f"databricks query attempt {attempt + 1}/{retries + 1} failed; "
+                    f"reconnecting", e, level="warning")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    raise last_err
 
 # >>> discover column_name + data_type via DESCRIBE catalog.schema.table (col 0 = name, col 1 = type) <<< #
 def _discover_columns_databricks(cursor, catalog, schema, table):
@@ -202,6 +275,7 @@ def _col_where_and_label_databricks(tbl_cfg, db_path, vintage):
     resolve_date_format(date_filter, tbl_cfg)
     date_col = tbl_cfg["date_col"]
     orig_where = (tbl_cfg.get("where") or "").strip()
+    base_where = (tbl_cfg.get("_base_where", orig_where) or "").strip()
     bounds = (tbl_cfg.get("_date_bounds") or "").strip()
     eff_dtype = date_filter.get("date_dtype")
     eff_fmt = date_filter.get("date_format")
@@ -209,12 +283,12 @@ def _col_where_and_label_databricks(tbl_cfg, db_path, vintage):
     if date_filter["filter_type"] == "between":
         dw = build_date_range_with_gaps(
             date_col, date_filter["dates"], eff_dtype, date_format=eff_fmt)
-        where = f"{dw} AND ({orig_where})" if orig_where else dw
+        where = f"{dw} AND ({base_where})" if base_where else dw
         dt_label, ret_vintage = (None, table_vintage) if buckets else ("all", "all")
     elif date_filter["filter_type"] == "in_list":
         dw = build_date_in_clause(
             date_col, date_filter["dates"], eff_dtype, date_format=eff_fmt)
-        where = f"{dw} AND ({orig_where})" if orig_where else dw
+        where = f"{dw} AND ({base_where})" if base_where else dw
         dt_label, ret_vintage = "sample", "all"
     elif bounds:
         where = f"{bounds} AND ({orig_where})" if orig_where else bounds

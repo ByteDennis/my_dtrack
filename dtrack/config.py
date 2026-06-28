@@ -1,7 +1,50 @@
 
+import csv as _csv
 import json
+import os
 import re
 from pathlib import Path
+
+# >>> sidecar CSV (next to the config) holding ALL pairs' col_map: pair,left,right <<< #
+def col_mapping_path(config_path):
+    d = os.path.dirname(os.path.abspath(str(config_path))) or "."
+    return os.path.join(d, "column_mapping.csv")
+
+# >>> read column_mapping.csv -> {pair: {left: right}} (pair is the first column) <<< #
+def read_col_mapping(config_path):
+    path = col_mapping_path(config_path)
+    out = {}
+    if not os.path.exists(path):
+        return out
+    try:
+        with open(path, newline="") as f:
+            for row in _csv.DictReader(f):
+                row = {(k or "").strip().lower(): (v or "").strip()
+                       for k, v in row.items()}
+                p, lc, rc = row.get("pair"), row.get("left"), row.get("right")
+                if p and lc:
+                    out.setdefault(p, {})[lc] = rc or lc
+    except Exception:
+        return {}
+    return out
+
+# >>> write every pair's col_map to column_mapping.csv (pair,left,right) <<< #
+def write_col_mapping(config, config_path):
+    path = col_mapping_path(config_path)
+    rows = []
+    for pname, pcfg in (config.get("pairs") or {}).items():
+        for left, right in (pcfg.get("col_map") or {}).items():
+            rows.append((pname, left, right))
+    if not rows:
+        if os.path.exists(path):
+            os.remove(path)
+        return None
+    with open(path, "w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(["pair", "left", "right"])
+        for p, lc, rc in rows:
+            w.writerow([p, lc, rc])
+    return path
 
 # >>> Derive a safe identifier for a side from its `table` field <<< #
 def _derive_side_name(side_cfg, pair_name):
@@ -85,20 +128,28 @@ def load_unified_config(config_path):
 
     validate_unified_config(config)
 
+    # col_map lives in column_mapping.csv (not pairs.json); inject it so every
+    # reader sees pcfg["col_map"]. Inline col_map in the JSON still wins.
+    mapping = read_col_mapping(config_path)
     for pair_name, pair_cfg in config.get("pairs", {}).items():
         for side in ("left", "right"):
             side_cfg = pair_cfg.get(side, {})
             if "name" not in side_cfg:
                 side_cfg["name"] = _derive_side_name(side_cfg, pair_name)
+        if not pair_cfg.get("col_map") and pair_name in mapping:
+            pair_cfg["col_map"] = mapping[pair_name]
 
     return config
 
 # >>> Save unified configuration to JSON file <<< #
 def save_unified_config(config, config_path):
     import copy
+    # col_map -> column_mapping.csv; strip it from the JSON we write
+    write_col_mapping(config, config_path)
     out = copy.deepcopy(config)
     # >>> strip a side's name only when it matches the table-derived one, so divergent names survive reload <<< #
     for pair_name, pair_cfg in out.get("pairs", {}).items():
+        pair_cfg.pop("col_map", None)
         for side in ("left", "right"):
             side_cfg = pair_cfg.get(side, {})
             if side_cfg.get("name") == _derive_side_name(side_cfg, pair_name):
