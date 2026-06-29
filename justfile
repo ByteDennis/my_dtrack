@@ -1,24 +1,15 @@
 # dtrack — quick start
+#   just pipx       editable install (recommended; .py live on next serve, js/html on refresh)
+#   just pipx-prod  frozen install   ·   just pipx-reinstall  rebuild venv (deps changed)
+#   just serve      web UI on :8080   ·   just serve-reload    auto-restart on .py edits
+#   just init       initialize SQLite db   ·   just doctor      resolved env-file/macros/AWS vars
 #
-#   just pipx               editable install (RECOMMENDED on remote)
-#                            edits to .py take effect on next `just serve`
-#                            edits to static/*.js & templates/*.html
-#                            are picked up on browser refresh (no restart)
-#   just pipx-prod          non-editable install (frozen copy)
-#   just pipx-reinstall     rebuild venv (use when deps change)
-#   just serve              run web UI on :8080
-#   just serve-reload       uvicorn --reload (auto-restart on .py edits)
-#   just init               initialize SQLite db
-#   just doctor             show resolved env-file + macros + AWS vars
-#
-# Required env (dtrack.conf | .env | dtrack.env): PCDS_USR, <macro>_pwd for
-# Oracle; AWS_DEFAULT_REGION, AWS_S3_WORK_GROUP, AWS_S3_STAGING_DIR for Athena.
-# Override env-file path with --env=/path or DTRACK_ENV_FILE=/path.
-# Add Oracle macros not in MACRO2SVC via DTRACK_ORACLE_MACROS=pb40:svc_x,pb50:svc_y.
+# Env (dtrack.conf | .env | dtrack.env): Oracle PCDS_USR + <macro>_pwd; Athena
+# AWS_DEFAULT_REGION/_S3_WORK_GROUP/_S3_STAGING_DIR. Override path with --env=PATH or
+# DTRACK_ENV_FILE. Extra Oracle macros: DTRACK_ORACLE_MACROS=pb40:svc_x,pb50:svc_y.
 
-# Shared working dir for BOTH the web UI and the e2e/CLI pipeline: holds
-# pairs.json (config), project.db, and csv/ sas/ output/. Point web + cli at
-# the same workdir so they operate on one project.
+# Shared workdir for web UI + e2e/CLI: holds pairs.json, project.db, csv/ sas/ output/.
+# Point web + cli at the same dir to share one project.
 workdir := "testing"
 db := workdir + "/project.db"
 port := "8080"
@@ -26,31 +17,25 @@ port := "8080"
 # Base dir for the live e2e pipeline; outputs land in {{e2edir}}/{csv,sas,output}
 e2edir := workdir
 
-# Run a subset of pairs from a dedicated config. Drop per-set files in
-# {{configdir}}/ (e.g. tableA.json, tableB.json), each holding only its own
-# `pairs`, then select one with `just pair=tableA e2e ...`. All sets share
-# {{db}}; the HTML output and skip-cache (.state) are namespaced by the set
-# name so sets never clobber each other. No pair= => {{workdir}}/pairs.json
-# (the same config the web UI uses).
+# Pair-subset run: drop {{configdir}}/NAME.json (only its `pairs`), select via
+# `just pair=NAME e2e ...`. Sets share {{db}}; HTML + .state are namespaced by NAME
+# so they don't clobber. No pair= => {{workdir}}/pairs.json (the web UI's config).
 pair := ""
 configdir := workdir
 config := if pair == "" { workdir + "/pairs.json" } else { configdir + "/" + pair + ".json" }
 suffix := if pair == "" { "" } else { "_" + pair }
 
-# Where e2e comparison reports (compare_{row,col}[_pair].{html,xlsx}) are
-# written. Override to keep e2e output separate from the web UI's output dir,
-# e.g. when running web + e2e at once:  just resultdir=testing/e2e_out e2e all
+# Where e2e reports (compare_{row,col}[_pair].{html,xlsx}) land. Override to keep
+# separate from the web UI output: just resultdir=testing/e2e_out e2e all
 resultdir := e2edir + "/output"
 
 # Unified pipeline log (every CLI command + errors). See `just logs`.
 export DTRACK_LOG := e2edir + "/output/run.log"
 
-# Explicit col-mapping file for `e2e col` (CSV: pair,left,right). Optional —
-# if it doesn't exist, match-columns just falls back to auto + col_rules.
+# Optional col-mapping for `e2e col` (CSV: pair,left,right); absent => auto + col_rules.
 mapcsv := e2edir + "/csv/col_map.csv"
 
-# Set force=1 to ignore the e2e skip-cache and re-run every expensive stage:
-#   just force=1 e2e all
+# force=1 ignores the e2e skip-cache and re-runs every expensive stage.
 force := ""
 
 # Key column for sample-hash / col-sample (just key=cust_id col-sample).
@@ -152,61 +137,35 @@ compare-col *args:
 
 # incremental col-stats compare: per vintage window, pull each side -> tmp CSV ->
 # local DuckDB stats -> upsert _col_stats + compare (bounded memory). Self-contained:
-# discovers dates via its own per-date COUNT(*) (reuses _row_counts if loaded) and
-# compares col stats on COUNT-MATCH dates only. No prior row-compare needed.
-#   just compare-csv --vintage month            # all pairs, monthly windows
-#   just force=1 compare-csv                      # re-pull (ignore skip-cache)
-#   just compare-csv --key acct,sub --sample 500     # 500 fixed keys/window (raw IN-list)
-#   just compare-csv --key acct,sub --sample 0.1      # 10% via hash-bucket pushdown
-#   just compare-csv --verbose                        # print full SQL (default: concise)
-# FRAC sampling pushes hash32(norm(key)) < FRAC*2^32 to both sides (same records on
-# every backend, normalized, order-independent); INT uses a raw-key IN-list.
-# --data-dir (must exist) = transient per-vintage scratch (raw pulls + csv/sql + .state,
-# replaced each window); project.db + {pair}_compare_col.csv persist by the project db.
-# skip-cache is the DEFAULT: already-loaded windows are skipped; a changed
-# sample/key/col_filter/preset/vintage auto-re-pulls. force=1 re-pulls everything.
+# discovers dates via its own per-date COUNT(*) on COUNT-MATCH dates; no prior row-compare.
+#   just compare-csv --vintage month                  # all pairs, monthly windows
+#   just force=1 compare-csv                           # re-pull (ignore skip-cache)
+#   just compare-csv --key acct,sub --sample 500       # 500 fixed keys/window (raw IN-list)
+#   just compare-csv --key acct,sub --sample 0.1       # 10% via hash32(norm key) pushdown
+#   just compare-csv --verbose                         # print full SQL (default: concise)
+# --data-dir (must exist) = transient per-window scratch; project.db + {pair}_compare_col.csv
+# persist. Skip-cache is default; changed sample/key/col_filter/preset/vintage auto-re-pulls.
+#
+# incremental col-stats compare per vintage window (bounded memory; details above)
 compare-csv *args:
     dtrack compare-csv {{db}} --config {{config}} {{ if pair == "" { "" } else { "--pair " + pair } }} {{ if force == "" { "" } else { "--force" } }} {{args}}
 
-# --- live e2e pipeline: real backends -> HTML -----------------------------
-# Single entry point. type = row | col-gen | col-run | col | all. Outputs land
-# in {{e2edir}}/output/compare_{row,col}[_<pair>].html. Override the backend
-# with `just config=my_live.json e2e all`, or pick a pair-subset config with
-# `just pair=tableA e2e ...` (see the pair/configdir vars above).
+# --- live e2e pipeline: real backends -> HTML ---------------------------------
+# Single entry point. type = row | col-gen | col-run | col | all (default all).
+# Reports land in {{resultdir}}/compare_{row,col}[_<pair>].html. Subcommand +
+# flag-forwarding details: `just help e2e`. Key rules:
+#  - row BEFORE col: col SQL is scoped to the dates row-compare matched, so `col*`
+#    alone needs a prior `just e2e row` (or `all`); `all` enforces it.
+#  - col-gen writes csv/extract_col.<platform>.sql and STOPS; review it, then col-run
+#    executes the SAME file via run-sql (mirrors the web flow, no regenerate).
+#  - extraction flags (--vintage --preset --stats-override --from/--to-date) bake into
+#    the SQL at col-gen; on col-run only --vintage/date flags still reach compare-col.
+#  - discover-columns runs once per invocation (shared sentinel), in the row phase.
+#  - skip-cache (default): row-extract/discover/col-extract drop a {{e2edir}}/.state
+#    sentinel and skip while it exists; load/compare/match always re-run. Bypass with
+#    `just force=1 e2e ...` or wipe via `just e2e-clean`.
 #
-#   row     : generate extract_row.<platform>.sql -> run-sql -> discover -> load-row -> compare-row
-#   col-gen : discover-columns -> match-columns (auto)
-#             -> `dtrack generate` writes csv/extract_col.<platform>.sql, then STOPS (no run)
-#   col-run : `dtrack run-sql` executes the generated SQL -> load-col -> compare-col
-#   col     : col-gen then col-run (no pause)
-#   all     : row, then col
-#
-# Mirrors the web col_gen flow: matching happens BEFORE the col SQL is
-# generated, so extract_col.sql is scoped to the matched col_map. `col-gen`
-# uses `dtrack generate` (writes SQL only, never runs; one
-# extract_col.<platform>.sql per platform so they don't clobber), then
-# `col-run` runs the reviewed file via `dtrack run-sql` (mirrors the web
-# /api/extract/run-sql — executes the SAME extract_col.<platform>.sql block by
-# block, not a regenerate). Extraction flags (--vintage --preset
-# --stats-override --from/--to-date) are baked into the SQL at `col-gen`, so
-# put them on col-gen; on col-run only --vintage / date flags still matter (they
-# reach compare-col). Matching is automatic (auto-match + --map-csv + the pair's
-# saved col_rules); annotate columns in the web col_mapping page, not the CLI.
-#
-# discover-columns (load-columns -> _column_meta + csv/{qname}_columns.csv)
-# runs once per invocation (shared `discover` sentinel); it lands in the row
-# phase so column/datatype metadata is downloaded as early as `just e2e row`.
-#
-# col SQL is filtered to the matching dates row-compare wrote, so the row
-# phase MUST finish first. `all` enforces this; running `col*` on its own
-# REQUIRES a prior `just e2e row` (or `all`) to have populated _row_comparison.
-#
-# SKIP-CACHE: the expensive backend stages (row extract, discover, col
-# extract) drop a sentinel in {{e2edir}}/.state/ on success and are
-# skipped while it exists. The cheap local steps (load / compare / match)
-# always re-run, so reports stay fresh and the DB is repopulated from the
-# cached CSVs even after a reset. Force a fresh pull with `just force=1 e2e
-# ...` or wipe the cache with `just e2e-clean`.
+# live e2e pipeline: row|col-gen|col-run|col|all -> HTML (run `just help e2e`)
 e2e type="all" *flags:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -298,15 +257,13 @@ e2e type="all" *flags:
         all)     do_row; do_col_gen; do_col_run ;;
     esac
 
-# clean e2e artifacts under {{e2edir}}, by distance from the backend. Each tier
-# is a superset of the one above. level: reports | rebuild | all (default rebuild)
-#   reports = compare_*.{html,xlsx} only       -> re-compare (instant, reads project.db)
-#   rebuild = + project.db* + .state/*.done     -> re-load+compare; KEEPS csv/ extracts
-#             sentinels                            & .state caches (query db + csv.duckdb)
-#                                                  -> NO backend hit
-#   all     = + .state (cached query db + materialized csv.duckdb) + csv/ extracts
-#                                               -> full re-extract (HITS backend)
-#   kept always: pairs.json, output/run.log
+# clean e2e artifacts under {{e2edir}}, by distance from the backend (each tier a
+# superset). level: reports | rebuild | all (default rebuild). Always keeps pairs.json + run.log.
+#   reports = compare_*.{html,xlsx}            -> re-compare (instant, reads project.db)
+#   rebuild = + project.db* + .state/*.done    -> re-load+compare; KEEPS csv/ + .state caches (no backend)
+#   all     = + .state caches + csv/ extracts  -> full re-extract (HITS backend)
+#
+# clean e2e artifacts: reports | rebuild | all (default rebuild)
 e2e-clean level="rebuild":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -326,6 +283,8 @@ e2e-clean level="rebuild":
 # sample N rows by key from both sides -> value + backend hash16 to excel (debug hash_sum)
 #   just key=cust_id sample-hash                 # all pairs, n=20
 #   just key=cust_id pair=tableA sample-hash -n 50
+#
+# sample N rows by key, both sides -> value + hash16 to excel (debug hash_sum)
 sample-hash *args:
     dtrack sample-hash {{db}} --config {{config}} --key {{key}} {{ if pair == "" { "" } else { "--pair " + pair } }} --out {{e2edir}}/output/sample_hash{{suffix}}.xlsx {{args}}
 
@@ -334,6 +293,8 @@ sample-hash *args:
 #   just key=cust_id col-sample -n 50 --cols amt,ccy
 #   just key=cust_id pair=tableA col-sample --sample-cols 5 --vintage month
 # then execute the generated SQL:  just force=1 [pair=NAME] e2e col-run
+#
+# deterministic key+col sample -> where_map + col SQL only (generate, no run)
 col-sample *args:
     dtrack col-sample {{db}} --config {{config}} --key {{key}} {{ if pair == "" { "" } else { "--pair " + pair } }} --outdir {{e2edir}} {{args}}
 
@@ -342,6 +303,8 @@ col-sample *args:
 #   just key=acct,sub sample-key -n -1               # key anti-join report
 #   just key=acct,sub sample-key --gen-col           # where_map + col SQL only
 #   just key=acct,sub sample-key --gen-col --out {{e2edir}}/output/sk.xlsx   # both
+#
+# unified composite-key sampler (supersedes sample-hash + col-sample)
 sample-key *args:
     dtrack sample-key {{db}} --config {{config}} --key {{key}} {{ if pair == "" { "" } else { "--pair " + pair } }} --outdir {{e2edir}} {{args}}
 

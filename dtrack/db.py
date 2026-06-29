@@ -1775,3 +1775,62 @@ def delete_col_stats_for_tables(db_path: str, tables) -> int:
         for t in tables:
             n += c.execute("DELETE FROM _col_stats WHERE source_table = ?", (t,)).rowcount
     return n
+
+# >>> drop the compare-csv run signature for a pair (forces re-evaluation next run) <<< #
+def delete_compare_csv_sig(db_path: str, pair_name: str) -> None:
+    with sqlite3.connect(db_path) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS _compare_csv_state "
+                  "(pair_name TEXT PRIMARY KEY, signature TEXT, created_at TEXT)")
+        c.execute("DELETE FROM _compare_csv_state WHERE pair_name = ?", (pair_name,))
+
+# >>> drop _row_counts rows for the given source tables <<< #
+def delete_row_counts_for_tables(db_path: str, tables) -> int:
+    n = 0
+    with sqlite3.connect(db_path) as c:
+        for t in tables:
+            try:
+                n += c.execute("DELETE FROM _row_counts WHERE source_table = ?",
+                               (t,)).rowcount
+            except sqlite3.OperationalError:
+                pass
+    return n
+
+# >>> drop a pair's saved comparisons (_row_comparison + _col_comparison) <<< #
+def delete_comparisons_for_pair(db_path: str, pair_name: str) -> None:
+    with sqlite3.connect(db_path) as c:
+        for tbl in ("_row_comparison", "_col_comparison"):
+            try:
+                c.execute(f"DELETE FROM {tbl} WHERE pair_name = ?", (pair_name,))
+            except sqlite3.OperationalError:
+                pass
+
+_CCSV_KEYS_DDL = ("CREATE TABLE IF NOT EXISTS _compare_csv_keys "
+                  "(pair_name TEXT, bucket TEXT, key_json TEXT, created_at TEXT, "
+                  "PRIMARY KEY (pair_name, bucket))")
+
+# >>> persist a bucket's sampled key tuples for a pair (resume reuses them; no loose files) <<< #
+def save_sampled_keys(db_path: str, pair_name: str, bucket: str, ktuples) -> None:
+    import json
+    from datetime import datetime
+    with sqlite3.connect(db_path) as c:
+        c.execute(_CCSV_KEYS_DDL)
+        c.execute("INSERT OR REPLACE INTO _compare_csv_keys "
+                  "(pair_name, bucket, key_json, created_at) VALUES (?, ?, ?, ?)",
+                  (pair_name, bucket, json.dumps([list(t) for t in ktuples]),
+                   datetime.now().isoformat()))
+
+# >>> read a bucket's saved sampled key tuples (None if not stored) <<< #
+def get_sampled_keys(db_path: str, pair_name: str, bucket: str):
+    import json
+    with sqlite3.connect(db_path) as c:
+        c.execute(_CCSV_KEYS_DDL)
+        row = c.execute("SELECT key_json FROM _compare_csv_keys "
+                        "WHERE pair_name = ? AND bucket = ?",
+                        (pair_name, bucket)).fetchone()
+    return [tuple(t) for t in json.loads(row[0])] if row else None
+
+# >>> drop a pair's saved sampled keys (clean) <<< #
+def delete_sampled_keys(db_path: str, pair_name: str) -> None:
+    with sqlite3.connect(db_path) as c:
+        c.execute(_CCSV_KEYS_DDL)
+        c.execute("DELETE FROM _compare_csv_keys WHERE pair_name = ?", (pair_name,))

@@ -26,6 +26,25 @@ from .base import (
     _mask_stats_in_rows,
 )
 
+# >>> int env knob with a safe default; shared by the Databricks resilience knobs <<< #
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+# >>> per-request socket timeout (s); a stuck poll raises instead of hanging <<< #
+def _dbx_socket_timeout():
+    return _env_int("DTRACK_DATABRICKS_SOCKET_TIMEOUT", 600)
+
+# >>> server-side + poll deadline (s); 0 disables <<< #
+def _dbx_timeout():
+    return _env_int("DTRACK_DATABRICKS_TIMEOUT", 1800)
+
+# >>> transient-failure retry budget for REST calls / link fetches <<< #
+def _dbx_retries():
+    return _env_int("DTRACK_DATABRICKS_RETRIES", 2)
+
 # >>> Spark-SQL flavor of athena._athena_portable_hash16 (same 16-bit MD5 recipe, Databricks dialect) <<< #
 def _databricks_portable_hash16(value_sql):
     return (
@@ -96,10 +115,7 @@ def databricks_connect(catalog_schema=None):
     }
     # socket timeout so a submitted statement whose poll stops responding
     # raises instead of hanging forever (the run can then reconnect/retry).
-    try:
-        sock = int(os.environ.get("DTRACK_DATABRICKS_SOCKET_TIMEOUT", "600"))
-    except ValueError:
-        sock = 600
+    sock = _dbx_socket_timeout()
     if sock > 0:
         kwargs["_socket_timeout"] = sock
     resolved = _resolve_catalog_schema(catalog_schema)
@@ -108,10 +124,7 @@ def databricks_connect(catalog_schema=None):
     conn = dbx_sql.connect(**kwargs)
     # server-side query timeout so a long/stuck statement fails instead of
     # hanging the run forever. DTRACK_DATABRICKS_TIMEOUT seconds (0 disables).
-    try:
-        secs = int(os.environ.get("DTRACK_DATABRICKS_TIMEOUT", "1800"))
-    except ValueError:
-        secs = 1800
+    secs = _dbx_timeout()
     if secs > 0:
         try:
             c = conn.cursor()
@@ -181,14 +194,8 @@ def _rest_request(method, host, path, body=None):
     import urllib.request
     url = f"https://{host}{path}"
     data = json.dumps(body).encode() if body is not None else None
-    try:
-        timeout = int(os.environ.get("DTRACK_DATABRICKS_SOCKET_TIMEOUT", "600"))
-    except ValueError:
-        timeout = 600
-    try:
-        tries = int(os.environ.get("DTRACK_DATABRICKS_RETRIES", "2"))
-    except ValueError:
-        tries = 2
+    timeout = _dbx_socket_timeout()
+    tries = _dbx_retries()
     from ..logmgr import log_exc
     last = None
     for attempt in range(tries + 1):
@@ -216,17 +223,54 @@ def _rest_request(method, host, path, body=None):
             time.sleep(2 ** attempt)
     raise last
 
-# >>> gather every result chunk for a finished statement into row dicts <<< #
+# >>> default result disposition; EXTERNAL_LINKS avoids the 25 MiB INLINE cap on big pulls <<< #
+def _dbx_disposition():
+    d = (os.environ.get("DTRACK_DATABRICKS_DISPOSITION") or "EXTERNAL_LINKS").strip().upper()
+    return "INLINE" if d == "INLINE" else "EXTERNAL_LINKS"
+
+# >>> fetch one EXTERNAL_LINKS presigned chunk (plain GET, NO auth header) -> JSON_ARRAY rows <<< #
+def _fetch_external_link(url):
+    import json
+    import time
+    import urllib.error
+    import urllib.request
+    timeout = _dbx_socket_timeout()
+    tries = _dbx_retries()
+    from ..logmgr import log_exc
+    last = None
+    for attempt in range(tries + 1):
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=max(timeout, 60)) as resp:
+                return json.loads(resp.read().decode())
+        except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            last = e
+            log_exc(f"databricks external_link fetch failed "
+                    f"(attempt {attempt + 1}/{tries + 1})", e, level="warning")
+            if attempt < tries:
+                time.sleep(2 ** attempt)
+    raise last
+
+# >>> gather every result chunk (inline data_array or EXTERNAL_LINKS) into row dicts <<< #
 def _rest_collect_rows(host, statement_id, payload):
     manifest = payload.get("manifest") or {}
     schema = (manifest.get("schema") or {}).get("columns") or []
     cols = [(c.get("name", "").lower(), c.get("type_name", "")) for c in schema]
     rows = []
 
-    def _add(result):
-        for arr in (result or {}).get("data_array") or []:
+    def _emit(data_array):
+        for arr in data_array or []:
             rows.append({cols[i][0]: _dbx_coerce(v, cols[i][1])
                          for i, v in enumerate(arr)})
+
+    def _add(result):
+        result = result or {}
+        if result.get("data_array") is not None:
+            _emit(result.get("data_array"))
+        for link in result.get("external_links") or []:
+            url = link.get("external_link")
+            if url:
+                _emit(_fetch_external_link(url))
 
     result = payload.get("result") or {}
     _add(result)
@@ -244,10 +288,7 @@ _DBX_TERMINAL = {"SUCCEEDED", "FAILED", "CANCELED", "CLOSED"}
 # >>> poll a submitted statement to a terminal state and return its final payload <<< #
 def _rest_poll(host, statement_id, payload):
     import time
-    try:
-        deadline = int(os.environ.get("DTRACK_DATABRICKS_TIMEOUT", "1800"))
-    except ValueError:
-        deadline = 1800
+    deadline = _dbx_timeout()
     waited = 0
     state = ((payload.get("status") or {}).get("state") or "").upper()
     while state not in _DBX_TERMINAL:
@@ -317,7 +358,7 @@ def _query_databricks_rest(sql, catalog_schema=None):
             "warehouse_id": warehouse_id,
             "statement": statement,
             "wait_timeout": "0s",
-            "disposition": "INLINE",
+            "disposition": _dbx_disposition(),
             "format": "JSON_ARRAY",
         }
         if catalog:
@@ -351,10 +392,7 @@ def _query_databricks(sql, catalog_schema=None):
     cached = cache_get(sql, catalog_schema)
     if cached is not None:
         return cached
-    try:
-        retries = int(os.environ.get("DTRACK_DATABRICKS_RETRIES", "2"))
-    except ValueError:
-        retries = 2
+    retries = _dbx_retries()
     last_err = None
     for attempt in range(retries + 1):
         conn = databricks_connect(catalog_schema)

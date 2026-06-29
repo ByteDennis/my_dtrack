@@ -143,9 +143,20 @@ def load_unified_config(config_path):
 
     return config
 
+# >>> back up the config to <path>.bk before a recipe runs or overwrites it (one rolling backup) <<< #
+def backup_config(config_path):
+    import shutil
+    src = Path(config_path)
+    if src.exists():
+        try:
+            shutil.copy2(src, src.with_suffix(src.suffix + ".bk"))
+        except OSError:
+            pass
+
 # >>> Save unified configuration to JSON file <<< #
 def save_unified_config(config, config_path):
     import copy
+    backup_config(config_path)
     write_col_mapping(config, config_path)
     out = copy.deepcopy(config)
     # >>> strip a side's name only when it matches the table-derived one, so divergent names survive reload <<< #

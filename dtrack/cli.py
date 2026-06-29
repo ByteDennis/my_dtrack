@@ -1184,6 +1184,7 @@ def cmd_compare_csv(args):
         workers=getattr(args, 'workers', None),
         force=getattr(args, 'force', False),
         verbose=getattr(args, 'verbose', False),
+        clean=getattr(args, 'clean', None),
     )
 
 # >>> sample-key: composite-key value+hash dump (--out/default) and/or col-sample gen (--gen-col) <<< #
@@ -1221,7 +1222,8 @@ def _log_strict_summary(config_path):
         config = load_unified_config(config_path)
     except Exception:
         return
-    env_on = os.environ.get('DTRACK_STRICT', '') not in ('', '0', 'false', 'False', 'no')
+    from .platforms.base import strict_env_on
+    env_on = strict_env_on()
     log = get_logger()
     for pname, pcfg in (config.get("pairs") or {}).items():
         if pcfg.get("skip"):
@@ -1517,6 +1519,11 @@ def main():
     p.add_argument('--verbose', action='store_true',
                    help='Print full backend SQL and per-block extract progress (default: one '
                         'concise line per step with rows + seconds; full detail always goes to run.log)')
+    p.add_argument('--clean', choices=['marks', 'cache', 'all'],
+                   help='Reset before running (3 tiers): marks = clear the run signature '
+                        '(re-evaluate skip); cache = + drop this pair\'s _col_stats/_row_counts/'
+                        'comparisons/sampled-keys + .state caches (re-pull/recompute); '
+                        'all = + delete project.db and wipe --data-dir scratch')
 
     p = sub.add_parser('gen-aws', help='Extract data from AWS Athena')
     p.add_argument('config')

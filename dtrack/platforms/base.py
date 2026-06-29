@@ -30,8 +30,7 @@ def cache_db_path(outdir):
 # >>> Enable per-process query caching at the given .cache.db path <<< #
 def set_cache_db(path):
     global _cache_db, _cache_hits, _cache_misses
-    if (os.environ.get('DTRACK_QUERY_CACHE') == '0'
-            or os.environ.get('DTRACK_ATHENA_CACHE') == '0'):
+    if os.environ.get('DTRACK_QUERY_CACHE') == '0':
         _cache_db = None
         return
     if path is None:
@@ -1420,6 +1419,10 @@ def _hash16_flat_expr(dialect, col_expr):
         return f"SUM(CAST({_athena_portable_hash16(col_expr)} AS DOUBLE))"
     raise ValueError(f"unknown dialect {dialect!r} for hash16 flat expr")
 
+# >>> truthiness of the DTRACK_STRICT env flag (single source for cli + compare) <<< #
+def strict_env_on():
+    return os.environ.get('DTRACK_STRICT', '') not in ('', '0', 'false', 'False', 'no')
+
 # >>> resolve STRICT mode: explicit arg > per-pair config > DTRACK_STRICT env <<< #
 def _resolve_strict(tbl_cfg, strict=None, col=None):
     v = strict if strict is not None else (tbl_cfg or {}).get('strict')
@@ -1430,8 +1433,7 @@ def _resolve_strict(tbl_cfg, strict=None, col=None):
         return (col or '').strip().lower() in cols
     if v is not None:
         return bool(v)
-    import os
-    return os.environ.get('DTRACK_STRICT', '') not in ('', '0', 'false', 'False', 'no')
+    return strict_env_on()
 
 # >>> STRICT value family derived from dtype: date | numeric | string <<< #
 def _strict_family(dtype, numeric):

@@ -12,7 +12,7 @@ from .date_utils import bucket_date, parse_date
 from .platforms.base import qualified_name, quote_ident, build_date_bounds_clause
 from .compare import (
     _dialect, _full_table_and_cte, _run_query,
-    compare_column_stats, _has_col_differences,
+    compare_column_stats, _has_col_differences, compare_row_counts,
     _key_in_clause, _hash16_expr, _limit,
     _hash32_expr, HASH_BUCKET_SPACE,
 )
@@ -20,6 +20,8 @@ from .db import (
     get_column_meta, get_metadata, get_col_stats, get_row_counts,
     get_pair_col_map_from_db, save_col_comparison, register_table_pair,
     get_compare_csv_sig, set_compare_csv_sig, delete_col_stats_for_tables,
+    upsert_row_counts, save_row_comparison,
+    save_sampled_keys, get_sampled_keys,
 )
 from .loader import load_precomputed_col_stats
 from .extract import extract_all
@@ -161,7 +163,7 @@ def _date_counts(project_db, tbl, from_date, to_date):
         out[k] = out.get(k, 0) + int(r.get("cnt") or 0)
     return out
 
-# >>> count-MATCH dates for a pair; reuse _row_counts if loaded, else live COUNT(*) <<< #
+# >>> count-MATCH dates for a pair; reuse _row_counts if loaded, else live COUNT(*) (persisted) <<< #
 def _matched_dates(project_db, pname, left, right, tl, tr, from_date, to_date):
     rl = {dt: c for dt, c in get_row_counts(project_db, tl, from_date, to_date) if dt}
     rr = {dt: c for dt, c in get_row_counts(project_db, tr, from_date, to_date) if dt}
@@ -170,12 +172,31 @@ def _matched_dates(project_db, pname, left, right, tl, tr, from_date, to_date):
         rl = _date_counts(project_db, left, from_date, to_date)
         rr = _date_counts(project_db, right, from_date, to_date)
         origin = "live COUNT(*)"
+        upsert_row_counts(project_db, tl, [(dt, c) for dt, c in rl.items()])
+        upsert_row_counts(project_db, tr, [(dt, c) for dt, c in rr.items()])
     common = set(rl) & set(rr)
     matched = sorted(dt for dt in common if rl[dt] == rr[dt])
     print(f"[compare-csv] {pname}: dates from {origin} -> "
           f"{len(matched)} count-match, {len(common) - len(matched)} count-diff, "
           f"{len(set(rl) ^ set(rr))} single-side")
-    return matched, rl
+    return matched, rl, rr
+
+# >>> persist the pair's row-count comparison (_row_comparison) so the row report renders, like e2e <<< #
+def _save_row_compare(project_db, pname, tl, tr, rl, rr, from_date, to_date):
+    rc = compare_row_counts(project_db, tl, tr, from_date, to_date)
+    ov_start = ov_end = None
+    if rl and rr:
+        ov_start = max(min(rl), min(rr))
+        ov_end = min(max(rl), max(rr))
+        if ov_start > ov_end:
+            ov_start = ov_end = None
+    matching = [dt for dt, _ in rc["matching"]]
+    non_matching = [dt for dt, _, _ in rc["mismatched"]]
+    excluded = [dt for dt, _ in rc["only_left"]] + [dt for dt, _ in rc["only_right"]]
+    save_row_comparison(project_db, pname, ov_start, ov_end, matching, excluded,
+                        non_matching_dates=non_matching)
+    print(f"[compare-csv] {pname}: row compare -> {len(matching)} match, "
+          f"{len(non_matching)} diff, {len(excluded)} single-side")
 
 # >>> collapse a date list into maximal calendar-contiguous [start, end] runs (gaps split runs) <<< #
 def _contiguous_runs(dates):
@@ -363,10 +384,10 @@ def _quiet_extract(tag):
     if text:
         get_logger().info("[compare-csv] local stats %s:\n%s", tag, text)
 
-# >>> col stats over a pulled CSV: extract in transient scratch (fresh .state), persist col CSV + SQL to <project>/csv, upsert <<< #
+# >>> col stats over a pulled CSV in the transient scratch csv/ (fresh .state), upsert into project.db <<< #
 def _extract_and_load(project_db, src_tbl, csv_path, columns, real_qname,
                       date_col, dt_label, vintage, preset, stats_override,
-                      scratch_csv, persist_csv, tag, workers=None):
+                      scratch_csv, tag, workers=None):
     csv_cfg = {
         "name": tag, "table": tag, "source": "csv",
         "conn_macro": csv_path, "date_col": date_col,
@@ -385,31 +406,10 @@ def _extract_and_load(project_db, src_tbl, csv_path, columns, real_qname,
                     stats_override=stats_override, max_workers=workers)
     col_csv = os.path.join(scratch_csv, f"{qualified_name(csv_cfg)}_col.csv")
     _stamp_dt(col_csv, dt_label)
-    os.makedirs(persist_csv, exist_ok=True)
-    shutil.copy2(col_csv, os.path.join(
-        persist_csv, f"{qualified_name(csv_cfg)}_{_safe_name(dt_label)}_col.csv"))
-    sql_src = os.path.join(scratch_csv, "extract_col.sql")
-    if os.path.exists(sql_src):
-        shutil.copy2(sql_src, os.path.join(persist_csv, "extract_col.sql"))
     return load_precomputed_col_stats(
         db_path=project_db, csv_path=col_csv, table_name=real_qname,
         mode="upsert", source=src_tbl.get("source"),
         db_name=src_tbl.get("conn_macro"), vintage=vintage)
-
-# >>> persist / reload the LEFT sampled key tuples for a bucket so a resume reuses them (no re-sample) <<< #
-def _write_keys_csv(path, key_cols, ktuples):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", newline="") as f:
-        w = _csv.writer(f)
-        w.writerow(list(key_cols))
-        for t in ktuples:
-            w.writerow(list(t))
-
-def _read_keys_csv(path):
-    with open(path, newline="") as f:
-        r = _csv.reader(f)
-        next(r, None)
-        return [tuple(row) for row in r if row]
 
 # >>> bucket-keys already present in _col_stats for a table (skip-cache) <<< #
 def _loaded_buckets(project_db, qname, vintage):
@@ -423,15 +423,74 @@ def _loaded_buckets(project_db, qname, vintage):
                 out.add(dt)
     return out
 
+_CLEAN_LEVELS = ("marks", "cache", "all")
+
+# >>> 3-tier reset: marks=clear run signature; cache=+drop skip-driving db rows/stats/keys/caches; all=+delete project.db & --data-dir <<< #
+def _clean_compare_csv(project_db, config, targets, level, data_dir):
+    import glob
+    from .db import (delete_compare_csv_sig, delete_col_stats_for_tables,
+                     delete_row_counts_for_tables, delete_comparisons_for_pair,
+                     delete_sampled_keys, init_database)
+    pairs = config.get("pairs", {})
+    proj_dir = os.path.dirname(os.path.abspath(project_db)) or "."
+    bases = {b for b in (data_dir, proj_dir) if b}
+
+    if os.path.exists(project_db):
+        for pname in targets:
+            delete_compare_csv_sig(project_db, pname)
+    for b in bases:
+        for f in glob.glob(os.path.join(b, ".state*", "*.done")):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    print(f"[compare-csv] clean[{level}]: cleared run marks ({len(targets)} pair(s))")
+    if level == "marks":
+        return
+
+    if os.path.exists(project_db):
+        for pname in targets:
+            p = pairs.get(pname)
+            if not p:
+                continue
+            tl, tr = qualified_name(p["left"]), qualified_name(p["right"])
+            delete_col_stats_for_tables(project_db, [tl, tr])
+            delete_row_counts_for_tables(project_db, [tl, tr])
+            delete_comparisons_for_pair(project_db, pname)
+            delete_sampled_keys(project_db, pname)
+            vcsv = os.path.join(proj_dir, f"{_safe_name(pname)}_compare_col.csv")
+            if os.path.exists(vcsv):
+                os.remove(vcsv)
+    for b in bases:
+        shutil.rmtree(os.path.join(b, ".state"), ignore_errors=True)
+    print(f"[compare-csv] clean[{level}]: dropped col/row stats, comparisons, "
+          f"sampled keys, caches")
+    if level == "cache":
+        return
+
+    for suf in ("", "-wal", "-shm"):
+        try:
+            os.remove(project_db + suf)
+        except OSError:
+            pass
+    init_database(project_db)
+    if data_dir and os.path.isdir(data_dir):
+        for f in glob.glob(os.path.join(data_dir, "*")):
+            shutil.rmtree(f, ignore_errors=True) if os.path.isdir(f) else \
+                os.remove(f)
+    print("[compare-csv] clean[all]: removed project.db (re-init) + --data-dir scratch")
+
 # >>> per-vintage-window pull -> local DuckDB col stats -> upsert, then compare+save <<< #
 def run_compare_csv(project_db, config_path, pair=None, vintage=None,
                     from_date=None, to_date=None, preset=None,
                     stats_override=None, keep_csv=False, resume=False,
                     sample=None, key=None, data_dir=None, workers=None,
-                    force=False, verbose=False):
+                    force=False, verbose=False, clean=None):
     from .extract import _cfg_max_workers
+    from .config import backup_config
     global _VERBOSE
     _VERBOSE = verbose
+    backup_config(config_path)
     config = load_unified_config(config_path)
     if data_dir and not os.path.isdir(data_dir):
         raise ValueError(f"--data-dir does not exist: {data_dir!r} "
@@ -439,6 +498,11 @@ def run_compare_csv(project_db, config_path, pair=None, vintage=None,
     pairs = config.get("pairs", {})
     targets = ([pair] if pair else
                [n for n, p in pairs.items() if not p.get("skip")])
+
+    if clean:
+        if clean not in _CLEAN_LEVELS:
+            raise ValueError(f"--clean must be one of {_CLEAN_LEVELS}; got {clean!r}")
+        _clean_compare_csv(project_db, config, targets, clean, data_dir)
 
     cli_key_cols = [k.strip() for k in str(key).split(",") if k.strip()] if key else []
 
@@ -599,8 +663,9 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
         why = "--force" if force else "params changed"
         print(f"[compare-csv] {pname}: {why} -> clearing cache, re-pulling all")
 
-    matched, counts = _matched_dates(project_db, pname, left, right, tl, tr,
-                                     eff_from, eff_to)
+    matched, counts, rcounts = _matched_dates(project_db, pname, left, right, tl, tr,
+                                              eff_from, eff_to)
+    _save_row_compare(project_db, pname, tl, tr, counts, rcounts, eff_from, eff_to)
     if not matched:
         print(f"[compare-csv] {pname}: no count-matching dates; skipping")
         set_compare_csv_sig(project_db, pname, run_sig)
@@ -615,8 +680,6 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
     done_r = _loaded_buckets(project_db, tr, vintage) if skip_done else set()
 
     proj_dir = os.path.dirname(os.path.abspath(project_db)) or "."
-    persist_csv = os.path.join(proj_dir, "csv")
-    os.makedirs(persist_csv, exist_ok=True)
     scratch = data_dir or tempfile.mkdtemp(prefix="dtrack_ccsv_")
     cleanup_scratch = not data_dir and not keep_csv
     scratch_csv = os.path.join(scratch, "csv")
@@ -634,8 +697,9 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
 
     for bkey in sorted(buckets):
         dates = buckets[bkey]
+        span = f"{min(dates)}..{max(dates)}"
         if skip_done and bkey in done_l and bkey in done_r:
-            print(f"  {bkey}: already loaded; skip (--force to re-pull)")
+            print(f"  {bkey} [{span}]: already loaded; skip (--force to re-pull)")
         else:
             total = sum(counts.get(dt, 0) for dt in dates)
             key_in_l = key_in_r = None
@@ -646,16 +710,15 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
                 key_in_r = _hash_bucket_where(right, right_key_cols, fams, threshold)
                 sample_label = f"~{sample:g} hash-bucket"
             elif sample is not None and key_cols:
-                keys_csv = os.path.join(
-                    persist_csv, f"{_safe_name(pname)}_{_safe_name(bkey)}_keys.csv")
-                if not fresh and os.path.exists(keys_csv):
-                    ktuples = _read_keys_csv(keys_csv)
-                    print(f"  {bkey}: reusing {len(ktuples)} sampled key(s) from "
-                          f"{os.path.basename(keys_csv)}")
+                saved = None if fresh else get_sampled_keys(project_db, pname, bkey)
+                if saved is not None:
+                    ktuples = saved
+                    print(f"  {bkey} [{span}]: reusing {len(ktuples)} sampled "
+                          f"key(s) from project.db")
                 else:
                     ktuples = _window_keys(project_db, left, key_cols, dates, sample,
                                            normalize=key_normalize)
-                    _write_keys_csv(keys_csv, key_cols, ktuples)
+                    save_sampled_keys(project_db, pname, bkey, ktuples)
                 nkeys = len(ktuples)
                 key_in_l, key_in_r = _key_filters(left, right, key_cols,
                                                    right_key_cols, ktuples,
@@ -674,13 +737,13 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
             shutil.rmtree(state_dir, ignore_errors=True)
             nl = _extract_and_load(project_db, left, lc, lcols, tl, dc_left, bkey,
                                    vintage, preset, stats_override, scratch_csv,
-                                   persist_csv, "left", workers)
+                                   "left", workers)
             nr = _extract_and_load(project_db, right, rc, rcols, tr, dc_right, bkey,
                                    vintage, preset, stats_override, scratch_csv,
-                                   persist_csv, "right", workers)
+                                   "right", workers)
             keyinfo = (f" on {nkeys} sampled key(s)" if nkeys is not None
                        else (f" via {sample_label}" if sample_label else ""))
-            print(f"  {bkey}: {len(dates)} date(s) | records sample "
+            print(f"  {bkey} [{span}]: {len(dates)} date(s) | records sample "
                   f"{pl}/{total} (L) {pr}/{total} (R){keyinfo} | "
                   f"col-stats {nl}/{nr}")
         _vintage_compare(project_db, pname, tl, tr, col_map, bkey,

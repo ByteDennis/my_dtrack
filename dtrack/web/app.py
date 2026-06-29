@@ -3978,7 +3978,7 @@ def _s3_creds_status():
     remaining = None
     if _aws_creds_expires:
         remaining = max(0, int(_aws_creds_expires - time.time()))
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or ""
+    region = os.environ.get("AWS_DEFAULT_REGION") or ""
     return {"has_keys": has_keys, "ttl_seconds": remaining, "region": region}
 
 @app.get("/api/s3/creds")
