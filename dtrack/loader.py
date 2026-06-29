@@ -18,6 +18,13 @@ from .stats import compute_column_stats
 DATE_ALIASES = {'rpg_dt', 'eff_dt', 'dt', 'date', 'run_date', 'snap_dt', 'snapshot_dt', 'date_value'}
 COUNT_ALIASES = {'row_count', 'rowcount', 'count', 'cnt', 'rows'}
 
+# >>> canonicalize a date to YYYY-MM-DD (raw on failure) for stable min/max <<< #
+def _canon_date(d):
+    try:
+        return parse_date(d)
+    except (ValueError, TypeError):
+        return d
+
 # >>> Detect which column is the date column based on common aliases <<< #
 def detect_date_column(headers: List[str]) -> Optional[str]:
     for header in headers:
@@ -128,16 +135,21 @@ def load_row_counts(
     else:
         raise ValueError(f"Invalid mode: {mode}")
 
-    min_dt = min(dt for dt, _ in data_list) if data_list else None
-    max_dt = max(dt for dt, _ in data_list) if data_list else None
+    # canonicalize dt before min/max so metadata stays YYYY-MM-DD (matches the
+    # col loader); a raw source format like hadoop's compact YYYYMMDD would
+    # otherwise mix with canonical values and pick min/max from different shapes
+    canon_dts = [_canon_date(dt) for dt, _ in data_list]
+    min_dt = min(canon_dts) if canon_dts else None
+    max_dt = max(canon_dts) if canon_dts else None
 
     if mode == "upsert" and (min_dt or max_dt):
         existing = get_metadata(db_path, table_name)
         if existing:
+            # canonicalize existing too so a previously-stored raw value heals
             if existing.get("min_date_loaded") and min_dt:
-                min_dt = min(min_dt, existing["min_date_loaded"])
+                min_dt = min(min_dt, _canon_date(existing["min_date_loaded"]))
             if existing.get("max_date_loaded") and max_dt:
-                max_dt = max(max_dt, existing["max_date_loaded"])
+                max_dt = max(max_dt, _canon_date(existing["max_date_loaded"]))
 
     total_count = sum(count for _, count in data_list)
     update_metadata(db_path, {
@@ -360,12 +372,7 @@ def load_precomputed_col_stats(
                      mode="coarse_merge" if level == "coarse" else "fine")
 
     dt_values = [s["dt"] for s in stats if s.get("dt")]
-    canonical_dts = []
-    for d in dt_values:
-        try:
-            canonical_dts.append(parse_date(d))
-        except ValueError:
-            canonical_dts.append(d)
+    canonical_dts = [_canon_date(d) for d in dt_values]
     min_dt = min(canonical_dts) if canonical_dts else None
     max_dt = max(canonical_dts) if canonical_dts else None
 
@@ -373,9 +380,9 @@ def load_precomputed_col_stats(
         existing = get_metadata(db_path, table_name)
         if existing:
             if existing.get("min_date_loaded") and min_dt:
-                min_dt = min(min_dt, existing["min_date_loaded"])
+                min_dt = min(min_dt, _canon_date(existing["min_date_loaded"]))
             if existing.get("max_date_loaded") and max_dt:
-                max_dt = max(max_dt, existing["max_date_loaded"])
+                max_dt = max(max_dt, _canon_date(existing["max_date_loaded"]))
 
     update_metadata(db_path, {
         "table_name": table_name,

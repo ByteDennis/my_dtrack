@@ -172,6 +172,11 @@ a definition is already present, for ALL sources:
 Discovery results are written to {qname}_columns.csv and _column_meta so the
 next run is offline.
 
+When col_map restricts a table to its mapped columns, the side's date_col is
+ALWAYS kept downloadable (it's the GROUP BY / date-filter column, not a mapped
+value column) — it's auto-added to the selected set and the col-fill filter, so
+it never gets dropped.
+
 
 ================================================================================
  7. pairs.json STRUCTURE (the source of truth)
@@ -190,8 +195,11 @@ next run is offline.
                      "columns_file": "/data/loans_cols.csv" },
           "fromDate": "2026-01-01", "toDate": "2026-04-30",
           "strict": false, "skip": false,
-          // col_map now lives in column_mapping.csv beside the config (see Notes);
-          // an inline "col_map" here still wins as a back-compat override
+          "col_map": { "ACCT_ID": "acct_id" },   // mirrored in column_mapping.csv
+          "key": "ACCT_ID",                       // compare-csv sample key (per pair;
+                                                  // left col(s), must be in col_map)
+          "sample": 500,                          // compare-csv per-pair sample: int
+                                                  // = #keys, float in (0,1] = fraction
           "col_filter": { "include": [], "exclude": [] },
           "col_type_overrides": {},
           "ignore_rows": [], "ignore_columns": [],
@@ -210,13 +218,18 @@ the column's stored shape (e.g. string_compact 2026-05-02 -> '20260502') and
 the date-bounds clause is emitted FIRST, then the table's `where`.
 
 Notes:
-- col_map is stored in column_mapping.csv (one file beside the config; header
-  `pair,left,right`, one row per mapped column) — NOT inline in pairs.json.
-  load_unified_config injects it transparently so every reader still sees
-  pcfg["col_map"]; save_unified_config writes the CSV and strips col_map from
-  the JSON. Precedence: an inline "col_map" in pairs.json > column_mapping.csv >
-  _table_pairs in the db. match-columns / the web col_mapping page / sample-key
-  all round-trip through save_unified_config, so the CSV stays the source.
+- col_map is mirrored in BOTH pairs.json (inline) AND column_mapping.csv (a file
+  beside the config; header `pair,left,right`, one row per mapped column), kept
+  in sync: save_unified_config writes both; load_unified_config makes the CSV
+  AUTHORITATIVE — a pair present in the CSV overrides a stale inline col_map; a
+  pair only inline (no CSV) is used as-is. So whatever you see in column_mapping.csv
+  is what every reader gets, and the JSON always shows it too. write_col_mapping is
+  NON-destructive: it MERGES into the existing CSV, so a save from a config that
+  lacks col_map in memory (a non-injecting/partial save) preserves the mappings
+  instead of wiping them; only an explicit col_map={} on a present pair clears that
+  pair's rows. match-columns / the web col_mapping page / sample-key all round-trip
+  through save_unified_config. Produced/updated in `just e2e` at the match-columns
+  (col-gen) and compare-col (col-run) steps.
 - Qualified table name = "{source}_{name}" (platforms.base.qualified_name);
   it keys _row_counts / _col_stats / _metadata / _column_meta.
 - where_map is rebuilt by compare-row from matching/excluded dates. The col
@@ -324,6 +337,10 @@ Debug:
     "No columns specified for ..."       load-columns, or set columns /
                                          columns_file in pairs.json
     "No matching dates"                  run compare-row before col gen/compare
+    col dt is 'all' for vintage=day      fixed; all sources bucket per-day now
+                                         (re-run col gen/extract if stale)
+    min/max_date_loaded mixed formats    fixed; row+col loaders canonicalize dt
+    (e.g. 2026-06-13 vs 20260613)        to YYYY-MM-DD — re-load to repair old
     wrong date literal in WHERE          check date_type per side (sec. 7)
     csv types look wrong                 check the materialized csv.duckdb:
                                          DESCRIBE t_<qname>; fix `columns`
@@ -378,19 +395,30 @@ vars: db=, config=, pair=, port=, e2edir=, resultdir=, force=1, key=.
     just pipx-reinstall        rebuild venv (deps changed)
     just install               uv editable install + [dev,debug] extras
     just doctor                show resolved env-file + macros + AWS vars
+      e.g.  just install                       # first-time dev setup
+            just doctor                         # why won't Oracle/AWS connect?
 
   WEB
     just serve                 web UI on :8080 (db + config)
     just serve-reload          uvicorn --reload (auto-restart on .py edits)
+      e.g.  just db=project.db config=pairs.json serve     # browse reports at :8080
+            just serve-reload                               # while hacking on web/
 
   DB / PIPELINE (manual step-by-step; see sec. 3-4 for the wrapped flow)
     just init [--force]        create / refresh project.db
+      e.g.  just init                           # create ./project.db from pairs.json
     just gen-aws [outdir]      write AWS/Athena extract scripts
+      e.g.  just gen-aws out/                   # write extract_*.athena.sql under out/
     just load-row [folder]     load {qname}_row.csv -> _row_counts
+      e.g.  just load-row e2e/csv               # ingest row CSVs after run-sql
     just load-col [folder]     load {qname}_col.csv -> _col_stats
+      e.g.  just load-col e2e/csv               # ingest col-stat CSVs after run-sql
     just compare-row           -> output/compare_row.html
+      e.g.  just compare-row                    # row-count diff + matching_dates
     just compare-col           -> output/compare_col.html
+      e.g.  just compare-col                    # full col-stat diff report
     just compare-csv [--vintage day|week|month] [--resume] [--keep-csv]
+                     [--key a[,b] --sample N|FRAC]
                                incremental alt to compare-col: per vintage window
                                pull each side -> tmp CSV -> local DuckDB col stats
                                -> upsert _col_stats + compare. Bounded memory /
@@ -399,8 +427,34 @@ vars: db=, config=, pair=, port=, e2edir=, resultdir=, force=1, key=.
                                finds dates via its own per-date COUNT(*) (reuses
                                _row_counts if loaded) and compares col stats on
                                COUNT-MATCH dates only -- no prior row-compare step
+                               (inits project.db itself if missing). Fully self-
+                               contained: if a pair has no col_map yet, it
+                               discovers column types (DESCRIBE, all 5 sources)
+                               into _column_meta, auto-matches col_map by name, and
+                               persists column_mapping.csv -- so no prior
+                               load-columns / match-columns / e2e row is required.
+                               If col_map ALREADY exists (e.g. e2e row ran), it is
+                               picked up from column_mapping.csv or _table_pairs.
+                               --sample (int #keys, or FRAC in (0,1]) + --key
+                               (composite row key) cut the download: the SAME keys
+                               are hash-sampled on both sides (deterministic), so
+                               stats stay comparable on a row subset. The key is
+                               normalized UPPER(TRIM(CAST(..str))) on both sides so
+                               differing source formats (numeric/string, CHAR pad,
+                               case) still match. Both --key and --sample are just
+                               DEFAULTS — set per-pair "key"/"sample" in the config
+                               for different keys/rates per pair (key must be in
+                               that pair's col_map)
+      e.g.  just compare-csv --vintage month                  # monthly windows, all rows
+            just compare-csv --key acct,sub --sample 500       # 500 sampled keys/window
+            just pair=loans compare-csv --sample 0.1 --resume  # 10% sample, skip done
     just e2e [row|col|all]      full driver w/ skip-cache + run.log (sec. 4)
+      e.g.  just e2e all                                       # row then col, end-to-end
+            just pair=loans e2e col --vintage month --preset detailed
+            just force=1 e2e col-run                           # re-run col after editing SQL
     just e2e-clean [level]      reports | rebuild | all   (sec. 4)
+      e.g.  just e2e-clean reports               # just re-render HTML (instant)
+            just e2e-clean all                   # full re-extract (hits backend)
 
   DEBUG TOOLS
     just key=a[,b] sample-key   unified composite-key sampler (supersedes
@@ -417,11 +471,18 @@ vars: db=, config=, pair=, port=, e2edir=, resultdir=, force=1, key=.
                                  --gen-col --out  do both in one pass
     just key=cust_id sample-hash [-n 50]   (alias: sample-key value dump)
     just key=cust_id col-sample [-n 50]    (alias: sample-key --gen-col)
+      e.g.  just key=acct,sub sample-key                  # value+hash16 dump to xlsx
+            just key=acct,sub sample-key -n -1            # key anti-join (unmatched combos)
+            just key=acct pair=loans sample-key --gen-col # sample -> where_map + col SQL
     just query "<SQL>" [--write]
                                run SQL against project.db (e.g. inspect
                                _row_comparison / patch _row_counts)
+      e.g.  just query "SELECT * FROM _col_comparison WHERE pair_name='loans'"
+            just query --write "DELETE FROM _row_counts WHERE source_table='aws_x'"
     just logs                  tail -f output/run.log
+      e.g.  just logs                            # watch the live pipeline log
     just doctor                env / macro / AWS resolution
+      e.g.  just doctor                          # verify creds before a backend run
 
   TESTS / LINT
     just test [args]           pytest
@@ -429,5 +490,8 @@ vars: db=, config=, pair=, port=, e2edir=, resultdir=, force=1, key=.
     just test-containers       real Oracle/Trino/Hive/Spark (--run-containers)
     just lint  /  just fmt     ruff check / format
     just clean                 rm generated sql/ csv/ caches
+      e.g.  just test tests/csv -q               # run one suite fast
+            just test-containers                 # real-engine integration (Docker)
+            just lint                             # ruff gate before commit
 
 End of manuscript.

@@ -156,6 +156,8 @@ compare-col *args:
 # compares col stats on COUNT-MATCH dates only. No prior row-compare needed.
 #   just compare-csv --vintage month            # all pairs, monthly windows
 #   just pair=tableA compare-csv --resume        # skip windows already loaded
+#   just compare-csv --key acct,sub --sample 500     # 500 sampled keys/window
+#   just compare-csv --key acct,sub --sample 0.1      # 10% of keys/window
 compare-csv *args:
     dtrack compare-csv {{db}} --config {{config}} {{ if pair == "" { "" } else { "--pair " + pair } }} {{args}}
 

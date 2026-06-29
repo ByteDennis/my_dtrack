@@ -28,13 +28,20 @@ def read_col_mapping(config_path):
         return {}
     return out
 
-# >>> write every pair's col_map to column_mapping.csv (pair,left,right) <<< #
+# >>> merge each pair's col_map INTO column_mapping.csv (pair,left,right) <<< #
+# >>> NON-destructive: a pair absent / without col_map keeps its existing CSV   <<< #
+# >>> rows, so a save from a config that wasn't injected can't wipe mappings.   <<< #
+# >>> Only an EXPLICIT empty col_map ({}) on a present pair clears its rows.     <<< #
 def write_col_mapping(config, config_path):
     path = col_mapping_path(config_path)
-    rows = []
+    merged = read_col_mapping(config_path)
     for pname, pcfg in (config.get("pairs") or {}).items():
-        for left, right in (pcfg.get("col_map") or {}).items():
-            rows.append((pname, left, right))
+        cm = pcfg.get("col_map")
+        if cm:
+            merged[pname] = dict(cm)
+        elif "col_map" in pcfg:
+            merged.pop(pname, None)
+    rows = [(p, lc, rc) for p, m in merged.items() for lc, rc in m.items()]
     if not rows:
         if os.path.exists(path):
             os.remove(path)
@@ -42,7 +49,7 @@ def write_col_mapping(config, config_path):
     with open(path, "w", newline="") as f:
         w = _csv.writer(f)
         w.writerow(["pair", "left", "right"])
-        for p, lc, rc in rows:
+        for p, lc, rc in sorted(rows):
             w.writerow([p, lc, rc])
     return path
 
@@ -128,15 +135,16 @@ def load_unified_config(config_path):
 
     validate_unified_config(config)
 
-    # col_map lives in column_mapping.csv (not pairs.json); inject it so every
-    # reader sees pcfg["col_map"]. Inline col_map in the JSON still wins.
+    # col_map is mirrored in BOTH pairs.json (inline) and column_mapping.csv;
+    # the CSV is authoritative, so the in-memory inline col_map is kept in sync
+    # with it on load (a pair only in the CSV is injected; one only inline stays).
     mapping = read_col_mapping(config_path)
     for pair_name, pair_cfg in config.get("pairs", {}).items():
         for side in ("left", "right"):
             side_cfg = pair_cfg.get(side, {})
             if "name" not in side_cfg:
                 side_cfg["name"] = _derive_side_name(side_cfg, pair_name)
-        if not pair_cfg.get("col_map") and pair_name in mapping:
+        if pair_name in mapping:
             pair_cfg["col_map"] = mapping[pair_name]
 
     return config
@@ -144,12 +152,12 @@ def load_unified_config(config_path):
 # >>> Save unified configuration to JSON file <<< #
 def save_unified_config(config, config_path):
     import copy
-    # col_map -> column_mapping.csv; strip it from the JSON we write
+    # col_map is written to BOTH column_mapping.csv AND kept inline in the JSON,
+    # so the two stay in sync (the CSV wins on the next load).
     write_col_mapping(config, config_path)
     out = copy.deepcopy(config)
     # >>> strip a side's name only when it matches the table-derived one, so divergent names survive reload <<< #
     for pair_name, pair_cfg in out.get("pairs", {}).items():
-        pair_cfg.pop("col_map", None)
         for side in ("left", "right"):
             side_cfg = pair_cfg.get(side, {})
             if side_cfg.get("name") == _derive_side_name(side_cfg, pair_name):
@@ -205,11 +213,18 @@ def get_all_tables_from_unified(config):
 
             if col_map:
                 if side == "left":
-                    table_cfg["_col_map_columns"] = set(col_map.keys())
+                    cols = set(col_map.keys())
                     table_cfg["_selected_cols"] = selected_left
                 else:
-                    table_cfg["_col_map_columns"] = set(col_map.values())
+                    cols = set(col_map.values())
                     table_cfg["_selected_cols"] = selected_right
+                # the date_col is the GROUP BY / date-filter column, not a mapped
+                # value column; always keep it downloadable so col-fill (and the
+                # csv materialization) never drops it
+                dc = table_cfg.get("date_col")
+                if dc:
+                    cols.add(dc)
+                table_cfg["_col_map_columns"] = cols
             elif cf_has_patterns:
                 table_cfg["_col_filter_patterns"] = {
                     "include": list(col_filter.get("include") or []),

@@ -996,7 +996,11 @@ def fill_columns_from_meta(tables, db_path):
             all_cols = {m['column_name']: m['data_type'] for m in meta}
             allowed = tbl.get('_col_map_columns')
             if allowed:
-                tbl['columns'] = {c: t for c, t in all_cols.items() if c in allowed}
+                # always keep the date_col (the GROUP BY / date-filter column),
+                # even if it isn't a mapped value column, so it stays downloadable
+                dc = (tbl.get('date_col') or '').lower()
+                tbl['columns'] = {c: t for c, t in all_cols.items()
+                                  if c in allowed or c.lower() == dc}
                 print(f"  {tbl['name']}: {len(tbl['columns'])}/{len(all_cols)} columns (filtered by col_map)")
             else:
                 tbl['columns'] = all_cols

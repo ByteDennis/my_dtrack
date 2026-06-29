@@ -1296,7 +1296,7 @@ async def api_update_pair(pair_name: str, request: Request):
         pair_cfg = config["pairs"][pair_name]
 
         _PAIR_KEYS = {"left", "right", "col_map", "col_filter", "description", "mode",
-                       "vintage", "strict",
+                       "vintage", "strict", "key",
                        "fromDate", "toDate", "dateRangeMode", "overlap",
                        "skip", "ignore_rows", "ignore_columns",
                        "col_type_overrides", "where_map", "time_map",
@@ -3395,10 +3395,9 @@ async def api_save_col_mappings(pair_name: str, request: Request):
             config = load_unified_config(_config_path)
             pairs_cfg = config.setdefault("pairs", {})
             if pair_name in pairs_cfg:
-                if mappings:
-                    pairs_cfg[pair_name]["col_map"] = mappings
-                else:
-                    pairs_cfg[pair_name].pop("col_map", None)
+                # explicit {} (not pop) so write_col_mapping clears this pair's
+                # CSV rows; a popped/absent col_map is preserved by the merge
+                pairs_cfg[pair_name]["col_map"] = mappings if mappings else {}
                 if rules_data and rules_data.get("rules"):
                     pairs_cfg[pair_name]["col_rules"] = rules_data
                 else:

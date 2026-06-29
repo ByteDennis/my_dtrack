@@ -581,7 +581,9 @@ def _full_table_and_cte(tbl):
         cp = tbl.get("conn_macro", "") or ""
         return resolve_table(tbl, f"'{cp}'" if cp else tbl.get("table", ""))
     if src in ("aws", "hadoop"):
-        return resolve_table(tbl, f"{tbl.get('conn_macro','')}.{tbl.get('table','')}")
+        cm = tbl.get("conn_macro", "") or ""
+        tn = tbl.get("table", "")
+        return resolve_table(tbl, f"{cm}.{tn}" if cm else tn)
     return resolve_table(tbl)
 
 # >>> run a SELECT against the table's backend; return list[dict] (lowercase cols) <<< #

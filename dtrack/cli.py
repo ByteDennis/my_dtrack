@@ -1154,8 +1154,19 @@ def cmd_col_sample(args):
 
 # >>> compare-csv: per-vintage-window backend pull -> local DuckDB col stats -> upsert + compare <<< #
 def cmd_compare_csv(args):
-    _require_db(args.project_db)
+    if not os.path.exists(args.project_db):
+        from .db import init_database
+        init_database(args.project_db)
+        print(f"Initialized database: {args.project_db}")
     from .compare_csv import run_compare_csv
+    raw = getattr(args, 'sample', None)
+    sample = None
+    if raw is not None:
+        try:
+            sample = float(raw) if '.' in str(raw) else int(raw)
+        except ValueError:
+            print(f"--sample must be an integer or a fraction; got {raw!r}")
+            sys.exit(1)
     run_compare_csv(
         project_db=args.project_db,
         config_path=args.config,
@@ -1167,6 +1178,8 @@ def cmd_compare_csv(args):
         stats_override=_parse_stats_override(getattr(args, 'stats_override', None)),
         keep_csv=getattr(args, 'keep_csv', False),
         resume=getattr(args, 'resume', False),
+        sample=sample,
+        key=getattr(args, 'key', None),
     )
 
 # >>> sample-key: composite-key value+hash dump (--out/default) and/or col-sample gen (--gen-col) <<< #
@@ -1468,6 +1481,16 @@ def main():
     p.add_argument('--to-date')
     p.add_argument('--preset', choices=['quick', 'standard', 'detailed'], help=_PRESET_HELP)
     p.add_argument('--stats-override', dest='stats_override', help=_STATS_OVERRIDE_HELP)
+    p.add_argument('--sample',
+                   help='Default sample to cut the download: integer = fixed #keys/window, '
+                        'float in (0,1] = fraction of keys. A per-pair "sample" field in the '
+                        'config overrides this. Requires a key (same keys sampled on BOTH sides '
+                        'via a deterministic hash, kept comparable)')
+    p.add_argument('--key',
+                   help='Default composite row key (comma-separated left columns; right resolved '
+                        'via col_map) for --sample. A per-pair "key" field in the config overrides '
+                        'this; key columns MUST be in col_map (else error). The key is normalized '
+                        '(upper/trim/cast-to-string) on both sides so differing formats still match')
     p.add_argument('--keep-csv', dest='keep_csv', action='store_true',
                    help='Keep the per-window tmp CSV/config dirs (else removed after each window)')
     p.add_argument('--resume', action='store_true',

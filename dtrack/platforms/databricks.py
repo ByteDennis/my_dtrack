@@ -279,7 +279,7 @@ def _col_where_and_label_databricks(tbl_cfg, db_path, vintage):
     bounds = (tbl_cfg.get("_date_bounds") or "").strip()
     eff_dtype = date_filter.get("date_dtype")
     eff_fmt = date_filter.get("date_format")
-    buckets = table_vintage in ("week", "month", "quarter", "year")
+    buckets = table_vintage in ("day", "week", "month", "quarter", "year")
     if date_filter["filter_type"] == "between":
         dw = build_date_range_with_gaps(
             date_col, date_filter["dates"], eff_dtype, date_format=eff_fmt)
