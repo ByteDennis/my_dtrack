@@ -52,9 +52,11 @@ _DBX_AUTH = None  # cached (server_hostname, http_path, token); set once, thread
 
 # >>> authenticate ONCE (proxy env + OAuth token); cached + locked so concurrent <<< #
 # >>> col workers don't race on os.environ / cfg.authenticate() (which can hang) <<< #
-def _databricks_auth():
+def _databricks_auth(force=False):
     global _DBX_AUTH
     with _DBX_AUTH_LOCK:
+        if force:
+            _DBX_AUTH = None
         if _DBX_AUTH is not None:
             return _DBX_AUTH
         from databricks.sdk.core import Config
@@ -171,23 +173,51 @@ def _dbx_coerce(value, type_name):
     return value
 
 # >>> one Databricks REST call (statements API); returns parsed JSON or raises <<< #
-def _rest_request(method, host, path, token, body=None):
+# >>> one REST call; token fetched (cached) per call, refreshed on 401/403, retried on transient errors <<< #
+def _rest_request(method, host, path, body=None):
     import json
+    import time
+    import urllib.error
     import urllib.request
     url = f"https://{host}{path}"
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Content-Type", "application/json")
     try:
         timeout = int(os.environ.get("DTRACK_DATABRICKS_SOCKET_TIMEOUT", "600"))
     except ValueError:
         timeout = 600
-    with urllib.request.urlopen(req, timeout=max(timeout, 60)) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        tries = int(os.environ.get("DTRACK_DATABRICKS_RETRIES", "2"))
+    except ValueError:
+        tries = 2
+    from ..logmgr import log_exc
+    last = None
+    for attempt in range(tries + 1):
+        token = _databricks_auth()[2]
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", "data-reconciliation")
+        try:
+            with urllib.request.urlopen(req, timeout=max(timeout, 60)) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code in (401, 403):
+                _databricks_auth(force=True)          # expired/invalid token -> refresh
+            elif e.code not in (429, 500, 502, 503, 504):
+                raise
+            log_exc(f"databricks REST {method} {path} HTTP {e.code} "
+                    f"(attempt {attempt + 1}/{tries + 1})", e, level="warning")
+        except urllib.error.URLError as e:
+            last = e
+            log_exc(f"databricks REST {method} {path} network error "
+                    f"(attempt {attempt + 1}/{tries + 1})", e, level="warning")
+        if attempt < tries:
+            time.sleep(2 ** attempt)
+    raise last
 
 # >>> gather every result chunk for a finished statement into row dicts <<< #
-def _rest_collect_rows(host, token, statement_id, payload):
+def _rest_collect_rows(host, statement_id, payload):
     manifest = payload.get("manifest") or {}
     schema = (manifest.get("schema") or {}).get("columns") or []
     cols = [(c.get("name", "").lower(), c.get("type_name", "")) for c in schema]
@@ -204,8 +234,7 @@ def _rest_collect_rows(host, token, statement_id, payload):
     while next_idx is not None:
         chunk = _rest_request(
             "GET", host,
-            f"/api/2.0/sql/statements/{statement_id}/result/chunks/{next_idx}",
-            token)
+            f"/api/2.0/sql/statements/{statement_id}/result/chunks/{next_idx}")
         _add(chunk)
         next_idx = chunk.get("next_chunk_index")
     return rows
@@ -213,7 +242,7 @@ def _rest_collect_rows(host, token, statement_id, payload):
 _DBX_TERMINAL = {"SUCCEEDED", "FAILED", "CANCELED", "CLOSED"}
 
 # >>> poll a submitted statement to a terminal state and return its final payload <<< #
-def _rest_poll(host, token, statement_id, payload):
+def _rest_poll(host, statement_id, payload):
     import time
     try:
         deadline = int(os.environ.get("DTRACK_DATABRICKS_TIMEOUT", "1800"))
@@ -228,7 +257,7 @@ def _rest_poll(host, token, statement_id, payload):
         time.sleep(5)
         waited += 5
         payload = _rest_request(
-            "GET", host, f"/api/2.0/sql/statements/{statement_id}", token)
+            "GET", host, f"/api/2.0/sql/statements/{statement_id}")
         state = ((payload.get("status") or {}).get("state") or "").upper()
     return payload
 
@@ -267,7 +296,7 @@ def _query_databricks_rest(sql, catalog_schema=None):
         try:
             payload = _rest_request(
                 "GET", server_hostname,
-                f"/api/2.0/sql/statements/{existing}", token)
+                f"/api/2.0/sql/statements/{existing}")
             state = ((payload.get("status") or {}).get("state") or "").upper()
             if state in ("FAILED", "CANCELED", "CLOSED"):
                 payload = None
@@ -296,13 +325,13 @@ def _query_databricks_rest(sql, catalog_schema=None):
         if schema:
             body["schema"] = schema
         payload = _rest_request(
-            "POST", server_hostname, "/api/2.0/sql/statements/", token, body)
+            "POST", server_hostname, "/api/2.0/sql/statements/", body)
         statement_id = payload.get("statement_id")
         if statement_id:
             statement_id_put(sql, catalog_schema, statement_id)
 
     statement_id = payload.get("statement_id")
-    payload = _rest_poll(server_hostname, token, statement_id, payload)
+    payload = _rest_poll(server_hostname, statement_id, payload)
     status = payload.get("status") or {}
     state = (status.get("state") or "").upper()
     if state != "SUCCEEDED":
@@ -310,7 +339,7 @@ def _query_databricks_rest(sql, catalog_schema=None):
         err = (status.get("error") or {}).get("message") or state
         raise RuntimeError(f"databricks statement {statement_id} {state}: {err}")
 
-    out = _rest_collect_rows(server_hostname, token, statement_id, payload)
+    out = _rest_collect_rows(server_hostname, statement_id, payload)
     cache_put(sql, catalog_schema, out, row_count=len(out))
     statement_id_delete(sql, catalog_schema)
     return out

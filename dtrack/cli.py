@@ -1171,7 +1171,7 @@ def cmd_compare_csv(args):
         project_db=args.project_db,
         config_path=args.config,
         pair=getattr(args, 'pair', None),
-        vintage=getattr(args, 'vintage', 'day'),
+        vintage=getattr(args, 'vintage', None),
         from_date=getattr(args, 'from_date', None),
         to_date=getattr(args, 'to_date', None),
         preset=getattr(args, 'preset', None),
@@ -1183,6 +1183,7 @@ def cmd_compare_csv(args):
         data_dir=getattr(args, 'data_dir', None),
         workers=getattr(args, 'workers', None),
         force=getattr(args, 'force', False),
+        verbose=getattr(args, 'verbose', False),
     )
 
 # >>> sample-key: composite-key value+hash dump (--out/default) and/or col-sample gen (--gen-col) <<< #
@@ -1477,23 +1478,27 @@ def main():
     p.add_argument('project_db')
     p.add_argument('--config', required=True)
     p.add_argument('--pair', help='Restrict to one pair (default: all non-skipped pairs)')
-    p.add_argument('--vintage', default='day',
+    p.add_argument('--vintage', default=None,
                    choices=['day', 'week', 'month', 'quarter', 'year'],
-                   help='One pull window per vintage bucket (default day)')
+                   help='One pull window per vintage bucket. Default: the per-pair '
+                        '"vintage" field if set, else day')
     p.add_argument('--from-date')
     p.add_argument('--to-date')
     p.add_argument('--preset', choices=['quick', 'standard', 'detailed'], help=_PRESET_HELP)
     p.add_argument('--stats-override', dest='stats_override', help=_STATS_OVERRIDE_HELP)
     p.add_argument('--sample',
-                   help='Default sample to cut the download: integer = fixed #keys/window, '
-                        'float in (0,1] = fraction of keys. A per-pair "sample" field in the '
-                        'config overrides this. Requires a key (same keys sampled on BOTH sides '
-                        'via a deterministic hash, kept comparable)')
+                   help='Default sample to cut the download: integer = fixed #keys/window '
+                        '(IN-list on the raw key, index-friendly), float in (0,1] = fraction '
+                        'via a hash-bucket pushdown predicate (no key list; scales to billions). '
+                        'A per-pair "sample" field overrides this. Requires a key (the SAME rows '
+                        'land on BOTH sides via the identical hash, kept comparable)')
     p.add_argument('--key',
                    help='Default composite row key (comma-separated left columns; right resolved '
-                        'via col_map) for --sample. A per-pair "key" field in the config overrides '
-                        'this; key columns MUST be in col_map (else error). The key is normalized '
-                        '(upper/trim/cast-to-string) on both sides so differing formats still match')
+                        'via col_map) for --sample. A per-pair "key" field overrides this; key '
+                        'columns MUST be in col_map (else error). Fraction sampling normalizes the '
+                        'key (STRICT family: trim/lower/nfc + numeric/date canonicalization) so the '
+                        'same logical key hashes to the same bucket on every backend. Fixed-N uses '
+                        'the raw key by default; set per-pair "key_normalize": true to normalize it')
     p.add_argument('--data-dir', dest='data_dir',
                    help='Folder for the per-window downloaded CSVs (large files). Default: '
                         'system temp. Use this to keep big pulls off the project folder / a small disk')
@@ -1509,6 +1514,9 @@ def main():
                         '--sample/--key/col_filter/--preset/--vintage auto-triggers a re-pull')
     p.add_argument('--resume', action='store_true',
                    help='(deprecated no-op) skip-cache is now the default; use --force to re-pull')
+    p.add_argument('--verbose', action='store_true',
+                   help='Print full backend SQL and per-block extract progress (default: one '
+                        'concise line per step with rows + seconds; full detail always goes to run.log)')
 
     p = sub.add_parser('gen-aws', help='Extract data from AWS Athena')
     p.add_argument('config')

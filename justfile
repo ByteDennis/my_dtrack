@@ -156,8 +156,13 @@ compare-col *args:
 # compares col stats on COUNT-MATCH dates only. No prior row-compare needed.
 #   just compare-csv --vintage month            # all pairs, monthly windows
 #   just force=1 compare-csv                      # re-pull (ignore skip-cache)
-#   just compare-csv --key acct,sub --sample 500     # 500 sampled keys/window
-#   just compare-csv --key acct,sub --sample 0.1      # 10% of keys/window
+#   just compare-csv --key acct,sub --sample 500     # 500 fixed keys/window (raw IN-list)
+#   just compare-csv --key acct,sub --sample 0.1      # 10% via hash-bucket pushdown
+#   just compare-csv --verbose                        # print full SQL (default: concise)
+# FRAC sampling pushes hash32(norm(key)) < FRAC*2^32 to both sides (same records on
+# every backend, normalized, order-independent); INT uses a raw-key IN-list.
+# --data-dir (must exist) = transient per-vintage scratch (raw pulls + csv/sql + .state,
+# replaced each window); project.db + {pair}_compare_col.csv persist by the project db.
 # skip-cache is the DEFAULT: already-loaded windows are skipped; a changed
 # sample/key/col_filter/preset/vintage auto-re-pulls. force=1 re-pulls everything.
 compare-csv *args:

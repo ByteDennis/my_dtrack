@@ -569,7 +569,34 @@ def _hash16_expr(source, col_q):
     if src == "csv":
         return (f"CAST(('0x' || substr(md5(trim(CAST({col_q} AS VARCHAR))), "
                 f"1, 4)) AS INTEGER)")
+    if src == "hadoop":
+        return (f"CAST(conv(substr(lower(md5(trim(CAST({col_q} AS STRING)))), "
+                f"1, 4), 16, 10) AS BIGINT)")
     return "NULL"
+
+HASH_BUCKET_SPACE = 2 ** 32
+
+# >>> 32-bit MD5 bucket of an already-normalized string expr (uniform 0..2^32-1) for cross-backend fraction sampling <<< #
+def _hash32_expr(dialect, str_expr):
+    d = (dialect or "").lower()
+    if d == "oracle":
+        return (f"TO_NUMBER(SUBSTR(STANDARD_HASH("
+                f"UTL_I18N.STRING_TO_RAW({str_expr}, 'AL32UTF8'), 'MD5'), 1, 8), "
+                f"'XXXXXXXX')")
+    if d in ("athena", "trino", "aws"):
+        return f"from_base(SUBSTR(LOWER(TO_HEX(MD5(TO_UTF8({str_expr})))), 1, 8), 16)"
+    if d in ("databricks", "spark", "hadoop", "hive"):
+        return f"CAST(conv(SUBSTR(LOWER(md5({str_expr})), 1, 8), 16, 10) AS BIGINT)"
+    if d == "duckdb":
+        return f"CAST(('0x' || SUBSTR(md5({str_expr}), 1, 8)) AS BIGINT)"
+    raise ValueError(f"no hash-bucket expr for dialect {dialect!r}")
+
+# >>> Python reference for _hash32_expr: 32-bit MD5 bucket of a normalized string <<< #
+def hash32_bucket(norm_value):
+    import hashlib
+    if norm_value is None:
+        return None
+    return int(hashlib.md5(str(norm_value).encode("utf-8")).hexdigest()[:8], 16)
 
 # >>> (from_ref, cte_prefix) for a table, honoring processed CTEs where supported <<< #
 def _full_table_and_cte(tbl):

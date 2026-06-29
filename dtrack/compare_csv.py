@@ -1,9 +1,11 @@
 
+import contextlib
 import csv as _csv
 import json
 import os
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 from .config import load_unified_config, get_col_type_overrides, get_ignored_columns
 from .date_utils import bucket_date, parse_date
@@ -12,6 +14,7 @@ from .compare import (
     _dialect, _full_table_and_cte, _run_query,
     compare_column_stats, _has_col_differences,
     _key_in_clause, _hash16_expr, _limit,
+    _hash32_expr, HASH_BUCKET_SPACE,
 )
 from .db import (
     get_column_meta, get_metadata, get_col_stats, get_row_counts,
@@ -23,13 +26,24 @@ from .extract import extract_all
 
 _CSV_SUPPORTED = ("aws", "oracle", "databricks", "csv", "hadoop")
 
-# >>> run a backend SQL, printing + logging it so every download step is transparent <<< #
+_VERBOSE = False
+
+# >>> run a backend SQL: concise rows+secs line by default; full SQL (stdout + log) only with --verbose <<< #
 def _q(tbl, sql, label):
+    import time
     from .logmgr import get_logger
     src = (tbl.get("source") or "").lower()
-    print(f"[compare-csv] {label} [{src}:{qualified_name(tbl)}]:\n{sql}")
-    get_logger().info("[compare-csv] %s [%s]: %s", label, qualified_name(tbl), sql)
-    return _run_query(tbl, sql)
+    log = get_logger()
+    if _VERBOSE:
+        print(f"[compare-csv] {label} [{src}:{qualified_name(tbl)}]:\n{sql}")
+        log.info("[compare-csv] %s [%s]: %s", label, qualified_name(tbl), sql)
+    t0 = time.time()
+    rows = _run_query(tbl, sql)
+    msg = f"[compare-csv] {label} [{src}]: {len(rows):,} rows in {time.time() - t0:.1f}s"
+    print(msg)
+    if not _VERBOSE:
+        log.info(msg)
+    return rows
 
 # >>> fallback column-name discovery for any source: one row -> its keys are the cols <<< #
 def _discover_names(tbl):
@@ -163,13 +177,39 @@ def _matched_dates(project_db, pname, left, right, tl, tr, from_date, to_date):
           f"{len(set(rl) ^ set(rr))} single-side")
     return matched, rl
 
-# >>> (base where AND date-window bounds) for a side, '' if none <<< #
+# >>> collapse a date list into maximal calendar-contiguous [start, end] runs (gaps split runs) <<< #
+def _contiguous_runs(dates):
+    from datetime import datetime, timedelta
+    ds = sorted(set(dates))
+    try:
+        parsed = [datetime.strptime(x, "%Y-%m-%d") for x in ds]
+    except (ValueError, TypeError):
+        return [(x, x) for x in ds]
+    runs = []
+    start = prev = 0
+    for i in range(1, len(parsed)):
+        if parsed[i] - parsed[prev] == timedelta(days=1):
+            prev = i
+        else:
+            runs.append((ds[start], ds[prev]))
+            start = prev = i
+    runs.append((ds[start], ds[prev]))
+    return runs
+
+# >>> (base where AND bucket date-window) for a side: union of count-matching date runs, skipping gaps <<< #
 def _window_where(project_db, tbl, date_col, dates):
     d = _dialect((tbl.get("source") or "").lower())
     ddtype, dfmt = _date_dtype_fmt(project_db, tbl)
     date_q = quote_ident(date_col, d)
-    bounds = build_date_bounds_clause(date_q, min(dates), max(dates), ddtype,
-                                      date_format=dfmt)
+    runs = [build_date_bounds_clause(date_q, lo, hi, ddtype, date_format=dfmt)
+            for lo, hi in _contiguous_runs(dates)]
+    runs = [r for r in runs if r]
+    if not runs:
+        bounds = ""
+    elif len(runs) == 1:
+        bounds = runs[0]
+    else:
+        bounds = "(" + " OR ".join(f"({r})" for r in runs) + ")"
     base = (tbl.get("where") or "").strip()
     return " AND ".join(f"({p})" for p in (base, bounds) if p)
 
@@ -195,12 +235,13 @@ def _distinct_key_count(tbl, key_cols, where):
     rows = _q(tbl, sql, "distinct key count")
     return int(rows[0].get("c") or 0) if rows else 0
 
-# >>> deterministic hash-sample of NORMALIZED composite-key tuples from the LEFT, window-scoped <<< #
-def _window_keys(project_db, left, key_cols, dates, sample):
+# >>> deterministic fixed-N hash-spread sample of composite-key tuples from the LEFT, window-scoped <<< #
+def _window_keys(project_db, left, key_cols, dates, sample, normalize=False):
     src = (left.get("source") or "").lower()
     d = _dialect(src)
     where = _window_where(project_db, left, left.get("date_col", ""), dates)
-    nexprs = [_norm_key_expr(d, quote_ident(k, d)) for k in key_cols]
+    kexprs = [(_norm_key_expr(d, quote_ident(k, d)) if normalize
+               else quote_ident(k, d)) for k in key_cols]
     if isinstance(sample, float):
         total = _distinct_key_count(left if where == "" else {**left, "where": ""},
                                     key_cols, where)
@@ -210,23 +251,57 @@ def _window_keys(project_db, left, key_cols, dates, sample):
     ft, cte = _full_table_and_cte(left)
     notnull = " AND ".join(f"{quote_ident(k, d)} IS NOT NULL" for k in key_cols)
     w = " AND ".join(f"({p})" for p in (where, notnull) if p) or "1=1"
-    sel = ", ".join(f"{e} AS k{i}" for i, e in enumerate(nexprs))
-    sql = (f"{cte}SELECT {sel} FROM {ft} WHERE {w} "
-           f"GROUP BY {', '.join(nexprs)} "
-           f"ORDER BY {_hash16_expr(src, nexprs[0])} {_limit(src, n)}")
+    sel = ", ".join(f"{e} AS k{i}" for i, e in enumerate(kexprs))
+    sql = (f"{cte}SELECT {sel}, {_hash16_expr(src, kexprs[0])} AS kh "
+           f"FROM {ft} WHERE {w} "
+           f"GROUP BY {', '.join(kexprs)} "
+           f"ORDER BY kh {_limit(src, n)}")
     rows = _q(left, sql, "sample keys")
     return [tuple(r.get(f"k{i}") for i in range(len(key_cols))) for r in rows]
 
-# >>> per-side NORMALIZED composite-key IN (...) for the sampled tuples <<< #
-def _key_filters(left, right, key_cols, right_key_cols, key_tuples):
+# >>> per-side composite-key IN (...) for the sampled tuples (raw by default, normalized opt-in) <<< #
+def _key_filters(left, right, key_cols, right_key_cols, key_tuples, normalize=False):
     dl = _dialect((left.get("source") or "").lower())
     dr = _dialect((right.get("source") or "").lower())
-    lq = [_norm_key_expr(dl, quote_ident(k, dl)) for k in key_cols]
-    rq = [_norm_key_expr(dr, quote_ident(rk, dr)) for rk in right_key_cols]
+    if normalize:
+        lq = [_norm_key_expr(dl, quote_ident(k, dl)) for k in key_cols]
+        rq = [_norm_key_expr(dr, quote_ident(rk, dr)) for rk in right_key_cols]
+    else:
+        lq = [quote_ident(k, dl) for k in key_cols]
+        rq = [quote_ident(rk, dr) for rk in right_key_cols]
     return _key_in_clause(lq, key_tuples), _key_in_clause(rq, key_tuples)
 
-# >>> pull one side's raw mapped-column rows for `dates` -> temp CSV + inline column types <<< #
-def _pull_side(project_db, tbl, value_cols, date_col, dates, tmpdir, tag,
+# >>> STRICT value family (date|numeric|string) per key col, taken from the LEFT side so both sides match <<< #
+def _sample_families(project_db, left, key_cols):
+    from .platforms.base import _strict_family, _is_numeric_col_type
+    types = _col_types(project_db, qualified_name(left))
+    fams = []
+    for k in key_cols:
+        dtype = types.get(k.lower(), "")
+        fams.append(_strict_family(dtype, _is_numeric_col_type(dtype)))
+    return fams
+
+# >>> pushdown predicate `hash32(normalized composite key) < threshold` (same recipe both sides) <<< #
+def _hash_bucket_where(tbl, key_cols, fams, threshold):
+    from .platforms.base import _strict_normalize
+    d = _dialect((tbl.get("source") or "").lower())
+    norm = [_strict_normalize(d, quote_ident(k, d), fam)
+            for k, fam in zip(key_cols, fams)]
+    if len(norm) == 1:
+        comp = norm[0]
+    elif d == "oracle":
+        comp = " || '|' || ".join(norm)
+    else:
+        comp = "concat_ws('|', " + ", ".join(norm) + ")"
+    return f"{_hash32_expr(d, comp)} < {threshold}"
+
+# >>> filesystem-safe form of a qualified table name <<< #
+def _safe_name(qname):
+    import re
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(qname))
+
+# >>> pull one side's raw mapped-column rows for `dates` -> CSV at out_csv + inline column types <<< #
+def _pull_side(project_db, tbl, value_cols, date_col, dates, out_csv, tag,
                extra_where=None):
     from .platforms.base import resolve_config_columns
     src = (tbl.get("source") or "").lower()
@@ -243,7 +318,6 @@ def _pull_side(project_db, tbl, value_cols, date_col, dates, tmpdir, tag,
     sql = f"{cte}SELECT {', '.join(cols_q)} FROM {ft} WHERE {where}"
     rows = _q(tbl, sql, f"download {tag}")
 
-    out_csv = os.path.join(tmpdir, f"{tag}.csv")
     header = [date_col] + list(value_cols)
     with open(out_csv, "w", newline="") as f:
         w = _csv.writer(f)
@@ -274,10 +348,25 @@ def _stamp_dt(col_csv, dt_label):
         w.writeheader()
         w.writerows(rows)
 
-# >>> compute col stats locally over a pulled CSV and upsert under the real qname, stamped with the bucket date <<< #
+# >>> swallow extract_all's banner/per-block stdout+stderr into run.log unless --verbose <<< #
+@contextlib.contextmanager
+def _quiet_extract(tag):
+    if _VERBOSE:
+        yield
+        return
+    import io
+    from .logmgr import get_logger
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        yield
+    text = buf.getvalue().strip()
+    if text:
+        get_logger().info("[compare-csv] local stats %s:\n%s", tag, text)
+
+# >>> col stats over a pulled CSV: extract in transient scratch (fresh .state), persist col CSV + SQL to <project>/csv, upsert <<< #
 def _extract_and_load(project_db, src_tbl, csv_path, columns, real_qname,
-                      date_col, dt_label, vintage, preset, stats_override, tmpdir,
-                      tag, workers=None):
+                      date_col, dt_label, vintage, preset, stats_override,
+                      scratch_csv, persist_csv, tag, workers=None):
     csv_cfg = {
         "name": tag, "table": tag, "source": "csv",
         "conn_macro": csv_path, "date_col": date_col,
@@ -286,18 +375,41 @@ def _extract_and_load(project_db, src_tbl, csv_path, columns, real_qname,
     if columns:
         csv_cfg["columns"] = columns
     temp_cfg = {"pairs": {"_w": {"left": csv_cfg, "right": csv_cfg}}, "metadata": {}}
-    cfg_path = os.path.join(tmpdir, f"{tag}.config.json")
+    os.makedirs(scratch_csv, exist_ok=True)
+    cfg_path = os.path.join(scratch_csv, f"{tag}.config.json")
     with open(cfg_path, "w") as f:
         json.dump(temp_cfg, f)
-    extract_all(config_path=cfg_path, outdir=tmpdir, types=["col"],
-                db_path=None, vintage="all", preset=preset,
-                stats_override=stats_override, max_workers=workers)
-    col_csv = os.path.join(tmpdir, "csv", f"{qualified_name(csv_cfg)}_col.csv")
+    with _quiet_extract(tag):
+        extract_all(config_path=cfg_path, outdir=scratch_csv, csv_outdir=scratch_csv,
+                    types=["col"], db_path=None, vintage="all", preset=preset,
+                    stats_override=stats_override, max_workers=workers)
+    col_csv = os.path.join(scratch_csv, f"{qualified_name(csv_cfg)}_col.csv")
     _stamp_dt(col_csv, dt_label)
+    os.makedirs(persist_csv, exist_ok=True)
+    shutil.copy2(col_csv, os.path.join(
+        persist_csv, f"{qualified_name(csv_cfg)}_{_safe_name(dt_label)}_col.csv"))
+    sql_src = os.path.join(scratch_csv, "extract_col.sql")
+    if os.path.exists(sql_src):
+        shutil.copy2(sql_src, os.path.join(persist_csv, "extract_col.sql"))
     return load_precomputed_col_stats(
         db_path=project_db, csv_path=col_csv, table_name=real_qname,
         mode="upsert", source=src_tbl.get("source"),
         db_name=src_tbl.get("conn_macro"), vintage=vintage)
+
+# >>> persist / reload the LEFT sampled key tuples for a bucket so a resume reuses them (no re-sample) <<< #
+def _write_keys_csv(path, key_cols, ktuples):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(list(key_cols))
+        for t in ktuples:
+            w.writerow(list(t))
+
+def _read_keys_csv(path):
+    with open(path, newline="") as f:
+        r = _csv.reader(f)
+        next(r, None)
+        return [tuple(row) for row in r if row]
 
 # >>> bucket-keys already present in _col_stats for a table (skip-cache) <<< #
 def _loaded_buckets(project_db, qname, vintage):
@@ -312,15 +424,18 @@ def _loaded_buckets(project_db, qname, vintage):
     return out
 
 # >>> per-vintage-window pull -> local DuckDB col stats -> upsert, then compare+save <<< #
-def run_compare_csv(project_db, config_path, pair=None, vintage="day",
+def run_compare_csv(project_db, config_path, pair=None, vintage=None,
                     from_date=None, to_date=None, preset=None,
                     stats_override=None, keep_csv=False, resume=False,
                     sample=None, key=None, data_dir=None, workers=None,
-                    force=False):
+                    force=False, verbose=False):
     from .extract import _cfg_max_workers
+    global _VERBOSE
+    _VERBOSE = verbose
     config = load_unified_config(config_path)
-    if data_dir:
-        os.makedirs(data_dir, exist_ok=True)
+    if data_dir and not os.path.isdir(data_dir):
+        raise ValueError(f"--data-dir does not exist: {data_dir!r} "
+                         f"(create it first; it is not a temp folder)")
     pairs = config.get("pairs", {})
     targets = ([pair] if pair else
                [n for n, p in pairs.items() if not p.get("skip")])
@@ -380,6 +495,29 @@ def _resolve_key(pname, pcfg, cli_key_cols, col_map):
         right_cols.append(ent[1])
     return key_cols, right_cols
 
+# >>> whether the fixed-N IN-list key should be normalized: explicit `key_normalize` else auto when key types differ <<< #
+def _resolve_key_normalize(project_db, pcfg, left, right, key_cols, right_key_cols):
+    v = pcfg.get("key_normalize")
+    if v is not None:
+        return bool(v)
+    lt = _col_types(project_db, qualified_name(left))
+    rt = _col_types(project_db, qualified_name(right))
+    return any(lt.get(lk.lower(), "") != rt.get(rk.lower(), "")
+               for lk, rk in zip(key_cols, right_key_cols))
+
+_VINTAGE_CHOICES = ("day", "week", "month", "quarter", "year")
+
+# >>> resolve a pair's vintage: pair-level `vintage`, else either side's table-level `vintage`, else CLI, else day <<< #
+def _resolve_vintage(pname, pcfg, cli_vintage):
+    v = (pcfg.get("vintage")
+         or (pcfg.get("left") or {}).get("vintage")
+         or (pcfg.get("right") or {}).get("vintage")
+         or cli_vintage or "day")
+    v = str(v).strip().lower()
+    if v not in _VINTAGE_CHOICES:
+        raise ValueError(f"{pname}: vintage must be one of {_VINTAGE_CHOICES}; got {v!r}")
+    return v
+
 # >>> resolve a pair's sample (per-pair `sample` else CLI --sample): int=#keys, float in (0,1]=fraction, None=all <<< #
 def _resolve_sample(pname, pcfg, cli_sample):
     s = pcfg.get("sample", None)
@@ -413,12 +551,13 @@ def _apply_pair_col_filter(cols, pcfg):
     return out
 
 # >>> signature of the params that change a window's CONTENT (excludes from/to dates) <<< #
-def _run_signature(vintage, sample, key_cols, value_cols, preset, stats_override):
+def _run_signature(vintage, sample, key_cols, value_cols, preset, stats_override,
+                   key_normalize=False):
     import hashlib
     payload = json.dumps([
         vintage, str(sample), sorted(c.lower() for c in (key_cols or [])),
         sorted(c.lower() for c in (value_cols or [])), preset or "",
-        json.dumps(stats_override or {}, sort_keys=True),
+        json.dumps(stats_override or {}, sort_keys=True), bool(key_normalize),
     ], sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -435,13 +574,23 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
 
     eff_from = from_date or ((pcfg.get("fromDate") or "").strip() or None)
     eff_to = to_date or ((pcfg.get("toDate") or "").strip() or None)
+    vintage = _resolve_vintage(pname, pcfg, vintage)
     sample = _resolve_sample(pname, pcfg, cli_sample)
     key_cols, right_key_cols = _resolve_key(pname, pcfg, cli_key_cols, col_map)
     if sample is not None and not key_cols:
         raise ValueError(f"{pname}: sample needs a key — set a per-pair 'key' "
                          f"in the config or pass --key")
+    frac_sample = isinstance(sample, float)
+    key_normalize = (_resolve_key_normalize(project_db, pcfg, left, right,
+                                            key_cols, right_key_cols)
+                     if (sample is not None and not frac_sample) else False)
+    fams = (_sample_families(project_db, left, key_cols)
+            if frac_sample else None)
+    threshold = (max(1, int(round(sample * HASH_BUCKET_SPACE)))
+                 if frac_sample else None)
 
-    run_sig = _run_signature(vintage, sample, key_cols, left_cols, preset, stats_override)
+    run_sig = _run_signature(vintage, sample, key_cols, left_cols, preset,
+                             stats_override, key_normalize)
     cached = get_compare_csv_sig(project_db, pname)
     params_changed = cached is not None and cached != run_sig
     fresh = force or params_changed
@@ -465,6 +614,20 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
     done_l = _loaded_buckets(project_db, tl, vintage) if skip_done else set()
     done_r = _loaded_buckets(project_db, tr, vintage) if skip_done else set()
 
+    proj_dir = os.path.dirname(os.path.abspath(project_db)) or "."
+    persist_csv = os.path.join(proj_dir, "csv")
+    os.makedirs(persist_csv, exist_ok=True)
+    scratch = data_dir or tempfile.mkdtemp(prefix="dtrack_ccsv_")
+    cleanup_scratch = not data_dir and not keep_csv
+    scratch_csv = os.path.join(scratch, "csv")
+    state_dir = os.path.join(scratch, ".state")
+
+    overrides = get_col_type_overrides(config, pname)
+    ignore = get_ignored_columns(config, pname)
+    vintage_csv = os.path.join(proj_dir, f"{_safe_name(pname)}_compare_col.csv")
+    if os.path.exists(vintage_csv):
+        os.remove(vintage_csv)
+
     print(f"[compare-csv] {pname}: {len(matched)} count-match dates -> "
           f"{len(buckets)} {vintage} window(s) "
           f"({len(left_cols)} value col(s), col-workers={workers})")
@@ -473,38 +636,101 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
         dates = buckets[bkey]
         if skip_done and bkey in done_l and bkey in done_r:
             print(f"  {bkey}: already loaded; skip (--force to re-pull)")
-            continue
-        tmpdir = tempfile.mkdtemp(prefix=f"dtrack_ccsv_{bkey}_", dir=data_dir)
-        try:
+        else:
             total = sum(counts.get(dt, 0) for dt in dates)
             key_in_l = key_in_r = None
             nkeys = None
-            if sample is not None and key_cols:
-                ktuples = _window_keys(project_db, left, key_cols, dates, sample)
+            sample_label = None
+            if frac_sample:
+                key_in_l = _hash_bucket_where(left, key_cols, fams, threshold)
+                key_in_r = _hash_bucket_where(right, right_key_cols, fams, threshold)
+                sample_label = f"~{sample:g} hash-bucket"
+            elif sample is not None and key_cols:
+                keys_csv = os.path.join(
+                    persist_csv, f"{_safe_name(pname)}_{_safe_name(bkey)}_keys.csv")
+                if not fresh and os.path.exists(keys_csv):
+                    ktuples = _read_keys_csv(keys_csv)
+                    print(f"  {bkey}: reusing {len(ktuples)} sampled key(s) from "
+                          f"{os.path.basename(keys_csv)}")
+                else:
+                    ktuples = _window_keys(project_db, left, key_cols, dates, sample,
+                                           normalize=key_normalize)
+                    _write_keys_csv(keys_csv, key_cols, ktuples)
                 nkeys = len(ktuples)
                 key_in_l, key_in_r = _key_filters(left, right, key_cols,
-                                                   right_key_cols, ktuples)
-            lc, _, lcols, pl = _pull_side(project_db, left, left_cols, dc_left,
-                                          dates, tmpdir, "left", extra_where=key_in_l)
-            rc, _, rcols, pr = _pull_side(project_db, right, right_cols, dc_right,
-                                          dates, tmpdir, "right", extra_where=key_in_r)
+                                                   right_key_cols, ktuples,
+                                                   normalize=key_normalize)
+            lc = os.path.join(scratch, f"{_safe_name(tl)}.csv")
+            rc = os.path.join(scratch, f"{_safe_name(tr)}.csv")
+            # both sides hit independent backends -> download concurrently (the slow
+            # part); the local DuckDB extract stays sequential (shared per-window state)
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                fl = ex.submit(_pull_side, project_db, left, left_cols, dc_left,
+                               dates, lc, "left", key_in_l)
+                fr = ex.submit(_pull_side, project_db, right, right_cols, dc_right,
+                               dates, rc, "right", key_in_r)
+                _, _, lcols, pl = fl.result()
+                _, _, rcols, pr = fr.result()
+            shutil.rmtree(state_dir, ignore_errors=True)
             nl = _extract_and_load(project_db, left, lc, lcols, tl, dc_left, bkey,
-                                   vintage, preset, stats_override, tmpdir, "left", workers)
+                                   vintage, preset, stats_override, scratch_csv,
+                                   persist_csv, "left", workers)
             nr = _extract_and_load(project_db, right, rc, rcols, tr, dc_right, bkey,
-                                   vintage, preset, stats_override, tmpdir, "right", workers)
-            keyinfo = f" on {nkeys} sampled key(s)" if nkeys is not None else ""
+                                   vintage, preset, stats_override, scratch_csv,
+                                   persist_csv, "right", workers)
+            keyinfo = (f" on {nkeys} sampled key(s)" if nkeys is not None
+                       else (f" via {sample_label}" if sample_label else ""))
             print(f"  {bkey}: {len(dates)} date(s) | records sample "
                   f"{pl}/{total} (L) {pr}/{total} (R){keyinfo} | "
                   f"col-stats {nl}/{nr}")
-            if keep_csv:
-                print(f"    kept tmp: {tmpdir}")
-        finally:
-            if not keep_csv:
-                shutil.rmtree(tmpdir, ignore_errors=True)
+        _vintage_compare(project_db, pname, tl, tr, col_map, bkey,
+                         overrides, ignore, vintage_csv)
+
+    if cleanup_scratch:
+        shutil.rmtree(scratch, ignore_errors=True)
+    elif not data_dir:
+        print(f"    kept scratch: {scratch}")
 
     _compare_and_save(project_db, config, pname, tl, tr, col_map,
                       set(matched), eff_from, eff_to)
     set_compare_csv_sig(project_db, pname, run_sig)
+
+_VINTAGE_COMPARE_FIELDS = [
+    "pair", "vintage", "column", "col_type",
+    "n_total_left", "n_total_right", "n_total_diff",
+    "n_missing_left", "n_missing_right", "n_missing_diff",
+    "n_unique_left", "n_unique_right", "n_unique_diff",
+    "min_match", "max_match", "hash_sum_match", "verdict",
+]
+
+# >>> compare one vintage bucket's col stats, append per-column rows to the per-vintage CSV + one-line summary <<< #
+def _vintage_compare(project_db, pname, tl, tr, col_map, bkey, overrides, ignore,
+                     vintage_csv):
+    result = compare_column_stats(
+        project_db, tl, tr, col_mappings=col_map,
+        matched_dates={bkey}, col_type_overrides=overrides)
+    if not result:
+        return
+    exists = os.path.exists(vintage_csv)
+    n_match, diff_cols = 0, []
+    with open(vintage_csv, "a", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=_VINTAGE_COMPARE_FIELDS,
+                            extrasaction="ignore")
+        if not exists:
+            w.writeheader()
+        for col in sorted(result):
+            if col in ignore:
+                continue
+            for c in result[col]:
+                is_diff = _has_col_differences(c)
+                if is_diff:
+                    diff_cols.append(col)
+                else:
+                    n_match += 1
+                w.writerow({**c, "pair": pname, "vintage": bkey, "column": col,
+                            "verdict": "diff" if is_diff else "match"})
+    extra = f" ({', '.join(sorted(set(diff_cols))[:4])})" if diff_cols else ""
+    print(f"  {bkey}: {n_match} match / {len(diff_cols)} diff{extra}")
 
 # >>> run the standard col-stats compare over the accumulated _col_stats and persist <<< #
 def _compare_and_save(project_db, config, pname, tl, tr, col_map,

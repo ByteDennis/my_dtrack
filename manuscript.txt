@@ -200,6 +200,12 @@ it never gets dropped.
                                                   // left col(s), must be in col_map)
           "sample": 500,                          // compare-csv per-pair sample: int
                                                   // = #keys, float in (0,1] = fraction
+          "key_normalize": false,                 // compare-csv: normalize the INT
+                                                  // #keys IN-list key (auto when the
+                                                  // two sides' key types differ);
+                                                  // FRAC always normalizes
+          "vintage": "quarter",                   // compare-csv per-pair window
+                                                  // (overrides --vintage)
           "col_filter": { "include": [], "exclude": [] },
           "col_type_overrides": {},
           "ignore_rows": [], "ignore_columns": [],
@@ -418,7 +424,7 @@ vars: db=, config=, pair=, port=, e2edir=, resultdir=, force=1, key=.
       e.g.  just compare-row                    # row-count diff + matching_dates
     just compare-col           -> output/compare_col.html
       e.g.  just compare-col                    # full col-stat diff report
-    just compare-csv [--vintage day|week|month] [--force] [--keep-csv]
+    just compare-csv [--vintage day|week|month] [--force] [--keep-csv] [--verbose]
                      [--key a[,b] --sample N|FRAC] [--data-dir DIR] [--workers N]
                                incremental alt to compare-col: per vintage window
                                pull each side -> tmp CSV -> local DuckDB col stats
@@ -436,12 +442,24 @@ vars: db=, config=, pair=, port=, e2edir=, resultdir=, force=1, key=.
                                load-columns / match-columns / e2e row is required.
                                If col_map ALREADY exists (e.g. e2e row ran), it is
                                picked up from column_mapping.csv or _table_pairs.
-                               Every backend SQL it issues (discover / count /
-                               sample / DOWNLOAD) is printed + logged to run.log
-                               for transparency. --data-dir DIR puts the per-window
-                               downloaded CSVs (the large files) under DIR instead
-                               of the system temp dir, keeping big pulls off the
-                               project folder / a small disk. Honors the per-pair
+                               CONCISE logging by default: one line per backend
+                               step (rows + seconds); the full SQL + per-block
+                               extract progress go to run.log, and to stdout only
+                               with --verbose. --data-dir DIR (must already exist;
+                               system temp when omitted) is TRANSIENT per-vintage
+                               scratch, same-named and REPLACED each window: the raw
+                               pulls {qname}.csv, the generated SQL + col CSV under
+                               DIR/csv/, and the DuckDB materialization under
+                               DIR/.state/ -- so big pulls stay off a small disk and
+                               nothing accumulates. PERSISTENT/incremental output
+                               lives in the project folder (dir(project.db)):
+                               project.db (col stats accumulate per vintage) and the
+                               per-vintage compare CSV. Each vintage window is
+                               compared right after its stats load, appending
+                               per-vintage rows to dir(project.db)/{pair}_compare_col.csv
+                               (one row-set per bucket); the pair-level
+                               _col_comparison (compare-col report) is still written
+                               once at the end. Honors the per-pair
                                config like e2e: fromDate/toDate are converted to
                                each side's date_type shape (e.g. 2025-11-21 +
                                string_compact -> 20251121), col_filter
@@ -465,15 +483,25 @@ vars: db=, config=, pair=, port=, e2edir=, resultdir=, force=1, key=.
                                changing only fromDate/toDate reuses cached windows
                                and pulls just the new range.
                                --sample (int #keys, or FRAC in (0,1]) + --key
-                               (composite row key) cut the download: the SAME keys
-                               are hash-sampled on both sides (deterministic), so
-                               stats stay comparable on a row subset. The key is
-                               normalized UPPER(TRIM(CAST(..str))) on both sides so
-                               differing source formats (numeric/string, CHAR pad,
-                               case) still match. Both --key and --sample are just
-                               DEFAULTS — set per-pair "key"/"sample" in the config
-                               for different keys/rates per pair (key must be in
-                               that pair's col_map)
+                               (composite row key) cut the download; both --sample
+                               and --key (and --vintage) are just DEFAULTS — a
+                               per-pair "key"/"sample"/"vintage" in the config wins
+                               (key must be in that pair's col_map). FRAC uses a
+                               hash-bucket PUSHDOWN predicate
+                               hash32(norm(key)) < FRAC*2^32 applied identically on
+                               both sides — no key list, no Python round-trip; it
+                               scales to billions and selects the SAME records on
+                               every backend (oracle/athena/hive/databricks/duckdb)
+                               regardless of row order. The hash key is normalized
+                               with the STRICT family rules (trim/lower/nfc for
+                               strings; trailing-zero/decimal canonicalization for
+                               numbers; date canonicalization) so the same logical
+                               key hashes to the same bucket across heterogeneous
+                               sources. INT #keys uses an IN-list on the RAW key by
+                               default (index-friendly, no per-row CAST); set
+                               per-pair "key_normalize": true (or it auto-enables
+                               when the two sides' key column types differ) to
+                               normalize the IN-list key instead
       e.g.  just compare-csv --vintage month                  # monthly windows, all rows
             just compare-csv --key acct,sub --sample 500       # 500 sampled keys/window
             just pair=loans compare-csv --sample 0.1 --resume  # 10% sample, skip done
