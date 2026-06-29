@@ -135,9 +135,6 @@ def load_row_counts(
     else:
         raise ValueError(f"Invalid mode: {mode}")
 
-    # canonicalize dt before min/max so metadata stays YYYY-MM-DD (matches the
-    # col loader); a raw source format like hadoop's compact YYYYMMDD would
-    # otherwise mix with canonical values and pick min/max from different shapes
     canon_dts = [_canon_date(dt) for dt, _ in data_list]
     min_dt = min(canon_dts) if canon_dts else None
     max_dt = max(canon_dts) if canon_dts else None
@@ -145,7 +142,6 @@ def load_row_counts(
     if mode == "upsert" and (min_dt or max_dt):
         existing = get_metadata(db_path, table_name)
         if existing:
-            # canonicalize existing too so a previously-stored raw value heals
             if existing.get("min_date_loaded") and min_dt:
                 min_dt = min(min_dt, _canon_date(existing["min_date_loaded"]))
             if existing.get("max_date_loaded") and max_dt:

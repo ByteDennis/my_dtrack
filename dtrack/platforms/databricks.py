@@ -20,6 +20,9 @@ from .base import (
     cache_db_path,
     cache_get,
     cache_put,
+    statement_id_get,
+    statement_id_put,
+    statement_id_delete,
     _mask_stats_in_rows,
 )
 
@@ -142,7 +145,180 @@ def _split_statements(sql):
     return [s.strip() for s in out if s.strip()]
 
 
+# >>> pull the SQL-warehouse id out of an http_path like /sql/1.0/warehouses/<id> <<< #
+def _warehouse_id_from_http_path(http_path):
+    import re
+    m = re.search(r"warehouses/([0-9a-zA-Z]+)", http_path or "")
+    return m.group(1) if m else None
+
+_DBX_NUMERIC_TYPES = {
+    "BYTE", "SHORT", "INT", "INTEGER", "LONG", "BIGINT", "SMALLINT", "TINYINT",
+}
+_DBX_FLOAT_TYPES = {"FLOAT", "DOUBLE", "REAL", "DECIMAL"}
+
+# >>> coerce a JSON_ARRAY string cell to int/float per the manifest column type <<< #
+def _dbx_coerce(value, type_name):
+    if value is None:
+        return None
+    t = (type_name or "").upper()
+    try:
+        if t in _DBX_NUMERIC_TYPES:
+            return int(value)
+        if t in _DBX_FLOAT_TYPES:
+            return float(value)
+    except (ValueError, TypeError):
+        return value
+    return value
+
+# >>> one Databricks REST call (statements API); returns parsed JSON or raises <<< #
+def _rest_request(method, host, path, token, body=None):
+    import json
+    import urllib.request
+    url = f"https://{host}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        timeout = int(os.environ.get("DTRACK_DATABRICKS_SOCKET_TIMEOUT", "600"))
+    except ValueError:
+        timeout = 600
+    with urllib.request.urlopen(req, timeout=max(timeout, 60)) as resp:
+        return json.loads(resp.read().decode())
+
+# >>> gather every result chunk for a finished statement into row dicts <<< #
+def _rest_collect_rows(host, token, statement_id, payload):
+    manifest = payload.get("manifest") or {}
+    schema = (manifest.get("schema") or {}).get("columns") or []
+    cols = [(c.get("name", "").lower(), c.get("type_name", "")) for c in schema]
+    rows = []
+
+    def _add(result):
+        for arr in (result or {}).get("data_array") or []:
+            rows.append({cols[i][0]: _dbx_coerce(v, cols[i][1])
+                         for i, v in enumerate(arr)})
+
+    result = payload.get("result") or {}
+    _add(result)
+    next_idx = result.get("next_chunk_index")
+    while next_idx is not None:
+        chunk = _rest_request(
+            "GET", host,
+            f"/api/2.0/sql/statements/{statement_id}/result/chunks/{next_idx}",
+            token)
+        _add(chunk)
+        next_idx = chunk.get("next_chunk_index")
+    return rows
+
+_DBX_TERMINAL = {"SUCCEEDED", "FAILED", "CANCELED", "CLOSED"}
+
+# >>> poll a submitted statement to a terminal state and return its final payload <<< #
+def _rest_poll(host, token, statement_id, payload):
+    import time
+    try:
+        deadline = int(os.environ.get("DTRACK_DATABRICKS_TIMEOUT", "1800"))
+    except ValueError:
+        deadline = 1800
+    waited = 0
+    state = ((payload.get("status") or {}).get("state") or "").upper()
+    while state not in _DBX_TERMINAL:
+        if deadline > 0 and waited >= deadline:
+            raise TimeoutError(
+                f"databricks statement {statement_id} still {state} after {waited}s")
+        time.sleep(5)
+        waited += 5
+        payload = _rest_request(
+            "GET", host, f"/api/2.0/sql/statements/{statement_id}", token)
+        state = ((payload.get("status") or {}).get("state") or "").upper()
+    return payload
+
+# >>> resume-by-ID Databricks executor: submit via statements API, persist the <<< #
+# >>> statement_id, and re-fetch by ID on retry instead of re-running the query <<< #
+def _query_databricks_rest(sql, catalog_schema=None):
+    cached = cache_get(sql, catalog_schema)
+    if cached is not None:
+        return cached
+
+    server_hostname, http_path, token = _databricks_auth()
+    warehouse_id = _warehouse_id_from_http_path(http_path)
+    if not warehouse_id:
+        raise RuntimeError(
+            f"DB_HTTPS http_path '{http_path}' is not a SQL warehouse path; "
+            "the resume-by-ID REST executor needs /sql/.../warehouses/<id> "
+            "(or set DTRACK_DATABRICKS_REST=0 to use the Thrift connector).")
+
+    resolved = _resolve_catalog_schema(catalog_schema)
+    catalog = schema = None
+    if resolved and "." in resolved:
+        catalog, schema = resolved.split(".", 1)
+    elif resolved:
+        schema = resolved
+
+    stmts = [s for s in _split_statements(sql)
+             if not s.lstrip().upper().startswith("USE ")]
+    if not stmts:
+        return []
+    statement = stmts[-1]
+
+    from ..logmgr import log_exc, get_logger
+    existing = statement_id_get(sql, catalog_schema)
+    payload = None
+    if existing:
+        try:
+            payload = _rest_request(
+                "GET", server_hostname,
+                f"/api/2.0/sql/statements/{existing}", token)
+            state = ((payload.get("status") or {}).get("state") or "").upper()
+            if state in ("FAILED", "CANCELED", "CLOSED"):
+                payload = None
+            else:
+                get_logger().info(
+                    "databricks: resuming statement %s (state=%s) — not re-running",
+                    existing, state or "?")
+        except Exception as e:
+            # 404 / expired statement: fall through to a fresh submit
+            log_exc(f"databricks: cannot resume statement {existing}; resubmitting",
+                    e, level="warning")
+            payload = None
+        if payload is None:
+            statement_id_delete(sql, catalog_schema)
+
+    if payload is None:
+        body = {
+            "warehouse_id": warehouse_id,
+            "statement": statement,
+            "wait_timeout": "0s",
+            "disposition": "INLINE",
+            "format": "JSON_ARRAY",
+        }
+        if catalog:
+            body["catalog"] = catalog
+        if schema:
+            body["schema"] = schema
+        payload = _rest_request(
+            "POST", server_hostname, "/api/2.0/sql/statements/", token, body)
+        statement_id = payload.get("statement_id")
+        if statement_id:
+            statement_id_put(sql, catalog_schema, statement_id)
+
+    statement_id = payload.get("statement_id")
+    payload = _rest_poll(server_hostname, token, statement_id, payload)
+    status = payload.get("status") or {}
+    state = (status.get("state") or "").upper()
+    if state != "SUCCEEDED":
+        statement_id_delete(sql, catalog_schema)
+        err = (status.get("error") or {}).get("message") or state
+        raise RuntimeError(f"databricks statement {statement_id} {state}: {err}")
+
+    out = _rest_collect_rows(server_hostname, token, statement_id, payload)
+    cache_put(sql, catalog_schema, out, row_count=len(out))
+    statement_id_delete(sql, catalog_schema)
+    return out
+
+
 def _query_databricks(sql, catalog_schema=None):
+    if os.environ.get("DTRACK_DATABRICKS_REST", "1") != "0":
+        return _query_databricks_rest(sql, catalog_schema)
     cached = cache_get(sql, catalog_schema)
     if cached is not None:
         return cached

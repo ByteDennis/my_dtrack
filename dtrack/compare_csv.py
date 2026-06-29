@@ -16,11 +16,20 @@ from .compare import (
 from .db import (
     get_column_meta, get_metadata, get_col_stats, get_row_counts,
     get_pair_col_map_from_db, save_col_comparison, register_table_pair,
+    get_compare_csv_sig, set_compare_csv_sig, delete_col_stats_for_tables,
 )
 from .loader import load_precomputed_col_stats
 from .extract import extract_all
 
 _CSV_SUPPORTED = ("aws", "oracle", "databricks", "csv", "hadoop")
+
+# >>> run a backend SQL, printing + logging it so every download step is transparent <<< #
+def _q(tbl, sql, label):
+    from .logmgr import get_logger
+    src = (tbl.get("source") or "").lower()
+    print(f"[compare-csv] {label} [{src}:{qualified_name(tbl)}]:\n{sql}")
+    get_logger().info("[compare-csv] %s [%s]: %s", label, qualified_name(tbl), sql)
+    return _run_query(tbl, sql)
 
 # >>> fallback column-name discovery for any source: one row -> its keys are the cols <<< #
 def _discover_names(tbl):
@@ -30,13 +39,12 @@ def _discover_names(tbl):
     where = f" WHERE {base}" if base else ""
     sql = f"{cte}SELECT * FROM {ft}{where} {_limit(src, 1)}"
     try:
-        rows = _run_query(tbl, sql)
+        rows = _q(tbl, sql, "discover columns")
     except Exception:
         return []
     return list(rows[0].keys()) if rows else []
 
-# >>> discover columns+TYPES (DESCRIBE) into _column_meta for tables missing it, <<< #
-# >>> covering all 5 sources by reusing each platform's own discovery <<< #
+# >>> discover columns+TYPES (DESCRIBE, all 5 sources) into _column_meta for tables missing it <<< #
 def _ensure_column_meta(project_db, tables, outdir):
     from .db import insert_column_meta
     need = [t for t in tables if not _col_types(project_db, qualified_name(t))]
@@ -61,8 +69,7 @@ def _ensure_column_meta(project_db, tables, outdir):
     except Exception as e:
         print(f"[compare-csv] column discovery warning: {e}")
 
-# >>> when no col_map exists yet, auto-match columns by name (from _column_meta, <<< #
-# >>> else a SELECT* name probe) and persist column_mapping.csv -> self-contained <<< #
+# >>> auto-match columns by name (from _column_meta, else a SELECT* probe) and persist column_mapping.csv <<< #
 def _ensure_col_map(project_db, config, config_path, pname, left, right):
     from .platforms.base import match_columns_from_dicts
     from .config import save_unified_config
@@ -99,16 +106,27 @@ def _col_types(project_db, qname):
         pass
     return out
 
+# >>> resolve (date_dtype, date_format) from the side's date_type (e2e semantics), else _column_meta/metadata <<< #
+def _date_dtype_fmt(project_db, tbl):
+    from .constants import DATE_TYPE_FORMATS, DATE_TYPE_TO_CANONICAL_DTYPE
+    dt = (tbl.get("date_type") or "").lower()
+    dfmt = DATE_TYPE_FORMATS.get(dt)
+    ddtype = DATE_TYPE_TO_CANONICAL_DTYPE.get(dt)
+    dc = (tbl.get("date_col") or "").lower()
+    if not ddtype:
+        ddtype = (_col_types(project_db, qualified_name(tbl)).get(dc)
+                  or ("VARCHAR" if dt.startswith("string") else None))
+    if not dfmt:
+        dfmt = (get_metadata(project_db, qualified_name(tbl)) or {}).get("date_format")
+    return ddtype, dfmt
+
 # >>> live per-date COUNT(*) on a side (cheap; no data download): {canonical_dt: count} <<< #
 def _date_counts(project_db, tbl, from_date, to_date):
     src = (tbl.get("source") or "").lower()
     d = _dialect(src)
     ft, cte = _full_table_and_cte(tbl)
-    qname = qualified_name(tbl)
-    types = _col_types(project_db, qname)
     dc = tbl.get("date_col", "")
-    ddtype = types.get(dc.lower())
-    dfmt = (get_metadata(project_db, qname) or {}).get("date_format")
+    ddtype, dfmt = _date_dtype_fmt(project_db, tbl)
     date_q = quote_ident(dc, d)
     base = (tbl.get("where") or "").strip()
     bounds = (build_date_bounds_clause(date_q, from_date, to_date, ddtype, date_format=dfmt)
@@ -118,7 +136,7 @@ def _date_counts(project_db, tbl, from_date, to_date):
            + (f" WHERE {where}" if where else "")
            + f" GROUP BY {date_q}")
     out = {}
-    for r in _run_query(tbl, sql):
+    for r in _q(tbl, sql, "date counts"):
         v = r.get("dt")
         if v is None:
             continue
@@ -147,20 +165,15 @@ def _matched_dates(project_db, pname, left, right, tl, tr, from_date, to_date):
 
 # >>> (base where AND date-window bounds) for a side, '' if none <<< #
 def _window_where(project_db, tbl, date_col, dates):
-    src = (tbl.get("source") or "").lower()
-    d = _dialect(src)
-    qname = qualified_name(tbl)
-    types = _col_types(project_db, qname)
-    ddtype = types.get((date_col or "").lower())
-    dfmt = (get_metadata(project_db, qname) or {}).get("date_format")
+    d = _dialect((tbl.get("source") or "").lower())
+    ddtype, dfmt = _date_dtype_fmt(project_db, tbl)
     date_q = quote_ident(date_col, d)
     bounds = build_date_bounds_clause(date_q, min(dates), max(dates), ddtype,
                                       date_format=dfmt)
     base = (tbl.get("where") or "").strip()
     return " AND ".join(f"({p})" for p in (base, bounds) if p)
 
-# >>> canonical key form so differing source representations align: <<< #
-# >>> UPPER(TRIM(CAST(col AS <string>))) -- fixes numeric-vs-string + CHAR padding + case <<< #
+# >>> canonical key form UPPER(TRIM(CAST(col AS str))) so differing source formats align <<< #
 def _norm_key_expr(dialect, col_q):
     d = dialect or ""
     if d == "oracle":
@@ -179,7 +192,7 @@ def _distinct_key_count(tbl, key_cols, where):
     sql = (f"{cte}SELECT COUNT(*) AS c FROM "
            f"(SELECT DISTINCT {keys_n} FROM {ft}"
            + (f" WHERE {where}" if where else "") + ") t")
-    rows = _run_query(tbl, sql)
+    rows = _q(tbl, sql, "distinct key count")
     return int(rows[0].get("c") or 0) if rows else 0
 
 # >>> deterministic hash-sample of NORMALIZED composite-key tuples from the LEFT, window-scoped <<< #
@@ -201,7 +214,7 @@ def _window_keys(project_db, left, key_cols, dates, sample):
     sql = (f"{cte}SELECT {sel} FROM {ft} WHERE {w} "
            f"GROUP BY {', '.join(nexprs)} "
            f"ORDER BY {_hash16_expr(src, nexprs[0])} {_limit(src, n)}")
-    rows = _run_query(left, sql)
+    rows = _q(left, sql, "sample keys")
     return [tuple(r.get(f"k{i}") for i in range(len(key_cols))) for r in rows]
 
 # >>> per-side NORMALIZED composite-key IN (...) for the sampled tuples <<< #
@@ -215,18 +228,20 @@ def _key_filters(left, right, key_cols, right_key_cols, key_tuples):
 # >>> pull one side's raw mapped-column rows for `dates` -> temp CSV + inline column types <<< #
 def _pull_side(project_db, tbl, value_cols, date_col, dates, tmpdir, tag,
                extra_where=None):
+    from .platforms.base import resolve_config_columns
     src = (tbl.get("source") or "").lower()
     d = _dialect(src)
     ft, cte = _full_table_and_cte(tbl)
     qname = qualified_name(tbl)
-    types = _col_types(project_db, qname)
+    declared = {k.lower(): v for k, v in (resolve_config_columns(tbl) or {}).items()}
+    types = {**_col_types(project_db, qname), **declared}
 
     date_q = quote_ident(date_col, d)
     cols_q = [date_q] + [quote_ident(c, d) for c in value_cols]
     win = _window_where(project_db, tbl, date_col, dates)
     where = " AND ".join(f"({p})" for p in (win, extra_where) if p) or "1=1"
     sql = f"{cte}SELECT {', '.join(cols_q)} FROM {ft} WHERE {where}"
-    rows = _run_query(tbl, sql)
+    rows = _q(tbl, sql, f"download {tag}")
 
     out_csv = os.path.join(tmpdir, f"{tag}.csv")
     header = [date_col] + list(value_cols)
@@ -241,9 +256,6 @@ def _pull_side(project_db, tbl, value_cols, date_col, dates, tmpdir, tag,
                 dv = "" if dv is None else str(dv)
             w.writerow([dv] + [r.get(c.lower()) for c in value_cols])
 
-    # faithful types from _column_meta when ALL value cols are known; otherwise
-    # leave columns=None so DuckDB auto-infers (keeps numeric cols numeric on a
-    # cold project.db, where no col extraction has recorded types yet)
     vt = {c: types[c.lower()] for c in value_cols if types.get(c.lower())}
     columns = ({date_col: "VARCHAR", **vt}
                if value_cols and len(vt) == len(value_cols) else None)
@@ -262,10 +274,10 @@ def _stamp_dt(col_csv, dt_label):
         w.writeheader()
         w.writerows(rows)
 
-# >>> compute col stats locally over a pulled CSV (whole window = one bucket) and <<< #
-# >>> upsert them under the real qname, stamped with the window's bucket date <<< #
+# >>> compute col stats locally over a pulled CSV and upsert under the real qname, stamped with the bucket date <<< #
 def _extract_and_load(project_db, src_tbl, csv_path, columns, real_qname,
-                      date_col, dt_label, vintage, preset, stats_override, tmpdir, tag):
+                      date_col, dt_label, vintage, preset, stats_override, tmpdir,
+                      tag, workers=None):
     csv_cfg = {
         "name": tag, "table": tag, "source": "csv",
         "conn_macro": csv_path, "date_col": date_col,
@@ -279,7 +291,7 @@ def _extract_and_load(project_db, src_tbl, csv_path, columns, real_qname,
         json.dump(temp_cfg, f)
     extract_all(config_path=cfg_path, outdir=tmpdir, types=["col"],
                 db_path=None, vintage="all", preset=preset,
-                stats_override=stats_override)
+                stats_override=stats_override, max_workers=workers)
     col_csv = os.path.join(tmpdir, "csv", f"{qualified_name(csv_cfg)}_col.csv")
     _stamp_dt(col_csv, dt_label)
     return load_precomputed_col_stats(
@@ -287,7 +299,7 @@ def _extract_and_load(project_db, src_tbl, csv_path, columns, real_qname,
         mode="upsert", source=src_tbl.get("source"),
         db_name=src_tbl.get("conn_macro"), vintage=vintage)
 
-# >>> bucket-keys already present in _col_stats for a table (for --resume) <<< #
+# >>> bucket-keys already present in _col_stats for a table (skip-cache) <<< #
 def _loaded_buckets(project_db, qname, vintage):
     out = set()
     for s in get_col_stats(project_db, qname):
@@ -303,14 +315,16 @@ def _loaded_buckets(project_db, qname, vintage):
 def run_compare_csv(project_db, config_path, pair=None, vintage="day",
                     from_date=None, to_date=None, preset=None,
                     stats_override=None, keep_csv=False, resume=False,
-                    sample=None, key=None):
+                    sample=None, key=None, data_dir=None, workers=None,
+                    force=False):
+    from .extract import _cfg_max_workers
     config = load_unified_config(config_path)
+    if data_dir:
+        os.makedirs(data_dir, exist_ok=True)
     pairs = config.get("pairs", {})
     targets = ([pair] if pair else
                [n for n, p in pairs.items() if not p.get("skip")])
 
-    # CLI --key/--sample are defaults; per-pair "key"/"sample" fields override
-    # them (resolved per pair in _run_pair, validated against that pair's col_map)
     cli_key_cols = [k.strip() for k in str(key).split(",") if k.strip()] if key else []
 
     for pname in targets:
@@ -326,29 +340,24 @@ def run_compare_csv(project_db, config_path, pair=None, vintage="day",
                       f"({', '.join(_CSV_SUPPORTED)}); skipping")
                 break
         else:
-            # discover column types into _column_meta if missing (so date bounds +
-            # typing are faithful) -- no prior `e2e row` / load-columns needed
-            tmpd = tempfile.mkdtemp(prefix="dtrack_ccsv_meta_")
-            try:
-                _ensure_column_meta(project_db, [left, right], tmpd)
-            finally:
-                shutil.rmtree(tmpd, ignore_errors=True)
+            cols_dir = os.path.dirname(os.path.abspath(config_path)) or "."
+            _ensure_column_meta(project_db, [left, right], cols_dir)
             col_map = (pcfg.get("col_map")
                        or get_pair_col_map_from_db(project_db, pname) or {})
             if not col_map:
-                # never generated -> discover + auto-match + persist column_mapping.csv
                 col_map = _ensure_col_map(project_db, config, config_path,
                                           pname, left, right)
             register_table_pair(project_db, pname, tl, tr,
                                 source_left=left.get("source"),
                                 source_right=right.get("source"),
                                 col_mappings=col_map or None)
+            nworkers = _cfg_max_workers(config, (left.get("source") or "").lower(),
+                                        workers) or 1
             _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
                       vintage, from_date, to_date, preset, stats_override,
-                      keep_csv, resume, sample, cli_key_cols)
+                      keep_csv, sample, cli_key_cols, data_dir, nworkers, force)
 
-# >>> resolve a pair's key cols (per-pair `key` field, else CLI --key) and their <<< #
-# >>> right-side names via col_map; RAISE if a key col isn't mapped <<< #
+# >>> resolve a pair's key cols (per-pair `key` else CLI --key) + right names via col_map; raise if unmapped <<< #
 def _resolve_key(pname, pcfg, cli_key_cols, col_map):
     k = pcfg.get("key")
     if k:
@@ -371,8 +380,7 @@ def _resolve_key(pname, pcfg, cli_key_cols, col_map):
         right_cols.append(ent[1])
     return key_cols, right_cols
 
-# >>> resolve a pair's sample (per-pair `sample` field, else CLI --sample); <<< #
-# >>> int = fixed #keys, float in (0,1] = fraction of keys; None = pull all <<< #
+# >>> resolve a pair's sample (per-pair `sample` else CLI --sample): int=#keys, float in (0,1]=fraction, None=all <<< #
 def _resolve_sample(pname, pcfg, cli_sample):
     s = pcfg.get("sample", None)
     if s is None:
@@ -389,42 +397,84 @@ def _resolve_sample(pname, pcfg, cli_sample):
     return s
 
 # >>> drive one pair: enumerate matched-date buckets, pull/load each, then compare <<< #
+# >>> apply a pair's col_filter include/exclude (fnmatch, lowercase) to left value cols <<< #
+def _apply_pair_col_filter(cols, pcfg):
+    cf = pcfg.get("col_filter") or {}
+    inc = [p.strip().lower() for p in (cf.get("include") or []) if p and p.strip()]
+    exc = [p.strip().lower() for p in (cf.get("exclude") or []) if p and p.strip()]
+    if not inc and not exc:
+        return cols
+    from fnmatch import fnmatch
+    out = cols
+    if inc:
+        out = [c for c in out if any(fnmatch(c.lower(), p) for p in inc)]
+    if exc:
+        out = [c for c in out if not any(fnmatch(c.lower(), p) for p in exc)]
+    return out
+
+# >>> signature of the params that change a window's CONTENT (excludes from/to dates) <<< #
+def _run_signature(vintage, sample, key_cols, value_cols, preset, stats_override):
+    import hashlib
+    payload = json.dumps([
+        vintage, str(sample), sorted(c.lower() for c in (key_cols or [])),
+        sorted(c.lower() for c in (value_cols or [])), preset or "",
+        json.dumps(stats_override or {}, sort_keys=True),
+    ], sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
 def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
               vintage, from_date, to_date, preset, stats_override,
-              keep_csv, resume, cli_sample=None, cli_key_cols=None):
+              keep_csv, cli_sample=None, cli_key_cols=None,
+              data_dir=None, workers=1, force=False):
     left, right = pcfg["left"], pcfg["right"]
     dc_left = left.get("date_col", "")
     dc_right = right.get("date_col", "")
-    left_cols = [c for c in col_map if c.lower() != dc_left.lower()]
+    left_cols = _apply_pair_col_filter(
+        [c for c in col_map if c.lower() != dc_left.lower()], pcfg)
     right_cols = [col_map[c] for c in left_cols]
 
+    eff_from = from_date or ((pcfg.get("fromDate") or "").strip() or None)
+    eff_to = to_date or ((pcfg.get("toDate") or "").strip() or None)
     sample = _resolve_sample(pname, pcfg, cli_sample)
     key_cols, right_key_cols = _resolve_key(pname, pcfg, cli_key_cols, col_map)
     if sample is not None and not key_cols:
         raise ValueError(f"{pname}: sample needs a key — set a per-pair 'key' "
                          f"in the config or pass --key")
 
+    run_sig = _run_signature(vintage, sample, key_cols, left_cols, preset, stats_override)
+    cached = get_compare_csv_sig(project_db, pname)
+    params_changed = cached is not None and cached != run_sig
+    fresh = force or params_changed
+    if fresh and cached is not None:
+        delete_col_stats_for_tables(project_db, [tl, tr])
+        why = "--force" if force else "params changed"
+        print(f"[compare-csv] {pname}: {why} -> clearing cache, re-pulling all")
+
     matched, counts = _matched_dates(project_db, pname, left, right, tl, tr,
-                                     from_date, to_date)
+                                     eff_from, eff_to)
     if not matched:
         print(f"[compare-csv] {pname}: no count-matching dates; skipping")
+        set_compare_csv_sig(project_db, pname, run_sig)
         return
 
     buckets = {}
     for dt in matched:
         buckets.setdefault(bucket_date(dt, vintage), []).append(dt)
 
-    done_l = _loaded_buckets(project_db, tl, vintage) if resume else set()
-    done_r = _loaded_buckets(project_db, tr, vintage) if resume else set()
+    skip_done = not fresh
+    done_l = _loaded_buckets(project_db, tl, vintage) if skip_done else set()
+    done_r = _loaded_buckets(project_db, tr, vintage) if skip_done else set()
 
     print(f"[compare-csv] {pname}: {len(matched)} count-match dates -> "
-          f"{len(buckets)} {vintage} window(s)")
+          f"{len(buckets)} {vintage} window(s) "
+          f"({len(left_cols)} value col(s), col-workers={workers})")
+
     for bkey in sorted(buckets):
         dates = buckets[bkey]
-        if resume and bkey in done_l and bkey in done_r:
-            print(f"  {bkey}: already loaded; skip (--resume)")
+        if skip_done and bkey in done_l and bkey in done_r:
+            print(f"  {bkey}: already loaded; skip (--force to re-pull)")
             continue
-        tmpdir = tempfile.mkdtemp(prefix=f"dtrack_ccsv_{bkey}_")
+        tmpdir = tempfile.mkdtemp(prefix=f"dtrack_ccsv_{bkey}_", dir=data_dir)
         try:
             total = sum(counts.get(dt, 0) for dt in dates)
             key_in_l = key_in_r = None
@@ -438,10 +488,10 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
                                           dates, tmpdir, "left", extra_where=key_in_l)
             rc, _, rcols, pr = _pull_side(project_db, right, right_cols, dc_right,
                                           dates, tmpdir, "right", extra_where=key_in_r)
-            nl = _extract_and_load(project_db, left, lc, lcols, tl, dc_left,
-                                   bkey, vintage, preset, stats_override, tmpdir, "left")
-            nr = _extract_and_load(project_db, right, rc, rcols, tr, dc_right,
-                                   bkey, vintage, preset, stats_override, tmpdir, "right")
+            nl = _extract_and_load(project_db, left, lc, lcols, tl, dc_left, bkey,
+                                   vintage, preset, stats_override, tmpdir, "left", workers)
+            nr = _extract_and_load(project_db, right, rc, rcols, tr, dc_right, bkey,
+                                   vintage, preset, stats_override, tmpdir, "right", workers)
             keyinfo = f" on {nkeys} sampled key(s)" if nkeys is not None else ""
             print(f"  {bkey}: {len(dates)} date(s) | records sample "
                   f"{pl}/{total} (L) {pr}/{total} (R){keyinfo} | "
@@ -453,7 +503,8 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
                 shutil.rmtree(tmpdir, ignore_errors=True)
 
     _compare_and_save(project_db, config, pname, tl, tr, col_map,
-                      set(matched), from_date, to_date)
+                      set(matched), eff_from, eff_to)
+    set_compare_csv_sig(project_db, pname, run_sig)
 
 # >>> run the standard col-stats compare over the accumulated _col_stats and persist <<< #
 def _compare_and_save(project_db, config, pname, tl, tr, col_map,

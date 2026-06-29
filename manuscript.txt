@@ -218,18 +218,18 @@ the column's stored shape (e.g. string_compact 2026-05-02 -> '20260502') and
 the date-bounds clause is emitted FIRST, then the table's `where`.
 
 Notes:
-- col_map is mirrored in BOTH pairs.json (inline) AND column_mapping.csv (a file
-  beside the config; header `pair,left,right`, one row per mapped column), kept
-  in sync: save_unified_config writes both; load_unified_config makes the CSV
-  AUTHORITATIVE — a pair present in the CSV overrides a stale inline col_map; a
-  pair only inline (no CSV) is used as-is. So whatever you see in column_mapping.csv
-  is what every reader gets, and the JSON always shows it too. write_col_mapping is
-  NON-destructive: it MERGES into the existing CSV, so a save from a config that
-  lacks col_map in memory (a non-injecting/partial save) preserves the mappings
-  instead of wiping them; only an explicit col_map={} on a present pair clears that
-  pair's rows. match-columns / the web col_mapping page / sample-key all round-trip
-  through save_unified_config. Produced/updated in `just e2e` at the match-columns
-  (col-gen) and compare-col (col-run) steps.
+- col_map lives in column_mapping.csv (one file beside the config; header
+  `pair,left,right`, one row per mapped column) — NOT duplicated inline in
+  pairs.json. save_unified_config writes the CSV and STRIPS col_map from the JSON;
+  load_unified_config injects it back (CSV authoritative — a pair present in the
+  CSV overrides a stale inline col_map; a pair only inline with no CSV is used
+  as-is, for back-compat). write_col_mapping is NON-destructive: it MERGES into
+  the existing CSV, so a save from a config that lacks col_map in memory (a
+  non-injecting/partial save) preserves the mappings instead of wiping them; only
+  an explicit col_map={} on a present pair clears that pair's rows. match-columns /
+  the web col_mapping page / sample-key all round-trip through save_unified_config.
+  Produced/updated in `just e2e` at the match-columns (col-gen) and compare-col
+  (col-run) steps.
 - Qualified table name = "{source}_{name}" (platforms.base.qualified_name);
   it keys _row_counts / _col_stats / _metadata / _column_meta.
 - where_map is rebuilt by compare-row from matching/excluded dates. The col
@@ -271,6 +271,7 @@ COUNT(DISTINCT) (APPROX_* is never emitted).
     _table_pairs     pair_name -> left/right + col_mappings/filters (JSON)
     _row_comparison  pair_name -> overlap, matching/excluded dates (JSON)
     _col_comparison  pair_name -> columns_compared, diff_columns, details
+    _compare_csv_state pair_name -> compare-csv run signature (skip-cache key)
 
     dtrack query <db> "SELECT * FROM _row_comparison LIMIT 5"
     dtrack query <db> --write "DELETE FROM _row_counts WHERE source_table='...'"
@@ -417,8 +418,8 @@ vars: db=, config=, pair=, port=, e2edir=, resultdir=, force=1, key=.
       e.g.  just compare-row                    # row-count diff + matching_dates
     just compare-col           -> output/compare_col.html
       e.g.  just compare-col                    # full col-stat diff report
-    just compare-csv [--vintage day|week|month] [--resume] [--keep-csv]
-                     [--key a[,b] --sample N|FRAC]
+    just compare-csv [--vintage day|week|month] [--force] [--keep-csv]
+                     [--key a[,b] --sample N|FRAC] [--data-dir DIR] [--workers N]
                                incremental alt to compare-col: per vintage window
                                pull each side -> tmp CSV -> local DuckDB col stats
                                -> upsert _col_stats + compare. Bounded memory /
@@ -435,6 +436,34 @@ vars: db=, config=, pair=, port=, e2edir=, resultdir=, force=1, key=.
                                load-columns / match-columns / e2e row is required.
                                If col_map ALREADY exists (e.g. e2e row ran), it is
                                picked up from column_mapping.csv or _table_pairs.
+                               Every backend SQL it issues (discover / count /
+                               sample / DOWNLOAD) is printed + logged to run.log
+                               for transparency. --data-dir DIR puts the per-window
+                               downloaded CSVs (the large files) under DIR instead
+                               of the system temp dir, keeping big pulls off the
+                               project folder / a small disk. Honors the per-pair
+                               config like e2e: fromDate/toDate are converted to
+                               each side's date_type shape (e.g. 2025-11-21 +
+                               string_compact -> 20251121), col_filter
+                               (include/exclude value cols), key/sample. The pulled
+                               tmp CSV is typed from the source columns (declared
+                               `columns`/columns_file > _column_meta) so the DuckDB
+                               table + col stats match e2e. (databricks: catalog is
+                               set at connect via conn_macro=catalog.schema, table
+                               ref = schema.table -- same as extract_databricks.)
+                               Vintage
+                               windows run ONE AFTER ANOTHER (sequential, bounded
+                               memory); --workers / settings.max_workers only
+                               parallelizes the COLUMNS within a window (local
+                               DuckDB compute) -- never across windows.
+                               SKIP-CACHE by default (like e2e): a window already in
+                               _col_stats is skipped (no re-pull). --force (just
+                               force=1) re-pulls + recomputes all. A changed
+                               --sample/--key/col_filter/--preset/--vintage is
+                               auto-detected (per-pair run signature in
+                               _compare_csv_state) and clears the cache + re-pulls;
+                               changing only fromDate/toDate reuses cached windows
+                               and pulls just the new range.
                                --sample (int #keys, or FRAC in (0,1]) + --key
                                (composite row key) cut the download: the SAME keys
                                are hash-sampled on both sides (deterministic), so

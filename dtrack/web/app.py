@@ -3395,8 +3395,6 @@ async def api_save_col_mappings(pair_name: str, request: Request):
             config = load_unified_config(_config_path)
             pairs_cfg = config.setdefault("pairs", {})
             if pair_name in pairs_cfg:
-                # explicit {} (not pop) so write_col_mapping clears this pair's
-                # CSV rows; a popped/absent col_map is preserved by the merge
                 pairs_cfg[pair_name]["col_map"] = mappings if mappings else {}
                 if rules_data and rules_data.get("rules"):
                     pairs_cfg[pair_name]["col_rules"] = rules_data

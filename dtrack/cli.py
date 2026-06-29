@@ -1180,6 +1180,9 @@ def cmd_compare_csv(args):
         resume=getattr(args, 'resume', False),
         sample=sample,
         key=getattr(args, 'key', None),
+        data_dir=getattr(args, 'data_dir', None),
+        workers=getattr(args, 'workers', None),
+        force=getattr(args, 'force', False),
     )
 
 # >>> sample-key: composite-key value+hash dump (--out/default) and/or col-sample gen (--gen-col) <<< #
@@ -1491,10 +1494,21 @@ def main():
                         'via col_map) for --sample. A per-pair "key" field in the config overrides '
                         'this; key columns MUST be in col_map (else error). The key is normalized '
                         '(upper/trim/cast-to-string) on both sides so differing formats still match')
+    p.add_argument('--data-dir', dest='data_dir',
+                   help='Folder for the per-window downloaded CSVs (large files). Default: '
+                        'system temp. Use this to keep big pulls off the project folder / a small disk')
+    p.add_argument('--workers', type=int,
+                   help='Concurrency for the LOCAL per-column stat compute within each window '
+                        '(CLI > settings.max_workers > 1). Vintage windows always run one after '
+                        'another (sequential); only the columns inside a window are parallel')
     p.add_argument('--keep-csv', dest='keep_csv', action='store_true',
                    help='Keep the per-window tmp CSV/config dirs (else removed after each window)')
+    p.add_argument('--force', action='store_true',
+                   help='Re-pull + recompute every window (ignore the skip-cache). Skip-cache '
+                        'is the default: windows already in _col_stats are skipped, and a changed '
+                        '--sample/--key/col_filter/--preset/--vintage auto-triggers a re-pull')
     p.add_argument('--resume', action='store_true',
-                   help='Skip vintage windows already present in _col_stats for both sides')
+                   help='(deprecated no-op) skip-cache is now the default; use --force to re-pull')
 
     p = sub.add_parser('gen-aws', help='Extract data from AWS Athena')
     p.add_argument('config')

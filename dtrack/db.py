@@ -1748,3 +1748,30 @@ def clear_playground_history(db_path: str) -> int:
     with sqlite3.connect(db_path) as c:
         cur = c.execute("DELETE FROM _playground_history")
         return cur.rowcount
+
+# >>> read the stored compare-csv run signature for a pair (None if unknown) <<< #
+def get_compare_csv_sig(db_path: str, pair_name: str) -> Optional[str]:
+    with sqlite3.connect(db_path) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS _compare_csv_state "
+                  "(pair_name TEXT PRIMARY KEY, signature TEXT, created_at TEXT)")
+        row = c.execute("SELECT signature FROM _compare_csv_state WHERE pair_name = ?",
+                        (pair_name,)).fetchone()
+    return row[0] if row else None
+
+# >>> persist the compare-csv run signature for a pair <<< #
+def set_compare_csv_sig(db_path: str, pair_name: str, signature: str) -> None:
+    from datetime import datetime
+    with sqlite3.connect(db_path) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS _compare_csv_state "
+                  "(pair_name TEXT PRIMARY KEY, signature TEXT, created_at TEXT)")
+        c.execute("INSERT OR REPLACE INTO _compare_csv_state "
+                  "(pair_name, signature, created_at) VALUES (?, ?, ?)",
+                  (pair_name, signature, datetime.now().isoformat()))
+
+# >>> drop _col_stats rows for the given source tables (clean slate on refresh) <<< #
+def delete_col_stats_for_tables(db_path: str, tables) -> int:
+    n = 0
+    with sqlite3.connect(db_path) as c:
+        for t in tables:
+            n += c.execute("DELETE FROM _col_stats WHERE source_table = ?", (t,)).rowcount
+    return n

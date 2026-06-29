@@ -28,10 +28,7 @@ def read_col_mapping(config_path):
         return {}
     return out
 
-# >>> merge each pair's col_map INTO column_mapping.csv (pair,left,right) <<< #
-# >>> NON-destructive: a pair absent / without col_map keeps its existing CSV   <<< #
-# >>> rows, so a save from a config that wasn't injected can't wipe mappings.   <<< #
-# >>> Only an EXPLICIT empty col_map ({}) on a present pair clears its rows.     <<< #
+# >>> merge each pair's col_map into column_mapping.csv (non-destructive; only an explicit {} clears a pair) <<< #
 def write_col_mapping(config, config_path):
     path = col_mapping_path(config_path)
     merged = read_col_mapping(config_path)
@@ -135,9 +132,6 @@ def load_unified_config(config_path):
 
     validate_unified_config(config)
 
-    # col_map is mirrored in BOTH pairs.json (inline) and column_mapping.csv;
-    # the CSV is authoritative, so the in-memory inline col_map is kept in sync
-    # with it on load (a pair only in the CSV is injected; one only inline stays).
     mapping = read_col_mapping(config_path)
     for pair_name, pair_cfg in config.get("pairs", {}).items():
         for side in ("left", "right"):
@@ -152,12 +146,11 @@ def load_unified_config(config_path):
 # >>> Save unified configuration to JSON file <<< #
 def save_unified_config(config, config_path):
     import copy
-    # col_map is written to BOTH column_mapping.csv AND kept inline in the JSON,
-    # so the two stay in sync (the CSV wins on the next load).
     write_col_mapping(config, config_path)
     out = copy.deepcopy(config)
     # >>> strip a side's name only when it matches the table-derived one, so divergent names survive reload <<< #
     for pair_name, pair_cfg in out.get("pairs", {}).items():
+        pair_cfg.pop("col_map", None)
         for side in ("left", "right"):
             side_cfg = pair_cfg.get(side, {})
             if side_cfg.get("name") == _derive_side_name(side_cfg, pair_name):
@@ -218,9 +211,6 @@ def get_all_tables_from_unified(config):
                 else:
                     cols = set(col_map.values())
                     table_cfg["_selected_cols"] = selected_right
-                # the date_col is the GROUP BY / date-filter column, not a mapped
-                # value column; always keep it downloadable so col-fill (and the
-                # csv materialization) never drops it
                 dc = table_cfg.get("date_col")
                 if dc:
                     cols.add(dc)

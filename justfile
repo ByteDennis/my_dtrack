@@ -155,11 +155,13 @@ compare-col *args:
 # discovers dates via its own per-date COUNT(*) (reuses _row_counts if loaded) and
 # compares col stats on COUNT-MATCH dates only. No prior row-compare needed.
 #   just compare-csv --vintage month            # all pairs, monthly windows
-#   just pair=tableA compare-csv --resume        # skip windows already loaded
+#   just force=1 compare-csv                      # re-pull (ignore skip-cache)
 #   just compare-csv --key acct,sub --sample 500     # 500 sampled keys/window
 #   just compare-csv --key acct,sub --sample 0.1      # 10% of keys/window
+# skip-cache is the DEFAULT: already-loaded windows are skipped; a changed
+# sample/key/col_filter/preset/vintage auto-re-pulls. force=1 re-pulls everything.
 compare-csv *args:
-    dtrack compare-csv {{db}} --config {{config}} {{ if pair == "" { "" } else { "--pair " + pair } }} {{args}}
+    dtrack compare-csv {{db}} --config {{config}} {{ if pair == "" { "" } else { "--pair " + pair } }} {{ if force == "" { "" } else { "--force" } }} {{args}}
 
 # --- live e2e pipeline: real backends -> HTML -----------------------------
 # Single entry point. type = row | col-gen | col-run | col | all. Outputs land

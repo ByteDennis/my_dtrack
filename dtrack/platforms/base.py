@@ -54,10 +54,67 @@ def set_cache_db(path):
                 payload BLOB
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS statement_ids (
+                sql_hash TEXT PRIMARY KEY,
+                statement_id TEXT,
+                scope     TEXT,
+                created_at TEXT
+            )
+        """)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.commit()
     finally:
         conn.close()
+
+# >>> Persisted in-flight Databricks statement_id for a (SQL, scope) key (resume by ID) <<< #
+def statement_id_get(sql, scope):
+    if not _cache_db:
+        return None
+    import sqlite3
+    key = _cache_key(sql, scope)
+    conn = sqlite3.connect(_cache_db)
+    try:
+        row = conn.execute(
+            "SELECT statement_id FROM statement_ids WHERE sql_hash = ?",
+            (key,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+# >>> Record the statement_id right after submit so a crash can resume fetch <<< #
+def statement_id_put(sql, scope, statement_id):
+    if not _cache_db:
+        return
+    import sqlite3
+    from datetime import datetime as _dt
+    key = _cache_key(sql, scope)
+    with _cache_lock:
+        conn = sqlite3.connect(_cache_db)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO statement_ids "
+                "(sql_hash, statement_id, scope, created_at) VALUES (?, ?, ?, ?)",
+                (key, statement_id, scope or '', _dt.now().isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+# >>> Drop the statement_id once results are cached (or the statement is dead) <<< #
+def statement_id_delete(sql, scope):
+    if not _cache_db:
+        return
+    import sqlite3
+    key = _cache_key(sql, scope)
+    with _cache_lock:
+        conn = sqlite3.connect(_cache_db)
+        try:
+            conn.execute("DELETE FROM statement_ids WHERE sql_hash = ?", (key,))
+            conn.commit()
+        finally:
+            conn.close()
 
 # >>> Return (hits, misses) since the most recent set_cache_db call <<< #
 def cache_stats():
@@ -996,8 +1053,6 @@ def fill_columns_from_meta(tables, db_path):
             all_cols = {m['column_name']: m['data_type'] for m in meta}
             allowed = tbl.get('_col_map_columns')
             if allowed:
-                # always keep the date_col (the GROUP BY / date-filter column),
-                # even if it isn't a mapped value column, so it stays downloadable
                 dc = (tbl.get('date_col') or '').lower()
                 tbl['columns'] = {c: t for c, t in all_cols.items()
                                   if c in allowed or c.lower() == dc}
