@@ -66,13 +66,121 @@ help topic="":
         echo "    --preset quick|standard|detailed            col-stats depth"
         echo "    --stats-override ...                        per-stat override"
         echo "    --from-date / --to-date YYYY-MM-DD          incremental window"
-        echo "    --clean[=reports|rebuild|all]               run e2e-clean first (default rebuild)"
+        echo "    --clean[=reports|rebuild|all]               reset first (default rebuild)"
         echo "    e.g.  just pair=month e2e col-gen --vintage month --preset detailed"
         echo "    e.g.  just e2e all --clean        # re-load+compare, no backend (rebuild)"
         echo "    e.g.  just e2e all --clean=all    # wipe extracts+caches, full re-extract"
         echo "  pair=NAME            use {{configdir}}/NAME.json; HTML + .state namespaced _NAME"
         echo "  resultdir=DIR        where reports land (default {{e2edir}}/output; separate from web)"
         echo "  force=1              ignore skip-cache; re-run row/discover/col extract"
+        ;;
+    compare-csv|csv)
+        echo "just [pair=NAME] [force=1] compare-csv [dtrack compare-csv flags]"
+        echo
+        echo "Incremental column-stats compare. Per vintage window: pull each side to a"
+        echo "tmp CSV -> compute stats locally in DuckDB -> upsert _col_stats + compare."
+        echo "Bounded memory (no one huge backend col scan). Self-contained: finds its own"
+        echo "count-matching dates (reuses _row_counts if loaded) — no prior compare-row."
+        echo "Sources: oracle, aws, databricks, hadoop, csv."
+        echo
+        echo "just-level vars (set as pair=.. force=1 before the recipe name):"
+        echo "  pair=NAME         only this pair, from {{configdir}}/NAME.json (else all non-skipped)"
+        echo "  force=1           re-pull+recompute every window (ignore skip-cache)"
+        echo "                    db={{db}}  config={{config}}  (override like db=other.db)"
+        echo
+        echo "forwarded flags (passed straight to dtrack compare-csv):"
+        echo "  --vintage day|week|month|quarter|year   one pull window per bucket"
+        echo "                                          (default: pair's vintage, else day)"
+        echo "  --from-date / --to-date YYYY-MM-DD      restrict the date range"
+        echo "  --preset quick|standard|detailed        col-stats depth"
+        echo "  --stats-override n_unique=on,hash_sum=off   per-stat toggle"
+        echo "      (keys: n_total n_missing n_unique min_max length hash_sum top_10)"
+        echo "  --key COLS        composite row key (comma left cols; right via col_map)."
+        echo "                    REQUIRED for --sample. Per-pair \"key\" overrides."
+        echo "  --sample N|FRAC   cut the download (needs --key):"
+        echo "                      N (int)    = N fixed keys/window, raw-key IN-list"
+        echo "                      FRAC 0-1   = fraction via hash32(norm key) pushdown"
+        echo "                                   (no key list; same records both sides)"
+        echo "                    Per-pair \"sample\"/\"key\"/\"vintage\" config fields override the flags."
+        echo "  --data-dir DIR    folder for the big per-window CSVs (must exist; def: temp)"
+        echo "  --workers N       concurrency for the LOCAL per-column stat compute"
+        echo "                    (windows run sequentially; columns within a window parallel)"
+        echo "  --keep-csv        keep the per-window tmp CSV/config dirs"
+        echo "  --verbose         print full backend SQL (default: one concise line/step)"
+        echo "  --clean marks|cache|all   reset first: marks=run signature; cache=+drop"
+        echo "                            stats/row-counts/sampled-keys/caches; all=+del project.db"
+        echo
+        echo "examples:"
+        echo "  just compare-csv --vintage month                 # all pairs, monthly windows"
+        echo "  just force=1 compare-csv                          # re-pull everything"
+        echo "  just compare-csv --key acct,sub --sample 500      # 500 fixed keys/window"
+        echo "  just compare-csv --key acct,sub --sample 0.1      # 10% via hash-bucket"
+        echo "  just pair=trades compare-csv --vintage week --preset detailed --verbose"
+        echo
+        echo "persists project.db + {pair}_compare_col.csv; per-window pulls are scratch."
+        echo "then renders {{resultdir}}/compare_{row,col}.html + compare_col.xlsx from"
+        echo "project.db (no backend, like e2e). Run dtrack compare-csv directly to skip reports."
+        echo "skip-cache is DEFAULT: loaded windows skip; a changed sample/key/preset/"
+        echo "vintage/col_filter auto-re-pulls. force=1 re-pulls all."
+        ;;
+    sample-key)
+        echo "just key=COLS [pair=NAME] sample-key [dtrack sample-key flags]"
+        echo
+        echo "Composite-key sampler + debugger. Pulls sampled key rows from BOTH sides."
+        echo "Supersedes sample-hash and col-sample (the older single-purpose forms)."
+        echo "Set the key with the key= var (required): just key=acct,sub sample-key"
+        echo
+        echo "three modes:"
+        echo "  (default)    value + backend hash16 dump to Excel — diff WHY hash_sum differs"
+        echo "  -n -1        anti-join: report KEY combinations unmatched across sides"
+        echo "  --gen-col    persist the sampled key IN(...) into where_map AND generate"
+        echo "               col SQL (then run with: just force=1 [pair=NAME] e2e col-run)"
+        echo "               combine with --out to ALSO dump values"
+        echo
+        echo "just-level vars:"
+        echo "  key=COLS          left key column(s), comma for composite (required)"
+        echo "  pair=NAME         only this pair (else all non-skipped)"
+        echo
+        echo "forwarded flags:"
+        echo "  -n N              keys to sample per pair (default 20; -1 = anti-join)"
+        echo "  --out PATH        value+hash16 Excel path (default sample_hash.xlsx)"
+        echo "  --gen-col         where_map + col SQL gen (see mode above)"
+        echo "  --keys a,b,c      (--gen-col) explicit key values instead of sampling"
+        echo "  --keys-file PATH  (--gen-col) key values, one per line"
+        echo "  --cols a,b        (--gen-col) columns to compare (else all mapped)"
+        echo "  --sample-cols N   (--gen-col) randomly pick N columns from col_map"
+        echo "  --vintage V  --from-date / --to-date  --preset  --stats-override"
+        echo
+        echo "examples:"
+        echo "  just key=acct,sub sample-key                 # value+hash16 dump (default)"
+        echo "  just key=acct,sub sample-key -n -1           # which keys don't line up"
+        echo "  just key=acct,sub sample-key --gen-col       # where_map + col SQL only"
+        echo "  just key=cust_id pair=trades sample-key --gen-col --sample-cols 5 --vintage month"
+        ;;
+    compare-row|compare-col|compare)
+        echo "just [pair=NAME] compare-row|compare-col [dtrack compare flags]"
+        echo
+        echo "Compare ALREADY-LOADED stats from project.db -> HTML (instant, no backend)."
+        echo "Reports land in {{e2edir}}/output/compare_{row,col}.html (override with --html)."
+        echo "The recipes bake in --html and -y; extra flags are forwarded."
+        echo
+        echo "compare-row forwarded flags:"
+        echo "  --from-date / --to-date YYYY-MM-DD     restrict the date range"
+        echo "  --title / --subtitle TEXT              HTML report text"
+        echo "  --html PATH                            override output path"
+        echo
+        echo "compare-col forwarded flags (above, plus):"
+        echo "  --no-date-filter      compare ALL vintages (skip the row-match date filter)"
+        echo "  --vintage month|quarter|year   HTML grouping granularity"
+        echo "  --excel PATH          also write an Excel report (default: html path + .xlsx)"
+        echo
+        echo "note: compare-col date-filters to the dates compare-row matched, so run"
+        echo "compare-row first (or pass --no-date-filter). For LIVE backend pulls +"
+        echo "compare in one shot, use compare-csv or e2e instead."
+        echo
+        echo "examples:"
+        echo "  just compare-row --from-date 2026-01-01"
+        echo "  just pair=trades compare-col --vintage month --excel testing/output/cc.xlsx"
         ;;
     *) just --show "{{topic}}" ;;
     esac
@@ -146,9 +254,16 @@ compare-col *args:
 # --data-dir (must exist) = transient per-window scratch; project.db + {pair}_compare_col.csv
 # persist. Skip-cache is default; changed sample/key/col_filter/preset/vintage auto-re-pulls.
 #
-# incremental col-stats compare per vintage window (bounded memory; details above)
+# incremental col-stats compare per vintage window -> project.db + HTML/Excel (details above)
 compare-csv *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
     dtrack compare-csv {{db}} --config {{config}} {{ if pair == "" { "" } else { "--pair " + pair } }} {{ if force == "" { "" } else { "--force" } }} {{args}}
+    out="{{resultdir}}"; mkdir -p "$out"
+    dtrack compare-row {{db}} --config {{config}} -y --html "$out/compare_row{{suffix}}.html"
+    dtrack compare-col {{db}} --config {{config}} -y --no-date-filter \
+        --html "$out/compare_col{{suffix}}.html" --excel "$out/compare_col{{suffix}}.xlsx"
+    echo ">>> reports: $out/compare_{row,col}{{suffix}}.html (+ compare_col{{suffix}}.xlsx)"
 
 # --- live e2e pipeline: real backends -> HTML ---------------------------------
 # Single entry point. type = row | col-gen | col-run | col | all (default all).
@@ -163,7 +278,7 @@ compare-csv *args:
 #  - discover-columns runs once per invocation (shared sentinel), in the row phase.
 #  - skip-cache (default): row-extract/discover/col-extract drop a {{e2edir}}/.state
 #    sentinel and skip while it exists; load/compare/match always re-run. Bypass with
-#    `just force=1 e2e ...` or wipe via `just e2e-clean`.
+#    `just force=1 e2e ...` or wipe via `just e2e --clean[=reports|rebuild|all]`.
 #
 # live e2e pipeline: row|col-gen|col-run|col|all -> HTML (run `just help e2e`)
 e2e type="all" *flags:
@@ -187,8 +302,14 @@ e2e type="all" *flags:
         esac
     done
     if [ -n "$clean_level" ]; then
-        echo ">>> clean: e2e-clean $clean_level (requested via --clean)"
-        just e2edir="{{e2edir}}" config="{{config}}" db="{{db}}" e2e-clean "$clean_level"
+        echo ">>> clean[$clean_level] (requested via --clean; keeps pairs.json + run.log)"
+        rm -f "{{e2edir}}/output"/compare_*.html "{{e2edir}}/output"/compare_*.xlsx
+        case "$clean_level" in
+            reports) : ;;
+            rebuild) rm -f "{{e2edir}}"/.state*/*.done "{{db}}" "{{db}}-shm" "{{db}}-wal" ;;
+            all)     rm -rf "{{e2edir}}"/.state* "{{db}}" "{{db}}-shm" "{{db}}-wal" "{{e2edir}}/csv" ;;
+            *) echo "--clean must be reports|rebuild|all; got '$clean_level'" >&2; exit 2 ;;
+        esac
     fi
     out="{{resultdir}}"; state="{{e2edir}}/.state{{suffix}}"
     logf="${DTRACK_LOG:-{{e2edir}}/output/run.log}"
@@ -255,29 +376,6 @@ e2e type="all" *flags:
         col-run) do_col_run ;;
         col)     do_col_gen; do_col_run ;;
         all)     do_row; do_col_gen; do_col_run ;;
-    esac
-
-# clean e2e artifacts under {{e2edir}}, by distance from the backend (each tier a
-# superset). level: reports | rebuild | all (default rebuild). Always keeps pairs.json + run.log.
-#   reports = compare_*.{html,xlsx}            -> re-compare (instant, reads project.db)
-#   rebuild = + project.db* + .state/*.done    -> re-load+compare; KEEPS csv/ + .state caches (no backend)
-#   all     = + .state caches + csv/ extracts  -> full re-extract (HITS backend)
-#
-# clean e2e artifacts: reports | rebuild | all (default rebuild)
-e2e-clean level="rebuild":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    rm_reports() { rm -f "{{e2edir}}/output"/compare_*.html "{{e2edir}}/output"/compare_*.xlsx; }
-    case "{{level}}" in
-        reports) rm_reports
-                 echo "cleaned: compare reports (re-compare to rebuild)" ;;
-        rebuild) rm_reports
-                 rm -f "{{e2edir}}"/.state*/*.done "{{db}}" "{{db}}-shm" "{{db}}-wal"
-                 echo "cleaned: reports + project.db + .state/*.done sentinels (csv/ extracts & .state caches kept; no backend on rerun)" ;;
-        all)     rm_reports
-                 rm -rf "{{e2edir}}"/.state* "{{db}}" "{{db}}-shm" "{{db}}-wal" "{{e2edir}}/csv"
-                 echo "cleaned: + .state caches + csv/ extracts (full re-extract; kept pairs.json, run.log)" ;;
-        *) echo "usage: just e2e-clean [reports|rebuild|all]" >&2; exit 2 ;;
     esac
 
 # sample N rows by key from both sides -> value + backend hash16 to excel (debug hash_sum)

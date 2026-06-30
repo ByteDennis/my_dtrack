@@ -31,7 +31,7 @@ _CSV_SUPPORTED = ("aws", "oracle", "databricks", "csv", "hadoop")
 _VERBOSE = False
 
 # >>> run a backend SQL: concise rows+secs line by default; full SQL (stdout + log) only with --verbose <<< #
-def _q(tbl, sql, label):
+def _q(tbl, sql, label, total=None):
     import time
     from .logmgr import get_logger
     src = (tbl.get("source") or "").lower()
@@ -41,7 +41,8 @@ def _q(tbl, sql, label):
         log.info("[compare-csv] %s [%s]: %s", label, qualified_name(tbl), sql)
     t0 = time.time()
     rows = _run_query(tbl, sql)
-    msg = f"[compare-csv] {label} [{src}]: {len(rows):,} rows in {time.time() - t0:.1f}s"
+    cnt = f"{len(rows):,} rows" + (f" / {total:,} total" if total is not None else "")
+    msg = f"[compare-csv] {label} [{src}]: {cnt} in {time.time() - t0:.1f}s"
     print(msg)
     if not _VERBOSE:
         log.info(msg)
@@ -323,7 +324,7 @@ def _safe_name(qname):
 
 # >>> pull one side's raw mapped-column rows for `dates` -> CSV at out_csv + inline column types <<< #
 def _pull_side(project_db, tbl, value_cols, date_col, dates, out_csv, tag,
-               extra_where=None):
+               extra_where=None, total=None):
     from .platforms.base import resolve_config_columns
     src = (tbl.get("source") or "").lower()
     d = _dialect(src)
@@ -337,7 +338,7 @@ def _pull_side(project_db, tbl, value_cols, date_col, dates, out_csv, tag,
     win = _window_where(project_db, tbl, date_col, dates)
     where = " AND ".join(f"({p})" for p in (win, extra_where) if p) or "1=1"
     sql = f"{cte}SELECT {', '.join(cols_q)} FROM {ft} WHERE {where}"
-    rows = _q(tbl, sql, f"download {tag}")
+    rows = _q(tbl, sql, f"download {tag}", total=total)
 
     header = [date_col] + list(value_cols)
     with open(out_csv, "w", newline="") as f:
@@ -376,13 +377,25 @@ def _quiet_extract(tag):
         yield
         return
     import io
+    import logging
+    import time
     from .logmgr import get_logger
+    log = get_logger()
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        yield
-    text = buf.getvalue().strip()
-    if text:
-        get_logger().info("[compare-csv] local stats %s:\n%s", tag, text)
+    prev = log.level
+    log.setLevel(logging.WARNING)
+    t0 = time.time()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            yield
+    except Exception:
+        log.setLevel(prev)
+        text = buf.getvalue().strip()
+        if text:
+            log.info("[compare-csv] local stats %s FAILED:\n%s", tag, text)
+        raise
+    log.setLevel(prev)
+    log.info("[compare-csv] local stats %s: done in %.1fs", tag, time.time() - t0)
 
 # >>> col stats over a pulled CSV in the transient scratch csv/ (fresh .state), upsert into project.db <<< #
 def _extract_and_load(project_db, src_tbl, csv_path, columns, real_qname,
@@ -488,8 +501,11 @@ def run_compare_csv(project_db, config_path, pair=None, vintage=None,
                     force=False, verbose=False, clean=None):
     from .extract import _cfg_max_workers
     from .config import backup_config
+    import logging as _logging
+    from .logmgr import get_logger
     global _VERBOSE
     _VERBOSE = verbose
+    get_logger().setLevel(_logging.DEBUG if verbose else _logging.INFO)
     backup_config(config_path)
     config = load_unified_config(config_path)
     if data_dir and not os.path.isdir(data_dir):
@@ -572,11 +588,18 @@ def _resolve_key_normalize(project_db, pcfg, left, right, key_cols, right_key_co
 _VINTAGE_CHOICES = ("day", "week", "month", "quarter", "year")
 
 # >>> resolve a pair's vintage: pair-level `vintage`, else either side's table-level `vintage`, else CLI, else day <<< #
+# >>> compare-csv buckets BOTH sides at ONE granularity, so conflicting side vintages are an error <<< #
 def _resolve_vintage(pname, pcfg, cli_vintage):
-    v = (pcfg.get("vintage")
-         or (pcfg.get("left") or {}).get("vintage")
-         or (pcfg.get("right") or {}).get("vintage")
-         or cli_vintage or "day")
+    pair_v = pcfg.get("vintage")
+    lv = (pcfg.get("left") or {}).get("vintage")
+    rv = (pcfg.get("right") or {}).get("vintage")
+    if not pair_v and lv and rv and \
+            str(lv).strip().lower() != str(rv).strip().lower():
+        raise ValueError(
+            f"{pname}: left vintage={lv!r} != right vintage={rv!r}; compare-csv "
+            f"compares both sides at ONE granularity. Set a pair-level \"vintage\" "
+            f"or make the two sides match.")
+    v = (pair_v or lv or rv or cli_vintage or "day")
     v = str(v).strip().lower()
     if v not in _VINTAGE_CHOICES:
         raise ValueError(f"{pname}: vintage must be one of {_VINTAGE_CHOICES}; got {v!r}")
@@ -625,11 +648,24 @@ def _run_signature(vintage, sample, key_cols, value_cols, preset, stats_override
     ], sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
+# >>> "source:table@conn (date=col)" — identifies a side in the start banner <<< #
+def _side_desc(tbl):
+    return (f"{(tbl.get('source') or '?').lower()}:"
+            f"{tbl.get('table') or tbl.get('name') or '?'}"
+            f"@{tbl.get('conn_macro') or '-'} "
+            f"(date={tbl.get('date_col') or '?'})")
+
 def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
               vintage, from_date, to_date, preset, stats_override,
               keep_csv, cli_sample=None, cli_key_cols=None,
               data_dir=None, workers=1, force=False):
     left, right = pcfg["left"], pcfg["right"]
+    from .logmgr import get_logger
+    _banner = (f"[compare-csv] {pname}:\n"
+               f"    LEFT  {_side_desc(left)}\n"
+               f"    RIGHT {_side_desc(right)}")
+    print(_banner)
+    get_logger().info(_banner)
     dc_left = left.get("date_col", "")
     dc_right = right.get("date_col", "")
     left_cols = _apply_pair_col_filter(
@@ -638,6 +674,8 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
 
     eff_from = from_date or ((pcfg.get("fromDate") or "").strip() or None)
     eff_to = to_date or ((pcfg.get("toDate") or "").strip() or None)
+    mode = (pcfg.get("mode") or "incremental").strip().lower()
+    force = force or mode == "full"
     vintage = _resolve_vintage(pname, pcfg, vintage)
     sample = _resolve_sample(pname, pcfg, cli_sample)
     key_cols, right_key_cols = _resolve_key(pname, pcfg, cli_key_cols, col_map)
@@ -653,6 +691,27 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
     threshold = (max(1, int(round(sample * HASH_BUCKET_SPACE)))
                  if frac_sample else None)
 
+    sdesc = ("all rows (no sample)" if sample is None else
+             (f"{sample:g} fraction (hash-bucket pushdown)" if frac_sample
+              else f"{int(sample)} keys/window (fixed-N IN-list)"))
+    kdesc = ",".join(key_cols) if key_cols else "-"
+    if key_cols and [k.lower() for k in right_key_cols] != [k.lower() for k in key_cols]:
+        kdesc = f"{kdesc} -> {','.join(right_key_cols)}"
+    cfg_parts = [f"vintage={vintage}", f"mode={mode}", f"sample={sdesc}", f"key=[{kdesc}]"]
+    if key_cols and not frac_sample:
+        cfg_parts.append(f"key_normalize={'on' if key_normalize else 'off'}")
+    if preset:
+        cfg_parts.append(f"preset={preset}")
+    if stats_override:
+        cfg_parts.append(f"stats_override={stats_override}")
+    if eff_from or eff_to:
+        cfg_parts.append(f"dates={eff_from or '-'}..{eff_to or '-'}")
+    cfg_parts.append(f"value_cols={len(left_cols)}")
+    cfg_parts.append(f"col_workers={workers}")
+    cfg_line = f"[compare-csv] {pname} config: " + "  ".join(cfg_parts)
+    print(cfg_line)
+    get_logger().info(cfg_line)
+
     run_sig = _run_signature(vintage, sample, key_cols, left_cols, preset,
                              stats_override, key_normalize)
     cached = get_compare_csv_sig(project_db, pname)
@@ -660,7 +719,7 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
     fresh = force or params_changed
     if fresh and cached is not None:
         delete_col_stats_for_tables(project_db, [tl, tr])
-        why = "--force" if force else "params changed"
+        why = "mode=full" if mode == "full" else ("--force" if force else "params changed")
         print(f"[compare-csv] {pname}: {why} -> clearing cache, re-pulling all")
 
     matched, counts, rcounts = _matched_dates(project_db, pname, left, right, tl, tr,
@@ -729,9 +788,9 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
             # part); the local DuckDB extract stays sequential (shared per-window state)
             with ThreadPoolExecutor(max_workers=2) as ex:
                 fl = ex.submit(_pull_side, project_db, left, left_cols, dc_left,
-                               dates, lc, "left", key_in_l)
+                               dates, lc, "left", key_in_l, total)
                 fr = ex.submit(_pull_side, project_db, right, right_cols, dc_right,
-                               dates, rc, "right", key_in_r)
+                               dates, rc, "right", key_in_r, total)
                 _, _, lcols, pl = fl.result()
                 _, _, rcols, pr = fr.result()
             shutil.rmtree(state_dir, ignore_errors=True)
@@ -755,7 +814,7 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
         print(f"    kept scratch: {scratch}")
 
     _compare_and_save(project_db, config, pname, tl, tr, col_map,
-                      set(matched), eff_from, eff_to)
+                      set(buckets), eff_from, eff_to)
     set_compare_csv_sig(project_db, pname, run_sig)
 
 _VINTAGE_COMPARE_FIELDS = [
@@ -766,9 +825,27 @@ _VINTAGE_COMPARE_FIELDS = [
     "min_match", "max_match", "hash_sum_match", "verdict",
 ]
 
+# >>> which stats differ on a comparison row -> "min(1 != 101) mean(5.5 != 105.5)" <<< #
+def _diff_detail(c):
+    from .compare import _DIFF_PREDICATES
+    toks = []
+    for k, pred in _DIFF_PREDICATES.items():
+        if pred(c):
+            toks.append(f"{k}({c.get(f'{k}_left')} != {c.get(f'{k}_right')})")
+    return " ".join(toks)
+
+# >>> stats that passed only via the precision/overflow tolerance -> "mean(a != b)" <<< #
+def _warn_detail(c):
+    toks = []
+    for k in ("mean", "std"):
+        if c.get(f"{k}_warn"):
+            toks.append(f"{k}({c.get(f'{k}_left')} != {c.get(f'{k}_right')})")
+    return " ".join(toks)
+
 # >>> compare one vintage bucket's col stats, append per-column rows to the per-vintage CSV + one-line summary <<< #
 def _vintage_compare(project_db, pname, tl, tr, col_map, bkey, overrides, ignore,
                      vintage_csv):
+    from .logmgr import get_logger
     result = compare_column_stats(
         project_db, tl, tr, col_mappings=col_map,
         matched_dates={bkey}, col_type_overrides=overrides)
@@ -788,8 +865,17 @@ def _vintage_compare(project_db, pname, tl, tr, col_map, bkey, overrides, ignore
                 is_diff = _has_col_differences(c)
                 if is_diff:
                     diff_cols.append(col)
+                    line = f"  {bkey}/{col}: DIFF {_diff_detail(c)}"
+                    print(line)
+                    get_logger().info(line)
                 else:
                     n_match += 1
+                    warn = _warn_detail(c)
+                    if warn:
+                        get_logger().debug(
+                            "  %s/%s: precision-pass %s -- low-order digits, "
+                            "likely float precision/overflow; passed as match",
+                            bkey, col, warn)
                 w.writerow({**c, "pair": pname, "vintage": bkey, "column": col,
                             "verdict": "diff" if is_diff else "match"})
     extra = f" ({', '.join(sorted(set(diff_cols))[:4])})" if diff_cols else ""

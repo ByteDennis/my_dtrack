@@ -69,7 +69,9 @@ thesis
 week_report*
 
 # Local-only — kept on disk, untracked from the remote tree (history retains prior commits)
-example/
+example/*
+!example/manuscript.txt
 output/
 testing/
 tests/
+.claude/

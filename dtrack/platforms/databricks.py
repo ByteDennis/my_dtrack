@@ -263,24 +263,29 @@ def _rest_collect_rows(host, statement_id, payload):
             rows.append({cols[i][0]: _dbx_coerce(v, cols[i][1])
                          for i, v in enumerate(arr)})
 
+    # >>> emit one ResultData; return next chunk idx from top-level OR the links (EXTERNAL_LINKS often sets only the latter) <<< #
     def _add(result):
         result = result or {}
         if result.get("data_array") is not None:
             _emit(result.get("data_array"))
+        nxt = result.get("next_chunk_index")
         for link in result.get("external_links") or []:
             url = link.get("external_link")
             if url:
                 _emit(_fetch_external_link(url))
+            ln = link.get("next_chunk_index")
+            if ln is not None:
+                nxt = ln if nxt is None else max(nxt, ln)
+        return nxt
 
-    result = payload.get("result") or {}
-    _add(result)
-    next_idx = result.get("next_chunk_index")
-    while next_idx is not None:
+    next_idx = _add(payload.get("result") or {})
+    seen = set()
+    while next_idx is not None and next_idx not in seen:
+        seen.add(next_idx)
         chunk = _rest_request(
             "GET", host,
             f"/api/2.0/sql/statements/{statement_id}/result/chunks/{next_idx}")
-        _add(chunk)
-        next_idx = chunk.get("next_chunk_index")
+        next_idx = _add(chunk)
     return rows
 
 _DBX_TERMINAL = {"SUCCEEDED", "FAILED", "CANCELED", "CLOSED"}

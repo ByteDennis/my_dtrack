@@ -224,6 +224,22 @@ def resolve_col_type(left_type, right_type, overrides=None, col_name=None):
     lf, rf = _col_family(left_type), _col_family(right_type)
     return lf if lf == rf else "categorical"
 
+# >>> classify a numeric stat pair (mean/std): 'match' (exact / <=abs_tiny), 'warn'
+#     (relative drift <= rel_warn — low-order digits, likely cross-platform float /
+#     overflow, PASSES), 'diff' (real), None (not comparable). Relative tol is the
+#     industrial way to compare aggregates whose magnitude varies by orders. <<< #
+def _float_status(a, b, rel_warn=1e-6, abs_tiny=1e-9):
+    if a is None or a == '' or b is None or b == '':
+        return None
+    try:
+        lf, rf = float(a), float(b)
+    except (ValueError, TypeError):
+        return 'match' if str(a).strip() == str(b).strip() else 'diff'
+    diff = abs(lf - rf)
+    if diff <= abs_tiny:
+        return 'match'
+    return 'warn' if diff / max(abs(lf), abs(rf), 1.0) <= rel_warn else 'diff'
+
 # >>> Compare column statistics between two tables <<< #
 def compare_column_stats(
     db_path, table_left, table_right,
@@ -387,17 +403,17 @@ def compare_column_stats(
                 comparison[f"{field}_match"] = match
 
             if level == "fine":
-                l_mean_key = _stat_match_key(left_stat["mean"], "m")
-                r_mean_key = _stat_match_key(right_stat["mean"], "m")
-                l_std_key = _stat_match_key(left_stat["std"], "s")
-                r_std_key = _stat_match_key(right_stat["std"], "s")
+                m_status = _float_status(left_stat["mean"], right_stat["mean"])
+                s_status = _float_status(left_stat["std"], right_stat["std"])
                 comparison.update({
                     "mean_left": left_stat["mean"],
                     "mean_right": right_stat["mean"],
-                    "mean_match": (l_mean_key == r_mean_key) if (l_mean_key is not None and r_mean_key is not None) else None,
+                    "mean_match": None if m_status is None else (m_status != "diff"),
+                    "mean_warn": m_status == "warn",
                     "std_left": left_stat["std"],
                     "std_right": right_stat["std"],
-                    "std_match": (l_std_key == r_std_key) if (l_std_key is not None and r_std_key is not None) else None,
+                    "std_match": None if s_status is None else (s_status != "diff"),
+                    "std_warn": s_status == "warn",
                 })
                 if resolved_type != "numeric":
                     comparison.update({

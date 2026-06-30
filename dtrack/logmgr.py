@@ -29,7 +29,8 @@ def get_logger():
         path = log_path()
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            fh = RotatingFileHandler(path, maxBytes=20_000_000, backupCount=3)
+            fh = RotatingFileHandler(path, maxBytes=20_000_000, backupCount=3,
+                                     encoding="utf-8")
             fh.setLevel(_level())
             fh.setFormatter(logging.Formatter(
                 "%(asctime)s %(levelname)s [%(module)s.%(funcName)s:%(lineno)d] %(message)s",

@@ -155,7 +155,7 @@ def cache_get(sql, scope):
         payload = pickle.loads(row[0])
         from ..logmgr import get_logger
         n = len(payload) if hasattr(payload, '__len__') else '?'
-        get_logger().info("query: CACHE HIT (%s rows) scope=%s", n, scope or '')
+        get_logger().debug("query: CACHE HIT (%s rows) scope=%s", n, scope or '')
         return payload
     except Exception as e:
         from ..logmgr import log_exc
@@ -184,8 +184,8 @@ def cache_put(sql, scope, value, row_count=None):
         finally:
             conn.close()
     from ..logmgr import get_logger
-    get_logger().info("query: LIVE DB read -> cached (%s rows) scope=%s",
-                      row_count if row_count is not None else '?', scope or '')
+    get_logger().debug("query: LIVE DB read -> cached (%s rows) scope=%s",
+                       row_count if row_count is not None else '?', scope or '')
 
 ORACLE_NUMERIC_TYPES = {
     'NUMBER', 'FLOAT', 'BINARY_FLOAT', 'BINARY_DOUBLE',
@@ -1477,8 +1477,10 @@ def _strict_normalize(dialect, expr, family):
             return ("REGEXP_REPLACE(TO_CHAR(CAST(" + expr +
                     " AS TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS'), ' 00:00:00$', '')")
         if family == 'numeric':
-            return (f"REGEXP_REPLACE(REGEXP_REPLACE({s}, "
-                    f"'(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')")
+            s2 = (f"REGEXP_REPLACE(REGEXP_REPLACE({s}, "
+                  f"'(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')")
+            return (f"REGEXP_REPLACE(REGEXP_REPLACE({s2}, '^-\\.', '-0.'), "
+                    f"'^\\.', '0.')")
         return _strict_blank_token(f"LOWER(TRIM(COMPOSE({s})))")
     if dialect in ('athena', 'trino', 'aws'):
         s = f'CAST({expr} AS VARCHAR)'
