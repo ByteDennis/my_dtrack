@@ -3588,17 +3588,20 @@ def _split_sql_blocks(sql):
         blocks.append(block[:])
     return blocks
 
-# >>> run each ;;-block on a DBAPI cursor; return [(columns, fetched), ...] per block <<< #
-def _run_sql_blocks_cursor(cur, sql):
+# >>> run each ;;-block on a FRESH cursor (Databricks Thrift rejects re-exec after fetch); return (per-block [(columns,fetched)], last cursor) <<< #
+def _run_sql_blocks_cursor(conn, sql, handle=None):
     blocks = _split_sql_blocks(sql) or [[sql]]
-    out = []
+    out, cur = [], None
     for stmts in blocks:
+        cur = conn.cursor()
+        if handle is not None:
+            handle["cursor"] = cur
         for stmt in stmts[:-1]:
             cur.execute(stmt)
         cur.execute(stmts[-1])
         columns = [d[0] for d in (cur.description or [])]
         out.append((columns, cur.fetchall() or []))
-    return out
+    return out, cur
 
 # >>> run each ;;-block on a DuckDB connection (optional per-stmt transform) <<< #
 def _run_sql_blocks_duckdb(conn, sql, transform=None):
@@ -3718,6 +3721,7 @@ async def api_playground_run(request: Request):
     all_rows: list = []
     n_rows_total = 0
     results: list = []
+    all_blocks: list = []
     block_outputs: list = []
     engine_sec: Optional[float] = None
     total_sec: Optional[float] = None
@@ -3734,10 +3738,8 @@ async def api_playground_run(request: Request):
             from ..platforms.athena import athena_connect, aws_creds_renew
             aws_creds_renew()
             conn = athena_connect(conn_id or None)
-            cur = conn.cursor()
-            handle["cursor"] = cur
             handle["conn"]   = conn
-            block_outputs = _run_sql_blocks_cursor(cur, sql)
+            block_outputs, cur = _run_sql_blocks_cursor(conn, sql, handle)
             ms = getattr(cur, 'engine_execution_time_in_millis', None)
             if ms is not None:
                 engine_sec = round(ms / 1000.0, 4)
@@ -3753,10 +3755,8 @@ async def api_playground_run(request: Request):
             conn = oracle_connect(conn_id)
             if conn is None:
                 raise RuntimeError("oracle_connect returned None")
-            cur = conn.cursor()
-            handle["cursor"] = cur
             handle["conn"]   = conn
-            block_outputs = _run_sql_blocks_cursor(cur, sql)
+            block_outputs, cur = _run_sql_blocks_cursor(conn, sql, handle)
             try:
                 cur.close()
                 conn.close()
@@ -3767,10 +3767,8 @@ async def api_playground_run(request: Request):
             conn = hadoop_connect(conn_id or None)
             if conn is None:
                 raise RuntimeError("hadoop_connect returned None")
-            cur = conn.cursor()
-            handle["cursor"] = cur
             handle["conn"]   = conn
-            block_outputs = _run_sql_blocks_cursor(cur, sql)
+            block_outputs, cur = _run_sql_blocks_cursor(conn, sql, handle)
             try:
                 cur.close()
                 conn.close()
@@ -3803,10 +3801,8 @@ async def api_playground_run(request: Request):
         else:
             from ..platforms.databricks import databricks_connect
             conn = databricks_connect(conn_id or None)
-            cur = conn.cursor()
-            handle["cursor"] = cur
             handle["conn"]   = conn
-            block_outputs = _run_sql_blocks_cursor(cur, sql)
+            block_outputs, cur = _run_sql_blocks_cursor(conn, sql, handle)
             try:
                 cur.close()
                 conn.close()
@@ -3825,12 +3821,13 @@ async def api_playground_run(request: Request):
 
     if err is None and not cancelled:
         results = _blocks_to_results(block_outputs, row_cap)
+        all_blocks = [{"columns": c, "rows": [_row_to_strs(r, len(c)) for r in f]}
+                      for c, f in block_outputs]
         if block_outputs:
-            lcols, lfetched = block_outputs[-1]
-            columns = lcols
-            all_rows = [_row_to_strs(r, len(lcols)) for r in lfetched]
+            columns = all_blocks[-1]["columns"]
+            all_rows = all_blocks[-1]["rows"]
             rows = all_rows[:row_cap]
-            n_rows_total = len(lfetched)
+            n_rows_total = len(block_outputs[-1][1])
 
     wall_sec = round(time.perf_counter() - t0, 4)
     elapsed = engine_sec if engine_sec is not None else wall_sec
@@ -3873,6 +3870,7 @@ async def api_playground_run(request: Request):
         "rows": all_rows,
         "n_rows_total": n_rows_total,
         "results": results,
+        "all_blocks": all_blocks,
         "elapsed_sec": elapsed,
         "engine_sec": engine_sec,
         "total_sec": total_sec,
@@ -3900,13 +3898,35 @@ async def api_playground_run(request: Request):
     }
 
 @app.get("/api/playground/download/{cache_key}")
-async def api_playground_download(cache_key: str):
-    # >>> stream full cached result as CSV so the browser never holds it in memory <<< #
+async def api_playground_download(cache_key: str, fmt: str = "csv"):
+    # >>> stream full cached result: csv (last/primary block) or xlsx (one sheet per ;;-block) <<< #
     entry = _pg_cache_get(cache_key)
     if entry is None:
         return JSONResponse(status_code=404, content={
             "error": f"result {cache_key[:12]}… not in cache (server restart or evicted)"
         })
+
+    if fmt == "xlsx":
+        import io
+        from openpyxl import Workbook
+        blocks = entry.get("all_blocks") or [
+            {"columns": entry["columns"], "rows": entry["rows"]}]
+        wb = Workbook()
+        wb.remove(wb.active)
+        for i, b in enumerate(blocks, 1):
+            ws = wb.create_sheet(title=f"Result {i}"[:31])
+            ws.append(list(b["columns"]))
+            for r in b["rows"]:
+                ws.append(list(r))
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition":
+                     f'attachment; filename="playground_{cache_key[:12]}.xlsx"'},
+        )
 
     columns = entry["columns"]
     rows = entry["rows"]

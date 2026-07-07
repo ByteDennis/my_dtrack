@@ -299,6 +299,9 @@ function _pgRenderResult(data) {
     if (data.cached) parts.push('<span style="color:var(--jp-success-color0);">cached</span>');
     meta.innerHTML = parts.join(' · ');
 
+    const dlBtn = document.getElementById('pg-download-btn');
+    if (dlBtn) dlBtn.textContent = multi ? 'Download XLSX' : 'Download CSV';
+
     const host = document.getElementById('pg-result');
     if (!multi) {
         host.innerHTML = _pgResultTableHTML(results[0].columns, results[0].rows);
@@ -323,15 +326,16 @@ function _pgRenderError(msg) {
         `<pre style="color:var(--jp-error-color0); white-space:pre-wrap;">${_pgEsc(msg)}</pre>`;
 }
 
-function pgDownloadResultCSV() {
+function pgDownloadResult() {
     if (!_pgLastResult || !_pgLastResult.cache_key) {
         _pgSetStatus('No result to download.', 'error');
         return;
     }
-    // Stream from server so we never hold the full result in JS memory —
-    // browser writes straight to disk via native download.
+    // Multiple ;; result sets -> one .xlsx with a sheet per result; else single CSV.
+    // Stream from server so we never hold the full result in JS memory.
+    const multi = (_pgLastResult.results && _pgLastResult.results.length > 1);
     const a = document.createElement('a');
-    a.href = `/api/playground/download/${_pgLastResult.cache_key}`;
+    a.href = `/api/playground/download/${_pgLastResult.cache_key}${multi ? '?fmt=xlsx' : ''}`;
     a.download = '';
     document.body.appendChild(a);
     a.click();
