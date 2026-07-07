@@ -21,7 +21,7 @@ from .db import (
     get_pair_col_map_from_db, save_col_comparison, register_table_pair,
     get_compare_csv_sig, set_compare_csv_sig, delete_col_stats_for_tables,
     upsert_row_counts, save_row_comparison,
-    save_sampled_keys, get_sampled_keys,
+    save_sampled_keys, get_sampled_keys, refresh_metadata_from_data,
 )
 from .loader import load_precomputed_col_stats
 from .extract import extract_all
@@ -400,12 +400,15 @@ def _quiet_extract(tag):
 # >>> col stats over a pulled CSV in the transient scratch csv/ (fresh .state), upsert into project.db <<< #
 def _extract_and_load(project_db, src_tbl, csv_path, columns, real_qname,
                       date_col, dt_label, vintage, preset, stats_override,
-                      scratch_csv, tag, workers=None):
+                      scratch_csv, tag, workers=None, strict=False):
     csv_cfg = {
         "name": tag, "table": tag, "source": "csv",
         "conn_macro": csv_path, "date_col": date_col,
         "date_type": "string_dash", "vintage": "all",
     }
+    if strict:
+        csv_cfg["strict"] = True
+        csv_cfg["strict_numeric_strings"] = True
     if columns:
         csv_cfg["columns"] = columns
     temp_cfg = {"pairs": {"_w": {"left": csv_cfg, "right": csv_cfg}}, "metadata": {}}
@@ -498,7 +501,7 @@ def run_compare_csv(project_db, config_path, pair=None, vintage=None,
                     from_date=None, to_date=None, preset=None,
                     stats_override=None, keep_csv=False, resume=False,
                     sample=None, key=None, data_dir=None, workers=None,
-                    force=False, verbose=False, clean=None):
+                    force=False, verbose=False, clean=None, strict=False):
     from .extract import _cfg_max_workers
     from .config import backup_config
     import logging as _logging
@@ -550,7 +553,10 @@ def run_compare_csv(project_db, config_path, pair=None, vintage=None,
                                         workers) or 1
             _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
                       vintage, from_date, to_date, preset, stats_override,
-                      keep_csv, sample, cli_key_cols, data_dir, nworkers, force)
+                      keep_csv, sample, cli_key_cols, data_dir, nworkers, force,
+                      strict)
+
+    refresh_metadata_from_data(project_db)
 
 # >>> resolve a pair's key cols (per-pair `key` else CLI --key) + right names via col_map; raise if unmapped <<< #
 def _resolve_key(pname, pcfg, cli_key_cols, col_map):
@@ -658,7 +664,7 @@ def _side_desc(tbl):
 def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
               vintage, from_date, to_date, preset, stats_override,
               keep_csv, cli_sample=None, cli_key_cols=None,
-              data_dir=None, workers=1, force=False):
+              data_dir=None, workers=1, force=False, strict=False):
     left, right = pcfg["left"], pcfg["right"]
     from .logmgr import get_logger
     _banner = (f"[compare-csv] {pname}:\n"
@@ -796,10 +802,10 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
             shutil.rmtree(state_dir, ignore_errors=True)
             nl = _extract_and_load(project_db, left, lc, lcols, tl, dc_left, bkey,
                                    vintage, preset, stats_override, scratch_csv,
-                                   "left", workers)
+                                   "left", workers, strict)
             nr = _extract_and_load(project_db, right, rc, rcols, tr, dc_right, bkey,
                                    vintage, preset, stats_override, scratch_csv,
-                                   "right", workers)
+                                   "right", workers, strict)
             keyinfo = (f" on {nkeys} sampled key(s)" if nkeys is not None
                        else (f" via {sample_label}" if sample_label else ""))
             print(f"  {bkey} [{span}]: {len(dates)} date(s) | records sample "

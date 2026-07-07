@@ -1,4 +1,12 @@
+import re as _re
 
+_ILLEGAL_XL_CHARS = _re.compile(r"[\000-\010]|[\013-\014]|[\016-\037]")
+
+# >>> strip control chars openpyxl rejects (IllegalCharacterError) from string cell values <<< #
+def _xl_clean(value):
+    if isinstance(value, str):
+        return _ILLEGAL_XL_CHARS.sub("", value)
+    return value
 
 # >>> build the row-comparison workbook (one sheet per pair) — see web /api/compare/row/export/excel-all <<< #
 def build_row_comparison_workbook(db_path, config_path, from_date=None, to_date=None):
@@ -85,10 +93,10 @@ def build_row_comparison_workbook(db_path, config_path, from_date=None, to_date=
         dates.sort(key=lambda r: (r[0], r[1]))
 
         for _sort_key, dt, left, right, status in dates:
-            ws.cell(row=row_num, column=1, value=dt)
-            ws.cell(row=row_num, column=2, value=left)
-            ws.cell(row=row_num, column=3, value=right)
-            ws.cell(row=row_num, column=4, value=status)
+            ws.cell(row=row_num, column=1, value=_xl_clean(dt))
+            ws.cell(row=row_num, column=2, value=_xl_clean(left))
+            ws.cell(row=row_num, column=3, value=_xl_clean(right))
+            ws.cell(row=row_num, column=4, value=_xl_clean(status))
             if status != "match":
                 for col in range(1, 5):
                     cell = ws.cell(row=row_num, column=col)
@@ -249,7 +257,7 @@ def build_col_comparison_workbook(db_path, config_path, from_date=None,
             ws.cell(row=row_num, column=2, value=table_left)
             row_num += 1
             for ci, cn in enumerate(col_names_left):
-                ws.cell(row=row_num, column=ci + 2, value=cn)
+                ws.cell(row=row_num, column=ci + 2, value=_xl_clean(cn))
             row_num += 1
             for si, (stat_label, stat_key) in enumerate(zip(stat_rows, stat_keys_l)):
                 ws.cell(row=row_num, column=1, value=stat_label).font = bold
@@ -265,7 +273,7 @@ def build_col_comparison_workbook(db_path, config_path, from_date=None,
                                 val = float(val)
                             except (ValueError, TypeError):
                                 pass
-                    cell = ws.cell(row=row_num, column=ci + 2, value=val if val != "" else None)
+                    cell = ws.cell(row=row_num, column=ci + 2, value=_xl_clean(val) if val != "" else None)
                     if (ci, si) in diff_cells:
                         cell.fill = red_fill
                     elif ci in problem_cols and si > 0:
@@ -278,7 +286,7 @@ def build_col_comparison_workbook(db_path, config_path, from_date=None,
             ws.cell(row=row_num, column=2, value=table_right)
             row_num += 1
             for ci, cn in enumerate(col_names_right):
-                ws.cell(row=row_num, column=ci + 2, value=cn)
+                ws.cell(row=row_num, column=ci + 2, value=_xl_clean(cn))
             row_num += 1
             for si, (stat_label, stat_key) in enumerate(zip(stat_rows, stat_keys_r)):
                 ws.cell(row=row_num, column=1, value=stat_label).font = bold
@@ -294,7 +302,7 @@ def build_col_comparison_workbook(db_path, config_path, from_date=None,
                                 val = float(val)
                             except (ValueError, TypeError):
                                 pass
-                    cell = ws.cell(row=row_num, column=ci + 2, value=val if val != "" else None)
+                    cell = ws.cell(row=row_num, column=ci + 2, value=_xl_clean(val) if val != "" else None)
                     if (ci, si) in diff_cells:
                         cell.fill = red_fill
                     elif ci in problem_cols and si > 0:

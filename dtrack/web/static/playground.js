@@ -200,7 +200,14 @@ async function pgRun() {
         } else {
             _pgLastResult = data;
             const tag = data.cached ? ' · cached' : '';
-            _pgSetStatus(`✓ ${data.n_rows_total} row${data.n_rows_total===1?'':'s'} · ${data.elapsed_sec}s${tag}`, 'ok');
+            const nres = (data.results && data.results.length) || 1;
+            const totRows = (data.results && data.results.length)
+                ? data.results.reduce((a, r) => a + (r.n_rows_total || 0), 0)
+                : data.n_rows_total;
+            const rlabel = nres > 1
+                ? `${nres} results · ${totRows} rows`
+                : `${totRows} row${totRows===1?'':'s'}`;
+            _pgSetStatus(`✓ ${rlabel} · ${data.elapsed_sec}s${tag}`, 'ok');
             _pgRenderResult(data);
         }
     } catch (e) {
@@ -239,15 +246,40 @@ function _pgSetStatus(text, kind) {
                    : 'var(--jp-ui-font-color2)';
 }
 
+function _pgResultTableHTML(cols, rows) {
+    cols = cols || [];
+    rows = rows || [];
+    if (!cols.length) {
+        return '<div class="empty-message">No columns returned.</div>';
+    }
+    const head = '<thead><tr>' + cols.map(c => `<th>${_pgEsc(c)}</th>`).join('') + '</tr></thead>';
+    const body = '<tbody>' + rows.map(r =>
+        '<tr>' + r.map(v => `<td>${_pgEsc(v)}</td>`).join('') + '</tr>'
+    ).join('') + '</tbody>';
+    return `<table class="data-table compact">${head}${body}</table>`;
+}
+
 function _pgRenderResult(data) {
     const card = document.getElementById('pg-result-card');
     card.style.display = '';
     const meta = document.getElementById('pg-result-meta');
 
-    const parts = [
-        `${data.n_rows_total} row${data.n_rows_total===1?'':'s'}`,
-        `${data.columns.length} col${data.columns.length===1?'':'s'}`,
-    ];
+    let results = data.results;
+    if (!results || !results.length) {
+        results = [{columns: data.columns || [], rows: data.rows || [],
+                    n_rows_total: data.n_rows_total, n_rows_returned: data.n_rows_returned}];
+    }
+    const multi = results.length > 1;
+    const totalRows = results.reduce((a, r) => a + (r.n_rows_total || 0), 0);
+
+    const parts = [];
+    if (multi) {
+        parts.push(`${results.length} result sets`);
+        parts.push(`${totalRows} row${totalRows===1?'':'s'} total`);
+    } else {
+        parts.push(`${results[0].n_rows_total} row${results[0].n_rows_total===1?'':'s'}`);
+        parts.push(`${(results[0].columns||[]).length} col${(results[0].columns||[]).length===1?'':'s'}`);
+    }
     if (data.engine_sec != null) {
         parts.push(`engine ${data.engine_sec}s`);
         if (data.total_sec != null && data.total_sec !== data.engine_sec) {
@@ -263,21 +295,24 @@ function _pgRenderResult(data) {
     if (data.query_id) {
         parts.push(`query_id <code>${_pgEsc(data.query_id)}</code>`);
     }
-    parts.push(`showing first ${data.n_rows_returned}`);
+    if (!multi) parts.push(`showing first ${results[0].n_rows_returned}`);
     if (data.cached) parts.push('<span style="color:var(--jp-success-color0);">cached</span>');
     meta.innerHTML = parts.join(' · ');
 
-    const cols = data.columns || [];
-    const rows = data.rows || [];
-    if (!cols.length) {
-        document.getElementById('pg-result').innerHTML = '<div class="empty-message">No columns returned.</div>';
+    const host = document.getElementById('pg-result');
+    if (!multi) {
+        host.innerHTML = _pgResultTableHTML(results[0].columns, results[0].rows);
         return;
     }
-    const head = '<thead><tr>' + cols.map(c => `<th>${_pgEsc(c)}</th>`).join('') + '</tr></thead>';
-    const body = '<tbody>' + rows.map(r =>
-        '<tr>' + r.map(v => `<td>${_pgEsc(v)}</td>`).join('') + '</tr>'
-    ).join('') + '</tbody>';
-    document.getElementById('pg-result').innerHTML = `<table class="data-table compact">${head}${body}</table>`;
+    host.innerHTML = results.map((r, k) => {
+        const cols = r.columns || [];
+        const sub = `Result #${k+1} · ${r.n_rows_total} row${r.n_rows_total===1?'':'s'} · `
+            + `${cols.length} col${cols.length===1?'':'s'} · showing first ${r.n_rows_returned}`;
+        return `<div style="margin-bottom:18px;">`
+            + `<div style="font-size:11px; color:var(--jp-ui-font-color2); margin:4px 0; font-weight:600;">${_pgEsc(sub)}</div>`
+            + `<div style="overflow-x:auto;">${_pgResultTableHTML(cols, r.rows)}</div>`
+            + `</div>`;
+    }).join('');
 }
 
 function _pgRenderError(msg) {

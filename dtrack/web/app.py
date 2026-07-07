@@ -3533,17 +3533,97 @@ def _split_sql_statements(sql):
         stmts.append(stmt)
     return stmts
 
-# >>> run all but the last statement on `cur`, execute+return (columns, rows) of the last <<< #
-def _run_multi_sql(cur, sql):
-    stmts = _split_sql_statements(sql)
-    if not stmts:
-        stmts = [sql]
-    for stmt in stmts[:-1]:
-        cur.execute(stmt)
-    cur.execute(stmts[-1])
-    columns = [d[0] for d in (cur.description or [])]
-    fetched = cur.fetchall() or []
-    return columns, fetched
+# >>> split a script into ;;-delimited blocks; each block is a list of ;-statements <<< #
+def _split_sql_blocks(sql):
+    blocks, block, buf = [], [], []
+    i, n = 0, len(sql)
+    in_squote = in_dquote = in_line = in_block = False
+
+    def _flush():
+        stmt = ''.join(buf).strip()
+        buf.clear()
+        if stmt:
+            block.append(stmt)
+        elif block:
+            blocks.append(block[:])
+            block.clear()
+
+    while i < n:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ''
+        if in_line:
+            buf.append(ch)
+            if ch == '\n':
+                in_line = False
+        elif in_block:
+            buf.append(ch)
+            if ch == '*' and nxt == '/':
+                buf.append(nxt); i += 1; in_block = False
+        elif in_squote:
+            buf.append(ch)
+            if ch == "'":
+                if nxt == "'":
+                    buf.append(nxt); i += 1
+                else:
+                    in_squote = False
+        elif in_dquote:
+            buf.append(ch)
+            if ch == '"':
+                in_dquote = False
+        elif ch == '-' and nxt == '-':
+            in_line = True; buf.append(ch)
+        elif ch == '/' and nxt == '*':
+            in_block = True; buf.append(ch)
+        elif ch == "'":
+            in_squote = True; buf.append(ch)
+        elif ch == '"':
+            in_dquote = True; buf.append(ch)
+        elif ch == ';':
+            _flush()
+        else:
+            buf.append(ch)
+        i += 1
+    _flush()
+    if block:
+        blocks.append(block[:])
+    return blocks
+
+# >>> run each ;;-block on a DBAPI cursor; return [(columns, fetched), ...] per block <<< #
+def _run_sql_blocks_cursor(cur, sql):
+    blocks = _split_sql_blocks(sql) or [[sql]]
+    out = []
+    for stmts in blocks:
+        for stmt in stmts[:-1]:
+            cur.execute(stmt)
+        cur.execute(stmts[-1])
+        columns = [d[0] for d in (cur.description or [])]
+        out.append((columns, cur.fetchall() or []))
+    return out
+
+# >>> run each ;;-block on a DuckDB connection (optional per-stmt transform) <<< #
+def _run_sql_blocks_duckdb(conn, sql, transform=None):
+    blocks = _split_sql_blocks(sql) or [[sql]]
+    out = []
+    for stmts in blocks:
+        res = None
+        for stmt in stmts:
+            res = conn.execute(transform(stmt) if transform else stmt)
+        columns = [d[0] for d in (res.description or [])]
+        out.append((columns, res.fetchall()))
+    return out
+
+# >>> per-block (columns, fetched) -> row-capped result dicts for the client <<< #
+def _blocks_to_results(block_outputs, row_cap):
+    results = []
+    for columns, fetched in block_outputs:
+        arows = [_row_to_strs(r, len(columns)) for r in fetched]
+        results.append({
+            "columns": columns,
+            "rows": arows[:row_cap],
+            "n_rows_total": len(fetched),
+            "n_rows_returned": min(len(arows), row_cap),
+        })
+    return results
 
 _PLAYGROUND_RUNNING: dict = {}
 
@@ -3603,6 +3683,7 @@ async def api_playground_run(request: Request):
                 "rows": cached_rows[:row_cap],
                 "n_rows_total": hit["n_rows_total"],
                 "n_rows_returned": min(len(cached_rows), row_cap),
+                "results": hit.get("results", []),
                 "elapsed_sec": hit.get("elapsed_sec"),
                 "wall_sec": 0,
                 "engine_sec": hit.get("engine_sec"),
@@ -3636,6 +3717,8 @@ async def api_playground_run(request: Request):
     rows: list = []
     all_rows: list = []
     n_rows_total = 0
+    results: list = []
+    block_outputs: list = []
     engine_sec: Optional[float] = None
     total_sec: Optional[float] = None
     data_scanned: Optional[int] = None
@@ -3645,8 +3728,7 @@ async def api_playground_run(request: Request):
 
     # >>> Runs in a worker thread. Stashes cur/conn into `handle` so the <<< #
     def _execute():
-        nonlocal columns, rows, all_rows, n_rows_total, engine_sec, total_sec
-        nonlocal data_scanned, query_id
+        nonlocal block_outputs, engine_sec, total_sec, data_scanned, query_id
 
         if engine == "athena":
             from ..platforms.athena import athena_connect, aws_creds_renew
@@ -3655,10 +3737,7 @@ async def api_playground_run(request: Request):
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn
-            columns, fetched = _run_multi_sql(cur, sql)
-            n_rows_total = len(fetched)
-            all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
-            rows = all_rows[:row_cap]
+            block_outputs = _run_sql_blocks_cursor(cur, sql)
             ms = getattr(cur, 'engine_execution_time_in_millis', None)
             if ms is not None:
                 engine_sec = round(ms / 1000.0, 4)
@@ -3677,10 +3756,7 @@ async def api_playground_run(request: Request):
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn
-            columns, fetched = _run_multi_sql(cur, sql)
-            n_rows_total = len(fetched)
-            all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
-            rows = all_rows[:row_cap]
+            block_outputs = _run_sql_blocks_cursor(cur, sql)
             try:
                 cur.close()
                 conn.close()
@@ -3694,10 +3770,7 @@ async def api_playground_run(request: Request):
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn
-            columns, fetched = _run_multi_sql(cur, sql)
-            n_rows_total = len(fetched)
-            all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
-            rows = all_rows[:row_cap]
+            block_outputs = _run_sql_blocks_cursor(cur, sql)
             try:
                 cur.close()
                 conn.close()
@@ -3711,7 +3784,7 @@ async def api_playground_run(request: Request):
                 import duckdb as _ddb
                 conn = _ddb.connect(conn_id, read_only=True)
                 handle["conn"] = conn
-                res = conn.execute(sql)
+                block_outputs = _run_sql_blocks_duckdb(conn, sql)
             else:
                 conn = duckdb_connect()
                 if conn is None:
@@ -3721,12 +3794,8 @@ async def api_playground_run(request: Request):
                     conn.execute(
                         "CREATE OR REPLACE VIEW data AS "
                         f"SELECT * FROM read_csv_auto('{conn_id}', header=true)")
-                res = conn.execute(_rewrite_csv_from_clauses(sql))
-            columns = [d[0] for d in (res.description or [])]
-            fetched = res.fetchall()
-            n_rows_total = len(fetched)
-            all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
-            rows = all_rows[:row_cap]
+                block_outputs = _run_sql_blocks_duckdb(
+                    conn, sql, transform=_rewrite_csv_from_clauses)
             try:
                 conn.close()
             except Exception:
@@ -3737,10 +3806,7 @@ async def api_playground_run(request: Request):
             cur = conn.cursor()
             handle["cursor"] = cur
             handle["conn"]   = conn
-            columns, fetched = _run_multi_sql(cur, sql)
-            n_rows_total = len(fetched)
-            all_rows = [_row_to_strs(r, len(columns)) for r in fetched]
-            rows = all_rows[:row_cap]
+            block_outputs = _run_sql_blocks_cursor(cur, sql)
             try:
                 cur.close()
                 conn.close()
@@ -3756,6 +3822,15 @@ async def api_playground_run(request: Request):
             cancelled = True
     finally:
         _PLAYGROUND_RUNNING.pop(history_id, None)
+
+    if err is None and not cancelled:
+        results = _blocks_to_results(block_outputs, row_cap)
+        if block_outputs:
+            lcols, lfetched = block_outputs[-1]
+            columns = lcols
+            all_rows = [_row_to_strs(r, len(lcols)) for r in lfetched]
+            rows = all_rows[:row_cap]
+            n_rows_total = len(lfetched)
 
     wall_sec = round(time.perf_counter() - t0, 4)
     elapsed = engine_sec if engine_sec is not None else wall_sec
@@ -3797,6 +3872,7 @@ async def api_playground_run(request: Request):
         "columns": columns,
         "rows": all_rows,
         "n_rows_total": n_rows_total,
+        "results": results,
         "elapsed_sec": elapsed,
         "engine_sec": engine_sec,
         "total_sec": total_sec,
@@ -3813,6 +3889,7 @@ async def api_playground_run(request: Request):
         "rows": rows,
         "n_rows_total": n_rows_total,
         "n_rows_returned": len(rows),
+        "results": results,
         "elapsed_sec": elapsed,
         "wall_sec": wall_sec,
         "engine_sec": engine_sec,

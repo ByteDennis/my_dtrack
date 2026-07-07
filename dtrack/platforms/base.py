@@ -1451,8 +1451,35 @@ def _strict_family(dtype, numeric):
 def _strict_blank_token(inner):
     return f"CASE WHEN ({inner}) IS NULL OR ({inner}) = '' THEN '<<NULL>>' ELSE ({inner}) END"
 
+# >>> collapse trailing decimal zeros ONLY on pure decimals; leading zeros ('007') kept <<< #
+def _strict_num_str_collapse(dialect, inner):
+    if dialect == 'duckdb':
+        c = (f"regexp_replace(regexp_replace({inner}, '(\\.[0-9]*[1-9])0+$', "
+             f"'\\1'), '\\.0+$', '')")
+        return (f"CASE WHEN regexp_full_match({inner}, '-?[0-9]+\\.[0-9]+') "
+                f"THEN {c} ELSE {inner} END")
+    if dialect in ('hadoop', 'databricks'):
+        c = (f"regexp_replace(regexp_replace({inner}, '(\\\\.[0-9]*[1-9])0+$', "
+             f"'$1'), '\\\\.0+$', '')")
+        return (f"CASE WHEN {inner} rlike '^-?[0-9]+\\\\.[0-9]+$' "
+                f"THEN {c} ELSE {inner} END")
+    if dialect == 'oracle':
+        c = (f"REGEXP_REPLACE(REGEXP_REPLACE({inner}, '(\\.[0-9]*[1-9])0+$', "
+             f"'\\1'), '\\.0+$', '')")
+        return (f"CASE WHEN REGEXP_LIKE({inner}, '^-?[0-9]+\\.[0-9]+$') "
+                f"THEN {c} ELSE {inner} END")
+    if dialect in ('athena', 'trino', 'aws'):
+        c = (f"regexp_replace(regexp_replace({inner}, '(\\.[0-9]*[1-9])0+$', "
+             f"'$1'), '\\.0+$', '')")
+        return (f"CASE WHEN regexp_like({inner}, '^-?[0-9]+\\.[0-9]+$') "
+                f"THEN {c} ELSE {inner} END")
+    return inner
+
 # >>> STRICT canonical string form of `expr` per dialect/family (extract-time) <<< #
-def _strict_normalize(dialect, expr, family):
+def _strict_normalize(dialect, expr, family, num_str=False):
+    def _str(inner):
+        return _strict_blank_token(
+            _strict_num_str_collapse(dialect, inner) if num_str else inner)
     if dialect in ('hadoop', 'databricks'):
         s = f'CAST({expr} AS STRING)'
         if family == 'date':
@@ -1461,7 +1488,7 @@ def _strict_normalize(dialect, expr, family):
         if family == 'numeric':
             return (f"regexp_replace(regexp_replace({s}, "
                     f"'(\\\\.[0-9]*[1-9])0+$', '$1'), '\\\\.0+$', '')")
-        return _strict_blank_token(f"lower(trim({s}))")
+        return _str(f"lower(trim({s}))")
     if dialect == 'duckdb':
         s = f'CAST({expr} AS VARCHAR)'
         if family == 'date':
@@ -1470,7 +1497,7 @@ def _strict_normalize(dialect, expr, family):
         if family == 'numeric':
             return (f"regexp_replace(regexp_replace({s}, "
                     f"'(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')")
-        return _strict_blank_token(f"lower(trim(nfc_normalize({s})))")
+        return _str(f"lower(trim(nfc_normalize({s})))")
     if dialect == 'oracle':
         s = f'TO_CHAR({expr})'
         if family == 'date':
@@ -1481,7 +1508,7 @@ def _strict_normalize(dialect, expr, family):
                   f"'(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')")
             return (f"REGEXP_REPLACE(REGEXP_REPLACE({s2}, '^-\\.', '-0.'), "
                     f"'^\\.', '0.')")
-        return _strict_blank_token(f"LOWER(TRIM(COMPOSE({s})))")
+        return _str(f"LOWER(TRIM(COMPOSE({s})))")
     if dialect in ('athena', 'trino', 'aws'):
         s = f'CAST({expr} AS VARCHAR)'
         if family == 'date':
@@ -1490,7 +1517,7 @@ def _strict_normalize(dialect, expr, family):
         if family == 'numeric':
             return (f"regexp_replace(regexp_replace({s}, "
                     f"'(\\.[0-9]*[1-9])0+$', '$1'), '\\.0+$', '')")
-        return _strict_blank_token(f"lower(trim(normalize({s}, NFC)))")
+        return _str(f"lower(trim(normalize({s}, NFC)))")
     return expr
 
 # >>> Build per-column stats SQL for any supported dialect <<< #
@@ -1519,6 +1546,7 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
         vintage = tbl_cfg.get('vintage', 'all') or 'all'
     numeric = is_numeric_type(dtype, is_oracle=ops['is_oracle_typed'])
     strict = _resolve_strict(tbl_cfg, strict, col=col)
+    numeric_strings = bool((tbl_cfg or {}).get('strict_numeric_strings'))
     family = _strict_family(dtype, numeric)
     wc = where.strip() if where else ops['wc_empty']
 
@@ -1544,7 +1572,7 @@ def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
         col_expr = apply_null_sentinels(
             col_q, dtype or ("numeric" if numeric else "categorical"), dialect)
         if strict and not numeric:
-            col_expr = _strict_normalize(dialect, col_expr, family)
+            col_expr = _strict_normalize(dialect, col_expr, family, numeric_strings)
         n_unique_sql = (
             f"COUNT(DISTINCT {col_expr})" if stats['n_unique'] else "0"
         )
@@ -1618,7 +1646,7 @@ FROM {full_table} WHERE {wc}{group_by}"""
 
     col_expr_cat = apply_null_sentinels(col_q, dtype or "categorical", dialect)
     if strict:
-        col_expr_cat = _strict_normalize(dialect, col_expr_cat, family)
+        col_expr_cat = _strict_normalize(dialect, col_expr_cat, family, numeric_strings)
     p_col_substr = f"SUBSTR({ops['cast_str'](col_expr_cat)}, 1, 200)"
     minmax_concat_min = ops['concat']("TRIM(p_col)", "'='", ops['cast_str']("cnt"))
     minmax_concat_max = minmax_concat_min

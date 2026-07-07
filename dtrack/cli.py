@@ -1185,6 +1185,7 @@ def cmd_compare_csv(args):
         force=getattr(args, 'force', False),
         verbose=getattr(args, 'verbose', False),
         clean=getattr(args, 'clean', None),
+        strict=getattr(args, 'strict', False),
     )
 
 # >>> sample-key: composite-key value+hash dump (--out/default) and/or col-sample gen (--gen-col) <<< #
@@ -1510,6 +1511,12 @@ def main():
                         'another (sequential); only the columns inside a window are parallel')
     p.add_argument('--keep-csv', dest='keep_csv', action='store_true',
                    help='Keep the per-window tmp CSV/config dirs (else removed after each window)')
+    p.add_argument('--strict', action='store_true',
+                   help='Normalize string values before length/hash/n_unique so cosmetic '
+                        'differences stop flagging: case + unicode(NFC) + blank/whitespace '
+                        "folding, plus trailing-zero collapse on pure decimals ('0.00'=='0', "
+                        "'1.50'=='1.5'). Leading zeros are preserved ('007' stays '007', never "
+                        "'7'). Same as DTRACK_STRICT=1 but scoped to this run")
     p.add_argument('--force', action='store_true',
                    help='Re-pull + recompute every window (ignore the skip-cache). Skip-cache '
                         'is the default: windows already in _col_stats are skipped, and a changed '
