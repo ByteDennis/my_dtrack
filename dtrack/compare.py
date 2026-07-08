@@ -153,9 +153,12 @@ def get_column_mapping(db_path, table_left, table_right, pair_name=None, col_map
     return {}
 
 # >>> Compare row counts between two tables <<< #
-def compare_row_counts(db_path, table_left, table_right, from_date=None, to_date=None):
-    rows_left = get_row_counts(db_path, table_left, from_date, to_date)
-    rows_right = get_row_counts(db_path, table_right, from_date, to_date)
+def compare_row_counts(db_path, table_left, table_right, from_date=None, to_date=None,
+                       date_synonyms=None):
+    rows_left = get_row_counts(db_path, table_left, from_date, to_date,
+                               date_synonyms=date_synonyms)
+    rows_right = get_row_counts(db_path, table_right, from_date, to_date,
+                                date_synonyms=date_synonyms)
 
     dict_left = {dt: count for dt, count in rows_left if dt}
     dict_right = {dt: count for dt, count in rows_right if dt}

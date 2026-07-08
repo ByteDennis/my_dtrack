@@ -22,6 +22,7 @@ from .db import (
     get_compare_csv_sig, set_compare_csv_sig, delete_col_stats_for_tables,
     upsert_row_counts, save_row_comparison,
     save_sampled_keys, get_sampled_keys, refresh_metadata_from_data,
+    apply_date_synonyms, normalize_date_synonyms,
 )
 from .loader import load_precomputed_col_stats
 from .extract import extract_all
@@ -165,16 +166,18 @@ def _date_counts(project_db, tbl, from_date, to_date):
     return out
 
 # >>> count-MATCH dates for a pair; reuse _row_counts if loaded, else live COUNT(*) (persisted) <<< #
-def _matched_dates(project_db, pname, left, right, tl, tr, from_date, to_date):
-    rl = {dt: c for dt, c in get_row_counts(project_db, tl, from_date, to_date) if dt}
-    rr = {dt: c for dt, c in get_row_counts(project_db, tr, from_date, to_date) if dt}
+def _matched_dates(project_db, pname, left, right, tl, tr, from_date, to_date, synonyms=None):
+    rl = {dt: c for dt, c in get_row_counts(project_db, tl, from_date, to_date, date_synonyms=synonyms) if dt}
+    rr = {dt: c for dt, c in get_row_counts(project_db, tr, from_date, to_date, date_synonyms=synonyms) if dt}
     origin = "_row_counts"
     if not rl or not rr:
-        rl = _date_counts(project_db, left, from_date, to_date)
-        rr = _date_counts(project_db, right, from_date, to_date)
+        raw_l = _date_counts(project_db, left, from_date, to_date)
+        raw_r = _date_counts(project_db, right, from_date, to_date)
         origin = "live COUNT(*)"
-        upsert_row_counts(project_db, tl, [(dt, c) for dt, c in rl.items()])
-        upsert_row_counts(project_db, tr, [(dt, c) for dt, c in rr.items()])
+        upsert_row_counts(project_db, tl, [(dt, c) for dt, c in raw_l.items()])
+        upsert_row_counts(project_db, tr, [(dt, c) for dt, c in raw_r.items()])
+        rl = apply_date_synonyms(raw_l, synonyms)
+        rr = apply_date_synonyms(raw_r, synonyms)
     common = set(rl) & set(rr)
     matched = sorted(dt for dt in common if rl[dt] == rr[dt])
     print(f"[compare-csv] {pname}: dates from {origin} -> "
@@ -183,8 +186,8 @@ def _matched_dates(project_db, pname, left, right, tl, tr, from_date, to_date):
     return matched, rl, rr
 
 # >>> persist the pair's row-count comparison (_row_comparison) so the row report renders, like e2e <<< #
-def _save_row_compare(project_db, pname, tl, tr, rl, rr, from_date, to_date):
-    rc = compare_row_counts(project_db, tl, tr, from_date, to_date)
+def _save_row_compare(project_db, pname, tl, tr, rl, rr, from_date, to_date, synonyms=None):
+    rc = compare_row_counts(project_db, tl, tr, from_date, to_date, date_synonyms=synonyms)
     ov_start = ov_end = None
     if rl and rr:
         ov_start = max(min(rl), min(rr))
@@ -219,12 +222,21 @@ def _contiguous_runs(dates):
     return runs
 
 # >>> (base where AND bucket date-window) for a side: union of count-matching date runs, skipping gaps <<< #
-def _window_where(project_db, tbl, date_col, dates):
+def _window_where(project_db, tbl, date_col, dates, synonyms=None):
     d = _dialect((tbl.get("source") or "").lower())
     ddtype, dfmt = _date_dtype_fmt(project_db, tbl)
     date_q = quote_ident(date_col, d)
     runs = [build_date_bounds_clause(date_q, lo, hi, ddtype, date_format=dfmt)
             for lo, hi in _contiguous_runs(dates)]
+    # a source may store a sentinel (e.g. 3000-01-01) that stands in for a real
+    # date in this window; pull those raw rows too so they land in the window.
+    syn = normalize_date_synonyms(synonyms)
+    if syn:
+        targets = set(dates)
+        for sentinel, target in syn.items():
+            if target in targets:
+                runs.append(build_date_bounds_clause(date_q, sentinel, sentinel,
+                                                     ddtype, date_format=dfmt))
     runs = [r for r in runs if r]
     if not runs:
         bounds = ""
@@ -258,10 +270,10 @@ def _distinct_key_count(tbl, key_cols, where):
     return int(rows[0].get("c") or 0) if rows else 0
 
 # >>> deterministic fixed-N hash-spread sample of composite-key tuples from the LEFT, window-scoped <<< #
-def _window_keys(project_db, left, key_cols, dates, sample, normalize=False):
+def _window_keys(project_db, left, key_cols, dates, sample, normalize=False, synonyms=None):
     src = (left.get("source") or "").lower()
     d = _dialect(src)
-    where = _window_where(project_db, left, left.get("date_col", ""), dates)
+    where = _window_where(project_db, left, left.get("date_col", ""), dates, synonyms)
     kexprs = [(_norm_key_expr(d, quote_ident(k, d)) if normalize
                else quote_ident(k, d)) for k in key_cols]
     if isinstance(sample, float):
@@ -324,7 +336,7 @@ def _safe_name(qname):
 
 # >>> pull one side's raw mapped-column rows for `dates` -> CSV at out_csv + inline column types <<< #
 def _pull_side(project_db, tbl, value_cols, date_col, dates, out_csv, tag,
-               extra_where=None, total=None):
+               extra_where=None, total=None, synonyms=None):
     from .platforms.base import resolve_config_columns
     src = (tbl.get("source") or "").lower()
     d = _dialect(src)
@@ -335,7 +347,7 @@ def _pull_side(project_db, tbl, value_cols, date_col, dates, out_csv, tag,
 
     date_q = quote_ident(date_col, d)
     cols_q = [date_q] + [quote_ident(c, d) for c in value_cols]
-    win = _window_where(project_db, tbl, date_col, dates)
+    win = _window_where(project_db, tbl, date_col, dates, synonyms)
     where = " AND ".join(f"({p})" for p in (win, extra_where) if p) or "1=1"
     sql = f"{cte}SELECT {', '.join(cols_q)} FROM {ft} WHERE {where}"
     rows = _q(tbl, sql, f"download {tag}", total=total)
@@ -680,6 +692,7 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
 
     eff_from = from_date or ((pcfg.get("fromDate") or "").strip() or None)
     eff_to = to_date or ((pcfg.get("toDate") or "").strip() or None)
+    syn = pcfg.get("date_synonyms")
     mode = (pcfg.get("mode") or "incremental").strip().lower()
     force = force or mode == "full"
     vintage = _resolve_vintage(pname, pcfg, vintage)
@@ -729,8 +742,8 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
         print(f"[compare-csv] {pname}: {why} -> clearing cache, re-pulling all")
 
     matched, counts, rcounts = _matched_dates(project_db, pname, left, right, tl, tr,
-                                              eff_from, eff_to)
-    _save_row_compare(project_db, pname, tl, tr, counts, rcounts, eff_from, eff_to)
+                                              eff_from, eff_to, syn)
+    _save_row_compare(project_db, pname, tl, tr, counts, rcounts, eff_from, eff_to, syn)
     if not matched:
         print(f"[compare-csv] {pname}: no count-matching dates; skipping")
         set_compare_csv_sig(project_db, pname, run_sig)
@@ -782,7 +795,7 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
                           f"key(s) from project.db")
                 else:
                     ktuples = _window_keys(project_db, left, key_cols, dates, sample,
-                                           normalize=key_normalize)
+                                           normalize=key_normalize, synonyms=syn)
                     save_sampled_keys(project_db, pname, bkey, ktuples)
                 nkeys = len(ktuples)
                 key_in_l, key_in_r = _key_filters(left, right, key_cols,
@@ -794,9 +807,9 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
             # part); the local DuckDB extract stays sequential (shared per-window state)
             with ThreadPoolExecutor(max_workers=2) as ex:
                 fl = ex.submit(_pull_side, project_db, left, left_cols, dc_left,
-                               dates, lc, "left", key_in_l, total)
+                               dates, lc, "left", key_in_l, total, syn)
                 fr = ex.submit(_pull_side, project_db, right, right_cols, dc_right,
-                               dates, rc, "right", key_in_r, total)
+                               dates, rc, "right", key_in_r, total, syn)
                 _, _, lcols, pl = fl.result()
                 _, _, rcols, pr = fr.result()
             shutil.rmtree(state_dir, ignore_errors=True)

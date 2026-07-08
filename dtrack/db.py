@@ -358,13 +358,45 @@ def upsert_row_counts(db_path: str, source_table: str, data: List[Tuple[str, int
     conn.commit()
     conn.close()
 
+# >>> normalize a raw {sentinel: target} date-synonym map to canonical parsed dates <<< #
+def normalize_date_synonyms(raw) -> Dict[str, str]:
+    if not raw or not isinstance(raw, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for k, v in raw.items():
+        if k is None or v is None:
+            continue
+        try:
+            pk = parse_date(str(k))
+        except (ValueError, AttributeError):
+            pk = str(k)
+        try:
+            pv = parse_date(str(v))
+        except (ValueError, AttributeError):
+            pv = str(v)
+        if pk and pv and pk != pv:
+            out[pk] = pv
+    return out
+
+# >>> collapse synonym date keys in a {date: count} dict, summing merged counts <<< #
+def apply_date_synonyms(counts: Dict[str, int], synonyms) -> Dict[str, int]:
+    syn = normalize_date_synonyms(synonyms)
+    if not syn:
+        return dict(counts)
+    out: Dict[str, int] = {}
+    for dt, c in counts.items():
+        key = syn.get(dt, dt)
+        out[key] = out.get(key, 0) + c
+    return out
+
 # >>> Get row counts from the unified _row_counts table <<< #
 def get_row_counts(
     db_path: str,
     source_table: str,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    date_synonyms=None,
 ) -> List[Tuple[str, int]]:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -392,6 +424,8 @@ def get_row_counts(
     for dt, count in parsed:
         if dt not in deduped or count > deduped[dt]:
             deduped[dt] = count
+    if date_synonyms:
+        deduped = apply_date_synonyms(deduped, date_synonyms)
     parsed = list(deduped.items())
 
     if from_date:

@@ -72,7 +72,7 @@ def load_row_count_csv(
                 except ValueError:
                     pass
 
-            dt = date_str
+            dt = _canon_date(date_str)
 
             try:
                 count = int(count_str)
@@ -120,6 +120,9 @@ def load_row_counts(
 
     data_list = sorted(all_data.items())
 
+    # pair-config mode (full/incremental) maps onto the loader's storage mode
+    mode = {"incremental": "upsert", "full": "replace"}.get(mode, mode)
+
     if mode == "replace":
         import sqlite3
         conn = sqlite3.connect(db_path)
@@ -135,19 +138,16 @@ def load_row_counts(
     else:
         raise ValueError(f"Invalid mode: {mode}")
 
-    canon_dts = [_canon_date(dt) for dt, _ in data_list]
-    min_dt = min(canon_dts) if canon_dts else None
-    max_dt = max(canon_dts) if canon_dts else None
+    # recompute range/total authoritatively from what is now in _row_counts
+    # (canonical dates) so the displayed range reflects the real data, never a
+    # stale merge with old metadata.
+    from .db import get_row_counts as _get_row_counts
+    stored = _get_row_counts(db_path, table_name)
+    stored_dts = sorted(dt for dt, _ in stored)
+    min_dt = stored_dts[0] if stored_dts else None
+    max_dt = stored_dts[-1] if stored_dts else None
 
-    if mode == "upsert" and (min_dt or max_dt):
-        existing = get_metadata(db_path, table_name)
-        if existing:
-            if existing.get("min_date_loaded") and min_dt:
-                min_dt = min(min_dt, _canon_date(existing["min_date_loaded"]))
-            if existing.get("max_date_loaded") and max_dt:
-                max_dt = max(max_dt, _canon_date(existing["max_date_loaded"]))
-
-    total_count = sum(count for _, count in data_list)
+    total_count = sum(count for _, count in stored)
     update_metadata(db_path, {
         "table_name": table_name,
         "source": source,

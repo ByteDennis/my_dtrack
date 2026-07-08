@@ -139,7 +139,7 @@ def _side_outdir(platform: str) -> str:
     if plat in _RIGHT_PLATFORMS:
         rel = settings.get("aws_outdir") or "./csv/"
     else:
-        rel = settings.get("left_outdir") or "./out/"
+        rel = settings.get("left_outdir") or settings.get("sas_outdir") or "./out/"
     return _resolve(rel)
 
 @app.get("/", response_class=HTMLResponse)
@@ -192,6 +192,16 @@ async def csv_compare_page(request: Request):
 async def s3_page(request: Request):
     return templates.TemplateResponse(request, "s3.html")
 
+# >>> canonical YYYY-MM-DD for display (raw string on parse failure) <<< #
+def _disp_date(v):
+    if not v:
+        return v
+    try:
+        from ..date_utils import parse_date
+        return parse_date(str(v))
+    except Exception:
+        return v
+
 # >>> Return pairs + metadata + date ranges <<< #
 @app.get("/api/status")
 async def api_status():
@@ -223,15 +233,15 @@ async def api_status():
             "source_right": right.get("source", ""),
             "skip": pair_cfg.get("skip", False),
             "left": {
-                "min_date": (meta_left or {}).get("min_date_loaded"),
-                "max_date": (meta_left or {}).get("max_date_loaded"),
+                "min_date": _disp_date((meta_left or {}).get("min_date_loaded")),
+                "max_date": _disp_date((meta_left or {}).get("max_date_loaded")),
                 "data_type": (meta_left or {}).get("data_type"),
                 "row_count": (meta_left or {}).get("row_count_total"),
                 "col_count": len(cols_left),
             },
             "right": {
-                "min_date": (meta_right or {}).get("min_date_loaded"),
-                "max_date": (meta_right or {}).get("max_date_loaded"),
+                "min_date": _disp_date((meta_right or {}).get("min_date_loaded")),
+                "max_date": _disp_date((meta_right or {}).get("max_date_loaded")),
                 "data_type": (meta_right or {}).get("data_type"),
                 "row_count": (meta_right or {}).get("row_count_total"),
                 "col_count": len(cols_right),
@@ -662,7 +672,7 @@ async def api_generate_files(request: Request):
     extract_type = body.get("type", "row")
     from_date = body.get("from_date")
     to_date = body.get("to_date")
-    left_outdir = _resolve(body.get("left_outdir", "./out/"))
+    left_outdir = _resolve(body.get("left_outdir") or body.get("sas_outdir") or "./out/")
     aws_outdir = _resolve(body.get("aws_outdir", "./csv/"))
     pair_names = body.get("pair_names")
     preset = body.get("preset", "") or ""
@@ -954,6 +964,16 @@ async def api_generate_files(request: Request):
             "ok": False, "error": str(e), "output": buf.getvalue()
         })
 
+# >>> loader storage mode for a table from its pair's mode (full->replace, incremental->upsert) <<< #
+def _row_load_mode(config, qname, fallback="incremental"):
+    from ..platforms.base import qualified_name
+    for pc in (config.get("pairs") or {}).values():
+        for side in ("left", "right"):
+            s = pc.get(side)
+            if s and qualified_name(s) == qname:
+                return pc.get("mode") or fallback
+    return fallback
+
 # >>> Run load-row or load-col <<< #
 @app.post("/api/load")
 async def api_load(request: Request):
@@ -985,7 +1005,7 @@ async def api_load(request: Request):
                         continue
                     load_row_counts(
                         db_path=_db_path, file_or_folder=csv_path,
-                        table_name=qname, mode="upsert",
+                        table_name=qname, mode=_row_load_mode(config, qname),
                         source=tbl.get("source"),
                         date_col=tbl.get("date_col"),
                     )
@@ -1397,7 +1417,7 @@ async def api_load_row_files(request: Request):
                         db_path=_db_path,
                         file_or_folder=file_path,
                         table_name=qname,
-                        mode=mode,
+                        mode=_row_load_mode(config, qname, fallback=mode),
                         source=tbl.get("source"),
                         date_col=tbl.get("date_col"),
                     )
@@ -1451,7 +1471,7 @@ async def api_load_row_upload(
             db_path=_db_path,
             file_or_folder=tmp_path,
             table_name=table_name,
-            mode=mode,
+            mode=_row_load_mode(config, table_name, fallback=mode),
             source=tbl_cfg.get("source") if tbl_cfg else None,
             date_col=None,
             date_var_override=tbl_cfg.get("date_col") if tbl_cfg else None,
@@ -1597,7 +1617,7 @@ async def api_load_row_path(request: Request):
             db_path=_db_path,
             file_or_folder=csv_path,
             table_name=table_name,
-            mode=mode,
+            mode=_row_load_mode(config, table_name, fallback=mode),
             source=tbl_cfg.get("source") if tbl_cfg else None,
             date_col=None,
             date_var_override=tbl_cfg.get("date_col") if tbl_cfg else None,
@@ -2376,6 +2396,15 @@ async def api_compare_row_export_excel_all(from_date: str = "", to_date: str = "
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+# >>> per-pair date-value synonym map (sentinel date -> real) from the unified config <<< #
+def _pair_date_synonyms(pair_name):
+    try:
+        from ..config import load_unified_config
+        cfg = load_unified_config(_config_path)
+        return (cfg.get("pairs", {}).get(pair_name) or {}).get("date_synonyms")
+    except Exception:
+        return None
+
 # >>> Generate full HTML report for all pairs <<< #
 @app.post("/api/compare/row/export/html")
 async def api_compare_row_export_html(request: Request):
@@ -2405,6 +2434,7 @@ async def api_compare_row_export_html(request: Request):
             comparison = compare_row_counts(
                 _db_path, pair["table_left"], pair["table_right"],
                 from_date=from_date or None, to_date=to_date or None,
+                date_synonyms=pair_cfg.get("date_synonyms"),
             )
 
             live = live_pairs.get(pname, {})
@@ -2478,6 +2508,7 @@ async def api_compare_row_export_excel(
         comparison = compare_row_counts(
             _db_path, pair["table_left"], pair["table_right"],
             from_date=from_date or None, to_date=to_date or None,
+            date_synonyms=_pair_date_synonyms(pair_name),
         )
 
         overlap_start = overlap_end = None
@@ -2561,6 +2592,7 @@ async def api_compare_row_pair(pair_name: str, from_date: str = "", to_date: str
         comparison = compare_row_counts(
             _db_path, pair["table_left"], pair["table_right"],
             from_date=from_date or None, to_date=to_date or None,
+            date_synonyms=_pair_date_synonyms(pair_name),
         )
 
         meta_left = get_metadata(_db_path, pair["table_left"]) or {}
@@ -2712,6 +2744,7 @@ async def api_compare_row_preview(pair_name: str, request: Request):
         comparison = compare_row_counts(
             _db_path, pair["table_left"], pair["table_right"],
             from_date=from_date, to_date=to_date,
+            date_synonyms=_pair_date_synonyms(pair_name),
         )
 
         if excluded_dates:

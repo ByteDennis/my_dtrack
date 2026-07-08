@@ -35,6 +35,7 @@ def build_row_comparison_workbook(db_path, config_path, from_date=None, to_date=
         comparison = compare_row_counts(
             db_path, pair["table_left"], pair["table_right"],
             from_date=from_date or None, to_date=to_date or None,
+            date_synonyms=pair_cfg.get("date_synonyms"),
         )
 
         meta_left = get_metadata(db_path, pair["table_left"]) or {}

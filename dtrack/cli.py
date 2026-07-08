@@ -360,7 +360,7 @@ def _load_columns_entry(project_db, store_name, raw_table, source, conn_macro):
 # >>> Run and print row count comparison for a single pair <<< #
 def _print_row_comparison(db_path, table_left, table_right, source_left, source_right,
                           from_date=None, to_date=None, pair_name=None,
-                          date_col_left=None, date_col_right=None):
+                          date_col_left=None, date_col_right=None, date_synonyms=None):
     source_left = source_left or "left"
     source_right = source_right or "right"
 
@@ -376,7 +376,8 @@ def _print_row_comparison(db_path, table_left, table_right, source_left, source_
         dc_str = date_col_left if date_col_left == date_col_right else f"{date_col_left} / {date_col_right}"
         print(f"Date column: {dc_str}")
 
-    result = compare_row_counts(db_path, table_left, table_right, from_date=from_date, to_date=to_date)
+    result = compare_row_counts(db_path, table_left, table_right, from_date=from_date,
+                                to_date=to_date, date_synonyms=date_synonyms)
     summary = result["summary"]
 
     if summary["count_left"] == 0 or summary["count_right"] == 0:
@@ -537,6 +538,7 @@ def cmd_compare_row(args):
             from_date=args.from_date, to_date=args.to_date,
             pair_name=pair_name,
             date_col_left=dc_left, date_col_right=dc_right,
+            date_synonyms=pair_config.get("date_synonyms"),
         )
         if result is None:
             continue
@@ -672,6 +674,7 @@ def cmd_compare_col(args):
             row_result = compare_row_counts(
                 args.project_db, table_left, table_right,
                 from_date=args.from_date, to_date=args.to_date,
+                date_synonyms=pair_config.get("date_synonyms"),
             )
             matched_dates = {dt for dt, _ in row_result['matching']}
             if matched_dates:
@@ -1424,7 +1427,8 @@ def main():
     p.add_argument('project_db')
     p.add_argument('folder', help='Folder with {qname}_row.csv files')
     p.add_argument('--config', required=True, help='Unified config JSON')
-    p.add_argument('--mode', default='upsert', choices=['replace', 'append', 'upsert'])
+    p.add_argument('--mode', default='upsert',
+                   choices=['replace', 'append', 'upsert', 'incremental', 'full'])
     p.add_argument('--db', help='Database name')
     p.add_argument('--date-var', help='Date column name')
 
