@@ -1325,6 +1325,13 @@ async def api_update_pair(pair_name: str, request: Request):
             if key in body:
                 if key in ("col_filter", "strict") and body[key] is None:
                     pair_cfg.pop(key, None)
+                elif key in ("left", "right") and isinstance(body[key], dict):
+                    # merge editor-managed fields into the existing side so inline
+                    # `columns` / `columns_file` (and any side key the editor form
+                    # doesn't render) survive the save instead of being wiped
+                    side = pair_cfg.get(key) or {}
+                    side.update(body[key])
+                    pair_cfg[key] = side
                 else:
                     pair_cfg[key] = body[key]
 

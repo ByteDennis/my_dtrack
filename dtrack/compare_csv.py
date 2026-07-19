@@ -336,7 +336,7 @@ def _safe_name(qname):
 
 # >>> pull one side's raw mapped-column rows for `dates` -> CSV at out_csv + inline column types <<< #
 def _pull_side(project_db, tbl, value_cols, date_col, dates, out_csv, tag,
-               extra_where=None, total=None, synonyms=None):
+               extra_where=None, total=None, synonyms=None, dryrun=False):
     from .platforms.base import resolve_config_columns
     src = (tbl.get("source") or "").lower()
     d = _dialect(src)
@@ -350,9 +350,13 @@ def _pull_side(project_db, tbl, value_cols, date_col, dates, out_csv, tag,
     win = _window_where(project_db, tbl, date_col, dates, synonyms)
     where = " AND ".join(f"({p})" for p in (win, extra_where) if p) or "1=1"
     sql = f"{cte}SELECT {', '.join(cols_q)} FROM {ft} WHERE {where}"
+    header = [date_col] + list(value_cols)
+    if dryrun:
+        from .logmgr import get_logger
+        get_logger().info("[compare-csv][DRY RUN] would pull %s (%s):\n%s", tag, qname, sql)
+        return out_csv, header, None, 0
     rows = _q(tbl, sql, f"download {tag}", total=total)
 
-    header = [date_col] + list(value_cols)
     with open(out_csv, "w", newline="") as f:
         w = _csv.writer(f)
         w.writerow(header)
@@ -513,7 +517,8 @@ def run_compare_csv(project_db, config_path, pair=None, vintage=None,
                     from_date=None, to_date=None, preset=None,
                     stats_override=None, keep_csv=False, resume=False,
                     sample=None, key=None, data_dir=None, workers=None,
-                    force=False, verbose=False, clean=None, strict=False):
+                    force=False, verbose=False, clean=None, strict=False,
+                    dryrun=False):
     from .extract import _cfg_max_workers
     from .config import backup_config
     import logging as _logging
@@ -566,9 +571,10 @@ def run_compare_csv(project_db, config_path, pair=None, vintage=None,
             _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
                       vintage, from_date, to_date, preset, stats_override,
                       keep_csv, sample, cli_key_cols, data_dir, nworkers, force,
-                      strict)
+                      strict, dryrun)
 
-    refresh_metadata_from_data(project_db)
+    if not dryrun:
+        refresh_metadata_from_data(project_db)
 
 # >>> resolve a pair's key cols (per-pair `key` else CLI --key) + right names via col_map; raise if unmapped <<< #
 def _resolve_key(pname, pcfg, cli_key_cols, col_map):
@@ -676,7 +682,7 @@ def _side_desc(tbl):
 def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
               vintage, from_date, to_date, preset, stats_override,
               keep_csv, cli_sample=None, cli_key_cols=None,
-              data_dir=None, workers=1, force=False, strict=False):
+              data_dir=None, workers=1, force=False, strict=False, dryrun=False):
     left, right = pcfg["left"], pcfg["right"]
     from .logmgr import get_logger
     _banner = (f"[compare-csv] {pname}:\n"
@@ -746,7 +752,8 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
     _save_row_compare(project_db, pname, tl, tr, counts, rcounts, eff_from, eff_to, syn)
     if not matched:
         print(f"[compare-csv] {pname}: no count-matching dates; skipping")
-        set_compare_csv_sig(project_db, pname, run_sig)
+        if not dryrun:
+            set_compare_csv_sig(project_db, pname, run_sig)
         return
 
     buckets = {}
@@ -787,6 +794,8 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
                 key_in_l = _hash_bucket_where(left, key_cols, fams, threshold)
                 key_in_r = _hash_bucket_where(right, right_key_cols, fams, threshold)
                 sample_label = f"~{sample:g} hash-bucket"
+            elif sample is not None and key_cols and dryrun:
+                sample_label = f"{int(sample)} keys/window (fixed-N; key sample skipped in dry-run)"
             elif sample is not None and key_cols:
                 saved = None if fresh else get_sampled_keys(project_db, pname, bkey)
                 if saved is not None:
@@ -803,6 +812,15 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
                                                    normalize=key_normalize)
             lc = os.path.join(scratch, f"{_safe_name(tl)}.csv")
             rc = os.path.join(scratch, f"{_safe_name(tr)}.csv")
+            if dryrun:
+                _pull_side(project_db, left, left_cols, dc_left, dates, lc,
+                           "left", key_in_l, total, syn, dryrun=True)
+                _pull_side(project_db, right, right_cols, dc_right, dates, rc,
+                           "right", key_in_r, total, syn, dryrun=True)
+                print(f"  {bkey} [{span}]: [DRY RUN] {len(dates)} date(s), "
+                      f"sample={sample_label or 'all rows'} -> logged pull SQL "
+                      f"(both sides); no data pulled, no compare")
+                continue
             # both sides hit independent backends -> download concurrently (the slow
             # part); the local DuckDB extract stays sequential (shared per-window state)
             with ThreadPoolExecutor(max_workers=2) as ex:
@@ -824,14 +842,19 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
             print(f"  {bkey} [{span}]: {len(dates)} date(s) | records sample "
                   f"{pl}/{total} (L) {pr}/{total} (R){keyinfo} | "
                   f"col-stats {nl}/{nr}")
-        _vintage_compare(project_db, pname, tl, tr, col_map, bkey,
-                         overrides, ignore, vintage_csv)
+        if not dryrun:
+            _vintage_compare(project_db, pname, tl, tr, col_map, bkey,
+                             overrides, ignore, vintage_csv)
 
     if cleanup_scratch:
         shutil.rmtree(scratch, ignore_errors=True)
     elif not data_dir:
         print(f"    kept scratch: {scratch}")
 
+    if dryrun:
+        print(f"[compare-csv] {pname}: [DRY RUN] plan + pull SQL logged; "
+              f"no data pulled, no compare, skip-cache untouched")
+        return
     _compare_and_save(project_db, config, pname, tl, tr, col_map,
                       set(buckets), eff_from, eff_to)
     set_compare_csv_sig(project_db, pname, run_sig)

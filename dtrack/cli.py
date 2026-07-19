@@ -1189,6 +1189,7 @@ def cmd_compare_csv(args):
         verbose=getattr(args, 'verbose', False),
         clean=getattr(args, 'clean', None),
         strict=getattr(args, 'strict', False),
+        dryrun=getattr(args, 'dryrun', False),
     )
 
 # >>> sample-key: composite-key value+hash dump (--out/default) and/or col-sample gen (--gen-col) <<< #
@@ -1527,6 +1528,11 @@ def main():
                         '--sample/--key/col_filter/--preset/--vintage auto-triggers a re-pull')
     p.add_argument('--resume', action='store_true',
                    help='(deprecated no-op) skip-cache is now the default; use --force to re-pull')
+    p.add_argument('--dryrun', action='store_true',
+                   help='Plan only: log the full window plan + the exact per-side pull SQL to '
+                        'run.log, but do NOT pull data from any backend, do NOT compute/compare '
+                        'col stats, and do NOT touch the skip-cache. Matched-date discovery still '
+                        'runs (reuses _row_counts; cheap COUNT(*) only if not loaded)')
     p.add_argument('--verbose', action='store_true',
                    help='Print full backend SQL and per-block extract progress (default: one '
                         'concise line per step with rows + seconds; full detail always goes to run.log)')
