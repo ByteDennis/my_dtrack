@@ -534,6 +534,29 @@ def _query_hadoop(sql, conn_macro):
     cache_put(sql, conn_macro, result, row_count=len(result))
     return result
 
+# >>> Streaming sibling of _query_hadoop: fetchmany(arraysize) batches to bound the ODBC fetch block (avoids Simba SQLFetch OOM); no cache <<< #
+def _iter_hadoop(sql, conn_macro, arraysize):
+    conn = hadoop_connect()
+    if conn is None:
+        return
+    try:
+        cur = conn.cursor()
+        try:
+            cur.arraysize = arraysize
+            cur.execute(sql)
+            if cur.description is None:
+                return
+            col_names = [d[0].lower().split('.')[-1] for d in cur.description]
+            while True:
+                rows = cur.fetchmany(arraysize)
+                if not rows:
+                    break
+                yield [dict(zip(col_names, r)) for r in rows]
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
 # >>> Discover (column_name -> data_type) for a Hive table via hadoop_connect <<< #
 def _discover_columns_hadoop(conn_macro, table):
     full = f"{conn_macro}.{table}" if conn_macro else table

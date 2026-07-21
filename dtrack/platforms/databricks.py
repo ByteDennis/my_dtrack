@@ -251,41 +251,52 @@ def _fetch_external_link(url):
                 time.sleep(2 ** attempt)
     raise last
 
-# >>> gather every result chunk (inline data_array or EXTERNAL_LINKS) into row dicts <<< #
-def _rest_collect_rows(host, statement_id, payload):
+# >>> stream every result chunk (inline data_array or EXTERNAL_LINKS) as row-dict batches, one batch per chunk (never the whole result in memory) <<< #
+def _rest_iter_rows(host, statement_id, payload):
     manifest = payload.get("manifest") or {}
     schema = (manifest.get("schema") or {}).get("columns") or []
     cols = [(c.get("name", "").lower(), c.get("type_name", "")) for c in schema]
-    rows = []
 
-    def _emit(data_array):
-        for arr in data_array or []:
-            rows.append({cols[i][0]: _dbx_coerce(v, cols[i][1])
-                         for i, v in enumerate(arr)})
+    def _rows(data_array):
+        return [{cols[i][0]: _dbx_coerce(v, cols[i][1]) for i, v in enumerate(arr)}
+                for arr in (data_array or [])]
 
-    # >>> emit one ResultData; return next chunk idx from top-level OR the links (EXTERNAL_LINKS often sets only the latter) <<< #
-    def _add(result):
+    # >>> batches + next chunk idx for one ResultData (EXTERNAL_LINKS often sets the idx only on the links) <<< #
+    def _emit(result):
         result = result or {}
-        if result.get("data_array") is not None:
-            _emit(result.get("data_array"))
+        batches = []
         nxt = result.get("next_chunk_index")
+        if result.get("data_array") is not None:
+            batches.append(_rows(result.get("data_array")))
         for link in result.get("external_links") or []:
             url = link.get("external_link")
             if url:
-                _emit(_fetch_external_link(url))
+                batches.append(_rows(_fetch_external_link(url)))
             ln = link.get("next_chunk_index")
             if ln is not None:
                 nxt = ln if nxt is None else max(nxt, ln)
-        return nxt
+        return batches, nxt
 
-    next_idx = _add(payload.get("result") or {})
+    batches, next_idx = _emit(payload.get("result") or {})
+    for b in batches:
+        if b:
+            yield b
     seen = set()
     while next_idx is not None and next_idx not in seen:
         seen.add(next_idx)
         chunk = _rest_request(
             "GET", host,
             f"/api/2.0/sql/statements/{statement_id}/result/chunks/{next_idx}")
-        next_idx = _add(chunk)
+        batches, next_idx = _emit(chunk)
+        for b in batches:
+            if b:
+                yield b
+
+# >>> gather every result chunk into one row-dict list (non-streaming callers) <<< #
+def _rest_collect_rows(host, statement_id, payload):
+    rows = []
+    for b in _rest_iter_rows(host, statement_id, payload):
+        rows.extend(b)
     return rows
 
 _DBX_TERMINAL = {"SUCCEEDED", "FAILED", "CANCELED", "CLOSED"}
@@ -307,13 +318,8 @@ def _rest_poll(host, statement_id, payload):
         state = ((payload.get("status") or {}).get("state") or "").upper()
     return payload
 
-# >>> resume-by-ID Databricks executor: submit via statements API, persist the <<< #
-# >>> statement_id, and re-fetch by ID on retry instead of re-running the query <<< #
-def _query_databricks_rest(sql, catalog_schema=None):
-    cached = cache_get(sql, catalog_schema)
-    if cached is not None:
-        return cached
-
+# >>> submit (or resume-by-ID) a statement + poll to SUCCEEDED; return (host, statement_id, terminal_payload) — shared by the list + streaming executors <<< #
+def _rest_submit_and_poll(sql, catalog_schema=None):
     server_hostname, http_path, token = _databricks_auth()
     warehouse_id = _warehouse_id_from_http_path(http_path)
     if not warehouse_id:
@@ -332,7 +338,7 @@ def _query_databricks_rest(sql, catalog_schema=None):
     stmts = [s for s in _split_statements(sql)
              if not s.lstrip().upper().startswith("USE ")]
     if not stmts:
-        return []
+        return server_hostname, None, None
     statement = stmts[-1]
 
     from ..logmgr import log_exc, get_logger
@@ -384,11 +390,59 @@ def _query_databricks_rest(sql, catalog_schema=None):
         statement_id_delete(sql, catalog_schema)
         err = (status.get("error") or {}).get("message") or state
         raise RuntimeError(f"databricks statement {statement_id} {state}: {err}")
+    return server_hostname, statement_id, payload
 
+# >>> resume-by-ID Databricks executor: submit via statements API, persist the <<< #
+# >>> statement_id, and re-fetch by ID on retry instead of re-running the query <<< #
+def _query_databricks_rest(sql, catalog_schema=None):
+    cached = cache_get(sql, catalog_schema)
+    if cached is not None:
+        return cached
+    server_hostname, statement_id, payload = _rest_submit_and_poll(sql, catalog_schema)
+    if payload is None:
+        return []
     out = _rest_collect_rows(server_hostname, statement_id, payload)
     cache_put(sql, catalog_schema, out, row_count=len(out))
     statement_id_delete(sql, catalog_schema)
     return out
+
+# >>> streaming REST executor: submit/poll then yield EXTERNAL_LINKS chunks as batches (no cache; bulk pulls stay off the cache DB) <<< #
+def _query_databricks_rest_iter(sql, catalog_schema=None):
+    server_hostname, statement_id, payload = _rest_submit_and_poll(sql, catalog_schema)
+    if payload is None:
+        return
+    try:
+        yield from _rest_iter_rows(server_hostname, statement_id, payload)
+    finally:
+        statement_id_delete(sql, catalog_schema)
+
+# >>> streaming sibling of _query_databricks: REST chunks by default, else Thrift fetchmany(arraysize); no cache <<< #
+def _iter_databricks(sql, catalog_schema=None, arraysize=50000):
+    if os.environ.get("DTRACK_DATABRICKS_REST", "1") != "0":
+        yield from _query_databricks_rest_iter(sql, catalog_schema)
+        return
+    conn = databricks_connect(catalog_schema)
+    try:
+        cur = conn.cursor()
+        try:
+            for stmt in _split_statements(sql):
+                if not stmt:
+                    continue
+                cur.execute(stmt)
+                if cur.description:
+                    cols = [d[0].lower() for d in cur.description]
+                    while True:
+                        rows = cur.fetchmany(arraysize)
+                        if not rows:
+                            break
+                        yield [dict(zip(cols, row)) for row in rows]
+        finally:
+            cur.close()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _query_databricks(sql, catalog_schema=None):

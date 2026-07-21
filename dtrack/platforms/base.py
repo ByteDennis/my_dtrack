@@ -1001,7 +1001,10 @@ def tag_generated_sql(outdir, extract_type, platform):
         return None
     dst = os.path.join(outdir, f"extract_{extract_type}.{platform}.sql")
     os.replace(src, dst)
-    print(f"[gen-only] {dst}")
+    abspath = os.path.abspath(dst)
+    from ..logmgr import get_logger
+    get_logger().info("[generate] %s %s SQL -> %s", platform, extract_type, abspath)
+    print(f"[gen-only] {abspath}")
     return dst
 
 # >>> append timing rows to per-table {outdir}/{qname}_timing.csv (row + col logs accumulate) <<< #

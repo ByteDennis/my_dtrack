@@ -1190,6 +1190,7 @@ def cmd_compare_csv(args):
         clean=getattr(args, 'clean', None),
         strict=getattr(args, 'strict', False),
         dryrun=getattr(args, 'dryrun', False),
+        arraysize=getattr(args, 'arraysize', None),
     )
 
 # >>> sample-key: composite-key value+hash dump (--out/default) and/or col-sample gen (--gen-col) <<< #
@@ -1510,6 +1511,12 @@ def main():
     p.add_argument('--data-dir', dest='data_dir',
                    help='Folder for the per-window downloaded CSVs (large files). Default: '
                         'system temp. Use this to keep big pulls off the project folder / a small disk')
+    p.add_argument('--arraysize', type=int, default=None,
+                   help='Rows per backend fetch when downloading a window (default 50000, or '
+                        'DTRACK_ARRAYSIZE). Each side streams fetchmany(arraysize) straight to '
+                        'CSV so no whole window sits in memory -- fixes Simba/ODBC SQLFetch OOM '
+                        'and server-side fetch timeouts. Lower it if a driver still chokes; Athena '
+                        'is capped at 1000 (API limit) and Databricks REST streams cloud chunks')
     p.add_argument('--workers', type=int,
                    help='Concurrency for the LOCAL per-column stat compute within each window '
                         '(CLI > settings.max_workers > 1). Vintage windows always run one after '

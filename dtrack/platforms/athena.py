@@ -213,6 +213,27 @@ def _query_athena(sql, data_base=None):
     _cache_put(sql, data_base, df, row_count=len(df))
     return df
 
+# >>> Streaming sibling of _query_athena: DB-API fetchmany batches (no pandas, no cache); page capped at 1000 (Athena GetQueryResults MaxResults limit) <<< #
+def _iter_athena(sql, data_base=None, arraysize=100000):
+    aws_creds_renew()
+    page = min(int(arraysize) if arraysize else 1000, 1000) or 1000
+    conn = athena_connect(data_base=data_base)
+    try:
+        cur = conn.cursor()
+        try:
+            cur.arraysize = page
+            cur.execute(sql)
+            cols = [d[0].lower() for d in cur.description]
+            while True:
+                rows = cur.fetchmany(page)
+                if not rows:
+                    break
+                yield [dict(zip(cols, r)) for r in rows]
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
 # >>> Append SQL to log file (thread-safe). No console output <<< #
 def _log_sql(col, sql):
     if _sql_log_file:

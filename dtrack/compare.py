@@ -666,6 +666,46 @@ def _run_query(tbl, sql):
     raise ValueError(f"sample-hash: unsupported source {src!r} "
                      f"(supported: {', '.join(_SUPPORTED)})")
 
+# >>> streaming sibling of _run_query: yield fetchmany(arraysize) row-dict batches; bypasses the query cache (bulk window pulls only) <<< #
+def _iter_query(tbl, sql, arraysize):
+    src = (tbl.get("source") or "").lower()
+    cm = tbl.get("conn_macro", "") or ""
+    if src == "aws":
+        from .platforms.athena import _iter_athena
+        yield from _iter_athena(sql, cm, arraysize)
+    elif src == "databricks":
+        from .platforms.databricks import _iter_databricks
+        yield from _iter_databricks(sql, cm, arraysize)
+    elif src == "hadoop":
+        from .platforms.hadoop import _iter_hadoop
+        yield from _iter_hadoop(sql, cm, arraysize)
+    elif src == "csv":
+        from .platforms.csv_duckdb import _query_duckdb
+        rows = _query_duckdb(sql, cm)
+        for i in range(0, len(rows), arraysize):
+            yield rows[i:i + arraysize]
+    elif src == "oracle":
+        from .db import oracle_connect
+        conn = oracle_connect(cm)
+        if conn is None:
+            return
+        try:
+            cur = conn.cursor()
+            cur.arraysize = arraysize
+            cur.execute(sql)
+            cols = [d[0].lower() for d in cur.description]
+            while True:
+                chunk = cur.fetchmany(arraysize)
+                if not chunk:
+                    break
+                yield [dict(zip(cols, r)) for r in chunk]
+            cur.close()
+        finally:
+            conn.close()
+    else:
+        raise ValueError(f"stream: unsupported source {src!r} "
+                         f"(supported: {', '.join(_SUPPORTED)})")
+
 def _limit(source, n):
     return f"FETCH FIRST {n} ROWS ONLY" if (source or "").lower() == "oracle" else f"LIMIT {n}"
 

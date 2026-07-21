@@ -31,6 +31,8 @@ _CSV_SUPPORTED = ("aws", "oracle", "databricks", "csv", "hadoop")
 
 _VERBOSE = False
 
+_DEFAULT_ARRAYSIZE = 50_000
+
 # >>> run a backend SQL: concise rows+secs line by default; full SQL (stdout + log) only with --verbose <<< #
 def _q(tbl, sql, label, total=None):
     import time
@@ -48,6 +50,39 @@ def _q(tbl, sql, label, total=None):
     if not _VERBOSE:
         log.info(msg)
     return rows
+
+# >>> stream a backend SQL in fetchmany(arraysize) batches straight to out_csv (never a whole window in memory); return row count <<< #
+def _stream_query_to_csv(tbl, sql, out_csv, header, date_col, value_cols,
+                         label, total, arraysize):
+    import time
+    from .compare import _iter_query
+    from .logmgr import get_logger
+    src = (tbl.get("source") or "").lower()
+    log = get_logger()
+    if _VERBOSE:
+        print(f"[compare-csv] {label} [{src}:{qualified_name(tbl)}]:\n{sql}")
+        log.info("[compare-csv] %s [%s]: %s", label, qualified_name(tbl), sql)
+    t0 = time.time()
+    n = 0
+    with open(out_csv, "w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(header)
+        for batch in _iter_query(tbl, sql, arraysize):
+            for r in batch:
+                dv = r.get(date_col.lower())
+                try:
+                    dv = parse_date(str(dv))
+                except Exception:
+                    dv = "" if dv is None else str(dv)
+                w.writerow([dv] + [r.get(c.lower()) for c in value_cols])
+            n += len(batch)
+    cnt = f"{n:,} rows" + (f" / {total:,} total" if total is not None else "")
+    msg = (f"[compare-csv] {label} [{src}]: {cnt} in {time.time() - t0:.1f}s "
+           f"(streamed, arraysize={arraysize:,})")
+    print(msg)
+    if not _VERBOSE:
+        log.info(msg)
+    return n
 
 # >>> fallback column-name discovery for any source: one row -> its keys are the cols <<< #
 def _discover_names(tbl):
@@ -336,7 +371,8 @@ def _safe_name(qname):
 
 # >>> pull one side's raw mapped-column rows for `dates` -> CSV at out_csv + inline column types <<< #
 def _pull_side(project_db, tbl, value_cols, date_col, dates, out_csv, tag,
-               extra_where=None, total=None, synonyms=None, dryrun=False):
+               extra_where=None, total=None, synonyms=None, dryrun=False,
+               arraysize=_DEFAULT_ARRAYSIZE):
     from .platforms.base import resolve_config_columns
     src = (tbl.get("source") or "").lower()
     d = _dialect(src)
@@ -355,23 +391,13 @@ def _pull_side(project_db, tbl, value_cols, date_col, dates, out_csv, tag,
         from .logmgr import get_logger
         get_logger().info("[compare-csv][DRY RUN] would pull %s (%s):\n%s", tag, qname, sql)
         return out_csv, header, None, 0
-    rows = _q(tbl, sql, f"download {tag}", total=total)
-
-    with open(out_csv, "w", newline="") as f:
-        w = _csv.writer(f)
-        w.writerow(header)
-        for r in rows:
-            dv = r.get(date_col.lower())
-            try:
-                dv = parse_date(str(dv))
-            except Exception:
-                dv = "" if dv is None else str(dv)
-            w.writerow([dv] + [r.get(c.lower()) for c in value_cols])
+    n = _stream_query_to_csv(tbl, sql, out_csv, header, date_col, value_cols,
+                             f"download {tag}", total, arraysize)
 
     vt = {c: types[c.lower()] for c in value_cols if types.get(c.lower())}
     columns = ({date_col: "VARCHAR", **vt}
                if value_cols and len(vt) == len(value_cols) else None)
-    return out_csv, header, columns, len(rows)
+    return out_csv, header, columns, n
 
 # >>> overwrite every dt cell in a col CSV with the window's bucket key <<< #
 def _stamp_dt(col_csv, dt_label):
@@ -518,13 +544,16 @@ def run_compare_csv(project_db, config_path, pair=None, vintage=None,
                     stats_override=None, keep_csv=False, resume=False,
                     sample=None, key=None, data_dir=None, workers=None,
                     force=False, verbose=False, clean=None, strict=False,
-                    dryrun=False):
+                    dryrun=False, arraysize=None):
     from .extract import _cfg_max_workers
     from .config import backup_config
     import logging as _logging
     from .logmgr import get_logger
     global _VERBOSE
     _VERBOSE = verbose
+    if not arraysize or int(arraysize) <= 0:
+        arraysize = int(os.environ.get("DTRACK_ARRAYSIZE", _DEFAULT_ARRAYSIZE))
+    arraysize = int(arraysize)
     get_logger().setLevel(_logging.DEBUG if verbose else _logging.INFO)
     backup_config(config_path)
     config = load_unified_config(config_path)
@@ -571,7 +600,7 @@ def run_compare_csv(project_db, config_path, pair=None, vintage=None,
             _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
                       vintage, from_date, to_date, preset, stats_override,
                       keep_csv, sample, cli_key_cols, data_dir, nworkers, force,
-                      strict, dryrun)
+                      strict, dryrun, arraysize)
 
     if not dryrun:
         refresh_metadata_from_data(project_db)
@@ -587,10 +616,18 @@ def _resolve_key(pname, pcfg, cli_key_cols, col_map):
     if not cols:
         return [], []
     cm_lower = {kk.lower(): (kk, vv) for kk, vv in (col_map or {}).items()}
+    dc_left = ((pcfg.get("left") or {}).get("date_col") or "").strip()
+    dc_right = ((pcfg.get("right") or {}).get("date_col") or "").strip()
     key_cols, right_cols = [], []
     for c in cols:
         ent = cm_lower.get(c.lower())
         if ent is None:
+            # the date_col is present on both sides but is never a mapped value
+            # column -> resolve it directly (left date_col -> right date_col)
+            if dc_left and c.lower() == dc_left.lower():
+                key_cols.append(dc_left)
+                right_cols.append(dc_right or dc_left)
+                continue
             raise ValueError(
                 f"{pname}: key column {c!r} is not in col_map "
                 f"(left cols: {sorted(col_map or {})}). Map it via match-columns "
@@ -682,7 +719,8 @@ def _side_desc(tbl):
 def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
               vintage, from_date, to_date, preset, stats_override,
               keep_csv, cli_sample=None, cli_key_cols=None,
-              data_dir=None, workers=1, force=False, strict=False, dryrun=False):
+              data_dir=None, workers=1, force=False, strict=False, dryrun=False,
+              arraysize=_DEFAULT_ARRAYSIZE):
     left, right = pcfg["left"], pcfg["right"]
     from .logmgr import get_logger
     _banner = (f"[compare-csv] {pname}:\n"
@@ -698,6 +736,16 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
 
     eff_from = from_date or ((pcfg.get("fromDate") or "").strip() or None)
     eff_to = to_date or ((pcfg.get("toDate") or "").strip() or None)
+    from datetime import datetime as _dtm
+    for _lbl, _v in (("fromDate", eff_from), ("toDate", eff_to)):
+        if _v:
+            try:
+                _dtm.strptime(str(_v), "%Y-%m-%d")
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"{pname}: {_lbl} {_v!r} is not a valid YYYY-MM-DD date "
+                    f"(e.g. an impossible day like 2018-02-31) — the bounds would "
+                    f"silently match nothing")
     syn = pcfg.get("date_synonyms")
     mode = (pcfg.get("mode") or "incremental").strip().lower()
     force = force or mode == "full"
@@ -825,9 +873,11 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
             # part); the local DuckDB extract stays sequential (shared per-window state)
             with ThreadPoolExecutor(max_workers=2) as ex:
                 fl = ex.submit(_pull_side, project_db, left, left_cols, dc_left,
-                               dates, lc, "left", key_in_l, total, syn)
+                               dates, lc, "left", key_in_l, total, syn, False,
+                               arraysize)
                 fr = ex.submit(_pull_side, project_db, right, right_cols, dc_right,
-                               dates, rc, "right", key_in_r, total, syn)
+                               dates, rc, "right", key_in_r, total, syn, False,
+                               arraysize)
                 _, _, lcols, pl = fl.result()
                 _, _, rcols, pr = fr.result()
             shutil.rmtree(state_dir, ignore_errors=True)
