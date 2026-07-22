@@ -1188,8 +1188,18 @@ def discover_and_write_columns(all_tables, outdir, db_path):
         except Exception as e:
             log_exc("oracle conn close", e, level="debug")
 
+_ignore_where_map = False
+
+# >>> Toggle skipping where_map injection (set by --ignore-where) <<< #
+def set_ignore_where_map(flag):
+    global _ignore_where_map
+    _ignore_where_map = bool(flag)
+
 # >>> Inject where_map filters from pair config into table configs <<< #
 def inject_where_from_config(tables, config):
+    if _ignore_where_map:
+        print("  where_map injection disabled (--ignore-where)")
+        return
     if "pairs" not in config:
         return
     for tbl in tables:

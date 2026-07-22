@@ -124,6 +124,8 @@ def cmd_load_row(args):
     _require_db(args.project_db)
     config = _load_config(args.config)
     tables = get_all_tables_from_unified(config)
+    pair_modes = {name: (pc.get('mode') or '').strip().lower()
+                  for name, pc in config.get('pairs', {}).items()}
 
     for tbl in tables:
         qname = qualified_name(tbl)
@@ -131,12 +133,16 @@ def cmd_load_row(args):
         if not os.path.exists(csv_path):
             print(f"WARNING: {csv_path} not found, skipping {qname}")
             continue
-        print(f"\n--- {qname} ---")
+        mode = args.mode
+        if not mode:
+            modes = {pair_modes.get(p, '') for p in tbl.get('_pairs', [])}
+            mode = 'full' if 'full' in modes else 'incremental'
+        print(f"\n--- {qname} (mode={mode}) ---")
         load_row_counts(
             db_path=args.project_db,
             file_or_folder=csv_path,
             table_name=qname,
-            mode=args.mode,
+            mode=mode,
             source=tbl.get('source'),
             db_name=args.db,
             source_table=tbl.get('table', ''),
@@ -961,6 +967,9 @@ def cmd_match_columns(args):
 def cmd_extract(args):
     from .extract import extract_all
     from .db import init_database
+    if getattr(args, 'ignore_where', False):
+        from .platforms.base import set_ignore_where_map
+        set_ignore_where_map(True)
     if not os.path.exists(args.project_db):
         init_database(args.project_db)
         print(f"Initialized database: {args.project_db}")
@@ -1253,6 +1262,9 @@ def _log_strict_summary(config_path):
 def cmd_generate(args):
     from .extract import extract_all
     from .db import init_database
+    if getattr(args, 'ignore_where', False):
+        from .platforms.base import set_ignore_where_map
+        set_ignore_where_map(True)
     if not os.path.exists(args.project_db):
         init_database(args.project_db)
         print(f"Initialized database: {args.project_db}")
@@ -1431,8 +1443,10 @@ def main():
     p.add_argument('project_db')
     p.add_argument('folder', help='Folder with {qname}_row.csv files')
     p.add_argument('--config', required=True, help='Unified config JSON')
-    p.add_argument('--mode', default='upsert',
-                   choices=['replace', 'append', 'upsert', 'incremental', 'full'])
+    p.add_argument('--mode', default=None,
+                   choices=['replace', 'append', 'upsert', 'incremental', 'full'],
+                   help='Override storage mode for all tables (default: per-pair '
+                        'config "mode" — full -> replace, else upsert)')
     p.add_argument('--db', help='Database name')
     p.add_argument('--date-var', help='Date column name')
 
@@ -1631,6 +1645,8 @@ def main():
     p.add_argument('--force', action='store_true')
     p.add_argument('--from-date', help='Start date for incremental extraction')
     p.add_argument('--to-date', help='End date for incremental extraction')
+    p.add_argument('--ignore-where', action='store_true',
+                   help='Skip injecting where_map from pair config into extraction SQL (all pairs)')
     p.add_argument('--preset', choices=['quick', 'standard', 'detailed'],
                    help=_PRESET_HELP)
     p.add_argument('--stats-override', dest='stats_override',
@@ -1656,6 +1672,8 @@ def main():
     p.add_argument('--vintage')
     p.add_argument('--from-date', help='Start date for incremental extraction')
     p.add_argument('--to-date', help='End date for incremental extraction')
+    p.add_argument('--ignore-where', action='store_true',
+                   help='Skip injecting where_map from pair config into extraction SQL (all pairs)')
     p.add_argument('--preset', choices=['quick', 'standard', 'detailed'],
                    help=_PRESET_HELP)
     p.add_argument('--stats-override', dest='stats_override',

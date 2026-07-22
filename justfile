@@ -66,6 +66,7 @@ help topic="":
         echo "    --preset quick|standard|detailed            col-stats depth"
         echo "    --stats-override ...                        per-stat override"
         echo "    --from-date / --to-date YYYY-MM-DD          incremental window"
+        echo "    --ignore-where                              skip where_map injection (all pairs)"
         echo "    --clean[=reports|rebuild|all]               reset first (default rebuild)"
         echo "    e.g.  just pair=month e2e col-gen --vintage month --preset detailed"
         echo "    e.g.  just e2e all --clean        # re-load+compare, no backend (rebuild)"
@@ -294,6 +295,7 @@ e2e type="all" *flags:
             --vintage)        ext="$ext --vintage $2"; case "$2" in month|quarter|year) cmpcol="$cmpcol --vintage $2" ;; esac; shift 2 ;;
             --preset)         ext="$ext --preset $2"; shift 2 ;;
             --stats-override) ext="$ext --stats-override $2"; shift 2 ;;
+            --ignore-where)   ext="$ext --ignore-where"; shift ;;
             --from-date)      ext="$ext --from-date $2"; cmprow="$cmprow --from-date $2"; cmpcol="$cmpcol --from-date $2"; shift 2 ;;
             --to-date)        ext="$ext --to-date $2"; cmprow="$cmprow --to-date $2"; cmpcol="$cmpcol --to-date $2"; shift 2 ;;
             --clean)          clean_level="rebuild"; shift ;;
@@ -337,6 +339,11 @@ e2e type="all" *flags:
         mark_done discover
     }
     do_row() {
+        if [ -z "{{force}}" ] && [ -f "$state/row.run.done" ] && \
+           python3 -c "import json,sys; c=json.load(open('{{config}}')); sys.exit(0 if any((p.get('mode') or '').strip().lower()=='full' for p in c.get('pairs',{}).values() if not p.get('skip')) else 1)" 2>/dev/null; then
+            say "[row] pair(s) with mode=full -> ignoring skip-cache, re-extracting"
+            rm -f "$state/row.run.done"
+        fi
         if is_done row.run; then say "[row] run-sql: cached (skip-cache)"; else
             step "[row] generate extract_row.<platform>.sql (NO run)" \
                 dtrack generate {{db}} --config {{config}} --outdir {{e2edir}} --type row $ext
