@@ -13,11 +13,17 @@ def _comment_icon(comment):
 def _escape_text(text):
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
-# >>> Render optional plain-text note shown between summary and detail table <<< #
+# >>> Render optional plain-text note shown above the summary line <<< #
 def _note_html(note):
     if not note:
         return ''
-    return f'                            <p style="margin:4px 0 8px 0; color:#5b7083; white-space:pre-wrap;">{_escape_text(note)}</p>\n'
+    icon = ('<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#c62828" '
+            'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" '
+            'style="vertical-align:-2px; margin-right:4px;">'
+            '<path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>'
+            '<line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>')
+    return (f'                    <p style="margin:4px; font-size:12px; color:#c62828; '
+            f'white-space:pre-wrap;">{icon}{_escape_text(note)}</p>\n')
 
 # >>> Format time value: raw seconds (int/float) → human readable, strings pass through <<< #
 def _fmt_time(val):
@@ -171,13 +177,14 @@ def generate_row_count_html(
 
     html += f'''            <tr>
                 <td colspan="6" style="border:1px solid #ccc; padding:4px;">
-                    <details style="margin:0;">
+'''
+    html += _note_html(note)
+    html += f'''                    <details style="margin:0;">
                         <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">
                             {summary_text}{attach_icon}
                         </summary>
                         <div style="padding:8px; font-size:12px;">
 '''
-    html += _note_html(note)
 
     if n_mismatch == 0 and n_only_left == 0 and n_only_right == 0:
         html += '                            <p style="margin:8px 0; color:green;">✓ All dates match perfectly!</p>\n'
@@ -399,13 +406,14 @@ def generate_column_stats_html(
 
     html += f'''            <tr>
                 <td colspan="7" style="border:1px solid #ccc; padding:4px;">
-                    <details style="margin:0;">
+'''
+    html += _note_html(note)
+    html += f'''                    <details style="margin:0;">
                         <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">
                             {summary_text}{attach_icon}
                         </summary>
                         <div style="padding:8px; font-size:12px;">
 '''
-    html += _note_html(note)
 
     if n_diff == 0:
         html += '                            <p style="margin:8px 0; color:green;">✓ All columns match across all vintages!</p>\n'
