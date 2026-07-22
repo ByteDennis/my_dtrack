@@ -2152,6 +2152,7 @@ async def api_compare_col_export_html(request: Request):
                 time_map=time_map,
                 comment_left=comment_map.get("left", ""),
                 comment_right=comment_map.get("right", ""),
+                note=pair_cfg.get("note", ""),
                 compare_fields=compare_fields,
             )
             row_sections.append(rows_html)
@@ -2487,6 +2488,7 @@ async def api_compare_row_export_html(request: Request):
                 left_cfg=pair_cfg.get("left"),
                 right_cfg=pair_cfg.get("right"),
                 description=pair_cfg.get("description", ""),
+                note=pair_cfg.get("note", ""),
             )
             sections.append(html)
 
@@ -2786,6 +2788,7 @@ async def api_compare_row_preview(pair_name: str, request: Request):
             left_cfg=pair_cfg.get("left"),
             right_cfg=pair_cfg.get("right"),
             description=pair_cfg.get("description", ""),
+            note=pair_cfg.get("note", ""),
         )
 
         from ..html_export import create_row_count_table

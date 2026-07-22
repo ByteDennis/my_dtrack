@@ -21,6 +21,7 @@ dependencies = [
     "ldap3>=2.9",
     "s3fs>=2023.1",
     "libcst>=1.8.6",
+    "code-review-graph>=2.3.7",
 ]
 
 [project.optional-dependencies]

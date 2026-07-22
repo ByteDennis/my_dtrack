@@ -75,3 +75,5 @@ output/
 testing/
 tests/
 .claude/
+# Added by code-review-graph
+.code-review-graph/

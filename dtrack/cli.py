@@ -602,6 +602,7 @@ def cmd_compare_row(args):
                 comment_left=cm.get('left', ''), comment_right=cm.get('right', ''),
                 left_cfg=pair_cfg.get('left'), right_cfg=pair_cfg.get('right'),
                 description=pair_cfg.get('description', ''),
+                note=pair_cfg.get('note', ''),
             )
             row_sections.append(section)
         gm = config.get('metadata', {})
@@ -752,6 +753,7 @@ def cmd_compare_col(args):
                 comment_left=comment_map.get('left', ''),
                 comment_right=comment_map.get('right', ''),
                 left_cfg=pair_cfg.get('left'), right_cfg=pair_cfg.get('right'),
+                note=pair_cfg.get('note', ''),
             )
             col_sections.append(section)
 

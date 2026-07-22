@@ -9,6 +9,16 @@ def _comment_icon(comment):
     safe = comment.replace('&', '&amp;').replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
     return f' <span title="{safe}" style="cursor:help; color:#5b7083;">ⓘ</span>'
 
+# >>> Escape plain text for safe HTML embedding <<< #
+def _escape_text(text):
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+# >>> Render optional plain-text note shown between summary and detail table <<< #
+def _note_html(note):
+    if not note:
+        return ''
+    return f'                            <p style="margin:4px 0 8px 0; color:#5b7083; white-space:pre-wrap;">{_escape_text(note)}</p>\n'
+
 # >>> Format time value: raw seconds (int/float) → human readable, strings pass through <<< #
 def _fmt_time(val):
     if val is None or val == '—' or val == '':
@@ -44,6 +54,7 @@ def generate_row_count_html(
     left_cfg: Optional[Dict] = None,
     right_cfg: Optional[Dict] = None,
     description: str = '',
+    note: str = '',
 ) -> str:
     summary = comparison['summary']
 
@@ -166,6 +177,7 @@ def generate_row_count_html(
                         </summary>
                         <div style="padding:8px; font-size:12px;">
 '''
+    html += _note_html(note)
 
     if n_mismatch == 0 and n_only_left == 0 and n_only_right == 0:
         html += '                            <p style="margin:8px 0; color:green;">✓ All dates match perfectly!</p>\n'
@@ -271,6 +283,7 @@ def generate_column_stats_html(
     left_cfg: Optional[Dict] = None,
     right_cfg: Optional[Dict] = None,
     description: str = '',
+    note: str = '',
     compare_fields=None,
 ) -> str:
     cf = set(compare_fields) if compare_fields is not None else None
@@ -392,6 +405,7 @@ def generate_column_stats_html(
                         </summary>
                         <div style="padding:8px; font-size:12px;">
 '''
+    html += _note_html(note)
 
     if n_diff == 0:
         html += '                            <p style="margin:8px 0; color:green;">✓ All columns match across all vintages!</p>\n'
