@@ -979,6 +979,7 @@ def oracle_connect(conn_macro: str, *, user: Optional[str] = None,
                    service: Optional[str] = None,
                    ldap_dsn: Optional[str] = None):
     import oracledb
+    oracledb.defaults.fetch_lobs = False
 
     svc = service or resolve_oracle_macro(conn_macro)
     if not svc:
@@ -1008,7 +1009,11 @@ def oracle_connect(conn_macro: str, *, user: Optional[str] = None,
     else:
         dsn = svc
 
-    return oracledb.connect(user=user, password=password, dsn=dsn)
+    try:
+        sdu = int(os.environ.get('DTRACK_ORACLE_SDU', 1048576))
+    except (TypeError, ValueError):
+        sdu = 1048576
+    return oracledb.connect(user=user, password=password, dsn=dsn, sdu=sdu)
 
 # >>> Discover column metadata from Oracle ALL_TAB_COLUMNS <<< #
 def discover_columns_oracle(conn, table_name: str) -> Dict[str, str]:

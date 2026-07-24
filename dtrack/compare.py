@@ -692,6 +692,7 @@ def _iter_query(tbl, sql, arraysize):
         try:
             cur = conn.cursor()
             cur.arraysize = arraysize
+            cur.prefetchrows = arraysize + 1
             cur.execute(sql)
             cols = [d[0].lower() for d in cur.description]
             while True:

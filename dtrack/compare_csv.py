@@ -340,22 +340,52 @@ def _key_filters(left, right, key_cols, right_key_cols, key_tuples, normalize=Fa
         rq = [quote_ident(rk, dr) for rk in right_key_cols]
     return _key_in_clause(lq, key_tuples), _key_in_clause(rq, key_tuples)
 
-# >>> STRICT value family (date|numeric|string) per key col, taken from the LEFT side so both sides match <<< #
-def _sample_families(project_db, left, key_cols):
-    from .platforms.base import _strict_family, _is_numeric_col_type
-    types = _col_types(project_db, qualified_name(left))
-    fams = []
-    for k in key_cols:
-        dtype = types.get(k.lower(), "")
-        fams.append(_strict_family(dtype, _is_numeric_col_type(dtype)))
-    return fams
+# >>> (is_date, ddtype, date_format) for a key col; date_col honors date_type, others use meta dtype <<< #
+def _date_key_info(project_db, tbl, col, types):
+    from .platforms.base import _is_date_col_type
+    dc = (tbl.get("date_col") or "")
+    if dc and col.lower() == dc.lower():
+        ddtype, dfmt = _date_dtype_fmt(project_db, tbl)
+    else:
+        ddtype, dfmt = types.get(col.lower(), ""), None
+    return (bool(dfmt) or _is_date_col_type(ddtype)), ddtype, dfmt
 
-# >>> pushdown predicate `hash32(normalized composite key) < threshold` (same recipe both sides) <<< #
-def _hash_bucket_where(tbl, key_cols, fams, threshold):
-    from .platforms.base import _strict_normalize
+# >>> per key position: how to normalize on each side so both hash identically <<< #
+# When the two sides store the same date in different type/format (e.g. DATE vs
+# compact string '20250202'), canonicalize BOTH to a 'YYYY-MM-DD' day-string;
+# any other type disagreement falls back to a plain-string hash.
+def _key_norm_plan(project_db, left, right, key_cols, right_key_cols):
+    from .platforms.base import _strict_family, _is_numeric_col_type, _is_date_col_type
+    lt = _col_types(project_db, qualified_name(left))
+    rt = _col_types(project_db, qualified_name(right))
+    plan = []
+    for lk, rk in zip(key_cols, right_key_cols):
+        l_date, l_dt, l_fmt = _date_key_info(project_db, left, lk, lt)
+        r_date, r_dt, r_fmt = _date_key_info(project_db, right, rk, rt)
+        if l_date and r_date and not (_is_date_col_type(l_dt) and _is_date_col_type(r_dt)):
+            plan.append({"mode": "date", "left": (l_dt, l_fmt), "right": (r_dt, r_fmt)})
+            continue
+        ldt = l_dt or lt.get(lk.lower(), "")
+        rdt = r_dt or rt.get(rk.lower(), "")
+        lfam = _strict_family(ldt, _is_numeric_col_type(ldt))
+        rfam = _strict_family(rdt, _is_numeric_col_type(rdt))
+        plan.append({"mode": "strict", "family": lfam if lfam == rfam else "string"})
+    return plan
+
+# >>> pushdown predicate `hash32(normalized composite key) < threshold` for one side (plan-driven) <<< #
+def _hash_bucket_where(tbl, key_cols, plan, threshold, side):
+    from .platforms.base import (_strict_normalize, _canonical_date_key_expr,
+                                  _strict_blank_token)
     d = _dialect((tbl.get("source") or "").lower())
-    norm = [_strict_normalize(d, quote_ident(k, d), fam)
-            for k, fam in zip(key_cols, fams)]
+    norm = []
+    for k, p in zip(key_cols, plan):
+        col_q = quote_ident(k, d)
+        if p["mode"] == "date":
+            ddtype, dfmt = p[side]
+            norm.append(_strict_blank_token(
+                _canonical_date_key_expr(d, col_q, ddtype, dfmt)))
+        else:
+            norm.append(_strict_normalize(d, col_q, p["family"]))
     if len(norm) == 1:
         comp = norm[0]
     elif d == "oracle":
@@ -759,8 +789,8 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
     key_normalize = (_resolve_key_normalize(project_db, pcfg, left, right,
                                             key_cols, right_key_cols)
                      if (sample is not None and not frac_sample) else False)
-    fams = (_sample_families(project_db, left, key_cols)
-            if frac_sample else None)
+    key_plan = (_key_norm_plan(project_db, left, right, key_cols, right_key_cols)
+                if frac_sample else None)
     threshold = (max(1, int(round(sample * HASH_BUCKET_SPACE)))
                  if frac_sample else None)
 
@@ -839,8 +869,8 @@ def _run_pair(project_db, pname, pcfg, tl, tr, col_map, config,
             nkeys = None
             sample_label = None
             if frac_sample:
-                key_in_l = _hash_bucket_where(left, key_cols, fams, threshold)
-                key_in_r = _hash_bucket_where(right, right_key_cols, fams, threshold)
+                key_in_l = _hash_bucket_where(left, key_cols, key_plan, threshold, "left")
+                key_in_r = _hash_bucket_where(right, right_key_cols, key_plan, threshold, "right")
                 sample_label = f"~{sample:g} hash-bucket"
             elif sample is not None and key_cols and dryrun:
                 sample_label = f"{int(sample)} keys/window (fixed-N; key sample skipped in dry-run)"

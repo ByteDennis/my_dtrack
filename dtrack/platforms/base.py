@@ -1533,6 +1533,41 @@ def _strict_normalize(dialect, expr, family, num_str=False):
         return _str(f"lower(trim(normalize({s}, NFC)))")
     return expr
 
+_CANON_DATE_STRPTIME = {'YYYYMMDD': '%Y%m%d', 'YYYY-MM-DD': '%Y-%m-%d', 'YYYYMM': '%Y%m'}
+_CANON_DATE_ORACLE = {'YYYYMMDD': 'YYYYMMDD', 'YYYY-MM-DD': 'YYYY-MM-DD', 'YYYYMM': 'YYYYMM'}
+_CANON_DATE_JAVA = {'YYYYMMDD': 'yyyyMMdd', 'YYYY-MM-DD': 'yyyy-MM-dd', 'YYYYMM': 'yyyyMM'}
+
+# >>> canonical 'YYYY-MM-DD' day-string for a date-ish key col, any type/format, per dialect <<< #
+# Real dates/timestamps are truncated to day; string/num dates are parsed via date_format.
+# Every dialect yields the SAME literal so cross-engine MD5 buckets match.
+def _canonical_date_key_expr(dialect, col_q, ddtype, date_format):
+    real = _is_date_col_type(ddtype)
+    fmt = (date_format or 'YYYYMMDD').upper()
+    if dialect in ('athena', 'trino', 'aws'):
+        d = col_q if real else \
+            f"date_parse(CAST({col_q} AS VARCHAR), '{_CANON_DATE_STRPTIME.get(fmt, '%Y%m%d')}')"
+        return f"date_format(CAST({d} AS DATE), '%Y-%m-%d')"
+    if dialect == 'oracle':
+        if real:
+            return f"TO_CHAR(TRUNC({col_q}), 'YYYY-MM-DD')"
+        return (f"TO_CHAR(TO_DATE(TO_CHAR({col_q}), "
+                f"'{_CANON_DATE_ORACLE.get(fmt, 'YYYYMMDD')}'), 'YYYY-MM-DD')")
+    if dialect == 'duckdb':
+        d = f"CAST({col_q} AS DATE)" if real else \
+            f"strptime(CAST({col_q} AS VARCHAR), '{_CANON_DATE_STRPTIME.get(fmt, '%Y%m%d')}')"
+        return f"strftime({d}, '%Y-%m-%d')"
+    if dialect in ('hadoop', 'hive'):
+        if real:
+            return f"date_format({col_q}, 'yyyy-MM-dd')"
+        return (f"from_unixtime(unix_timestamp(CAST({col_q} AS STRING), "
+                f"'{_CANON_DATE_JAVA.get(fmt, 'yyyyMMdd')}'), 'yyyy-MM-dd')")
+    if dialect in ('databricks', 'spark'):
+        if real:
+            return f"date_format({col_q}, 'yyyy-MM-dd')"
+        return (f"date_format(to_date(CAST({col_q} AS STRING), "
+                f"'{_CANON_DATE_JAVA.get(fmt, 'yyyyMMdd')}'), 'yyyy-MM-dd')")
+    return col_q
+
 # >>> Build per-column stats SQL for any supported dialect <<< #
 def build_col_sql(dialect, tbl_cfg, col, dtype, full_table, cte_prefix="",
                    vintage=None, date_dtype=None, date_format=None,
