@@ -1,9 +1,72 @@
 
 import logging
 import os
+import sys
+import threading
 from logging.handlers import RotatingFileHandler
 
 _logger = None
+
+_BRK_LOCK = threading.Lock()
+
+_BREAK_ON = None
+
+# >>> arm the break-on-message debugger (verbatim substring; set via `dtrack --msg`) <<< #
+def set_break_on(pattern):
+    global _BREAK_ON
+    _BREAK_ON = pattern or None
+
+# >>> nearest frame outside logging/logmgr = the original log call site <<< #
+def _call_site_frame():
+    lg_dir = os.path.dirname(logging.__file__)
+    here = os.path.abspath(__file__)
+    f = sys._getframe(2)
+    while f:
+        fn = os.path.abspath(f.f_code.co_filename)
+        if fn != here and not fn.startswith(lg_dir):
+            return f
+        f = f.f_back
+    return sys._getframe(2)
+
+# >>> stop a live debugger at the log call site; survives _quiet_extract's stdout/stderr redirect <<< #
+def _enter_debugger(msg):
+    if not _BRK_LOCK.acquire(blocking=False):
+        return
+    try:
+        frame = _call_site_frame()
+        sys.__stderr__.write(
+            f"\n[dtrack] --msg matched -> "
+            f"{frame.f_code.co_filename}:{frame.f_lineno}\n"
+            f"[dtrack] message: {msg}\n")
+        if "debugpy" in sys.modules:
+            import debugpy
+            debugpy.breakpoint()
+            return
+        if sys.stdout is sys.__stdout__:
+            try:
+                import ipdb
+                ipdb.set_trace(frame)
+                return
+            except ImportError:
+                pass
+        import pdb
+        pdb.Pdb(stdin=sys.__stdin__, stdout=sys.__stdout__).set_trace(frame)
+    finally:
+        _BRK_LOCK.release()
+
+# >>> break into the debugger when the --msg text appears verbatim (case-insensitive) in a captured message <<< #
+class _BreakOnFilter(logging.Filter):
+    def filter(self, record):
+        pat = _BREAK_ON
+        if not pat:
+            return True
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if pat.lower() in msg.lower():
+            _enter_debugger(msg)
+        return True
 
 # >>> single log path; override with DTRACK_LOG, default <cwd>/output/run.log <<< #
 def log_path():
@@ -25,6 +88,8 @@ def get_logger():
     lg = logging.getLogger("dtrack")
     lg.setLevel(logging.DEBUG)
     lg.propagate = False
+    if not any(isinstance(f, _BreakOnFilter) for f in lg.filters):
+        lg.addFilter(_BreakOnFilter())
     if not any(isinstance(h, RotatingFileHandler) for h in lg.handlers):
         path = log_path()
         try:

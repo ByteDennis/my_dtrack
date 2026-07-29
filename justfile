@@ -41,6 +41,10 @@ force := ""
 # Key column for sample-hash / col-sample (just key=cust_id col-sample).
 key := ""
 
+# Default --data-dir for compare-csv per-window scratch CSVs (auto-created).
+# Override per run: just datadir=/big/disk compare-csv, or pass --data-dir in args.
+datadir := workdir + "/data"
+
 # list recipes
 default:
     @just --list
@@ -103,7 +107,8 @@ help topic="":
         echo "                      FRAC 0-1   = fraction via hash32(norm key) pushdown"
         echo "                                   (no key list; same records both sides)"
         echo "                    Per-pair \"sample\"/\"key\"/\"vintage\" config fields override the flags."
-        echo "  --data-dir DIR    folder for the big per-window CSVs (must exist; def: temp)"
+        echo "  --data-dir DIR    folder for the big per-window CSVs (def: {{datadir}}, auto-created;"
+        echo "                    override dir via datadir=DIR or an explicit --data-dir)"
         echo "  --workers N       concurrency for the LOCAL per-column stat compute"
         echo "                    (windows run sequentially; columns within a window parallel)"
         echo "  --keep-csv        keep the per-window tmp CSV/config dirs"
@@ -259,7 +264,8 @@ compare-col *args:
 compare-csv *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    dtrack compare-csv {{db}} --config {{config}} {{ if pair == "" { "" } else { "--pair " + pair } }} {{ if force == "" { "" } else { "--force" } }} {{args}}
+    mkdir -p "{{datadir}}"
+    dtrack compare-csv {{db}} --config {{config}} --data-dir {{datadir}} {{ if pair == "" { "" } else { "--pair " + pair } }} {{ if force == "" { "" } else { "--force" } }} {{args}}
     out="{{resultdir}}"; mkdir -p "$out"
     dtrack compare-row {{db}} --config {{config}} -y --html "$out/compare_row{{suffix}}.html"
     dtrack compare-col {{db}} --config {{config}} -y --no-date-filter \

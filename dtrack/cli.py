@@ -1422,6 +1422,10 @@ def main():
     )
     parser.add_argument('--env', dest='env_file', help='Path to .env file')
     parser.add_argument('--debug', choices=['ipdb', 'attach'], default=None)
+    parser.add_argument('--msg', default=None,
+                        help='break into the debugger when this exact text appears in a '
+                             'captured log message (case-insensitive substring, e.g. '
+                             '--msg "invalid unicode (byte sequence mismatch)")')
 
     sub = parser.add_subparsers(dest='command', help='Available commands')
 
@@ -1759,6 +1763,10 @@ def main():
         debugpy.listen(('0.0.0.0', 5678))
         print('Waiting for debugger attach on port 5678...')
         debugpy.wait_for_client()
+
+    if args.msg:
+        from .logmgr import set_break_on
+        set_break_on(args.msg)
 
     if not args.command:
         parser.print_help()

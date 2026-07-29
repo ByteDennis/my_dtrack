@@ -1956,7 +1956,7 @@ def run_extract_sql_file(sql_path, outdir, *,
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from datetime import datetime
     from ..constants import COL_CSV_HEADERS, ROW_CSV_HEADERS, PLATFORM_RUNNER
-    from ..logmgr import get_logger
+    from ..logmgr import get_logger, log_exc
 
     cfg = PLATFORM_RUNNER[platform]
     platform.capitalize()
@@ -2060,6 +2060,7 @@ def run_extract_sql_file(sql_path, outdir, *,
                 result["csv_path"] = os.path.join(outdir, f"{qname}{file_suffix}")
         except Exception as e:
             elapsed = time.time() - start_time
+            log_exc(f"query {block_name} [{qname}] FAILED", e)
             result = {"name": block_name, "ok": False, "error": str(e),
                       "elapsed": round(elapsed, 1), "start": start_ts}
         finally:
