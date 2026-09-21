@@ -2,6 +2,7 @@ import pytest
 
 from dtrack_distributed.domain.gates import evaluate_gate, reconcile_partitions
 from dtrack_distributed.domain.manifest import build_manifest, sample_plan, unit_id
+from dtrack_distributed.engine.sampling import sample_csv
 from dtrack_distributed.engine.sql import partition_where
 
 
@@ -41,3 +42,17 @@ def test_sampling_requires_valid_values_and_unit_id_is_stable():
     with pytest.raises(ValueError):
         sample_plan(0)
     assert unit_id("p", "2026-01", "x") == unit_id("p", "2026-01", "x")
+
+
+def test_fixed_sampling_uses_manifest_key_tuples_on_both_sides(tmp_path):
+    path = tmp_path / "rows.csv"
+    path.write_text("id,value\n1,a\n2.0,b\n3,c\n")
+    sampled = sample_csv(
+        path,
+        key_columns=["id"],
+        mode="fixed",
+        count=1,
+        key_tuples=[["2"]],
+        families=["numeric"],
+    )
+    assert sampled.read_text().splitlines() == ["id,value", "2.0,b"]

@@ -31,6 +31,7 @@ def stage1_command(args) -> int:
         pair_names=args.pair,
         kickstarter=kickstarter,
         pair_workers=args.workers,
+        work_dir=args.work_dir,
     )
     print(json.dumps({"run_id": run_id, "pairs": len(documents), "released": len(manifests)}))
     return 0
@@ -110,6 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage1.add_argument("--pair", action="append")
     stage1.add_argument("--job-id", type=int)
     stage1.add_argument("--workers", type=int, default=4)
+    stage1.add_argument("--work-dir", default=".dtrack-work/stage1")
     stage1.add_argument("--kms-key-id")
     stage1.set_defaults(func=stage1_command)
 

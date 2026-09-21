@@ -20,6 +20,7 @@
       "toDate": "2026-01-31",
       "vintage": "month",
       "key": "order_id",
+      "key_families": {"order_id": "numeric"},
       "sample": 0.1,
       "col_map": {
         "order_id": "order_id",

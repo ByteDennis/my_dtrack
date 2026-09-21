@@ -8,12 +8,16 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 from ..adapters.sources.factory import source_from_config
 from ..adapters.targets.databricks import DatabricksTarget
 from ..domain.gates import evaluate_gate, reconcile_partitions, summarize_partitions
 from ..domain.manifest import build_manifest
+from ..engine.sampling import sample_csv
 
 
 def make_run_id(config: dict[str, Any], *, now: datetime | None = None) -> str:
@@ -79,6 +83,7 @@ def run_stage1(
     kickstarter=None,
     report_store=None,
     pair_workers: int = 4,
+    work_dir: str | Path = ".dtrack-work/stage1",
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     run_id = run_id or make_run_id(config)
     pairs = {
@@ -136,6 +141,22 @@ def run_stage1(
         documents.append(doc)
         if doc["gate_decision"]["passed"]:
             manifest = build_manifest(run_id, name, pair, doc)
+            if manifest["sample"]["mode"] == "fixed":
+                source = source_factory(pair["left"])
+                for window in manifest["windows"]:
+                    output = Path(work_dir) / name / window["bucket"] / "keys.csv"
+                    path = source.pull_window(
+                        window["partitions"], [], output, key_columns=manifest["key_cols"]
+                    )
+                    sampled = sample_csv(
+                        path,
+                        key_columns=manifest["key_cols"],
+                        mode="fixed",
+                        count=manifest["sample"]["count"],
+                        families=manifest["key_families"],
+                    )
+                    key_rows = pd.read_csv(sampled, dtype=object)[manifest["key_cols"]]
+                    window["key_tuples"] = key_rows.drop_duplicates().values.tolist()
             store.put_json(f"manifest/{name}.json", manifest)
             manifests.append(manifest)
             if kickstarter and not kicked:

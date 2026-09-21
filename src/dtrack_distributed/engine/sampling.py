@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .normalization import HASH_BUCKET_SPACE, selected_fraction
+from .normalization import HASH_BUCKET_SPACE, normalize_value, selected_fraction
 
 
 def sample_csv(
@@ -15,6 +15,7 @@ def sample_csv(
     rate: float | None = None,
     count: int | None = None,
     families: list[str] | None = None,
+    key_tuples: list[list[object]] | None = None,
 ) -> Path:
     if mode == "all":
         return Path(path)
@@ -29,14 +30,37 @@ def sample_csv(
         )
         sampled = frame[mask]
     elif mode == "fixed":
-        ranked = frame.assign(
-            __rank=frame[key_columns]
-            .astype(str)
-            .agg("|".join, axis=1)
-            .map(lambda value: __import__("hashlib").md5(value.encode()).hexdigest())
-        )
-        keys = ranked.sort_values("__rank")[key_columns].drop_duplicates().head(int(count))
-        sampled = frame.merge(keys, on=key_columns, how="inner")
+        if key_tuples is not None:
+            wanted = {
+                tuple(normalize_value(value, family) for value, family in zip(row, families))
+                for row in key_tuples
+            }
+            mask = frame[key_columns].apply(
+                lambda row: (
+                    tuple(normalize_value(value, family) for value, family in zip(row, families))
+                    in wanted
+                ),
+                axis=1,
+            )
+            sampled = frame[mask]
+        else:
+            ranked = frame.assign(
+                __rank=frame[key_columns].apply(
+                    lambda row: (
+                        __import__("hashlib")
+                        .md5(
+                            "|".join(
+                                normalize_value(value, family)
+                                for value, family in zip(row, families)
+                            ).encode()
+                        )
+                        .hexdigest()
+                    ),
+                    axis=1,
+                )
+            )
+            keys = ranked.sort_values("__rank")[key_columns].drop_duplicates().head(int(count))
+            sampled = frame.merge(keys, on=key_columns, how="inner")
     else:
         raise ValueError(f"unsupported sample mode: {mode}")
     output = Path(path).with_name(Path(path).stem + ".sampled.csv")

@@ -74,6 +74,13 @@ def build_manifest(
         for bucket, partitions in sorted(grouped.items())
     ]
     keys = [part.strip() for part in str(pair.get("key") or "").split(",") if part.strip()]
+    key_family_config = dict(pair.get("key_families") or {})
+    key_families = [key_family_config.get(key, "string") for key in keys]
+    unsupported_families = sorted(set(key_families) - {"string", "numeric", "date"})
+    if unsupported_families:
+        raise ValueError(
+            f"{pair_name}: unsupported key families: {', '.join(unsupported_families)}"
+        )
     sampling = sample_plan(pair.get("sample"))
     if sampling["mode"] != "all" and not keys:
         raise ValueError(f"{pair_name}: sampling requires a key")
@@ -85,6 +92,7 @@ def build_manifest(
         "vintage": vintage,
         "key_cols": keys,
         "right_key_cols": [(pair["col_map"]).get(key, key) for key in keys],
+        "key_families": key_families,
         "columns": columns,
         "col_map": {column: pair["col_map"][column] for column in columns},
         "windows": windows,

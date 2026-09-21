@@ -155,6 +155,15 @@ class ConsumerRuntime:
         path = self.target_factory(manifest["right"]).pull_window(
             window["partitions"], right_columns, output, key_columns=manifest["right_key_cols"]
         )
-        sampled = sample_csv(path, key_columns=manifest["right_key_cols"], **manifest["sample"])
+        plan = manifest["sample"]
+        sampled = sample_csv(
+            path,
+            key_columns=manifest["right_key_cols"],
+            mode=plan["mode"],
+            rate=plan.get("rate"),
+            count=plan.get("count"),
+            families=manifest["key_families"],
+            key_tuples=window.get("key_tuples"),
+        )
         stats = compute_csv_statistics(sampled, right_columns, strict=manifest.get("strict", False))
         return {left: stats[right] for left, right in manifest["col_map"].items()}

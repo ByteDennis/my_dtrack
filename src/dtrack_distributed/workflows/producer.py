@@ -131,7 +131,16 @@ class ProducerRuntime:
         path = source_from_config(manifest["left"]).pull_window(
             window["partitions"], manifest["columns"], output, key_columns=manifest["key_cols"]
         )
-        return sample_csv(path, key_columns=manifest["key_cols"], **manifest["sample"])
+        plan = manifest["sample"]
+        return sample_csv(
+            path,
+            key_columns=manifest["key_cols"],
+            mode=plan["mode"],
+            rate=plan.get("rate"),
+            count=plan.get("count"),
+            families=manifest["key_families"],
+            key_tuples=window.get("key_tuples"),
+        )
 
     @staticmethod
     def compute_stats(manifest, _window, path):
