@@ -1,0 +1,13 @@
+services:
+  moto:
+    image: ghcr.io/getmoto/motoserver:5.2.2
+    ports:
+      - "127.0.0.1:${DTRACK_S3_SIM_PORT:-4566}:5000"
+    environment:
+      MOTO_PORT: "5000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5000/"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+

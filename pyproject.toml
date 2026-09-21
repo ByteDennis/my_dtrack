@@ -3,60 +3,36 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "dtrack"
+name = "dtrack-distributed"
 version = "0.1.0"
-description = "Data tracking CLI for row counts and column statistics"
+description = "S3-coordinated two-stage data reconciliation"
 requires-python = ">=3.11"
 dependencies = [
-    "pandas>=1.3.0",
-    "numpy>=1.20.0",
-    "python-dotenv>=1.0.1",
-    "oracledb>=3.0.0",
-    "openpyxl>=3.1.5",
-    "pyathena>=2.0.0",
-    "fastapi>=0.100.0",
-    "uvicorn>=0.20.0",
-    "jinja2>=3.0.0",
-    "python-multipart>=0.0.22",
-    "ldap3>=2.9",
-    "s3fs>=2023.1",
-    "libcst>=1.8.6",
-    "code-review-graph>=2.3.7",
+    "boto3>=1.34",
+    "databricks-sdk>=0.18",
+    "databricks-sql-connector>=3.0",
+    "oracledb>=3.0",
+    "pandas>=2.0",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0.0", "pytest-cov>=3.0.0", "ruff"]
-debug = ["ipdb>=0.13.0", "debugpy>=1.6.0"]
-# Required only when a pair has source=csv. The CSV-as-source mode reads
-# CSVs in-process via DuckDB so we can run the same row_gen / col_gen
-# pipeline against local files without engine credentials. dtrack as a
-# whole works fine without duckdb installed -- the import is lazy
-# inside platforms/csv_duckdb.py and surfaces a clear error message
-# when the user tries to extract from a csv-source pair without it.
-csv = ["duckdb>=0.10.0"]
-databricks = ["databricks-sql-connector>=3.0.0", "databricks-sdk>=0.18.0"]
-containers = [
-    "testcontainers[oracle,trino]>=4.0",
-    "trino>=0.328",
-    "pyspark>=3.5",
-    "impyla>=0.19",
-    "thrift_sasl>=0.4",
-    "pure-sasl>=0.6",
-]
+athena = ["pyathena>=2.0"]
+hadoop = ["impyla>=0.19", "thrift-sasl>=0.4", "pure-sasl>=0.6"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.9"]
 
 [project.scripts]
-dtrack = "dtrack.cli:main"
+dtrack-distributed = "dtrack_distributed.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["dtrack"]
+packages = ["src/dtrack_distributed"]
 
 [tool.pytest.ini_options]
-# Live-integration pair marks (mirror LIVE_PAIRS keys in
-# tests/integration/conftest.py); registered here so `pytest tests/` is
-# warning-free. New pairs are also registered dynamically by that conftest's
-# pytest_configure, so add an entry here only to silence the full-suite run.
-markers = [
-    "oracle_vs_athena: live pair oracle vs athena",
-    "oracle_vs_databricks: live pair oracle vs databricks",
-    "hadoop_vs_athena: live pair hadoop vs athena",
-]
+testpaths = ["tests"]
+markers = ["integration: local container-backed integration tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
