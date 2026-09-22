@@ -1,0 +1,26 @@
+{
+  "run_id": "20260922T023938Z-e2e",
+  "status": "DONE",
+  "generated_at": "2026-09-22T02:39:53.361417+00:00",
+  "pairs": 2,
+  "released_pairs": [
+    "customers",
+    "orders"
+  ],
+  "units_expected": 11,
+  "units_completed": 11,
+  "findings": {
+    "row_count_diff": 1,
+    "partition_missing": 2,
+    "col_stat_diff": 2
+  },
+  "errors": [],
+  "files": [
+    "customers_compare_col.csv",
+    "customers_compare_row.csv",
+    "index.html",
+    "orders_compare_col.csv",
+    "orders_compare_row.csv",
+    "report.xlsx"
+  ]
+}

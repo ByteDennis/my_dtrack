@@ -1,0 +1,86 @@
+{
+  "connections": {
+    "ora_pcds": {
+      "source": "oracle",
+      "dsn": "pcds-scan.example.com:1521/PCDS",
+      "user_env": "PCDS_USER",
+      "password_env": "PCDS_PASSWORD"
+    },
+    "ora_edw": {
+      "source": "oracle",
+      "dsn": "edw-scan.example.com:1521/EDWPRD",
+      "user_env": "EDW_USER",
+      "password_env": "EDW_PASSWORD"
+    },
+    "dbx_main": {
+      "source": "databricks",
+      "server_hostname": "adb-main.example.azuredatabricks.net",
+      "http_path": "/sql/1.0/warehouses/main-serverless",
+      "access_token_env": "DBX_MAIN_TOKEN"
+    },
+    "dbx_risk": {
+      "source": "databricks",
+      "server_hostname": "adb-risk.example.azuredatabricks.net",
+      "http_path": "/sql/1.0/warehouses/risk-serverless",
+      "access_token_env": "DBX_RISK_TOKEN"
+    }
+  },
+  "pairs": {
+    "orders": {
+      "left": {
+        "source": "csv",
+        "path": "examples/e2e/data/left/ORDERS.csv",
+        "date_col": "BUSINESS_DATE",
+        "date_type": "string_dash"
+      },
+      "right": {
+        "conn_macro": "dbx_main",
+        "catalog": "main",
+        "schema": "sales",
+        "table": "orders",
+        "date_col": "business_date",
+        "date_type": "string_dash"
+      },
+      "fromDate": "2026-01-01",
+      "toDate": "2026-02-28",
+      "vintage": "month",
+      "key": "ORDER_ID",
+      "key_families": {"ORDER_ID": "numeric"},
+      "sample": 0.25,
+      "col_map": {
+        "ORDER_ID": "order_id",
+        "AMOUNT": "amount",
+        "STATUS": "status",
+        "REGION": "region"
+      }
+    },
+    "customers": {
+      "left": {
+        "source": "csv",
+        "path": "examples/e2e/data/left/CUSTOMERS.csv",
+        "date_col": "SNAPSHOT_DT",
+        "date_type": "string_dash"
+      },
+      "right": {
+        "conn_macro": "dbx_risk",
+        "catalog": "risk",
+        "schema": "crm",
+        "table": "customers",
+        "date_col": "snapshot_dt",
+        "date_type": "string_dash"
+      },
+      "fromDate": "2026-01-01",
+      "toDate": "2026-01-31",
+      "vintage": "month",
+      "key": "CUST_ID",
+      "key_families": {"CUST_ID": "numeric"},
+      "sample": 40,
+      "strict": true,
+      "col_map": {
+        "CUST_ID": "cust_id",
+        "TIER": "tier",
+        "BALANCE": "balance"
+      }
+    }
+  }
+}

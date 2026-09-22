@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import time
 from collections import deque
 from collections.abc import Callable, Iterable
@@ -8,10 +9,77 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from ..adapters.sources.factory import source_from_config
 from ..domain.manifest import unit_id, validate_manifest
 from ..engine.sampling import sample_csv
 from ..engine.statistics import compute_csv_statistics
+
+log = logging.getLogger("dtrack.producer")
+
+
+# >>> block until the Right side has closed Stage 1; surface its status while waiting <<< #
+def wait_for_manifests(store, *, timeout: float = 1800, poll_interval: float = 3, pair_names=None):
+    started = time.monotonic()
+    last_state = None
+    while True:
+        if store.exists("stage1/_CLOSED"):
+            manifests = [
+                value
+                for key, value in store.list_json("manifest/")
+                if key != "manifest/_CLOSED"
+                and not key.endswith(".keys.json")
+                and (not pair_names or value["pair"] in pair_names)
+            ]
+            log.info("stage1/_CLOSED seen: %d manifest(s) released", len(manifests))
+            return manifests
+        state = store.get_json("_STATUS.json") if store.exists("_STATUS.json") else {}
+        if state != last_state:
+            log.info("waiting for the Right side: status=%s", state)
+            last_state = state
+        if store.exists("_PREFLIGHT.json") and not store.get_json("_PREFLIGHT.json").get(
+            "ok", True
+        ):
+            raise RuntimeError(f"Right side preflight failed: {store.get_json('_PREFLIGHT.json')}")
+        if time.monotonic() - started > timeout:
+            raise TimeoutError("Right side did not close Stage 1 before timeout")
+        time.sleep(poll_interval)
+
+
+# >>> fixed-N sampling: the left side chooses the keys once and shares them through manifest/<pair>.keys.json <<< #
+def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
+    if manifest["sample"]["mode"] != "fixed" or store.exists(
+        f"manifest/{manifest['pair']}.keys.json"
+    ):
+        return None
+    source = source_from_config(manifest["left"])
+    windows = {}
+    for window in manifest["windows"]:
+        output = Path(work_dir) / manifest["pair"] / window["bucket"] / "keys.csv"
+        path = source.pull_window(
+            window["partitions"], [], output, key_columns=manifest["key_cols"]
+        )
+        sampled = sample_csv(
+            path,
+            key_columns=manifest["key_cols"],
+            mode="fixed",
+            count=manifest["sample"]["count"],
+            families=manifest["key_families"],
+        )
+        rows = pd.read_csv(sampled, dtype=object)[manifest["key_cols"]]
+        windows[window["bucket"]] = rows.drop_duplicates().values.tolist()
+    document = {"pair": manifest["pair"], "windows": windows}
+    store.put_json(f"manifest/{manifest['pair']}.keys.json", document)
+    log.info(
+        "fixed sample keys %s: %s -> manifest/%s.keys.json",
+        manifest["pair"],
+        {k: len(v) for k, v in windows.items()},
+        manifest["pair"],
+    )
+    for window in manifest["windows"]:
+        window["key_tuples"] = windows[window["bucket"]]
+    return document
 
 
 def iter_windows_round_robin(manifests: Iterable[dict[str, Any]]):
@@ -55,6 +123,13 @@ class ProducerPipeline:
         exhausted = False
         self.store.put_json("_STATUS.json", {"state": "producer_running"})
         self.store.heartbeat()
+        log.info(
+            "producer start: %d manifest(s), %d unit(s) already indexed, next sequence=%d, wip=%d",
+            len(manifests),
+            len(existing),
+            sequence,
+            self.wip,
+        )
         with (
             ThreadPoolExecutor(self.pull_workers) as pulls,
             ThreadPoolExecutor(self.stat_workers) as stats,
@@ -67,6 +142,12 @@ class ProducerPipeline:
                     except StopIteration:
                         exhausted = True
                         break
+                    log.info(
+                        "pull %s %s: %d partition(s)",
+                        manifest["pair"],
+                        window["bucket"],
+                        len(window["partitions"]),
+                    )
                     job = pulls.submit(self.pull_window, manifest, window)
                     pull_jobs[job] = (manifest, window)
                 while ready and len(stat_jobs) < self.stat_workers:
@@ -80,15 +161,18 @@ class ProducerPipeline:
                 for job in complete:
                     if job in pull_jobs:
                         manifest, window = pull_jobs.pop(job)
+                        log.info("pulled %s %s -> stat queue", manifest["pair"], window["bucket"])
                         ready.append((manifest, window, job.result()))
                         continue
                     manifest, window = stat_jobs.pop(job)
                     rows = job.result()
+                    first = sequence
                     for column in manifest["columns"]:
                         uid = unit_id(manifest["pair"], window["bucket"], column)
                         if uid in existing:
                             continue
                         while self.store.ready_unclaimed() > self.wip:
+                            log.info("backpressure: ready_unclaimed > wip=%d, sleeping", self.wip)
                             time.sleep(self.backpressure_sleep)
                         self.store.commit_unit(
                             sequence,
@@ -102,16 +186,31 @@ class ProducerPipeline:
                             },
                         )
                         sequence += 1
+                    log.info(
+                        "committed %s %s: %d unit(s) _INDEX/%08d..%08d (data before pointer)",
+                        manifest["pair"],
+                        window["bucket"],
+                        sequence - first,
+                        first,
+                        max(first, sequence - 1),
+                    )
                     self.store.heartbeat()
         published = {
             row["pair"]: row
             for key, row in self.store.list_json("manifest/")
-            if key != "manifest/_CLOSED"
+            if key != "manifest/_CLOSED" and not key.endswith(".keys.json")
         }
         expected = sum(row["expected_units"] for row in published.values())
         indexed = len(self.store.list_keys("_INDEX/"))
         if indexed >= expected:
             self.store.close_manifests(list(published), expected)
+            log.info(
+                "manifest/_CLOSED written: pairs=%s expected_units=%d", sorted(published), expected
+            )
+        else:
+            log.warning(
+                "producer partial: %d/%d units indexed, _CLOSED not written", indexed, expected
+            )
         self.store.put_json(
             "_STATUS.json",
             {
@@ -122,17 +221,27 @@ class ProducerPipeline:
         return sequence - first_sequence
 
 
+# >>> data rows in a CSV, header excluded <<< #
+def _row_count(path: str | Path) -> int:
+    with Path(path).open(encoding="utf-8") as handle:
+        return max(0, sum(1 for _ in handle) - 1)
+
+
 class ProducerRuntime:
-    def __init__(self, work_dir: str | Path):
+    def __init__(self, work_dir: str | Path, store=None):
         self.work_dir = Path(work_dir)
+        self.store = store
 
     def pull_window(self, manifest, window):
+        if manifest["sample"]["mode"] == "fixed" and "key_tuples" not in window:
+            keys = self.store.get_json(f"manifest/{manifest['pair']}.keys.json")["windows"]
+            window["key_tuples"] = keys.get(window["bucket"], [])
         output = self.work_dir / manifest["pair"] / window["bucket"] / "left.csv"
         path = source_from_config(manifest["left"]).pull_window(
             window["partitions"], manifest["columns"], output, key_columns=manifest["key_cols"]
         )
         plan = manifest["sample"]
-        return sample_csv(
+        sampled = sample_csv(
             path,
             key_columns=manifest["key_cols"],
             mode=plan["mode"],
@@ -141,6 +250,15 @@ class ProducerRuntime:
             families=manifest["key_families"],
             key_tuples=window.get("key_tuples"),
         )
+        log.info(
+            "left %s %s: %d rows scanned -> %d sampled (%s)",
+            manifest["pair"],
+            window["bucket"],
+            _row_count(path),
+            _row_count(sampled),
+            sampled,
+        )
+        return sampled
 
     @staticmethod
     def compute_stats(manifest, _window, path):

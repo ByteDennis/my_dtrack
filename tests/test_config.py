@@ -34,3 +34,54 @@ def test_optional_adapters_fail_with_install_instructions_when_absent():
         AthenaSource({"source": "athena"}).connect()
     with pytest.raises(ImportError, match=r"\[hadoop\]"):
         HadoopSource({"source": "hadoop"}).connect()
+
+
+def test_conn_macro_expands_named_profiles_and_pair_fields_win():
+    config = {
+        "connections": {
+            "pcds": {"source": "oracle", "dsn": "pcds:1521/PCDS", "user_env": "PCDS_USER"},
+            "edw": {"source": "oracle", "dsn": "edw:1521/EDW", "user_env": "EDW_USER"},
+            "dbx_main": {"source": "databricks", "server_hostname": "main.host", "http_path": "/a"},
+        },
+        "pairs": {
+            "a": {
+                "left": {"conn_macro": "pcds", "table": "A", "date_col": "dt"},
+                "right": {
+                    "conn_macro": "dbx_main",
+                    "catalog": "c1",
+                    "table": "a",
+                    "date_col": "dt",
+                },
+                "col_map": {"x": "x"},
+            },
+            "b": {
+                "left": {"conn_macro": "edw", "table": "B", "date_col": "dt", "dsn": "override"},
+                "right": {
+                    "conn_macro": "dbx_main",
+                    "catalog": "c2",
+                    "table": "b",
+                    "date_col": "dt",
+                },
+                "col_map": {"x": "x"},
+            },
+        },
+    }
+    resolved = validate_config(config)["pairs"]
+    assert resolved["a"]["left"]["dsn"] == "pcds:1521/PCDS"
+    assert resolved["a"]["left"]["user_env"] == "PCDS_USER"
+    assert resolved["b"]["left"]["dsn"] == "override"
+    assert resolved["b"]["left"]["user_env"] == "EDW_USER"
+    assert resolved["a"]["right"]["server_hostname"] == "main.host"
+    assert resolved["a"]["right"]["catalog"] == "c1"
+    assert resolved["b"]["right"]["catalog"] == "c2"
+    with pytest.raises(ValueError, match="unknown conn_macro"):
+        validate_config(
+            {
+                "pairs": {
+                    "p": {
+                        **pair(),
+                        "left": {"conn_macro": "nope", "source": "oracle", "date_col": "dt"},
+                    }
+                }
+            }
+        )

@@ -1,0 +1,417 @@
+
+2026-09-22T12:27:49.376Z
+=== 0. environment ===
+2026-09-22T12:27:49.388Z  repo=/home/dalab2/.local/dtrack git=8ca0c00 branch=pkg/distributed
+2026-09-22T12:27:49.619Z  python=3.13.2 dtrack-distributed=0.1.0
+2026-09-22T12:27:49.655Z  moto endpoint=http://127.0.0.1:4566 container=dtrack-moto-1 ghcr.io/getmoto/motoserver:5.2.2 Up 24 hours (healthy)
+2026-09-22T12:27:49.658Z  run_id=20260922T122749Z-e2e
+2026-09-22T12:27:49.663Z  work store=s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e   report store=s3://dtrack-e2e-report
+2026-09-22T12:27:49.667Z  LEFT process: uv run dtrack-distributed (src/dtrack_distributed, no Databricks credentials)
+2026-09-22T12:27:49.671Z  RIGHT process: python -m dtrack_cloud (databricks/dtrack_cloud, csv anchor standing in for spark.sql)
+2026-09-22T12:27:49.680Z  databricks env vars present: 0 (expected 0)
+
+2026-09-22T12:27:49.684Z
+=== 1. unit + integration tests ===
+2026-09-22T12:27:49.692Z  START 01_pytest_unit
+2026-09-22T12:27:49.696Z    cmd: uv run pytest -q
+  > ...................................                                      [100%]
+  > 35 passed in 1.22s
+2026-09-22T12:27:51.523Z  END   01_pytest_unit rc=0 elapsed=1.830s log=/home/dalab2/.local/dtrack/examples/e2e/logs/01_pytest_unit.log
+2026-09-22T12:27:51.530Z  START 02_pytest_s3_protocol
+2026-09-22T12:27:51.535Z    cmd: uv run pytest -q -m integration tests/integration/test_s3_protocol.py
+  > .                                                                        [100%]
+  > 1 passed in 0.49s
+2026-09-22T12:27:52.466Z  END   02_pytest_s3_protocol rc=0 elapsed=0.934s log=/home/dalab2/.local/dtrack/examples/e2e/logs/02_pytest_s3_protocol.log
+
+2026-09-22T12:27:52.471Z
+=== 2. synthetic data ===
+2026-09-22T12:27:52.478Z  START 03_make_synthetic
+2026-09-22T12:27:52.483Z    cmd: uv run python examples/e2e/make_synthetic.py
+  > {"orders": {"left_rows": 1740, "right_rows": 1737, "injected": {"2026-01-15": "right side drops 3 rows -> count_diff", "2026-01-31": "left side lacks the day -> right_only", "2026-02-10": "right side lacks the day -> left_only", "2026-02-05": "right AMOUNT +0.01 on every row -> AMOUNT diff in window 2026-02-01", "2026-01-03": "right STATUS lower-cased -> STATUS diff in window 2026-01-01"}}, "customers": {"left_rows": 620, "right_rows": 620, "injected": {"TIER": "right upper-cases the value; strict=true must still match"}}}
+2026-09-22T12:27:52.635Z  END   03_make_synthetic rc=0 elapsed=0.155s log=/home/dalab2/.local/dtrack/examples/e2e/logs/03_make_synthetic.log
+2026-09-22T12:27:52.647Z  data: /home/dalab2/.local/dtrack/examples/e2e/data/left/ORDERS.csv rows=1740 header=BUSINESS_DATE,ORDER_ID,AMOUNT,STATUS,REGION
+2026-09-22T12:27:52.659Z  data: /home/dalab2/.local/dtrack/examples/e2e/data/left/CUSTOMERS.csv rows=620 header=SNAPSHOT_DT,CUST_ID,TIER,BALANCE
+2026-09-22T12:27:52.671Z  data: /home/dalab2/.local/dtrack/examples/e2e/data/right/orders.csv rows=1737 header=business_date,order_id,amount,status,region
+2026-09-22T12:27:52.684Z  data: /home/dalab2/.local/dtrack/examples/e2e/data/right/customers.csv rows=620 header=snapshot_dt,cust_id,tier,balance
+
+2026-09-22T12:27:52.689Z
+=== 3. buckets ===
+2026-09-22T12:27:52.697Z  START 04_create_buckets
+2026-09-22T12:27:52.702Z    cmd: uv run python -c 
+import boto3, os
+from botocore.config import Config
+c = boto3.client('s3', endpoint_url=os.environ['DTRACK_S3_ENDPOINT_URL'], config=Config(s3={'addressing_style': 'path'}))
+for b in ('dtrack-e2e-work', 'dtrack-e2e-report'):
+    c.create_bucket(Bucket=b); print('bucket ready: s3://' + b)
+
+  > bucket ready: s3://dtrack-e2e-work
+  > bucket ready: s3://dtrack-e2e-report
+2026-09-22T12:27:53.329Z  END   04_create_buckets rc=0 elapsed=0.630s log=/home/dalab2/.local/dtrack/examples/e2e/logs/04_create_buckets.log
+
+2026-09-22T12:27:53.333Z
+=== 4. RIGHT job starts first and waits (started once, by hand) ===
+2026-09-22T12:27:53.341Z  START 05_cloud_job (background)
+2026-09-22T12:27:53.346Z    cmd: env PYTHONPATH=/home/dalab2/.local/dtrack/databricks uv run python -m dtrack_cloud --work s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e --report s3://dtrack-e2e-report --right-csv-dir examples/e2e/data/right --out /home/dalab2/.local/dtrack/examples/e2e/output/report --work-dir /home/dalab2/.local/dtrack/examples/e2e/work/cloud --poll-interval 1 --idle-timeout 120
+2026-09-22T12:27:56.354Z  cloud job pid=308496 is polling s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/stage1/ for left counts
+
+2026-09-22T12:27:56.359Z
+=== 5. LEFT stage1: left-side counts only -> stage1/<pair>.left.json ===
+2026-09-22T12:27:56.367Z  START 06_stage1_left
+2026-09-22T12:27:56.372Z    cmd: uv run dtrack-distributed stage1 --config examples/e2e/config.json --s3 s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e --run-id 20260922T122749Z-e2e
+  > {"run_id": "20260922T122749Z-e2e", "pairs": 2}
+2026-09-22T12:27:57.765Z  END   06_stage1_left rc=0 elapsed=1.396s log=/home/dalab2/.local/dtrack/examples/e2e/logs/06_stage1_left.log
+2026-09-22T12:27:57.770Z  file: /home/dalab2/.local/dtrack/examples/e2e/logs/06_stage1_left.log
+  | 2026-09-22T12:27:57.089Z INFO botocore.credentials: Found credentials in environment variables.
+  | 2026-09-22T12:27:57.250Z INFO dtrack.stage1: run_id=20260922T122749Z-e2e work=s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e pairs=['orders', 'customers']
+  | 2026-09-22T12:27:57.297Z INFO dtrack.stage1: left preflight orders: OK
+  | 2026-09-22T12:27:57.297Z INFO dtrack.stage1: left preflight customers: OK
+  | 2026-09-22T12:27:57.414Z INFO dtrack.stage1: left count orders: 58 partitions, 1740 rows (0.117s)
+  | 2026-09-22T12:27:57.431Z INFO dtrack.stage1: -> stage1/orders.left.json
+  | 2026-09-22T12:27:57.431Z INFO dtrack.stage1: left count customers: 31 partitions, 620 rows (0.110s)
+  | 2026-09-22T12:27:57.459Z INFO dtrack.stage1: -> stage1/customers.left.json
+  | 2026-09-22T12:27:57.550Z INFO dtrack.stage1: left side closed: 2 pair(s) in 0.277s; waiting on the Right side for verdicts
+
+2026-09-22T12:27:57.779Z
+=== 6. LEFT produce: waits for the Right side's manifests, then pushes Units ===
+2026-09-22T12:27:57.785Z  START 07_produce
+2026-09-22T12:27:57.788Z    cmd: uv run dtrack-distributed produce --s3 s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e --work-dir /home/dalab2/.local/dtrack/examples/e2e/work/producer --pull-workers 2 --stat-workers 2 --wip 200 --poll-interval 1 --wait-timeout 120
+  > {"published_units": 11, "pairs": ["customers", "orders"]}
+2026-09-22T12:28:00.843Z  END   07_produce rc=0 elapsed=3.056s log=/home/dalab2/.local/dtrack/examples/e2e/logs/07_produce.log
+2026-09-22T12:28:00.848Z  file: /home/dalab2/.local/dtrack/examples/e2e/logs/07_produce.log
+  | 2026-09-22T12:27:58.442Z INFO botocore.credentials: Found credentials in environment variables.
+  | 2026-09-22T12:27:58.687Z INFO dtrack.producer: stage1/_CLOSED seen: 2 manifest(s) released
+  | 2026-09-22T12:27:58.794Z INFO dtrack.producer: fixed sample keys customers: {'2026-01-01': 40} -> manifest/customers.keys.json
+  | 2026-09-22T12:27:58.855Z INFO dtrack.producer: producer start: 2 manifest(s), 0 unit(s) already indexed, next sequence=1, wip=200
+  | 2026-09-22T12:27:58.856Z INFO dtrack.producer: pull customers 2026-01-01: 31 partition(s)
+  | 2026-09-22T12:27:58.856Z INFO dtrack.producer: pull orders 2026-01-01: 29 partition(s)
+  | 2026-09-22T12:27:58.973Z INFO dtrack.producer: left customers 2026-01-01: 620 rows scanned -> 40 sampled (/home/dalab2/.local/dtrack/examples/e2e/work/producer/customers/2026-01-01/left.sampled.csv)
+  | 2026-09-22T12:27:58.973Z INFO dtrack.producer: pulled customers 2026-01-01 -> stat queue
+  | 2026-09-22T12:27:58.976Z INFO dtrack.producer: pull orders 2026-02-01: 27 partition(s)
+  | 2026-09-22T12:27:59.060Z INFO dtrack.producer: left orders 2026-01-01: 870 rows scanned -> 215 sampled (/home/dalab2/.local/dtrack/examples/e2e/work/producer/orders/2026-01-01/left.sampled.csv)
+  | 2026-09-22T12:27:59.113Z INFO dtrack.producer: left orders 2026-02-01: 810 rows scanned -> 200 sampled (/home/dalab2/.local/dtrack/examples/e2e/work/producer/orders/2026-02-01/left.sampled.csv)
+  | 2026-09-22T12:27:59.297Z INFO dtrack.producer: committed customers 2026-01-01: 3 unit(s) _INDEX/00000001..00000003 (data before pointer)
+  | 2026-09-22T12:27:59.317Z INFO dtrack.producer: pulled orders 2026-01-01 -> stat queue
+  | 2026-09-22T12:27:59.317Z INFO dtrack.producer: pulled orders 2026-02-01 -> stat queue
+  | 2026-09-22T12:27:59.794Z INFO dtrack.producer: committed orders 2026-01-01: 4 unit(s) _INDEX/00000004..00000007 (data before pointer)
+  | 2026-09-22T12:28:00.377Z INFO dtrack.producer: committed orders 2026-02-01: 4 unit(s) _INDEX/00000008..00000011 (data before pointer)
+  | 2026-09-22T12:28:00.588Z INFO dtrack.producer: manifest/_CLOSED written: pairs=['customers', 'orders'] expected_units=11
+
+2026-09-22T12:28:00.856Z
+=== 7. RIGHT job drains, builds the report, publishes it, exits ===
+  > {"results": 11, "status": "DONE", "published": ["history/20260922T122749Z-e2e/customers_compare_col.csv", "history/20260922T122749Z-e2e/customers_compare_row.csv", "history/20260922T122749Z-e2e/index.html", "history/20260922T122749Z-e2e/orders_compare_col.csv", "history/20260922T122749Z-e2e/orders_compare_row.csv", "history/20260922T122749Z-e2e/report.xlsx", "history/20260922T122749Z-e2e/summary.json", "latest/pointer.json"]}
+2026-09-22T12:28:03.472Z  END   05_cloud_job rc=0 elapsed=10.129s log=/home/dalab2/.local/dtrack/examples/e2e/logs/05_cloud_job.log
+2026-09-22T12:28:03.477Z  file: /home/dalab2/.local/dtrack/examples/e2e/logs/05_cloud_job.log
+  | 2026-09-22T12:27:53.820Z INFO dtrack.cloud: cloud job start: work=s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e run_id=<auto> report=s3://dtrack-e2e-report gate=auto
+  | 2026-09-22T12:27:53.989Z INFO botocore.credentials: Found credentials in environment variables.
+  | 2026-09-22T12:27:57.477Z INFO dtrack.cloud: run resolved: 20260922T122749Z-e2e (s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e)
+  | 2026-09-22T12:27:57.687Z INFO dtrack.cloud.stage1: right count customers: 31 partitions, 620 rows (0.025s)
+  | 2026-09-22T12:27:57.690Z INFO dtrack.cloud.stage1: reconcile customers: {'match': 31, 'count_diff': 0, 'left_only': 0, 'right_only': 0}
+  | 2026-09-22T12:27:57.690Z INFO dtrack.cloud.stage1: gate customers: policy=auto passed=True excluded_ratio=0.0000
+  | 2026-09-22T12:27:57.743Z INFO dtrack.cloud.stage1: manifest customers: 1 windows x 3 columns = 3 units -> manifest/customers.json
+  | 2026-09-22T12:27:57.790Z INFO dtrack.cloud.stage1: right count orders: 58 partitions, 1737 rows (0.037s)
+  | 2026-09-22T12:27:57.794Z INFO dtrack.cloud.stage1: reconcile orders: {'match': 56, 'count_diff': 1, 'left_only': 1, 'right_only': 1}
+  | 2026-09-22T12:27:57.795Z INFO dtrack.cloud.stage1:   finding orders 2026-01-15 left=30 right=27
+  | 2026-09-22T12:27:57.795Z INFO dtrack.cloud.stage1:   finding orders 2026-01-31 left=None right=30
+  | 2026-09-22T12:27:57.795Z INFO dtrack.cloud.stage1:   finding orders 2026-02-10 left=30 right=None
+  | 2026-09-22T12:27:57.795Z INFO dtrack.cloud.stage1: gate orders: policy=auto passed=True excluded_ratio=0.0508
+  | 2026-09-22T12:27:57.872Z INFO dtrack.cloud.stage1: manifest orders: 2 windows x 4 columns = 8 units -> manifest/orders.json
+  | 2026-09-22T12:27:57.957Z INFO dtrack.cloud.stage1: stage1 closed: 2/2 pairs released
+  | 2026-09-22T12:27:58.016Z INFO dtrack.cloud.consumer: manifest orders loaded: 2 windows x 4 columns = 8 units -> B-queue seeded
+  | 2026-09-22T12:27:58.026Z INFO dtrack.cloud.consumer: poll: 1 new object(s), cursor=None
+  | 2026-09-22T12:27:58.035Z INFO dtrack.cloud.consumer: B fetch_right orders 2026-01-01: 29 partition(s)
+  | 2026-09-22T12:27:58.119Z INFO dtrack.cloud.consumer: B right stats ready orders 2026-01-01 (0.085s) -> 0 unit(s) promoted to A-queue
+  | 2026-09-22T12:27:58.206Z INFO dtrack.cloud.consumer: B fetch_right orders 2026-02-01: 27 partition(s)
+  | 2026-09-22T12:27:58.291Z INFO dtrack.cloud.consumer: B right stats ready orders 2026-02-01 (0.085s) -> 0 unit(s) promoted to A-queue
+  | 2026-09-22T12:27:59.805Z INFO dtrack.cloud.consumer: manifest customers loaded: 1 windows x 3 columns = 3 units -> B-queue seeded
+  | 2026-09-22T12:28:00.051Z INFO dtrack.cloud.consumer: poll: 8 new object(s), cursor=_INDEX/00000007-orders--2026-01-01--status--5f1e638acc28.json
+  | 2026-09-22T12:28:00.091Z INFO dtrack.cloud.consumer: A compare orders 2026-01-01 AMOUNT -> MATCH
+  | 2026-09-22T12:28:00.285Z INFO dtrack.cloud.consumer: poll: 2 new object(s), cursor=_INDEX/00000009-orders--2026-02-01--order-id--26b77acc8a23.json
+  | 2026-09-22T12:28:00.340Z INFO dtrack.cloud.consumer: A compare orders 2026-01-01 ORDER_ID -> MATCH
+  | 2026-09-22T12:28:00.526Z INFO dtrack.cloud.consumer: poll: 2 new object(s), cursor=_INDEX/00000011-orders--2026-02-01--status--a7ba91862e41.json
+  | 2026-09-22T12:28:00.600Z INFO dtrack.cloud.consumer: A compare orders 2026-01-01 REGION -> MATCH
+  | 2026-09-22T12:28:00.773Z INFO dtrack.cloud.consumer: A compare orders 2026-01-01 STATUS -> DIFF
+  | 2026-09-22T12:28:00.934Z INFO dtrack.cloud.consumer: A compare orders 2026-02-01 AMOUNT -> DIFF
+  | 2026-09-22T12:28:01.079Z INFO dtrack.cloud.consumer: A compare orders 2026-02-01 ORDER_ID -> MATCH
+  | 2026-09-22T12:28:01.229Z INFO dtrack.cloud.consumer: A compare orders 2026-02-01 REGION -> MATCH
+  | 2026-09-22T12:28:01.381Z INFO dtrack.cloud.consumer: A compare orders 2026-02-01 STATUS -> MATCH
+  | 2026-09-22T12:28:01.576Z INFO dtrack.cloud.consumer: B fetch_right customers 2026-01-01: 31 partition(s)
+  | 2026-09-22T12:28:01.623Z INFO dtrack.cloud.consumer: B right stats ready customers 2026-01-01 (0.047s) -> 3 unit(s) promoted to A-queue
+  | 2026-09-22T12:28:01.771Z INFO dtrack.cloud.consumer: A compare customers 2026-01-01 BALANCE -> MATCH
+  | 2026-09-22T12:28:01.913Z INFO dtrack.cloud.consumer: A compare customers 2026-01-01 CUST_ID -> MATCH
+  | 2026-09-22T12:28:02.055Z INFO dtrack.cloud.consumer: A compare customers 2026-01-01 TIER -> MATCH
+  | 2026-09-22T12:28:02.361Z INFO dtrack.cloud.consumer: drain complete: 11 result(s), 0 dead
+  | 2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/customers_compare_col.csv (1503 bytes)
+  | 2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/customers_compare_row.csv (1126 bytes)
+  | 2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/index.html (13756 bytes)
+  | 2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/orders_compare_col.csv (3916 bytes)
+  | 2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/orders_compare_row.csv (1941 bytes)
+  | 2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/report.xlsx (11092 bytes)
+  | 2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/summary.json (526 bytes)
+  | 2026-09-22T12:28:03.079Z INFO dtrack.report: report 20260922T122749Z-e2e: status=DONE findings={'row_count_diff': 1, 'partition_missing': 2, 'col_stat_diff': 2} units=11/11
+  | 2026-09-22T12:28:03.105Z INFO dtrack.report: published history/20260922T122749Z-e2e/customers_compare_col.csv
+  | 2026-09-22T12:28:03.127Z INFO dtrack.report: published history/20260922T122749Z-e2e/customers_compare_row.csv
+  | 2026-09-22T12:28:03.148Z INFO dtrack.report: published history/20260922T122749Z-e2e/index.html
+  | 2026-09-22T12:28:03.169Z INFO dtrack.report: published history/20260922T122749Z-e2e/orders_compare_col.csv
+  | 2026-09-22T12:28:03.190Z INFO dtrack.report: published history/20260922T122749Z-e2e/orders_compare_row.csv
+  | 2026-09-22T12:28:03.212Z INFO dtrack.report: published history/20260922T122749Z-e2e/report.xlsx
+  | 2026-09-22T12:28:03.232Z INFO dtrack.report: published history/20260922T122749Z-e2e/summary.json
+  | 2026-09-22T12:28:03.251Z INFO dtrack.report: published latest/pointer.json -> history/20260922T122749Z-e2e/
+  | 2026-09-22T12:28:03.270Z INFO dtrack.cloud: cloud job done: 11 result(s), report -> s3://dtrack-e2e-report
+
+2026-09-22T12:28:03.486Z
+=== 8. idempotent re-runs (resume semantics) ===
+2026-09-22T12:28:03.494Z  START 08_produce_again
+2026-09-22T12:28:03.499Z    cmd: uv run dtrack-distributed produce --s3 s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e --work-dir /home/dalab2/.local/dtrack/examples/e2e/work/producer --wait-timeout 10
+  > {"published_units": 0, "pairs": ["customers", "orders"]}
+2026-09-22T12:28:05.526Z  END   08_produce_again rc=0 elapsed=2.030s log=/home/dalab2/.local/dtrack/examples/e2e/logs/08_produce_again.log
+2026-09-22T12:28:05.535Z  START 09_cloud_again
+2026-09-22T12:28:05.540Z    cmd: env PYTHONPATH=/home/dalab2/.local/dtrack/databricks uv run python -m dtrack_cloud --work s3://dtrack-e2e-work/dtrack/v1/runs --run-id 20260922T122749Z-e2e --right-csv-dir examples/e2e/data/right --out /home/dalab2/.local/dtrack/examples/e2e/work/report-rerun --work-dir /home/dalab2/.local/dtrack/examples/e2e/work/cloud --poll-interval 1 --idle-timeout 20
+  > {"results": 0, "status": "DONE", "published": []}
+2026-09-22T12:28:08.905Z  END   09_cloud_again rc=0 elapsed=3.370s log=/home/dalab2/.local/dtrack/examples/e2e/logs/09_cloud_again.log
+2026-09-22T12:28:08.912Z  START 10_fetch_report
+2026-09-22T12:28:08.916Z    cmd: uv run dtrack-distributed fetch-report --report-s3 s3://dtrack-e2e-report --out /home/dalab2/.local/dtrack/examples/e2e/output/fetched_report
+  > {"run_id": "20260922T122749Z-e2e", "files": {"customers_compare_col.csv": "/home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/customers_compare_col.csv", "customers_compare_row.csv": "/home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/customers_compare_row.csv", "index.html": "/home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/index.html", "orders_compare_col.csv": "/home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/orders_compare_col.csv", "orders_compare_row.csv": "/home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/orders_compare_row.csv", "report.xlsx": "/home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/report.xlsx", "summary.json": "/home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/summary.json"}}
+2026-09-22T12:28:10.146Z  END   10_fetch_report rc=0 elapsed=1.233s log=/home/dalab2/.local/dtrack/examples/e2e/logs/10_fetch_report.log
+
+2026-09-22T12:28:10.151Z
+=== 9. gate policies on the Right side (separate run prefixes) ===
+2026-09-22T12:28:10.159Z  START 11_stage1_left_manual
+2026-09-22T12:28:10.164Z    cmd: uv run dtrack-distributed stage1 --config examples/e2e/config.json --s3 s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e-manual --run-id 20260922T122749Z-e2e-manual
+  > {"run_id": "20260922T122749Z-e2e-manual", "pairs": 2}
+2026-09-22T12:28:11.407Z  END   11_stage1_left_manual rc=0 elapsed=1.245s log=/home/dalab2/.local/dtrack/examples/e2e/logs/11_stage1_left_manual.log
+2026-09-22T12:28:11.415Z  START 12_cloud_manual
+2026-09-22T12:28:11.420Z    cmd: env PYTHONPATH=/home/dalab2/.local/dtrack/databricks uv run python -m dtrack_cloud --work s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e-manual --right-csv-dir examples/e2e/data/right --out /home/dalab2/.local/dtrack/examples/e2e/work/report-manual --work-dir /home/dalab2/.local/dtrack/examples/e2e/work/cloud-manual --gate manual --poll-interval 1 --idle-timeout 8 --wait-timeout 10
+2026-09-22T12:28:21.128Z  END   12_cloud_manual rc=1 elapsed=9.711s log=/home/dalab2/.local/dtrack/examples/e2e/logs/12_cloud_manual.log
+2026-09-22T12:28:22.237Z  gate=manual: manifests written=0; orders passed=False excluded_ratio=0.0508; customers passed=False excluded_ratio=0.0000 (cloud job exits rc=1 by idle timeout: no producer in this demo, expected)
+2026-09-22T12:28:22.245Z  START 11_stage1_left_ratio
+2026-09-22T12:28:22.249Z    cmd: uv run dtrack-distributed stage1 --config examples/e2e/config.json --s3 s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e-ratio --run-id 20260922T122749Z-e2e-ratio
+  > {"run_id": "20260922T122749Z-e2e-ratio", "pairs": 2}
+2026-09-22T12:28:23.471Z  END   11_stage1_left_ratio rc=0 elapsed=1.225s log=/home/dalab2/.local/dtrack/examples/e2e/logs/11_stage1_left_ratio.log
+2026-09-22T12:28:23.477Z  START 12_cloud_ratio
+2026-09-22T12:28:23.480Z    cmd: env PYTHONPATH=/home/dalab2/.local/dtrack/databricks uv run python -m dtrack_cloud --work s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e-ratio --right-csv-dir examples/e2e/data/right --out /home/dalab2/.local/dtrack/examples/e2e/work/report-ratio --work-dir /home/dalab2/.local/dtrack/examples/e2e/work/cloud-ratio --gate ratio:0.02 --poll-interval 1 --idle-timeout 8 --wait-timeout 10
+2026-09-22T12:28:33.541Z  END   12_cloud_ratio rc=1 elapsed=10.062s log=/home/dalab2/.local/dtrack/examples/e2e/logs/12_cloud_ratio.log
+2026-09-22T12:28:34.718Z  gate=ratio:0.02: manifests written=1; orders passed=False excluded_ratio=0.0508; customers passed=True excluded_ratio=0.0000 (cloud job exits rc=1 by idle timeout: no producer in this demo, expected)
+
+2026-09-22T12:28:34.723Z
+=== 10. mirror the work store and the report store to disk ===
+2026-09-22T12:28:34.730Z  START 13_s3_mirror_work
+2026-09-22T12:28:34.734Z    cmd: uv run python examples/e2e/s3_mirror.py s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror
+  >       28  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_HEARTBEAT  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_HEARTBEAT
+  >      228  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_INDEX/00000001-customers--2026-01-01--balance--1b4528733684.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_INDEX/00000001-customers--2026-01-01--balance--1b4528733684.json
+  >      228  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_INDEX/00000002-customers--2026-01-01--cust-id--f648ea9e5b55.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_INDEX/00000002-customers--2026-01-01--cust-id--f648ea9e5b55.json
+  >      216  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_INDEX/00000003-customers--2026-01-01--tier--407c6f5e59cc.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_INDEX/00000003-customers--2026-01-01--tier--407c6f5e59cc.json
+  >      215  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_INDEX/00000004-orders--2026-01-01--amount--bd3b0f461ee3.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_INDEX/00000004-orders--2026-01-01--amount--bd3b0f461ee3.json
+  >      223  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_INDEX/00000005-orders--2026-01-01--order-id--2300f5318252.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_INDEX/00000005-orders--2026-01-01--order-id--2300f5318252.json
+  >      215  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_INDEX/00000006-orders--2026-01-01--region--3f3069d1c3b4.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_INDEX/00000006-orders--2026-01-01--region--3f3069d1c3b4.json
+  >      215  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_INDEX/00000007-orders--2026-01-01--status--5f1e638acc28.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_INDEX/00000007-orders--2026-01-01--status--5f1e638acc28.json
+  >      215  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_INDEX/00000008-orders--2026-02-01--amount--dae64eb47234.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_INDEX/00000008-orders--2026-02-01--amount--dae64eb47234.json
+  >      223  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_INDEX/00000009-orders--2026-02-01--order-id--26b77acc8a23.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_INDEX/00000009-orders--2026-02-01--order-id--26b77acc8a23.json
+  >      216  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_INDEX/00000010-orders--2026-02-01--region--aebeee9bae4c.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_INDEX/00000010-orders--2026-02-01--region--aebeee9bae4c.json
+  >      216  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_INDEX/00000011-orders--2026-02-01--status--a7ba91862e41.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_INDEX/00000011-orders--2026-02-01--status--a7ba91862e41.json
+  >       79  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/_STATUS.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/_STATUS.json
+  >       52  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/manifest/_CLOSED  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/manifest/_CLOSED
+  >     1135  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/manifest/customers.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/manifest/customers.json
+  >      407  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/manifest/customers.keys.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/manifest/customers.keys.json
+  >     1572  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/manifest/orders.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/manifest/orders.json
+  >     1126  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/reports/customers_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/reports/customers_compare_row.csv
+  >     1941  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/reports/orders_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/reports/orders_compare_row.csv
+  >      913  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/results/customers--2026-01-01--balance--1b4528733684.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/results/customers--2026-01-01--balance--1b4528733684.json
+  >      903  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/results/customers--2026-01-01--cust-id--f648ea9e5b55.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/results/customers--2026-01-01--cust-id--f648ea9e5b55.json
+  >     1080  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/results/customers--2026-01-01--tier--407c6f5e59cc.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/results/customers--2026-01-01--tier--407c6f5e59cc.json
+  >      928  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/results/orders--2026-01-01--amount--bd3b0f461ee3.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/results/orders--2026-01-01--amount--bd3b0f461ee3.json
+  >      938  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/results/orders--2026-01-01--order-id--2300f5318252.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/results/orders--2026-01-01--order-id--2300f5318252.json
+  >     1138  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/results/orders--2026-01-01--region--3f3069d1c3b4.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/results/orders--2026-01-01--region--3f3069d1c3b4.json
+  >     1295  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/results/orders--2026-01-01--status--5f1e638acc28.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/results/orders--2026-01-01--status--5f1e638acc28.json
+  >      959  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/results/orders--2026-02-01--amount--dae64eb47234.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/results/orders--2026-02-01--amount--dae64eb47234.json
+  >      920  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/results/orders--2026-02-01--order-id--26b77acc8a23.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/results/orders--2026-02-01--order-id--26b77acc8a23.json
+  >     1110  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/results/orders--2026-02-01--region--aebeee9bae4c.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/results/orders--2026-02-01--region--aebeee9bae4c.json
+  >     1168  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/results/orders--2026-02-01--status--a7ba91862e41.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/results/orders--2026-02-01--status--a7ba91862e41.json
+  >       32  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/stage1/_CLOSED  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/stage1/_CLOSED
+  >       64  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/stage1/_LEFT_CLOSED  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/stage1/_LEFT_CLOSED
+  >     2450  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/stage1/customers.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/stage1/customers.json
+  >     1539  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/stage1/customers.left.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/stage1/customers.left.json
+  >     4017  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/stage1/orders.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/stage1/orders.json
+  >     1993  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/stage1/orders.left.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/stage1/orders.left.json
+  >      224  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/units/customers--2026-01-01--balance--1b4528733684.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/units/customers--2026-01-01--balance--1b4528733684.json
+  >      219  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/units/customers--2026-01-01--cust-id--f648ea9e5b55.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/units/customers--2026-01-01--cust-id--f648ea9e5b55.json
+  >      313  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/units/customers--2026-01-01--tier--407c6f5e59cc.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/units/customers--2026-01-01--tier--407c6f5e59cc.json
+  >      236  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/units/orders--2026-01-01--amount--bd3b0f461ee3.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/units/orders--2026-01-01--amount--bd3b0f461ee3.json
+  >      238  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/units/orders--2026-01-01--order-id--2300f5318252.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/units/orders--2026-01-01--order-id--2300f5318252.json
+  >      342  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/units/orders--2026-01-01--region--3f3069d1c3b4.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/units/orders--2026-01-01--region--3f3069d1c3b4.json
+  >      370  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/units/orders--2026-01-01--status--5f1e638acc28.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/units/orders--2026-01-01--status--5f1e638acc28.json
+  >      236  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/units/orders--2026-02-01--amount--dae64eb47234.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/units/orders--2026-02-01--amount--dae64eb47234.json
+  >      229  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/units/orders--2026-02-01--order-id--26b77acc8a23.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/units/orders--2026-02-01--order-id--26b77acc8a23.json
+  >      328  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/units/orders--2026-02-01--region--aebeee9bae4c.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/units/orders--2026-02-01--region--aebeee9bae4c.json
+  >      357  s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e/units/orders--2026-02-01--status--a7ba91862e41.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror/units/orders--2026-02-01--status--a7ba91862e41.json
+  > 47 object(s) mirrored under /home/dalab2/.local/dtrack/examples/e2e/output/s3_mirror
+2026-09-22T12:28:37.270Z  END   13_s3_mirror_work rc=0 elapsed=2.538s log=/home/dalab2/.local/dtrack/examples/e2e/logs/13_s3_mirror_work.log
+2026-09-22T12:28:37.276Z  START 14_s3_mirror_report
+2026-09-22T12:28:37.280Z    cmd: uv run python examples/e2e/s3_mirror.py s3://dtrack-e2e-report /home/dalab2/.local/dtrack/examples/e2e/output/report_store
+  >     1503  s3://dtrack-e2e-report/history/20260922T023938Z-e2e/customers_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T023938Z-e2e/customers_compare_col.csv
+  >     1126  s3://dtrack-e2e-report/history/20260922T023938Z-e2e/customers_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T023938Z-e2e/customers_compare_row.csv
+  >    13796  s3://dtrack-e2e-report/history/20260922T023938Z-e2e/index.html  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T023938Z-e2e/index.html
+  >     3916  s3://dtrack-e2e-report/history/20260922T023938Z-e2e/orders_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T023938Z-e2e/orders_compare_col.csv
+  >     1941  s3://dtrack-e2e-report/history/20260922T023938Z-e2e/orders_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T023938Z-e2e/orders_compare_row.csv
+  >    11057  s3://dtrack-e2e-report/history/20260922T023938Z-e2e/report.xlsx  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T023938Z-e2e/report.xlsx
+  >      526  s3://dtrack-e2e-report/history/20260922T023938Z-e2e/summary.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T023938Z-e2e/summary.json
+  >     1503  s3://dtrack-e2e-report/history/20260922T024016Z-e2e/customers_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024016Z-e2e/customers_compare_col.csv
+  >     1126  s3://dtrack-e2e-report/history/20260922T024016Z-e2e/customers_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024016Z-e2e/customers_compare_row.csv
+  >    13796  s3://dtrack-e2e-report/history/20260922T024016Z-e2e/index.html  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024016Z-e2e/index.html
+  >     3916  s3://dtrack-e2e-report/history/20260922T024016Z-e2e/orders_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024016Z-e2e/orders_compare_col.csv
+  >     1941  s3://dtrack-e2e-report/history/20260922T024016Z-e2e/orders_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024016Z-e2e/orders_compare_row.csv
+  >    11057  s3://dtrack-e2e-report/history/20260922T024016Z-e2e/report.xlsx  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024016Z-e2e/report.xlsx
+  >      526  s3://dtrack-e2e-report/history/20260922T024016Z-e2e/summary.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024016Z-e2e/summary.json
+  >     1503  s3://dtrack-e2e-report/history/20260922T024208Z-e2e/customers_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024208Z-e2e/customers_compare_col.csv
+  >     1126  s3://dtrack-e2e-report/history/20260922T024208Z-e2e/customers_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024208Z-e2e/customers_compare_row.csv
+  >    13764  s3://dtrack-e2e-report/history/20260922T024208Z-e2e/index.html  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024208Z-e2e/index.html
+  >     3916  s3://dtrack-e2e-report/history/20260922T024208Z-e2e/orders_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024208Z-e2e/orders_compare_col.csv
+  >     1941  s3://dtrack-e2e-report/history/20260922T024208Z-e2e/orders_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024208Z-e2e/orders_compare_row.csv
+  >    11092  s3://dtrack-e2e-report/history/20260922T024208Z-e2e/report.xlsx  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024208Z-e2e/report.xlsx
+  >      526  s3://dtrack-e2e-report/history/20260922T024208Z-e2e/summary.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T024208Z-e2e/summary.json
+  >     1503  s3://dtrack-e2e-report/history/20260922T115149Z-e2e/customers_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115149Z-e2e/customers_compare_col.csv
+  >     1126  s3://dtrack-e2e-report/history/20260922T115149Z-e2e/customers_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115149Z-e2e/customers_compare_row.csv
+  >    13756  s3://dtrack-e2e-report/history/20260922T115149Z-e2e/index.html  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115149Z-e2e/index.html
+  >     3916  s3://dtrack-e2e-report/history/20260922T115149Z-e2e/orders_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115149Z-e2e/orders_compare_col.csv
+  >     1941  s3://dtrack-e2e-report/history/20260922T115149Z-e2e/orders_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115149Z-e2e/orders_compare_row.csv
+  >    11092  s3://dtrack-e2e-report/history/20260922T115149Z-e2e/report.xlsx  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115149Z-e2e/report.xlsx
+  >      526  s3://dtrack-e2e-report/history/20260922T115149Z-e2e/summary.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115149Z-e2e/summary.json
+  >     1503  s3://dtrack-e2e-report/history/20260922T115429Z-e2e/customers_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115429Z-e2e/customers_compare_col.csv
+  >     1126  s3://dtrack-e2e-report/history/20260922T115429Z-e2e/customers_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115429Z-e2e/customers_compare_row.csv
+  >    13756  s3://dtrack-e2e-report/history/20260922T115429Z-e2e/index.html  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115429Z-e2e/index.html
+  >     3916  s3://dtrack-e2e-report/history/20260922T115429Z-e2e/orders_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115429Z-e2e/orders_compare_col.csv
+  >     1941  s3://dtrack-e2e-report/history/20260922T115429Z-e2e/orders_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115429Z-e2e/orders_compare_row.csv
+  >    11093  s3://dtrack-e2e-report/history/20260922T115429Z-e2e/report.xlsx  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115429Z-e2e/report.xlsx
+  >      526  s3://dtrack-e2e-report/history/20260922T115429Z-e2e/summary.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T115429Z-e2e/summary.json
+  >     1503  s3://dtrack-e2e-report/history/20260922T120601Z-e2e/customers_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T120601Z-e2e/customers_compare_col.csv
+  >     1126  s3://dtrack-e2e-report/history/20260922T120601Z-e2e/customers_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T120601Z-e2e/customers_compare_row.csv
+  >    13756  s3://dtrack-e2e-report/history/20260922T120601Z-e2e/index.html  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T120601Z-e2e/index.html
+  >     3916  s3://dtrack-e2e-report/history/20260922T120601Z-e2e/orders_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T120601Z-e2e/orders_compare_col.csv
+  >     1941  s3://dtrack-e2e-report/history/20260922T120601Z-e2e/orders_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T120601Z-e2e/orders_compare_row.csv
+  >    11092  s3://dtrack-e2e-report/history/20260922T120601Z-e2e/report.xlsx  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T120601Z-e2e/report.xlsx
+  >      526  s3://dtrack-e2e-report/history/20260922T120601Z-e2e/summary.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T120601Z-e2e/summary.json
+  >     1503  s3://dtrack-e2e-report/history/20260922T122749Z-e2e/customers_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T122749Z-e2e/customers_compare_col.csv
+  >     1126  s3://dtrack-e2e-report/history/20260922T122749Z-e2e/customers_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T122749Z-e2e/customers_compare_row.csv
+  >    13756  s3://dtrack-e2e-report/history/20260922T122749Z-e2e/index.html  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T122749Z-e2e/index.html
+  >     3916  s3://dtrack-e2e-report/history/20260922T122749Z-e2e/orders_compare_col.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T122749Z-e2e/orders_compare_col.csv
+  >     1941  s3://dtrack-e2e-report/history/20260922T122749Z-e2e/orders_compare_row.csv  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T122749Z-e2e/orders_compare_row.csv
+  >    11092  s3://dtrack-e2e-report/history/20260922T122749Z-e2e/report.xlsx  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T122749Z-e2e/report.xlsx
+  >      526  s3://dtrack-e2e-report/history/20260922T122749Z-e2e/summary.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/history/20260922T122749Z-e2e/summary.json
+  >      150  s3://dtrack-e2e-report/latest/pointer.json  ->  /home/dalab2/.local/dtrack/examples/e2e/output/report_store/latest/pointer.json
+  > 50 object(s) mirrored under /home/dalab2/.local/dtrack/examples/e2e/output/report_store
+2026-09-22T12:28:39.672Z  END   14_s3_mirror_report rc=0 elapsed=2.393s log=/home/dalab2/.local/dtrack/examples/e2e/logs/14_s3_mirror_report.log
+
+2026-09-22T12:28:39.677Z
+=== 11. deliverables ===
+2026-09-22T12:28:39.682Z  file: /home/dalab2/.local/dtrack/examples/e2e/output/report/summary.json
+  | {
+  |   "run_id": "20260922T122749Z-e2e",
+  |   "status": "DONE",
+  |   "generated_at": "2026-09-22T12:28:02.361991+00:00",
+  |   "pairs": 2,
+  |   "released_pairs": [
+  |     "customers",
+  |     "orders"
+  |   ],
+  |   "units_expected": 11,
+  |   "units_completed": 11,
+  |   "findings": {
+  |     "row_count_diff": 1,
+  |     "partition_missing": 2,
+  |     "col_stat_diff": 2
+  |   },
+  |   "errors": [],
+  |   "files": [
+  |     "customers_compare_col.csv",
+  |     "customers_compare_row.csv",
+  |     "index.html",
+  |     "orders_compare_col.csv",
+  |     "orders_compare_row.csv",
+  |     "report.xlsx"
+  |   ]
+  | }
+2026-09-22T12:28:39.691Z  file: /home/dalab2/.local/dtrack/examples/e2e/output/report/orders_compare_row.csv
+  | pair,partition,left,right,delta,verdict
+  | orders,2026-01-01,30,30,,match
+  | orders,2026-01-02,30,30,,match
+  | orders,2026-01-03,30,30,,match
+  | orders,2026-01-04,30,30,,match
+  | orders,2026-01-05,30,30,,match
+  | orders,2026-01-06,30,30,,match
+  | orders,2026-01-07,30,30,,match
+  | orders,2026-01-08,30,30,,match
+  | orders,2026-01-09,30,30,,match
+  | orders,2026-01-10,30,30,,match
+  | orders,2026-01-11,30,30,,match
+  | orders,2026-01-12,30,30,,match
+  | orders,2026-01-13,30,30,,match
+  | orders,2026-01-14,30,30,,match
+  | orders,2026-01-15,30,27,-3,count_diff
+  | orders,2026-01-16,30,30,,match
+  | orders,2026-01-17,30,30,,match
+  | orders,2026-01-18,30,30,,match
+  | orders,2026-01-19,30,30,,match
+  | orders,2026-01-20,30,30,,match
+  | orders,2026-01-21,30,30,,match
+  | orders,2026-01-22,30,30,,match
+  | orders,2026-01-23,30,30,,match
+  | orders,2026-01-24,30,30,,match
+  | orders,2026-01-25,30,30,,match
+  | orders,2026-01-26,30,30,,match
+  | orders,2026-01-27,30,30,,match
+  | orders,2026-01-28,30,30,,match
+  | orders,2026-01-29,30,30,,match
+  | orders,2026-01-30,30,30,,match
+  | orders,2026-01-31,,30,,right_only
+  | orders,2026-02-01,30,30,,match
+  | orders,2026-02-02,30,30,,match
+  | orders,2026-02-03,30,30,,match
+  | orders,2026-02-04,30,30,,match
+  | orders,2026-02-05,30,30,,match
+  | orders,2026-02-06,30,30,,match
+  | orders,2026-02-07,30,30,,match
+  | orders,2026-02-08,30,30,,match
+  | orders,2026-02-09,30,30,,match
+  | orders,2026-02-10,30,,,left_only
+  | orders,2026-02-11,30,30,,match
+  | orders,2026-02-12,30,30,,match
+  | orders,2026-02-13,30,30,,match
+  | orders,2026-02-14,30,30,,match
+  | orders,2026-02-15,30,30,,match
+  | orders,2026-02-16,30,30,,match
+  | orders,2026-02-17,30,30,,match
+  | orders,2026-02-18,30,30,,match
+  | orders,2026-02-19,30,30,,match
+  | orders,2026-02-20,30,30,,match
+  | orders,2026-02-21,30,30,,match
+  | orders,2026-02-22,30,30,,match
+  | orders,2026-02-23,30,30,,match
+  | orders,2026-02-24,30,30,,match
+  | orders,2026-02-25,30,30,,match
+  | orders,2026-02-26,30,30,,match
+  | orders,2026-02-27,30,30,,match
+  | orders,2026-02-28,30,30,,match
+2026-09-22T12:28:39.699Z  file: /home/dalab2/.local/dtrack/examples/e2e/output/report/orders_compare_col.csv
+  | col_type,column,hash_sum_left,hash_sum_match,hash_sum_right,length_avg_left,length_avg_match,length_avg_right,length_max_left,length_max_match,length_max_right,max_left,max_match,max_right,mean_diff,mean_left,mean_match,mean_right,min_left,min_match,min_right,n_missing_diff,n_missing_left,n_missing_right,n_total_diff,n_total_left,n_total_right,n_unique_diff,n_unique_left,n_unique_right,pair,right_col,std_diff,std_left,std_match,std_right,top_10_left,top_10_right,unit_id,verdict,vintage
+  | numeric,AMOUNT,1904478589113441817476,True,1904478589113441817476,,,,,,,498.65,True,498.65,0.0,262.31325581395345,True,262.31325581395345,7.44,True,7.44,0,0,0,0,215,215,0,215,215,orders,amount,0.0,152.83780003407756,True,152.83780003407756,,,orders--2026-01-01--amount--bd3b0f461ee3,match,2026-01-01
+  | numeric,ORDER_ID,1857691498602908589798,True,1857691498602908589798,,,,,,,100899,True,100899,0.0,100437.70697674419,True,100437.70697674419,100003,True,100003,0,0,0,0,215,215,0,215,215,orders,order_id,0.0,260.26566710663565,True,260.26566710663565,,,orders--2026-01-01--order-id--2300f5318252,match,2026-01-01
+  | categorical,REGION,3384433662861493317651,True,3384433662861493317651,1.7488372093023257,True,1.7488372093023257,2,True,2,W,True,W,,,,,MW,True,MW,0,0,0,0,215,215,0,4,4,orders,region,,,,,"[{""value"":""NE"",""count"":60},{""value"":""SE"",""count"":56},{""value"":""W"",""count"":54},{""value"":""MW"",""count"":45}]","[{""value"":""NE"",""count"":60},{""value"":""SE"",""count"":56},{""value"":""W"",""count"":54},{""value"":""MW"",""count"":45}]",orders--2026-01-01--region--3f3069d1c3b4,match,2026-01-01
+  | categorical,STATUS,2823123397846579177224,False,2758876032985509994749,5.841860465116279,True,5.841860465116279,9,True,9,SHIPPED,False,paid,,,,,CANCELLED,True,CANCELLED,0,0,0,0,215,215,3,4,7,orders,status,,,,,"[{""value"":""CANCELLED"",""count"":68},{""value"":""NEW"",""count"":61},{""value"":""PAID"",""count"":47},{""value"":""SHIPPED"",""count"":39}]","[{""value"":""CANCELLED"",""count"":66},{""value"":""NEW"",""count"":60},{""value"":""PAID"",""count"":43},{""value"":""SHIPPED"",""count"":39},{""value"":""paid"",""count"":4},{""value"":""cancelled"",""count"":2},{""value"":""new"",""count"":1}]",orders--2026-01-01--status--5f1e638acc28,diff,2026-01-01
+  | numeric,AMOUNT,1789923584280938000321,False,1792373685513303202628,,,,,,,498.09,True,498.09,0.0004499999999723059,237.28900000000002,False,237.28945,6.39,True,6.39,0,0,0,0,200,200,0,200,200,orders,amount,-0.00016222679587940547,143.54811714431642,False,143.54795491752054,,,orders--2026-02-01--amount--dae64eb47234,diff,2026-02-01
+  | numeric,ORDER_ID,1851063451288997126003,True,1851063451288997126003,,,,,,,101770,True,101770,0.0,101359.48,True,101359.48,100934,True,100934,0,0,0,0,200,200,0,200,200,orders,order_id,0.0,243.72020286884745,True,243.72020286884745,,,orders--2026-02-01--order-id--26b77acc8a23,match,2026-02-01
+  | categorical,REGION,3152585361865034582270,True,3152585361865034582270,1.76,True,1.76,2,True,2,W,True,W,,,,,MW,True,MW,0,0,0,0,200,200,0,4,4,orders,region,,,,,"[{""value"":""SE"",""count"":62},{""value"":""W"",""count"":48},{""value"":""NE"",""count"":46},{""value"":""MW"",""count"":44}]","[{""value"":""SE"",""count"":62},{""value"":""W"",""count"":48},{""value"":""NE"",""count"":46},{""value"":""MW"",""count"":44}]",orders--2026-02-01--region--aebeee9bae4c,match,2026-02-01
+  | categorical,STATUS,2677434743195442659517,True,2677434743195442659517,5.56,True,5.56,9,True,9,SHIPPED,True,SHIPPED,,,,,CANCELLED,True,CANCELLED,0,0,0,0,200,200,0,4,4,orders,status,,,,,"[{""value"":""NEW"",""count"":63},{""value"":""CANCELLED"",""count"":51},{""value"":""PAID"",""count"":46},{""value"":""SHIPPED"",""count"":40}]","[{""value"":""NEW"",""count"":63},{""value"":""CANCELLED"",""count"":51},{""value"":""PAID"",""count"":46},{""value"":""SHIPPED"",""count"":40}]",orders--2026-02-01--status--a7ba91862e41,match,2026-02-01
+2026-09-22T12:28:39.707Z  file: /home/dalab2/.local/dtrack/examples/e2e/output/report/customers_compare_col.csv
+  | col_type,column,hash_sum_left,hash_sum_match,hash_sum_right,length_avg_left,length_avg_match,length_avg_right,length_max_left,length_max_match,length_max_right,max_left,max_match,max_right,mean_diff,mean_left,mean_match,mean_right,min_left,min_match,min_right,n_missing_diff,n_missing_left,n_missing_right,n_total_diff,n_total_left,n_total_right,n_unique_diff,n_unique_left,n_unique_right,pair,right_col,std_diff,std_left,std_match,std_right,top_10_left,top_10_right,unit_id,verdict,vintage
+  | numeric,BALANCE,376942955760242498471,True,376942955760242498471,,,,,,,9970.96,True,9970.96,0.0,4636.416,True,4636.416,51.54,True,51.54,0,0,0,0,40,40,0,40,40,customers,balance,0.0,2855.535182086242,True,2855.535182086242,,,customers--2026-01-01--balance--1b4528733684,match,2026-01-01
+  | numeric,CUST_ID,367983816899832110220,True,367983816899832110220,,,,,,,5611,True,5611,0.0,5293.2,True,5293.2,5001,True,5001,0,0,0,0,40,40,0,40,40,customers,cust_id,0.0,174.13201593721635,True,174.13201593721635,,,customers--2026-01-01--cust-id--f648ea9e5b55,match,2026-01-01
+  | categorical,TIER,358559588115297383054,True,358559588115297383054,5.3,True,5.3,6,True,6,silver,True,silver,,,,,bronze,True,bronze,0,0,0,0,40,40,0,3,3,customers,tier,,,,,"[{""value"":""silver"",""count"":16},{""value"":""gold"",""count"":14},{""value"":""bronze"",""count"":10}]","[{""value"":""silver"",""count"":16},{""value"":""gold"",""count"":14},{""value"":""bronze"",""count"":10}]",customers--2026-01-01--tier--407c6f5e59cc,match,2026-01-01
+2026-09-22T12:28:39.721Z  html: /home/dalab2/.local/dtrack/examples/e2e/output/report/index.html (13756 bytes)
+2026-09-22T12:28:40.121Z  xlsx: /home/dalab2/.local/dtrack/examples/e2e/output/report/report.xlsx sheets=['customers_row', 'customers_col', 'orders_row', 'orders_col']
+2026-09-22T12:28:40.129Z  pointer: /home/dalab2/.local/dtrack/examples/e2e/output/report_store/latest/pointer.json -> {"base":"history/20260922T122749Z-e2e/","findings":5,"finished_at":"2026-09-22T12:28:03.232511+00:00","run_id":"20260922T122749Z-e2e","status":"DONE"}
+2026-09-22T12:28:40.139Z  fetched on-prem via fetch-report: customers_compare_col.csv customers_compare_row.csv index.html orders_compare_col.csv orders_compare_row.csv report.xlsx summary.json 
+2026-09-22T12:28:40.188Z  work store objects: left=2 verdicts=2 manifests=2 fixed_keys=1 units=11 index=11 results=11 dead=0
+2026-09-22T12:28:40.194Z  scratch (git-ignored): /home/dalab2/.local/dtrack/examples/e2e/work
+
+2026-09-22T12:28:40.199Z
+=== done ===
+2026-09-22T12:28:40.204Z  execution record: /home/dalab2/.local/dtrack/examples/e2e/execution.txt

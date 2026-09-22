@@ -1,23 +1,18 @@
 from __future__ import annotations
 
-import csv
 import hashlib
-import io
 import json
+import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
 from ..adapters.sources.factory import source_from_config
-from ..adapters.targets.databricks import DatabricksTarget
-from ..domain.gates import evaluate_gate, reconcile_partitions, summarize_partitions
-from ..domain.manifest import build_manifest
-from ..engine.sampling import sample_csv
+
+log = logging.getLogger("dtrack.stage1")
+SECRET_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
 
 
 def make_run_id(config: dict[str, Any], *, now: datetime | None = None) -> str:
@@ -28,63 +23,26 @@ def make_run_id(config: dict[str, Any], *, now: datetime | None = None) -> str:
     return f"{now.strftime('%Y%m%dT%H%M%SZ')}-{digest}"
 
 
-def stage1_csv_bytes(document: dict[str, Any]) -> bytes:
-    output = io.StringIO(newline="")
-    writer = csv.DictWriter(
-        output, fieldnames=["pair", "partition", "left", "right", "delta", "verdict"]
-    )
-    writer.writeheader()
-    for partition, row in sorted(document["partitions"].items()):
-        writer.writerow(
-            {
-                "pair": document["pair"],
-                "partition": partition,
-                "left": row.get("left"),
-                "right": row.get("right"),
-                "delta": row.get("delta", ""),
-                "verdict": row["verdict"],
-            }
-        )
-    return output.getvalue().encode()
+# >>> pair config as the Right side needs it: no credentials, no connection endpoints <<< #
+def public_pair_config(pair: dict[str, Any]) -> dict[str, Any]:
+    result = {key: value for key, value in pair.items() if key not in ("left", "right")}
+    for side in ("left", "right"):
+        result[side] = {
+            k: v for k, v in pair[side].items() if k not in SECRET_FIELDS and not k.endswith("_env")
+        }
+    return result
 
 
-def _document(
-    run_id: str,
-    name: str,
-    pair: dict[str, Any],
-    health: dict[str, Any],
-    left_counts: dict[str, int],
-    right_counts: dict[str, int],
-    gate: str,
-) -> dict[str, Any]:
-    partitions = reconcile_partitions(left_counts, right_counts, pair.get("date_synonyms"))
-    return {
-        "run_id": run_id,
-        "pair": name,
-        "left": pair["left"],
-        "right": pair["right"],
-        "bounds": {"from": pair.get("fromDate"), "to": pair.get("toDate")},
-        "partitions": partitions,
-        "summary": summarize_partitions(partitions),
-        "gate_decision": evaluate_gate(partitions, gate),
-        "preflight": health,
-    }
-
-
-def run_stage1(
+# >>> Stage 1, left half: preflight + exact per-Partition counts -> stage1/<pair>.left.json <<< #
+def run_stage1_left(
     config: dict[str, Any],
     store,
     *,
     run_id: str | None = None,
-    gate: str = "auto",
     pair_names: list[str] | None = None,
     source_factory: Callable[[dict[str, Any]], Any] = source_from_config,
-    target_factory: Callable[[dict[str, Any]], Any] = DatabricksTarget,
-    kickstarter=None,
-    report_store=None,
     pair_workers: int = 4,
-    work_dir: str | Path = ".dtrack-work/stage1",
-) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]]]:
     run_id = run_id or make_run_id(config)
     pairs = {
         name: pair
@@ -93,78 +51,60 @@ def run_stage1(
     }
     if not pairs:
         raise ValueError("no active pairs selected")
-    store.put_json("_STATUS.json", {"state": "preflight", "run_id": run_id})
-
-    # All Right-side preflights must pass before any expensive count begins.
-    with ThreadPoolExecutor(max_workers=max(1, pair_workers)) as pool:
-        futures = {
-            name: pool.submit(target_factory(pair["right"]).preflight)
-            for name, pair in pairs.items()
-        }
-        health = {name: future.result() for name, future in futures.items()}
-    store.put_json(
-        "_PREFLIGHT.json", {"ok": all(row.get("ok") for row in health.values()), "pairs": health}
-    )
+    log.info("run_id=%s work=%s pairs=%s", run_id, store.root_uri, list(pairs))
+    store.put_json("_STATUS.json", {"state": "left_counting", "run_id": run_id, "role": "left"})
+    started = time.monotonic()
+    sources = {name: source_factory(pair["left"]) for name, pair in pairs.items()}
+    health = {name: source.preflight() for name, source in sources.items()}
+    for name, row in health.items():
+        log.info(
+            "left preflight %s: %s", name, "OK" if row.get("ok") else f"FAIL {row.get('error')}"
+        )
     failed = [name for name, row in health.items() if not row.get("ok")]
     if failed:
-        raise RuntimeError(f"Databricks preflight failed: {', '.join(failed)}")
+        raise RuntimeError(f"left preflight failed: {', '.join(failed)}")
 
-    # Finish every Right-side exact count before starting any Left-side count.
-    def count(target, pair):
-        started = time.monotonic()
-        values = target.partition_counts(pair.get("fromDate"), pair.get("toDate"))
-        return values, round(time.monotonic() - started, 6)
+    def count(name: str):
+        pair = pairs[name]
+        begun = time.monotonic()
+        values = sources[name].partition_counts(pair.get("fromDate"), pair.get("toDate"))
+        return values, round(time.monotonic() - begun, 6)
 
     with ThreadPoolExecutor(max_workers=max(1, pair_workers)) as pool:
-        right_futures = {
-            name: pool.submit(count, target_factory(pair["right"]), pair)
-            for name, pair in pairs.items()
-        }
-        right = {name: future.result() for name, future in right_futures.items()}
-    with ThreadPoolExecutor(max_workers=max(1, pair_workers)) as pool:
-        left_futures = {
-            name: pool.submit(count, source_factory(pair["left"]), pair)
-            for name, pair in pairs.items()
-        }
-        left = {name: future.result() for name, future in left_futures.items()}
-
-    documents, manifests = [], []
-    kicked = False
+        counted = {name: pool.submit(count, name) for name in pairs}
+        counts = {name: future.result() for name, future in counted.items()}
+    documents = []
     for name, pair in pairs.items():
-        doc = _document(run_id, name, pair, health[name], left[name][0], right[name][0], gate)
-        doc["timing"] = {"left_count_s": left[name][1], "right_count_s": right[name][1]}
-        store.put_json(f"stage1/{name}.json", doc)
-        report = stage1_csv_bytes(doc)
-        store.put_bytes(f"reports/{name}_compare_row.csv", report, content_type="text/csv")
-        if report_store:
-            report_store.put_bytes(f"{name}_compare_row.csv", report, content_type="text/csv")
-        documents.append(doc)
-        if doc["gate_decision"]["passed"]:
-            manifest = build_manifest(run_id, name, pair, doc)
-            if manifest["sample"]["mode"] == "fixed":
-                source = source_factory(pair["left"])
-                for window in manifest["windows"]:
-                    output = Path(work_dir) / name / window["bucket"] / "keys.csv"
-                    path = source.pull_window(
-                        window["partitions"], [], output, key_columns=manifest["key_cols"]
-                    )
-                    sampled = sample_csv(
-                        path,
-                        key_columns=manifest["key_cols"],
-                        mode="fixed",
-                        count=manifest["sample"]["count"],
-                        families=manifest["key_families"],
-                    )
-                    key_rows = pd.read_csv(sampled, dtype=object)[manifest["key_cols"]]
-                    window["key_tuples"] = key_rows.drop_duplicates().values.tolist()
-            store.put_json(f"manifest/{name}.json", manifest)
-            manifests.append(manifest)
-            if kickstarter and not kicked:
-                kickstarter.start(run_id=run_id, s3_root=store.root_uri)
-                kicked = True
-    store.close_stage1(list(pairs))
-    store.put_json(
-        "_STATUS.json",
-        {"state": "stage1_closed", "run_id": run_id, "released_pairs": len(manifests)},
+        values, took = counts[name]
+        log.info(
+            "left count %s: %d partitions, %d rows (%.3fs)",
+            name,
+            len(values),
+            sum(values.values()),
+            took,
+        )
+        public = public_pair_config(pair)
+        document = {
+            "run_id": run_id,
+            "pair": name,
+            "left": public["left"],
+            "right": public["right"],
+            "bounds": {"from": pair.get("fromDate"), "to": pair.get("toDate")},
+            "date_synonyms": dict(pair.get("date_synonyms") or {}),
+            "counts": values,
+            "pair_config": public,
+            "preflight": health[name],
+            "timing": {"left_count_s": took},
+        }
+        store.put_json(f"stage1/{name}.left.json", document)
+        log.info("-> stage1/%s.left.json", name)
+        documents.append(document)
+    store.put_json("stage1/_LEFT_CLOSED", {"pairs": sorted(pairs), "run_id": run_id})
+    store.heartbeat()
+    store.put_json("_STATUS.json", {"state": "left_closed", "run_id": run_id, "role": "left"})
+    log.info(
+        "left side closed: %d pair(s) in %.3fs; waiting on the Right side for verdicts",
+        len(pairs),
+        time.monotonic() - started,
     )
-    return run_id, documents, manifests
+    return run_id, documents

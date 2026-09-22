@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reconciliation Report</title>
+
+    <style>
+        body { margin: 0; padding: 12px; font-family: Segoe UI, Arial, sans-serif; font-size: 12.5px; }
+        summary::-webkit-details-marker { display: none; }
+        details[open] summary::before { content: '▼ '; }
+        details summary::before { content: '▶ '; }
+        div.page-title { font-family: "Segoe UI", Arial, sans-serif; font-size: 28px; font-weight: 600; color: #1f2933; margin-bottom: 6px; }
+        div.page-title .update-note { margin-top: 4px; font-size: 13px; color: #6b7280; font-weight: 400; }
+        h2.section { font-size: 18px; color: #1f2933; margin: 24px 0 8px 0; }
+        .calendar-icon { width: 14px; height: 14px; margin-right: 6px; vertical-align: -2px; stroke: #9CA3AF; stroke-width: 2; fill: none; }
+    </style>
+</head>
+<body>
+    <div class="page-title">
+        Reconciliation Report
+        <div class="update-note">
+            <svg class="calendar-icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></svg>
+            Latest update: Sep 22, 2026 12:28 UTC | run 20260922T122749Z-e2e
+        </div>
+    </div>
+
+    <p style="font-size:13px;">run <code>20260922T122749Z-e2e</code> <span style="color:green; font-weight:600;">DONE</span> · 2 pair(s) · row_count_diff 1 · partition_missing 2 · col_stat_diff 2 · units 11/11</p>
+<h2 class="section">Stage 1 · Row counts by partition</h2>
+    <table style="border-collapse:collapse; width:100%; font-family:Segoe UI, Arial, sans-serif; font-size:12.5px; table-layout:fixed;">
+        <colgroup>
+            <col style="width:120px;">
+            <col style="width:140px;">
+            <col style="width:110px;">
+            <col style="width:110px;">
+            <col style="width:160px;">
+            <col style="width:120px;">
+        </colgroup>
+        <thead><tr>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Environment</th>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Date Variable</th>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Min Date</th>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Max Date</th>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Row Count</th>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Query Runtime</th>
+        </tr></thead>
+        <tbody>
+            <tr><td colspan="6" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">customers</td></tr>
+            <tr><td style="border:1px solid #ccc; padding:8px;">csv</td><td style="border:1px solid #ccc; padding:8px;">SNAPSHOT_DT</td><td style="border:1px solid #ccc; padding:8px;">2026-01-01</td><td style="border:1px solid #ccc; padding:8px;">2026-01-31</td><td style="border:1px solid #ccc; padding:8px;">620 (0.00 M)</td><td style="border:1px solid #ccc; padding:8px;">0.1s</td></tr>
+            <tr><td style="border:1px solid #ccc; padding:8px;">databricks</td><td style="border:1px solid #ccc; padding:8px;">snapshot_dt</td><td style="border:1px solid #ccc; padding:8px;">2026-01-01</td><td style="border:1px solid #ccc; padding:8px;">2026-01-31</td><td style="border:1px solid #ccc; padding:8px;">620 (0.00 M)</td><td style="border:1px solid #ccc; padding:8px;">0.0s</td></tr>
+            <tr><td colspan="6" style="border:1px solid #ccc; padding:4px;">
+                <details style="margin:0;">
+                    <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">csv only: 0, databricks only: 0, <span style="color:green;">days match: 31</span>, <span style="color:green;">days mismatch: 0</span></summary>
+                    <div style="padding:8px; font-size:12px;">
+<p style="margin:8px 0; color:green;">✓ All dates match perfectly!</p>
+                    </div>
+                </details>
+            </td></tr>
+            <tr><td colspan="6" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">orders</td></tr>
+            <tr><td style="border:1px solid #ccc; padding:8px;">csv</td><td style="border:1px solid #ccc; padding:8px;">BUSINESS_DATE</td><td style="border:1px solid #ccc; padding:8px;">2026-01-01</td><td style="border:1px solid #ccc; padding:8px;">2026-02-28</td><td style="border:1px solid #ccc; padding:8px;">1,740 (0.00 M)</td><td style="border:1px solid #ccc; padding:8px;">0.1s</td></tr>
+            <tr><td style="border:1px solid #ccc; padding:8px;">databricks</td><td style="border:1px solid #ccc; padding:8px;">business_date</td><td style="border:1px solid #ccc; padding:8px;">2026-01-01</td><td style="border:1px solid #ccc; padding:8px;">2026-02-28</td><td style="border:1px solid #ccc; padding:8px;">1,737 (0.00 M)</td><td style="border:1px solid #ccc; padding:8px;">0.0s</td></tr>
+            <tr><td colspan="6" style="border:1px solid #ccc; padding:4px;">
+                <details style="margin:0;">
+                    <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">csv only: 1, databricks only: 1, <span style="color:green;">days match: 56</span>, <span style="color:#c62828; font-weight:600;">days mismatch: 1</span></summary>
+                    <div style="padding:8px; font-size:12px;">
+<table style="width:100%; border:none; border-spacing:0;"><tr style="vertical-align:top;">
+<td style="width:32%; padding:0 12px; border:none; ">
+<p style="margin:4px 0; font-weight:600; text-align:center;">Mismatched Dates (1)</p>
+<table style="border-collapse:collapse; font-size:11px; width:100%;">
+<tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">CSV</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">DATABRICKS</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>
+<tr><td style="padding:2px; font-size:10px;">2026-01-15</td><td style="padding:2px; font-size:10px;">30</td><td style="padding:2px; font-size:10px;">27</td><td style="padding:2px; font-size:10px;">-3</td></tr>
+</table>
+</td>
+<td style="width:32%; padding:0 12px; border:none; border-left:1px solid #ddd;">
+<p style="margin:4px 0; font-weight:600; text-align:center;">CSV-Only Dates (1)</p>
+<table style="border-collapse:collapse; font-size:11px; width:100%;">
+<tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">CSV</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">DATABRICKS</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>
+<tr><td style="padding:2px; font-size:10px;">2026-02-10</td><td style="padding:2px; font-size:10px;">30</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">-30</td></tr>
+</table>
+</td>
+<td style="width:32%; padding:0 12px; border:none; border-left:1px solid #ddd;">
+<p style="margin:4px 0; font-weight:600; text-align:center;">DATABRICKS-Only Dates (1)</p>
+<table style="border-collapse:collapse; font-size:11px; width:100%;">
+<tr><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Date</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">CSV</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">DATABRICKS</th><th style="border-bottom:1px solid #ddd; padding:3px; text-align:left;">Diff</th></tr>
+<tr><td style="padding:2px; font-size:10px;">2026-01-31</td><td style="padding:2px; font-size:10px;">0</td><td style="padding:2px; font-size:10px;">30</td><td style="padding:2px; font-size:10px;">+30</td></tr>
+</table>
+</td>
+</tr></table>
+                    </div>
+                </details>
+            </td></tr>
+        </tbody>
+    </table>
+<h2 class="section">Stage 2 · Sampled column statistics</h2>
+    <table style="border-collapse:collapse; width:100%; font-family:Segoe UI, Arial, sans-serif; font-size:12.5px; table-layout:fixed;">
+        <colgroup>
+            <col style="width:120px;">
+            <col style="width:140px;">
+            <col style="width:110px;">
+            <col style="width:110px;">
+            <col style="width:100px;">
+            <col style="width:100px;">
+            <col style="width:120px;">
+        </colgroup>
+        <thead><tr>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Environment</th>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Date Variable</th>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Min Date</th>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Max Date</th>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;"># Columns</th>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;"># months</th>
+            <th style="border:1px solid #ccc; padding:8px; background:#f3f3f3; text-align:left;">Query Runtime</th>
+        </tr></thead>
+        <tbody>
+            <tr><td colspan="7" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">customers</td></tr>
+            <tr><td style="border:1px solid #ccc; padding:8px;">csv</td><td style="border:1px solid #ccc; padding:8px;">SNAPSHOT_DT</td><td style="border:1px solid #ccc; padding:8px;">2026-01-01</td><td style="border:1px solid #ccc; padding:8px;">2026-01-01</td><td style="border:1px solid #ccc; padding:8px;">3</td><td style="border:1px solid #ccc; padding:8px;">1</td><td style="border:1px solid #ccc; padding:8px;">—</td></tr>
+            <tr><td style="border:1px solid #ccc; padding:8px;">databricks</td><td style="border:1px solid #ccc; padding:8px;">snapshot_dt</td><td style="border:1px solid #ccc; padding:8px;">2026-01-01</td><td style="border:1px solid #ccc; padding:8px;">2026-01-01</td><td style="border:1px solid #ccc; padding:8px;">3</td><td style="border:1px solid #ccc; padding:8px;">1</td><td style="border:1px solid #ccc; padding:8px;">—</td></tr>
+            <tr><td colspan="7" style="border:1px solid #ccc; padding:4px;">
+                <details style="margin:0;">
+                    <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">3 columns: <span style="color:green;">3 match</span>, <span style="color:green;">0 diff</span> (None)</summary>
+                    <div style="padding:8px; font-size:12px;">
+<p style="margin:8px 0; color:green;">✓ All columns match across all vintages!</p>
+                    </div>
+                </details>
+            </td></tr>
+            <tr><td colspan="7" style="border:1px solid #ccc; padding:8px; background:#e8f0fe; font-weight:600;">orders</td></tr>
+            <tr><td style="border:1px solid #ccc; padding:8px;">csv</td><td style="border:1px solid #ccc; padding:8px;">BUSINESS_DATE</td><td style="border:1px solid #ccc; padding:8px;">2026-01-01</td><td style="border:1px solid #ccc; padding:8px;">2026-02-01</td><td style="border:1px solid #ccc; padding:8px;">4</td><td style="border:1px solid #ccc; padding:8px;">2</td><td style="border:1px solid #ccc; padding:8px;">—</td></tr>
+            <tr><td style="border:1px solid #ccc; padding:8px;">databricks</td><td style="border:1px solid #ccc; padding:8px;">business_date</td><td style="border:1px solid #ccc; padding:8px;">2026-01-01</td><td style="border:1px solid #ccc; padding:8px;">2026-02-01</td><td style="border:1px solid #ccc; padding:8px;">4</td><td style="border:1px solid #ccc; padding:8px;">2</td><td style="border:1px solid #ccc; padding:8px;">—</td></tr>
+            <tr><td colspan="7" style="border:1px solid #ccc; padding:4px;">
+                <details style="margin:0;">
+                    <summary style="cursor:pointer; padding:4px; list-style:none; font-weight:500; font-size:12px;">4 columns: <span style="color:green;">2 match</span>, <span style="color:#c62828; font-weight:600;">2 diff</span> (AMOUNT, STATUS)</summary>
+                    <div style="padding:8px; font-size:12px;">
+<table style="width:100%; border:none;"><tr style="vertical-align:top;">
+<td style="width:33%; padding-right:10px; border:none;">
+<p style="margin:4px 0 2px 0; font-weight:600; color:#1f2933; font-size:11px;">AMOUNT → amount (numeric) - 1 diffs:</p>
+<div style="margin-left:12px; font-size:10px; line-height:1.5;">
+├─ 2026-02-01: mean (237.2890→237.2894), std (143.5481→143.5480), hash_sum (1789923584280938000321→1792373685513303202628)<br>
+</div>
+</td>
+<td style="width:33%; padding-right:10px; border:none;">
+<p style="margin:4px 0 2px 0; font-weight:600; color:#1f2933; font-size:11px;">STATUS → status (categorical) - 1 diffs:</p>
+<div style="margin-left:12px; font-size:10px; line-height:1.5;">
+├─ 2026-01-01: n_unique (4→7), max (SHIPPED→paid), hash_sum (2823123397846579177224→2758876032985509994749)<br>
+</div>
+</td>
+<td style="width:33%; padding-right:10px; border:none;">
+</td>
+</tr></table>
+                    </div>
+                </details>
+            </td></tr>
+        </tbody>
+    </table>
+
+</body>
+</html>

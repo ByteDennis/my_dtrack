@@ -1,0 +1,1 @@
+{"col_type":"categorical","hash_sum":"3384433662861493317651","length_avg":1.7488372093023257,"length_max":2,"max_val":"W","mean":null,"min_val":"MW","n_missing":0,"n_total":215,"n_unique":4,"std":null,"top_10":"[{\"value\":\"NE\",\"count\":60},{\"value\":\"SE\",\"count\":56},{\"value\":\"W\",\"count\":54},{\"value\":\"MW\",\"count\":45}]"}

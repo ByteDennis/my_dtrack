@@ -72,9 +72,12 @@ class S3Store:
     def put_json(self, relative: str, value: Any) -> str:
         return self.put_bytes(relative, self.json_bytes(value), content_type="application/json")
 
-    def get_json(self, relative: str) -> Any:
+    def get_bytes(self, relative: str) -> bytes:
         response = self.client.get_object(Bucket=self.bucket, Key=self._key(relative))
-        return json.loads(response["Body"].read().decode())
+        return response["Body"].read()
+
+    def get_json(self, relative: str) -> Any:
+        return json.loads(self.get_bytes(relative).decode())
 
     def exists(self, relative: str) -> bool:
         try:

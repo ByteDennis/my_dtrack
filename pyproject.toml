@@ -9,8 +9,7 @@ description = "S3-coordinated two-stage data reconciliation"
 requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.34",
-    "databricks-sdk>=0.18",
-    "databricks-sql-connector>=3.0",
+    "openpyxl>=3.1",
     "oracledb>=3.0",
     "pandas>=2.0",
     "python-dotenv>=1.0",
@@ -31,8 +30,15 @@ packages = ["src/dtrack_distributed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["databricks"]
 markers = ["integration: local container-backed integration tests"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["databricks/consumer_notebook.py"]
+
+[tool.ruff.lint.per-file-ignores]
+"databricks/dtrack_cloud/*.py" = ["BLE001"]
+"src/dtrack_distributed/adapters/sources/*.py" = ["BLE001"]
+"src/dtrack_distributed/adapters/storage/*.py" = ["BLE001"]

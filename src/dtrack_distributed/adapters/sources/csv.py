@@ -26,7 +26,7 @@ class CsvSource:
             if missing:
                 raise ValueError(f"missing columns: {', '.join(missing)}")
             return {"ok": True, "source": "csv", "columns": columns}
-        except Exception as exc:  # noqa: BLE001 - preflight reports adapter health
+        except Exception as exc:
             return {"ok": False, "source": "csv", "error": str(exc)}
 
     def partition_counts(

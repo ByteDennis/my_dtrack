@@ -1,0 +1,30 @@
+2026-09-22T12:28:11.932Z INFO dtrack.cloud: cloud job start: work=s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e-manual run_id=<auto> report=None gate=manual
+2026-09-22T12:28:12.099Z INFO botocore.credentials: Found credentials in environment variables.
+2026-09-22T12:28:12.275Z INFO dtrack.cloud: run resolved: 20260922T122749Z-e2e-manual (s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e-manual)
+2026-09-22T12:28:12.415Z INFO dtrack.cloud.stage1: right count customers: 31 partitions, 620 rows (0.015s)
+2026-09-22T12:28:12.417Z INFO dtrack.cloud.stage1: reconcile customers: {'match': 31, 'count_diff': 0, 'left_only': 0, 'right_only': 0}
+2026-09-22T12:28:12.417Z INFO dtrack.cloud.stage1: gate customers: policy=manual passed=False excluded_ratio=0.0000
+2026-09-22T12:28:12.497Z INFO dtrack.cloud.stage1: right count orders: 58 partitions, 1737 rows (0.038s)
+2026-09-22T12:28:12.502Z INFO dtrack.cloud.stage1: reconcile orders: {'match': 56, 'count_diff': 1, 'left_only': 1, 'right_only': 1}
+2026-09-22T12:28:12.502Z INFO dtrack.cloud.stage1:   finding orders 2026-01-15 left=30 right=27
+2026-09-22T12:28:12.502Z INFO dtrack.cloud.stage1:   finding orders 2026-01-31 left=None right=30
+2026-09-22T12:28:12.502Z INFO dtrack.cloud.stage1:   finding orders 2026-02-10 left=30 right=None
+2026-09-22T12:28:12.502Z INFO dtrack.cloud.stage1: gate orders: policy=manual passed=False excluded_ratio=0.0508
+2026-09-22T12:28:12.672Z INFO dtrack.cloud.stage1: stage1 closed: 0/2 pairs released
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/dalab2/.local/dtrack/databricks/dtrack_cloud/__main__.py", line 66, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/home/dalab2/.local/dtrack/databricks/dtrack_cloud/__main__.py", line 42, in main
+    outcome = run(
+        args.work,
+    ...<7 lines>...
+        wait_timeout=args.wait_timeout,
+    )
+  File "/home/dalab2/.local/dtrack/databricks/dtrack_cloud/app.py", line 65, in run
+    results = consumer.run()
+  File "/home/dalab2/.local/dtrack/databricks/dtrack_cloud/consumer.py", line 195, in run
+    raise TimeoutError("consumer idle timeout expired")
+TimeoutError: consumer idle timeout expired

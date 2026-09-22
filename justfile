@@ -22,3 +22,6 @@ test-s3: s3-up
     AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 \
       DTRACK_S3_ENDPOINT_URL=http://127.0.0.1:4566 \
       uv run pytest -q -m integration tests/integration/test_s3_protocol.py
+
+e2e: s3-up
+    ./examples/e2e/run_e2e.sh

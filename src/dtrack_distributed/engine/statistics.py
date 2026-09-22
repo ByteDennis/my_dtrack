@@ -7,6 +7,8 @@ from typing import Any
 
 import pandas as pd
 
+from .normalization import collapse_decimal
+
 
 def _hash16(value: object) -> int:
     text = "<<NULL>>" if value is None or pd.isna(value) else str(value)
@@ -26,7 +28,11 @@ def column_statistics(series: pd.Series, *, strict: bool = False) -> dict[str, A
     values = series.copy()
     if strict:
         values = values.map(
-            lambda value: value if value is None or pd.isna(value) else str(value).strip().lower()
+            lambda value: (
+                value
+                if value is None or pd.isna(value)
+                else collapse_decimal(str(value).strip()).lower()
+            )
         )
     non_null = values.dropna()
     numeric = pd.to_numeric(non_null, errors="coerce")

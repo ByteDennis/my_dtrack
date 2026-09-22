@@ -1,0 +1,9 @@
+2026-09-22T12:28:09.622Z INFO botocore.credentials: Found credentials in environment variables.
+2026-09-22T12:28:09.808Z INFO dtrack.fetch: latest/pointer.json -> run 20260922T122749Z-e2e (DONE, 5 findings)
+2026-09-22T12:28:09.845Z INFO dtrack.fetch: fetched history/20260922T122749Z-e2e/customers_compare_col.csv -> /home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/customers_compare_col.csv (1503 bytes)
+2026-09-22T12:28:09.863Z INFO dtrack.fetch: fetched history/20260922T122749Z-e2e/customers_compare_row.csv -> /home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/customers_compare_row.csv (1126 bytes)
+2026-09-22T12:28:09.879Z INFO dtrack.fetch: fetched history/20260922T122749Z-e2e/index.html -> /home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/index.html (13756 bytes)
+2026-09-22T12:28:09.899Z INFO dtrack.fetch: fetched history/20260922T122749Z-e2e/orders_compare_col.csv -> /home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/orders_compare_col.csv (3916 bytes)
+2026-09-22T12:28:09.919Z INFO dtrack.fetch: fetched history/20260922T122749Z-e2e/orders_compare_row.csv -> /home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/orders_compare_row.csv (1941 bytes)
+2026-09-22T12:28:09.932Z INFO dtrack.fetch: fetched history/20260922T122749Z-e2e/report.xlsx -> /home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/report.xlsx (11092 bytes)
+2026-09-22T12:28:09.950Z INFO dtrack.fetch: fetched history/20260922T122749Z-e2e/summary.json -> /home/dalab2/.local/dtrack/examples/e2e/output/fetched_report/summary.json (526 bytes)

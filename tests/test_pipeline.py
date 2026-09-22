@@ -1,9 +1,8 @@
+import pytest
 from conftest import MemoryStore
 
 from dtrack_distributed.domain.manifest import unit_id
-from dtrack_distributed.workflows.consumer import Consumer
-from dtrack_distributed.workflows.producer import ProducerPipeline
-from dtrack_distributed.workflows.scheduler import DrainScheduler
+from dtrack_distributed.workflows.producer import ProducerPipeline, wait_for_manifests
 
 
 def manifest():
@@ -25,19 +24,7 @@ def manifest():
     }
 
 
-STATS = {
-    "col_type": "numeric",
-    "n_total": 2,
-    "n_missing": 0,
-    "n_unique": 2,
-    "hash_sum": "3",
-    "mean": 1.5,
-    "std": 0.7,
-    "min_val": "1",
-    "max_val": "2",
-    "length_avg": None,
-    "length_max": None,
-}
+STATS = {"col_type": "numeric", "n_total": 2, "n_missing": 0, "n_unique": 2, "hash_sum": "3"}
 
 
 def test_producer_commits_payload_before_pointer_and_closes_only_when_complete():
@@ -57,29 +44,30 @@ def test_producer_commits_payload_before_pointer_and_closes_only_when_complete()
     assert store.exists("manifest/_CLOSED")
 
 
-def test_scheduler_prioritizes_ready_compare_over_prefetch():
-    scheduler = DrainScheduler()
-    row = manifest()
-    scheduler.add_manifest(row)
-    pointer = {"pair": "pair", "window": "2026-01", "unit_id": "u"}
-    scheduler.add_unit(pointer)
-    first = scheduler.next_task()
-    assert first.kind == "prefetch"
-    scheduler.mark_right_ready("pair", "2026-01", {"amount": STATS})
-    assert scheduler.next_task().kind == "compare"
-
-
-def test_consumer_completes_a_matching_unit():
+def test_producer_skips_units_already_indexed():
     store = MemoryStore()
     row = manifest()
     store.put_json("manifest/pair.json", row)
-    uid = unit_id("pair", "2026-01", "amount")
-    store.commit_unit(1, uid, STATS, {"pair": "pair", "window": "2026-01", "column": "amount"})
-    store.close_manifests(["pair"], 1)
-    store.heartbeat()
-    consumer = Consumer(
-        store, fetch_right=lambda _manifest, _window: {"amount": STATS}, poll_interval=0
-    )
-    results = consumer.run()
-    assert results[0]["verdict"] == "match"
-    assert store.exists(f"results/{uid}.json")
+    args = {
+        "pull_window": lambda _m, _w: "pulled",
+        "compute_stats": lambda _m, _w, _p: {"amount": STATS},
+    }
+    assert ProducerPipeline(store, **args).run([row]) == 1
+    assert ProducerPipeline(store, **args).run([row]) == 0
+
+
+def test_wait_for_manifests_returns_only_after_right_side_closes_stage1():
+    store = MemoryStore()
+    store.put_json("manifest/pair.json", manifest())
+    store.put_json("manifest/pair.keys.json", {"pair": "pair", "windows": {}})
+    with pytest.raises(TimeoutError):
+        wait_for_manifests(store, timeout=0, poll_interval=0)
+    store.put_json("stage1/_CLOSED", {"pairs": ["pair"]})
+    assert [m["pair"] for m in wait_for_manifests(store, timeout=0, poll_interval=0)] == ["pair"]
+
+
+def test_wait_for_manifests_fails_fast_on_right_preflight_failure():
+    store = MemoryStore()
+    store.put_json("_PREFLIGHT.json", {"ok": False, "pairs": {"pair": {"error": "no table"}}})
+    with pytest.raises(RuntimeError, match="preflight failed"):
+        wait_for_manifests(store, timeout=0, poll_interval=0)

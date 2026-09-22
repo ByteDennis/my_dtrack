@@ -23,6 +23,10 @@ class MemoryStore:
     def get_json(self, key):
         return json.loads(json.dumps(self.objects[key]))
 
+    def get_bytes(self, key):
+        value = self.objects[key]
+        return value if isinstance(value, bytes) else json.dumps(value).encode()
+
     def exists(self, key):
         return key in self.objects
 

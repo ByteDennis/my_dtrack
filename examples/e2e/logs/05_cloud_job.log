@@ -1,0 +1,56 @@
+2026-09-22T12:27:53.820Z INFO dtrack.cloud: cloud job start: work=s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e run_id=<auto> report=s3://dtrack-e2e-report gate=auto
+2026-09-22T12:27:53.989Z INFO botocore.credentials: Found credentials in environment variables.
+2026-09-22T12:27:57.477Z INFO dtrack.cloud: run resolved: 20260922T122749Z-e2e (s3://dtrack-e2e-work/dtrack/v1/runs/20260922T122749Z-e2e)
+2026-09-22T12:27:57.687Z INFO dtrack.cloud.stage1: right count customers: 31 partitions, 620 rows (0.025s)
+2026-09-22T12:27:57.690Z INFO dtrack.cloud.stage1: reconcile customers: {'match': 31, 'count_diff': 0, 'left_only': 0, 'right_only': 0}
+2026-09-22T12:27:57.690Z INFO dtrack.cloud.stage1: gate customers: policy=auto passed=True excluded_ratio=0.0000
+2026-09-22T12:27:57.743Z INFO dtrack.cloud.stage1: manifest customers: 1 windows x 3 columns = 3 units -> manifest/customers.json
+2026-09-22T12:27:57.790Z INFO dtrack.cloud.stage1: right count orders: 58 partitions, 1737 rows (0.037s)
+2026-09-22T12:27:57.794Z INFO dtrack.cloud.stage1: reconcile orders: {'match': 56, 'count_diff': 1, 'left_only': 1, 'right_only': 1}
+2026-09-22T12:27:57.795Z INFO dtrack.cloud.stage1:   finding orders 2026-01-15 left=30 right=27
+2026-09-22T12:27:57.795Z INFO dtrack.cloud.stage1:   finding orders 2026-01-31 left=None right=30
+2026-09-22T12:27:57.795Z INFO dtrack.cloud.stage1:   finding orders 2026-02-10 left=30 right=None
+2026-09-22T12:27:57.795Z INFO dtrack.cloud.stage1: gate orders: policy=auto passed=True excluded_ratio=0.0508
+2026-09-22T12:27:57.872Z INFO dtrack.cloud.stage1: manifest orders: 2 windows x 4 columns = 8 units -> manifest/orders.json
+2026-09-22T12:27:57.957Z INFO dtrack.cloud.stage1: stage1 closed: 2/2 pairs released
+2026-09-22T12:27:58.016Z INFO dtrack.cloud.consumer: manifest orders loaded: 2 windows x 4 columns = 8 units -> B-queue seeded
+2026-09-22T12:27:58.026Z INFO dtrack.cloud.consumer: poll: 1 new object(s), cursor=None
+2026-09-22T12:27:58.035Z INFO dtrack.cloud.consumer: B fetch_right orders 2026-01-01: 29 partition(s)
+2026-09-22T12:27:58.119Z INFO dtrack.cloud.consumer: B right stats ready orders 2026-01-01 (0.085s) -> 0 unit(s) promoted to A-queue
+2026-09-22T12:27:58.206Z INFO dtrack.cloud.consumer: B fetch_right orders 2026-02-01: 27 partition(s)
+2026-09-22T12:27:58.291Z INFO dtrack.cloud.consumer: B right stats ready orders 2026-02-01 (0.085s) -> 0 unit(s) promoted to A-queue
+2026-09-22T12:27:59.805Z INFO dtrack.cloud.consumer: manifest customers loaded: 1 windows x 3 columns = 3 units -> B-queue seeded
+2026-09-22T12:28:00.051Z INFO dtrack.cloud.consumer: poll: 8 new object(s), cursor=_INDEX/00000007-orders--2026-01-01--status--5f1e638acc28.json
+2026-09-22T12:28:00.091Z INFO dtrack.cloud.consumer: A compare orders 2026-01-01 AMOUNT -> MATCH
+2026-09-22T12:28:00.285Z INFO dtrack.cloud.consumer: poll: 2 new object(s), cursor=_INDEX/00000009-orders--2026-02-01--order-id--26b77acc8a23.json
+2026-09-22T12:28:00.340Z INFO dtrack.cloud.consumer: A compare orders 2026-01-01 ORDER_ID -> MATCH
+2026-09-22T12:28:00.526Z INFO dtrack.cloud.consumer: poll: 2 new object(s), cursor=_INDEX/00000011-orders--2026-02-01--status--a7ba91862e41.json
+2026-09-22T12:28:00.600Z INFO dtrack.cloud.consumer: A compare orders 2026-01-01 REGION -> MATCH
+2026-09-22T12:28:00.773Z INFO dtrack.cloud.consumer: A compare orders 2026-01-01 STATUS -> DIFF
+2026-09-22T12:28:00.934Z INFO dtrack.cloud.consumer: A compare orders 2026-02-01 AMOUNT -> DIFF
+2026-09-22T12:28:01.079Z INFO dtrack.cloud.consumer: A compare orders 2026-02-01 ORDER_ID -> MATCH
+2026-09-22T12:28:01.229Z INFO dtrack.cloud.consumer: A compare orders 2026-02-01 REGION -> MATCH
+2026-09-22T12:28:01.381Z INFO dtrack.cloud.consumer: A compare orders 2026-02-01 STATUS -> MATCH
+2026-09-22T12:28:01.576Z INFO dtrack.cloud.consumer: B fetch_right customers 2026-01-01: 31 partition(s)
+2026-09-22T12:28:01.623Z INFO dtrack.cloud.consumer: B right stats ready customers 2026-01-01 (0.047s) -> 3 unit(s) promoted to A-queue
+2026-09-22T12:28:01.771Z INFO dtrack.cloud.consumer: A compare customers 2026-01-01 BALANCE -> MATCH
+2026-09-22T12:28:01.913Z INFO dtrack.cloud.consumer: A compare customers 2026-01-01 CUST_ID -> MATCH
+2026-09-22T12:28:02.055Z INFO dtrack.cloud.consumer: A compare customers 2026-01-01 TIER -> MATCH
+2026-09-22T12:28:02.361Z INFO dtrack.cloud.consumer: drain complete: 11 result(s), 0 dead
+2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/customers_compare_col.csv (1503 bytes)
+2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/customers_compare_row.csv (1126 bytes)
+2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/index.html (13756 bytes)
+2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/orders_compare_col.csv (3916 bytes)
+2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/orders_compare_row.csv (1941 bytes)
+2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/report.xlsx (11092 bytes)
+2026-09-22T12:28:03.079Z INFO dtrack.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/summary.json (526 bytes)
+2026-09-22T12:28:03.079Z INFO dtrack.report: report 20260922T122749Z-e2e: status=DONE findings={'row_count_diff': 1, 'partition_missing': 2, 'col_stat_diff': 2} units=11/11
+2026-09-22T12:28:03.105Z INFO dtrack.report: published history/20260922T122749Z-e2e/customers_compare_col.csv
+2026-09-22T12:28:03.127Z INFO dtrack.report: published history/20260922T122749Z-e2e/customers_compare_row.csv
+2026-09-22T12:28:03.148Z INFO dtrack.report: published history/20260922T122749Z-e2e/index.html
+2026-09-22T12:28:03.169Z INFO dtrack.report: published history/20260922T122749Z-e2e/orders_compare_col.csv
+2026-09-22T12:28:03.190Z INFO dtrack.report: published history/20260922T122749Z-e2e/orders_compare_row.csv
+2026-09-22T12:28:03.212Z INFO dtrack.report: published history/20260922T122749Z-e2e/report.xlsx
+2026-09-22T12:28:03.232Z INFO dtrack.report: published history/20260922T122749Z-e2e/summary.json
+2026-09-22T12:28:03.251Z INFO dtrack.report: published latest/pointer.json -> history/20260922T122749Z-e2e/
+2026-09-22T12:28:03.270Z INFO dtrack.cloud: cloud job done: 11 result(s), report -> s3://dtrack-e2e-report

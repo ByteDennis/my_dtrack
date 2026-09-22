@@ -1,81 +1,59 @@
 from conftest import MemoryStore
 
-from dtrack_distributed.workflows.stage1 import run_stage1
+from dtrack_distributed.workflows.stage1 import run_stage1_left
 
 
-def test_stage1_orders_all_preflights_then_right_counts_then_left_counts():
-    calls = []
+class Fake:
+    def preflight(self):
+        return {"ok": True}
+
+    def partition_counts(self, *_args):
+        return {"2026-01-01": 1, "20260102": 2}
+
+
+def test_stage1_left_publishes_counts_and_public_config_without_secrets():
     config = {
         "pairs": {
-            name: {
-                "left": {"source": "csv", "path": "unused", "date_col": "dt"},
-                "right": {"source": "databricks", "table": name, "date_col": "dt"},
+            "p": {
+                "left": {
+                    "source": "oracle",
+                    "table": "A",
+                    "date_col": "dt",
+                    "dsn": "host:1521/SVC",
+                    "user_env": "PCDS_USER",
+                    "password": "secret",
+                },
+                "right": {
+                    "source": "databricks",
+                    "catalog": "c",
+                    "schema": "s",
+                    "table": "a",
+                    "date_col": "dt",
+                    "server_hostname": "adb.example.net",
+                    "access_token_env": "TOK",
+                },
                 "col_map": {"amount": "amount"},
+                "sample": 0.1,
+                "key": "id",
             }
-            for name in ("a", "b")
         }
     }
-
-    class Fake:
-        def __init__(self, side, name):
-            self.side, self.name = side, name
-
-        def preflight(self):
-            calls.append(("preflight", self.name))
-            return {"ok": True}
-
-        def partition_counts(self, *_args):
-            calls.append((self.side, self.name))
-            return {"2026-01-01": 1}
-
     store = MemoryStore()
-    run_stage1(
-        config,
-        store,
-        run_id="run",
-        source_factory=lambda row: Fake("left", row.get("table", "left")),
-        target_factory=lambda row: Fake("right", row["table"]),
+    run_id, documents = run_stage1_left(
+        config, store, run_id="run", source_factory=lambda _row: Fake()
     )
-    kinds = [kind for kind, _name in calls]
-    assert max(i for i, kind in enumerate(kinds) if kind == "preflight") < min(
-        i for i, kind in enumerate(kinds) if kind == "right"
-    )
-    assert max(i for i, kind in enumerate(kinds) if kind == "right") < min(
-        i for i, kind in enumerate(kinds) if kind == "left"
-    )
-    assert store.exists("manifest/a.json")
-    assert store.exists("stage1/_CLOSED")
-
-
-def test_stage1_materializes_fixed_sample_keys_before_publishing_manifest(tmp_path):
-    pair = {
-        "left": {"source": "csv", "path": "unused", "date_col": "dt"},
-        "right": {"source": "databricks", "table": "right", "date_col": "dt"},
-        "key": "id",
-        "sample": 1,
-        "col_map": {"id": "id", "amount": "amount"},
+    doc = store.get_json("stage1/p.left.json")
+    assert run_id == "run" and len(documents) == 1
+    assert doc["counts"] == {"2026-01-01": 1, "20260102": 2}
+    assert doc["pair_config"]["sample"] == 0.1
+    assert "dsn" not in doc["left"] and "password" not in doc["left"]
+    assert "user_env" not in doc["left"]
+    assert doc["right"] == {
+        "source": "databricks",
+        "catalog": "c",
+        "schema": "s",
+        "table": "a",
+        "date_col": "dt",
     }
-
-    class Fake:
-        def preflight(self):
-            return {"ok": True}
-
-        def partition_counts(self, *_args):
-            return {"2026-01-01": 2}
-
-        def pull_window(self, _partitions, _columns, output, *, key_columns):
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text("dt,id\n2026-01-01,10\n2026-01-01,20\n")
-            return output
-
-    store = MemoryStore()
-    run_stage1(
-        {"pairs": {"p": pair}},
-        store,
-        run_id="run",
-        source_factory=lambda _row: Fake(),
-        target_factory=lambda _row: Fake(),
-        work_dir=tmp_path,
-    )
-    window = store.get_json("manifest/p.json")["windows"][0]
-    assert len(window["key_tuples"]) == 1
+    assert store.get_json("stage1/_LEFT_CLOSED")["pairs"] == ["p"]
+    assert not any(key.startswith("manifest/") for key in store.objects)

@@ -1,6 +1,6 @@
 import pytest
+from dtrack_cloud.gates import evaluate_gate, reconcile_partitions
 
-from dtrack_distributed.domain.gates import evaluate_gate, reconcile_partitions
 from dtrack_distributed.domain.manifest import build_manifest, sample_plan, unit_id
 from dtrack_distributed.engine.sampling import sample_csv
 from dtrack_distributed.engine.sql import partition_where

@@ -47,7 +47,7 @@ class SqlSource(ABC):
         try:
             self.query(f"SELECT * FROM {self.relation()} WHERE 1=0")
             return {"ok": True, "source": self.config.get("source")}
-        except Exception as exc:  # noqa: BLE001 - preflight reports adapter health
+        except Exception as exc:
             return {"ok": False, "source": self.config.get("source"), "error": str(exc)}
 
     def partition_counts(

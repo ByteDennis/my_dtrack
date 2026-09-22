@@ -9,10 +9,30 @@ from dotenv import load_dotenv
 LEFT_SOURCES = {"oracle", "athena", "aws", "hadoop", "csv"}
 
 
+# >>> expand side.conn_macro from top-level connections; pair-level fields win <<< #
+def resolve_connections(config: dict[str, Any]) -> dict[str, Any]:
+    profiles = config.get("connections") or {}
+    if not isinstance(profiles, dict):
+        raise TypeError("connections must be an object of named profiles")
+    for name, pair in (config.get("pairs") or {}).items():
+        for side in ("left", "right"):
+            spec = pair.get(side)
+            macro = (spec or {}).get("conn_macro")
+            if not macro or not isinstance(spec, dict):
+                continue
+            if macro not in profiles:
+                if str(spec.get("source") or "").lower() == "csv":
+                    continue
+                raise ValueError(f"{name}: unknown conn_macro {macro!r} for {side}")
+            pair[side] = {**profiles[macro], **spec}
+    return config
+
+
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     pairs = config.get("pairs")
     if not isinstance(pairs, dict) or not pairs:
         raise ValueError("config requires a non-empty pairs object")
+    resolve_connections(config)
     for name, pair in pairs.items():
         if pair.get("skip"):
             continue
