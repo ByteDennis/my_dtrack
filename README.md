@@ -1,46 +1,42 @@
-# dtrack-distributed
+# dtrack
 
-Two-stage distributed reconciliation, split into two codebases that only meet in S3 (ADR 0006):
+Two-stage data reconciliation between on-prem sources and Databricks, split into two codebases
+that only meet in S3 (ADR 0006):
 
-- `src/dtrack_distributed` runs on-prem: counts the Left side, waits for the Right side's verdicts,
-  publishes left-side statistics with data-before-pointer commits, downloads the finished report.
-  No Databricks credential, about 1.7k lines.
-- `databricks/dtrack_cloud` runs as a Databricks job started once: counts the Right side with
-  `spark.sql`, reconciles per Partition, prefetches its own statistics, compares Units, publishes
-  the report, exits.
+| Package | Runs on | Commands / entry | Needs |
+| --- | --- | --- | --- |
+| `src/dtrack_left` | on-prem PC | `dtrack row-check`, `dtrack col-check`, `dtrack fetch-report`, `dtrack doctor`, `dtrack debug` | Left-side DB access, S3 write on one prefix, S3 read on the report store |
+| `src/dtrack_right` | a Databricks job, started once | `src/dtrack_right/notebook.py` (`python -m dtrack_right` locally) | table or Volume read, work/report locations |
 
-Oracle is installed by default on-prem; Athena and Hadoop are optional extras. SAS is out of scope.
+- **row check** (stage 1): exact row counts per day on both sides; only days whose counts agree
+  go on. Left writes `row_check/<pair>.left.json`; Right reconciles and writes the verdicts and the
+  `manifest/<pair>.json` plan.
+- **col check** (stage 2): deterministic sampling and per-column statistics on both sides,
+  compared on the Right. Left publishes `units/` + `_INDEX/` pointers; Right prefetches its own
+  side, compares, writes `results/`, builds and publishes the report.
+
+The on-prem side holds no Databricks credential and installs no Databricks package. The Right
+side never imports the Left package. Oracle is installed by default; Athena and Hadoop are extras.
 
 ```bash
 uv sync
 uv run pytest
-uv run dtrack-distributed --help
+uv run dtrack --help          # or: python -m dtrack --help (no console-script launcher)
+just e2e            # both sides against a local Moto S3
 ```
 
-Run the local S3 protocol simulator and its integration test:
-
-```bash
-just test-s3
-```
-
-See [docs/workflow.md](docs/workflow.md) for commands, object layout, invariants, and live-environment acceptance gates.
+See `docs/workflow.md` for commands and the S3 contract, `docs/notes/` for the walkthrough, and
+`docs/plans/plan_coverage.md` for what is and is not implemented.
 
 ## Repository shape
 
 ```text
-.
-├── src/dtrack_distributed/   # LEFT side (on-prem)
-│   ├── domain/       # Barrier, Manifest, Unit
-│   ├── engine/       # exact local statistics, sampling, SQL generation
-│   ├── adapters/     # Oracle/CSV/S3 plus optional Athena/Hadoop
-│   └── workflows/    # stage1 (left counts), producer, fetch (report download)
-├── databricks/               # RIGHT side (Databricks)
-│   ├── consumer_notebook.py  # start once; watches, reconciles, drains, reports, exits
-│   └── dtrack_cloud/         # self-contained: SparkTarget, stage1_right, consumer, reporting, S3/Volume store
-├── tests/            # left-side tests, tests/cloud for the right side + parity
-├── docker/           # optional Moto S3 simulator
-├── docs/             # workflow, ADRs, source plans, plan coverage, Obsidian notes (docs/notes)
-├── .agents/skills/   # grilling and domain-modeling project skills
-├── CONTEXT.md
-└── pyproject.toml
+src/dtrack_left/     cli, config, sources (oracle/csv/athena/hadoop), s3, row_check, col_check, fetch, debug,
+                     manifest, sampling, statistics, normalization, dates, sql
+src/dtrack_right/    notebook.py, app, row_check, col_check, scheduler, comparison, targets (SparkTarget, CsvAnchorTarget),
+                     store (S3 / Volume), report, report_html, report_excel, gates, manifest, sampling, statistics, ...
+tests/               left tests; tests/right for the right side and the vendored-module parity test
+examples/e2e/        two-process end-to-end run with synthetic data
+docker/              Moto S3 simulator
+docs/                workflow, ADRs, plans, notes, slides
 ```

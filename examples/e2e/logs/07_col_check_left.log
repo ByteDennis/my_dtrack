@@ -1,0 +1,17 @@
+2026-09-23T11:57:48.150Z INFO botocore.credentials: Found credentials in environment variables.
+2026-09-23T11:57:48.386Z INFO dtrack.left.col_check: row_check/_CLOSED seen: 2 manifest(s) released
+2026-09-23T11:57:48.480Z INFO dtrack.left.col_check: fixed sample keys customers: {'2026-01-01': 40} -> manifest/customers.keys.json
+2026-09-23T11:57:48.538Z INFO dtrack.left.col_check: col_check start: 2 manifest(s), 0 unit(s) already indexed, next sequence=1, wip=200
+2026-09-23T11:57:48.539Z INFO dtrack.left.col_check: pull customers 2026-01-01: 31 partition(s)
+2026-09-23T11:57:48.539Z INFO dtrack.left.col_check: pull orders 2026-01-01: 29 partition(s)
+2026-09-23T11:57:48.602Z INFO dtrack.left.col_check: left customers 2026-01-01: 620 rows scanned -> 40 sampled (/home/dalab2/.local/dtrack/examples/e2e/work/col_check/customers/2026-01-01/left.sampled.csv)
+2026-09-23T11:57:48.608Z INFO dtrack.left.col_check: pulled customers 2026-01-01 -> stat queue
+2026-09-23T11:57:48.609Z INFO dtrack.left.col_check: pull orders 2026-02-01: 27 partition(s)
+2026-09-23T11:57:48.691Z INFO dtrack.left.col_check: left orders 2026-01-01: 870 rows scanned -> 215 sampled (/home/dalab2/.local/dtrack/examples/e2e/work/col_check/orders/2026-01-01/left.sampled.csv)
+2026-09-23T11:57:48.722Z INFO dtrack.left.col_check: left orders 2026-02-01: 810 rows scanned -> 200 sampled (/home/dalab2/.local/dtrack/examples/e2e/work/col_check/orders/2026-02-01/left.sampled.csv)
+2026-09-23T11:57:48.981Z INFO dtrack.left.col_check: committed customers 2026-01-01: 3 unit(s) _INDEX/00000001..00000003 (data before pointer)
+2026-09-23T11:57:48.995Z INFO dtrack.left.col_check: pulled orders 2026-02-01 -> stat queue
+2026-09-23T11:57:48.996Z INFO dtrack.left.col_check: pulled orders 2026-01-01 -> stat queue
+2026-09-23T11:57:49.533Z INFO dtrack.left.col_check: committed orders 2026-02-01: 4 unit(s) _INDEX/00000004..00000007 (data before pointer)
+2026-09-23T11:57:50.071Z INFO dtrack.left.col_check: committed orders 2026-01-01: 4 unit(s) _INDEX/00000008..00000011 (data before pointer)
+2026-09-23T11:57:50.245Z INFO dtrack.left.col_check: manifest/_CLOSED written: pairs=['customers', 'orders'] expected_units=11

@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted. Paths renamed on 2026-09-23: `src/dtrack_left` (was `src/dtrack_distributed`), `src/dtrack_right`
+(was `databricks/dtrack_cloud`); "stage1" is now `row_check`, "stage2"/producer/consumer is `col_check`.
 
 ## Context
 

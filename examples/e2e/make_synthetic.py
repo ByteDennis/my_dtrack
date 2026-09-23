@@ -7,8 +7,6 @@ from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-LEFT = ROOT / "data" / "left"
-RIGHT = ROOT / "data" / "right"
 STATUSES = ["NEW", "PAID", "SHIPPED", "CANCELLED"]
 REGIONS = ["NE", "SE", "MW", "W"]
 TIERS = ["Gold", "Silver", "Bronze"]
@@ -30,7 +28,7 @@ def write(path: Path, header: list[str], rows: list[list[object]]) -> Path:
 
 
 # >>> orders: 59 daily partitions with injected row-count and column findings <<< #
-def build_orders(rng: random.Random) -> dict[str, object]:
+def build_orders(rng: random.Random, left_dir: Path, right_dir: Path) -> dict[str, object]:
     left, right = [], []
     order_id = 100000
     for day in days(date(2026, 1, 1), date(2026, 2, 28)):
@@ -52,8 +50,8 @@ def build_orders(rng: random.Random) -> dict[str, object]:
                 right.append(right_row)
     dropped = [row for row in right if row[0] == "2026-01-15"][:3]
     right = [row for row in right if row not in dropped]
-    write(LEFT / "ORDERS.csv", ["BUSINESS_DATE", "ORDER_ID", "AMOUNT", "STATUS", "REGION"], left)
-    write(RIGHT / "orders.csv", ["business_date", "order_id", "amount", "status", "region"], right)
+    write(left_dir / "ORDERS.csv", ["BUSINESS_DATE", "ORDER_ID", "AMOUNT", "STATUS", "REGION"], left)
+    write(right_dir / "orders.csv", ["business_date", "order_id", "amount", "status", "region"], right)
     return {
         "left_rows": len(left),
         "right_rows": len(right),
@@ -68,7 +66,7 @@ def build_orders(rng: random.Random) -> dict[str, object]:
 
 
 # >>> customers: one month, identical populations, TIER differs only by case <<< #
-def build_customers(rng: random.Random) -> dict[str, object]:
+def build_customers(rng: random.Random, left_dir: Path, right_dir: Path) -> dict[str, object]:
     left, right = [], []
     cust_id = 5000
     for day in days(date(2026, 1, 1), date(2026, 1, 31)):
@@ -79,8 +77,8 @@ def build_customers(rng: random.Random) -> dict[str, object]:
             balance = round(rng.uniform(0, 10000), 2)
             left.append([iso, cust_id, tier, f"{balance:.2f}"])
             right.append([iso, cust_id, tier.upper(), f"{balance:.2f}"])
-    write(LEFT / "CUSTOMERS.csv", ["SNAPSHOT_DT", "CUST_ID", "TIER", "BALANCE"], left)
-    write(RIGHT / "customers.csv", ["snapshot_dt", "cust_id", "tier", "balance"], right)
+    write(left_dir / "CUSTOMERS.csv", ["SNAPSHOT_DT", "CUST_ID", "TIER", "BALANCE"], left)
+    write(right_dir / "customers.csv", ["snapshot_dt", "cust_id", "tier", "balance"], right)
     return {
         "left_rows": len(left),
         "right_rows": len(right),
@@ -88,11 +86,20 @@ def build_customers(rng: random.Random) -> dict[str, object]:
     }
 
 
+# >>> write both pairs under <root>/left and <root>/right; deterministic for a fixed seed <<< #
+def build(root: Path, seed: int = 20260921) -> dict[str, object]:
+    rng = random.Random(seed)
+    left_dir, right_dir = Path(root) / "left", Path(root) / "right"
+    summary = {
+        "orders": build_orders(rng, left_dir, right_dir),
+        "customers": build_customers(rng, left_dir, right_dir),
+    }
+    (Path(root) / "SYNTHETIC.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return summary
+
+
 def main() -> None:
-    rng = random.Random(20260921)
-    summary = {"orders": build_orders(rng), "customers": build_customers(rng)}
-    (ROOT / "data" / "SYNTHETIC.json").write_text(json.dumps(summary, indent=2) + "\n")
-    print(json.dumps(summary))
+    print(json.dumps(build(ROOT / "data")))
 
 
 if __name__ == "__main__":

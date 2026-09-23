@@ -1,19 +1,16 @@
-import os
 import uuid
 
 import boto3
 import pytest
 from botocore.config import Config
 
-from dtrack_distributed.adapters.storage.s3 import S3Store
+from dtrack_left.s3 import S3Store
 
 pytestmark = pytest.mark.integration
 
 
-def test_moto_s3_data_before_pointer_and_start_after():
-    endpoint = os.getenv("DTRACK_S3_ENDPOINT_URL")
-    if not endpoint:
-        pytest.skip("DTRACK_S3_ENDPOINT_URL is not set")
+def test_moto_s3_data_before_pointer_and_start_after(moto_endpoint):
+    endpoint = moto_endpoint
     client = boto3.client(
         "s3",
         endpoint_url=endpoint,

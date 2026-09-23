@@ -1,0 +1,56 @@
+2026-09-23T11:57:43.703Z INFO dtrack.right: right job start: work=s3://dtrack-e2e-work/dtrack/v1/runs/20260923T115738Z-e2e run_id=<auto> report=s3://dtrack-e2e-report gate=auto
+2026-09-23T11:57:43.876Z INFO botocore.credentials: Found credentials in environment variables.
+2026-09-23T11:57:47.335Z INFO dtrack.right: run resolved: 20260923T115738Z-e2e (s3://dtrack-e2e-work/dtrack/v1/runs/20260923T115738Z-e2e)
+2026-09-23T11:57:47.521Z INFO dtrack.right.row_check: right count customers: 31 partitions, 620 rows (0.023s)
+2026-09-23T11:57:47.524Z INFO dtrack.right.row_check: reconcile customers: {'match': 31, 'count_diff': 0, 'left_only': 0, 'right_only': 0}
+2026-09-23T11:57:47.524Z INFO dtrack.right.row_check: gate customers: policy=auto passed=True excluded_ratio=0.0000
+2026-09-23T11:57:47.566Z INFO dtrack.right.row_check: manifest customers: 1 windows x 3 columns = 3 units -> manifest/customers.json
+2026-09-23T11:57:47.617Z INFO dtrack.right.row_check: right count orders: 58 partitions, 1737 rows (0.042s)
+2026-09-23T11:57:47.621Z INFO dtrack.right.row_check: reconcile orders: {'match': 56, 'count_diff': 1, 'left_only': 1, 'right_only': 1}
+2026-09-23T11:57:47.621Z INFO dtrack.right.row_check:   finding orders 2026-01-15 left=30 right=27
+2026-09-23T11:57:47.621Z INFO dtrack.right.row_check:   finding orders 2026-01-31 left=None right=30
+2026-09-23T11:57:47.621Z INFO dtrack.right.row_check:   finding orders 2026-02-10 left=30 right=None
+2026-09-23T11:57:47.621Z INFO dtrack.right.row_check: gate orders: policy=auto passed=True excluded_ratio=0.0508
+2026-09-23T11:57:47.658Z INFO dtrack.right.row_check: manifest orders: 2 windows x 4 columns = 8 units -> manifest/orders.json
+2026-09-23T11:57:47.717Z INFO dtrack.right.row_check: row_check closed: 2/2 pairs released
+2026-09-23T11:57:47.792Z INFO dtrack.right.col_check: manifest orders loaded: 2 windows x 4 columns = 8 units -> B-queue seeded
+2026-09-23T11:57:47.813Z INFO dtrack.right.col_check: poll: 1 new object(s), cursor=None
+2026-09-23T11:57:47.830Z INFO dtrack.right.col_check: B fetch_right orders 2026-01-01: 29 partition(s)
+2026-09-23T11:57:47.921Z INFO dtrack.right.col_check: B right stats ready orders 2026-01-01 (0.091s) -> 0 unit(s) promoted to A-queue
+2026-09-23T11:57:48.023Z INFO dtrack.right.col_check: B fetch_right orders 2026-02-01: 27 partition(s)
+2026-09-23T11:57:48.123Z INFO dtrack.right.col_check: B right stats ready orders 2026-02-01 (0.100s) -> 0 unit(s) promoted to A-queue
+2026-09-23T11:57:49.632Z INFO dtrack.right.col_check: manifest customers loaded: 1 windows x 3 columns = 3 units -> B-queue seeded
+2026-09-23T11:57:49.859Z INFO dtrack.right.col_check: poll: 8 new object(s), cursor=_INDEX/00000007-orders--2026-02-01--status--a7ba91862e41.json
+2026-09-23T11:57:49.915Z INFO dtrack.right.col_check: A compare orders 2026-02-01 AMOUNT -> DIFF
+2026-09-23T11:57:50.107Z INFO dtrack.right.col_check: poll: 3 new object(s), cursor=_INDEX/00000010-orders--2026-01-01--region--3f3069d1c3b4.json
+2026-09-23T11:57:50.165Z INFO dtrack.right.col_check: A compare orders 2026-02-01 ORDER_ID -> MATCH
+2026-09-23T11:57:50.288Z INFO dtrack.right.col_check: poll: 1 new object(s), cursor=_INDEX/00000011-orders--2026-01-01--status--5f1e638acc28.json
+2026-09-23T11:57:50.322Z INFO dtrack.right.col_check: A compare orders 2026-02-01 REGION -> MATCH
+2026-09-23T11:57:50.488Z INFO dtrack.right.col_check: A compare orders 2026-02-01 STATUS -> MATCH
+2026-09-23T11:57:50.612Z INFO dtrack.right.col_check: A compare orders 2026-01-01 AMOUNT -> MATCH
+2026-09-23T11:57:50.749Z INFO dtrack.right.col_check: A compare orders 2026-01-01 ORDER_ID -> MATCH
+2026-09-23T11:57:50.892Z INFO dtrack.right.col_check: A compare orders 2026-01-01 REGION -> MATCH
+2026-09-23T11:57:51.049Z INFO dtrack.right.col_check: A compare orders 2026-01-01 STATUS -> DIFF
+2026-09-23T11:57:51.266Z INFO dtrack.right.col_check: B fetch_right customers 2026-01-01: 31 partition(s)
+2026-09-23T11:57:51.316Z INFO dtrack.right.col_check: B right stats ready customers 2026-01-01 (0.049s) -> 3 unit(s) promoted to A-queue
+2026-09-23T11:57:51.439Z INFO dtrack.right.col_check: A compare customers 2026-01-01 BALANCE -> MATCH
+2026-09-23T11:57:51.639Z INFO dtrack.right.col_check: A compare customers 2026-01-01 CUST_ID -> MATCH
+2026-09-23T11:57:51.784Z INFO dtrack.right.col_check: A compare customers 2026-01-01 TIER -> MATCH
+2026-09-23T11:57:52.083Z INFO dtrack.right.col_check: col_check complete: 11 result(s), 0 dead
+2026-09-23T11:57:52.763Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/customers_compare_col.csv (1503 bytes)
+2026-09-23T11:57:52.763Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/customers_compare_row.csv (1126 bytes)
+2026-09-23T11:57:52.763Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/index.html (13756 bytes)
+2026-09-23T11:57:52.763Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/orders_compare_col.csv (3916 bytes)
+2026-09-23T11:57:52.763Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/orders_compare_row.csv (1941 bytes)
+2026-09-23T11:57:52.763Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/report.xlsx (11093 bytes)
+2026-09-23T11:57:52.763Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/output/report/summary.json (526 bytes)
+2026-09-23T11:57:52.763Z INFO dtrack.right.report: report 20260923T115738Z-e2e: status=DONE findings={'row_count_diff': 1, 'partition_missing': 2, 'col_stat_diff': 2} units=11/11
+2026-09-23T11:57:52.788Z INFO dtrack.right.report: published history/20260923T115738Z-e2e/customers_compare_col.csv
+2026-09-23T11:57:52.804Z INFO dtrack.right.report: published history/20260923T115738Z-e2e/customers_compare_row.csv
+2026-09-23T11:57:52.824Z INFO dtrack.right.report: published history/20260923T115738Z-e2e/index.html
+2026-09-23T11:57:52.843Z INFO dtrack.right.report: published history/20260923T115738Z-e2e/orders_compare_col.csv
+2026-09-23T11:57:52.862Z INFO dtrack.right.report: published history/20260923T115738Z-e2e/orders_compare_row.csv
+2026-09-23T11:57:52.881Z INFO dtrack.right.report: published history/20260923T115738Z-e2e/report.xlsx
+2026-09-23T11:57:52.901Z INFO dtrack.right.report: published history/20260923T115738Z-e2e/summary.json
+2026-09-23T11:57:52.917Z INFO dtrack.right.report: published latest/pointer.json -> history/20260923T115738Z-e2e/
+2026-09-23T11:57:52.937Z INFO dtrack.right: right job done: 11 result(s), report -> s3://dtrack-e2e-report

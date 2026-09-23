@@ -1,160 +1,132 @@
-# Distributed reconciliation workflow
+# Workflow
 
-This repository contains only the distributed reconciliation package. It does not vendor the
-original `dtrack` application or `ccsv`; those were references used to preserve comparison
-semantics.
+Two codebases, one S3 (or Volume) work location, no direct link between the sides (ADR 0006).
 
-## Two codebases (ADR 0006)
-
-| Side | Code | Runs on | Needs |
+| Side | Package | Runs on | Needs |
 | --- | --- | --- | --- |
-| Left | `src/dtrack_distributed` (`dtrack-distributed` CLI): `stage1`, `produce`, `fetch-report`, `doctor` | on-prem PC | Left-side DB access, S3 write on one prefix, S3 read on the report store |
-| Right | `databricks/dtrack_cloud` + `databricks/consumer_notebook.py` | a Databricks job, started once | table or Volume read, work/report location |
+| Left | `src/dtrack_left`, CLI `dtrack` | on-prem PC | Left-side DB access, S3 write on one prefix, S3 read on the report store |
+| Right | `src/dtrack_right` + `src/dtrack_right/notebook.py` | a Databricks job, started once | table or Volume read, work/report locations |
 
-The on-prem side holds no Databricks credential and installs no Databricks package. The cloud side
-never imports the on-prem package. Sync the `databricks/` folder to a Repo; the notebook's folder is
-on `sys.path`, so `import dtrack_cloud` works without a wheel.
+Sync `src/` to a Databricks Repo; the notebook puts its parent folder on `sys.path`, so
+`import dtrack_right` works without a wheel. The Right side never imports `dtrack_left`
+(`tests/test_dependencies.py`). The Left side has no Databricks package or credential.
 
-`work` may be a run folder or the runs root; with the root and no `run_id` the job picks the newest
-run whose `_STATUS.json` is not `complete`. On Databricks the recommended trigger is a file arrival
-trigger on the runs Volume path, so the job starts by itself when `stage1/*.left.json` lands.
-
-## Runtime sequence
-
-Step-by-step notes with code excerpts live in `docs/notes/` (start at `00 索引.md`); the
-plan-vs-implementation matrix and improvement list are in `docs/plans/plan_coverage.md`.
-
-1. Right job starts (by hand or on a schedule) and polls the work location for `stage1/*.left.json`.
-2. Left `stage1` counts every Left-side Partition and writes `stage1/<pair>.left.json` plus
-   `stage1/_LEFT_CLOSED`. The document carries the pair config without credentials.
-3. Right job preflights and counts its side with `spark.sql`, reconciles, gates, writes
-   `stage1/<pair>.json`, `reports/<pair>_compare_row.csv`, `manifest/<pair>.json`, then `stage1/_CLOSED`.
-4. Left `produce` waits for `stage1/_CLOSED`, publishes `manifest/<pair>.keys.json` for fixed-N
-   pairs, scans admitted Windows, computes statistics, writes each Unit payload and only then its
-   Ready pointer, and closes with `manifest/_CLOSED`.
-5. Right job prefetches its own side per Window (B), compares as Units arrive (A), writes
-   `results/` and `dead/`, builds `summary.json` + CSV + HTML + XLSX, publishes `history/<run_id>/`
-   then `latest/pointer.json`, and exits.
-
-## Dependencies
-
-- Base install (on-prem): boto3, pandas, oracledb, python-dotenv. Nothing for reporting.
-- Cloud side: `databricks/requirements.txt` (`openpyxl`, `boto3`); the notebook's first cell runs
-  `%pip install -r ./requirements.txt` because a job cluster is a fresh environment.
-
-## Key normalisation (ported from the legacy branch)
-
-Both sides normalise a key the same way before hashing: strings `lower(trim(NFC))`, dates to
-`YYYY-MM-DD`, numerics collapse trailing zeros **only on pure decimals** (`2.50 → 2.5`, `2.0 → 2`)
-while leading zeros and exponents are kept (`007`, `1e3` stay). Blank or NULL becomes `<<NULL>>`.
-The Python rule lives in `engine/normalization.py` (vendored into the cloud package, parity-tested)
-and its Spark SQL twin in `dtrack_cloud/targets.py::_norm_sql`. The bucket is `md5(...)` first 8 hex
-as a 32-bit integer, identical to the legacy `_hash32_expr`.
-- `.[athena]`: Athena Left-side adapter.
-- `.[hadoop]`: Hadoop/Impala Left-side adapter.
-- SAS: deliberately deferred and absent.
-
-Install optional adapters with `uv sync --extra athena` or `uv sync --extra hadoop`.
+Step-by-step notes with code excerpts live in `docs/notes/`; the plan-vs-implementation matrix and
+improvement list are in `docs/plans/plan_coverage.md`.
 
 ## Commands
 
 ```bash
 # on-prem
-dtrack-distributed doctor  --config config.json
-dtrack-distributed stage1  --config config.json --s3 s3://bucket/run-prefix --run-id <id>
-dtrack-distributed produce --s3 s3://bucket/run-prefix            # waits for the Right side
-dtrack-distributed fetch-report --report-s3 s3://report-bucket --out ./report [--run-id <id>]   # download what the cloud published
+dtrack doctor       --config config.json
+dtrack row-check    --config config.json --s3 s3://work/dtrack/v1/runs/<run_id> [--run-id <id>]
+dtrack col-check    --s3 s3://work/dtrack/v1/runs/<run_id>              # waits for the Right side's manifests
+dtrack fetch-report --report-s3 s3://report --out ./report [--run-id <id>]
+dtrack debug [--attach [PORT]] -- <subcommand and its arguments>         # ipdb, or wait for VS Code
+python -m dtrack <subcommand ...>      # same CLI without the Scripts/dtrack.exe launcher (Windows Defender blocks it on some PCs)
 
-# Databricks (notebook widgets: work, report, gate) — or the local stand-in for tests:
-PYTHONPATH=databricks python -m dtrack_cloud --work s3://bucket/dtrack/v1/runs [--run-id <id>] --report s3://report-bucket --right-csv-dir DIR
+# Databricks: notebook widgets work / run_id / report / gate — or the local stand-in used by the e2e:
+PYTHONPATH=src python -m dtrack_right --work s3://work/dtrack/v1/runs [--run-id <id>] --report s3://report --right-csv-dir DIR
 ```
 
-The cloud job builds the report at the end of every run: `summary.json`, `<pair>_compare_row.csv`,
-`<pair>_compare_col.csv`, a self-contained `index.html` (same look as the original dtrack `--html`
-reports) and `report.xlsx` (`<pair>_row` and `<pair>_col` sheets, findings in red). It uploads the
-immutable `history/<run_id>/` set first and `latest/pointer.json` last, so a reader of the pointer
-never sees a half-written run. `fetch-report` downloads that set on-prem; without `--run-id` it
-follows the pointer.
+`work` may be a run folder or the runs root; with the root and no `run_id` the Right job picks the
+newest run whose `_STATUS.json` is not `complete`. The recommended Databricks trigger is a file
+arrival trigger on the runs Volume path, so the job starts by itself when `row_check/*.left.json`
+lands. Every command accepts `--log-level` and writes UTC-stamped lines to stderr; the final JSON
+summary goes to stdout.
 
-`python -m dtrack_cloud --right-csv-dir DIR` is the local stand-in for the notebook: the Right side
-of each Pair is read from `DIR/<table>.csv` with the same pandas statistics as the Left side.
-Production uses `SparkTarget`. Every command accepts `--log-level` and writes UTC-stamped progress
-lines to stderr; the final JSON summary goes to stdout.
+## Runtime sequence
 
-## Connection profiles
-
-Several Oracle servers (different accounts, passwords, service names) and several Databricks
-workspaces (different warehouses, catalogs, schemas) are described once under `connections` and
-referenced per side with `conn_macro`. Fields written directly on the side override the profile.
-
-```jsonc
-{
-  "connections": {
-    "ora_pcds": {"source": "oracle", "dsn": "pcds-scan:1521/PCDS",
-                 "user_env": "PCDS_USER", "password_env": "PCDS_PASSWORD"},
-    "ora_edw":  {"source": "oracle", "dsn": "edw-scan:1521/EDWPRD",
-                 "user_env": "EDW_USER", "password_env": "EDW_PASSWORD"},
-    "dbx_main": {"source": "databricks", "server_hostname": "adb-main...net",
-                 "http_path": "/sql/1.0/warehouses/main", "access_token_env": "DBX_MAIN_TOKEN"}
-  },
-  "pairs": {
-    "orders": {
-      "left":  {"conn_macro": "ora_pcds", "schema": "FINANCE", "table": "ORDERS", "date_col": "BUSINESS_DATE", "date_type": "date"},
-      "right": {"conn_macro": "dbx_main", "catalog": "main", "schema": "sales", "table": "orders", "date_col": "business_date", "date_type": "date"}
-    }
-  }
-}
-```
-
-Credentials never live in the config file: `user_env` / `password_env` / `access_token_env` name
-the environment variables (or `.env` entries) to read.
-
-## End-to-end example
-
-`just e2e` (or `examples/e2e/run_e2e.sh`) generates synthetic data, runs Stage 1, starts the
-Consumer before the Producer, drains, re-runs both for resume semantics, exercises the `manual`
-and `ratio` gates, builds the report, and mirrors the work store and the report store to
-`examples/e2e/output/`. The timestamped record is `examples/e2e/execution.txt`; per-command logs
-are in `examples/e2e/logs/`.
+1. Right job starts (by hand, schedule, or file arrival) and polls the runs location.
+2. Left `row-check` counts every Left-side Partition and writes `row_check/<pair>.left.json`
+   (counts plus the pair config stripped of credentials) and `row_check/_LEFT_CLOSED`.
+3. Right job preflights and counts its side with `spark.sql`, reconciles per Partition, gates, and
+   writes `row_check/<pair>.json`, `reports/<pair>_compare_row.csv`, `manifest/<pair>.json`, then
+   `row_check/_CLOSED`.
+4. Left `col-check` waits for `row_check/_CLOSED`, publishes `manifest/<pair>.keys.json` for fixed-N
+   pairs, scans admitted Windows, computes statistics, writes each Unit payload and only then its
+   Ready pointer, and closes with `manifest/_CLOSED`.
+5. Right job prefetches its own side per Window (B), compares as Units arrive (A), writes
+   `results/` and `dead/`, builds `summary.json` + CSV + HTML + XLSX, publishes
+   `history/<run_id>/` then `latest/pointer.json`, and exits.
+6. Left `fetch-report` downloads that set; without `--run-id` it follows the pointer.
 
 ## S3 object contract
 
 ```text
-run-prefix/
-├── _PREFLIGHT.json
-├── _STATUS.json
-├── _HEARTBEAT
-├── stage1/<pair>.left.json      written by the Left side
-├── stage1/_LEFT_CLOSED
-├── stage1/<pair>.json           written by the Right side
-├── stage1/_CLOSED
-├── manifest/<pair>.json         written by the Right side
-├── manifest/<pair>.keys.json    fixed-N only, written by the Left side
-├── manifest/_CLOSED
-├── units/<unit-id>.json
-├── _INDEX/<sequence>-<unit-id>.json
-├── results/<unit-id>.json
-├── dead/<unit-id>.json
-└── reports/<pair>_compare_row.csv
+<work>/dtrack/v1/runs/<run_id>/
+├── _STATUS.json                 whoever is working overwrites it (role: left | right)
+├── _HEARTBEAT                   Left col-check liveness
+├── row_check/<pair>.left.json   LEFT  counts + credential-free pair config   ← Right's first signal
+├── row_check/_LEFT_CLOSED       LEFT
+├── row_check/<pair>.json        RIGHT verdict per Partition
+├── row_check/_CLOSED            RIGHT                                        ← Left col-check waits for it
+├── reports/<pair>_compare_row.csv  RIGHT
+├── manifest/<pair>.json         RIGHT admitted days, sampling rule, columns
+├── manifest/<pair>.keys.json    LEFT  fixed-N only
+├── manifest/_CLOSED             LEFT  {pairs, expected_units}
+├── units/<unit-id>.json         LEFT  payload
+├── _INDEX/<sequence>-<unit-id>.json  LEFT pointer, written after the payload
+├── results/<unit-id>.json       RIGHT
+└── dead/<unit-id>.json          RIGHT
+<report>/
+├── history/<run_id>/            summary.json · <pair>_compare_row.csv · <pair>_compare_col.csv · index.html · report.xlsx
+└── latest/pointer.json          written last
 ```
 
-The payload under `units/` must exist before its `_INDEX/` pointer. Consumers use `StartAfter` to
-advance monotonically. A Unit ends in exactly one of `results/` or `dead/`.
+The payload under `units/` must exist before its `_INDEX/` pointer. The Right side discovers Units
+only through `_INDEX/` with `StartAfter`. A Unit ends in exactly one of `results/` or `dead/`.
 
-## Local S3 simulator
+## Connection profiles
 
-The simulator is useful for protocol integration tests but is not required for unit tests or
-production:
+Several Oracle servers and Databricks workspaces are described once under `connections` and
+referenced per side with `conn_macro`; fields on the side override the profile. Credentials never
+live in the file: `user_env` / `password_env` name the environment variables (or `.env` entries).
+The Right side only receives `catalog/schema/table/date_col/date_type`.
+
+## Key normalisation (ported from the legacy branch)
+
+Both sides normalise a key the same way before hashing: strings `lower(trim(NFC))`, dates to
+`YYYY-MM-DD`, numerics collapse trailing zeros only on pure decimals (`2.50 → 2.5`) while leading
+zeros and exponents stay (`007`, `1e3`). Blank or NULL becomes `<<NULL>>`. Python rule in
+`dtrack_left/normalization.py` (vendored into `dtrack_right`, parity-tested); Spark SQL twin in
+`dtrack_right/targets.py::_norm_sql`. The bucket is `md5(...)` first 8 hex as a 32-bit integer.
+
+## Dependencies
+
+- Left: boto3, pandas, oracledb, openpyxl, python-dotenv. Extras: `.[athena]`, `.[hadoop]`.
+  Dev: pytest, ruff, ipdb, debugpy, pyspark (local `SparkTarget` verification), testcontainers
+  (Oracle container verification).
+- Right: `src/dtrack_right/requirements.txt` (`openpyxl`, `boto3`); the notebook's first cell runs
+  `%pip install -r ./requirements.txt` because a job cluster is a fresh environment.
+
+## Local S3 simulator and end-to-end run
 
 ```bash
-docker compose -f docker/compose.s3.yaml up -d
-DTRACK_S3_ENDPOINT_URL=http://127.0.0.1:4566 \
-AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 \
-uv run pytest -m integration
+just s3-up          # Moto on 127.0.0.1:4566
+just test-s3        # protocol integration test
+just e2e            # examples/e2e/run_e2e.sh: both sides, synthetic data, timestamped record
 ```
+
+## Tests
+
+```bash
+uv run pytest                    # tests/left + tests/right on real synthetic files (default)
+just test-s3                     # tests/integration on Moto        (--run-integration)
+just test-spark                  # tests/spark: SparkTarget vs pandas on local pyspark (--run-spark)
+just test-containers             # tests/containers: OracleSource on gvenzl/oracle-free (--run-containers)
+just test-e2e                    # tests/e2e: the examples script   (--run-e2e)
+just test-live                   # tests/live: your real tables     (--run-live, DTRACK_LIVE_* env)
+just test-debug <pytest args>    # ipdb post-mortem;  just test-attach <args> waits for VS Code on :5678
+```
+
+Numeric columns are hashed and counted on their canonical decimal text on both sides
+(`collapse_decimal`), and `min/max` follow pandas formatting; this is verified against a local
+Spark session and a real Oracle container.
 
 ## Acceptance boundary
 
-Local tests prove configuration, domain rules, scheduling, retry terminal states, and the S3
-protocol. Production acceptance still requires live Oracle/Databricks credentials, representative
-tables, and a real bucket policy/KMS validation.
+Default tests prove configuration, domain rules, scheduling, retry terminal states, the protocol on a
+real directory store and left/right parity on real files. `SparkTarget` is verified on a local
+pyspark session and `OracleSource` on an Oracle container; production acceptance still needs a
+Databricks cluster, representative tables and a real bucket policy (`tests/live`).

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "dtrack-distributed"
+name = "dtrack"
 version = "0.1.0"
 description = "S3-coordinated two-stage data reconciliation"
 requires-python = ">=3.11"
@@ -20,25 +20,39 @@ athena = ["pyathena>=2.0"]
 hadoop = ["impyla>=0.19", "thrift-sasl>=0.4", "pure-sasl>=0.6"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.9"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.9",
+    "ipdb>=0.13",
+    "debugpy>=1.8",
+    "pyspark>=3.5,<4",
+    "testcontainers>=4",
+]
 
 [project.scripts]
-dtrack-distributed = "dtrack_distributed.cli:main"
+dtrack = "dtrack_left.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dtrack_distributed"]
+packages = ["src/dtrack_left", "src/dtrack"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["databricks"]
-markers = ["integration: local container-backed integration tests"]
+pythonpath = ["src", "tests"]
+markers = [
+    "integration: needs the local Moto S3 container (run with --run-integration)",
+    "e2e: runs examples/e2e/run_e2e.sh end to end (run with --run-e2e)",
+    "spark: local pyspark session, verifies SparkTarget SQL against pandas (run with --run-spark)",
+    "containers: real databases via testcontainers, e.g. Oracle (run with --run-containers)",
+    "live: needs real Oracle / Databricks credentials (run with --run-live)",
+]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["databricks/consumer_notebook.py"]
+extend-exclude = ["src/dtrack_right/notebook.py"]
 
 [tool.ruff.lint.per-file-ignores]
-"databricks/dtrack_cloud/*.py" = ["BLE001"]
-"src/dtrack_distributed/adapters/sources/*.py" = ["BLE001"]
-"src/dtrack_distributed/adapters/storage/*.py" = ["BLE001"]
+"src/dtrack_right/*.py" = ["BLE001"]
+"src/dtrack_left/debug.py" = ["T100"]
+"src/dtrack_left/sources.py" = ["BLE001"]
+"src/dtrack_left/s3.py" = ["BLE001"]

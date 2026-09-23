@@ -1,0 +1,9 @@
+2026-09-23T11:57:46.911Z INFO botocore.credentials: Found credentials in environment variables.
+2026-09-23T11:57:47.047Z INFO dtrack.left.row_check: run_id=20260923T115738Z-e2e work=s3://dtrack-e2e-work/dtrack/v1/runs/20260923T115738Z-e2e pairs=['orders', 'customers']
+2026-09-23T11:57:47.100Z INFO dtrack.left.row_check: left preflight orders: OK
+2026-09-23T11:57:47.101Z INFO dtrack.left.row_check: left preflight customers: OK
+2026-09-23T11:57:47.176Z INFO dtrack.left.row_check: left count orders: 58 partitions, 1740 rows (0.075s)
+2026-09-23T11:57:47.195Z INFO dtrack.left.row_check: -> row_check/orders.left.json
+2026-09-23T11:57:47.195Z INFO dtrack.left.row_check: left count customers: 31 partitions, 620 rows (0.070s)
+2026-09-23T11:57:47.211Z INFO dtrack.left.row_check: -> row_check/customers.left.json
+2026-09-23T11:57:47.277Z INFO dtrack.left.row_check: left side closed: 2 pair(s) in 0.201s; waiting on the Right side for row-check verdicts

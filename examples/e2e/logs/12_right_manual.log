@@ -1,0 +1,30 @@
+2026-09-23T11:58:00.816Z INFO dtrack.right: right job start: work=s3://dtrack-e2e-work/dtrack/v1/runs/20260923T115738Z-e2e-manual run_id=<auto> report=None gate=manual
+2026-09-23T11:58:00.986Z INFO botocore.credentials: Found credentials in environment variables.
+2026-09-23T11:58:01.171Z INFO dtrack.right: run resolved: 20260923T115738Z-e2e-manual (s3://dtrack-e2e-work/dtrack/v1/runs/20260923T115738Z-e2e-manual)
+2026-09-23T11:58:01.350Z INFO dtrack.right.row_check: right count customers: 31 partitions, 620 rows (0.023s)
+2026-09-23T11:58:01.353Z INFO dtrack.right.row_check: reconcile customers: {'match': 31, 'count_diff': 0, 'left_only': 0, 'right_only': 0}
+2026-09-23T11:58:01.353Z INFO dtrack.right.row_check: gate customers: policy=manual passed=False excluded_ratio=0.0000
+2026-09-23T11:58:01.447Z INFO dtrack.right.row_check: right count orders: 58 partitions, 1737 rows (0.041s)
+2026-09-23T11:58:01.451Z INFO dtrack.right.row_check: reconcile orders: {'match': 56, 'count_diff': 1, 'left_only': 1, 'right_only': 1}
+2026-09-23T11:58:01.451Z INFO dtrack.right.row_check:   finding orders 2026-01-15 left=30 right=27
+2026-09-23T11:58:01.451Z INFO dtrack.right.row_check:   finding orders 2026-01-31 left=None right=30
+2026-09-23T11:58:01.451Z INFO dtrack.right.row_check:   finding orders 2026-02-10 left=30 right=None
+2026-09-23T11:58:01.451Z INFO dtrack.right.row_check: gate orders: policy=manual passed=False excluded_ratio=0.0508
+2026-09-23T11:58:01.623Z INFO dtrack.right.row_check: row_check closed: 0/2 pairs released
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/dalab2/.local/dtrack/src/dtrack_right/__main__.py", line 66, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/home/dalab2/.local/dtrack/src/dtrack_right/__main__.py", line 42, in main
+    outcome = run(
+        args.work,
+    ...<7 lines>...
+        wait_timeout=args.wait_timeout,
+    )
+  File "/home/dalab2/.local/dtrack/src/dtrack_right/app.py", line 65, in run
+    results = col_check.run()
+  File "/home/dalab2/.local/dtrack/src/dtrack_right/col_check.py", line 195, in run
+    raise TimeoutError("right idle timeout expired")
+TimeoutError: right idle timeout expired

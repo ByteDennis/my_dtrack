@@ -1,0 +1,16 @@
+2026-09-23T11:57:53.821Z INFO botocore.credentials: Found credentials in environment variables.
+2026-09-23T11:57:54.086Z INFO dtrack.left.col_check: row_check/_CLOSED seen: 2 manifest(s) released
+2026-09-23T11:57:54.353Z INFO dtrack.left.col_check: col_check start: 2 manifest(s), 11 unit(s) already indexed, next sequence=12, wip=200
+2026-09-23T11:57:54.353Z INFO dtrack.left.col_check: pull customers 2026-01-01: 31 partition(s)
+2026-09-23T11:57:54.355Z INFO dtrack.left.col_check: pull orders 2026-01-01: 29 partition(s)
+2026-09-23T11:57:54.482Z INFO dtrack.left.col_check: left customers 2026-01-01: 620 rows scanned -> 40 sampled (/home/dalab2/.local/dtrack/examples/e2e/work/col_check/customers/2026-01-01/left.sampled.csv)
+2026-09-23T11:57:54.482Z INFO dtrack.left.col_check: pulled customers 2026-01-01 -> stat queue
+2026-09-23T11:57:54.482Z INFO dtrack.left.col_check: pull orders 2026-02-01: 27 partition(s)
+2026-09-23T11:57:54.485Z INFO dtrack.left.col_check: left orders 2026-01-01: 870 rows scanned -> 215 sampled (/home/dalab2/.local/dtrack/examples/e2e/work/col_check/orders/2026-01-01/left.sampled.csv)
+2026-09-23T11:57:54.494Z INFO dtrack.left.col_check: pulled orders 2026-01-01 -> stat queue
+2026-09-23T11:57:54.536Z INFO dtrack.left.col_check: committed customers 2026-01-01: 0 unit(s) _INDEX/00000012..00000012 (data before pointer)
+2026-09-23T11:57:54.617Z INFO dtrack.left.col_check: left orders 2026-02-01: 810 rows scanned -> 200 sampled (/home/dalab2/.local/dtrack/examples/e2e/work/col_check/orders/2026-02-01/left.sampled.csv)
+2026-09-23T11:57:54.623Z INFO dtrack.left.col_check: pulled orders 2026-02-01 -> stat queue
+2026-09-23T11:57:54.624Z INFO dtrack.left.col_check: committed orders 2026-01-01: 0 unit(s) _INDEX/00000012..00000012 (data before pointer)
+2026-09-23T11:57:54.673Z INFO dtrack.left.col_check: committed orders 2026-02-01: 0 unit(s) _INDEX/00000012..00000012 (data before pointer)
+2026-09-23T11:57:54.890Z INFO dtrack.left.col_check: manifest/_CLOSED written: pairs=['customers', 'orders'] expected_units=11

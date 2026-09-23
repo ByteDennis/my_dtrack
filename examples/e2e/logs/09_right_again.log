@@ -1,0 +1,16 @@
+2026-09-23T11:57:55.582Z INFO dtrack.right: right job start: work=s3://dtrack-e2e-work/dtrack/v1/runs run_id=<auto> report=None gate=auto
+2026-09-23T11:57:55.778Z INFO botocore.credentials: Found credentials in environment variables.
+2026-09-23T11:57:56.054Z INFO dtrack.right: run resolved: 20260923T115738Z-e2e (s3://dtrack-e2e-work/dtrack/v1/runs/20260923T115738Z-e2e)
+2026-09-23T11:57:56.499Z INFO dtrack.right.col_check: manifest customers loaded: 1 windows x 3 columns = 3 units -> B-queue seeded
+2026-09-23T11:57:56.499Z INFO dtrack.right.col_check: manifest orders loaded: 2 windows x 4 columns = 8 units -> B-queue seeded
+2026-09-23T11:57:56.745Z INFO dtrack.right.col_check: poll: 2 new object(s), cursor=_INDEX/00000011-orders--2026-01-01--status--5f1e638acc28.json
+2026-09-23T11:57:56.951Z INFO dtrack.right.col_check: col_check complete: 0 result(s), 0 dead
+2026-09-23T11:57:57.613Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/work/report-rerun/customers_compare_col.csv (1503 bytes)
+2026-09-23T11:57:57.613Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/work/report-rerun/customers_compare_row.csv (1126 bytes)
+2026-09-23T11:57:57.613Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/work/report-rerun/index.html (13756 bytes)
+2026-09-23T11:57:57.613Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/work/report-rerun/orders_compare_col.csv (3916 bytes)
+2026-09-23T11:57:57.613Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/work/report-rerun/orders_compare_row.csv (1941 bytes)
+2026-09-23T11:57:57.613Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/work/report-rerun/report.xlsx (11093 bytes)
+2026-09-23T11:57:57.613Z INFO dtrack.right.report: wrote /home/dalab2/.local/dtrack/examples/e2e/work/report-rerun/summary.json (526 bytes)
+2026-09-23T11:57:57.614Z INFO dtrack.right.report: report 20260923T115738Z-e2e: status=DONE findings={'row_count_diff': 1, 'partition_missing': 2, 'col_stat_diff': 2} units=11/11
+2026-09-23T11:57:57.623Z INFO dtrack.right: right job done: 0 result(s), report -> /home/dalab2/.local/dtrack/examples/e2e/work/report-rerun
