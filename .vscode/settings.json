@@ -1,0 +1,39 @@
+{
+    "python.testing.pytestArgs": [
+        "tests"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+
+    "notebook.markup.fontSize": 14,
+    "notebook.output.fontSize": 13,
+    "notebook.output.lineHeight": 20,
+    "notebook.output.fontFamily": "'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace",
+    "notebook.output.wordWrap": true,
+    "notebook.output.scrolling": true,
+    "notebook.output.textLineLimit": 60,
+    "notebook.lineNumbers": "on",
+    "notebook.compactView": true,
+    "notebook.cellToolbarLocation": { "default": "right" },
+    "notebook.cellFocusIndicator": "border",
+    "[python]": { "editor.fontSize": 13 },
+
+    "workbench.colorCustomizations": {
+        "[*Dark*]": {
+            "textPreformat.foreground": "#e5c07b",
+            "textPreformat.background": "#2d2f34",
+            "textCodeBlock.background": "#181a1f",
+            "notebook.cellBorderColor": "#3a3d41",
+            "notebook.focusedCellBorder": "#4e94ce",
+            "notebook.outputContainerBackgroundColor": "#1b1d21"
+        },
+        "[*Light*]": {
+            "textPreformat.foreground": "#a31515",
+            "textPreformat.background": "#eff1f3",
+            "textCodeBlock.background": "#f6f8fa",
+            "notebook.cellBorderColor": "#d0d7de",
+            "notebook.focusedCellBorder": "#0969da",
+            "notebook.outputContainerBackgroundColor": "#fafbfc"
+        }
+    }
+}

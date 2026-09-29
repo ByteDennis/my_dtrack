@@ -21,7 +21,7 @@ resume semantics are the real code paths.
 | `make_synthetic.py` | Deterministic generator; injected findings are listed in `data/SYNTHETIC.json` |
 | `data/left/*.csv`, `data/right/*.csv` | Left and Right populations (upper-case vs lower-case column names, mapped by `col_map`) |
 | `run_e2e.sh` | Driver; every step is stamped with a UTC time, the command line, exit code and elapsed seconds. Step 05 is the Right job running in the background for the whole run |
-| `execution.txt` | The complete timestamped record of the last run |
+| `execution.txt` | The complete timestamped record of the last run (with `logs/` and `output/`: written by `just e2e`, git-ignored) |
 | `logs/NN_<step>.log` | stderr of each step: UTC-stamped lines from `dtrack.left.*` and `dtrack.right.*`; each step's stdout JSON is inlined in `execution.txt` |
 | `output/report/` | The deliverables the Right job built: `summary.json`, `<pair>_compare_row.csv`, `<pair>_compare_col.csv`, `index.html`, `report.xlsx` |
 | `output/fetched_report/` | The same set downloaded on-prem with `fetch-report` (follows `latest/pointer.json`) |

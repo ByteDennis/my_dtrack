@@ -7,8 +7,8 @@ import sys
 import time
 from pathlib import Path
 
-from .app import run
-from .targets import CsvAnchorTarget
+from .backends.targets import CsvAnchorTarget
+from .job import run
 
 
 # >>> local stand-in for the Databricks notebook: same loop, CSV anchor instead of spark <<< #

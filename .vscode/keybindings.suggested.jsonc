@@ -1,0 +1,95 @@
+// Place your key bindings in this file to override the defaults
+[
+    // >>> palette and quick open: cmd+p commands, cmd+o files, cmd+j / cmd+k move in lists <<< //
+    { "key": "cmd+p", "command": "workbench.action.showCommands" },
+    { "key": "cmd+o", "command": "workbench.action.quickOpen" },
+    { "key": "cmd+j", "command": "workbench.action.quickOpenSelectNext", "when": "inQuickOpen" },
+    { "key": "cmd+k", "command": "workbench.action.quickOpenSelectPrevious", "when": "inQuickOpen" },
+    {
+        "key": "cmd+j",
+        "command": "selectNextSuggestion",
+        "when": "suggestWidgetVisible && textInputFocus"
+    },
+    {
+        "key": "cmd+k",
+        "command": "selectPrevSuggestion",
+        "when": "suggestWidgetVisible && textInputFocus"
+    },
+    { "key": "cmd+m", "command": "editor.action.triggerParameterHints", "when": "editorHasSignatureHelpProvider && editorTextFocus" },
+    { "key": "shift+cmd+space", "command": "-editor.action.triggerParameterHints", "when": "editorHasSignatureHelpProvider && editorTextFocus" },
+    { "key": "cmd+t", "command": "-workbench.action.showAllSymbols" },
+    { "key": "cmd+\\", "command": "unicode-latex.insertMathSymbol" },
+
+    // >>> editors: shift+cmd+t reopens the closed editor again; close-others back on its default alt+cmd+t <<< //
+    { "key": "shift+cmd+w", "command": "workbench.action.closeEditorsAndGroup" },
+    { "key": "alt+cmd+t", "command": "workbench.action.closeOtherEditors" },
+    { "key": "shift+cmd+t", "command": "workbench.action.reopenClosedEditor" },
+    { "key": "cmd+i", "command": "-kilo-code.addToContextAndFocus", "when": "editorTextFocus && kilocode.ghost.enableQuickInlineTaskKeybinding && !github.copilot.completions.enabled" },
+    { "key": "ctrl+o", "command": "-lineBreakInsert", "when": "textInputFocus && !editorReadonly" },
+
+    // >>> terminal: cmd+t toggles editor <-> terminal, cmd+[ / cmd+] cycle, ctrl+shift+w kills (ctrl+w stays delete-word) <<< //
+    { "key": "ctrl+t", "command": "workbench.action.terminal.new", "when": "terminalProcessSupported || terminalWebExtensionContributedProfile" },
+    { "key": "ctrl+shift+`", "command": "-workbench.action.terminal.new", "when": "terminalProcessSupported || terminalWebExtensionContributedProfile" },
+    { "key": "cmd+t", "command": "workbench.action.terminal.focus", "when": "!terminalFocus" },
+    { "key": "cmd+t", "command": "workbench.action.focusActiveEditorGroup", "when": "terminalFocus" },
+    { "key": "cmd+t", "command": "-workbench.action.browser.newTab", "when": "activeEditor == 'workbench.editor.browser'" },
+    { "key": "ctrl+shift+w", "command": "workbench.action.terminal.kill", "when": "terminalFocus" },
+    { "key": "shift+cmd+m", "command": "workbench.action.toggleMaximizedPanel", "when": "terminalFocus" },
+    { "key": "shift+enter", "command": "workbench.action.terminal.sendSequence", "args": { "text": "\u001b\r" }, "when": "terminalFocus" },
+    {
+        "key": "cmd+]",
+        "command": "workbench.action.terminal.focusNext",
+        "when": "terminalFocus && !terminalEditorFocus"
+    },
+    { "key": "shift+cmd+]", "command": "-workbench.action.terminal.focusNext", "when": "terminalFocus && terminalHasBeenCreated && !terminalEditorFocus || terminalFocus && terminalProcessSupported && !terminalEditorFocus" },
+    {
+        "key": "cmd+[",
+        "command": "workbench.action.terminal.focusPrevious",
+        "when": "terminalFocus && !terminalEditorFocus"
+    },
+    { "key": "shift+cmd+[", "command": "-workbench.action.terminal.focusPrevious", "when": "terminalFocus && terminalHasBeenCreated && !terminalEditorFocus || terminalFocus && terminalProcessSupported && !terminalEditorFocus" },
+
+    // >>> debug on the ctrl+d chord; never while the terminal has focus, so ctrl+d still sends EOF to ipdb / the shell <<< //
+    { "key": "ctrl+d ctrl+d", "command": "editor.debug.action.toggleBreakpoint", "when": "editorTextFocus" },
+    { "key": "ctrl+d ctrl+x", "command": "editor.debug.action.conditionalBreakpoint", "when": "editorTextFocus" },
+    { "key": "ctrl+d ctrl+p", "command": "workbench.action.debug.start", "when": "editorLangId == 'python' && !inDebugMode && !terminalFocus" },
+    { "key": "ctrl+d ctrl+r", "command": "workbench.action.debug.restart", "when": "inDebugMode && !terminalFocus" },
+    { "key": "ctrl+d ctrl+s", "command": "workbench.action.debug.stop", "when": "inDebugMode && !terminalFocus" },
+    { "key": "ctrl+d ctrl+g", "command": "workbench.action.debug.continue", "when": "debugState == 'stopped' && !terminalFocus" },
+    { "key": "ctrl+d ctrl+n", "command": "workbench.action.debug.stepOver", "when": "debugState == 'stopped' && !terminalFocus" },
+    { "key": "ctrl+d ctrl+i", "command": "workbench.action.debug.stepInto", "when": "debugState == 'stopped' && !terminalFocus" },
+    { "key": "ctrl+d ctrl+o", "command": "workbench.action.debug.stepOut", "when": "debugState == 'stopped' && !terminalFocus" },
+    { "key": "ctrl+d ctrl+c", "command": "editor.debug.action.runToCursor", "when": "debugState == 'stopped' && editorTextFocus" },
+    { "key": "ctrl+d ctrl+e", "command": "editor.debug.action.selectionToRepl", "when": "inDebugMode && editorHasSelection" },
+    { "key": "ctrl+d ctrl+b", "command": "workbench.debug.action.toggleRepl", "when": "!terminalFocus" },
+
+    // >>> run on the cmd+r chord: python file, tasks (just recipes), and pytest through the Testing view <<< //
+    { "key": "cmd+r cmd+p", "command": "python.execInDedicatedTerminal", "when": "editorLangId == 'python'" },
+    { "key": "cmd+r cmd+t", "command": "workbench.action.tasks.runTask" },
+    { "key": "cmd+r cmd+u", "command": "testing.runAtCursor", "when": "editorTextFocus" },
+    { "key": "cmd+r cmd+d", "command": "testing.debugAtCursor", "when": "editorTextFocus" },
+    { "key": "cmd+r cmd+f", "command": "testing.runCurrentFile", "when": "editorTextFocus" },
+    { "key": "cmd+r cmd+l", "command": "testing.reRunLastRun" },
+    { "key": "cmd+r cmd+o", "command": "testing.showMostRecentOutput" },
+
+    // >>> notebooks: j / k between cells in command mode, cmd+r chords for the kernel <<< //
+    { "key": "j", "command": "notebook.focusNextEditor", "when": "notebookEditorFocused && !inputFocus && !notebookOutputInputFocused" },
+    { "key": "k", "command": "notebook.focusPreviousEditor", "when": "notebookEditorFocused && !inputFocus && !notebookOutputInputFocused" },
+    { "key": "cmd+r cmd+a", "command": "notebook.execute", "when": "notebookEditorFocused" },
+    { "key": "cmd+r cmd+r", "command": "jupyter.restartkernel", "when": "notebookEditorFocused" },
+    { "key": "cmd+r cmd+c", "command": "notebook.clearAllCellsOutputs", "when": "notebookEditorFocused" },
+    { "key": "cmd+r cmd+b", "command": "notebook.cell.executeCellsAbove", "when": "notebookEditorFocused" },
+
+    // >>> neovim insert mode: cmd+h / cmd+l move one character <<< //
+    { "key": "cmd+h", "command": "cursorLeft", "when": "editorTextFocus && neovim.mode == insert" },
+    { "key": "cmd+l", "command": "cursorRight", "when": "editorTextFocus && neovim.mode == insert" },
+
+    // >>> which-key: space in the side bar, shift+space elsewhere except while typing in neovim insert mode <<< //
+    { "key": "space", "command": "whichkey.show", "when": "sideBarFocus && !textInputFocus && !inputFocus" },
+    { "key": "shift+space", "command": "whichkey.show", "when": "(textInputFocus || inputFocus) && neovim.mode != insert" },
+
+    // >>> extensions: translate moved off the cmd+t chord so cmd+t stays one keystroke <<< //
+    { "key": "ctrl+alt+t", "command": "translates.translates", "when": "editorHasSelection" },
+    { "key": "shift+cmd+t", "command": "-translates.translates", "when": "editorHasSelection" },
+    { "key": "shift+cmd+l", "command": "annotate.searchKeyword" }
+]

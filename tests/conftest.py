@@ -1,16 +1,16 @@
 import os
+import shutil
+import subprocess
+from functools import cache
 
 import pytest
 
 GATES = {
-    "integration": ("--run-integration", "needs the Moto S3 container; pass --run-integration"),
-    "e2e": ("--run-e2e", "runs the full examples/e2e script; pass --run-e2e"),
+    "moto": ("--run-moto", "needs the Moto S3 container (just s3-up); pass --run-moto"),
     "spark": ("--run-spark", "starts a local pyspark session (needs Java); pass --run-spark"),
-    "containers": (
-        "--run-containers",
-        "starts database containers with testcontainers; pass --run-containers",
-    ),
-    "live": ("--run-live", "needs real Oracle / Databricks credentials; pass --run-live"),
+    "oracle": ("--run-oracle", "starts an Oracle container via testcontainers; pass --run-oracle"),
+    "e2e": ("--run-e2e", "runs the full examples/e2e script; pass --run-e2e"),
+    "live": ("--run-live", "talks to real AWS S3 and Databricks; pass --run-live"),
 }
 
 
@@ -19,12 +19,34 @@ def pytest_addoption(parser):
         parser.addoption(flag, action="store_true", default=False, help=help_text)
 
 
-# >>> integration / e2e / live tests are opt-in; everything else runs by default <<< #
+# >>> a Docker daemon answers `docker info`; checked once, only when a docker test is collected <<< #
+@cache
+def docker_available() -> bool:
+    if not shutil.which("docker"):
+        return False
+    try:
+        return (
+            subprocess.run(
+                ["docker", "info"], capture_output=True, timeout=15, check=False
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+# >>> tests/local and tests/live are opt-in per marker; docker tests also need a reachable daemon <<< #
 def pytest_collection_modifyitems(config, items):
     for item in items:
         for marker, (flag, reason) in GATES.items():
             if marker in item.keywords and not config.getoption(flag):
                 item.add_marker(pytest.mark.skip(reason=reason))
+        if (
+            "docker" in item.keywords
+            and not item.get_closest_marker("skip")
+            and not docker_available()
+        ):
+            item.add_marker(pytest.mark.skip(reason="needs a Docker daemon (docker info failed)"))
 
 
 @pytest.fixture

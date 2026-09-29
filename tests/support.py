@@ -149,3 +149,320 @@ class MemoryStore:
 
     def put_dead(self, unit_id, result):
         return self.put_json(f"dead/{unit_id}.json", result)
+
+
+class FakeCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self.description = None
+        self.rows = []
+
+    def execute(self, sql):
+        self.connection.statements.append(sql)
+        columns, self.rows = self.connection.responder(sql)
+        self.description = [(name,) for name in columns] if columns else None
+
+    def fetchall(self):
+        return list(self.rows)
+
+    def close(self):
+        self.connection.cursors_closed += 1
+
+
+# >>> DB-API stand-in: records every statement, answers with responder(sql) -> (columns, rows) <<< #
+class FakeConnection:
+    def __init__(self, responder=lambda sql: ([], [])):
+        self.responder = responder
+        self.statements = []
+        self.cursors_closed = 0
+        self.closed = False
+
+    def cursor(self):
+        return FakeCursor(self)
+
+    def close(self):
+        self.closed = True
+
+
+class FakeRow(dict):
+    def asDict(self):
+        return dict(self)
+
+
+class FakeFrame:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def collect(self):
+        return list(self.rows)
+
+
+# >>> SparkSession stand-in: records spark.sql text, answers with responder(sql) -> rows <<< #
+class FakeSpark:
+    def __init__(self, responder=lambda sql: []):
+        self.responder = responder
+        self.statements = []
+
+    def sql(self, text):
+        self.statements.append(text)
+        return FakeFrame(self.responder(text))
+
+
+# >>> the store contract both S3Store and VolumeStore must honour <<< #
+def assert_store_contract(store):
+    store.put_json("a/b.json", {"x": 1})
+    store.put_bytes("a/c.csv", b"h\n1\n", content_type="text/csv")
+    assert store.get_json("a/b.json") == {"x": 1} and store.get_bytes("a/c.csv") == b"h\n1\n"
+    assert store.exists("a/b.json") and not store.exists("a/missing.json")
+    assert store.list_keys("a/") == ["a/b.json", "a/c.csv"]
+    assert store.list_keys("a/", start_after="a/b.json") == ["a/c.csv"]
+    assert store.list_keys("nothing/") == []
+    first = store.commit_unit(1, "u1", {"v": 1}, {"pair": "p"})
+    store.commit_unit(2, "u2", {"v": 2}, {"pair": "p"})
+    assert first == {"pair": "p", "unit_id": "u1", "payload_key": "units/u1.json", "sequence": 1}
+    assert [key for key, _ in store.list_json("_INDEX/")] == [
+        "_INDEX/00000001-u1.json",
+        "_INDEX/00000002-u2.json",
+    ]
+    assert store.ready_unclaimed() == 2
+    store.put_result("u1", {"verdict": "match"})
+    store.put_dead("u2", {"error": "x"})
+    assert store.ready_unclaimed() == 0
+    assert store.heartbeat_age() is None
+    store.heartbeat(now=100.0)
+    assert store.heartbeat_age(now=130.0) == 30.0 and store.heartbeat_age(now=50.0) == 0.0
+    assert store.heartbeat_age() > 0
+    store.close_row_check(["b", "a"])
+    store.close_manifests(["b", "a"], 4)
+    assert store.get_json("row_check/_CLOSED") == {"pairs": ["a", "b"]}
+    assert store.get_json("manifest/_CLOSED") == {"pairs": ["a", "b"], "expected_units": 4}
+
+
+# >>> a manifest whose every partition matched, built from real left counts <<< #
+def all_match_manifest(build_manifest, run_id, name, pair, counts):
+    verdict = {
+        "gate_decision": {"passed": True},
+        "partitions": {
+            day: {"left": n, "right": n, "verdict": "match"} for day, n in counts.items()
+        },
+    }
+    return build_manifest(run_id, name, pair, verdict)
+
+
+# >>> fake AWS credentials and no Moto endpoint, so moto.mock_aws intercepts boto3 in-process <<< #
+def mock_aws_env(monkeypatch):
+    for name, value in {
+        "AWS_ACCESS_KEY_ID": "testing",
+        "AWS_SECRET_ACCESS_KEY": "testing",
+        "AWS_DEFAULT_REGION": "us-east-1",
+    }.items():
+        monkeypatch.setenv(name, value)
+    for name in ("DTRACK_S3_ENDPOINT_URL", "AWS_PROFILE", "AWS_SESSION_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+
+STATS = {
+    "col_type": "numeric",
+    "n_total": 2,
+    "n_missing": 0,
+    "n_unique": 2,
+    "hash_sum": "3",
+    "mean": 1.5,
+    "std": 0.7,
+    "min_val": "1",
+    "max_val": "2",
+    "length_avg": None,
+    "length_max": None,
+    "top_10": "",
+}
+
+
+# >>> a row_check/<pair>.left.json as the Left side writes it <<< #
+def left_document(pair="p", counts=None, sample=0.5):
+    side = {"left": {"source": "oracle", "table": "A", "date_col": "dt"}}
+    side["right"] = {"source": "databricks", "table": "a", "date_col": "dt"}
+    return {
+        "run_id": "run",
+        "pair": pair,
+        **side,
+        "bounds": {"from": "2026-01-01", "to": "2026-01-03"},
+        "date_synonyms": {},
+        "counts": counts or {"2026-01-01": 1, "2026-01-02": 1, "2026-01-03": 5},
+        "pair_config": {
+            **side,
+            "col_map": {"amount": "amount"},
+            "vintage": "month",
+            "key": "id",
+            "sample": sample,
+        },
+        "timing": {"left_count_s": 0.1},
+    }
+
+
+# >>> Right target stand-in: fixed counts and statistics, records every window it was asked for <<< #
+class FakeTarget:
+    def __init__(self, counts=None, stats=None, healthy=True):
+        self.counts = counts or {"2026-01-01": 1, "2026-01-02": 2}
+        self.stats = stats or {"amount": STATS}
+        self.healthy = healthy
+        self.calls = []
+
+    def preflight(self):
+        return {"ok": True} if self.healthy else {"ok": False, "error": "TABLE_OR_VIEW_NOT_FOUND"}
+
+    def partition_counts(self, *_args):
+        return self.counts
+
+    def window_statistics(self, manifest, window):
+        self.calls.append((manifest["pair"], window["bucket"], window.get("key_tuples")))
+        return self.stats
+
+
+# >>> boto3 S3 client stand-in: records calls, serves canned list pages, raises on head_object <<< #
+class RecordingClient:
+    def __init__(self, pages=None, head_error=None):
+        self.calls = []
+        self.pages = list(pages or [])
+        self.head_error = head_error
+
+    def put_object(self, **kwargs):
+        self.calls.append(("put_object", kwargs))
+
+    def head_object(self, **kwargs):
+        raise self.head_error
+
+    def list_objects_v2(self, **kwargs):
+        self.calls.append(("list_objects_v2", dict(kwargs)))
+        return self.pages.pop(0)
+
+
+ORACLE_IMAGE = "gvenzl/oracle-free:slim-faststart"
+ORACLE_TABLES = {
+    "ORDERS": (
+        (
+            "CREATE TABLE ORDERS (BUSINESS_DATE DATE, ORDER_ID NUMBER(12), AMOUNT NUMBER(10,2), "
+            "STATUS VARCHAR2(20), REGION VARCHAR2(4))"
+        ),
+        "INSERT INTO ORDERS VALUES (TO_DATE(:1, 'YYYY-MM-DD'), :2, :3, :4, :5)",
+    ),
+    "CUSTOMERS": (
+        (
+            "CREATE TABLE CUSTOMERS (SNAPSHOT_DT DATE, CUST_ID NUMBER(12), TIER VARCHAR2(20), "
+            "BALANCE NUMBER(12,2))"
+        ),
+        "INSERT INTO CUSTOMERS VALUES (TO_DATE(:1, 'YYYY-MM-DD'), :2, :3, :4)",
+    ),
+}
+
+
+# >>> an Oracle Free container via testcontainers; yields connect kwargs (user, password, dsn) <<< #
+def oracle_container():
+    from testcontainers.core.container import DockerContainer
+    from testcontainers.core.waiting_utils import wait_for_logs
+
+    container = (
+        DockerContainer(ORACLE_IMAGE)
+        .with_env("ORACLE_PASSWORD", "dtrack")
+        .with_env("APP_USER", "dtrack")
+        .with_env("APP_USER_PASSWORD", "dtrack")
+        .with_exposed_ports(1521)
+    )
+    container.start()
+    try:
+        wait_for_logs(container, "DATABASE IS READY TO USE!", timeout=600)
+        host, port = container.get_container_host_ip(), container.get_exposed_port(1521)
+        yield {"user": "dtrack", "password": "dtrack", "dsn": f"{host}:{port}/FREEPDB1"}
+    finally:
+        container.stop()
+
+
+# >>> load the synthetic left CSVs into Oracle tables of the same name <<< #
+def load_oracle_tables(oracle: dict, left_dir: Path, tables=("ORDERS", "CUSTOMERS")) -> None:
+    import csv
+    import time
+
+    import oracledb
+
+    for attempt in range(30):
+        try:
+            connection = oracledb.connect(**oracle)
+            break
+        except oracledb.Error:
+            if attempt == 29:
+                raise
+            time.sleep(2)
+    with connection:
+        cursor = connection.cursor()
+        for table in tables:
+            create, insert = ORACLE_TABLES[table]
+            cursor.execute(create)
+            with (left_dir / f"{table}.csv").open() as handle:
+                cursor.executemany(insert, [list(row.values()) for row in csv.DictReader(handle)])
+        connection.commit()
+
+
+EXACT_FIELDS = ("col_type", "n_total", "n_missing", "n_unique", "hash_sum")
+EXACT_FIELDS += ("min_val", "max_val", "length_max")
+CLOSE_FIELDS = ("mean", "std", "length_avg")
+
+
+# >>> two statistics dicts agree: exact for counts/hashes/extremes, 1e-9 relative for floats <<< #
+def assert_stats_agree(columns, got, want):
+    for column in columns:
+        for field in EXACT_FIELDS:
+            assert str(got[column][field]) == str(want[column][field]), (
+                column,
+                field,
+                got[column][field],
+                want[column][field],
+            )
+        for field in CLOSE_FIELDS:
+            a, b = got[column][field], want[column][field]
+            assert (a is None) == (b is None), (column, field)
+            if a is not None:
+                assert abs(float(a) - float(b)) <= 1e-9 * max(1.0, abs(float(b))), (column, field)
+
+
+# >>> the Left pairs read from the Oracle container; the Right side is only named, never contacted <<< #
+def oracle_config(oracle, right_tables=None):
+    right = right_tables or {"orders": "main.sales.orders", "customers": "main.crm.customers"}
+
+    def side(table):
+        catalog, schema, name = right[table].split(".")
+        return {"source": "databricks", "catalog": catalog, "schema": schema, "table": name}
+
+    return {
+        "pairs": {
+            "orders": {
+                "left": {"source": "oracle", "table": "ORDERS", "date_col": "BUSINESS_DATE"}
+                | {"date_type": "date", **oracle},
+                "right": side("orders") | {"date_col": "business_date", "date_type": "string_dash"},
+                "fromDate": "2026-01-01",
+                "toDate": "2026-02-28",
+                "vintage": "month",
+                "key": "ORDER_ID",
+                "key_families": {"ORDER_ID": "numeric"},
+                "sample": 0.25,
+                "col_map": {
+                    "ORDER_ID": "order_id",
+                    "AMOUNT": "amount",
+                    "STATUS": "status",
+                    "REGION": "region",
+                },
+            },
+            "customers": {
+                "left": {"source": "oracle", "table": "CUSTOMERS", "date_col": "SNAPSHOT_DT"}
+                | {"date_type": "date", **oracle},
+                "right": side("customers")
+                | {"date_col": "snapshot_dt", "date_type": "string_dash"},
+                "fromDate": "2026-01-01",
+                "toDate": "2026-01-31",
+                "vintage": "month",
+                "key": "CUST_ID",
+                "key_families": {"CUST_ID": "numeric"},
+                "sample": 40,
+                "strict": True,
+                "col_map": {"CUST_ID": "cust_id", "TIER": "tier", "BALANCE": "balance"},
+            },
+        }
+    }

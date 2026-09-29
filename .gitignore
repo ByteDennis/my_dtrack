@@ -12,3 +12,15 @@ build/
 work/
 reports/
 .dtrack-work/
+.venv-live/
+tests/live/live.env
+.coverage-html/
+.coverage
+tests/live/.provision.json
+examples/nbs/.work/
+examples/e2e/output/
+examples/e2e/logs/
+examples/e2e/execution.txt
+docs/
+.ipynb_checkpoints/
+.DS_Store

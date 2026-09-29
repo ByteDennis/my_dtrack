@@ -9,6 +9,8 @@ description = "S3-coordinated two-stage data reconciliation"
 requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.34",
+    "click>=8.1",
+    "duckdb>=1.1",
     "openpyxl>=3.1",
     "oracledb>=3.0",
     "pandas>=2.0",
@@ -18,16 +20,31 @@ dependencies = [
 [project.optional-dependencies]
 athena = ["pyathena>=2.0"]
 hadoop = ["impyla>=0.19", "thrift-sasl>=0.4", "pure-sasl>=0.6"]
+ldap = ["ldap3>=2.9"]
+dbx = ["databricks-sdk>=0.40"]
 
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "databricks-sdk>=0.143.0",
+    "ipykernel>=6.29",
+    "nbclient>=0.10",
+    "pytest-cov>=7.1.0",
     "ruff>=0.9",
     "ipdb>=0.13",
     "debugpy>=1.8",
-    "pyspark>=3.5,<4",
+    "moto[s3]>=5",
     "testcontainers>=4",
 ]
+spark = ["pyspark>=3.5,<4"]
+live = [
+    "databricks-sdk>=0.40",
+    "databricks-connect>=16.4 ; python_version == '3.12'",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+conflicts = [[{ group = "spark" }, { group = "live" }]]
 
 [project.scripts]
 dtrack = "dtrack_left.cli:main"
@@ -38,13 +55,23 @@ packages = ["src/dtrack_left", "src/dtrack"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
+addopts = "--import-mode=importlib"
 markers = [
-    "integration: needs the local Moto S3 container (run with --run-integration)",
-    "e2e: runs examples/e2e/run_e2e.sh end to end (run with --run-e2e)",
-    "spark: local pyspark session, verifies SparkTarget SQL against pandas (run with --run-spark)",
-    "containers: real databases via testcontainers, e.g. Oracle (run with --run-containers)",
-    "live: needs real Oracle / Databricks credentials (run with --run-live)",
+    "moto: tests/local/s3, needs the Moto S3 container (run with --run-moto)",
+    "spark: tests/local/spark, local pyspark session (run with --run-spark)",
+    "oracle: tests/local/oracle, Oracle via testcontainers (run with --run-oracle)",
+    "e2e: tests/local/e2e, runs examples/e2e/run_e2e.sh (run with --run-e2e)",
+    "live: tests/live, real AWS S3 and Databricks (run with --run-live)",
+    "docker: needs a local Docker daemon; skipped when none is reachable (select with -m 'not docker')",
 ]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["src/dtrack_right/notebook.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
 
 [tool.ruff]
 line-length = 100
@@ -52,7 +79,6 @@ target-version = "py311"
 extend-exclude = ["src/dtrack_right/notebook.py"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/dtrack_right/*.py" = ["BLE001"]
-"src/dtrack_left/debug.py" = ["T100"]
-"src/dtrack_left/sources.py" = ["BLE001"]
-"src/dtrack_left/s3.py" = ["BLE001"]
+"src/dtrack_right/**/*.py" = ["BLE001"]
+"src/dtrack_left/cli/tools.py" = ["T100"]
+"src/dtrack_left/backends/*.py" = ["BLE001"]

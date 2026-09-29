@@ -1,1 +1,0 @@
-{"col_type":"categorical","hash_sum":"2677434743195442659517","length_avg":5.56,"length_max":9,"max_val":"SHIPPED","mean":null,"min_val":"CANCELLED","n_missing":0,"n_total":200,"n_unique":4,"std":null,"top_10":"[{\"value\":\"NEW\",\"count\":63},{\"value\":\"CANCELLED\",\"count\":51},{\"value\":\"PAID\",\"count\":46},{\"value\":\"SHIPPED\",\"count\":40}]"}

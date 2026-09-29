@@ -50,8 +50,8 @@ log "RIGHT process: python -m dtrack_right (src/dtrack_right, csv anchor standin
 log "databricks env vars present: $(env | grep -c '^DATABRICKS_' || true) (expected 0)"
 
 section "1. unit + integration tests"
-run "01_pytest_unit" uv run pytest -q tests/left tests/right
-run "02_pytest_s3_protocol" uv run pytest -q --run-integration tests/integration
+run "01_pytest_unit" uv run pytest -q tests/unit
+run "02_pytest_s3_protocol" uv run pytest -q --run-moto tests/local/s3
 
 section "2. synthetic data"
 run "03_make_synthetic" uv run python examples/e2e/make_synthetic.py
