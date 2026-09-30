@@ -24,3 +24,4 @@ examples/e2e/execution.txt
 docs/
 .ipynb_checkpoints/
 .DS_Store
+.dtrack-local/

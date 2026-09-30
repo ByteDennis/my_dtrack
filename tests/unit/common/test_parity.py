@@ -1,11 +1,13 @@
 from pathlib import Path
 
+import pytest
+
 from dtrack_left.common import hashing
 from dtrack_right.checks import col_check as cloud_col_check
 from dtrack_right.common import hashing as cloud_hashing
 
 SRC = Path(__file__).resolve().parents[3] / "src"
-SHARED = ["dates.py", "hashing.py", "stats.py", "manifest.py"]
+SHARED = ["__init__.py", "dates.py", "hashing.py", "stats.py", "manifest.py"]
 
 
 def test_shared_common_modules_are_byte_identical_on_both_sides():
@@ -13,6 +15,51 @@ def test_shared_common_modules_are_byte_identical_on_both_sides():
     for name in SHARED:
         assert (left / name).read_bytes() == (right / name).read_bytes(), f"{name} drifted"
     assert sorted(p.name for p in left.glob("*.py")) == sorted(p.name for p in right.glob("*.py"))
+
+
+@pytest.mark.parametrize("side", ["dtrack_left", "dtrack_right"])
+def test_disabled_classes_refuse_to_instantiate_but_keep_their_attributes(side):
+    import importlib
+
+    disabled = importlib.import_module(f"{side}.common").disabled
+
+    @disabled("not fixed")
+    class Broken:
+        kind = "x"
+
+        def __init__(self, value):
+            self.value = value
+
+    class Child(Broken):
+        pass
+
+    assert Broken.kind == "x"
+    with pytest.raises(NotImplementedError, match="Broken is disabled: not fixed"):
+        Broken(1)
+    with pytest.raises(NotImplementedError, match="Child is disabled"):
+        Child(1)
+
+
+@pytest.mark.parametrize("side", ["dtrack_left", "dtrack_right"])
+def test_disabled_functions_and_methods_refuse_to_run_but_keep_their_names(side):
+    import importlib
+
+    disabled = importlib.import_module(f"{side}.common").disabled
+
+    @disabled("not fixed")
+    def pull(table):
+        return table
+
+    class Source:
+        @disabled("no auth")
+        def connect(self):
+            return "conn"
+
+    assert pull.__name__ == "pull" and pull.__wrapped__("t") == "t"
+    with pytest.raises(NotImplementedError, match="pull is disabled: not fixed"):
+        pull("t")
+    with pytest.raises(NotImplementedError, match="Source.connect is disabled: no auth"):
+        Source().connect()
 
 
 def test_cloud_comparison_matches_expected_verdicts():

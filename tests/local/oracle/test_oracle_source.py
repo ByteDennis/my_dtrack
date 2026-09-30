@@ -53,3 +53,29 @@ def test_oracle_window_pull_honours_holes_and_statistics_match_csv(oracle, left_
     for column in columns:
         for field in ("n_total", "n_missing", "n_unique", "hash_sum", "min_val", "max_val"):
             assert str(from_oracle[column][field]) == str(from_csv[column][field]), (column, field)
+
+
+# >>> DATE values carrying a time are counted and pulled by calendar day, the last bounded day included <<< #
+def test_oracle_dates_with_times_count_and_pull_by_calendar_day(oracle, tmp_path):
+    source = OracleSource(
+        {"source": "oracle", "table": "TIMED", "date_col": "APP_DT", "date_type": "date", **oracle}
+    )
+    connection = source.connect()
+    cursor = connection.cursor()
+    cursor.execute(
+        "BEGIN EXECUTE IMMEDIATE 'DROP TABLE TIMED'; EXCEPTION WHEN OTHERS THEN NULL; END;"
+    )
+    cursor.execute("CREATE TABLE TIMED (ID NUMBER, APP_DT DATE)")
+    rows = [
+        (1, "2022-09-05 00:00:00"),
+        (2, "2022-09-06 00:00:00"),
+        (3, "2022-09-06 08:15:00"),
+        (4, "2022-09-06 23:59:59"),
+        (5, "2022-09-07 12:00:00"),
+    ]
+    cursor.executemany("INSERT INTO TIMED VALUES (:1, TO_DATE(:2, 'YYYY-MM-DD HH24:MI:SS'))", rows)
+    connection.commit()
+    connection.close()
+    assert source.partition_counts("2022-09-05", "2022-09-06") == {"2022-09-05": 1, "2022-09-06": 3}
+    pulled = source.pull_window(["2022-09-06"], ["ID"], tmp_path / "w.csv")
+    assert sorted(pd.read_csv(pulled)["ID"]) == [2, 3, 4]

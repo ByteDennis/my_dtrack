@@ -19,7 +19,7 @@ def test_right_side_is_always_databricks():
         validate_config({"pairs": {"p": pair(right="csv")}})
 
 
-@pytest.mark.parametrize("source", ["oracle", "athena", "aws", "hadoop", "csv"])
+@pytest.mark.parametrize("source", ["oracle", "athena", "aws", "hadoop", "csv", "file", "duckdb"])
 def test_supported_left_sources(source):
     assert validate_config({"pairs": {"p": pair(left=source)}})
 
@@ -34,8 +34,8 @@ def test_optional_adapters_fail_with_install_instructions_when_absent():
 
     with pytest.raises(ImportError, match=r"\[athena\]"):
         AthenaSource({"source": "athena"}).connect()
-    with pytest.raises(ImportError, match=r"\[hadoop\]"):
-        HadoopSource({"source": "hadoop"}).connect()
+    with pytest.raises(NotImplementedError, match="disabled"):
+        HadoopSource({"source": "hadoop"})
 
 
 def test_conn_macro_expands_named_profiles_and_pair_fields_win():
@@ -133,3 +133,65 @@ def test_right_files_kind_with_a_src_patch_is_accepted():
     row["right"] = {"source": "databricks", "kind": "files", "path": "/Volumes/c/s/work/in/"}
     row["right"] |= {"format": "csv", "query": "SELECT * FROM {src}", "date_col": "dt"}
     assert validate_config({"pairs": {"p": row}})["pairs"]["p"]["right"]["kind"] == "files"
+
+
+# >>> a config whose pair p points col_map at a file in a maps/ folder next to it <<< #
+def config_with_map(tmp_path, col_map, **extra):
+    (tmp_path / "maps").mkdir(exist_ok=True)
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({"pairs": {"p": {**pair(), "col_map": col_map, **extra}}}))
+    return path
+
+
+def test_col_map_csv_is_relative_to_the_config_file_and_fills_types(tmp_path, monkeypatch):
+    path = config_with_map(tmp_path, "maps/p.csv")
+    (tmp_path / "maps/p.csv").write_text(
+        "﻿# left side, right side\nleft, right ,type\nORDER_ID,order_id,\n\nAMT,amount,Numeric\n"
+    )
+    monkeypatch.chdir(tmp_path / "maps")
+    loaded = load_config(path)["pairs"]["p"]
+    assert loaded["col_map"] == {"ORDER_ID": "order_id", "AMT": "amount"}
+    assert loaded["col_type_overrides"] == {"AMT": "numeric"}
+
+
+def test_col_map_json_file_and_inline_overrides_merge(tmp_path):
+    path = config_with_map(tmp_path, "maps/p.json", col_type_overrides={"ID": "categorical"})
+    (tmp_path / "maps/p.json").write_text(json.dumps({"ID": "id", "AMT": "amount"}))
+    loaded = load_config(path)["pairs"]["p"]
+    assert loaded["col_map"] == {"ID": "id", "AMT": "amount"}
+    assert loaded["col_type_overrides"] == {"ID": "categorical"}
+
+
+def test_inline_col_map_is_untouched(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({"pairs": {"p": pair()}}))
+    assert load_config(path)["pairs"]["p"]["col_map"] == {"amount": "amount"}
+
+
+@pytest.mark.parametrize(
+    ("name", "body", "error"),
+    [
+        ("missing.csv", None, "col_map file not found: .*missing.csv"),
+        ("p.txt", "a", r"must be \.csv or \.json"),
+        ("p.csv", "src,dst\na,b\n", "left,right"),
+        ("p.csv", "left,right\na,\n", "needs left and right"),
+        ("p.csv", "left,right\na,x\nb,x\n", "twice"),
+        ("p.csv", "left,right\na,x\na,y\n", "twice"),
+        ("p.json", '["a"]', "object of left: right"),
+        ("p.json", '{"a": 1}', "object of left: right"),
+        ("p.csv", "left,right,type\na,x,text\n", "numeric|categorical"),
+    ],
+)
+def test_bad_col_map_files_fail_with_the_path(tmp_path, name, body, error):
+    path = config_with_map(tmp_path, f"maps/{name}")
+    if body is not None:
+        (tmp_path / "maps" / name).write_text(body)
+    with pytest.raises((ValueError, FileNotFoundError), match=error):
+        load_config(path)
+
+
+def test_col_map_type_must_agree_with_inline_overrides(tmp_path):
+    path = config_with_map(tmp_path, "maps/p.csv", col_type_overrides={"a": "categorical"})
+    (tmp_path / "maps/p.csv").write_text("left,right,type\na,x,numeric\n")
+    with pytest.raises(ValueError, match=r"disagree on \['a'\]"):
+        load_config(path)

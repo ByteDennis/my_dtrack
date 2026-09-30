@@ -50,7 +50,7 @@ conflicts = [[{ group = "spark" }, { group = "live" }]]
 dtrack = "dtrack_left.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dtrack_left", "src/dtrack"]
+packages = ["src/dtrack_left", "src/dtrack", "src/dtrack_right", "src/dtrack_local"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

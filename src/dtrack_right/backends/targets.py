@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..common.dates import bounds_where, canonical_date, partition_where, quote_ident
+from ..common.dates import bounds_where, canonical_date, day_expr, partition_where, quote_ident
 from ..common.hashing import sample_csv
 from ..common.stats import compute_csv_statistics
 
@@ -99,7 +99,7 @@ class SparkTarget:
         self, from_date: str | None = None, to_date: str | None = None
     ) -> dict[str, int]:
         date_col = self.config["date_col"]
-        ref = quote_ident(date_col, "spark")
+        ref = day_expr(date_col, "spark", self.config.get("date_type"))
         bounds = bounds_where(
             date_col,
             dialect="spark",
@@ -110,7 +110,11 @@ class SparkTarget:
         rows = self._rows(
             f"SELECT {ref}, COUNT(*) FROM {self.relation()} WHERE {self._where(bounds)} GROUP BY {ref}"
         )
-        return {canonical_date(row[0]): int(row[1]) for row in rows}
+        counts: dict[str, int] = {}
+        for value, count in rows:
+            day = canonical_date(value)
+            counts[day] = counts.get(day, 0) + int(count)
+        return counts
 
     def _sample_predicate(self, manifest: dict[str, Any], window: dict[str, Any]) -> str | None:
         plan = manifest["sample"]

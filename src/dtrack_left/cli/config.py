@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 from typing import Any
 
 from dotenv import find_dotenv, load_dotenv
 
-LEFT_SOURCES = {"oracle", "athena", "aws", "hadoop", "csv", "file"}
+LEFT_SOURCES = {"oracle", "athena", "aws", "hadoop", "csv", "file", "duckdb"}
 COL_TYPES = {"numeric", "categorical"}
 RIGHT_KINDS = {"table": ("table",), "query": ("query",), "files": ("path", "format")}
 
@@ -60,7 +61,60 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+# >>> a col_map file as {left: right} plus optional types: CSV left,right[,type] or a JSON object <<< #
+def read_col_map(path: Path) -> tuple[dict[str, str], dict[str, str]]:
+    if not path.is_file():
+        raise FileNotFoundError(f"col_map file not found: {path}")
+    if path.suffix.lower() == ".json":
+        mapping = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(mapping, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in mapping.items()
+        ):
+            raise ValueError(f"{path}: col_map JSON must be an object of left: right names")
+        rows = [{"left": key, "right": value} for key, value in mapping.items()]
+    elif path.suffix.lower() == ".csv":
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        kept = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
+        reader = csv.DictReader(kept)
+        if not {"left", "right"} <= {name.strip() for name in reader.fieldnames or []}:
+            raise ValueError(f"{path}: col_map CSV needs a left,right[,type] header")
+        reader.fieldnames = [name.strip() for name in reader.fieldnames]
+        rows = list(reader)
+    else:
+        raise ValueError(f"{path}: col_map file must be .csv or .json")
+    mapping, types = {}, {}
+    for row in rows:
+        left, right = (row.get("left") or "").strip(), (row.get("right") or "").strip()
+        if not left or not right:
+            raise ValueError(f"{path}: every col_map row needs left and right, got {row}")
+        if left in mapping or right in mapping.values():
+            raise ValueError(f"{path}: col_map maps {left!r} or {right!r} twice")
+        mapping[left] = right
+        if (row.get("type") or "").strip():
+            types[left] = row["type"].strip().lower()
+    return mapping, types
+
+
+# >>> replace a col_map path (relative to the config file) with its mapping and merge its types <<< #
+def expand_col_maps(config: dict[str, Any], base: Path) -> dict[str, Any]:
+    for name, pair in (config.get("pairs") or {}).items():
+        if not isinstance(pair.get("col_map"), str):
+            continue
+        mapping, types = read_col_map(base / pair["col_map"])
+        overrides = dict(pair.get("col_type_overrides") or {})
+        clash = {col for col, kind in types.items() if overrides.get(col, kind) != kind}
+        if clash:
+            raise ValueError(
+                f"{name}: col_map type and col_type_overrides disagree on {sorted(clash)}"
+            )
+        pair["col_map"] = mapping
+        if types or overrides:
+            pair["col_type_overrides"] = {**types, **overrides}
+    return config
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     load_dotenv(find_dotenv(usecwd=True))
-    with Path(path).open(encoding="utf-8") as handle:
-        return validate_config(json.load(handle))
+    path = Path(path)
+    with path.open(encoding="utf-8") as handle:
+        return validate_config(expand_col_maps(json.load(handle), path.resolve().parent))

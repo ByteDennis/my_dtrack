@@ -105,9 +105,10 @@ def test_partition_counts_run_one_grouped_query_with_bounds_and_where():
     }
     assert spark.statements == [
         (
-            "SELECT `business_date`, COUNT(*) FROM `main`.`sales`.`orders` WHERE (region = 'EU') AND "
-            "(`business_date` >= DATE '2026-01-01' AND `business_date` <= DATE '2026-01-31') "
-            "GROUP BY `business_date`"
+            "SELECT to_date(`business_date`), COUNT(*) FROM `main`.`sales`.`orders` "
+            "WHERE (region = 'EU') AND "
+            "(`business_date` >= DATE '2026-01-01' AND `business_date` < DATE '2026-02-01') "
+            "GROUP BY to_date(`business_date`)"
         )
     ]
 
@@ -173,7 +174,7 @@ def test_window_statistics_is_one_query_mapped_back_per_column():
     stats = target.window_statistics(_manifest({"mode": "fraction", "threshold": 99}), window)
     assert len(spark.statements) == 2
     query = spark.statements[1]
-    assert "`business_date` BETWEEN DATE '2026-01-01' AND DATE '2026-01-02'" in query
+    assert "`business_date` >= DATE '2026-01-01' AND `business_date` < DATE '2026-01-03'" in query
     assert "< 99" in query and "APPROX" not in query.upper()
     assert "cast(min(`order_id`) as string)" in query
     assert "cast(min(cast(`amount` as double)) as string)" in query

@@ -52,6 +52,26 @@ def test_left_pipeline_never_touches_databricks_and_dbx_imports_the_sdk_lazily()
         ), path
 
 
+# >>> the S3 credential helper is an operator tool: no pipeline module imports it <<< #
+def test_left_pipeline_never_imports_the_aws_helper():
+    left = ROOT / "src/dtrack_left"
+    pipeline = [*(left / "checks").glob("*.py"), *(left / "common").glob("*.py")]
+    pipeline += [left / "cli/checks.py", left / "backends/sources.py", left / "backends/store.py"]
+    for path in pipeline:
+        text = path.read_text()
+        assert "import aws" not in text and "backends.aws" not in text, path
+
+
+# >>> the local backup plan builds on both sides; neither side nor the Right job may depend on it <<< #
+def test_only_dtrack_local_combines_the_two_sides():
+    for side in ("dtrack_left", "dtrack_right"):
+        for path in (ROOT / "src" / side).rglob("*.py"):
+            text = path.read_text()
+            assert "import dtrack_local" not in text and "from dtrack_local" not in text, path
+    local = "\n".join(path.read_text() for path in (ROOT / "src/dtrack_local").glob("*.py"))
+    assert "from dtrack_left" in local and "from dtrack_right" in local
+
+
 def test_right_job_installs_only_what_a_databricks_runtime_lacks():
     requirements = (ROOT / "src/dtrack_right/requirements.txt").read_text().split()
     assert sorted(name.split(">=")[0] for name in requirements) == ["boto3", "openpyxl"]

@@ -9,6 +9,7 @@ from support import FakeConnection
 from dtrack_left.backends import sources
 from dtrack_left.backends.sources import (
     AthenaSource,
+    DuckDBSource,
     FileSource,
     HadoopSource,
     OracleSource,
@@ -38,7 +39,9 @@ def test_write_rows_creates_parents_and_writes_a_header(tmp_path):
 
 
 def test_relation_quotes_parts_wraps_queries_and_needs_a_table():
-    assert OracleSource({**ORACLE, "schema": "OWN"}).relation() == '"OWN"."ORDERS"'
+    assert OracleSource({**ORACLE, "schema": "OWN"}).relation() == "OWN.ORDERS"
+    assert OracleSource({**ORACLE, "table": "own.v_app"}).relation() == "own.v_app"
+    assert OracleSource({**ORACLE, "table": 'OWN."my view"'}).relation() == 'OWN."my view"'
     assert OracleSource({"query": "SELECT 1 FROM dual"}).relation() == (
         "(SELECT 1 FROM dual) dtrack_source"
     )
@@ -65,7 +68,7 @@ def test_oracle_connect_requires_all_three_credentials(monkeypatch):
 def test_preflight_runs_an_empty_select_and_reports_failures(monkeypatch):
     source, connection, captured = _oracle(monkeypatch, lambda sql: (["A"], []))
     assert source.preflight() == {"ok": True, "source": "oracle"}
-    assert connection.statements == ['SELECT * FROM "ORDERS" WHERE 1=0']
+    assert connection.statements == ["SELECT * FROM ORDERS WHERE 1=0"]
     assert captured == {"user": "u", "password": "p", "dsn": "h:1521/S"}
     assert connection.closed and connection.cursors_closed == 1
 
@@ -81,7 +84,11 @@ def test_preflight_runs_an_empty_select_and_reports_failures(monkeypatch):
 
 
 def test_partition_counts_groups_by_day_within_bounds_and_extra_where(monkeypatch):
-    rows = [(pd.Timestamp("2026-01-01"), 3), ("20260102", "4")]
+    rows = [
+        (pd.Timestamp("2026-01-01"), 1),
+        (pd.Timestamp("2026-01-01 17:30"), 2),
+        ("20260102", "4"),
+    ]
     source, connection, _ = _oracle(
         monkeypatch, lambda sql: (["P", "N"], rows), where="REGION = 'EU'"
     )
@@ -91,9 +98,9 @@ def test_partition_counts_groups_by_day_within_bounds_and_extra_where(monkeypatc
     }
     assert connection.statements == [
         (
-            'SELECT "BUSINESS_DATE" AS dtrack_partition, COUNT(*) AS dtrack_count FROM "ORDERS" '
-            "WHERE (REGION = 'EU') AND (\"BUSINESS_DATE\" >= DATE '2026-01-01' AND "
-            '"BUSINESS_DATE" <= DATE \'2026-01-31\') GROUP BY "BUSINESS_DATE"'
+            "SELECT TRUNC(BUSINESS_DATE) AS dtrack_partition, COUNT(*) AS dtrack_count FROM ORDERS "
+            "WHERE (REGION = 'EU') AND (BUSINESS_DATE >= DATE '2026-01-01' AND "
+            "BUSINESS_DATE < DATE '2026-02-01') GROUP BY TRUNC(BUSINESS_DATE)"
         )
     ]
 
@@ -117,9 +124,12 @@ def test_pull_window_selects_date_keys_and_columns_once_over_the_admitted_days(
     )
     assert out.read_text().splitlines() == ["BUSINESS_DATE,ORDER_ID,AMOUNT", "2026-01-01,1,2.5"]
     assert connection.statements[0].startswith(
-        'SELECT "BUSINESS_DATE", "ORDER_ID", "AMOUNT" FROM "ORDERS" WHERE (('
+        "SELECT BUSINESS_DATE, ORDER_ID, AMOUNT FROM ORDERS WHERE (("
     )
-    assert "\"BUSINESS_DATE\" = DATE '2026-01-03'" in connection.statements[0]
+    assert (
+        "BUSINESS_DATE >= DATE '2026-01-03' AND BUSINESS_DATE < DATE '2026-01-04'"
+        in connection.statements[0]
+    )
 
 
 def test_athena_and_hadoop_connect_through_their_optional_drivers(monkeypatch):
@@ -131,12 +141,10 @@ def test_athena_and_hadoop_connect_through_their_optional_drivers(monkeypatch):
     athena = AthenaSource(
         {"source": "athena", "schema": "db", "s3_staging_dir": "s3://q/", "region": "us-east-1"}
     )
-    hadoop = HadoopSource({"source": "hadoop", "host": "hive", "port": "10001"})
-    assert athena.connect() == "conn" and hadoop.connect() == "conn"
-    assert calls == [
-        {"s3_staging_dir": "s3://q/", "region_name": "us-east-1", "schema_name": "db"},
-        {"host": "hive", "port": 10001, "database": "default", "auth_mechanism": "PLAIN"},
-    ]
+    assert athena.connect() == "conn"
+    assert calls == [{"s3_staging_dir": "s3://q/", "region_name": "us-east-1", "schema_name": "db"}]
+    with pytest.raises(NotImplementedError, match="HadoopSource is disabled"):
+        HadoopSource({"source": "hadoop", "host": "hive", "port": "10001"})
 
 
 def test_optional_drivers_explain_the_extra_to_install(monkeypatch):
@@ -145,8 +153,6 @@ def test_optional_drivers_explain_the_extra_to_install(monkeypatch):
     monkeypatch.setitem(sys.modules, "impala.dbapi", None)
     with pytest.raises(ImportError, match=r"dtrack\[athena\]"):
         AthenaSource({"source": "athena"}).connect()
-    with pytest.raises(ImportError, match=r"dtrack\[hadoop\]"):
-        HadoopSource({"source": "hadoop"}).connect()
 
 
 @pytest.mark.parametrize(
@@ -155,13 +161,17 @@ def test_optional_drivers_explain_the_extra_to_install(monkeypatch):
         ("oracle", OracleSource),
         ("ATHENA", AthenaSource),
         ("aws", AthenaSource),
-        ("hadoop", HadoopSource),
         ("csv", FileSource),
         ("file", FileSource),
     ],
 )
 def test_source_from_config_dispatches_on_source(name, cls):
     assert isinstance(source_from_config({"source": name}), cls)
+
+
+def test_source_from_config_reaches_the_disabled_hadoop_source():
+    with pytest.raises(NotImplementedError, match="HadoopSource is disabled"):
+        source_from_config({"source": "hadoop"})
 
 
 def test_source_from_config_rejects_unknown_sources():
@@ -342,3 +352,121 @@ def test_oracle_service_goes_through_ldap_when_a_template_is_set(monkeypatch):
         source.resolve_dsn()
     with pytest.raises(ValueError, match="unsupported LDAP_DSN"):
         sources.solve_ldap("tns:nothing")
+
+
+# >>> a DuckDB database file with schema fin and nine orders over three days <<< #
+@pytest.fixture
+def duckdb_file(tmp_path):
+    import duckdb
+
+    path = tmp_path / "sales-2026.duckdb"
+    connection = duckdb.connect(str(path))
+    connection.execute(
+        "CREATE SCHEMA fin; CREATE TABLE fin.orders AS SELECT DATE '2026-01-01' + (i % 3)::INT "
+        "AS business_date, i AS amount, 'o' || i AS order_id FROM range(9) t(i)"
+    )
+    connection.close()
+    return path
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"table": "fin.orders"},
+        {"table": "FIN.ORDERS"},
+        {"table": "sales-2026.fin.orders"},
+        {"catalog": "sales-2026", "schema": "fin", "table": "orders"},
+        {"query": "SELECT * FROM fin.orders"},
+    ],
+)
+def test_duckdb_source_reads_tables_by_any_name_spelling(duckdb_file, spec):
+    source = source_from_config(
+        {
+            "source": "duckdb",
+            "path": str(duckdb_file),
+            "date_col": "BUSINESS_DATE",
+            "date_type": "date",
+            **spec,
+        }
+    )
+    assert isinstance(source, DuckDBSource) and source.preflight()["ok"]
+    assert source.partition_counts() == {"2026-01-01": 3, "2026-01-02": 3, "2026-01-03": 3}
+
+
+def test_duckdb_source_pulls_a_window_and_never_writes(duckdb_file, tmp_path):
+    source = DuckDBSource(
+        {
+            "path": str(duckdb_file),
+            "table": "fin.orders",
+            "date_col": "business_date",
+            "date_type": "date",
+        }
+    )
+    output = source.pull_window(
+        ["2026-01-02"], ["amount"], tmp_path / "w.csv", key_columns=["order_id"]
+    )
+    lines = output.read_text().splitlines()
+    assert lines[0] == "business_date,order_id,amount" and len(lines) == 4
+    with pytest.raises(Exception, match="read-only"):
+        source.query("CREATE TABLE fin.x (i INT)")
+
+
+def test_duckdb_source_needs_a_path_and_reports_a_missing_database(tmp_path):
+    with pytest.raises(ValueError, match="requires path"):
+        DuckDBSource({"table": "t"})
+    missing = DuckDBSource({"path": str(tmp_path / "nope.duckdb"), "table": "t", "date_col": "d"})
+    assert missing.preflight()["ok"] is False
+    assert DuckDBSource({"path": "s3://bucket/dir/sales.duckdb"}).alias == "sales"
+    assert DuckDBSource({"conn_macro": "https://h/x/prod.db"}).alias == "prod"
+    with pytest.raises(ValueError, match="table or query"):
+        DuckDBSource({"path": "a.duckdb"}).relation()
+
+
+# >>> another process holds the database read-write and has three uncheckpointed rows in its .wal <<< #
+@pytest.fixture
+def locked_duckdb(duckdb_file):
+    import subprocess
+
+    script = (
+        "import duckdb, sys\n"
+        f"c = duckdb.connect({str(duckdb_file)!r})\n"
+        "c.execute(\"INSERT INTO fin.orders VALUES (DATE '2026-01-04', 9, 'o9'), "
+        "(DATE '2026-01-04', 10, 'o10'), (DATE '2026-01-04', 11, 'o11')\")\n"
+        "print('ready', flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    writer = subprocess.Popen(
+        [sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    )
+    assert writer.stdout.readline().strip() == "ready"
+    yield duckdb_file
+    writer.stdin.close()
+    writer.wait(timeout=30)
+
+
+def test_duckdb_lock_held_by_a_writer_explains_the_snapshot_option(locked_duckdb):
+    source = DuckDBSource({"path": str(locked_duckdb), "table": "fin.orders", "date_col": "d"})
+    result = source.preflight()
+    assert result["ok"] is False and '"snapshot": true' in result["error"]
+
+
+def test_duckdb_snapshot_reads_a_copy_with_the_writers_wal_once(locked_duckdb):
+    source = DuckDBSource(
+        {
+            "path": str(locked_duckdb),
+            "table": "fin.orders",
+            "date_col": "business_date",
+            "date_type": "date",
+            "snapshot": True,
+        }
+    )
+    assert source.partition_counts()["2026-01-04"] == 3
+    first = source.database()
+    assert source.partition_counts()["2026-01-01"] == 3 and source.database() == first
+    assert first != str(locked_duckdb) and first.endswith("sales-2026.duckdb")
+    assert source.relation() == '"fin"."orders"'
+
+
+def test_duckdb_snapshot_is_off_for_urls():
+    assert DuckDBSource({"path": "s3://b/x.duckdb", "snapshot": True}).snapshot is False
+    assert DuckDBSource({"path": "x.duckdb", "snapshot": True}).snapshot is True

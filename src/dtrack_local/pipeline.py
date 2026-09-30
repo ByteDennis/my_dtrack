@@ -1,0 +1,371 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from dtrack_left.backends.sources import source_from_config
+from dtrack_left.checks.col_check import (
+    ColCheckPipeline,
+    LeftRuntime,
+    publish_fixed_keys,
+    wait_for_manifests,
+)
+from dtrack_left.checks.row_check import make_run_id
+from dtrack_left.checks.row_check import run_row_check as left_row_check
+from dtrack_left.cli.config import load_config
+from dtrack_right.backends.store import S3Store, VolumeStore, open_store
+from dtrack_right.backends.targets import SparkTarget
+from dtrack_right.checks.col_check import ColCheck
+from dtrack_right.checks.row_check import run_row_check as right_row_check
+from dtrack_right.common.dates import partition_where, quote_ident
+from dtrack_right.common.hashing import sample_csv
+from dtrack_right.common.stats import compute_csv_statistics
+from dtrack_right.report import build_report, publish_report
+
+from .warehouse import Warehouse
+
+log = logging.getLogger("dtrack.local")
+LOCAL = "_local"
+NEVER_BLOCK = 10**9
+
+
+# >>> every pulled window, Left and Right, kept as raw text in one local DuckDB file for ad-hoc queries <<< #
+class Landing:
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.Lock()
+
+    def land(self, side: str, pair: str, bucket: str, csv_path: str | Path) -> int:
+        import duckdb
+
+        table = quote_ident(f"{side}__{pair}", "sql")
+        source = (
+            "read_csv('" + str(csv_path).replace("'", "''") + "', all_varchar=true, header=true)"
+        )
+        label = "'" + bucket.replace("'", "''") + "'"
+        with self.lock, duckdb.connect(str(self.path)) as connection:
+            connection.execute(
+                f"CREATE TABLE IF NOT EXISTS {table} AS "
+                f"SELECT *, {label} AS dtrack_bucket FROM {source} LIMIT 0"
+            )
+            connection.execute(f"DELETE FROM {table} WHERE dtrack_bucket = {label}")
+            connection.execute(
+                f"INSERT INTO {table} BY NAME SELECT *, {label} AS dtrack_bucket FROM {source}"
+            )
+            return connection.execute(
+                f"SELECT count(*) FROM {table} WHERE dtrack_bucket = {label}"
+            ).fetchone()[0]
+
+    def tables(self) -> dict[str, int]:
+        import duckdb
+
+        if not self.path.exists():
+            return {}
+        with self.lock, duckdb.connect(str(self.path), read_only=True) as connection:
+            names = [row[0] for row in connection.execute("SHOW TABLES").fetchall()]
+            return {
+                name: connection.execute(
+                    f"SELECT count(*) FROM {quote_ident(name, 'sql')}"
+                ).fetchone()[0]
+                for name in names
+            }
+
+
+# >>> the Right side pulled to this machine: counts via GROUP BY on the warehouse, windows as raw rows, statistics local <<< #
+class WarehouseTarget(SparkTarget):
+    def __init__(
+        self,
+        warehouse: Warehouse,
+        config: dict[str, Any],
+        work_dir: str | Path,
+        *,
+        landing: Landing | None = None,
+        push_sample: bool = False,
+    ):
+        super().__init__(None, config)
+        self.warehouse = warehouse
+        self.work_dir = Path(work_dir)
+        self.landing = landing
+        self.push_sample = push_sample
+
+    def _rows(self, sql: str) -> list[tuple]:
+        return self.warehouse.rows(sql)
+
+    def window_sql(self, manifest: dict[str, Any], window: dict[str, Any]) -> tuple[str, list[str]]:
+        date_col = self.config["date_col"]
+        predicate = partition_where(
+            date_col, window["partitions"], dialect="spark", date_type=self.config.get("date_type")
+        )
+        sample = self._sample_predicate(manifest, window) if self.push_sample else None
+        where = self._where(predicate if sample is None else f"{predicate} AND ({sample})")
+        right_columns = [manifest["col_map"][column] for column in manifest["columns"]]
+        selected = list(dict.fromkeys([date_col, *manifest["right_key_cols"], *right_columns]))
+        casts = ", ".join(
+            f"CAST({quote_ident(column, 'spark')} AS STRING) AS {quote_ident(column, 'spark')}"
+            for column in selected
+        )
+        return f"SELECT {casts} FROM {self.relation()} WHERE {where}", selected
+
+    def window_statistics(
+        self, manifest: dict[str, Any], window: dict[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        sql, selected = self.window_sql(manifest, window)
+        output = self.work_dir / manifest["pair"] / window["bucket"] / "right.csv"
+        pulled = self.warehouse.to_csv(sql, output, selected)
+        if self.landing:
+            self.landing.land("right", manifest["pair"], window["bucket"], output)
+        plan = manifest["sample"]
+        sampled = (
+            output
+            if pulled == 0
+            else sample_csv(
+                output,
+                key_columns=manifest["right_key_cols"],
+                mode=plan["mode"],
+                rate=plan.get("rate"),
+                count=plan.get("count"),
+                families=manifest["key_families"],
+                key_tuples=window.get("key_tuples"),
+            )
+        )
+        overrides = manifest.get("col_type_overrides") or {}
+        return compute_csv_statistics(
+            sampled,
+            [manifest["col_map"][column] for column in manifest["columns"]],
+            strict=manifest.get("strict", False),
+            col_types={manifest["col_map"][k]: v for k, v in overrides.items()},
+        )
+
+
+# >>> Left pulls exactly as `dtrack col-check`, plus a copy of each raw window in the landing DuckDB <<< #
+class LandingLeftRuntime(LeftRuntime):
+    def __init__(self, work_dir: str | Path, store, landing: Landing | None = None):
+        super().__init__(work_dir, store)
+        self.landing = landing
+
+    def pull_window(self, manifest, window):
+        sampled = super().pull_window(manifest, window)
+        if self.landing:
+            raw = self.work_dir / manifest["pair"] / window["bucket"] / "left.csv"
+            self.landing.land("left", manifest["pair"], window["bucket"], raw)
+        return sampled
+
+
+# >>> one local run: the config, a directory store laid out exactly like an S3 run folder, and how to reach the Right side <<< #
+@dataclass
+class LocalRun:
+    config: dict[str, Any]
+    run_id: str
+    folder: Path
+    target_factory: Callable[[dict[str, Any]], Any]
+    landing: Landing
+    pairs: list[str] | None = None
+    store: VolumeStore = field(init=False)
+
+    def __post_init__(self):
+        self.folder = Path(self.folder)
+        self.store = VolumeStore(self.folder)
+
+    @property
+    def local(self) -> Path:
+        return self.folder / LOCAL
+
+    def status(self) -> dict[str, Any]:
+        return self.store.get_json("_STATUS.json") if self.store.exists("_STATUS.json") else {}
+
+
+# >>> open (or resume) a run under `out`: config file or dict, warehouse from profile + id, landing DuckDB in _local/ <<< #
+def open_run(
+    config: str | Path | dict[str, Any],
+    *,
+    run_id: str | None = None,
+    out: str | Path = ".dtrack-local/runs",
+    profile: str | None = None,
+    warehouse_id: str | None = None,
+    disposition: str = "external_links",
+    push_sample: bool = False,
+    pairs: list[str] | None = None,
+    target_factory: Callable[[dict[str, Any]], Any] | None = None,
+) -> LocalRun:
+    document = config if isinstance(config, dict) else load_config(config)
+    run_id = run_id or make_run_id(document)
+    folder = Path(out) / run_id
+    landing = Landing(folder / LOCAL / "data.duckdb")
+    if target_factory is None:
+        from dtrack_left.backends.databricks import DEFAULT_PROFILE, workspace
+
+        client = workspace(profile or os.getenv("DTRACK_DBX_PROFILE") or DEFAULT_PROFILE)
+        warehouse = Warehouse(
+            client,
+            warehouse_id or os.getenv("DTRACK_DBX_WAREHOUSE_ID", ""),
+            disposition=disposition,
+        )
+        work = folder / LOCAL / "right"
+
+        def target_factory(right: dict[str, Any]):
+            return WarehouseTarget(warehouse, right, work, landing=landing, push_sample=push_sample)
+
+    run = LocalRun(document, run_id, folder, target_factory, landing, pairs)
+    log.info("local run %s at %s", run_id, folder)
+    return run
+
+
+# >>> both sides reachable before any counting: Left SELECT ... WHERE 1=0, Right DESCRIBE QUERY <<< #
+def preflight(run: LocalRun) -> dict[str, dict[str, Any]]:
+    result = {}
+    for name, pair in run.config["pairs"].items():
+        if pair.get("skip") or (run.pairs and name not in run.pairs):
+            continue
+        result[name] = {
+            "left": source_from_config(pair["left"]).preflight(),
+            "right": run.target_factory(pair["right"]).preflight(),
+        }
+        log.info(
+            "preflight %s: left=%s right=%s",
+            name,
+            result[name]["left"].get("ok"),
+            result[name]["right"].get("ok"),
+        )
+    return result
+
+
+# >>> Stage 1: Left counts, Right counts, reconcile and gate; manifests for every pair that passed <<< #
+def row_check(run: LocalRun, *, gate: str = "auto", workers: int = 4) -> dict[str, Any]:
+    left_row_check(
+        run.config, run.store, run_id=run.run_id, pair_names=run.pairs, pair_workers=workers
+    )
+    right_row_check(run.store, run.target_factory, gate=gate)
+    verdicts = {
+        key.removeprefix("row_check/").removesuffix(".json"): value
+        for key, value in run.store.list_json("row_check/")
+        if key.count(".") == 1 and not key.startswith("row_check/_")
+    }
+    return {
+        pair: {
+            "summary": document.get("summary"),
+            "gate": document.get("gate_decision"),
+        }
+        for pair, document in verdicts.items()
+    }
+
+
+# >>> Stage 2: Left pulls and statistics become units, then the Right windows are pulled and every unit compared <<< #
+def col_check(
+    run: LocalRun, *, pull_workers: int = 2, stat_workers: int = 2, max_attempts: int = 3
+) -> dict[str, Any]:
+    manifests = wait_for_manifests(run.store, timeout=0, poll_interval=0, pair_names=run.pairs)
+    left_work = run.local / "left"
+    for manifest in manifests:
+        publish_fixed_keys(run.store, manifest, left_work)
+    runtime = LandingLeftRuntime(left_work, run.store, run.landing)
+    published = ColCheckPipeline(
+        run.store,
+        pull_window=runtime.pull_window,
+        compute_stats=runtime.compute_stats,
+        pull_workers=pull_workers,
+        stat_workers=stat_workers,
+        wip=NEVER_BLOCK,
+    ).run(manifests)
+    results = ColCheck(
+        run.store, run.target_factory, max_attempts=max_attempts, poll_interval=0.2
+    ).run()
+    verdicts: dict[str, int] = {}
+    for row in results:
+        verdicts[row["verdict"]] = verdicts.get(row["verdict"], 0) + 1
+    return {
+        "published_units": published,
+        "compared": len(results),
+        "verdicts": verdicts,
+        "dead": len(run.store.list_keys("dead/")),
+    }
+
+
+# >>> HTML, XLSX, CSVs and summary.json into <run>/report/; optionally published to the report store <<< #
+def report(run: LocalRun, *, report_s3: str | None = None) -> dict[str, Any]:
+    files = build_report(run.store, run.folder / "report")
+    summary = json.loads(files["summary.json"].read_text())
+    published = []
+    if report_s3:
+        published = publish_report(open_store(report_s3), run.run_id, files, summary)
+    run.store.put_json(
+        "_STATUS.json",
+        {
+            "state": "complete",
+            "role": "local",
+            "run_id": run.run_id,
+            "results": summary["units_completed"],
+        },
+    )
+    return {
+        "summary": summary,
+        "files": {k: str(v) for k, v in files.items()},
+        "published": published,
+    }
+
+
+# >>> copy the run folder to s3://.../runs/<run_id>/, laid out like a distributed run; pulled data only when asked <<< #
+def backup(run: LocalRun, s3_root: str, *, include_data: bool = False) -> dict[str, Any]:
+    target = S3Store(f"{s3_root.rstrip('/')}/{run.run_id}")
+    uploaded, skipped = [], 0
+    for path in sorted(run.folder.rglob("*")):
+        if not path.is_file() or path.name.endswith(".part"):
+            continue
+        relative = path.relative_to(run.folder).as_posix()
+        if relative.startswith(f"{LOCAL}/") and not (
+            include_data and relative == f"{LOCAL}/data.duckdb"
+        ):
+            skipped += 1
+            continue
+        content_type = "application/json" if path.suffix == ".json" else "application/octet-stream"
+        target.put_bytes(relative, path.read_bytes(), content_type=content_type)
+        uploaded.append(relative)
+    log.info(
+        "backup %s: %d file(s) -> %s (%d local file(s) kept back)",
+        run.run_id,
+        len(uploaded),
+        target.root_uri,
+        skipped,
+    )
+    return {"uri": target.root_uri, "files": len(uploaded), "skipped": skipped}
+
+
+# >>> the whole backup plan in one call: preflight, Stage 1, Stage 2, report, backup <<< #
+def run_all(
+    run: LocalRun,
+    *,
+    gate: str = "auto",
+    report_s3: str | None = None,
+    backup_s3: str | None = None,
+    include_data: bool = False,
+) -> dict[str, Any]:
+    health = preflight(run)
+    failed = [
+        f"{name}.{side}: {row[side].get('error')}"
+        for name, row in health.items()
+        for side in ("left", "right")
+        if not row[side].get("ok")
+    ]
+    if failed:
+        raise RuntimeError("preflight failed: " + "; ".join(failed))
+    stage_one = row_check(run, gate=gate)
+    stage_two = col_check(run) if run.store.exists("row_check/_CLOSED") else None
+    built = report(run, report_s3=report_s3)
+    saved = backup(run, backup_s3, include_data=include_data) if backup_s3 else None
+    return {
+        "run_id": run.run_id,
+        "folder": str(run.folder),
+        "row_check": stage_one,
+        "col_check": stage_two,
+        "status": built["summary"]["status"],
+        "findings": built["summary"]["findings"],
+        "published": built["published"],
+        "backup": saved,
+        "landing": run.landing.tables(),
+    }

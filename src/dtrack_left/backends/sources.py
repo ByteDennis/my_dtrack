@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import atexit
 import csv
 import os
+import shutil
+import tempfile
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 
-from ..common.dates import bounds_where, canonical_date, partition_where, quote_ident
+from ..common import disabled
+from ..common.dates import bounds_where, canonical_date, day_expr, partition_where, quote_ident
 
 
 def write_rows(path: str | Path, columns: list[str], rows: Iterable[Iterable[object]]) -> Path:
@@ -65,7 +71,7 @@ class SqlSource(ABC):
         self, from_date: str | None = None, to_date: str | None = None
     ) -> dict[str, int]:
         date_col = self.config["date_col"]
-        date_ref = quote_ident(date_col, self.dialect)
+        date_ref = day_expr(date_col, self.dialect, self.config.get("date_type"))
         bounds = bounds_where(
             date_col,
             dialect=self.dialect,
@@ -78,7 +84,11 @@ class SqlSource(ABC):
             f"FROM {self.relation()} WHERE {self._where(bounds)} GROUP BY {date_ref}"
         )
         _columns, rows = self.query(sql)
-        return {canonical_date(row[0]): int(row[1]) for row in rows}
+        counts: dict[str, int] = {}
+        for value, count in rows:
+            day = canonical_date(value)
+            counts[day] = counts.get(day, 0) + int(count)
+        return counts
 
     def pull_window(
         self,
@@ -168,6 +178,72 @@ class FileSource(SqlSource):
             return {"ok": False, "source": "file", "error": str(exc)}
 
 
+# >>> tables inside a DuckDB database (local file or s3:// / https:// URL), attached read-only under its file stem <<< #
+class DuckDBSource(SqlSource):
+    dialect = "duckdb"
+
+    def __init__(self, config: dict[str, Any]):
+        super().__init__(config)
+        self.path = str(config.get("path") or config.get("conn_macro") or "")
+        if not self.path:
+            raise ValueError("duckdb source requires path to a .duckdb database file or URL")
+        self.alias = PurePosixPath(urlparse(self.path).path or self.path).stem or "dtrack_db"
+        self.snapshot = bool(config.get("snapshot")) and not urlparse(self.path).netloc
+        self._copy: str | None = None
+        self._copy_lock = threading.Lock()
+
+    # >>> one copy of the database and its .wal per source, so a writer holding the lock does not block us <<< #
+    def database(self) -> str:
+        if not self.snapshot:
+            return self.path
+        with self._copy_lock:
+            if self._copy is None:
+                folder = tempfile.mkdtemp(prefix="dtrack-duckdb-")
+                atexit.register(shutil.rmtree, folder, True)
+                target = Path(folder) / Path(self.path).name
+                shutil.copyfile(self.path, target)
+                if Path(self.path + ".wal").is_file():
+                    shutil.copyfile(self.path + ".wal", str(target) + ".wal")
+                self._copy = str(target)
+        return self._copy
+
+    def relation(self) -> str:
+        if self.config.get("query"):
+            return super().relation()
+        parts = [self.config.get(name) for name in ("catalog", "schema", "table")]
+        names = [name for part in parts if part for name in str(part).split(".")]
+        if not names:
+            raise ValueError("source requires table or query")
+        return ".".join(quote_ident(name, self.dialect) for name in names)
+
+    def connect(self):
+        import duckdb
+
+        connection = duckdb.connect()
+        alias = quote_ident(self.alias, self.dialect)
+        try:
+            connection.execute(f"ATTACH {_duckdb_value(self.database())} AS {alias} (READ_ONLY)")
+        except duckdb.IOException as exc:
+            connection.close()
+            if "lock" not in str(exc).lower():
+                raise
+            raise RuntimeError(
+                f"{self.path} is open read-write in another process; "
+                'set "snapshot": true to read a copy, or open it read-only there'
+            ) from exc
+        connection.execute(f"USE {alias}")
+        return connection
+
+    def query(self, sql: str) -> tuple[list[str], list[tuple[Any, ...]]]:
+        connection = self.connect()
+        try:
+            connection.execute(sql)
+            columns = [str(item[0]) for item in connection.description or []]
+            return columns, connection.fetchall() if connection.description else []
+        finally:
+            connection.close()
+
+
 # >>> legacy LDAP lookup: ldap://host/service,cn=OracleContext,... -> TNS descriptor <<< #
 def solve_ldap(ldap_dsn: str) -> str:
     import re
@@ -245,6 +321,9 @@ class AthenaSource(SqlSource):
         )
 
 
+@disabled(
+    "identifiers use double quotes and there is no Kerberos/ODBC auth; export Parquet and use source: file"
+)
 class HadoopSource(SqlSource):
     dialect = "hadoop"
 
@@ -278,4 +357,6 @@ def source_from_config(config: dict[str, Any]):
         return HadoopSource(config)
     if source in {"file", "csv"}:
         return FileSource(config)
+    if source == "duckdb":
+        return DuckDBSource(config)
     raise ValueError(f"unsupported Left source: {source}")

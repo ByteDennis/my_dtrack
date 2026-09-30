@@ -62,14 +62,36 @@ def contiguous_runs(partitions: list[str]) -> list[tuple[str, str]]:
 def quote_ident(name: str, dialect: str) -> str:
     if dialect == "spark":
         return ".".join("`" + part.replace("`", "``") + "`" for part in name.split("."))
-    if dialect in {"oracle", "athena", "hadoop", "databricks"}:
+    if dialect == "oracle":
+        return name
+    if dialect in {"athena", "hadoop", "databricks"}:
         return ".".join(f'"{part.replace(chr(34), chr(34) * 2)}"' for part in name.split("."))
     return f'"{name.replace(chr(34), chr(34) * 2)}"'
 
 
+DAY_TYPES = frozenset({"date", "timestamp", "datetime"})
+
+
+# >>> the partition key of a row: the column itself, or its calendar day when it can carry a time <<< #
+def day_expr(date_col: str, dialect: str, date_type: str | None) -> str:
+    column = quote_ident(date_col, dialect)
+    if (date_type or "").lower() not in DAY_TYPES:
+        return column
+    if dialect == "oracle":
+        return f"TRUNC({column})"
+    if dialect in {"spark", "hadoop"}:
+        return f"to_date({column})"
+    return f"CAST({column} AS DATE)"
+
+
+# >>> the ISO day after `value` <<< #
+def next_day(value: str) -> str:
+    return (date.fromisoformat(value) + timedelta(days=1)).isoformat()
+
+
 def date_literal(value: str, dialect: str, date_type: str | None) -> str:
     kind = (date_type or "").lower()
-    if kind in {"date", "timestamp", "datetime"}:
+    if kind in DAY_TYPES:
         return f"DATE '{value}'"
     if kind in {"num", "integer", "int", "number"}:
         return value.replace("-", "")
@@ -84,9 +106,14 @@ def partition_where(
     date_type: str | None = None,
 ) -> str:
     column = quote_ident(date_col, dialect)
+    days = (date_type or "").lower() in DAY_TYPES
     clauses = []
     for start, end in contiguous_runs(partitions):
         lo = date_literal(start, dialect, date_type)
+        if days:
+            after = date_literal(next_day(end), dialect, date_type)
+            clauses.append(f"{column} >= {lo} AND {column} < {after}")
+            continue
         hi = date_literal(end, dialect, date_type)
         clauses.append(f"{column} = {lo}" if start == end else f"{column} BETWEEN {lo} AND {hi}")
     if not clauses:
@@ -106,6 +133,8 @@ def bounds_where(
     clauses = []
     if from_date:
         clauses.append(f"{column} >= {date_literal(from_date, dialect, date_type)}")
-    if to_date:
+    if to_date and (date_type or "").lower() in DAY_TYPES:
+        clauses.append(f"{column} < {date_literal(next_day(to_date), dialect, date_type)}")
+    elif to_date:
         clauses.append(f"{column} <= {date_literal(to_date, dialect, date_type)}")
     return " AND ".join(clauses) or None
