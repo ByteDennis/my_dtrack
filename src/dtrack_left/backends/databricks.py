@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import subprocess
 import time
 import webbrowser
 from datetime import UTC, datetime, timedelta
 from itertools import islice
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 DEFAULT_PROFILE = "corp"
 RUNNING_STATEMENT = {"PENDING", "RUNNING"}
+WORKSPACE_SOURCE_LANGUAGES = {".py": "PYTHON", ".r": "R"}
+WORKSPACE_NOTEBOOK_HEADER = "# databricks notebook"
 
 
 # >>> a WorkspaceClient for a ~/.databrickscfg profile; external-browser profiles log in here <<< #
@@ -50,6 +54,185 @@ def login(w, *, open_browser: bool = True, opener=webbrowser.open) -> dict:
         "user": me.user_name,
         "browser_opened": opened,
     }
+
+
+# >>> local file/folder -> Workspace files; source notebooks lose their language suffix remotely <<< #
+def upload_workspace(
+    w,
+    source: str | Path,
+    target: str | None = None,
+    *,
+    overwrite: bool = False,
+    dry_run: bool = False,
+) -> dict:
+    from databricks.sdk.service.workspace import ImportFormat, Language
+
+    source = Path(source)
+    if source.is_symlink():
+        raise ValueError(f"source must not be a symbolic link: {source}")
+    if not source.exists():
+        raise ValueError(f"source does not exist: {source}")
+    if not source.is_file() and not source.is_dir():
+        raise ValueError(f"source must be a file or directory: {source}")
+
+    if target is None:
+        user = w.current_user.me().user_name
+        target = f"/Users/{user}/{source.name}"
+    remote_root = _workspace_path(target)
+
+    if source.is_file():
+        local_files = [source]
+        skipped = 0
+    else:
+        local_files, skipped = _workspace_local_files(source)
+
+    uploads = []
+    directories = {remote_root.parent if source.is_file() else remote_root}
+    for local in local_files:
+        relative = Path(local.name) if source.is_file() else local.relative_to(source)
+        remote = remote_root.joinpath(*relative.parts) if source.is_dir() else remote_root
+        notebook = _workspace_notebook(local)
+        if notebook == "JUPYTER":
+            remote = remote.with_suffix("")
+            format_ = ImportFormat.JUPYTER
+            language_ = None
+        elif notebook:
+            remote = remote.with_suffix("")
+            format_ = ImportFormat.SOURCE
+            language_ = Language(notebook)
+        else:
+            format_ = ImportFormat.AUTO
+            language_ = None
+        directories.add(remote.parent)
+        uploads.append((local, remote, format_, language_))
+
+    ordered_directories = sorted(directories, key=lambda path: (len(path.parts), str(path)))
+    failures = []
+    uploaded = []
+    if not dry_run:
+        for directory in ordered_directories:
+            try:
+                w.workspace.mkdirs(str(directory))
+            except Exception as exc:
+                failures.append({"path": str(directory), "error": f"{type(exc).__name__}: {exc}"})
+        for local, remote, format_, language in uploads:
+            try:
+                options = {"format": format_, "overwrite": overwrite}
+                if language is not None:
+                    options["language"] = language
+                w.workspace.upload(str(remote), local.read_bytes(), **options)
+                uploaded.append(str(remote))
+            except Exception as exc:
+                failures.append({"path": str(remote), "error": f"{type(exc).__name__}: {exc}"})
+
+    planned = [str(remote) for _local, remote, _format, _language in uploads]
+    return {
+        "source": str(source),
+        "target": str(remote_root),
+        "dry_run": dry_run,
+        "planned": len(uploads),
+        "uploaded": len(uploaded),
+        "directories": len(ordered_directories),
+        "skipped": skipped,
+        "paths": planned if dry_run else uploaded,
+        "failed": failures,
+        "exit_code": 1 if failures else 0,
+    }
+
+
+def _workspace_path(path: str) -> PurePosixPath:
+    if not path.startswith("/"):
+        raise ValueError(f"workspace target must be absolute: {path}")
+    remote = PurePosixPath(path)
+    if ".." in remote.parts or remote == PurePosixPath("/"):
+        raise ValueError(f"invalid workspace target: {path}")
+    return remote
+
+
+def _workspace_local_files(root: Path) -> tuple[list[Path], int]:
+    git_files = _git_workspace_files(root)
+    if git_files is not None:
+        return git_files
+
+    files = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"source tree contains a symbolic link: {path}")
+        if path.is_file():
+            files.append(path)
+    return files, 0
+
+
+def _git_workspace_files(root: Path) -> tuple[list[Path], int] | None:
+    repository = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if repository.returncode != 0:
+        return None
+
+    worktree = Path(repository.stdout.strip()).resolve()
+    relative_root = root.resolve().relative_to(worktree)
+    use_ignores = _has_gitignore(root.resolve(), worktree)
+    command = ["git", "-C", str(worktree), "ls-files", "-z", "--cached", "--others"]
+    if use_ignores:
+        command.append("--exclude-standard")
+    command.extend(["--", relative_root.as_posix()])
+    listed = subprocess.run(command, capture_output=True, check=True).stdout
+
+    files = []
+    for name in filter(None, listed.decode().split("\0")):
+        path = worktree / name
+        if path.is_symlink():
+            raise ValueError(f"source tree contains a symbolic link: {path}")
+        if path.is_file():
+            files.append(root / path.relative_to(root.resolve()))
+
+    skipped = 0
+    if use_ignores:
+        ignored = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "ls-files",
+                "-z",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--",
+                relative_root.as_posix(),
+            ],
+            capture_output=True,
+            check=True,
+        ).stdout
+        skipped = sum(bool(name) for name in ignored.decode().split("\0"))
+    return sorted(files), skipped
+
+
+def _has_gitignore(root: Path, worktree: Path) -> bool:
+    current = root
+    while True:
+        if (current / ".gitignore").is_file():
+            return True
+        if current == worktree:
+            break
+        current = current.parent
+    return any(path.is_file() for path in root.rglob(".gitignore"))
+
+
+def _workspace_notebook(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    if suffix == ".ipynb":
+        return "JUPYTER"
+    language = WORKSPACE_SOURCE_LANGUAGES.get(suffix)
+    if language is None:
+        return None
+    with path.open("rb") as stream:
+        first_line = stream.readline(256).decode("utf-8-sig", errors="replace").rstrip("\r\n")
+    return language if first_line.casefold().startswith(WORKSPACE_NOTEBOOK_HEADER) else None
 
 
 # >>> one cluster: state, EC2 node types and instance ids, uptime since the last (re)start <<< #

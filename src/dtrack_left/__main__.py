@@ -2,7 +2,7 @@
 #
 # 0. Once: `uv sync` (+ --extra dbx / ldap / athena as needed); .env with the Left credentials
 #    (<macro>_USR/_PWD/_DSN), DTRACK_REPORT_S3, DTRACK_DBX_PROFILE; upload the Right package:
-#      databricks workspace import-dir src/dtrack_right /Workspace/Users/<you>/dtrack/dtrack_right -p corp
+#      dtrack dbx workspace upload src/dtrack_right /Users/<you>/dtrack/dtrack_right --overwrite
 # 1. Check the config:        dtrack doctor --config c.json
 # 2. Pick the run:            export DTRACK_S3=s3://<bucket>/dtrack/work/runs/<run_id>
 #                             (the last folder is the run id; a new id for every fresh run)

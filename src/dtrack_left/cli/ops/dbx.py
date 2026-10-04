@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from pathlib import Path
 
 import click
 from dotenv import find_dotenv, load_dotenv
@@ -44,7 +45,7 @@ def with_workspace(func):
 # >>> dtrack dbx: operator helpers for Databricks; the pipeline commands never import this <<< #
 @click.group(
     "dbx",
-    help="Databricks helpers: login, compute, warehouse, sql, runs (needs dtrack[dbx]); s3 credentials",
+    help="Databricks helpers: login, workspace, compute, warehouse, sql, runs; s3 credentials",
     context_settings=CONTEXT_SETTINGS,
 )
 def dbx_group():
@@ -66,6 +67,34 @@ def dbx_group():
 @with_workspace
 def dbx_login(w, open_browser):
     return databricks.login(w, open_browser=open_browser)
+
+
+# >>> dtrack dbx workspace: files and notebooks under /Users, /Shared and other Workspace paths <<< #
+@dbx_group.group(
+    "workspace",
+    help="manage Workspace files and notebooks",
+    context_settings=CONTEXT_SETTINGS,
+)
+def workspace_group():
+    pass
+
+
+# >>> dtrack dbx workspace upload: copy one local file or directory tree into the Workspace <<< #
+@workspace_group.command(
+    "upload",
+    help="upload a local file or folder to a Workspace path",
+    context_settings=CONTEXT_SETTINGS,
+)
+@click.argument("source", type=click.Path(exists=True, readable=True, path_type=Path))
+@click.argument("target", required=False)
+@profile_option
+@click.option("--overwrite", is_flag=True, help="replace existing Workspace objects")
+@click.option("--dry-run", is_flag=True, help="show planned remote paths without uploading")
+@log_level_option
+@emit_json
+@with_workspace
+def dbx_workspace_upload(w, source, target, overwrite, dry_run):
+    return databricks.upload_workspace(w, source, target, overwrite=overwrite, dry_run=dry_run)
 
 
 # >>> dtrack dbx compute status|start|stop: one all-purpose cluster <<< #

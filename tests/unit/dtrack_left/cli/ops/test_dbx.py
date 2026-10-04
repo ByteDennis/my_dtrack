@@ -22,6 +22,7 @@ def dbx_calls(monkeypatch):
         "run_sql",
         "list_runs",
         "run_detail",
+        "upload_workspace",
     ):
         monkeypatch.setattr(
             dbx.databricks,
@@ -80,6 +81,55 @@ def test_dbx_ids_and_profile_come_from_the_environment(dbx_calls, monkeypatch, t
         and main(["dbx", "sql", "--file", str(tmp_path / "q.sql")]) == 0
     )
     assert dbx_calls[0][1] == ("w:work", "c9") and dbx_calls[1][1] == ("w:work", "SELECT 2", "wh9")
+
+
+def test_dbx_workspace_upload_calls_backend_with_paths_and_flags(dbx_calls, tmp_path, capsys):
+    source = tmp_path / "right"
+    source.mkdir()
+
+    assert (
+        main(
+            [
+                "dbx",
+                "workspace",
+                "upload",
+                str(source),
+                "/Users/me/right",
+                "--profile",
+                "work",
+                "--overwrite",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+
+    assert dbx_calls == [
+        (
+            "upload_workspace",
+            ("w:work", source, "/Users/me/right"),
+            {"overwrite": True, "dry_run": True},
+        )
+    ]
+    assert json.loads(capsys.readouterr().out) == {"called": "upload_workspace"}
+
+
+def test_dbx_workspace_upload_keeps_backend_exit_code(dbx_calls, monkeypatch, tmp_path, capsys):
+    source = tmp_path / "a.txt"
+    source.write_text("a")
+    monkeypatch.setattr(
+        dbx.databricks,
+        "upload_workspace",
+        lambda *_args, **_kwargs: {"uploaded": 0, "failed": ["a.txt"], "exit_code": 1},
+    )
+
+    assert main(["dbx", "workspace", "upload", str(source)]) == 1
+    assert json.loads(capsys.readouterr().out) == {"failed": ["a.txt"], "uploaded": 0}
+
+
+def test_dbx_workspace_upload_requires_an_existing_source(dbx_calls, tmp_path):
+    assert main(["dbx", "workspace", "upload"]) == 2
+    assert main(["dbx", "workspace", "upload", str(tmp_path / "missing")]) == 2
 
 
 def test_dbx_usage_errors_exit_two_and_sdk_errors_exit_one(dbx_calls, monkeypatch, capsys):

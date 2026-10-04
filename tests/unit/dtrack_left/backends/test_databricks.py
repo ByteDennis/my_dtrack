@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from enum import Enum
 from types import SimpleNamespace as NS
@@ -118,6 +119,176 @@ def test_login_opens_the_host_and_reports_the_identity():
     assert opened == ["https://x.cloud.databricks.com"] and result["browser_opened"] is True
     assert result["user"] == "me@corp.com" and result["auth_type"] == "external-browser"
     assert databricks.login(client(cluster()), open_browser=False)["browser_opened"] is False
+
+
+class WorkspaceFiles:
+    def __init__(self, fail_on=None):
+        self.calls = []
+        self.fail_on = fail_on
+
+    def mkdirs(self, path):
+        self.calls.append(("mkdirs", path))
+
+    def upload(self, path, content, **options):
+        self.calls.append(("upload", path, content, options))
+        if path == self.fail_on:
+            raise OSError("upload failed")
+
+
+def workspace_files(fail_on=None):
+    files = WorkspaceFiles(fail_on)
+    return NS(
+        workspace=files,
+        current_user=NS(me=lambda: NS(user_name="me@corp.com")),
+    )
+
+
+def git_init(path):
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+
+
+def test_upload_workspace_file_uses_the_personal_default_and_preserves_plain_python(tmp_path):
+    source = tmp_path / "helpers.py"
+    source.write_text("def answer():\n    return 42\n")
+    w = workspace_files()
+
+    result = databricks.upload_workspace(w, source)
+
+    assert result["target"] == "/Users/me@corp.com/helpers.py"
+    assert result["uploaded"] == 1 and result["failed"] == []
+    upload = next(call for call in w.workspace.calls if call[0] == "upload")
+    assert upload[1:3] == ("/Users/me@corp.com/helpers.py", source.read_bytes())
+    assert upload[3]["format"].value == "AUTO" and "language" not in upload[3]
+
+
+def test_upload_workspace_folder_ignores_junk_and_imports_source_notebook(tmp_path):
+    git_init(tmp_path)
+    (tmp_path / ".gitignore").write_text("generated-data/\n*.scratch\n")
+    source = tmp_path / "right"
+    (source / "pkg").mkdir(parents=True)
+    (source / "generated-data").mkdir()
+    (source / "pkg" / "module.py").write_text("VALUE = 1\n")
+    (source / "notebook.py").write_text("# DATABRICKS NOTEBOOK source\nprint('ok')\n")
+    (source / "generated-data" / "rows.bin").write_bytes(b"cache")
+    (source / "notes.scratch").write_text("ignored")
+    w = workspace_files()
+
+    result = databricks.upload_workspace(w, source, "/Users/me/right", overwrite=True)
+
+    assert result["planned"] == result["uploaded"] == 2
+    assert result["skipped"] == 2
+    uploads = [call for call in w.workspace.calls if call[0] == "upload"]
+    assert [call[1] for call in uploads] == [
+        "/Users/me/right/notebook",
+        "/Users/me/right/pkg/module.py",
+    ]
+    notebook_options = uploads[0][3]
+    assert notebook_options["format"].value == "SOURCE"
+    assert notebook_options["language"].value == "PYTHON"
+    assert notebook_options["overwrite"] is True
+
+
+def test_upload_workspace_honors_nested_gitignore_negation(tmp_path):
+    git_init(tmp_path)
+    (tmp_path / ".gitignore").write_text("*.secret\n")
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / ".gitignore").write_text("!keep.secret\n")
+    (source / "drop.secret").write_text("drop")
+    (source / "keep.secret").write_text("keep")
+    w = workspace_files()
+
+    result = databricks.upload_workspace(w, source, "/Shared/project", dry_run=True)
+
+    assert result["skipped"] == 1
+    assert result["paths"] == ["/Shared/project/.gitignore", "/Shared/project/keep.secret"]
+
+
+def test_upload_workspace_without_gitignore_does_not_filter_names_or_suffixes(tmp_path):
+    git_init(tmp_path)
+    source = tmp_path / "project"
+    (source / "__pycache__").mkdir(parents=True)
+    (source / "__pycache__" / "module.pyc").write_bytes(b"cache")
+    (source / ".DS_Store").write_bytes(b"metadata")
+    w = workspace_files()
+
+    result = databricks.upload_workspace(w, source, "/Shared/project", dry_run=True)
+
+    assert result["skipped"] == 0
+    assert result["paths"] == [
+        "/Shared/project/.DS_Store",
+        "/Shared/project/__pycache__/module.pyc",
+    ]
+
+
+def test_upload_workspace_accepts_a_relative_folder_inside_a_git_worktree(tmp_path, monkeypatch):
+    git_init(tmp_path)
+    (tmp_path / ".gitignore").write_text("*.tmp\n")
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "keep.txt").write_text("keep")
+    (source / "drop.tmp").write_text("drop")
+    monkeypatch.chdir(tmp_path)
+
+    result = databricks.upload_workspace(
+        workspace_files(), "project", "/Shared/project", dry_run=True
+    )
+
+    assert result["paths"] == ["/Shared/project/keep.txt"]
+    assert result["skipped"] == 1
+
+
+def test_upload_workspace_imports_ipynb_as_a_jupyter_notebook(tmp_path):
+    source = tmp_path / "analysis.ipynb"
+    source.write_text('{"cells": [], "nbformat": 4, "nbformat_minor": 5}')
+    w = workspace_files()
+
+    result = databricks.upload_workspace(w, source, "/Users/me/analysis.ipynb")
+
+    assert result["paths"] == ["/Users/me/analysis"]
+    upload = next(call for call in w.workspace.calls if call[0] == "upload")
+    assert upload[1] == "/Users/me/analysis"
+    assert upload[3]["format"].value == "JUPYTER"
+    assert "language" not in upload[3]
+
+
+def test_upload_workspace_dry_run_has_no_writes_and_lists_remote_paths(tmp_path):
+    source = tmp_path / "folder"
+    source.mkdir()
+    (source / "a.txt").write_text("a")
+    w = workspace_files()
+
+    result = databricks.upload_workspace(w, source, "/Shared/folder", dry_run=True)
+
+    assert w.workspace.calls == []
+    assert result["uploaded"] == 0
+    assert result["paths"] == ["/Shared/folder/a.txt"]
+
+
+def test_upload_workspace_rejects_relative_targets_and_symbolic_links(tmp_path):
+    source = tmp_path / "a.txt"
+    source.write_text("a")
+    with pytest.raises(ValueError, match="must be absolute"):
+        databricks.upload_workspace(workspace_files(), source, "Shared/a.txt")
+
+    link = tmp_path / "link.txt"
+    link.symlink_to(source)
+    with pytest.raises(ValueError, match="symbolic link"):
+        databricks.upload_workspace(workspace_files(), link, "/Shared/link.txt")
+
+
+def test_upload_workspace_reports_individual_failures_and_exit_one(tmp_path):
+    source = tmp_path / "folder"
+    source.mkdir()
+    (source / "a.txt").write_text("a")
+    (source / "b.txt").write_text("b")
+    w = workspace_files(fail_on="/Shared/folder/a.txt")
+
+    result = databricks.upload_workspace(w, source, "/Shared/folder")
+
+    assert result["uploaded"] == 1 and result["exit_code"] == 1
+    assert result["paths"] == ["/Shared/folder/b.txt"]
+    assert result["failed"] == [{"path": "/Shared/folder/a.txt", "error": "OSError: upload failed"}]
 
 
 def test_compute_status_reports_ec2_nodes_and_uptime_since_the_last_restart():

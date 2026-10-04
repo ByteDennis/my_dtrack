@@ -22,18 +22,19 @@ dev action="sync":
 
 # unit | cov | moto | spark | oracle | e2e | local | all | debug | attach  [pytest args]
 [group('test')]
+[positional-arguments]
 test kind="unit" *args:
-    @case "{{kind}}" in \
-      unit)   uv run pytest -q tests/unit {{args}} ;; \
-      cov)    uv run pytest -q tests/unit --cov --cov-report=term --cov-report=html:.coverage-html {{args}} ;; \
-      moto)   just s3 up && {{moto_env}} uv run pytest -q --run-moto tests/local/s3 {{args}} ;; \
-      spark)  uv run --group spark pytest -q --run-spark tests/local/spark {{args}} ;; \
-      oracle) uv run pytest -q --run-oracle tests/local/oracle {{args}} ;; \
-      e2e)    just s3 up && {{moto_env}} uv run pytest -q --run-e2e tests/local/e2e {{args}} ;; \
+    @shift; case "{{kind}}" in \
+      unit)   uv run pytest -q tests/unit "$@" ;; \
+      cov)    uv run pytest -q tests/unit --cov --cov-report=term --cov-report=html:.coverage-html "$@" ;; \
+      moto)   just s3 up && {{moto_env}} uv run pytest -q --run-moto tests/local/s3 "$@" ;; \
+      spark)  uv run --group spark pytest -q --run-spark tests/local/spark "$@" ;; \
+      oracle) uv run pytest -q --run-oracle tests/local/oracle "$@" ;; \
+      e2e)    just s3 up && {{moto_env}} uv run pytest -q --run-e2e tests/local/e2e "$@" ;; \
       local)  just test moto && just test spark && just test oracle ;; \
       all)    just test unit && just test local ;; \
-      debug)  uv run pytest -x -s --pdb --pdbcls=IPython.terminal.debugger:TerminalPdb {{args}} ;; \
-      attach) uv run python -m debugpy --listen 5678 --wait-for-client -m pytest -x -s {{args}} ;; \
+      debug)  uv run pytest -x -s --pdb --pdbcls=IPython.terminal.debugger:TerminalPdb "$@" ;; \
+      attach) uv run python -m debugpy --listen 5678 --wait-for-client -m pytest -x -s "$@" ;; \
       *)      echo "usage: just test unit|cov|moto|spark|oracle|e2e|local|all|debug|attach [args]" >&2; exit 2 ;; \
     esac
 

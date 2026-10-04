@@ -6,6 +6,7 @@
 #   dtrack dbx sql        "SELECT ..." | --file q.sql --warehouse-id ID [--limit 20]
 #                         one statement; several: wrap them in BEGIN ... END
 #   dtrack dbx runs       [--limit 10] [--job-id N] [--active] | --run-id N
+#   dtrack dbx workspace upload SOURCE [TARGET] [--overwrite] [--dry-run] [--profile corp]
 #   dtrack dbx s3 creds   [--profile corp] [--target corp-winscp] [--watch] [--every 1200]
 #   dtrack dbx s3 winscp  [--site corp-s3] [--profile] [--target] [--every]
 #   dtrack dbx s3 whoami  [--profile corp]

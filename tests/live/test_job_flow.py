@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from support import oracle_config
 
+from dtrack_left.backends import databricks
 from dtrack_left.backends.store import S3Store
 from dtrack_left.cli import main
 
@@ -16,28 +17,9 @@ RIGHT_PACKAGE = Path(__file__).resolve().parents[2] / "src/dtrack_right"
 
 # >>> copy src/dtrack_right into the workspace: notebook.py as a notebook, the rest as plain files <<< #
 def upload_right_package(workspace, folder: str) -> str:
-    from databricks.sdk.service.workspace import ImportFormat, Language
-
     target = f"{folder}/dtrack_right"
-    for path in sorted(RIGHT_PACKAGE.rglob("*")):
-        if "__pycache__" in path.parts:
-            continue
-        remote = f"{target}/{path.relative_to(RIGHT_PACKAGE).as_posix()}"
-        if path.is_dir():
-            workspace.workspace.mkdirs(remote)
-        elif path.name == "notebook.py":
-            workspace.workspace.upload(
-                remote.removesuffix(".py"),
-                path.read_bytes(),
-                format=ImportFormat.SOURCE,
-                language=Language.PYTHON,
-                overwrite=True,
-            )
-        else:
-            workspace.workspace.mkdirs(remote.rsplit("/", 1)[0])
-            workspace.workspace.upload(
-                remote, path.read_bytes(), format=ImportFormat.AUTO, overwrite=True
-            )
+    outcome = databricks.upload_workspace(workspace, RIGHT_PACKAGE, target, overwrite=True)
+    assert outcome["failed"] == [], outcome
     return f"{target}/notebook"
 
 
