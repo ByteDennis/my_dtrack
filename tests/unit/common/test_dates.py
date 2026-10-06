@@ -13,6 +13,8 @@ import pytest
         ("01/02/2026", "2026-01-02"),
         ("02JAN2026", "2026-01-02"),
         ("02-Jan-2026", "2026-01-02"),
+        ("2026-01-02 00:00:00", "2026-01-02"),
+        ("2026-01-02T13:05:00.123456", "2026-01-02"),
     ],
 )
 def test_canonical_date_accepts_every_supported_format(common, value, expected):

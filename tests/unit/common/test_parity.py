@@ -83,9 +83,11 @@ def test_cloud_comparison_matches_expected_verdicts():
     assert same["verdict"] == "match" and changed["verdict"] == "diff"
 
 
-def test_key_normalisation_keeps_leading_zeros_and_collapses_only_pure_decimals():
+def test_key_normalisation_strips_numeric_zeros_but_string_keeps_them():
     cases = {
-        ("007", "numeric"): "007",
+        ("007", "numeric"): "7",
+        ("007", "string"): "007",
+        ("+007.50", "numeric"): "7.5",
         ("2.50", "numeric"): "2.5",
         ("2.0", "numeric"): "2",
         ("1e3", "numeric"): "1e3",

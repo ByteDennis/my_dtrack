@@ -27,7 +27,7 @@ def test_collapse_decimal_touches_only_pure_decimals(common, text, expected):
         (None, "string", "<<NULL>>"),
         ("   ", "numeric", "<<NULL>>"),
         (" Abc ", "string", "abc"),
-        ("Café", "string", "café"),
+        ("CAFÉ", "string", "café"),
         ("02JAN2026", "date", "2026-01-02"),
         (" 7.50 ", "numeric", "7.5"),
         (7, "numeric", "7"),
@@ -68,7 +68,7 @@ def test_sample_csv_rejects_missing_keys_and_unknown_modes(common, tmp_path):
         common.hashing.sample_csv(path, key_columns=["id"], mode="stratified")
 
 
-def test_sample_csv_fraction_keeps_rows_under_the_threshold_and_leading_zeros(common, tmp_path):
+def test_sample_csv_fraction_hashes_the_normalised_key_and_keeps_raw_rows(common, tmp_path):
     rows = [[f"{i:05d}", "x"] for i in range(400)]
     path = _keys_csv(tmp_path, rows)
     sampled = pd.read_csv(
@@ -78,7 +78,7 @@ def test_sample_csv_fraction_keeps_rows_under_the_threshold_and_leading_zeros(co
         dtype=object,
     )
     threshold = round(0.25 * 2**32)
-    expected = [key for key, _ in rows if common.hashing.hash32(key) < threshold]
+    expected = [key for key, _ in rows if common.hashing.hash32(str(int(key))) < threshold]
     assert list(sampled["id"]) == expected and 60 < len(expected) < 140
 
 

@@ -8,7 +8,7 @@ from typing import Any
 
 from .. import PROTOCOL_VERSION
 from .dates import bucket_date
-from .hashing import HASH_BUCKET_SPACE
+from .hashing import HASH_BUCKET_SPACE, key_family
 
 
 def _slug(value: object) -> str:
@@ -75,12 +75,15 @@ def build_manifest(
     ]
     keys = [part.strip() for part in str(pair.get("key") or "").split(",") if part.strip()]
     key_family_config = dict(pair.get("key_families") or {})
-    key_families = [key_family_config.get(key, "string") for key in keys]
-    unsupported_families = sorted(set(key_families) - {"string", "numeric", "date"})
-    if unsupported_families:
+    unknown_keys = sorted(set(key_family_config) - set(keys))
+    if keys and unknown_keys:
         raise ValueError(
-            f"{pair_name}: unsupported key families: {', '.join(unsupported_families)}"
+            f"{pair_name}: key_families names non-key columns: {', '.join(unknown_keys)}"
         )
+    try:
+        key_families = [key_family(key_family_config.get(key)).spec() for key in keys]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{pair_name}: unsupported key families: {exc}") from None
     overrides = dict(pair.get("col_type_overrides") or {})
     unknown = sorted(set(overrides) - set(columns))
     invalid = sorted(set(overrides.values()) - {"numeric", "categorical"})

@@ -15,7 +15,10 @@ def canonical_date(value: object) -> str:
             return datetime.strptime(text, fmt).date().isoformat()  # noqa: DTZ007
         except ValueError:
             continue
-    raise ValueError(f"unsupported date value: {value!r}")
+    try:
+        return datetime.fromisoformat(text).date().isoformat()
+    except ValueError:
+        raise ValueError(f"unsupported date value: {value!r}") from None
 
 
 def bucket_date(value: str, vintage: str) -> str:

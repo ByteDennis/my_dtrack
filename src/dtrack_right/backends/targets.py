@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from ..common.dates import bounds_where, canonical_date, day_expr, partition_where, quote_ident
-from ..common.hashing import sample_csv
+from ..common.hashing import collapse_decimal_sql as _collapse_decimal_sql
+from ..common.hashing import key_families, key_family, sample_csv, spark_literal
 from ..common.stats import compute_csv_statistics
 
 log = logging.getLogger("dtrack.right.target")
@@ -23,23 +24,9 @@ NUMERIC_TYPES = (
 INTEGRAL_TYPES = ("int", "bigint", "smallint", "tinyint", "long", "short")
 
 
-# >>> Spark SQL twin of normalization.collapse_decimal: pure decimals lose trailing zeros, nothing else changes <<< #
-def _collapse_decimal_sql(text: str) -> str:
-    collapsed = (
-        f"regexp_replace(regexp_replace({text}, '(\\\\.[0-9]*[1-9])0+$', '$1'), '\\\\.0+$', '')"
-    )
-    return f"CASE WHEN {text} rlike '^-?[0-9]+\\\\.[0-9]+$' THEN {collapsed} ELSE {text} END"
-
-
-# >>> normalisation of a key expression in Spark SQL, mirroring normalization.normalize_value <<< #
-def _norm_sql(column: str, family: str) -> str:
-    ref = quote_ident(column, "spark")
-    text = f"trim(cast({ref} as string))"
-    if family == "numeric":
-        return f"coalesce(nullif({_collapse_decimal_sql(text)}, ''), '<<NULL>>')"
-    if family == "date":
-        return f"coalesce(date_format(cast({ref} as date), 'yyyy-MM-dd'), '<<NULL>>')"
-    return f"coalesce(nullif(lower({text}), ''), '<<NULL>>')"
+# >>> normalisation of a Right key column in Spark SQL: the family's right_transform_sql <<< #
+def _norm_sql(column: str, family: object) -> str:
+    return key_family(family).sql(quote_ident(column, "spark"), "right")
 
 
 # >>> Right side read through spark.sql: counts, sampling predicate and statistics all run in the warehouse <<< #
@@ -127,8 +114,10 @@ class SparkTarget:
         if plan["mode"] == "fraction":
             return f"conv(substr(md5({composite}), 1, 8), 16, 10) < {int(plan['threshold'])}"
         tuples = window.get("key_tuples") or []
+        resolved = key_families(families, len(keys))
         values = ", ".join(
-            "'" + "|".join(str(v) for v in row).replace("'", "''") + "'" for row in tuples
+            spark_literal("|".join(f.normalize(v, "left") for v, f in zip(row, resolved)))
+            for row in tuples
         )
         return f"{composite} IN ({values})" if values else "1=0"
 
@@ -267,6 +256,7 @@ class CsvAnchorTarget:
             count=plan.get("count"),
             families=manifest["key_families"],
             key_tuples=window.get("key_tuples"),
+            side="right",
         )
         overrides = manifest.get("col_type_overrides") or {}
         return compute_csv_statistics(

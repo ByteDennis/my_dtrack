@@ -5,7 +5,7 @@ from support import FakeRow, FakeSpark, pairs_config
 
 from dtrack_right.backends import targets
 from dtrack_right.backends.targets import CsvAnchorTarget, SparkTarget
-from dtrack_right.common.hashing import collapse_decimal
+from dtrack_right.common.hashing import collapse_decimal, key_family
 
 ORDERS = {"source": "databricks", "catalog": "main", "schema": "sales", "table": "orders"}
 ORDERS |= {"date_col": "business_date", "date_type": "date"}
@@ -40,16 +40,11 @@ def test_spark_collapse_decimal_sql_applies_the_same_rule_as_python(text):
     assert _spark_rule(sql)(text) == collapse_decimal(text)
 
 
-@pytest.mark.parametrize(
-    ("family", "fragment"),
-    [
-        ("numeric", "coalesce(nullif(CASE WHEN trim(cast(`k` as string))"),
-        ("date", "coalesce(date_format(cast(`k` as date), 'yyyy-MM-dd'), '<<NULL>>')"),
-        ("string", "coalesce(nullif(lower(trim(cast(`k` as string))), ''), '<<NULL>>')"),
-    ],
-)
-def test_norm_sql_mirrors_normalize_value_per_family(family, fragment):
-    assert targets._norm_sql("k", family).startswith(fragment)
+@pytest.mark.parametrize("family", ["string", "numeric", "date", "exact", "digits"])
+def test_norm_sql_is_the_family_right_transform_sql(family):
+    sql = targets._norm_sql("k", family)
+    assert sql == key_family(family).sql("`k`", "right")
+    assert sql.startswith("coalesce(nullif(") and sql.endswith(", ''), '<<NULL>>')")
 
 
 def test_relation_supports_tables_queries_and_raw_volume_files():
@@ -130,7 +125,7 @@ def _manifest(sample, strict=False, keys=("order_id",), families=("numeric",)):
     [
         ({"mode": "all"}, {}, None),
         ({"mode": "fraction", "threshold": 1000}, {}, "conv(substr(md5(concat_ws('|', "),
-        ({"mode": "fixed"}, {"key_tuples": [["7"], ["o'k"]]}, "IN ('7', 'o''k')"),
+        ({"mode": "fixed"}, {"key_tuples": [["7"], ["o'k"]]}, "IN ('7', 'o\\'k')"),
         ({"mode": "fixed"}, {"key_tuples": []}, "1=0"),
     ],
 )
@@ -245,3 +240,11 @@ def test_csv_anchor_target_preflight_reports_problems(tmp_path):
     assert missing.preflight()["ok"] is False
     (tmp_path / "t.csv").write_text("x\n1\n")
     assert "missing column d" in missing.preflight()["error"]
+
+
+def test_fixed_sample_normalizes_left_key_tuples_per_family():
+    keys, families = ("card", "amt", "eff_dt"), ("string", "numeric", "date")
+    manifest = _manifest({"mode": "fixed"}, keys=keys, families=families)
+    window = {"key_tuples": [[" ABC ", "1.50", "2026-01-31 00:00:00"], ["O'K", "007", "20260131"]]}
+    predicate = SparkTarget(None, ORDERS)._sample_predicate(manifest, window)
+    assert predicate.endswith("IN ('abc|1.5|2026-01-31', 'o\\'k|7|2026-01-31')")

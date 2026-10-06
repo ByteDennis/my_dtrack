@@ -50,7 +50,11 @@
 #   col_type_overrides   {"LEFT": "numeric" | "categorical"}   (CSV type column fills it)
 #   vintage              day (default) | week | month | quarter | year   -> one window per bucket
 #   key                  "ORDER_ID" or "A,B"; right names via col_map, else the same name
-#   key_families         {"KEY": "string" (default) | "numeric" | "date"}   hash normalisation
+#   key_families         {"KEY": family} hash normalisation, keyed by the Left key name; family is
+#                        a name: string (default, trim+lower) | exact | numeric (007, +7.00 -> 7) |
+#                        date | digits, or a step list ["trim", "upper", "strip_prefix:ID-"], or
+#                        {"family"?, "transform"?, "left_transform"?, "right_transform"?}
+#                        (sides default to transform; steps and families: common/hashing.py)
 #   sample               missing / "" / false = all rows | 0 < x <= 1 fraction by key hash |
 #                        N > 0 fixed N keys per window chosen by the Left side (both need key)
 #   strict               true: text compared lower-cased and decimal-collapsed

@@ -133,6 +133,7 @@ class WarehouseTarget(SparkTarget):
                 count=plan.get("count"),
                 families=manifest["key_families"],
                 key_tuples=window.get("key_tuples"),
+                side="right",
             )
         )
         overrides = manifest.get("col_type_overrides") or {}
