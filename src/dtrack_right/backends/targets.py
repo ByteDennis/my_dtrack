@@ -6,7 +6,8 @@ from typing import Any
 
 from ..common.dates import bounds_where, canonical_date, day_expr, partition_where, quote_ident
 from ..common.hashing import collapse_decimal_sql as _collapse_decimal_sql
-from ..common.hashing import key_families, key_family, sample_csv, spark_literal
+from ..common.hashing import key_family, sample_csv
+from ..common.sampling import sample_predicate_sql
 from ..common.stats import compute_csv_statistics
 
 log = logging.getLogger("dtrack.right.target")
@@ -104,22 +105,15 @@ class SparkTarget:
         return counts
 
     def _sample_predicate(self, manifest: dict[str, Any], window: dict[str, Any]) -> str | None:
-        plan = manifest["sample"]
         keys, families = manifest["right_key_cols"], manifest["key_families"]
-        if plan["mode"] == "all" or not keys:
-            return None
-        composite = (
-            "concat_ws('|', " + ", ".join(_norm_sql(k, f) for k, f in zip(keys, families)) + ")"
+        return sample_predicate_sql(
+            manifest["sample"],
+            [quote_ident(key, "spark") for key in keys],
+            families,
+            "spark",
+            "right",
+            window.get("key_tuples"),
         )
-        if plan["mode"] == "fraction":
-            return f"conv(substr(md5({composite}), 1, 8), 16, 10) < {int(plan['threshold'])}"
-        tuples = window.get("key_tuples") or []
-        resolved = key_families(families, len(keys))
-        values = ", ".join(
-            spark_literal("|".join(f.normalize(v, "left") for v, f in zip(row, resolved)))
-            for row in tuples
-        )
-        return f"{composite} IN ({values})" if values else "1=0"
 
     def window_statistics(
         self, manifest: dict[str, Any], window: dict[str, Any]

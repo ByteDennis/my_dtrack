@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterable
@@ -12,7 +13,6 @@ from typing import Any
 import pandas as pd
 
 from ..backends.sources import source_from_config
-from ..common.hashing import sample_csv
 from ..common.manifest import unit_id, validate_manifest
 from ..common.stats import compute_csv_statistics
 
@@ -57,15 +57,12 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
     windows = {}
     for window in manifest["windows"]:
         output = Path(work_dir) / manifest["pair"] / window["bucket"] / "keys.csv"
-        path = source.pull_window(
-            window["partitions"], [], output, key_columns=manifest["key_cols"]
-        )
-        sampled = sample_csv(
-            path,
-            key_columns=manifest["key_cols"],
-            mode="fixed",
+        sampled = source.sample_keys(
+            window["partitions"],
+            manifest["key_cols"],
+            output,
             count=manifest["sample"]["count"],
-            families=manifest["key_families"],
+            key_families=manifest["key_families"],
         )
         rows = pd.read_csv(sampled, dtype=object)[manifest["key_cols"]]
         windows[window["bucket"]] = rows.drop_duplicates().values.tolist()
@@ -233,34 +230,39 @@ class LeftRuntime:
     def __init__(self, work_dir: str | Path, store=None):
         self.work_dir = Path(work_dir)
         self.store = store
+        self.sources = {}
+        self.sources_lock = threading.Lock()
+
+    def source(self, manifest):
+        pair = manifest["pair"]
+        with self.sources_lock:
+            if pair not in self.sources:
+                self.sources[pair] = source_from_config(manifest["left"])
+            return self.sources[pair]
 
     def pull_window(self, manifest, window):
         if manifest["sample"]["mode"] == "fixed" and "key_tuples" not in window:
             keys = self.store.get_json(f"manifest/{manifest['pair']}.keys.json")["windows"]
             window["key_tuples"] = keys.get(window["bucket"], [])
         output = self.work_dir / manifest["pair"] / window["bucket"] / "left.csv"
-        path = source_from_config(manifest["left"]).pull_window(
-            window["partitions"], manifest["columns"], output, key_columns=manifest["key_cols"]
-        )
-        plan = manifest["sample"]
-        sampled = sample_csv(
-            path,
+        path = self.source(manifest).pull_window(
+            window["partitions"],
+            manifest["columns"],
+            output,
             key_columns=manifest["key_cols"],
-            mode=plan["mode"],
-            rate=plan.get("rate"),
-            count=plan.get("count"),
-            families=manifest["key_families"],
+            sample_plan=manifest["sample"],
+            key_families=manifest["key_families"],
+            side="left",
             key_tuples=window.get("key_tuples"),
         )
         log.info(
-            "left %s %s: %d rows scanned -> %d sampled (%s)",
+            "left %s %s: %d sampled row(s) pulled (%s)",
             manifest["pair"],
             window["bucket"],
             _row_count(path),
-            _row_count(sampled),
-            sampled,
+            path,
         )
-        return sampled
+        return path
 
     @staticmethod
     def compute_stats(manifest, _window, path):

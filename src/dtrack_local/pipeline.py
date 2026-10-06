@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from dtrack_right.common.hashing import sample_csv
 from dtrack_right.common.stats import compute_csv_statistics
 from dtrack_right.report import build_report, publish_report
 
+from .run_logging import configure_run_logging, log_exception_once
 from .warehouse import Warehouse
 
 log = logging.getLogger("dtrack.local")
@@ -35,7 +37,7 @@ LOCAL = "_local"
 NEVER_BLOCK = 10**9
 
 
-# >>> every pulled window, Left and Right, kept as raw text in one local DuckDB file for ad-hoc queries <<< #
+# >>> every pulled window, Left and Right, kept in one local DuckDB file for ad-hoc queries <<< #
 class Landing:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -87,7 +89,7 @@ class WarehouseTarget(SparkTarget):
         work_dir: str | Path,
         *,
         landing: Landing | None = None,
-        push_sample: bool = False,
+        push_sample: bool = True,
     ):
         super().__init__(None, config)
         self.warehouse = warehouse
@@ -107,11 +109,8 @@ class WarehouseTarget(SparkTarget):
         where = self._where(predicate if sample is None else f"{predicate} AND ({sample})")
         right_columns = [manifest["col_map"][column] for column in manifest["columns"]]
         selected = list(dict.fromkeys([date_col, *manifest["right_key_cols"], *right_columns]))
-        casts = ", ".join(
-            f"CAST({quote_ident(column, 'spark')} AS STRING) AS {quote_ident(column, 'spark')}"
-            for column in selected
-        )
-        return f"SELECT {casts} FROM {self.relation()} WHERE {where}", selected
+        projection = ", ".join(quote_ident(column, "spark") for column in selected)
+        return f"SELECT {projection} FROM {self.relation()} WHERE {where}", selected
 
     def window_statistics(
         self, manifest: dict[str, Any], window: dict[str, Any]
@@ -122,10 +121,9 @@ class WarehouseTarget(SparkTarget):
         if self.landing:
             self.landing.land("right", manifest["pair"], window["bucket"], output)
         plan = manifest["sample"]
-        sampled = (
-            output
-            if pulled == 0
-            else sample_csv(
+        sampled = output
+        if pulled and not self.push_sample:
+            sampled = sample_csv(
                 output,
                 key_columns=manifest["right_key_cols"],
                 mode=plan["mode"],
@@ -135,7 +133,6 @@ class WarehouseTarget(SparkTarget):
                 key_tuples=window.get("key_tuples"),
                 side="right",
             )
-        )
         overrides = manifest.get("col_type_overrides") or {}
         return compute_csv_statistics(
             sampled,
@@ -145,7 +142,7 @@ class WarehouseTarget(SparkTarget):
         )
 
 
-# >>> Left pulls exactly as `dtrack col-check`, plus a copy of each raw window in the landing DuckDB <<< #
+# >>> Left pulls exactly as `dtrack col-check`, plus its query-filtered window in the landing DuckDB <<< #
 class LandingLeftRuntime(LeftRuntime):
     def __init__(self, work_dir: str | Path, store, landing: Landing | None = None):
         super().__init__(work_dir, store)
@@ -178,6 +175,10 @@ class LocalRun:
     def local(self) -> Path:
         return self.folder / LOCAL
 
+    @property
+    def error_log(self) -> Path:
+        return self.local / "logs" / "errors.log"
+
     def status(self) -> dict[str, Any]:
         return self.store.get_json("_STATUS.json") if self.store.exists("_STATUS.json") else {}
 
@@ -191,13 +192,14 @@ def open_run(
     profile: str | None = None,
     warehouse_id: str | None = None,
     disposition: str = "external_links",
-    push_sample: bool = False,
+    push_sample: bool = True,
     pairs: list[str] | None = None,
     target_factory: Callable[[dict[str, Any]], Any] | None = None,
 ) -> LocalRun:
     document = config if isinstance(config, dict) else load_config(config)
     run_id = run_id or make_run_id(document)
     folder = Path(out) / run_id
+    configure_run_logging(folder)
     landing = Landing(folder / LOCAL / "data.duckdb")
     if target_factory is None:
         from dtrack_left.backends.databricks import DEFAULT_PROFILE, workspace
@@ -214,7 +216,7 @@ def open_run(
             return WarehouseTarget(warehouse, right, work, landing=landing, push_sample=push_sample)
 
     run = LocalRun(document, run_id, folder, target_factory, landing, pairs)
-    log.info("local run %s at %s", run_id, folder)
+    log.info("local run %s at %s; errors -> %s", run_id, folder, run.error_log)
     return run
 
 
@@ -257,26 +259,57 @@ def row_check(run: LocalRun, *, gate: str = "auto", workers: int = 4) -> dict[st
     }
 
 
-# >>> Stage 2: Left pulls and statistics become units, then the Right windows are pulled and every unit compared <<< #
+# >>> Stage 2: publish Left units while the Right side prefetches and compares them concurrently <<< #
 def col_check(
     run: LocalRun, *, pull_workers: int = 2, stat_workers: int = 2, max_attempts: int = 3
+) -> dict[str, Any]:
+    try:
+        return _col_check(
+            run,
+            pull_workers=pull_workers,
+            stat_workers=stat_workers,
+            max_attempts=max_attempts,
+        )
+    except Exception as exc:
+        log_exception_once(log, "local col-check failed", exc)
+        raise
+
+
+def _col_check(
+    run: LocalRun, *, pull_workers: int, stat_workers: int, max_attempts: int
 ) -> dict[str, Any]:
     manifests = wait_for_manifests(run.store, timeout=0, poll_interval=0, pair_names=run.pairs)
     left_work = run.local / "left"
     for manifest in manifests:
         publish_fixed_keys(run.store, manifest, left_work)
     runtime = LandingLeftRuntime(left_work, run.store, run.landing)
-    published = ColCheckPipeline(
+    producer = ColCheckPipeline(
         run.store,
         pull_window=runtime.pull_window,
         compute_stats=runtime.compute_stats,
         pull_workers=pull_workers,
         stat_workers=stat_workers,
         wip=NEVER_BLOCK,
-    ).run(manifests)
-    results = ColCheck(
-        run.store, run.target_factory, max_attempts=max_attempts, poll_interval=0.2
-    ).run()
+    )
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="dtrack-left") as executor:
+        producer_job = executor.submit(producer.run, manifests)
+
+        def producer_health() -> bool:
+            if not producer_job.done():
+                return False
+            producer_job.result()
+            if not run.store.exists("manifest/_CLOSED"):
+                raise RuntimeError("Left col-check finished without closing the manifest")
+            return False
+
+        results = ColCheck(
+            run.store,
+            run.target_factory,
+            max_attempts=max_attempts,
+            poll_interval=0.2,
+            on_idle=producer_health,
+        ).run()
+        published = producer_job.result()
     verdicts: dict[str, int] = {}
     for row in results:
         verdicts[row["verdict"]] = verdicts.get(row["verdict"], 0) + 1
@@ -369,4 +402,5 @@ def run_all(
         "published": built["published"],
         "backup": saved,
         "landing": run.landing.tables(),
+        "error_log": str(run.error_log),
     }

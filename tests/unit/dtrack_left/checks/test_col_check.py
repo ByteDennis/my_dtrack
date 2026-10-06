@@ -153,6 +153,8 @@ def test_fixed_sample_keys_are_published_once_and_reused_by_the_runtime(syntheti
     assert publish_fixed_keys(store, manifest(), tmp_path) is None
     fresh = _fixed_manifest(synthetic)
     sampled = LeftRuntime(tmp_path / "work", store).pull_window(fresh, fresh["windows"][0])
+    assert sampled.name == "left.csv"
+    assert not sampled.with_name("left.sampled.csv").exists()
     frame = pd.read_csv(sampled, dtype=object)
     assert sorted(frame["CUST_ID"].unique()) == sorted(key[0] for key in keys)
     stats = LeftRuntime.compute_stats(fresh, None, sampled)

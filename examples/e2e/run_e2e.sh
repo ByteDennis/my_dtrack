@@ -103,7 +103,7 @@ show "$LOGS/05_right_job.log"
 section "8. idempotent re-runs (resume semantics)"
 run "08_col_check_again" uv run dtrack col-check --s3 "$S3" --work-dir "$WORK/col_check" --wait-timeout 10
 run "09_right_again" $RIGHT_CMD --work "s3://$WORK_BUCKET/dtrack/v1/runs" --run-id "$RUN_ID" --right-csv-dir "$RIGHT" --out "$WORK/report-rerun" --work-dir "$WORK/right" --poll-interval 1 --idle-timeout 20
-run "10_fetch_report" uv run dtrack fetch-report --report-s3 "$REPORT_S3" --out "$OUT/fetched_report"
+run "10_fetch_report" uv run dtrack tools fetch-report --report-s3 "$REPORT_S3" --out "$OUT/fetched_report"
 
 section "9. gate policies on the Right side (separate run prefixes)"
 for policy in manual ratio:0.02; do

@@ -19,7 +19,7 @@ def workspace(profile: str):
     try:
         from databricks.sdk import WorkspaceClient
     except ImportError as exc:
-        raise ImportError("dtrack dbx requires dtrack[dbx] (databricks-sdk)") from exc
+        raise ImportError("dtrack tools dbx requires dtrack[dbx] (databricks-sdk)") from exc
     return WorkspaceClient(profile=profile)
 
 

@@ -6,7 +6,11 @@ from dtrack_left.cli import main
 from dtrack_left.cli.ops import dbx
 
 
-# >>> dtrack dbx: every subcommand reaches its backend function with the resolved ids <<< #
+def run_tool(argv):
+    return main(["tools", *argv])
+
+
+# >>> dtrack tools dbx: every subcommand reaches its backend function with the resolved ids <<< #
 @pytest.fixture
 def dbx_calls(monkeypatch):
     calls = []
@@ -66,7 +70,7 @@ def dbx_calls(monkeypatch):
     ],
 )
 def test_dbx_commands_call_their_backend(dbx_calls, capsys, argv, call):
-    assert main(argv) == 0
+    assert run_tool(argv) == 0
     assert dbx_calls == [call]
     assert json.loads(capsys.readouterr().out) == {"called": call[0]}
 
@@ -77,8 +81,8 @@ def test_dbx_ids_and_profile_come_from_the_environment(dbx_calls, monkeypatch, t
     monkeypatch.setenv("DTRACK_DBX_WAREHOUSE_ID", "wh9")
     (tmp_path / "q.sql").write_text("SELECT 2")
     assert (
-        main(["dbx", "compute"]) == 0
-        and main(["dbx", "sql", "--file", str(tmp_path / "q.sql")]) == 0
+        run_tool(["dbx", "compute"]) == 0
+        and run_tool(["dbx", "sql", "--file", str(tmp_path / "q.sql")]) == 0
     )
     assert dbx_calls[0][1] == ("w:work", "c9") and dbx_calls[1][1] == ("w:work", "SELECT 2", "wh9")
 
@@ -88,7 +92,7 @@ def test_dbx_workspace_upload_calls_backend_with_paths_and_flags(dbx_calls, tmp_
     source.mkdir()
 
     assert (
-        main(
+        run_tool(
             [
                 "dbx",
                 "workspace",
@@ -123,27 +127,27 @@ def test_dbx_workspace_upload_keeps_backend_exit_code(dbx_calls, monkeypatch, tm
         lambda *_args, **_kwargs: {"uploaded": 0, "failed": ["a.txt"], "exit_code": 1},
     )
 
-    assert main(["dbx", "workspace", "upload", str(source)]) == 1
+    assert run_tool(["dbx", "workspace", "upload", str(source)]) == 1
     assert json.loads(capsys.readouterr().out) == {"failed": ["a.txt"], "uploaded": 0}
 
 
 def test_dbx_workspace_upload_requires_an_existing_source(dbx_calls, tmp_path):
-    assert main(["dbx", "workspace", "upload"]) == 2
-    assert main(["dbx", "workspace", "upload", str(tmp_path / "missing")]) == 2
+    assert run_tool(["dbx", "workspace", "upload"]) == 2
+    assert run_tool(["dbx", "workspace", "upload", str(tmp_path / "missing")]) == 2
 
 
 def test_dbx_usage_errors_exit_two_and_sdk_errors_exit_one(dbx_calls, monkeypatch, capsys):
     monkeypatch.delenv("DTRACK_DBX_CLUSTER_ID", raising=False)
     monkeypatch.delenv("DTRACK_DBX_WAREHOUSE_ID", raising=False)
-    assert main(["dbx", "compute"]) == 2
-    assert main(["dbx", "sql", "--warehouse-id", "wh"]) == 2
+    assert run_tool(["dbx", "compute"]) == 2
+    assert run_tool(["dbx", "sql", "--warehouse-id", "wh"]) == 2
     capsys.readouterr()
 
     def missing(*_args, **_kwargs):
         raise OSError("Cluster nope does not exist")
 
     monkeypatch.setattr(dbx.databricks, "compute_status", missing)
-    assert main(["dbx", "compute", "--cluster-id", "nope"]) == 1
+    assert run_tool(["dbx", "compute", "--cluster-id", "nope"]) == 1
     assert json.loads(capsys.readouterr().out) == {"error": "OSError: Cluster nope does not exist"}
 
 
@@ -152,7 +156,7 @@ def test_dbx_reads_its_defaults_from_dotenv(dbx_calls, monkeypatch, tmp_path, ca
     for name in ("DTRACK_DBX_PROFILE", "DTRACK_DBX_CLUSTER_ID"):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".env").write_text("DTRACK_DBX_PROFILE=dotenv\nDTRACK_DBX_CLUSTER_ID=c-dotenv\n")
-    assert main(["dbx", "compute"]) == 0
+    assert run_tool(["dbx", "compute"]) == 0
     assert dbx_calls == [("compute_status", ("w:dotenv", "c-dotenv"), {})]
     for name in ("DTRACK_DBX_PROFILE", "DTRACK_DBX_CLUSTER_ID"):
         monkeypatch.delenv(name, raising=False)

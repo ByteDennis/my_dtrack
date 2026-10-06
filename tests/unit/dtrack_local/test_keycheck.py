@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from dtrack_left.backends.sources import FileSource
 from dtrack_local import keycheck
 
 PAIR = {
@@ -107,6 +108,127 @@ def test_pull_right_keys_selects_raw_keys_and_the_spark_composite(tmp_path):
     assert seen["cols"] == ["dw_dt", "acct_id", "open_dt", keycheck.NORM_SQL]
     assert "`dw_dt` IN (20260131)" in seen["sql"] or "20260131" in seen["sql"]
     assert f"concat_ws('|', {families[0].sql('`acct_id`', 'right')}" in seen["sql"]
+    assert "CAST(`dw_dt` AS STRING)" not in seen["sql"]
+
+
+def test_fraction_sample_is_pushed_into_both_key_queries(tmp_path):
+    seen = {}
+
+    class Source:
+        def pull_window(self, partitions, columns, output, **kwargs):
+            seen["left"] = (partitions, columns, kwargs)
+            pd.DataFrame(
+                {"EFF_DT": ["2026-01-31"], "ACCT_ID": ["007"], "OPEN_DT": ["2020-01-01"]}
+            ).to_csv(output, index=False)
+            return output
+
+    warehouse = SimpleNamespace(
+        to_csv=lambda sql, output, columns: (
+            seen.update(right_sql=sql),
+            pd.DataFrame(
+                {
+                    "dw_dt": ["20260131"],
+                    "acct_id": ["7"],
+                    "open_dt": ["20200101"],
+                    keycheck.NORM_SQL: ["7|2020-01-01"],
+                }
+            ).to_csv(output, index=False),
+        )[-1]
+    )
+    target = SimpleNamespace(
+        config=PAIR["right"],
+        relation=lambda: "`t`",
+        _where=lambda predicate: predicate,
+        warehouse=warehouse,
+    )
+    pair = {**PAIR, "sample": 0.25}
+    result = keycheck.run_sample_check("p", pair, Source(), target, ["2026-01-31"], tmp_path)
+    left_options = seen["left"][2]
+    assert left_options["sample_plan"] == result.sample
+    assert left_options["side"] == "left"
+    assert "conv(substr(md5(" in seen["right_sql"]
+    assert result.summary()["sample mode"] == "fraction"
+    assert result.summary()["ok"] is True
+
+
+def test_fixed_sample_uses_left_selected_keys_on_both_sides(tmp_path):
+    seen = {}
+
+    class Source:
+        def sample_keys(self, partitions, keys, output, **kwargs):
+            seen["selection"] = (partitions, keys, kwargs)
+            pd.DataFrame({"ACCT_ID": ["007"], "OPEN_DT": ["2020-01-01"]}).to_csv(
+                output, index=False
+            )
+            return output
+
+        def pull_window(self, partitions, columns, output, **kwargs):
+            seen["left"] = kwargs
+            pd.DataFrame(
+                {"EFF_DT": ["2026-01-31"], "ACCT_ID": ["007"], "OPEN_DT": ["2020-01-01"]}
+            ).to_csv(output, index=False)
+            return output
+
+    warehouse = SimpleNamespace(
+        to_csv=lambda sql, output, columns: (
+            seen.update(right_sql=sql),
+            pd.DataFrame(
+                {
+                    "dw_dt": ["20260131"],
+                    "acct_id": ["7"],
+                    "open_dt": ["20200101"],
+                    keycheck.NORM_SQL: ["7|2020-01-01"],
+                }
+            ).to_csv(output, index=False),
+        )[-1]
+    )
+    target = SimpleNamespace(
+        config=PAIR["right"],
+        relation=lambda: "`t`",
+        _where=lambda predicate: predicate,
+        warehouse=warehouse,
+    )
+    result = keycheck.run_sample_check(
+        "p", {**PAIR, "sample": 10}, Source(), target, ["2026-01-31"], tmp_path
+    )
+    assert seen["selection"][2]["count"] == 10
+    assert seen["left"]["key_tuples"] == [["007", "2020-01-01"]]
+    assert " IN ('7|2020-01-01')" in seen["right_sql"]
+    assert result.selected_keys == [["007", "2020-01-01"]]
+    assert result.summary()["selected fixed keys"] == 1
+
+
+def test_real_left_source_accepts_the_resolved_families_for_fixed_sampling(tmp_path):
+    left_path = tmp_path / "left.csv"
+    pd.DataFrame({"EFF_DT": ["2026-01-31"], "ACCT_ID": ["007"], "OPEN_DT": ["2020-01-01"]}).to_csv(
+        left_path, index=False
+    )
+    pair = {
+        **PAIR,
+        "sample": 1,
+        "left": {**PAIR["left"], "path": str(left_path), "date_type": "string_dash"},
+    }
+
+    def right_csv(_sql, output, _columns):
+        pd.DataFrame(
+            {
+                "dw_dt": ["20260131"],
+                "acct_id": ["7"],
+                "open_dt": ["20200101"],
+                keycheck.NORM_SQL: ["7|2020-01-01"],
+            }
+        ).to_csv(output, index=False)
+
+    target = SimpleNamespace(
+        config=pair["right"],
+        relation=lambda: "`t`",
+        _where=lambda predicate: predicate,
+        warehouse=SimpleNamespace(to_csv=right_csv),
+    )
+    result = keycheck.run_sample_check(
+        "p", pair, FileSource(pair["left"]), target, ["2026-01-31"], tmp_path / "out"
+    )
+    assert result.summary()["ok"] is True
 
 
 def test_key_spec_needs_a_key():

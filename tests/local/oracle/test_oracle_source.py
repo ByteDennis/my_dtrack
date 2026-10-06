@@ -3,6 +3,8 @@ import pytest
 from support import load_oracle_tables, oracle_container, synthetic_data
 
 from dtrack_left.backends.sources import OracleSource
+from dtrack_left.common.hashing import key_family, sample_csv
+from dtrack_left.common.sampling import normalize_sql, sample_predicate_sql
 from dtrack_left.common.stats import compute_csv_statistics
 
 pytestmark = [pytest.mark.oracle, pytest.mark.docker]
@@ -53,6 +55,131 @@ def test_oracle_window_pull_honours_holes_and_statistics_match_csv(oracle, left_
     for column in columns:
         for field in ("n_total", "n_missing", "n_unique", "hash_sum", "min_val", "max_val"):
             assert str(from_oracle[column][field]) == str(from_csv[column][field]), (column, field)
+
+
+def test_oracle_fraction_pushdown_matches_python_sampling(oracle, left_dir, tmp_path):
+    source = _source(oracle)
+    partitions = ["2026-01-01", "2026-01-02", "2026-01-03"]
+    full = source.pull_window(
+        partitions, ["AMOUNT"], tmp_path / "full.csv", key_columns=["ORDER_ID"]
+    )
+    expected = sample_csv(
+        full, key_columns=["ORDER_ID"], mode="fraction", rate=0.25, families=["numeric"]
+    )
+    pushed = source.pull_window(
+        partitions,
+        ["AMOUNT"],
+        tmp_path / "pushed.csv",
+        key_columns=["ORDER_ID"],
+        sample_plan={"mode": "fraction", "rate": 0.25, "threshold": round(0.25 * 2**32)},
+        key_families=["numeric"],
+    )
+    assert pd.read_csv(pushed, dtype=object).equals(pd.read_csv(expected, dtype=object))
+
+
+def test_oracle_fixed_key_query_matches_python_md5_rank(oracle, left_dir, tmp_path):
+    source = _source(oracle)
+    partitions = ["2026-01-01", "2026-01-02", "2026-01-03"]
+    full = source.pull_window(partitions, [], tmp_path / "all.csv", key_columns=["ORDER_ID"])
+    expected = sample_csv(
+        full, key_columns=["ORDER_ID"], mode="fixed", count=5, families=["numeric"]
+    )
+    selected = source.sample_keys(
+        partitions,
+        ["ORDER_ID"],
+        tmp_path / "keys.csv",
+        count=5,
+        key_families=["numeric"],
+    )
+    assert set(pd.read_csv(selected, dtype=object)["ORDER_ID"]) == set(
+        pd.read_csv(expected, dtype=object)["ORDER_ID"]
+    )
+
+
+def test_oracle_native_key_normalisation_is_independent_of_session_nls(oracle):
+    numeric = normalize_sql("n", key_family("numeric"), "oracle", "left", "DB_TYPE_NUMBER")
+    date = normalize_sql("d", key_family("date"), "oracle", "left", "DB_TYPE_DATE")
+    timestamp = normalize_sql("ts", key_family("date"), "oracle", "left", "DB_TYPE_TIMESTAMP")
+    before_family = key_family(["trim", "strip_prefix:2026-", "date"])
+    after_family = key_family(["trim", "date", "strip_prefix:2026-"])
+    before_date = normalize_sql("d", before_family, "oracle", "left", "DB_TYPE_DATE")
+    after_date = normalize_sql("d", after_family, "oracle", "left", "DB_TYPE_DATE")
+    connection = _source(oracle).connect()
+    cursor = connection.cursor()
+    try:
+        cursor.execute("ALTER SESSION SET NLS_DATE_FORMAT = 'DD-MON-RR'")
+        cursor.execute("ALTER SESSION SET NLS_NUMERIC_CHARACTERS = ',.'")
+        cursor.execute(
+            f"SELECT {numeric}, {date}, {timestamp}, {before_date}, {after_date} FROM ("
+            "SELECT CAST(7.50 AS NUMBER) n, DATE '2026-01-31' d, "
+            "TIMESTAMP '2026-01-31 23:59:59.123456' ts FROM dual)"
+        )
+        assert cursor.fetchone() == (
+            "7.5",
+            "2026-01-31",
+            "2026-01-31",
+            before_family.normalize("2026-01-31 00:00:00"),
+            after_family.normalize("2026-01-31 00:00:00"),
+        )
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def test_oracle_fixed_predicate_over_1000_keys_executes(oracle):
+    predicate = sample_predicate_sql(
+        {"mode": "fixed"},
+        ["v"],
+        ["numeric"],
+        "oracle",
+        "left",
+        [[str(value)] for value in range(1001)],
+    )
+    connection = _source(oracle).connect()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(f"SELECT COUNT(*) FROM (SELECT '1000' v FROM dual) WHERE {predicate}")
+        assert cursor.fetchone()[0] == 1
+    finally:
+        cursor.close()
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("date_col", "date_type"),
+    [
+        ("COMPACT_DAY", "string_compact"),
+        ("SAS_TEXT_DAY", "string_sas"),
+        ("SAS_NUMBER_DAY", "sas_days"),
+    ],
+)
+def test_oracle_source_supports_compact_and_sas_dates(oracle, tmp_path, date_col, date_type):
+    base = {"source": "oracle", "table": "DTRACK_DATE_FORMATS", **oracle}
+    connection = OracleSource({**base, "date_col": date_col, "date_type": date_type}).connect()
+    cursor = connection.cursor()
+    cursor.execute(
+        "BEGIN EXECUTE IMMEDIATE 'DROP TABLE DTRACK_DATE_FORMATS'; "
+        "EXCEPTION WHEN OTHERS THEN NULL; END;"
+    )
+    cursor.execute(
+        "CREATE TABLE DTRACK_DATE_FORMATS ("
+        "ID NUMBER, COMPACT_DAY VARCHAR2(8), SAS_TEXT_DAY VARCHAR2(16), SAS_NUMBER_DAY VARCHAR2(16))"
+    )
+    cursor.executemany(
+        "INSERT INTO DTRACK_DATE_FORMATS VALUES (:1, :2, :3, :4)",
+        [(1, "20260101", " 01JAN2026", "24107"), (2, "20260102", "02JAN2026 ", "24108.0")],
+    )
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    source = OracleSource({**base, "date_col": date_col, "date_type": date_type})
+    assert source.partition_counts("2026-01-01", "2026-01-02") == {
+        "2026-01-01": 1,
+        "2026-01-02": 1,
+    }
+    pulled = source.pull_window(["2026-01-02"], ["ID"], tmp_path / f"{date_type}.csv")
+    assert pd.read_csv(pulled)["ID"].tolist() == [2]
 
 
 # >>> DATE values carrying a time are counted and pulled by calendar day, the last bounded day included <<< #

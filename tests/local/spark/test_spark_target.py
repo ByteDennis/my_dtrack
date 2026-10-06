@@ -2,6 +2,9 @@ import pandas as pd
 import pytest
 from support import assert_stats_agree, synthetic_data
 
+from dtrack_left.backends.sources import FileSource
+from dtrack_left.common.hashing import normalize_value
+from dtrack_local.pipeline import WarehouseTarget
 from dtrack_right.backends.targets import SparkTarget
 from dtrack_right.common.hashing import sample_csv
 from dtrack_right.common.stats import compute_csv_statistics
@@ -88,6 +91,33 @@ def test_partition_counts_match_the_file(spark, orders):
     assert counts["2026-01-15"] == 27 and "2026-02-10" not in counts
 
 
+@pytest.mark.parametrize(
+    ("date_type", "raw_days"),
+    [
+        ("string_compact", ["20260101", "20260102"]),
+        ("string_sas", [" 01JAN2026", "02JAN2026 "]),
+        ("sas_days", ["24107", "24108.0"]),
+    ],
+)
+def test_partition_counts_support_compact_and_sas_dates(spark, date_type, raw_days):
+    spark.createDataFrame(
+        [(raw_days[0],), (raw_days[1],)], "raw_day STRING"
+    ).createOrReplaceTempView("date_formats")
+    target = SparkTarget(
+        spark,
+        {
+            "source": "databricks",
+            "table": "date_formats",
+            "date_col": "raw_day",
+            "date_type": date_type,
+        },
+    )
+    assert target.partition_counts("2026-01-01", "2026-01-02") == {
+        "2026-01-01": 1,
+        "2026-01-02": 1,
+    }
+
+
 # >>> the hash-bucket predicate in SQL selects exactly the rows pandas selects, and every statistic agrees <<< #
 @pytest.mark.parametrize("strict", [False, True])
 def test_window_statistics_agree_with_pandas_on_a_fraction_sample(spark, orders, tmp_path, strict):
@@ -129,3 +159,65 @@ def test_window_statistics_agree_with_pandas_on_fixed_keys(spark, orders, tmp_pa
     pandas_stats = _pandas_reference(orders, partitions, sample, False, tmp_path, key_tuples=keys)
     assert spark_stats["order_id"]["n_total"] == pandas_stats["order_id"]["n_total"] == 4
     assert_stats_agree(COLUMNS, spark_stats, pandas_stats)
+
+
+# >>> the local Databricks query and Left source select the exact same normalised record keys <<< #
+def test_local_databricks_query_selects_the_same_fraction_keys_as_left(spark, tmp_path):
+    left = tmp_path / "left.csv"
+    pd.DataFrame(
+        {
+            "day": ["2026-01-01"] * 12,
+            "left_id": [f"{key:04d}.0" for key in range(1, 13)],
+            "value": list(range(12)),
+        }
+    ).to_csv(left, index=False)
+    spark.createDataFrame(
+        [("2026-01-01", key, key - 1) for key in range(1, 13)],
+        "day STRING, right_id BIGINT, value BIGINT",
+    ).createOrReplaceTempView("local_sample_parity")
+    sample = {"mode": "fraction", "rate": 0.5, "threshold": round(0.5 * 2**32)}
+    left_path = FileSource(
+        {
+            "source": "csv",
+            "path": str(left),
+            "date_col": "day",
+            "date_type": "string_dash",
+        }
+    ).pull_window(
+        ["2026-01-01"],
+        ["value"],
+        tmp_path / "left-selected.csv",
+        key_columns=["left_id"],
+        sample_plan=sample,
+        key_families=["numeric"],
+        side="left",
+    )
+    manifest = {
+        "pair": "parity",
+        "columns": ["value"],
+        "col_map": {"value": "value"},
+        "right_key_cols": ["right_id"],
+        "key_families": ["numeric"],
+        "sample": sample,
+    }
+    query, _columns = WarehouseTarget(
+        None,
+        {
+            "source": "databricks",
+            "table": "local_sample_parity",
+            "date_col": "day",
+            "date_type": "string_dash",
+        },
+        tmp_path,
+    ).window_sql(manifest, {"bucket": "2026-01-01", "partitions": ["2026-01-01"]})
+    right_keys = {
+        normalize_value(row.right_id, "numeric", "right") for row in spark.sql(query).collect()
+    }
+    left_keys = {
+        normalize_value(value, "numeric", "left")
+        for value in pd.read_csv(left_path, dtype=object)["left_id"]
+    }
+    assert left_keys == right_keys
+    assert 0 < len(left_keys) < 12
+    assert "md5(" in query
+    assert " AS STRING) AS " not in query

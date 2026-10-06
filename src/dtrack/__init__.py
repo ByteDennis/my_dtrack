@@ -1,3 +1,3 @@
-from dtrack_left.cli import main
+from .cli import main
 
 __all__ = ["main"]

@@ -14,7 +14,16 @@ from .options import CONTEXT_SETTINGS, config_option, emit_json, log_level_optio
 log = logging.getLogger("dtrack.left.debug")
 
 
-# >>> dtrack fetch-report: download a finished run's report set from the report store <<< #
+@click.group(
+    "tools",
+    help="operator and diagnostic helpers",
+    context_settings=CONTEXT_SETTINGS,
+)
+def tools_group():
+    pass
+
+
+# >>> dtrack tools fetch-report: download a finished run's report set from the report store <<< #
 @click.command(
     "fetch-report",
     help="download a finished run's report set from the report store",
@@ -47,7 +56,7 @@ def describe_right(spec: dict) -> dict:
     return {"kind": kind, "target": target, "patched": patched}
 
 
-# >>> dtrack doctor: preflight every Left source and show what the Right side will read <<< #
+# >>> dtrack tools doctor: preflight every Left source and show what the Right side will read <<< #
 @click.command(
     "doctor",
     help="preflight every Left source; show each pair's Right relation",
@@ -69,7 +78,7 @@ def doctor_command(config):
     return {**results, "exit_code": 0 if all(row["ok"] for row in results.values()) else 1}
 
 
-# >>> dtrack rollback: delete one pair's signals so a stage is produced again (dry run unless --yes) <<< #
+# >>> dtrack tools rollback: delete one pair's signals so a stage is produced again (dry run unless --yes) <<< #
 @click.command(
     "rollback",
     help="delete one pair's Stage 1/2 signals so they are produced again; dry run unless --yes",
@@ -104,6 +113,8 @@ def rollback_command(location, pair, stage, config_path, apply):
     outcome = rollbacks.rollback(store, pair, stage, config=config, apply=apply)
     if not apply:
         outcome["dry_run"] = "nothing deleted; add --yes (stop the Right job first)"
+    elif outcome["failed"]:
+        outcome["exit_code"] = 1
     return outcome
 
 
@@ -130,7 +141,7 @@ def run_under_debugger(main, argv: list[str], *, attach: int | None = None) -> i
         return 1
 
 
-# >>> dtrack debug [--attach [PORT]] -- <command ...>: the same CLI under a debugger <<< #
+# >>> dtrack tools debug [--attach [PORT]] -- <command ...>: the same CLI under a debugger <<< #
 @click.command(
     "debug",
     help="run a dtrack command under ipdb, or wait for a VS Code attach",
@@ -154,6 +165,8 @@ def debug_command(attach, argv):
 
     argv = [item for item in argv if item != "--"]
     if not argv:
-        raise click.UsageError("give the command to debug, e.g. dtrack debug -- row-check ...")
+        raise click.UsageError(
+            "give the command to debug, e.g. dtrack tools debug -- row-check ..."
+        )
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     return run_under_debugger(main, argv, attach=attach)

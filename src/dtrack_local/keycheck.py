@@ -8,8 +8,10 @@ from typing import Any
 
 import pandas as pd
 
+from dtrack_left.common.manifest import sample_plan as resolve_sample_plan
 from dtrack_right.common.dates import canonical_date, partition_where, quote_ident
 from dtrack_right.common.hashing import FAMILIES, NULL, KeyFamily, collapse_decimal, key_family
+from dtrack_right.common.sampling import sample_predicate_sql
 
 NORM_SQL = "dtrack_norm_sql"
 
@@ -24,29 +26,66 @@ def key_spec(pair: dict[str, Any], families: dict[str, Any] | None = None):
     return keys, right, [key_family(configured.get(key)) for key in keys]
 
 
-# >>> Left keys of the window through the configured source: date column + key columns, every row <<< #
+# >>> Left keys selected by the same query-side sample predicate as production Stage 2 <<< #
 def pull_left_keys(
-    source, pair, partitions: list[str], output: str | Path, keys: list[str]
+    source,
+    pair,
+    partitions: list[str],
+    output: str | Path,
+    keys: list[str],
+    families: list[Any] | None = None,
+    *,
+    sample: dict[str, Any] | None = None,
+    key_tuples: list[list[object]] | None = None,
 ) -> Path:
-    return source.pull_window(partitions, [], Path(output), key_columns=keys)
+    left_families = [
+        family.spec() if isinstance(family, KeyFamily) else family for family in families or []
+    ]
+    return source.pull_window(
+        partitions,
+        [],
+        Path(output),
+        key_columns=keys,
+        sample_plan=sample,
+        key_families=left_families,
+        side="left",
+        key_tuples=key_tuples,
+    )
 
 
-# >>> Right keys of the window from the warehouse: raw text per key plus the Spark right_transform_sql composite <<< #
-def pull_right_keys(target, partitions, output, right_keys: list[str], families: list[KeyFamily]):
+# >>> Right keys selected by production Spark sampling, plus Spark's normalised composite for parity <<< #
+def pull_right_keys(
+    target,
+    partitions,
+    output,
+    right_keys: list[str],
+    families: list[KeyFamily],
+    *,
+    sample: dict[str, Any] | None = None,
+    key_tuples: list[list[object]] | None = None,
+):
     date_col = target.config["date_col"]
     predicate = partition_where(
         date_col, partitions, dialect="spark", date_type=target.config.get("date_type")
     )
+    sampled = sample_predicate_sql(
+        sample,
+        [quote_ident(key, "spark") for key in right_keys],
+        families,
+        "spark",
+        "right",
+        key_tuples,
+    )
+    predicate = " AND ".join(f"({item})" for item in (predicate, sampled) if item)
     selected = list(dict.fromkeys([date_col, *right_keys]))
-    casts = [
-        f"CAST({quote_ident(column, 'spark')} AS STRING) AS {quote_ident(column, 'spark')}"
-        for column in selected
-    ]
+    projection = [quote_ident(column, "spark") for column in selected]
     composite = ", ".join(
         family.sql(quote_ident(key, "spark"), "right") for key, family in zip(right_keys, families)
     )
-    casts.append(f"concat_ws('|', {composite}) AS {NORM_SQL}")
-    sql = f"SELECT {', '.join(casts)} FROM {target.relation()} WHERE {target._where(predicate)}"
+    projection.append(f"concat_ws('|', {composite}) AS {NORM_SQL}")
+    sql = (
+        f"SELECT {', '.join(projection)} FROM {target.relation()} WHERE {target._where(predicate)}"
+    )
     target.warehouse.to_csv(sql, output, [*selected, NORM_SQL])
     return Path(output)
 
@@ -100,6 +139,9 @@ class KeyCheck:
     families: list[KeyFamily]
     left: pd.DataFrame
     right: pd.DataFrame
+    sample: dict[str, Any] = field(default_factory=lambda: {"mode": "all"})
+    selected_keys: list[list[object]] = field(default_factory=list)
+    artifacts: dict[str, str] = field(default_factory=dict)
     matched: int = 0
     left_only: pd.DataFrame = field(default_factory=pd.DataFrame)
     right_only: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -110,6 +152,8 @@ class KeyCheck:
         return {
             "pair": self.pair,
             "window": "..".join(self.window),
+            "sample mode": self.sample["mode"],
+            "selected fixed keys": len(self.selected_keys),
             "left rows": len(self.left),
             "right rows": len(self.right),
             "left keys": self.left["norm"].nunique(),
@@ -193,6 +237,81 @@ def compare_keys(
         differ = right[right[NORM_SQL].fillna("") != right["norm"]]
         check.sql_mismatch = differ[[*right_keys, "norm", NORM_SQL]].drop_duplicates()
     check.suggestions = suggest(left, right, left_keys, right_keys, resolved)
+    return check
+
+
+# >>> run the exact production sample on both backends; fixed N keys are chosen once by Left and reused <<< #
+def run_sample_check(
+    pair_name: str,
+    pair: dict[str, Any],
+    source,
+    target,
+    partitions: list[str],
+    output: str | Path,
+    *,
+    window: tuple[str, str] | None = None,
+    families: dict[str, Any] | None = None,
+    only_keys: list[list[object]] | None = None,
+    max_examples: int = 200,
+) -> KeyCheck:
+    if not partitions:
+        raise ValueError(f"{pair_name}: the requested window has no Left partitions")
+    work = Path(output)
+    work.mkdir(parents=True, exist_ok=True)
+    left_keys, right_keys, resolved = key_spec(pair, families)
+    left_family_specs = [family.spec() for family in resolved]
+    plan = resolve_sample_plan(pair.get("sample"))
+    selected_keys: list[list[object]] = []
+    artifacts: dict[str, str] = {}
+    if plan["mode"] == "fixed":
+        fixed_csv = source.sample_keys(
+            partitions,
+            left_keys,
+            work / "fixed.keys.csv",
+            count=plan["count"],
+            key_families=left_family_specs,
+        )
+        selected = pd.read_csv(fixed_csv, dtype=object, keep_default_na=False)
+        selected_keys = selected[left_keys].drop_duplicates().values.tolist()
+        artifacts["fixed_keys"] = str(Path(fixed_csv))
+    left_csv = pull_left_keys(
+        source,
+        pair,
+        partitions,
+        work / "left.sample.csv",
+        left_keys,
+        left_family_specs,
+        sample=plan,
+        key_tuples=selected_keys,
+    )
+    right_csv = pull_right_keys(
+        target,
+        partitions,
+        work / "right.sample.csv",
+        right_keys,
+        resolved,
+        sample=plan,
+        key_tuples=selected_keys,
+    )
+    check = compare_keys(
+        pair_name,
+        pair,
+        left_csv,
+        right_csv,
+        window=window or (partitions[0], partitions[-1]),
+        families=families,
+        only_keys=only_keys,
+    )
+    check.sample = plan
+    check.selected_keys = selected_keys
+    report = write_report(check, work / f"{pair_name}.keys.txt", max_examples=max_examples)
+    check.artifacts = {
+        **artifacts,
+        "left_sample": str(left_csv),
+        "right_sample": str(right_csv),
+        "report": str(report),
+        "unmatched": str(report.with_suffix(".csv")),
+    }
     return check
 
 

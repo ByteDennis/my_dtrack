@@ -42,7 +42,7 @@ def with_workspace(func):
     return wrapper
 
 
-# >>> dtrack dbx: operator helpers for Databricks; the pipeline commands never import this <<< #
+# >>> dtrack tools dbx: operator helpers for Databricks; pipeline commands never import this <<< #
 @click.group(
     "dbx",
     help="Databricks helpers: login, workspace, compute, warehouse, sql, runs; s3 credentials",
@@ -52,7 +52,7 @@ def dbx_group():
     load_dotenv(find_dotenv(usecwd=True))
 
 
-# >>> dtrack dbx login: open the workspace in the browser and confirm the identity <<< #
+# >>> dtrack tools dbx login: open the workspace and confirm the identity <<< #
 @dbx_group.command(
     "login",
     help="open the workspace (SSO) and show who is logged in",
@@ -69,7 +69,7 @@ def dbx_login(w, open_browser):
     return databricks.login(w, open_browser=open_browser)
 
 
-# >>> dtrack dbx workspace: files and notebooks under /Users, /Shared and other Workspace paths <<< #
+# >>> dtrack tools dbx workspace: files and notebooks under Workspace paths <<< #
 @dbx_group.group(
     "workspace",
     help="manage Workspace files and notebooks",
@@ -79,7 +79,7 @@ def workspace_group():
     pass
 
 
-# >>> dtrack dbx workspace upload: copy one local file or directory tree into the Workspace <<< #
+# >>> dtrack tools dbx workspace upload: copy a local file or tree into the Workspace <<< #
 @workspace_group.command(
     "upload",
     help="upload a local file or folder to a Workspace path",
@@ -97,7 +97,7 @@ def dbx_workspace_upload(w, source, target, overwrite, dry_run):
     return databricks.upload_workspace(w, source, target, overwrite=overwrite, dry_run=dry_run)
 
 
-# >>> dtrack dbx compute status|start|stop: one all-purpose cluster <<< #
+# >>> dtrack tools dbx compute status|start|stop: one all-purpose cluster <<< #
 @dbx_group.command(
     "compute", help="status | start | stop a cluster", context_settings=CONTEXT_SETTINGS
 )
@@ -118,7 +118,7 @@ def dbx_compute(w, action, cluster_id, wait, timeout):
     return change(w, cluster_id, wait=wait, timeout_minutes=timeout)
 
 
-# >>> dtrack dbx warehouse status|start|stop: one SQL warehouse <<< #
+# >>> dtrack tools dbx warehouse status|start|stop: one SQL warehouse <<< #
 @dbx_group.command(
     "warehouse", help="status | start | stop a SQL warehouse", context_settings=CONTEXT_SETTINGS
 )
@@ -141,7 +141,7 @@ def dbx_warehouse(w, action, warehouse_id, wait, timeout):
     return change(w, warehouse_id, wait=wait, timeout_minutes=timeout)
 
 
-# >>> dtrack dbx sql: one statement (argument or --file) on a SQL warehouse <<< #
+# >>> dtrack tools dbx sql: one statement (argument or --file) on a SQL warehouse <<< #
 @dbx_group.command(
     "sql", help="run one SQL statement on a warehouse", context_settings=CONTEXT_SETTINGS
 )
@@ -162,7 +162,7 @@ def dbx_sql(w, statement, sql_file, warehouse_id, limit):
     return databricks.run_sql(w, text, warehouse_id, limit=limit)
 
 
-# >>> dtrack dbx runs: latest job runs, or one run with its tasks <<< #
+# >>> dtrack tools dbx runs: latest job runs, or one run with its tasks <<< #
 @dbx_group.command(
     "runs", help="latest job runs, or one run and its tasks", context_settings=CONTEXT_SETTINGS
 )

@@ -1,0 +1,35 @@
+Commit: 38586d3a9da406ede76ea433cb4187515c29e4ab
+src/dtrack_left/backends/sources.py — Modified: pushed deterministic fraction sampling into source queries and added fixed-key selection queries.
+src/dtrack_left/checks/col_check.py — Modified: published Left-selected fixed keys and wrote query-sampled rows directly without duplicate sample CSVs.
+src/dtrack_left/checks/rollback.py — Modified: resolved exact local or S3 deletion targets and verified deleted, missing, and failed outcomes.
+src/dtrack_left/cli/__init__.py — Modified: documented SAS DATE9 strings and numeric SAS-day date types.
+src/dtrack_left/cli/tools.py — Modified: returned a failing exit code when any rollback target cannot be deleted.
+src/dtrack_left/common/dates.py — Modified: added SAS DATE9 and SAS-day parsing, filtering, bounds, and partition expressions.
+src/dtrack_left/common/sampling.py — Added: implemented cross-dialect deterministic key normalization, MD5 sampling predicates, and fixed-key SQL.
+src/dtrack_local/__init__.py — Modified: documented default query-side sampling, native warehouse output, and dedicated error logs.
+src/dtrack_local/__main__.py — Modified: documented the sample key-check command and full-window sampling override.
+src/dtrack_local/cli.py — Modified: added production sample key-check CLI, enabled sampling pushdown by default, and reported private error logs.
+src/dtrack_local/keycheck.py — Modified: compared actual production-sampled keys using shared fraction predicates or Left-selected fixed keys.
+src/dtrack_local/notebooks/00_setup_and_preflight.ipynb — Modified: documented backend sampling and displayed the dedicated error-log path.
+src/dtrack_local/notebooks/01_row_check.ipynb — Modified: enabled warehouse sample pushdown by default.
+src/dtrack_local/notebooks/02_col_check.ipynb — Modified: documented concurrent Left/Right execution, query-side sampling, and private error logging.
+src/dtrack_local/notebooks/03_report_and_backup.ipynb — Modified: enabled warehouse sample pushdown by default.
+src/dtrack_local/notebooks/04_rollback.ipynb — Modified: displayed exact rollback targets and per-target deletion verification results.
+src/dtrack_local/notebooks/05_key_families.ipynb — Modified: ran the real production sample and checked Left/Databricks sampled-key parity.
+src/dtrack_local/pipeline.py — Modified: used native warehouse projections, default sampling pushdown, concurrent Stage 2 processing, and run error logs.
+src/dtrack_local/run_logging.py — Added: routed ERROR and CRITICAL details to a private run log instead of the console.
+src/dtrack_right/backends/targets.py — Modified: compiled deterministic sampling predicates into Right queries with a controlled CSV fallback.
+src/dtrack_right/checks/col_check.py — Modified: captured stable tracebacks for dead units and dedicated error logs.
+src/dtrack_right/common/dates.py — Modified: added SAS DATE9 and SAS-day parsing, filtering, bounds, and partition expressions.
+src/dtrack_right/common/sampling.py — Added: implemented the shared Spark-side deterministic normalization and sampling SQL contract.
+tests/local/oracle/test_oracle_source.py — Modified: covered Oracle fraction pushdown, fixed-key ranking, native key formats, large key sets, and SAS dates.
+tests/local/spark/test_spark_target.py — Modified: covered Spark SAS partitions and Left/Databricks sampled-key parity.
+tests/unit/common/test_dates.py — Modified: covered compact strings, SAS DATE9 strings, and SAS-day predicates.
+tests/unit/common/test_parity.py — Modified: required Left and Right sampling modules to remain byte-identical.
+tests/unit/common/test_sampling_sql.py — Added: covered cross-dialect normalization, hashing, fraction predicates, fixed keys, and fail-closed behavior.
+tests/unit/dtrack_left/backends/test_sources.py — Modified: covered query-side fraction sampling, fixed-key selection, custom-family failures, and SAS dates.
+tests/unit/dtrack_left/checks/test_col_check.py — Modified: verified sampled Left output reuses left.csv without creating a duplicate sample file.
+tests/unit/dtrack_left/checks/test_rollback.py — Modified: covered exact physical targets, safe path validation, S3 deletion, and verified deletion statuses.
+tests/unit/dtrack_local/test_keycheck.py — Modified: covered fraction and fixed production sampling, native projections, and shared sampled keys.
+tests/unit/dtrack_local/test_pipeline.py — Modified: covered native warehouse projections, sampling modes, concurrent Stage 2, key-check CLI, and error propagation.
+tests/unit/dtrack_local/test_run_logging.py — Added: verified errors and tracebacks stay in the dedicated log and out of console output.

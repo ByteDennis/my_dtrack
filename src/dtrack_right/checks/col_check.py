@@ -220,6 +220,7 @@ class ColCheck:
 
     def _failure(self, task, exc):
         uid = task.payload.get("unit_id") or f"right--{task.pair}--{task.window}"
+        details = "".join(traceback.format_exception(exc))
         self.attempts[uid] += 1
         if self.attempts[uid] >= self.max_attempts:
             units = [uid]
@@ -229,7 +230,13 @@ class ColCheck:
                     for col in self.scheduler.manifests[task.pair]["columns"]
                 ]
             for failed_uid in units:
-                log.error("dead %s after %d attempt(s): %s", failed_uid, self.attempts[uid], exc)
+                log.error(
+                    "dead %s after %d attempt(s): %s",
+                    failed_uid,
+                    self.attempts[uid],
+                    exc,
+                    extra={"dtrack_traceback": details},
+                )
                 self.store.put_dead(
                     failed_uid,
                     {
@@ -237,7 +244,7 @@ class ColCheck:
                         "pair": task.pair,
                         "window": task.window,
                         "error": str(exc),
-                        "traceback": traceback.format_exc(),
+                        "traceback": details,
                     },
                 )
             return

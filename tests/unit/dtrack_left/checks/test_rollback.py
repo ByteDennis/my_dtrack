@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import boto3
 import pytest
@@ -33,9 +34,13 @@ def test_col_rollback_rebuilds_the_manifest_from_stage_two_settings_only(finishe
     config["pairs"]["orders"]["col_map"].pop("STATUS")
     dry = rollback.rollback(run.store, "orders", "col", config=config)
     assert dry["keys"][:2] == ["_STATUS.json", "manifest/_CLOSED"] and "deleted" not in dry
+    assert all(Path(row["location"]).is_absolute() for row in dry["targets"])
+    assert [row["key"] for row in dry["targets"]] == dry["keys"]
     assert run.store.exists("manifest/_CLOSED")
     done = rollback.rollback(run.store, "orders", "col", config=config, apply=True)
     assert done["deleted"] == dry["planned"] and done["expected_units"] == 6
+    assert done["failed"] == done["missing"] == 0
+    assert {row["status"] for row in done["deletions"]} == {"deleted"}
     assert not any(document["pair"] == "orders" for _, document in run.store.list_json("results/"))
     run = finished(config, pairs=["orders"])
     pipeline.col_check(run)
@@ -82,6 +87,14 @@ def test_rollback_deletes_from_s3_run_folders(s3_bucket):
     store.put_json("results/v.json", {"pair": "q"})
     outcome = rollback.rollback(store, "p", "col", apply=True)
     assert outcome["keys"] == ["results/u.json"] and outcome["deleted"] == 1
+    assert outcome["targets"] == [
+        {
+            "key": "results/u.json",
+            "location": f"s3://{s3_bucket}/runs/r/results/u.json",
+            "object_key": "runs/r/results/u.json",
+        }
+    ]
+    assert outcome["deletions"][0]["status"] == "deleted"
     left = boto3.client("s3").list_objects_v2(Bucket=s3_bucket)["Contents"]
     assert sorted(row["Key"] for row in left) == [
         "runs/r/results/v.json",
@@ -92,10 +105,20 @@ def test_rollback_deletes_from_s3_run_folders(s3_bucket):
 
 def test_rollback_command_is_a_dry_run_until_yes(finished, tmp_path, capsys):
     folder = str(finished().folder)
-    assert main(["rollback", "--run", folder, "--pair", "orders", "--stage", "dead"]) == 0
+    assert main(["tools", "rollback", "--run", folder, "--pair", "orders", "--stage", "dead"]) == 0
     dry = json.loads(capsys.readouterr().out)
-    assert dry["planned"] == 0 and "add --yes" in dry["dry_run"]
-    argv = ["rollback", "--run", folder, "--pair", "orders", "--stage", "col", "--yes"]
+    assert dry["planned"] == 0 and dry["targets"] == [] and "add --yes" in dry["dry_run"]
+    argv = [
+        "tools",
+        "rollback",
+        "--run",
+        folder,
+        "--pair",
+        "orders",
+        "--stage",
+        "col",
+        "--yes",
+    ]
     assert main(argv) == 0
     outcome = json.loads(capsys.readouterr().out)
     assert outcome["deleted"] > 0 and "dry_run" not in outcome
@@ -103,3 +126,22 @@ def test_rollback_command_is_a_dry_run_until_yes(finished, tmp_path, capsys):
     assert rollback.next_steps("row", "p", "s3://b/r")[0].startswith(
         "distributed: dtrack row-check"
     )
+
+
+def test_local_target_rejects_paths_outside_the_run(tmp_path):
+    store = rollback.LocalFolder(tmp_path / "run")
+    with pytest.raises(ValueError, match="outside the run folder"):
+        rollback.locate(store, "../other.json")
+
+
+def test_delete_reports_a_target_that_disappeared_after_planning(tmp_path):
+    store = rollback.LocalFolder(tmp_path / "run")
+    path = store.root / "results" / "u.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{}")
+    target = rollback.locate(store, "results/u.json")
+    path.unlink()
+    outcome = rollback.delete(store, [target])
+    assert outcome["deleted"] == outcome["failed"] == 0
+    assert outcome["missing"] == 1
+    assert outcome["deletions"] == [{**target, "status": "missing"}]

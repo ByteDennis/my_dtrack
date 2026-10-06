@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..backends.store import S3Store
@@ -80,17 +80,85 @@ def plan(store, pair: str, stage: str) -> list[str]:
     return sorted(present, key=lambda key: (key not in COMMIT_MARKERS, key))
 
 
-# >>> delete keys from an S3 run folder or a local one (dtrack_local's VolumeStore included) <<< #
-def delete(store, keys: list[str]) -> int:
+# >>> resolve a logical store key to the exact local path or S3 object that rollback will delete <<< #
+def locate(store, key: str) -> dict[str, str]:
+    logical = PurePosixPath(key)
+    if not logical.parts or logical.is_absolute() or ".." in logical.parts or "\\" in key:
+        raise ValueError(f"rollback target is outside the run folder: {key!r}")
     if hasattr(store, "client"):
-        for start in range(0, len(keys), 1000):
-            batch = [{"Key": store._key(key)} for key in keys[start : start + 1000]]
-            store.client.delete_objects(Bucket=store.bucket, Delete={"Objects": batch})
+        object_key = store._key(key)
+        return {
+            "key": key,
+            "location": f"s3://{store.bucket}/{object_key}",
+            "object_key": object_key,
+        }
+    root = Path(store.root).resolve()
+    path = (root / Path(*logical.parts)).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise ValueError(f"rollback target is outside the run folder: {key!r}") from None
+    return {"key": key, "location": str(path)}
+
+
+def _deletion(target: dict[str, str], status: str, error: str | None = None) -> dict[str, str]:
+    row = {**target, "status": status}
+    if error:
+        row["error"] = error
+    return row
+
+
+def _target_exists(store, target: dict[str, str]) -> bool:
+    if "object_key" in target:
+        return store.exists(target["key"])
+    return Path(target["location"]).is_file()
+
+
+# >>> delete the frozen physical targets, then verify each one is absent instead of trusting a count <<< #
+def delete(store, targets: list[dict[str, str]]) -> dict[str, Any]:
+    before = {target["key"]: _target_exists(store, target) for target in targets}
+    errors: dict[str, str] = {}
+    if hasattr(store, "client"):
+        existing = [target for target in targets if before[target["key"]]]
+        for start in range(0, len(existing), 1000):
+            batch = existing[start : start + 1000]
+            response = store.client.delete_objects(
+                Bucket=store.bucket,
+                Delete={"Objects": [{"Key": target["object_key"]} for target in batch]},
+            )
+            for error in response.get("Errors") or []:
+                errors[error["Key"]] = f"{error.get('Code', 'Error')}: {error.get('Message', '')}"
     else:
-        for key in keys:
-            (Path(store.root) / key).unlink(missing_ok=True)
-    log.info("rollback deleted %d object(s) from %s", len(keys), store.root_uri)
-    return len(keys)
+        for target in targets:
+            if not before[target["key"]]:
+                continue
+            try:
+                Path(target["location"]).unlink()
+            except OSError as exc:
+                errors[target["location"]] = str(exc)
+    rows = []
+    for target in targets:
+        error = errors.get(target.get("object_key", target["location"]))
+        if not before[target["key"]]:
+            rows.append(_deletion(target, "missing"))
+        elif error:
+            rows.append(_deletion(target, "failed", error))
+        elif _target_exists(store, target):
+            rows.append(_deletion(target, "failed", "target still exists after delete"))
+        else:
+            rows.append(_deletion(target, "deleted"))
+    counts = {
+        status: sum(row["status"] == status for row in rows)
+        for status in ("deleted", "missing", "failed")
+    }
+    log.info(
+        "rollback at %s: deleted=%d missing=%d failed=%d",
+        store.root_uri,
+        counts["deleted"],
+        counts["missing"],
+        counts["failed"],
+    )
+    return {**counts, "deletions": rows}
 
 
 # >>> the pair's new public config, refused when a Stage 1 setting differs from what was counted <<< #
@@ -153,10 +221,17 @@ def rollback(
     if config is not None:
         stage_two_config(store, config, pair)
     keys = plan(store, pair, stage)
-    outcome: dict[str, Any] = {"pair": pair, "stage": stage, "planned": len(keys), "keys": keys}
+    targets = [locate(store, key) for key in keys]
+    outcome: dict[str, Any] = {
+        "pair": pair,
+        "stage": stage,
+        "planned": len(keys),
+        "keys": keys,
+        "targets": targets,
+    }
     if apply:
-        outcome["deleted"] = delete(store, keys)
-        if config is not None:
+        outcome.update(delete(store, targets))
+        if config is not None and not outcome["failed"]:
             outcome["expected_units"] = rebuild_manifest(store, config, pair)["expected_units"]
     outcome["next"] = next_steps(stage, pair, store.root_uri)
     return outcome

@@ -84,6 +84,11 @@ def test_quote_ident_per_dialect(common, name, dialect, expected):
         ("TIMESTAMP", "DATE '2026-01-02'"),
         ("number", "20260102"),
         ("string_dash", "'2026-01-02'"),
+        ("string_compact", "'20260102'"),
+        ("string_sas", "DATE '2026-01-02'"),
+        ("string_sas_date9", "DATE '2026-01-02'"),
+        ("sas_days", "24108"),
+        ("sas_date", "24108"),
         (None, "'2026-01-02'"),
     ],
 )
@@ -125,6 +130,28 @@ def test_bounds_where_is_none_without_bounds(common):
         ("spark", "datetime", "to_date(`DT`)"),
         ("duckdb", "date", 'CAST("DT" AS DATE)'),
         ("oracle", "string_dash", "DT"),
+        ("oracle", "string_compact", "DT"),
+        (
+            "oracle",
+            "string_sas",
+            "TO_DATE(TRIM(DT), 'DDMONYYYY', 'NLS_DATE_LANGUAGE=English')",
+        ),
+        ("spark", "string_sas_date9", "to_date(TRIM(`DT`), 'ddMMMyyyy')"),
+        (
+            "athena",
+            "string_sas",
+            "CAST(date_parse(TRIM(\"DT\"), '%d%b%Y') AS DATE)",
+        ),
+        (
+            "athena",
+            "sas_days",
+            "date_add('day', CAST(CAST(\"DT\" AS DOUBLE) AS BIGINT), DATE '1960-01-01')",
+        ),
+        (
+            "duckdb",
+            "sas_days",
+            "DATE '1960-01-01' + CAST(CAST(CAST(\"DT\" AS DOUBLE) AS BIGINT) AS INTEGER)",
+        ),
         ("oracle", None, "DT"),
         ("spark", "num", "`DT`"),
     ],
@@ -147,3 +174,41 @@ def test_day_bounds_are_half_open_so_times_on_the_last_day_count(common):
     assert common.dates.partition_where(
         "dt", ["2026-01-01"], dialect="oracle", date_type="string_dash"
     ) == ("((dt = '2026-01-01'))")
+
+
+def test_string_compact_predicates_use_compact_literals(common):
+    assert (
+        common.dates.bounds_where(
+            "dt",
+            dialect="oracle",
+            date_type="string_compact",
+            from_date="2026-01-01",
+            to_date="2026-01-31",
+        )
+        == "dt >= '20260101' AND dt <= '20260131'"
+    )
+    assert (
+        common.dates.partition_where(
+            "dt", ["2026-01-01", "2026-01-02"], dialect="spark", date_type="string_compact"
+        )
+        == "((`dt` BETWEEN '20260101' AND '20260102'))"
+    )
+
+
+def test_sas_date9_predicates_parse_before_comparing(common):
+    where = common.dates.bounds_where(
+        "dt",
+        dialect="oracle",
+        date_type="string_sas",
+        from_date="2026-01-31",
+        to_date="2026-02-01",
+    )
+    parsed = "TO_DATE(TRIM(dt), 'DDMONYYYY', 'NLS_DATE_LANGUAGE=English')"
+    assert where == f"{parsed} >= DATE '2026-01-31' AND {parsed} < DATE '2026-02-02'"
+
+
+def test_sas_day_predicates_convert_iso_bounds_to_1960_offsets(common):
+    where = common.dates.partition_where(
+        "dt", ["2026-01-01", "2026-01-02"], dialect="oracle", date_type="sas_days"
+    )
+    assert where == ("((TRUNC(TO_NUMBER(dt)) >= 24107 AND TRUNC(TO_NUMBER(dt)) < 24109))")

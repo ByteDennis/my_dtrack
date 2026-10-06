@@ -7,7 +7,7 @@ from dtrack_right.checks import col_check as cloud_col_check
 from dtrack_right.common import hashing as cloud_hashing
 
 SRC = Path(__file__).resolve().parents[3] / "src"
-SHARED = ["__init__.py", "dates.py", "hashing.py", "stats.py", "manifest.py"]
+SHARED = ["__init__.py", "dates.py", "hashing.py", "sampling.py", "stats.py", "manifest.py"]
 
 
 def test_shared_common_modules_are_byte_identical_on_both_sides():

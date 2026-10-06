@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from ..common import disabled
 from ..common.dates import bounds_where, canonical_date, day_expr, partition_where, quote_ident
+from ..common.sampling import fixed_keys_sql, sample_predicate_sql
 
 
 def write_rows(path: str | Path, columns: list[str], rows: Iterable[Iterable[object]]) -> Path:
@@ -67,6 +68,9 @@ class SqlSource(ABC):
         except Exception as exc:
             return {"ok": False, "source": self.config.get("source"), "error": str(exc)}
 
+    def key_types(self, key_columns: list[str]) -> list[str | None]:
+        return [None] * len(key_columns)
+
     def partition_counts(
         self, from_date: str | None = None, to_date: str | None = None
     ) -> dict[str, int]:
@@ -97,6 +101,10 @@ class SqlSource(ABC):
         output: Path,
         *,
         key_columns: list[str] | None = None,
+        sample_plan: dict[str, Any] | None = None,
+        key_families: list[Any] | None = None,
+        side: str = "left",
+        key_tuples: list[list[object]] | None = None,
     ) -> Path:
         selected = list(dict.fromkeys([self.config["date_col"], *(key_columns or []), *columns]))
         predicate = partition_where(
@@ -105,12 +113,51 @@ class SqlSource(ABC):
             dialect=self.dialect,
             date_type=self.config.get("date_type"),
         )
+        needs_sample = sample_plan and sample_plan.get("mode") != "all"
+        key_types = self.key_types(key_columns or []) if needs_sample else []
+        sample = sample_predicate_sql(
+            sample_plan,
+            [quote_ident(column, self.dialect) for column in key_columns or []],
+            key_families or [],
+            self.dialect,
+            side,
+            key_tuples,
+            key_types,
+        )
+        predicate = " AND ".join(f"({item})" for item in (predicate, sample) if item)
         sql = (
             f"SELECT {', '.join(quote_ident(column, self.dialect) for column in selected)} "
             f"FROM {self.relation()} WHERE {self._where(predicate)}"
         )
         _columns, rows = self.query(sql)
         return write_rows(output, selected, rows)
+
+    def sample_keys(
+        self,
+        partitions: list[str],
+        key_columns: list[str],
+        output: Path,
+        *,
+        count: int,
+        key_families: list[Any] | None = None,
+    ) -> Path:
+        predicate = partition_where(
+            self.config["date_col"],
+            partitions,
+            dialect=self.dialect,
+            date_type=self.config.get("date_type"),
+        )
+        sql = fixed_keys_sql(
+            self.relation(),
+            self._where(predicate),
+            [quote_ident(column, self.dialect) for column in key_columns],
+            key_families or [],
+            self.dialect,
+            count,
+            self.key_types(key_columns),
+        )
+        _columns, rows = self.query(sql)
+        return write_rows(output, key_columns, rows)
 
 
 READERS = {"csv": "read_csv", "json": "read_json", "ndjson": "read_json", "parquet": "read_parquet"}
@@ -279,6 +326,8 @@ class OracleSource(SqlSource):
         self.password = self._pick("password", "PWD", "pwd") or os.getenv("ORACLE_PASSWORD")
         self.service = config.get("service") or oracle_macro_services().get(self.macro)
         self.dsn = self._pick("dsn", "DSN") or (None if self.service else os.getenv("ORACLE_DSN"))
+        self._key_types: dict[tuple[str, ...], list[str | None]] = {}
+        self._key_types_lock = threading.Lock()
 
     def _pick(self, field: str, *suffixes: str) -> str | None:
         names = [self.config.get(f"{field}_env")]
@@ -298,6 +347,34 @@ class OracleSource(SqlSource):
         if not (self.user and self.password and (self.dsn or self.service)):
             raise ValueError("Oracle requires user, password, and dsn")
         return oracledb.connect(user=self.user, password=self.password, dsn=self.resolve_dsn())
+
+    def key_types(self, key_columns: list[str]) -> list[str | None]:
+        if not key_columns:
+            return []
+        cache_key = tuple(key_columns)
+        with self._key_types_lock:
+            if cache_key not in self._key_types:
+                connection = self.connect()
+                cursor = connection.cursor()
+                try:
+                    selected = ", ".join(
+                        quote_ident(column, self.dialect) for column in key_columns
+                    )
+                    cursor.execute(
+                        f"SELECT {selected} FROM {self.relation()} WHERE {self._where('1=0')}"
+                    )
+                    found = {}
+                    for item in cursor.description or []:
+                        name = str(item[0]).lower()
+                        kind = item[1] if len(item) > 1 else None
+                        found[name] = getattr(kind, "name", str(kind) if kind else None)
+                    self._key_types[cache_key] = [
+                        found.get(column.lower()) for column in key_columns
+                    ]
+                finally:
+                    cursor.close()
+                    connection.close()
+            return list(self._key_types[cache_key])
 
 
 class AthenaSource(SqlSource):

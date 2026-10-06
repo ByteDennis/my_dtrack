@@ -93,7 +93,9 @@ def test_left_on_this_machine_and_right_as_a_databricks_job(
 
     capsys.readouterr()
     out = tmp_path / "report"
-    assert main(["fetch-report", "--report-s3", f"{s3_report}/{tag}", "--out", str(out)]) == 0
+    assert (
+        main(["tools", "fetch-report", "--report-s3", f"{s3_report}/{tag}", "--out", str(out)]) == 0
+    )
     summary = json.loads((out / "summary.json").read_text())
     assert summary["run_id"] == tag and summary["status"] == "DONE"
     assert summary["findings"] == {"row_count_diff": 1, "partition_missing": 2, "col_stat_diff": 2}

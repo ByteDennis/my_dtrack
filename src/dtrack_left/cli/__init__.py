@@ -4,11 +4,8 @@
 #   row-check     --config c.json --s3 s3://.../runs/<run_id> [--run-id] [--pair P ...] [--workers 4]
 #   col-check     --s3 s3://.../runs/<run_id> [--pair P] [--work-dir] [--pull-workers 2]
 #                 [--stat-workers 2] [--wip 200] [--wait-timeout 1800] [--poll-interval 3]
-#   fetch-report  --report-s3 s3://.../report --out DIR [--run-id ID]   (default: latest/pointer.json)
-#   doctor        --config c.json          Left preflight + what the Right side will read
-#   rollback      --run <run folder> --pair P --stage dead|col|row [--config c.json] [--yes]
-#   debug         [--attach [PORT]] -- <command ...>      ipdb, or debugpy for VS Code
-#   dbx           Databricks and S3 operator helpers (see cli/ops/__init__.py)
+#   tools         fetch-report, doctor, rollback, debug, blog, and dbx helpers
+#                 (the installed dtrack CLI also adds the local key-check helper)
 #   Every command: --log-level debug|info|warning|error (stderr); stdout is one JSON line.
 #   .env is loaded (cwd upwards) before options parse; shell variables win over .env.
 #
@@ -38,6 +35,10 @@
 # Both sides: date_col (required) and date_type
 #   date | timestamp | datetime   DATE 'YYYY-MM-DD' literals; counted and filtered per calendar day
 #                                 (TRUNC / to_date / CAST AS DATE; col >= day AND col < day + 1)
+#   string_dash                    'YYYY-MM-DD' strings
+#   string_compact                 'YYYYMMDD' strings
+#   string_sas | string_sas_date9  SAS DATE9 strings such as '31JAN2026' (English month names)
+#   sas_days | sas_date            numeric days since 1960-01-01 (including text exports like '24108.0')
 #   num | integer | int | number  20260131 literals
 #   anything else / missing       'YYYY-MM-DD' string literals (the column must hold that text)
 #
@@ -66,10 +67,17 @@ import click
 from dotenv import find_dotenv, load_dotenv
 
 from .. import __version__
+from .blog import blog_command
 from .checks import col_check_command, row_check_command
 from .ops import dbx_group
 from .options import CONTEXT_SETTINGS
-from .tools import debug_command, doctor_command, fetch_report_command, rollback_command
+from .tools import (
+    debug_command,
+    doctor_command,
+    fetch_report_command,
+    rollback_command,
+    tools_group,
+)
 
 
 # >>> dtrack: the Left-side CLI; .env loads before any subcommand parses its options (shell variables win) <<< #
@@ -82,13 +90,19 @@ def cli():
 for command in (
     row_check_command,
     col_check_command,
-    fetch_report_command,
-    doctor_command,
-    debug_command,
-    rollback_command,
-    dbx_group,
+    tools_group,
 ):
     cli.add_command(command)
+
+for command in (
+    fetch_report_command,
+    doctor_command,
+    rollback_command,
+    debug_command,
+    blog_command,
+    dbx_group,
+):
+    tools_group.add_command(command)
 
 
 # >>> console entry point: click parsing with the command's return value as the exit code <<< #

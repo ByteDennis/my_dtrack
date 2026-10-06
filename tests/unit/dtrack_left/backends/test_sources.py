@@ -16,6 +16,8 @@ from dtrack_left.backends.sources import (
     source_from_config,
     write_rows,
 )
+from dtrack_left.common.hashing import key_family, sample_csv
+from dtrack_left.common.sampling import SamplingSqlNotSupported
 
 ORACLE = {"source": "oracle", "table": "ORDERS", "date_col": "BUSINESS_DATE", "date_type": "date"}
 
@@ -132,6 +134,53 @@ def test_pull_window_selects_date_keys_and_columns_once_over_the_admitted_days(
     )
 
 
+def test_oracle_pull_window_pushes_the_fraction_hash_into_the_query(monkeypatch, tmp_path):
+    source, connection, _ = _oracle(
+        monkeypatch, lambda sql: (["D", "K", "A"], [("2026-01-01", "007", "x")])
+    )
+    source.pull_window(
+        ["2026-01-01"],
+        ["AMOUNT"],
+        tmp_path / "sample.csv",
+        key_columns=["ORDER_ID"],
+        sample_plan={"mode": "fraction", "threshold": 99},
+        key_families=["numeric"],
+    )
+    assert connection.statements[0] == "SELECT ORDER_ID FROM ORDERS WHERE (1=0)"
+    sql = connection.statements[-1]
+    assert "STANDARD_HASH" in sql and "TO_NUMBER" in sql and "< 99" in sql
+
+    source.pull_window(
+        ["2026-01-02"],
+        ["AMOUNT"],
+        tmp_path / "sample-2.csv",
+        key_columns=["ORDER_ID"],
+        sample_plan={"mode": "fraction", "threshold": 99},
+        key_families=["numeric"],
+    )
+    assert connection.statements.count("SELECT ORDER_ID FROM ORDERS WHERE (1=0)") == 1
+
+
+def test_unsupported_custom_sampling_sql_fails_before_pulling_a_window(synthetic, tmp_path):
+    class CustomFamily(type(key_family("string"))):
+        name = "source-custom-test"
+
+        def left_transform(self, text):
+            return text.removeprefix("X")
+
+    output = tmp_path / "must-not-exist.csv"
+    with pytest.raises(SamplingSqlNotSupported, match="needs duckdb SQL"):
+        _orders(synthetic, date_type="string_dash").pull_window(
+            ["2026-01-01"],
+            ["AMOUNT"],
+            output,
+            key_columns=["ORDER_ID"],
+            sample_plan={"mode": "fraction", "threshold": 99},
+            key_families=[CustomFamily()],
+        )
+    assert not output.exists()
+
+
 def test_athena_and_hadoop_connect_through_their_optional_drivers(monkeypatch):
     calls = []
     fake = SimpleNamespace(connect=lambda **kwargs: calls.append(kwargs) or "conn")
@@ -209,6 +258,43 @@ def test_file_source_pull_window_matches_the_old_pandas_reader_byte_for_byte(syn
     assert len(pd.read_csv(out)) == 29 * 30
 
 
+def test_file_source_fraction_pushdown_matches_the_python_reference(synthetic, tmp_path):
+    source = _orders(synthetic, date_type="string_dash")
+    days = ["2026-01-01", "2026-01-02", "2026-01-03"]
+    full = source.pull_window(days, ["AMOUNT"], tmp_path / "full.csv", key_columns=["ORDER_ID"])
+    expected = sample_csv(
+        full, key_columns=["ORDER_ID"], mode="fraction", rate=0.25, families=["numeric"]
+    )
+    pushed = source.pull_window(
+        days,
+        ["AMOUNT"],
+        tmp_path / "pushed.csv",
+        key_columns=["ORDER_ID"],
+        sample_plan={"mode": "fraction", "rate": 0.25, "threshold": round(0.25 * 2**32)},
+        key_families=["numeric"],
+    )
+    assert pd.read_csv(pushed, dtype=object).equals(pd.read_csv(expected, dtype=object))
+
+
+def test_file_source_selects_fixed_keys_in_duckdb_before_writing_csv(synthetic, tmp_path):
+    source = _orders(synthetic, date_type="string_dash")
+    days = ["2026-01-01", "2026-01-02", "2026-01-03"]
+    full = source.pull_window(days, [], tmp_path / "all.csv", key_columns=["ORDER_ID"])
+    expected = sample_csv(
+        full, key_columns=["ORDER_ID"], mode="fixed", count=5, families=["numeric"]
+    )
+    selected = source.sample_keys(
+        days,
+        ["ORDER_ID"],
+        tmp_path / "keys.csv",
+        count=5,
+        key_families=["numeric"],
+    )
+    got = set(pd.read_csv(selected, dtype=object)["ORDER_ID"])
+    want = set(pd.read_csv(expected, dtype=object)["ORDER_ID"])
+    assert got == want and len(got) == 5
+
+
 def test_file_source_preflight_reports_missing_file_and_missing_date_column(tmp_path):
     missing = FileSource({"source": "csv", "path": str(tmp_path / "nope.csv"), "date_col": "D"})
     assert missing.preflight()["ok"] is False
@@ -282,6 +368,29 @@ def test_query_patch_and_date_format_over_a_glob_of_files(tmp_path):
     assert source.partition_counts("2026-01-02") == {"2026-01-02": 2}
     out = source.pull_window(["2026-01-01"], ["V"], tmp_path / "w.csv", key_columns=["ID"])
     assert out.read_text().splitlines() == ["D,ID,V", "2026-01-01,1,a", "2026-01-01,2,b"]
+
+
+@pytest.mark.parametrize(
+    ("date_type", "raw_days"),
+    [
+        ("string_compact", ["20260101", "20260102"]),
+        ("string_sas", [" 01JAN2026", "02JAN2026 "]),
+        ("string_sas_date9", ["01JAN2026", "02JAN2026"]),
+        ("sas_days", ["24107", "24108.0"]),
+    ],
+)
+def test_file_source_filters_supported_text_and_sas_dates(tmp_path, date_type, raw_days):
+    path = tmp_path / f"{date_type}.csv"
+    path.write_text(f"D,V\n{raw_days[0]},a\n{raw_days[1]},b\n")
+    source = FileSource(
+        {"source": "file", "path": str(path), "date_col": "D", "date_type": date_type}
+    )
+    assert source.partition_counts("2026-01-01", "2026-01-02") == {
+        "2026-01-01": 1,
+        "2026-01-02": 1,
+    }
+    pulled = source.pull_window(["2026-01-02"], ["V"], tmp_path / f"{date_type}-out.csv")
+    assert pulled.read_text().splitlines() == ["D,V", f"{raw_days[1]},b"]
 
 
 def test_file_formats_come_from_the_suffix_or_config_and_unknown_ones_fail():

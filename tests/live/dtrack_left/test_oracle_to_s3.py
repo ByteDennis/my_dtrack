@@ -13,7 +13,7 @@ pytestmark = [pytest.mark.live, pytest.mark.docker]
 def test_row_check_from_oracle_lands_on_real_s3(s3_scratch, oracle, tmp_path, capsys):
     path = tmp_path / "config.json"
     path.write_text(json.dumps(oracle_config(oracle)))
-    assert main(["doctor", "--config", str(path)]) == 0
+    assert main(["tools", "doctor", "--config", str(path)]) == 0
     capsys.readouterr()
     uri = f"{s3_scratch}/runs/oracle"
     assert main(["row-check", "--config", str(path), "--s3", uri, "--run-id", "oracle"]) == 0

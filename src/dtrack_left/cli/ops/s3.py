@@ -74,7 +74,7 @@ def keep_fresh(refresh, alive, every: int, first: dict) -> int:
         return -1
 
 
-# >>> dtrack dbx s3: AWS credentials for the S3 side (WinSCP and friends) <<< #
+# >>> dtrack tools dbx s3: AWS credentials for the S3 side (WinSCP and friends) <<< #
 @click.group(
     "s3",
     help="S3 helpers: static credentials for WinSCP, identity",
@@ -84,7 +84,7 @@ def s3_group():
     pass
 
 
-# >>> dtrack dbx s3 creds: write the static profile once, or keep it fresh with --watch <<< #
+# >>> dtrack tools dbx s3 creds: write the static profile once, or refresh with --watch <<< #
 @s3_group.command(
     "creds",
     help="copy --profile into the static --target profile (WinSCP reads it)",
@@ -105,7 +105,7 @@ def s3_creds(profile, target, watch, every):
     return outcome
 
 
-# >>> dtrack dbx s3 winscp: refresh, open the saved site, keep refreshing until WinSCP closes <<< #
+# >>> dtrack tools dbx s3 winscp: refresh, open the site, refresh until WinSCP closes <<< #
 @s3_group.command(
     "winscp",
     help="refresh --target, open a saved WinSCP site, refresh until it closes",
@@ -134,12 +134,12 @@ def s3_winscp(site, profile, target, every):
     if time.monotonic() - started < QUICK_EXIT:
         outcome["note"] = (
             "WinSCP exited at once (a running WinSCP took the site?); "
-            "keep `dtrack dbx s3 creds --watch` running instead"
+            "keep `dtrack tools dbx s3 creds --watch` running instead"
         )
     return outcome
 
 
-# >>> dtrack dbx s3 whoami: account, ARN and how long the credentials last <<< #
+# >>> dtrack tools dbx s3 whoami: account, ARN and how long the credentials last <<< #
 @s3_group.command(
     "whoami", help="identity and credential expiry of --profile", context_settings=CONTEXT_SETTINGS
 )

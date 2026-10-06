@@ -20,6 +20,8 @@ def test_fetch_report_command_downloads_from_the_real_bucket(s3_scratch, tmp_pat
     report = S3Store(f"{s3_scratch}/report")
     report.put_bytes("history/r1/index.html", b"<html>", content_type="text/html")
     report.put_json("latest/pointer.json", {"run_id": "r1", "status": "DONE", "findings": 0})
-    assert main(["fetch-report", "--report-s3", report.root_uri, "--out", str(tmp_path)]) == 0
+    assert (
+        main(["tools", "fetch-report", "--report-s3", report.root_uri, "--out", str(tmp_path)]) == 0
+    )
     assert json.loads(capsys.readouterr().out)["run_id"] == "r1"
     assert fetch_report(report, tmp_path / "again")["files"]["index.html"].read_bytes() == b"<html>"

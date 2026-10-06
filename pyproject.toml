@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 athena = ["pyathena>=2.0"]
+confluence = ["atlassian-python-api==5.0.5"]
 hadoop = ["impyla>=0.19", "thrift-sasl>=0.4", "pure-sasl>=0.6"]
 ldap = ["ldap3>=2.9"]
 dbx = ["databricks-sdk>=0.40"]
@@ -47,7 +48,7 @@ default-groups = ["dev"]
 conflicts = [[{ group = "spark" }, { group = "live" }]]
 
 [project.scripts]
-dtrack = "dtrack_left.cli:main"
+dtrack = "dtrack.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dtrack_left", "src/dtrack", "src/dtrack_right", "src/dtrack_local"]

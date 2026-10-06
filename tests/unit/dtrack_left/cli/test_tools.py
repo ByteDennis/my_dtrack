@@ -20,12 +20,25 @@ def config_path(synthetic, tmp_path):
 def test_help_lists_every_command(capsys):
     assert main(["-h"]) == 0
     out = capsys.readouterr().out
-    for command in ("row-check", "col-check", "fetch-report", "doctor", "debug"):
+    for command in ("row-check", "col-check", "tools"):
         assert command in out
+    for command in ("fetch-report", "doctor", "rollback", "debug", "dbx"):
+        assert f"  {command}" not in out
+
+    assert main(["tools", "-h"]) == 0
+    tools_help = capsys.readouterr().out
+    for command in ("fetch-report", "doctor", "rollback", "debug", "dbx", "blog"):
+        assert command in tools_help
+
+
+@pytest.mark.parametrize("command", ["fetch-report", "doctor", "rollback", "debug", "dbx", "blog"])
+def test_auxiliary_commands_require_the_tools_group(command, capsys):
+    assert main([command, "-h"]) == 2
+    assert f"No such command '{command}'" in capsys.readouterr().err
 
 
 def test_doctor_preflights_real_csv_sources_and_prints_one_json_line(config_path, capsys):
-    assert main(["doctor", "--config", str(config_path)]) == 0
+    assert main(["tools", "doctor", "--config", str(config_path)]) == 0
     result = json.loads(capsys.readouterr().out)
     assert set(result) == {"orders", "customers"} and all(row["ok"] for row in result.values())
     assert (
@@ -62,21 +75,37 @@ def test_doctor_fails_with_exit_code_one_when_a_source_is_missing(config_path, t
     config["pairs"]["orders"]["left"]["path"] = str(tmp_path / "missing.csv")
     broken = tmp_path / "broken.json"
     broken.write_text(json.dumps(config))
-    assert main(["doctor", "--config", str(broken)]) == 1
+    assert main(["tools", "doctor", "--config", str(broken)]) == 1
     assert json.loads(capsys.readouterr().out)["orders"]["ok"] is False
 
 
 def test_usage_errors_exit_two(capsys):
     assert main(["row-check", "--config", "nope.json", "--s3", "s3://b/p"]) == 2
-    assert main(["debug"]) == 2
+    assert main(["tools", "debug"]) == 2
 
 
 @pytest.mark.parametrize(
     ("argv", "attach"),
     [
-        (["debug", "--", "doctor", "--config", "c.json"], None),
-        (["debug", "--attach", "--", "doctor", "--config", "c.json"], 5678),
-        (["debug", "--attach", "6000", "--", "doctor", "--config", "c.json"], 6000),
+        (["tools", "debug", "--", "tools", "doctor", "--config", "c.json"], None),
+        (
+            ["tools", "debug", "--attach", "--", "tools", "doctor", "--config", "c.json"],
+            5678,
+        ),
+        (
+            [
+                "tools",
+                "debug",
+                "--attach",
+                "6000",
+                "--",
+                "tools",
+                "doctor",
+                "--config",
+                "c.json",
+            ],
+            6000,
+        ),
     ],
 )
 def test_debug_forwards_the_command_and_attach_port(monkeypatch, argv, attach):
@@ -87,13 +116,13 @@ def test_debug_forwards_the_command_and_attach_port(monkeypatch, argv, attach):
         lambda main, rest, attach: seen.update(rest=rest, attach=attach),
     )
     main(argv)
-    assert seen == {"rest": ["doctor", "--config", "c.json"], "attach": attach}
+    assert seen == {"rest": ["tools", "doctor", "--config", "c.json"], "attach": attach}
 
 
 def test_version_and_abort_map_to_exit_codes(monkeypatch, capsys):
     assert main(["--version"]) == 0 and "dtrack, version" in capsys.readouterr().out
     monkeypatch.setattr(cli_package.cli, "main", lambda **_: (_ for _ in ()).throw(click.Abort()))
-    assert main(["doctor"]) == 1 and "Aborted!" in capsys.readouterr().err
+    assert main(["tools", "doctor"]) == 1 and "Aborted!" in capsys.readouterr().err
 
 
 def test_fetch_report_command_downloads_the_latest_run(s3_bucket, tmp_path, capsys):
@@ -102,12 +131,26 @@ def test_fetch_report_command_downloads_the_latest_run(s3_bucket, tmp_path, caps
     client = boto3.client("s3")
     client.put_object(Bucket=s3_bucket, Key="rep/history/r9/index.html", Body=b"<html>")
     client.put_object(Bucket=s3_bucket, Key="rep/latest/pointer.json", Body=b'{"run_id": "r9"}')
-    code = main(["fetch-report", "--report-s3", f"s3://{s3_bucket}/rep", "--out", str(tmp_path)])
+    code = main(
+        ["tools", "fetch-report", "--report-s3", f"s3://{s3_bucket}/rep", "--out", str(tmp_path)]
+    )
     assert code == 0
     assert json.loads(capsys.readouterr().out) == {
         "files": {"index.html": str(tmp_path / "index.html")},
         "run_id": "r9",
     }
+    nested = tmp_path / "nested"
+    code = main(
+        [
+            "tools",
+            "fetch-report",
+            "--report-s3",
+            f"s3://{s3_bucket}/rep",
+            "--out",
+            str(nested),
+        ]
+    )
+    assert code == 0 and json.loads(capsys.readouterr().out)["run_id"] == "r9"
 
 
 class FakeDebugger:
@@ -161,7 +204,7 @@ def test_dotenv_feeds_option_envvars_of_every_command_and_the_shell_wins(
     monkeypatch.delenv("DTRACK_REPORT_S3", raising=False)
     (tmp_path / ".env").write_text("DTRACK_REPORT_S3=not-an-s3-uri\n")
     with pytest.raises(ValueError, match="not-an-s3-uri"):
-        main(["fetch-report", "--out", str(tmp_path / "out")])
+        main(["tools", "fetch-report", "--out", str(tmp_path / "out")])
     monkeypatch.setenv("DTRACK_REPORT_S3", "shell-wins")
     with pytest.raises(ValueError, match="shell-wins"):
-        main(["fetch-report", "--out", str(tmp_path / "out")])
+        main(["tools", "fetch-report", "--out", str(tmp_path / "out")])

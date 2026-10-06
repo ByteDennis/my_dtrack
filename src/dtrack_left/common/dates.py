@@ -72,13 +72,64 @@ def quote_ident(name: str, dialect: str) -> str:
     return f'"{name.replace(chr(34), chr(34) * 2)}"'
 
 
-DAY_TYPES = frozenset({"date", "timestamp", "datetime"})
+NATIVE_DAY_TYPES = frozenset({"date", "timestamp", "datetime"})
+COMPACT_STRING_TYPES = frozenset({"string_compact"})
+SAS_DATE9_TYPES = frozenset({"string_sas", "string_sas_date9", "sas_date9"})
+SAS_DAY_TYPES = frozenset({"sas_days", "sas_date"})
+DAY_TYPES = NATIVE_DAY_TYPES | SAS_DATE9_TYPES | SAS_DAY_TYPES
+
+
+def _sas_date9_expr(column: str, dialect: str) -> str:
+    text = f"TRIM({column})"
+    if dialect == "oracle":
+        return f"TO_DATE({text}, 'DDMONYYYY', 'NLS_DATE_LANGUAGE=English')"
+    if dialect in {"spark", "databricks", "hadoop"}:
+        return f"to_date({text}, 'ddMMMyyyy')"
+    if dialect == "athena":
+        return f"CAST(date_parse({text}, '%d%b%Y') AS DATE)"
+    if dialect == "duckdb":
+        return f"strptime(TRIM(CAST({column} AS VARCHAR)), '%d%b%Y')::DATE"
+    raise ValueError(f"string_sas dates do not support dialect {dialect!r}")
+
+
+def _sas_day_number_expr(column: str, dialect: str) -> str:
+    if dialect == "oracle":
+        return f"TRUNC(TO_NUMBER({column}))"
+    return f"CAST(CAST({column} AS DOUBLE) AS BIGINT)"
+
+
+def _sas_day_expr(column: str, dialect: str) -> str:
+    number = _sas_day_number_expr(column, dialect)
+    if dialect == "oracle":
+        return f"DATE '1960-01-01' + {number}"
+    if dialect in {"spark", "databricks", "hadoop"}:
+        return f"date_add(DATE '1960-01-01', CAST({number} AS INT))"
+    if dialect == "athena":
+        return f"date_add('day', {number}, DATE '1960-01-01')"
+    if dialect == "duckdb":
+        return f"DATE '1960-01-01' + CAST({number} AS INTEGER)"
+    raise ValueError(f"sas_days dates do not support dialect {dialect!r}")
+
+
+def _predicate_expr(date_col: str, dialect: str, date_type: str | None) -> str:
+    column = quote_ident(date_col, dialect)
+    kind = (date_type or "").lower()
+    if kind in SAS_DATE9_TYPES:
+        return _sas_date9_expr(column, dialect)
+    if kind in SAS_DAY_TYPES:
+        return _sas_day_number_expr(column, dialect)
+    return column
 
 
 # >>> the partition key of a row: the column itself, or its calendar day when it can carry a time <<< #
 def day_expr(date_col: str, dialect: str, date_type: str | None) -> str:
     column = quote_ident(date_col, dialect)
-    if (date_type or "").lower() not in DAY_TYPES:
+    kind = (date_type or "").lower()
+    if kind in SAS_DATE9_TYPES:
+        return _sas_date9_expr(column, dialect)
+    if kind in SAS_DAY_TYPES:
+        return _sas_day_expr(column, dialect)
+    if kind not in NATIVE_DAY_TYPES:
         return column
     if dialect == "oracle":
         return f"TRUNC({column})"
@@ -94,8 +145,13 @@ def next_day(value: str) -> str:
 
 def date_literal(value: str, dialect: str, date_type: str | None) -> str:
     kind = (date_type or "").lower()
-    if kind in DAY_TYPES:
+    if kind in NATIVE_DAY_TYPES | SAS_DATE9_TYPES:
         return f"DATE '{value}'"
+    if kind in SAS_DAY_TYPES:
+        origin = date(1960, 1, 1)
+        return str((date.fromisoformat(canonical_date(value)) - origin).days)
+    if kind in COMPACT_STRING_TYPES:
+        return "'" + canonical_date(value).replace("-", "") + "'"
     if kind in {"num", "integer", "int", "number"}:
         return value.replace("-", "")
     return "'" + value.replace("'", "''") + "'"
@@ -108,7 +164,7 @@ def partition_where(
     dialect: str,
     date_type: str | None = None,
 ) -> str:
-    column = quote_ident(date_col, dialect)
+    column = _predicate_expr(date_col, dialect, date_type)
     days = (date_type or "").lower() in DAY_TYPES
     clauses = []
     for start, end in contiguous_runs(partitions):
@@ -132,7 +188,7 @@ def bounds_where(
     from_date: str | None,
     to_date: str | None,
 ) -> str | None:
-    column = quote_ident(date_col, dialect)
+    column = _predicate_expr(date_col, dialect, date_type)
     clauses = []
     if from_date:
         clauses.append(f"{column} >= {date_literal(from_date, dialect, date_type)}")

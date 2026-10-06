@@ -3,6 +3,7 @@
 # 0. Once: `uv sync --extra dbx`; .env with DTRACK_DBX_PROFILE (corp), DTRACK_DBX_WAREHOUSE_ID,
 #    the Left credentials, and optionally DTRACK_REPORT_S3 and DTRACK_LOCAL_BACKUP_S3.
 # 1. Check:        python -m dtrack_local preflight --config c.json
+#    Sample keys:  python -m dtrack_local key-check --config c.json --pair orders
 # 2. Everything:   python -m dtrack_local run --config c.json \
 #                      [--report-s3 s3://<bucket>/dtrack/report] [--backup-s3 s3://<bucket>/dtrack/local/runs]
 #    or step by step in src/dtrack_local/notebooks: 00 setup/preflight, 01 row check,
@@ -11,8 +12,8 @@
 #                  duckdb -readonly <out>/<run_id>/_local/data.duckdb
 #
 # Interrupted? The same command with --run-id <run_id> resumes; finished work is skipped.
-# Presigned downloads blocked? --disposition inline. Too many rows pulled? --push-sample.
-# Config fixed for one pair?  dtrack rollback --run <out>/<run_id> --pair P --stage col|row
+# Presigned downloads blocked? --disposition inline. Need the full Right window? --no-push-sample.
+# Config fixed for one pair?  dtrack tools rollback --run <out>/<run_id> --pair P --stage col|row
 #   [--config c.json] --yes, then `run --run-id <run_id> --pair P` (or notebook 04).
 
 from .cli import main

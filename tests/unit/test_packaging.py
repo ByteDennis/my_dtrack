@@ -16,9 +16,10 @@ def test_left_package_has_no_databricks_dependency_and_optional_left_adapters():
     assert not any("pyathena" in item or "impyla" in item for item in dependencies)
     assert extras["athena"] == ["pyathena>=2.0"]
     assert any(item.startswith("impyla") for item in extras["hadoop"])
-    assert sorted(extras) == ["athena", "dbx", "hadoop", "ldap"]
+    assert sorted(extras) == ["athena", "confluence", "dbx", "hadoop", "ldap"]
+    assert extras["confluence"] == ["atlassian-python-api==5.0.5"]
     assert [item.split(">")[0] for item in extras["dbx"]] == ["databricks-sdk"]
-    assert project["project"]["scripts"] == {"dtrack": "dtrack_left.cli:main"}
+    assert project["project"]["scripts"] == {"dtrack": "dtrack.cli:main"}
 
 
 def test_right_package_never_imports_the_left_package():
@@ -26,7 +27,7 @@ def test_right_package_never_imports_the_left_package():
         assert "dtrack_left" not in path.read_text(), path
 
 
-# >>> the pipeline never touches Databricks; only the operator helper `dtrack dbx` may, lazily <<< #
+# >>> the pipeline never touches Databricks; only `dtrack tools dbx` may, lazily <<< #
 def test_left_pipeline_never_touches_databricks_and_dbx_imports_the_sdk_lazily():
     left = ROOT / "src/dtrack_left"
     helper = left / "backends/databricks.py"
@@ -79,9 +80,9 @@ def test_right_job_installs_only_what_a_databricks_runtime_lacks():
 
 def test_python_dash_m_dtrack_is_the_same_cli():
     import dtrack
-    import dtrack_left.cli
+    import dtrack.cli
 
-    assert dtrack.main is dtrack_left.cli.main
+    assert dtrack.main is dtrack.cli.main
     completed = subprocess.run(
         [sys.executable, "-m", "dtrack", "--version"],
         capture_output=True,
