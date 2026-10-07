@@ -279,4 +279,6 @@ class LeftRuntime:
             manifest["columns"],
             strict=manifest.get("strict", False),
             col_types=manifest.get("col_type_overrides"),
+            column_types=manifest.get("column_types"),
+            side="left",
         )

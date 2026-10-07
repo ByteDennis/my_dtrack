@@ -26,14 +26,15 @@ def _client(states, chunks=None):
     return NS(statement_execution=api), calls
 
 
-def test_inline_rows_follow_every_chunk_after_polling():
+def test_rows_follow_every_chunk_after_polling_without_forcing_a_disposition():
     client, calls = _client(
         [_response("PENDING"), _response("SUCCEEDED", rows=[["1", "x"]], following=1)],
         chunks={1: NS(data_array=[["2", None]], external_links=None, next_chunk_index=None)},
     )
-    warehouse = Warehouse(client, "wh", inline=True, poll=0)
+    warehouse = Warehouse(client, "wh", poll=0)
     assert warehouse.rows("SELECT a, b FROM t") == [("1", "x"), ("2", None)]
-    assert calls[0]["disposition"].value == "INLINE" and calls[0]["format"].value == "JSON_ARRAY"
+    assert "disposition" not in calls[0]
+    assert calls[0]["format"].value == "JSON_ARRAY"
 
 
 def test_statement_is_audited_before_submission():

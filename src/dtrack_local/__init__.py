@@ -2,7 +2,7 @@
 #
 # API (what the notebooks and `python -m dtrack_local` call)
 #   open_run(config, run_id=None, out=".dtrack-local/runs", profile=None, warehouse_id=None,
-#            inline=False, pairs=None) -> LocalRun
+#            pairs=None) -> LocalRun
 #   preflight(run)            Left SELECT ... WHERE 1=0, Right DESCRIBE QUERY
 #   row_check(run, gate="auto"|"manual"|"ratio:x")   Stage 1: counts, reconcile, gate, manifests
 #   col_check(run)            Stage 2: pull, statistics, compare (units skipped when already done)
@@ -19,8 +19,7 @@
 #
 # Right side: WarehouseTarget reads through a SQL warehouse (Statement Execution API): counts are
 #   one GROUP BY there, JSON_ARRAY windows come back as text, statistics are computed here
-#   with the Left side's code. By default result chunks use presigned links; inline=True returns
-#   rows through the workspace host (<= 25 MiB per window). Sampling always runs in the warehouse.
+#   with the Left side's code. Sampling always runs in the warehouse.
 
 from .pipeline import (
     Landing,

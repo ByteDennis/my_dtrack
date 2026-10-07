@@ -6,10 +6,10 @@
 #             [--run-s3 s3://.../runs]
 #
 # Run options: --run-id (resume; default <UTC stamp>-<config hash>), --out (.dtrack-local/runs),
-#   --profile (corp), --warehouse-id, --inline,
+#   --profile (corp), --warehouse-id,
 #   --pair P (repeatable), --log-level.
 # Environment (.env works): DTRACK_DBX_PROFILE, DTRACK_DBX_WAREHOUSE_ID, DTRACK_LOCAL_OUT,
-#   DTRACK_LOCAL_INLINE, DTRACK_RUN_S3, Left credentials.
+#   DTRACK_RUN_S3, Left credentials.
 # Roll back: dtrack tools rollback --run-s3 <out> --run-id ID --pair P [--pair Q|--pair all]
 
 from __future__ import annotations
@@ -54,7 +54,6 @@ LOCAL_OPTIONS = {
         "out",
         "profile",
         "warehouse_id",
-        "inline",
         "pairs",
         "gate",
         "run_s3",
@@ -66,7 +65,6 @@ LOCAL_OPTIONS = {
         "out",
         "profile",
         "warehouse_id",
-        "inline",
         "pairs",
         "log_level",
         "debug",
@@ -81,7 +79,6 @@ LOCAL_OPTIONS = {
         "out",
         "profile",
         "warehouse_id",
-        "inline",
         "max_examples",
         "log_level",
         "debug",
@@ -158,12 +155,6 @@ def run_options(func):
         envvar="DTRACK_DBX_WAREHOUSE_ID",
         help="SQL warehouse the Right side is read through",
     )
-    @runtime_option(
-        "--inline",
-        is_flag=True,
-        envvar="DTRACK_LOCAL_INLINE",
-        help="return inline rows (<=25 MiB per window) instead of presigned links",
-    )
     @pair_option
     @functools.wraps(func)
     def wrapper(
@@ -173,7 +164,6 @@ def run_options(func):
         out,
         profile,
         warehouse_id,
-        inline,
         pairs,
         **kwargs,
     ):
@@ -183,7 +173,6 @@ def run_options(func):
             out=out,
             profile=profile,
             warehouse_id=warehouse_id,
-            inline=inline,
             pairs=pairs,
         )
         return func(*args, run=run, **kwargs)
@@ -202,14 +191,13 @@ def cli():
     load_dotenv(find_dotenv(usecwd=True))
 
 
-def _keycheck_target(pair, work, *, profile, warehouse_id, inline, sql_audit=None):
+def _keycheck_target(pair, work, *, profile, warehouse_id, sql_audit=None):
     from dtrack_left.backends.databricks import DEFAULT_PROFILE, workspace
 
     client = workspace(profile or os.getenv("DTRACK_DBX_PROFILE") or DEFAULT_PROFILE)
     warehouse = pipeline.Warehouse(
         client,
         warehouse_id or os.getenv("DTRACK_DBX_WAREHOUSE_ID", ""),
-        inline=inline,
         sql_audit=sql_audit,
     )
     return pipeline.WarehouseTarget(warehouse, pair["right"], work)
@@ -352,12 +340,6 @@ def _family_overrides(values: tuple[str, ...]) -> dict[str, object]:
 @runtime_option("--profile", envvar="DTRACK_DBX_PROFILE", help="Databricks profile")
 @runtime_option("--warehouse-id", envvar="DTRACK_DBX_WAREHOUSE_ID", help="SQL warehouse id")
 @runtime_option(
-    "--inline",
-    is_flag=True,
-    envvar="DTRACK_LOCAL_INLINE",
-    help="return inline rows instead of presigned links",
-)
-@runtime_option(
     "--max-examples",
     type=click.IntRange(min=1),
     default=200,
@@ -377,7 +359,6 @@ def key_check_command(
     out,
     profile,
     warehouse_id,
-    inline,
     max_examples,
 ):
     config = load_config(config_path)
@@ -412,7 +393,6 @@ def key_check_command(
         work,
         profile=profile,
         warehouse_id=warehouse_id,
-        inline=inline,
         sql_audit=SqlAudit(audit_store, "right", pair=pair_name),
     )
     check = keycheck.run_sample_check(

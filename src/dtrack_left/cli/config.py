@@ -7,6 +7,7 @@ from typing import Any
 
 from dotenv import find_dotenv, load_dotenv
 
+from ..common.column_types import portable_column_type
 from ..common.dates import resolve_date_type
 
 LEFT_SOURCES = {"oracle", "athena", "aws", "hadoop", "csv", "file", "duckdb"}
@@ -60,25 +61,74 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 resolve_date_type(side.get("date_type"))
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"{name}: invalid {side_name} date_type: {exc}") from None
+        _expand_inline_col_map(pair)
         if not isinstance(pair.get("col_map"), dict) or not pair["col_map"]:
             raise ValueError(f"{name}: col_map must be non-empty")
         overrides = pair.get("col_type_overrides") or {}
         if set(overrides) - set(pair["col_map"]) or set(overrides.values()) - COL_TYPES:
             raise ValueError(f"{name}: col_type_overrides maps col_map keys to numeric|categorical")
+        column_types = pair.get("column_types") or {}
+        if set(column_types) - set(pair["col_map"]):
+            raise ValueError(f"{name}: column_types names columns outside col_map")
+        conflict = sorted(set(column_types) & set(overrides))
+        if conflict:
+            raise ValueError(
+                f"{name}: columns cannot use both col_type_overrides and column_types: "
+                f"{', '.join(conflict)}"
+            )
+        try:
+            pair["column_types"] = {
+                column: portable_column_type(spec) for column, spec in column_types.items()
+            }
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{name}: type must be numeric|categorical or a registered column type: {exc}"
+            ) from None
     return config
 
 
-# >>> a col_map file as {left: right} plus optional types: CSV left,right[,type] or a JSON object <<< #
-def read_col_map(path: Path) -> tuple[dict[str, str], dict[str, str]]:
+def _expand_inline_col_map(pair: dict[str, Any]) -> None:
+    mapping = pair.get("col_map")
+    if not isinstance(mapping, dict):
+        return
+    normalized, types = {}, dict(pair.get("column_types") or {})
+    for left, value in mapping.items():
+        if isinstance(value, str):
+            normalized[left] = value
+            continue
+        if not isinstance(value, dict) or not isinstance(value.get("right"), str):
+            raise ValueError(  # noqa: TRY004 - malformed config values are validation errors
+                "col_map values must be right names or {right, type} objects"
+            )
+        unknown = set(value) - {"right", "type"}
+        if unknown:
+            raise ValueError(f"unsupported col_map fields: {', '.join(sorted(unknown))}")
+        normalized[left] = value["right"]
+        if value.get("type"):
+            types[left] = value["type"]
+    pair["col_map"] = normalized
+    if types:
+        pair["column_types"] = types
+
+
+# >>> a col_map file as {left: right|{right,type}} or CSV left,right[,type] <<< #
+def read_col_map(path: Path) -> tuple[dict[str, str], dict[str, str], dict[str, Any]]:
     if not path.is_file():
         raise FileNotFoundError(f"col_map file not found: {path}")
     if path.suffix.lower() == ".json":
         mapping = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(mapping, dict) or not all(
-            isinstance(key, str) and isinstance(value, str) for key, value in mapping.items()
-        ):
-            raise ValueError(f"{path}: col_map JSON must be an object of left: right names")
-        rows = [{"left": key, "right": value} for key, value in mapping.items()]
+        if not isinstance(mapping, dict):
+            raise ValueError(f"{path}: col_map JSON must be an object of left: right values")
+        rows = []
+        for key, value in mapping.items():
+            if isinstance(value, str):
+                rows.append({"left": key, "right": value})
+            elif isinstance(value, dict):
+                rows.append({"left": key, **value})
+            else:
+                raise ValueError(  # noqa: TRY004 - malformed config values are validation errors
+                    f"{path}: col_map JSON must be an object of left: right names or objects"
+                )
     elif path.suffix.lower() == ".csv":
         lines = path.read_text(encoding="utf-8-sig").splitlines()
         kept = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
@@ -89,7 +139,7 @@ def read_col_map(path: Path) -> tuple[dict[str, str], dict[str, str]]:
         rows = list(reader)
     else:
         raise ValueError(f"{path}: col_map file must be .csv or .json")
-    mapping, types = {}, {}
+    mapping, overrides, column_types = {}, {}, {}
     for row in rows:
         left, right = (row.get("left") or "").strip(), (row.get("right") or "").strip()
         if not left or not right:
@@ -98,8 +148,12 @@ def read_col_map(path: Path) -> tuple[dict[str, str], dict[str, str]]:
             raise ValueError(f"{path}: col_map maps {left!r} or {right!r} twice")
         mapping[left] = right
         if (row.get("type") or "").strip():
-            types[left] = row["type"].strip().lower()
-    return mapping, types
+            kind = row["type"].strip().lower()
+            if kind in COL_TYPES:
+                overrides[left] = kind
+            else:
+                column_types[left] = kind
+    return mapping, overrides, column_types
 
 
 # >>> replace a col_map path (relative to the config file) with its mapping and merge its types <<< #
@@ -107,7 +161,7 @@ def expand_col_maps(config: dict[str, Any], base: Path) -> dict[str, Any]:
     for name, pair in (config.get("pairs") or {}).items():
         if not isinstance(pair.get("col_map"), str):
             continue
-        mapping, types = read_col_map(base / pair["col_map"])
+        mapping, types, column_types = read_col_map(base / pair["col_map"])
         overrides = dict(pair.get("col_type_overrides") or {})
         clash = {col for col, kind in types.items() if overrides.get(col, kind) != kind}
         if clash:
@@ -117,6 +171,8 @@ def expand_col_maps(config: dict[str, Any], base: Path) -> dict[str, Any]:
         pair["col_map"] = mapping
         if types or overrides:
             pair["col_type_overrides"] = {**types, **overrides}
+        if column_types:
+            pair["column_types"] = {**column_types, **(pair.get("column_types") or {})}
     return config
 
 

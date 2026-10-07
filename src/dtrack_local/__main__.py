@@ -6,13 +6,12 @@
 #    Sample keys:  dtrack local key-check --config c.json --pair orders
 # 2. Everything:   dtrack local run --config c.json \
 #                      [--run-s3 s3://<bucket>/dtrack/runs]
-#    or step by step in src/dtrack_local/notebooks: 00 setup/preflight, 01 row check,
-#    02 col check, 03 report + backup, 04 roll one pair back
+#    See examples/nbs/02_local.ipynb for the current SQL Warehouse workflow.
 # 3. Look:         <out>/<run_id>/report/index.html, report.xlsx;
 #                  duckdb -readonly <out>/<run_id>/_local/data.duckdb
 #
 # Interrupted? The same command with --run-id <run_id> resumes; finished work is skipped.
-# Presigned downloads blocked? Use --inline. Sampling always happens before transfer.
+# Sampling always happens before transfer.
 # Config fixed? dtrack tools rollback --run-s3 <out> --run-id <run_id> --pair P \
 #   [--pair Q|--pair all] --stage col|row
 #   [--config c.json] --yes, then `run --run-id <run_id> --pair P` (or notebook 04).

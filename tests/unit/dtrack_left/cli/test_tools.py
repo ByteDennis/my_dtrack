@@ -23,16 +23,18 @@ def test_help_lists_every_command(capsys):
     out = capsys.readouterr().out
     for command in ("row-check", "col-check", "tools"):
         assert command in out
-    for command in ("fetch-report", "doctor", "rollback", "debug", "dbx"):
+    for command in ("fetch-report", "materialize", "doctor", "rollback", "debug", "dbx"):
         assert f"  {command}" not in out
 
     assert main(["tools", "-h"]) == 0
     tools_help = capsys.readouterr().out
-    for command in ("fetch-report", "doctor", "rollback", "debug", "dbx", "blog"):
+    for command in ("fetch-report", "materialize", "doctor", "rollback", "debug", "dbx", "blog"):
         assert command in tools_help
 
 
-@pytest.mark.parametrize("command", ["fetch-report", "doctor", "rollback", "debug", "dbx", "blog"])
+@pytest.mark.parametrize(
+    "command", ["fetch-report", "materialize", "doctor", "rollback", "debug", "dbx", "blog"]
+)
 def test_auxiliary_commands_require_the_tools_group(command, capsys):
     assert main([command, "-h"]) == 2
     assert f"No such command '{command}'" in capsys.readouterr().err

@@ -47,6 +47,8 @@
 #   col_map              {"LEFT": "right"} | "maps/p.csv" (left,right[,type]) | "maps/p.json",
 #                        paths relative to the config file; date_col is dropped from it
 #   col_type_overrides   {"LEFT": "numeric" | "categorical"}   (CSV type column fills it)
+#   mapping type         may instead name a registered ColumnType; `sas_datetime_date` compares
+#                        Left SAS datetime text with a Right native date by calendar day
 #   vintage              day (default) | week | month | quarter | year   -> one window per bucket
 #   key                  "ORDER_ID" or "A,B"; right names via col_map, else the same name
 #   key_families         {"KEY": family} hash normalisation, keyed by the Left key name; family is
@@ -60,6 +62,9 @@
 #                        N > 0 fixed N keys per window chosen by the Left side (both need key)
 #   strict               true: text compared lower-cased and decimal-collapsed
 #   skip                 true: the pair is ignored
+#
+# Large local CSV: `dtrack tools materialize --config c.json --pair P --delete-source`
+#   writes verified date-partitioned/hash-sorted Parquet, updates config, then removes the CSV.
 
 from __future__ import annotations
 
@@ -75,6 +80,7 @@ from .tools import (
     debug_command,
     doctor_command,
     fetch_report_command,
+    materialize_command,
     rollback_command,
     tools_group,
 )
@@ -96,6 +102,7 @@ for command in (
 
 for command in (
     fetch_report_command,
+    materialize_command,
     doctor_command,
     rollback_command,
     debug_command,

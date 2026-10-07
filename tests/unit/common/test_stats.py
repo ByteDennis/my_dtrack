@@ -102,3 +102,23 @@ def test_compute_csv_statistics_applies_overrides_by_column(tmp_path):
         path, ["ID", "AMOUNT"], col_types={"ID": "categorical"}
     )
     assert result["ID"]["col_type"] == "categorical" and result["AMOUNT"]["col_type"] == "numeric"
+
+
+def test_registered_date_column_type_normalizes_each_side_before_hashing(tmp_path):
+    left = tmp_path / "left.csv"
+    right = tmp_path / "right.csv"
+    left.write_text("D\n01AUG2026:09:45:35\n02AUG2026:00:00:00\n")
+    right.write_text("D\n2026-08-01\n2026-08-02\n")
+    spec = {
+        "type": "date",
+        "left_date_type": {"type": "sas", "format": "datetime"},
+        "right_date_type": "date",
+    }
+    left_stats = stats.compute_csv_statistics(
+        left, ["D"], column_types={"D": spec}, side="left"
+    )
+    right_stats = stats.compute_csv_statistics(
+        right, ["D"], column_types={"D": spec}, side="right"
+    )
+    assert left_stats == right_stats
+    assert left_stats["D"]["min_val"] == "2026-08-01"

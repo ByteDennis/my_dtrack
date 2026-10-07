@@ -7,6 +7,7 @@ from collections import defaultdict
 from typing import Any
 
 from .. import PROTOCOL_VERSION
+from .column_types import portable_column_type, resolve_column_type
 from .dates import bucket_date, portable_date_type
 from .hashing import HASH_BUCKET_SPACE, key_family
 
@@ -102,6 +103,20 @@ def build_manifest(
             f"{pair_name}: col_type_overrides needs mapped columns and numeric|categorical, "
             f"got {', '.join(unknown + invalid)}"
         )
+    configured_column_types = dict(pair.get("column_types") or {})
+    unknown_column_types = sorted(set(configured_column_types) - set(columns))
+    if unknown_column_types:
+        raise ValueError(
+            f"{pair_name}: column_types needs mapped columns, got "
+            f"{', '.join(unknown_column_types)}"
+        )
+    try:
+        column_types = {
+            column: portable_column_type(spec)
+            for column, spec in configured_column_types.items()
+        }
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{pair_name}: unsupported column types: {exc}") from None
     sampling = sample_plan(pair.get("sample"))
     if sampling["mode"] != "all" and not keys:
         raise ValueError(f"{pair_name}: sampling requires a key")
@@ -122,6 +137,7 @@ def build_manifest(
         "date_synonyms": dict(pair.get("date_synonyms") or {}),
         "strict": bool(pair.get("strict")),
         "col_type_overrides": overrides,
+        "column_types": column_types,
         "expected_units": len(windows) * len(columns),
     }
     validate_manifest(manifest)
@@ -151,6 +167,14 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     expected = len(manifest["windows"]) * len(manifest["columns"])
     if manifest["expected_units"] != expected:
         raise ValueError("expected_units does not equal Windows x columns")
+    column_types = manifest.get("column_types") or {}
+    unknown_column_types = sorted(set(column_types) - set(manifest["columns"]))
+    if unknown_column_types:
+        raise ValueError(
+            f"column_types names columns outside manifest: {', '.join(unknown_column_types)}"
+        )
+    for spec in column_types.values():
+        resolve_column_type(spec)
     for window in manifest["windows"]:
         if window["partitions"] != sorted(set(window["partitions"])):
             raise ValueError("Window Partitions must be sorted and unique")

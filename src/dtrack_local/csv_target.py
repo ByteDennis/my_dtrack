@@ -83,9 +83,12 @@ class CsvAnchorTarget:
             side="right",
         )
         overrides = manifest.get("col_type_overrides") or {}
+        column_types = manifest.get("column_types") or {}
         return compute_csv_statistics(
             sampled,
             right_columns,
             strict=manifest.get("strict", False),
             col_types={manifest["col_map"][key]: value for key, value in overrides.items()},
+            column_types={manifest["col_map"][key]: value for key, value in column_types.items()},
+            side="right",
         )

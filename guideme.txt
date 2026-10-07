@@ -31,6 +31,19 @@ For a custom debugpy port, use `dtrack tools debug --attach PORT -- <command ...
 
 Terminal mode uses ipdb and opens post-mortem on unhandled runtime errors.
 
+Executable learning cases live only in `examples/nbs`:
+
+  00_row_check.ipynb   distributed Left Stage 1 + Databricks Job hand-off
+  01_col_check.ipynb   distributed Left Stage 2 + Databricks compare/report
+  02_local.ipynb       one-process run through Databricks SQL Warehouse
+  03_tools.ipynb       doctor, materialize, report, rollback, debug, dbx, blog
+  04_common.ipynb      date, hash, manifest, sampling, and statistics contracts
+
+They load `examples/e2e/config.json` and its deterministic generated data. The five notebooks also
+group every current unit-test module by domain and demonstrate its important contracts through
+direct production-API assertions, not a pytest launcher. Markdown is limited to the title;
+executable cells carry short comments beside the real public CLI commands and assertions.
+
 
 1. INSTALL + ENVIRONMENT
 ------------------------
@@ -167,6 +180,10 @@ Parameter choice:
   col_map
     Left -> Right column names. Inline JSON or a config-relative CSV/JSON file.
     CSV header: left,right[,type]. The date column is excluded from value statistics.
+    `type` may be numeric, categorical, or a registered attribute comparison type. Built-in
+    `sas_datetime_date` compares Left `01AUG2026:09:45:35` with Right native dates as
+    `2026-08-01`. JSON may use
+    {"SAS_ATTRIBUTE": {"right": "date_attribute", "type": "sas_datetime_date"}}.
 
   key
     Record identity, comma-separated. Required when `sample` is not all rows.
@@ -201,6 +218,19 @@ Parameter choice:
 
   skip
     true excludes the pair.
+
+  large local CSV materialization
+    A single CSV is scanned once per Stage-2 window, so materialize it before recurring runs:
+
+      dtrack tools materialize --config config.json --pair orders --delete-source
+
+    The command chooses day or month physical partitions independently of vintage, normalizes
+    the configured date column to native DATE, stores deterministic `dtrack_hash`, sorts each
+    partition by that hash, validates per-day total/1%/2% counts, updates config atomically, and
+    only then deletes the CSV. `week`, `month`, and `year` vintages reuse the same dataset.
+    `--partition day|month` overrides auto selection; `--out` overrides the sibling
+    `<csv-stem>.dtrack-parquet` destination. Deletion is refused for a source with `where` or
+    `query`, because that would destroy rows outside the derived view.
 
 
 3. DISTRIBUTED CLI WORKFLOW
@@ -483,7 +513,6 @@ Useful options:
   --run-id ID             resume the same local run
   --out DIR               default .dtrack-local/runs
   --gate POLICY           same row gate
-  --inline                use when presigned result downloads are unavailable
   --run-s3 URI            stable runs root; backup to URI/<run_id>, including report/
 
 Local option precedence is CLI > config `local` section > environment > built-in. Running
@@ -496,7 +525,17 @@ store. Errors go to `<run>/_local/logs/errors.log`; normal CLI JSON remains on s
 Representative submitted SQL shapes are retained in `<run>/audit.txt`; key-check uses
 `.dtrack-local/keycheck/<pair>/audit.txt`.
 
-The CSV Right stand-in and pandas reference statistics live only in `dtrack_local`. The uploaded
+For very large `source=file` CSVs, DuckDB scans the file in place and applies partition/sample
+predicates before export. DTrack writes matching rows in 10,000-row batches and computes statistics
+with DuckDB aggregates, so it does not materialize the whole CSV in Python RAM. DuckDB parallel scan
+is enabled by default and may spill blocking aggregates to disk. Prefer partitioned Parquet for
+repeated runs because projection/filter pushdown avoids reparsing the full CSV.
+
+After `dtrack tools materialize`, fraction sampling uses the stored versioned `dtrack_hash` when
+the configured keys and key families still match. If that contract changes, DTrack falls back to
+recomputing the hash from the keys rather than silently reusing a stale value.
+
+The CSV Right stand-in lives only in `dtrack_local`. The uploaded
 `dtrack_right` package contains the Spark target, Spark sampling SQL, comparison, store, audit,
 and report code; it does not ship local CSV execution or source-platform sampling adapters.
 

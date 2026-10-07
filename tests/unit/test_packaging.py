@@ -1,3 +1,5 @@
+import ast
+import json
 import subprocess
 import sys
 import tomllib
@@ -33,6 +35,7 @@ def test_right_package_contains_only_databricks_runtime_code():
     assert common == {
         "__init__.py",
         "audit.py",
+        "column_types.py",
         "date_platforms.py",
         "dates.py",
         "hashing.py",
@@ -111,3 +114,41 @@ def test_python_dash_m_dtrack_is_the_same_cli():
         cwd=ROOT,
     )
     assert completed.stdout.startswith("dtrack, version")
+
+
+def test_learning_notebooks_match_the_public_cli_layout():
+    notebooks = ROOT / "examples/nbs"
+    expected = [
+        "00_row_check.ipynb",
+        "01_col_check.ipynb",
+        "02_local.ipynb",
+        "03_tools.ipynb",
+        "04_common.ipynb",
+    ]
+    assert sorted(path.name for path in notebooks.glob("*.ipynb")) == expected
+    assert not list((ROOT / "src").rglob("*.ipynb"))
+
+    sources = {}
+    for name in expected:
+        document = json.loads((notebooks / name).read_text())
+        assert sum(cell["cell_type"] == "markdown" for cell in document["cells"]) == 1
+        assert all(not cell.get("outputs") for cell in document["cells"])
+        code = "\n".join(
+            "".join(cell["source"])
+            for cell in document["cells"]
+            if cell["cell_type"] == "code"
+        )
+        ast.parse(code)
+        sources[name] = code
+
+    assert "'row-check'" in sources[expected[0]]
+    assert "'col-check'" in sources[expected[1]]
+    assert "'local', 'run'" in sources[expected[2]]
+    assert "'tools', 'doctor'" in sources[expected[3]]
+    assert "detect_date_type" in sources[expected[4]]
+    assert "build_manifest" in sources[expected[4]]
+    assert "src/dtrack_right/notebook.py" in sources[expected[0]]
+    assert "SQL Warehouse" in sources[expected[1]] + sources[expected[2]]
+    assert all("assert " in sources[name] for name in expected)
+    assert all("pytest.main" not in sources[name] for name in expected)
+    assert all("subprocess.run(['pytest'" not in sources[name] for name in expected)

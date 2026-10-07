@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from pathlib import Path
 
 import click
 
@@ -88,6 +89,55 @@ def doctor_command(config):
         if not pair.get("skip")
     }
     return {**results, "exit_code": 0 if all(row["ok"] for row in results.values()) else 1}
+
+
+# >>> dtrack tools materialize: replace one huge local CSV with verified hash-sorted Parquet <<< #
+@click.command(
+    "materialize",
+    help="convert one pair's local CSV to reusable partitioned Parquet",
+    context_settings=CONTEXT_SETTINGS,
+)
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    envvar="DTRACK_CONFIG",
+    help="pairs config JSON; updated atomically after validation",
+)
+@click.option("--pair", "pair_name", required=True, help="one source=file/csv pair")
+@click.option(
+    "--out",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Parquet dataset; default <csv-stem>.dtrack-parquet beside the CSV",
+)
+@click.option(
+    "--partition",
+    type=click.Choice(("auto", "day", "month")),
+    default="auto",
+    show_default=True,
+    help="physical partitioning; independent of vintage",
+)
+@click.option(
+    "--delete-source",
+    is_flag=True,
+    help="delete the CSV only after Parquet, counts, dates, hashes, and config validate",
+)
+@log_level_option
+@emit_json
+def materialize_command(config_path, pair_name, out, partition, delete_source):
+    from ..backends.materialize import materialize_pair
+
+    try:
+        return materialize_pair(
+            config_path,
+            pair_name,
+            output=out,
+            partition=partition,
+            delete_source=delete_source,
+        )
+    except (FileExistsError, FileNotFoundError, KeyError, TypeError, ValueError) as exc:
+        raise click.UsageError(str(exc)) from None
 
 
 # >>> dtrack tools rollback: safely reset one, several, or all pairs (dry run unless --yes) <<< #

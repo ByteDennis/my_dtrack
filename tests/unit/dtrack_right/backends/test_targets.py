@@ -238,6 +238,24 @@ def test_overrides_force_a_string_column_numeric_and_a_decimal_categorical():
     assert stats["order_id"]["col_type"] == "numeric"
 
 
+def test_registered_date_column_type_normalizes_the_right_expression():
+    spark = FakeSpark(
+        lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]
+    )
+    manifest = _manifest({"mode": "all"})
+    manifest["column_types"] = {
+        "STATUS": {
+            "type": "date",
+            "left_date_type": {"type": "sas", "format": "datetime"},
+            "right_date_type": "date",
+        }
+    }
+    SparkTarget(spark, ORDERS).window_statistics(manifest, {"partitions": ["2026-01-01"]})
+    query = spark.statements[1]
+    assert "date_format(to_date(`status`), 'yyyy-MM-dd')" in query
+    assert "NULL AS mean_2" in query
+
+
 def test_strict_mode_lowercases_and_collapses_text_columns():
     spark = FakeSpark(
         lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]

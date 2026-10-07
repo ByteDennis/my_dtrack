@@ -12,7 +12,7 @@ def test_unified_cli_has_a_local_workflow_group(capsys):
 
     assert main(["tools", "-h"]) == 0
     tools_help = capsys.readouterr().out
-    for command in ("fetch-report", "doctor", "rollback", "debug", "dbx", "blog"):
+    for command in ("fetch-report", "materialize", "doctor", "rollback", "debug", "dbx", "blog"):
         assert command in tools_help
     assert "key-check" not in tools_help
 
@@ -22,7 +22,16 @@ def test_unified_cli_has_a_local_workflow_group(capsys):
 
 
 def test_auxiliary_commands_are_not_available_at_the_root(capsys):
-    for command in ("fetch-report", "doctor", "rollback", "debug", "dbx", "blog", "key-check"):
+    for command in (
+        "fetch-report",
+        "materialize",
+        "doctor",
+        "rollback",
+        "debug",
+        "dbx",
+        "blog",
+        "key-check",
+    ):
         assert main([command, "-h"]) == 2
         assert f"No such command '{command}'" in capsys.readouterr().err
 

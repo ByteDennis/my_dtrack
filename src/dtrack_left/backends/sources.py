@@ -22,6 +22,7 @@ from ..common.dates import (
     quote_ident,
     resolve_date_type,
 )
+from ..common.hashing import HASH_BUCKET_SPACE, key_family
 from ..common.sampling import fixed_keys_sql, sample_predicate_sql
 
 
@@ -96,6 +97,12 @@ class SqlSource(ABC):
         finally:
             cursor.close()
             connection.close()
+
+    def query_to_csv(
+        self, sql: str, output: Path, columns: list[str], *, operation: str = "query"
+    ) -> Path:
+        _columns, rows = self.query(sql, operation=operation)
+        return write_rows(output, columns, rows)
 
     def date_type(self):
         with self._date_type_lock:
@@ -176,22 +183,37 @@ class SqlSource(ABC):
         )
         needs_sample = sample_plan and sample_plan.get("mode") != "all"
         key_types = self.key_types(key_columns or []) if needs_sample else []
-        sample = sample_predicate_sql(
-            sample_plan,
-            [quote_ident(column, self.dialect) for column in key_columns or []],
-            key_families or [],
-            self.dialect,
-            side,
-            key_tuples,
-            key_types,
+        stored_hash = self.config.get("sample_hash") or {}
+        if stored_hash and stored_hash.get("version") != 1:
+            raise ValueError(f"unsupported materialized sample hash version: {stored_hash.get('version')}")
+        family_specs = [key_family(spec).spec() for spec in key_families or []]
+        use_stored_hash = (
+            sample_plan
+            and sample_plan.get("mode") == "fraction"
+            and stored_hash
+            and list(key_columns or []) == stored_hash.get("keys")
+            and family_specs == stored_hash.get("families")
+        )
+        sample = (
+            f"{quote_ident(stored_hash['column'], self.dialect)} < "
+            f"{int(sample_plan.get('threshold') or round(float(sample_plan['rate']) * HASH_BUCKET_SPACE))}"
+            if use_stored_hash
+            else sample_predicate_sql(
+                sample_plan,
+                [quote_ident(column, self.dialect) for column in key_columns or []],
+                key_families or [],
+                self.dialect,
+                side,
+                key_tuples,
+                key_types,
+            )
         )
         predicate = " AND ".join(f"({item})" for item in (predicate, sample) if item)
         sql = (
             f"SELECT {', '.join(quote_ident(column, self.dialect) for column in selected)} "
             f"FROM {self.relation()} WHERE {self._where(predicate)}"
         )
-        _columns, rows = self.query(sql, operation="pull_window")
-        return write_rows(output, selected, rows)
+        return self.query_to_csv(sql, output, selected, operation="pull_window")
 
     def sample_keys(
         self,
@@ -276,6 +298,24 @@ class FileSource(SqlSource):
         import duckdb
 
         return duckdb.connect()
+
+    def query_to_csv(
+        self, sql: str, output: Path, columns: list[str], *, operation: str = "query"
+    ) -> Path:
+        target = Path(output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        connection = self.connect()
+        try:
+            self._audit(sql, operation)
+            cursor = connection.execute(sql)
+            with target.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle, lineterminator="\n")
+                writer.writerow(columns)
+                while rows := cursor.fetchmany(10_000):
+                    writer.writerows(rows)
+            return target
+        finally:
+            connection.close()
 
     def preflight(self) -> dict[str, Any]:
         try:

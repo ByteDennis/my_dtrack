@@ -71,6 +71,24 @@ def test_build_manifest_windows_keep_holes_and_count_units(common):
         "run", "p", _variant(col_type_overrides={"AMOUNT": "numeric"}), ROW_CHECK
     )
     assert forced["col_type_overrides"] == {"AMOUNT": "numeric"}
+    dated = common.manifest.build_manifest(
+        "run",
+        "p",
+        _variant(
+            column_types={
+                "AMOUNT": {
+                    "type": "date",
+                    "left_date_type": {"type": "sas", "format": "datetime"},
+                    "right_date_type": "date",
+                }
+            }
+        ),
+        ROW_CHECK,
+    )
+    assert dated["column_types"]["AMOUNT"]["left_date_type"] == {
+        "type": "sas",
+        "format": "datetime",
+    }
 
 
 def _variant(**changes):

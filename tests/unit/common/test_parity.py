@@ -12,6 +12,7 @@ SRC = Path(__file__).resolve().parents[3] / "src"
 RIGHT_COMMON = {
     "__init__.py",
     "audit.py",
+    "column_types.py",
     "date_platforms.py",
     "dates.py",
     "hashing.py",

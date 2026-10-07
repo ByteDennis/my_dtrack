@@ -142,11 +142,14 @@ class WarehouseTarget(SparkTarget):
         if self.landing:
             self.landing.land("right", manifest["pair"], window["bucket"], output)
         overrides = manifest.get("col_type_overrides") or {}
+        column_types = manifest.get("column_types") or {}
         return compute_csv_statistics(
             output,
             [manifest["col_map"][column] for column in manifest["columns"]],
             strict=manifest.get("strict", False),
             col_types={manifest["col_map"][k]: v for k, v in overrides.items()},
+            column_types={manifest["col_map"][k]: v for k, v in column_types.items()},
+            side="right",
         )
 
 
@@ -199,7 +202,6 @@ def open_run(
     out: str | Path = ".dtrack-local/runs",
     profile: str | None = None,
     warehouse_id: str | None = None,
-    inline: bool = False,
     pairs: list[str] | None = None,
     target_factory: Callable[[dict[str, Any]], Any] | None = None,
 ) -> LocalRun:
@@ -219,7 +221,6 @@ def open_run(
         warehouse = Warehouse(
             client,
             warehouse_id or os.getenv("DTRACK_DBX_WAREHOUSE_ID", ""),
-            inline=inline,
             sql_audit=SqlAudit(run_store, "right"),
         )
         work = folder / LOCAL / "right"

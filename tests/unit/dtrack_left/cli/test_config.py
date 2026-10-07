@@ -1,9 +1,11 @@
 import json
 import os
+from typing import ClassVar
 
 import pytest
 
 from dtrack_left.cli.config import load_config, validate_config
+from dtrack_left.common.column_types import DateColumnType, register_column_type
 
 
 def pair(right="databricks", left="oracle"):
@@ -152,6 +154,53 @@ def test_col_map_csv_is_relative_to_the_config_file_and_fills_types(tmp_path, mo
     loaded = load_config(path)["pairs"]["p"]
     assert loaded["col_map"] == {"ORDER_ID": "order_id", "AMT": "amount"}
     assert loaded["col_type_overrides"] == {"AMT": "numeric"}
+
+
+def test_col_map_type_can_name_a_registered_asymmetric_date_type(tmp_path):
+    path = config_with_map(tmp_path, "maps/p.csv")
+    (tmp_path / "maps/p.csv").write_text(
+        "left,right,type\nSAS_ATTRIBUTE,date_attribute,sas_datetime_date\n"
+    )
+    loaded = load_config(path)["pairs"]["p"]
+    assert loaded["col_map"] == {"SAS_ATTRIBUTE": "date_attribute"}
+    assert loaded["column_types"] == {
+        "SAS_ATTRIBUTE": {
+            "type": "date",
+            "left_date_type": {"type": "sas", "format": "datetime"},
+            "right_date_type": "date",
+        }
+    }
+
+
+def test_inline_json_col_map_accepts_right_and_registered_type(tmp_path):
+    path = tmp_path / "c.json"
+    document = {"pairs": {"p": pair()}}
+    document["pairs"]["p"]["col_map"] = {
+        "SAS_ATTRIBUTE": {"right": "date_attribute", "type": "sas_datetime_date"}
+    }
+    path.write_text(json.dumps(document))
+    loaded = load_config(path)["pairs"]["p"]
+    assert loaded["col_map"] == {"SAS_ATTRIBUTE": "date_attribute"}
+    assert loaded["column_types"]["SAS_ATTRIBUTE"]["right_date_type"] == "date"
+
+
+def test_a_new_date_column_type_only_needs_a_registered_class(tmp_path):
+    @register_column_type("test_compact_to_date")
+    class CompactToDate(DateColumnType):
+        left_date_type: ClassVar[object] = {"type": "string", "format": "compact"}
+        right_date_type: ClassVar[object] = "date"
+
+    path = tmp_path / "c.json"
+    document = {"pairs": {"p": pair()}}
+    document["pairs"]["p"]["col_map"] = {
+        "D": {"right": "d", "type": "test_compact_to_date"}
+    }
+    path.write_text(json.dumps(document))
+    assert load_config(path)["pairs"]["p"]["column_types"]["D"] == {
+        "type": "date",
+        "left_date_type": {"type": "string", "format": "compact"},
+        "right_date_type": "date",
+    }
 
 
 def test_col_map_json_file_and_inline_overrides_merge(tmp_path):

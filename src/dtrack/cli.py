@@ -12,12 +12,14 @@ from dtrack_left.cli.tools import (
     debug_command,
     doctor_command,
     fetch_report_command,
+    materialize_command,
     rollback_command,
 )
 from dtrack_local.cli import cli as local_group
 
 AUXILIARY_COMMANDS = (
     fetch_report_command,
+    materialize_command,
     doctor_command,
     rollback_command,
     debug_command,

@@ -292,6 +292,35 @@ def test_file_source_pull_window_matches_the_old_pandas_reader_byte_for_byte(syn
     assert len(pd.read_csv(out)) == 29 * 30
 
 
+def test_file_source_csv_export_fetches_bounded_batches(tmp_path, monkeypatch):
+    class StreamingConnection:
+        description = (("A",), ("B",))
+
+        def __init__(self):
+            self.batches = [[("1", "x")], [("2", None)], []]
+            self.closed = False
+
+        def execute(self, _sql):
+            return self
+
+        def fetchmany(self, size):
+            assert size == 10_000
+            return self.batches.pop(0)
+
+        def fetchall(self):
+            raise AssertionError("large file exports must not call fetchall")
+
+        def close(self):
+            self.closed = True
+
+    connection = StreamingConnection()
+    source = FileSource({"source": "file", "path": "ignored.csv", "date_col": "D"})
+    monkeypatch.setattr(source, "connect", lambda: connection)
+    output = source.query_to_csv("SELECT A, B", tmp_path / "streamed.csv", ["A", "B"])
+    assert output.read_text() == "A,B\n1,x\n2,\n"
+    assert connection.closed
+
+
 def test_file_source_fraction_pushdown_matches_the_python_reference(synthetic, tmp_path):
     source = _orders(synthetic, date_type="string")
     days = ["2026-01-01", "2026-01-02", "2026-01-03"]

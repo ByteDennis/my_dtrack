@@ -4,6 +4,7 @@ import logging
 import threading
 from typing import Any
 
+from ..common.column_types import resolve_column_type
 from ..common.dates import (
     bounds_where,
     canonical_date,
@@ -179,16 +180,25 @@ class SparkTarget:
         where = self._where(predicate if sample is None else f"{predicate} AND ({sample})")
         right_columns = [manifest["col_map"][column] for column in manifest["columns"]]
         overrides = manifest.get("col_type_overrides") or {}
+        column_types = manifest.get("column_types") or {}
         kinds = {}
         selects = ["count(1) AS n_total"]
         for i, (left_column, column) in enumerate(zip(manifest["columns"], right_columns)):
             ref = quote_ident(column, "spark")
             column_type = self.column_types.get(column, "")
             native = any(column_type.startswith(t) for t in NUMERIC_TYPES)
-            numeric = overrides.get(left_column, "numeric" if native else "") == "numeric"
+            comparison = column_types.get(left_column)
+            numeric = (
+                not comparison
+                and overrides.get(left_column, "numeric" if native else "") == "numeric"
+            )
             kinds[column] = numeric
             integral = native and any(column_type.startswith(t) for t in INTEGRAL_TYPES)
-            text = f"trim(cast({ref} as string))"
+            text = (
+                resolve_column_type(comparison).normalize_sql(ref, "spark", "right")
+                if comparison
+                else f"trim(cast({ref} as string))"
+            )
             if numeric:
                 text = _collapse_decimal_sql(text)
             if strict:

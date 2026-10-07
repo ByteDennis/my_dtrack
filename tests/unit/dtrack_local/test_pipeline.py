@@ -228,12 +228,10 @@ def test_cli_runs_the_plan_and_preflight_reports_failures(synthetic, tmp_path, m
         )
 
     monkeypatch.setattr(pipeline, "open_run", open_run)
-    assert (
-        main(["run", "--config", str(config), "--pair", "orders", "--inline"]) == 0
-    )
+    assert main(["run", "--config", str(config), "--pair", "orders"]) == 0
     outcome = json.loads(capsys.readouterr().out)
     assert outcome["status"] == "DONE" and outcome["findings"]["row_count_diff"] == 1
-    assert opened[0]["pairs"] == ["orders"] and opened[0]["inline"] is True
+    assert opened[0]["pairs"] == ["orders"]
     (synthetic.root / "right" / "orders.csv").rename(tmp_path / "moved.csv")
     try:
         assert main(["preflight", "--config", str(config), "--run-id", "p"]) == 1
@@ -300,7 +298,6 @@ def test_local_config_supplies_every_optional_run_value(tmp_path, monkeypatch, c
         "out": str(tmp_path / "configured-runs"),
         "profile": "config-profile",
         "warehouse-id": "config-warehouse",
-        "inline": True,
         "pair": "orders, customers",
         "log-level": "WARNING",
         "run": {
@@ -338,7 +335,6 @@ def test_local_config_supplies_every_optional_run_value(tmp_path, monkeypatch, c
         "out": str(tmp_path / "configured-runs"),
         "profile": "config-profile",
         "warehouse_id": "config-warehouse",
-        "inline": True,
         "pairs": ["orders", "customers"],
     }
     assert seen["execute"] == {
@@ -415,17 +411,15 @@ def test_local_help_shows_effective_environment_defaults(monkeypatch, capsys):
 
     monkeypatch.setenv("DTRACK_RUN_ID", "env-run")
     monkeypatch.setenv("DTRACK_RUN_S3", "s3://env/runs")
-    monkeypatch.setenv("DTRACK_LOCAL_INLINE", "1")
     assert main(["run", "--help"]) == 0
     output = capsys.readouterr().out
     compact = " ".join(output.split())
-    assert "--inline" in output and "--disposition" not in output
+    assert "--inline" not in output and "--disposition" not in output
     assert "--sample-locally" not in output and "--sample-in-warehouse" not in output
     assert "--backup-data" not in output and "--include-data" not in output
     assert "DTRACK_PAIRS" in compact and "DTRACK_DEBUG" in compact
     assert "default: env-run" in compact
     assert "default: s3://env/runs" in compact
-    assert "DTRACK_LOCAL_INLINE" in compact and "default: 1" in compact
 
 
 def test_key_check_cli_runs_the_production_sample_for_one_window(

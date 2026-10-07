@@ -32,7 +32,6 @@ class Warehouse:
         client,
         warehouse_id: str,
         *,
-        inline: bool = False,
         poll: float = 2.0,
         fetch=download_chunk,
         sql_audit=None,
@@ -41,7 +40,6 @@ class Warehouse:
             raise ValueError("a SQL warehouse id is required (DTRACK_DBX_WAREHOUSE_ID)")
         self.client = client
         self.warehouse_id = warehouse_id
-        self.inline = inline
         self.poll = poll
         self.fetch = fetch
         self.sql_audit = sql_audit
@@ -52,7 +50,6 @@ class Warehouse:
 
     def execute(self, sql: str, *, operation: str = "statement"):
         from databricks.sdk.service.sql import (
-            Disposition,
             ExecuteStatementRequestOnWaitTimeout,
             Format,
         )
@@ -66,7 +63,6 @@ class Warehouse:
             warehouse_id=self.warehouse_id,
             wait_timeout="30s",
             on_wait_timeout=ExecuteStatementRequestOnWaitTimeout.CONTINUE,
-            disposition=Disposition("INLINE" if self.inline else "EXTERNAL_LINKS"),
             format=Format.JSON_ARRAY,
         )
         while _value(response.status.state) in RUNNING:
@@ -118,10 +114,5 @@ class Warehouse:
                 yield from chunk
 
         write_rows(output, columns, rows())
-        log.info(
-            "pulled %d row(s) -> %s (%s)",
-            counted[0],
-            output,
-            "inline" if self.inline else "external links",
-        )
+        log.info("pulled %d row(s) -> %s", counted[0], output)
         return counted[0]
