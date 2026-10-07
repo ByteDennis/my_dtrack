@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 from dtrack_left.common.audit import SqlAudit as LeftSqlAudit
+from dtrack_left.common.audit import prune_audit_history
 from dtrack_right.backends.store import VolumeStore
 from dtrack_right.common.audit import SqlAudit as RightSqlAudit
 
@@ -19,12 +20,8 @@ def test_left_and_right_sql_events_merge_into_one_run_audit(tmp_path):
     assert left_key and right_key
     assert len(store.list_keys("audit/")) == 2
     text = store.get_bytes("audit.txt").decode()
-    assert "side=left" in text and "backend=oracle" in text
-    assert "side=right" in text and "backend=spark" in text
-    assert "operation=query" in text and "pair=orders" in text
-    assert "policy=first_per_shape" in text
-    assert "SELECT * FROM APP.ORDERS" in text
-    assert "SELECT * FROM main.sales.orders" in text
+    assert text == "SELECT * FROM APP.ORDERS\n\nSELECT * FROM main.sales.orders\n\n"
+    assert "-- timestamp=" not in text
 
 
 def test_sql_audit_failure_is_recorded_but_never_raises():
@@ -108,3 +105,22 @@ def test_mutating_sql_is_never_sampled_and_internal_maintenance_is_omitted(tmp_p
     assert audit.record("DELETE FROM T WHERE ID = 2", backend="duckdb")
     assert audit.record("SHOW TABLES", backend="duckdb", operation="landing_inspect") is None
     assert len(store.list_keys("audit/")) == 2
+
+
+def test_detailed_audit_events_are_retained_for_only_the_latest_five_runs(tmp_path):
+    runs = VolumeStore(tmp_path / "runs")
+    for index in range(7):
+        run = runs.child(f"run-{index}")
+        run.put_bytes(
+            f"audit/2026010{index + 1}T000000000000Z-event.txt",
+            f"-- audit_key={index}\nSELECT {index}\n\n".encode(),
+        )
+        run.put_bytes("audit.txt", f"SELECT {index}\n".encode())
+
+    assert prune_audit_history(runs, keep=5) == ["run-1", "run-0"]
+    assert not runs.child("run-0").list_keys("audit/")
+    assert not runs.child("run-1").list_keys("audit/")
+    assert not (tmp_path / "runs/run-0/audit").exists()
+    assert not (tmp_path / "runs/run-1/audit").exists()
+    assert all(runs.child(f"run-{index}").list_keys("audit/") for index in range(2, 7))
+    assert all(runs.child(f"run-{index}").exists("audit.txt") for index in range(7))

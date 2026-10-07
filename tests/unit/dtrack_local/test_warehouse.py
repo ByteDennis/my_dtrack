@@ -31,7 +31,7 @@ def test_inline_rows_follow_every_chunk_after_polling():
         [_response("PENDING"), _response("SUCCEEDED", rows=[["1", "x"]], following=1)],
         chunks={1: NS(data_array=[["2", None]], external_links=None, next_chunk_index=None)},
     )
-    warehouse = Warehouse(client, "wh", disposition="inline", poll=0)
+    warehouse = Warehouse(client, "wh", inline=True, poll=0)
     assert warehouse.rows("SELECT a, b FROM t") == [("1", "x"), ("2", None)]
     assert calls[0]["disposition"].value == "INLINE" and calls[0]["format"].value == "JSON_ARRAY"
 
@@ -73,7 +73,5 @@ def test_failures_carry_the_warehouse_error_and_bad_settings_fail_early():
     client, _ = _client([_response("FAILED", error="TABLE_OR_VIEW_NOT_FOUND")])
     with pytest.raises(RuntimeError, match="FAILED: TABLE_OR_VIEW_NOT_FOUND"):
         Warehouse(client, "wh").rows("SELECT * FROM nope")
-    with pytest.raises(ValueError, match="disposition"):
-        Warehouse(client, "wh", disposition="cloud")
     with pytest.raises(ValueError, match="DTRACK_DBX_WAREHOUSE_ID"):
         Warehouse(client, "")

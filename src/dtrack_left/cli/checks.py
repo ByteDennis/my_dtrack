@@ -5,12 +5,15 @@ import click
 from ..backends.store import validate_run_id
 from ..checks.col_check import ColCheckPipeline, LeftRuntime, publish_fixed_keys, wait_for_manifests
 from ..checks.row_check import make_run_id, run_row_check
+from ..common.audit import prune_audit_history
 from .options import (
     CONTEXT_SETTINGS,
     config_option,
+    debug_option,
     emit_json,
     log_level_option,
     pair_option,
+    runtime_option,
     store_option,
 )
 
@@ -42,15 +45,18 @@ def _active_run(root, run_id: str | None):
     help="count the Left side per partition and hand off to the Right side",
     context_settings=CONTEXT_SETTINGS,
 )
+@debug_option
 @config_option
 @store_option()
-@click.option(
+@runtime_option(
     "--run-id",
     envvar="DTRACK_RUN_ID",
     help="folder below --run-s3; default <UTC stamp>-<config hash>",
 )
 @pair_option
-@click.option("--workers", default=4, show_default=True, help="pairs counted in parallel")
+@runtime_option(
+    "--workers", default=4, envvar="DTRACK_ROW_WORKERS", help="pairs counted in parallel"
+)
 @log_level_option
 @emit_json
 def row_check_command(config, store, run_id, pairs, workers):
@@ -63,6 +69,7 @@ def row_check_command(config, store, run_id, pairs, workers):
     run_id, documents = run_row_check(
         config, run_store, run_id=run_id, pair_names=pairs, pair_workers=workers
     )
+    prune_audit_history(store, keep=5)
     return {"run_id": run_id, "run": run_store.root_uri, "pairs": len(documents)}
 
 
@@ -72,23 +79,51 @@ def row_check_command(config, store, run_id, pairs, workers):
     help="wait for the Right side's manifests, then publish left-side statistics units",
     context_settings=CONTEXT_SETTINGS,
 )
+@debug_option
+@runtime_option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False),
+    envvar="DTRACK_CONFIG",
+    expose_value=False,
+    help="pairs config JSON; used here for command defaults",
+)
 @store_option()
-@click.option("--run-id", envvar="DTRACK_RUN_ID", help="run below --run-s3; default newest unfinished")
+@runtime_option(
+    "--run-id", envvar="DTRACK_RUN_ID", help="run below --run-s3; default newest unfinished"
+)
 @pair_option
-@click.option(
+@runtime_option(
     "--work-dir",
     default=".dtrack-work/col_check",
-    show_default=True,
+    envvar="DTRACK_COL_WORK_DIR",
     type=click.Path(file_okay=False),
     help="scratch space for pulled windows",
 )
-@click.option("--pull-workers", default=2, show_default=True, help="concurrent window pulls")
-@click.option("--stat-workers", default=2, show_default=True, help="concurrent statistics jobs")
-@click.option("--wip", default=200, show_default=True, help="max published but unclaimed units")
-@click.option(
-    "--wait-timeout", default=1800.0, show_default=True, help="seconds to wait for manifests"
+@runtime_option(
+    "--pull-workers", default=2, envvar="DTRACK_COL_PULL_WORKERS", help="concurrent window pulls"
 )
-@click.option("--poll-interval", default=3.0, show_default=True, help="seconds between S3 polls")
+@runtime_option(
+    "--stat-workers",
+    default=2,
+    envvar="DTRACK_COL_STAT_WORKERS",
+    help="concurrent statistics jobs",
+)
+@runtime_option(
+    "--wip", default=200, envvar="DTRACK_COL_WIP", help="max published but unclaimed units"
+)
+@runtime_option(
+    "--wait-timeout",
+    default=1800.0,
+    envvar="DTRACK_COL_WAIT_TIMEOUT",
+    help="seconds to wait for manifests",
+)
+@runtime_option(
+    "--poll-interval",
+    default=3.0,
+    envvar="DTRACK_COL_POLL_INTERVAL",
+    help="seconds between S3 polls",
+)
 @log_level_option
 @emit_json
 def col_check_command(

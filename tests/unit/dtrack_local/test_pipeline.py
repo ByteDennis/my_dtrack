@@ -37,7 +37,7 @@ def test_run_all_matches_the_distributed_protocol_and_backs_up(synthetic, tmp_pa
     assert set(outcome["landing"]) == {"left__orders", "left__customers"}
     assert outcome["error_log"].endswith("r1/_local/logs/errors.log")
     audit = (tmp_path / "runs/r1/audit.txt").read_text()
-    assert "side=left backend=duckdb" in audit and "SELECT" in audit
+    assert "SELECT" in audit and "-- timestamp=" not in audit
     assert list((tmp_path / "runs/r1/audit").glob("*.txt"))
     keys = {row["Key"] for row in boto3.client("s3").list_objects_v2(Bucket=s3_bucket)["Contents"]}
     assert "runs/r1/row_check/orders.json" in keys and "runs/r1/report/index.html" in keys
@@ -85,7 +85,7 @@ def test_warehouse_target_pulls_native_columns_and_computes_statistics_locally(t
     landing = pipeline.Landing(tmp_path / "data.duckdb")
     config = {"catalog": "c", "schema": "s", "table": "orders", "date_col": "business_date"}
     target = pipeline.WarehouseTarget(
-        warehouse, config, tmp_path / "w", landing=landing, push_sample=False
+        warehouse, config, tmp_path / "w", landing=landing
     )
     window = {"bucket": "2026-01-01", "partitions": ["2026-01-01", "2026-01-02"]}
     stats = target.window_statistics(MANIFEST, window)
@@ -94,13 +94,13 @@ def test_warehouse_target_pulls_native_columns_and_computes_statistics_locally(t
     sql = next(item for item in warehouse.sql if item.startswith("SELECT `business_date`,"))
     assert sql.startswith("SELECT `business_date`, `order_id`, `amount`, `status`")
     assert " AS STRING) AS " not in sql
-    assert "FROM `c`.`s`.`orders` WHERE" in sql and "md5" not in sql
+    assert "FROM `c`.`s`.`orders` WHERE" in sql
     assert landing.tables() == {"right__orders": 2}
     target.window_statistics(MANIFEST, window)
     assert landing.tables() == {"right__orders": 2}
 
 
-def test_pushed_sample_filters_in_the_warehouse_by_default(tmp_path):
+def test_sample_filters_in_the_warehouse_before_transfer(tmp_path):
     warehouse = FakeWarehouse([("2026-01-01", "1", "10.50", "OPEN")])
     config = {"table": "orders", "date_col": "dt"}
     target = pipeline.WarehouseTarget(warehouse, config, tmp_path)
@@ -112,25 +112,6 @@ def test_pushed_sample_filters_in_the_warehouse_by_default(tmp_path):
     pulled = next(item for item in warehouse.sql if item.startswith("SELECT `dt`,"))
     assert "md5(" in pulled and stats["amount"]["n_total"] == 1
     assert not (tmp_path / "orders" / "b" / "right.sampled.csv").exists()
-
-
-def test_disabled_pushdown_samples_once_after_the_full_window_is_landed(tmp_path):
-    warehouse = FakeWarehouse([("2026-01-01", str(key), "10.50", "OPEN") for key in range(1, 9)])
-    landing = pipeline.Landing(tmp_path / "data.duckdb")
-    target = pipeline.WarehouseTarget(
-        warehouse,
-        {"table": "orders", "date_col": "dt"},
-        tmp_path,
-        landing=landing,
-        push_sample=False,
-    )
-    manifest = {**MANIFEST, "sample": {"mode": "fraction", "threshold": 2**31, "rate": 0.5}}
-    stats = target.window_statistics(manifest, {"bucket": "b", "partitions": ["2026-01-01"]})
-    pulled = next(item for item in warehouse.sql if item.startswith("SELECT `dt`,"))
-    assert "md5(" not in pulled
-    assert (tmp_path / "orders" / "b" / "right.sampled.csv").exists()
-    assert 0 < stats["amount"]["n_total"] < 8
-    assert landing.tables() == {"right__orders": 8}
 
 
 def test_local_col_check_consumes_while_left_is_still_publishing(tmp_path, monkeypatch):
@@ -247,17 +228,155 @@ def test_cli_runs_the_plan_and_preflight_reports_failures(synthetic, tmp_path, m
 
     monkeypatch.setattr(pipeline, "open_run", open_run)
     assert (
-        main(["run", "--config", str(config), "--pair", "orders", "--disposition", "inline"]) == 0
+        main(["run", "--config", str(config), "--pair", "orders", "--inline"]) == 0
     )
     outcome = json.loads(capsys.readouterr().out)
     assert outcome["status"] == "DONE" and outcome["findings"]["row_count_diff"] == 1
-    assert opened[0]["pairs"] == ["orders"] and opened[0]["disposition"] == "inline"
+    assert opened[0]["pairs"] == ["orders"] and opened[0]["inline"] is True
     (synthetic.root / "right" / "orders.csv").rename(tmp_path / "moved.csv")
     try:
         assert main(["preflight", "--config", str(config), "--run-id", "p"]) == 1
     finally:
         (tmp_path / "moved.csv").rename(synthetic.root / "right" / "orders.csv")
     assert json.loads(capsys.readouterr().out)["orders"]["right"]["ok"] is False
+
+
+def test_local_config_supplies_every_optional_run_value(tmp_path, monkeypatch, capsys):
+    import dtrack_local.cli as local_cli
+
+    config = tmp_path / "config.json"
+    document = pairs_config(tmp_path)
+    document["local"] = {
+        "run-id": "config-run",
+        "out": str(tmp_path / "configured-runs"),
+        "profile": "config-profile",
+        "warehouse-id": "config-warehouse",
+        "inline": True,
+        "pair": "orders, customers",
+        "log-level": "WARNING",
+        "run": {
+            "gate": "manual",
+            "run-s3": "s3://config/runs",
+        },
+    }
+    config.write_text(json.dumps(document))
+    seen = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "open_run",
+        lambda path, **kwargs: seen.update(path=path, open=kwargs) or "run",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "run_all",
+        lambda run, **kwargs: seen.update(run=run, execute=kwargs)
+        or {
+            "run_id": "config-run",
+            "folder": "folder",
+            "status": "DONE",
+            "findings": {},
+            "backup": {},
+            "landing": {},
+            "error_log": "errors.log",
+        },
+    )
+
+    assert local_cli.main(["run", "--config", str(config)]) == 0
+    json.loads(capsys.readouterr().out)
+    assert seen["open"] == {
+        "run_id": "config-run",
+        "out": str(tmp_path / "configured-runs"),
+        "profile": "config-profile",
+        "warehouse_id": "config-warehouse",
+        "inline": True,
+        "pairs": ["orders", "customers"],
+    }
+    assert seen["execute"] == {
+        "gate": "manual",
+        "run_s3": "s3://config/runs",
+    }
+
+
+def test_cli_then_config_then_environment_precedence(tmp_path, monkeypatch, capsys):
+    import dtrack_local.cli as local_cli
+
+    config = tmp_path / "config.json"
+    document = pairs_config(tmp_path)
+    document["local"] = {"run-id": "config-run", "run": {"run-s3": "s3://config/runs"}}
+    config.write_text(json.dumps(document))
+    opened, executed = [], []
+    monkeypatch.setattr(
+        pipeline,
+        "open_run",
+        lambda _path, **kwargs: opened.append(kwargs) or "run",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "run_all",
+        lambda _run, **kwargs: executed.append(kwargs)
+        or {
+            "run_id": kwargs.get("run_id", "r"),
+            "folder": "folder",
+            "status": "DONE",
+            "findings": {},
+            "backup": {},
+            "landing": {},
+            "error_log": "errors.log",
+        },
+    )
+    monkeypatch.setenv("DTRACK_RUN_ID", "env-run")
+    monkeypatch.setenv("DTRACK_RUN_S3", "s3://env/runs")
+
+    assert local_cli.main(["run", "--config", str(config)]) == 0
+    capsys.readouterr()
+    assert opened[-1]["run_id"] == "config-run"
+    assert executed[-1]["run_s3"] == "s3://config/runs"
+
+    argv = ["run", "--config", str(config), "--run-id", "cli-run", "--run-s3", "s3://cli/runs"]
+    assert local_cli.main(argv) == 0
+    capsys.readouterr()
+    assert opened[-1]["run_id"] == "cli-run"
+    assert executed[-1]["run_s3"] == "s3://cli/runs"
+
+
+def test_local_help_reads_config_before_showing_effective_defaults(tmp_path, monkeypatch, capsys):
+    from dtrack_local.cli import main
+
+    config = tmp_path / "config.json"
+    document = pairs_config(tmp_path)
+    document["local"] = {
+        "run-id": "config-run",
+        "run": {"run-s3": "s3://config/runs"},
+    }
+    config.write_text(json.dumps(document))
+    monkeypatch.setenv("DTRACK_RUN_ID", "env-run")
+    monkeypatch.setenv("DTRACK_RUN_S3", "s3://env/runs")
+
+    assert main(["run", "--config", str(config), "--help"]) == 0
+    output = " ".join(capsys.readouterr().out.split())
+    assert "default: config-run" in output
+    assert "default: s3://config/runs" in output
+    assert "default: env-run" not in output
+    assert "default: s3://env/runs" not in output
+
+
+def test_local_help_shows_effective_environment_defaults(monkeypatch, capsys):
+    from dtrack_local.cli import main
+
+    monkeypatch.setenv("DTRACK_RUN_ID", "env-run")
+    monkeypatch.setenv("DTRACK_RUN_S3", "s3://env/runs")
+    monkeypatch.setenv("DTRACK_LOCAL_INLINE", "1")
+    assert main(["run", "--help"]) == 0
+    output = capsys.readouterr().out
+    compact = " ".join(output.split())
+    assert "--inline" in output and "--disposition" not in output
+    assert "--sample-locally" not in output and "--sample-in-warehouse" not in output
+    assert "--backup-data" not in output and "--include-data" not in output
+    assert "DTRACK_PAIRS" in compact and "DTRACK_DEBUG" in compact
+    assert "default: env-run" in compact
+    assert "default: s3://env/runs" in compact
+    assert "DTRACK_LOCAL_INLINE" in compact and "default: 1" in compact
 
 
 def test_key_check_cli_runs_the_production_sample_for_one_window(

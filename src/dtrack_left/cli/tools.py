@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import functools
 import logging
-import sys
 
 import click
 
@@ -9,6 +9,7 @@ from ..backends.sources import source_from_config
 from ..backends.store import fetch_report, validate_run_id
 from ..checks import rollback as rollbacks
 from .config import load_config
+from .debugging import run_under_debugger
 from .options import CONTEXT_SETTINGS, config_option, emit_json, log_level_option
 
 log = logging.getLogger("dtrack.left.debug")
@@ -144,45 +145,20 @@ def rollback_command(runs_uri, run_id, pairs, stage, config_path, apply):
     return outcome
 
 
-# >>> run a dtrack command under ipdb in the terminal, or debugpy waiting for a VS Code attach <<< #
-def run_under_debugger(main, argv: list[str], *, attach: int | None = None) -> int:
-    if attach:
-        import debugpy
-
-        debugpy.listen(("0.0.0.0", attach))
-        log.info("debugpy listening on port %d; attach from VS Code, then continue", attach)
-        debugpy.wait_for_client()
-        debugpy.breakpoint()
-        return main(argv)
-    try:
-        import ipdb as debugger
-    except ImportError:
-        import pdb as debugger
-    log.info("entering %s; `c` to run %s, `n`/`s` to step, `q` to quit", debugger.__name__, argv)
-    try:
-        return debugger.runcall(main, argv)
-    except Exception:
-        log.exception("command raised; opening post-mortem")
-        debugger.post_mortem(sys.exc_info()[2])
-        return 1
-
-
-# >>> local Click runner without the production exception boundary, so ipdb keeps the traceback <<< #
-def _local_debug_main(argv: list[str]) -> int:
-    from dtrack_local.cli import cli as local_cli
-
-    code = local_cli.main(
+# >>> invoke whichever root Click tree owns `tools debug`, without swallowing runtime exceptions <<< #
+def _command_debug_main(command, prog_name: str, argv: list[str]) -> int:
+    code = command.main(
         args=argv,
-        prog_name="python -m dtrack_local",
+        prog_name=prog_name,
         standalone_mode=False,
     )
     return code if isinstance(code, int) else 0
 
 
-# >>> dtrack tools debug [--local] [--attach [PORT]] -- <command ...>: either CLI in a debugger <<< #
+# >>> dtrack tools debug [--attach [PORT]] -- <command ...>: any command in this root CLI <<< #
 @click.command(
     "debug",
-    help="run a dtrack or local command under ipdb, or wait for a VS Code attach",
+    help="run any dtrack command under ipdb, or wait for a VS Code attach",
     context_settings={
         **CONTEXT_SETTINGS,
         "ignore_unknown_options": True,
@@ -197,22 +173,13 @@ def _local_debug_main(argv: list[str]) -> int:
     default=None,
     help="wait for VS Code on this port (bare --attach = 5678) instead of ipdb",
 )
-@click.option(
-    "--local",
-    "local_mode",
-    is_flag=True,
-    help="debug the python -m dtrack_local command tree",
-)
 @click.argument("argv", nargs=-1, type=click.UNPROCESSED)
-def debug_command(attach, local_mode, argv):
-    from . import main
-
+@click.pass_context
+def debug_command(ctx, attach, argv):
     argv = [item for item in argv if item != "--"]
     if not argv:
-        raise click.UsageError(
-            "give the command to debug, e.g. dtrack tools debug -- row-check ... "
-            "or dtrack tools debug --local -- run ..."
-        )
+        raise click.UsageError("give the command to debug, e.g. dtrack tools debug -- row-check ...")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    target = _local_debug_main if local_mode else main
+    root = ctx.find_root()
+    target = functools.partial(_command_debug_main, root.command, root.info_name or "dtrack")
     return run_under_debugger(target, argv, attach=attach)

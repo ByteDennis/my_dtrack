@@ -12,7 +12,6 @@ from dtrack_left.backends.sources import write_rows
 
 log = logging.getLogger("dtrack.local.warehouse")
 RUNNING = {"PENDING", "RUNNING"}
-DISPOSITIONS = {"inline": "INLINE", "external_links": "EXTERNAL_LINKS"}
 
 
 # >>> enum members as their plain value <<< #
@@ -33,20 +32,16 @@ class Warehouse:
         client,
         warehouse_id: str,
         *,
-        disposition: str = "external_links",
+        inline: bool = False,
         poll: float = 2.0,
         fetch=download_chunk,
         sql_audit=None,
     ):
-        if disposition not in DISPOSITIONS:
-            raise ValueError(
-                f"disposition must be one of {sorted(DISPOSITIONS)}, got {disposition!r}"
-            )
         if not warehouse_id:
             raise ValueError("a SQL warehouse id is required (DTRACK_DBX_WAREHOUSE_ID)")
         self.client = client
         self.warehouse_id = warehouse_id
-        self.disposition = disposition
+        self.inline = inline
         self.poll = poll
         self.fetch = fetch
         self.sql_audit = sql_audit
@@ -71,7 +66,7 @@ class Warehouse:
             warehouse_id=self.warehouse_id,
             wait_timeout="30s",
             on_wait_timeout=ExecuteStatementRequestOnWaitTimeout.CONTINUE,
-            disposition=Disposition(DISPOSITIONS[self.disposition]),
+            disposition=Disposition("INLINE" if self.inline else "EXTERNAL_LINKS"),
             format=Format.JSON_ARRAY,
         )
         while _value(response.status.state) in RUNNING:
@@ -123,5 +118,10 @@ class Warehouse:
                 yield from chunk
 
         write_rows(output, columns, rows())
-        log.info("pulled %d row(s) -> %s (%s)", counted[0], output, self.disposition)
+        log.info(
+            "pulled %d row(s) -> %s (%s)",
+            counted[0],
+            output,
+            "inline" if self.inline else "external links",
+        )
         return counted[0]

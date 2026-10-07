@@ -8,7 +8,7 @@ directory with the same run layout:
 | --- | --- | --- | --- |
 | `src/dtrack_left` | on-prem PC | `dtrack row-check`, `dtrack col-check`, `dtrack tools ...` | Left DB access; shared runs root |
 | `src/dtrack_right` | a Databricks job, started once | `src/dtrack_right/notebook.py` | table/Volume read; same runs root |
-| `src/dtrack_local` | one operator machine | `python -m dtrack_local ...` | both connections; runs root optional for backup |
+| `src/dtrack_local` | one operator machine | `dtrack local ...` | both connections; runs root optional for backup |
 
 - **row check** (stage 1): exact row counts per day on both sides; only days whose counts agree
   go on. Left writes `row_check/<pair>.left.json`; Right reconciles and writes the verdicts and the
@@ -40,12 +40,12 @@ uv run dtrack tools --help    # reports, diagnostics, sampling, rollback, Databr
 just e2e            # both sides against a local Moto S3
 ```
 
-`dtrack tools key-check` can override `--key`, `--family KEY=...`, and `--sample` to compare
+`dtrack local key-check` can override `--key`, `--family KEY=...`, and `--sample` to compare
 the exact sampled key set selected by the Left source and Databricks. `dtrack tools blog` renders
 a Confluence tracking-page preview from a report directory; add `--publish` for an explicit write.
-Use `dtrack tools debug -- <command>` for the distributed CLI, or add `--local` before `--` to
-debug `python -m dtrack_local` commands. Add bare `--attach` (port 5678) or `--attach PORT` for
-debugpy/IDE attach instead of terminal ipdb.
+Add `--debug ipdb` or `--debug attach` directly to `row-check`, `col-check`, or any
+`dtrack local` subcommand. Attach mode waits for debugpy on port 5678. `dtrack tools debug --
+<command>` remains useful when a custom attach port is needed.
 Install that optional integration with `uv sync --extra confluence`. Server/Data Center PAT auth uses
 `CONFLUENCE_URL` + `CONFLUENCE_TOKEN`; Cloud additionally needs `CONFLUENCE_USERNAME` and `--cloud`.
 The integration is pinned to `atlassian-python-api==5.0.5` and uses Confluence REST API v1 by

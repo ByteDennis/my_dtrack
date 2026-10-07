@@ -3,13 +3,13 @@
 #   key-check --config c.json --pair P [--from-date D --to-date D] production sample key parity
 #   preflight --config c.json [run options]                        both sides reachable?
 #   run       --config c.json [run options] [--gate auto|manual|ratio:x]
-#             [--run-s3 s3://.../runs] [--include-data]
+#             [--run-s3 s3://.../runs]
 #
 # Run options: --run-id (resume; default <UTC stamp>-<config hash>), --out (.dtrack-local/runs),
-#   --profile (corp), --warehouse-id, --disposition external_links|inline, --no-push-sample,
+#   --profile (corp), --warehouse-id, --inline,
 #   --pair P (repeatable), --log-level.
 # Environment (.env works): DTRACK_DBX_PROFILE, DTRACK_DBX_WAREHOUSE_ID, DTRACK_LOCAL_OUT,
-#   DTRACK_LOCAL_DISPOSITION, DTRACK_RUN_S3, Left credentials.
+#   DTRACK_LOCAL_INLINE, DTRACK_RUN_S3, Left credentials.
 # Roll back: dtrack tools rollback --run-s3 <out> --run-id ID --pair P [--pair Q|--pair all]
 
 from __future__ import annotations
@@ -26,55 +26,141 @@ from dotenv import find_dotenv, load_dotenv
 
 from dtrack_left.backends.sources import source_from_config
 from dtrack_left.cli.config import load_config
-from dtrack_left.cli.options import CONTEXT_SETTINGS, emit_json, log_level_option, pair_option
+from dtrack_left.cli.options import (
+    COMMA_TEXT,
+    CONTEXT_SETTINGS,
+    SEMICOLON_TEXT,
+    ConfigDefaultsGroup,
+    debug_option,
+    emit_json,
+    log_level_option,
+    normalized_options,
+    pair_option,
+    runtime_option,
+)
 from dtrack_left.common.audit import SqlAudit, attach_sql_audit
 from dtrack_right.backends.store import VolumeStore
 
 from . import keycheck, pipeline
 from .run_logging import current_error_log, log_exception_once
-from .warehouse import DISPOSITIONS
 
 log = logging.getLogger("dtrack.local")
+
+LOCAL_OPTIONS = {
+    "run": {
+        "run_id",
+        "out",
+        "profile",
+        "warehouse_id",
+        "inline",
+        "pairs",
+        "gate",
+        "run_s3",
+        "log_level",
+        "debug",
+    },
+    "preflight": {
+        "run_id",
+        "out",
+        "profile",
+        "warehouse_id",
+        "inline",
+        "pairs",
+        "log_level",
+        "debug",
+    },
+    "key-check": {
+        "keys",
+        "family_values",
+        "sample",
+        "from_date",
+        "to_date",
+        "days",
+        "out",
+        "profile",
+        "warehouse_id",
+        "inline",
+        "max_examples",
+        "log_level",
+        "debug",
+    },
+}
+LOCAL_ALIASES = {"pair": "pairs", "key": "keys", "family": "family_values"}
+
+
+def _local_default_map(document: dict) -> dict[str, dict]:
+    section = document.get("local") or {}
+    if not isinstance(section, dict):
+        raise click.UsageError("config local must be an object")
+    nested = {name: section.get(name) or {} for name in LOCAL_OPTIONS}
+    if any(not isinstance(value, dict) for value in nested.values()):
+        raise click.UsageError("config local command sections must be objects")
+    flat = {key: value for key, value in section.items() if key not in LOCAL_OPTIONS}
+    known = set().union(*LOCAL_OPTIONS.values())
+    shared = normalized_options(
+        flat,
+        allowed=known,
+        label="local",
+        aliases=LOCAL_ALIASES,
+        comma_lists={"pairs"},
+        repeatables={"keys", "family_values"},
+    )
+    result = {}
+    for command, allowed in LOCAL_OPTIONS.items():
+        command_values = normalized_options(
+            nested[command],
+            allowed=allowed,
+            label=f"local.{command}",
+            aliases=LOCAL_ALIASES,
+            comma_lists={"pairs"},
+            repeatables={"keys", "family_values"},
+        )
+        result[command] = {
+            **{key: value for key, value in shared.items() if key in allowed},
+            **command_values,
+        }
+    return result
+
+
+class LocalGroup(ConfigDefaultsGroup):
+    def config_defaults(self, document: dict) -> dict[str, dict]:
+        return _local_default_map(document)
 
 
 # >>> where the run lives and how the Right side is reached; shared by every command <<< #
 def run_options(func):
-    @click.option(
+    @runtime_option(
         "--config",
         "config_path",
         required=True,
         type=click.Path(exists=True, dir_okay=False),
+        envvar="DTRACK_CONFIG",
         help="pairs config JSON",
     )
-    @click.option("--run-id", help="resume this run; default <UTC stamp>-<config hash>")
-    @click.option(
+    @runtime_option(
+        "--run-id",
+        envvar="DTRACK_RUN_ID",
+        help="resume this run; default <UTC stamp>-<config hash>",
+    )
+    @runtime_option(
         "--out",
         default=".dtrack-local/runs",
-        show_default=True,
         envvar="DTRACK_LOCAL_OUT",
         help="local runs root",
     )
-    @click.option(
+    @runtime_option(
         "--profile", envvar="DTRACK_DBX_PROFILE", help="~/.databrickscfg profile [default: corp]"
     )
-    @click.option(
+    @runtime_option(
         "--warehouse-id",
         envvar="DTRACK_DBX_WAREHOUSE_ID",
         help="SQL warehouse the Right side is read through",
     )
-    @click.option(
-        "--disposition",
-        type=click.Choice(sorted(DISPOSITIONS)),
-        default="external_links",
-        show_default=True,
-        envvar="DTRACK_LOCAL_DISPOSITION",
-        help="inline rows (<=25 MiB per window) or presigned download links",
-    )
-    @click.option(
-        "--push-sample/--no-push-sample",
-        default=True,
-        show_default=True,
-        help="filter the sample in the warehouse; disable only to retain the full Right window",
+    @runtime_option(
+        "--inline",
+        is_flag=True,
+        envvar="DTRACK_LOCAL_INLINE",
+        help="return inline rows (<=25 MiB per window) instead of presigned links",
     )
     @pair_option
     @functools.wraps(func)
@@ -85,8 +171,7 @@ def run_options(func):
         out,
         profile,
         warehouse_id,
-        disposition,
-        push_sample,
+        inline,
         pairs,
         **kwargs,
     ):
@@ -96,8 +181,7 @@ def run_options(func):
             out=out,
             profile=profile,
             warehouse_id=warehouse_id,
-            disposition=disposition,
-            push_sample=push_sample,
+            inline=inline,
             pairs=pairs,
         )
         return func(*args, run=run, **kwargs)
@@ -106,19 +190,24 @@ def run_options(func):
 
 
 # >>> python -m dtrack_local: the backup plan, both sides pulled to this machine and compared here <<< #
-@click.group(context_settings=CONTEXT_SETTINGS)
+@click.group(
+    "local",
+    cls=LocalGroup,
+    help="Local execution against both connections",
+    context_settings=CONTEXT_SETTINGS,
+)
 def cli():
     load_dotenv(find_dotenv(usecwd=True))
 
 
-def _keycheck_target(pair, work, *, profile, warehouse_id, disposition, sql_audit=None):
+def _keycheck_target(pair, work, *, profile, warehouse_id, inline, sql_audit=None):
     from dtrack_left.backends.databricks import DEFAULT_PROFILE, workspace
 
     client = workspace(profile or os.getenv("DTRACK_DBX_PROFILE") or DEFAULT_PROFILE)
     warehouse = pipeline.Warehouse(
         client,
         warehouse_id or os.getenv("DTRACK_DBX_WAREHOUSE_ID", ""),
-        disposition=disposition,
+        inline=inline,
         sql_audit=sql_audit,
     )
     return pipeline.WarehouseTarget(warehouse, pair["right"], work)
@@ -165,44 +254,74 @@ def _family_overrides(values: tuple[str, ...]) -> dict[str, object]:
     help="verify that the production sample selects the same keys on both sides",
     context_settings=CONTEXT_SETTINGS,
 )
-@click.option(
+@debug_option
+@runtime_option(
     "--config",
     "config_path",
     required=True,
     type=click.Path(exists=True, dir_okay=False),
+    envvar="DTRACK_CONFIG",
     help="pairs config JSON",
 )
-@click.option("--pair", "pair_name", required=True, help="one pair to check")
-@click.option(
+@runtime_option(
+    "--pair", "pair_name", required=True, envvar="DTRACK_PAIR", help="one pair to check"
+)
+@runtime_option(
     "--key",
     "keys",
     multiple=True,
+    type=COMMA_TEXT,
+    envvar="DTRACK_KEYS",
     help="override Left key columns; repeat or use comma-separated names",
 )
-@click.option(
+@runtime_option(
     "--family",
     "family_values",
     multiple=True,
+    type=SEMICOLON_TEXT,
+    envvar="DTRACK_KEY_FAMILIES",
     help="override a family as LEFT_KEY=name|JSON (repeatable)",
 )
-@click.option(
-    "--sample", help="override pair sample: fraction such as 0.1 or fixed count such as 100"
+@runtime_option(
+    "--sample",
+    envvar="DTRACK_SAMPLE",
+    help="override pair sample: fraction such as 0.1 or fixed count such as 100",
 )
-@click.option("--from-date", help="first partition, YYYY-MM-DD")
-@click.option("--to-date", help="last partition, YYYY-MM-DD; default yesterday")
-@click.option(
-    "--days", type=int, default=3, show_default=True, help="window when --from-date is absent"
+@runtime_option(
+    "--from-date", envvar="DTRACK_KEY_CHECK_FROM_DATE", help="first partition, YYYY-MM-DD"
 )
-@click.option("--out", default=".dtrack-local/keycheck", show_default=True, help="artifact root")
-@click.option("--profile", envvar="DTRACK_DBX_PROFILE", help="Databricks profile")
-@click.option("--warehouse-id", envvar="DTRACK_DBX_WAREHOUSE_ID", help="SQL warehouse id")
-@click.option(
-    "--disposition",
-    type=click.Choice(sorted(DISPOSITIONS)),
-    default="external_links",
-    show_default=True,
+@runtime_option(
+    "--to-date",
+    envvar="DTRACK_KEY_CHECK_TO_DATE",
+    help="last partition, YYYY-MM-DD; default yesterday",
 )
-@click.option("--max-examples", type=click.IntRange(min=1), default=200, show_default=True)
+@runtime_option(
+    "--days",
+    type=int,
+    default=3,
+    envvar="DTRACK_KEY_CHECK_DAYS",
+    help="window when --from-date is absent",
+)
+@runtime_option(
+    "--out",
+    default=".dtrack-local/keycheck",
+    envvar="DTRACK_KEY_CHECK_OUT",
+    help="artifact root",
+)
+@runtime_option("--profile", envvar="DTRACK_DBX_PROFILE", help="Databricks profile")
+@runtime_option("--warehouse-id", envvar="DTRACK_DBX_WAREHOUSE_ID", help="SQL warehouse id")
+@runtime_option(
+    "--inline",
+    is_flag=True,
+    envvar="DTRACK_LOCAL_INLINE",
+    help="return inline rows instead of presigned links",
+)
+@runtime_option(
+    "--max-examples",
+    type=click.IntRange(min=1),
+    default=200,
+    envvar="DTRACK_KEY_CHECK_MAX_EXAMPLES",
+)
 @log_level_option
 @emit_json
 def key_check_command(
@@ -217,7 +336,7 @@ def key_check_command(
     out,
     profile,
     warehouse_id,
-    disposition,
+    inline,
     max_examples,
 ):
     config = load_config(config_path)
@@ -251,7 +370,7 @@ def key_check_command(
         work,
         profile=profile,
         warehouse_id=warehouse_id,
-        disposition=disposition,
+        inline=inline,
         sql_audit=SqlAudit(audit_store, "right", pair=pair_name),
     )
     check = keycheck.run_sample_check(
@@ -279,6 +398,7 @@ def key_check_command(
 
 # >>> preflight: both sides reachable, nothing counted <<< #
 @cli.command("preflight", help="check both sides are reachable", context_settings=CONTEXT_SETTINGS)
+@debug_option
 @run_options
 @log_level_option
 @emit_json
@@ -290,27 +410,23 @@ def preflight_command(run):
 
 # >>> run: preflight, row check, col check, report, then optional S3 backup <<< #
 @cli.command("run", help="the whole comparison on this machine", context_settings=CONTEXT_SETTINGS)
+@debug_option
 @run_options
-@click.option(
+@runtime_option(
     "--gate",
     default="auto",
-    show_default=True,
+    envvar="DTRACK_GATE",
     help="Stage 1 gate: auto | manual | ratio:<max excluded share>",
 )
-@click.option(
+@runtime_option(
     "--run-s3",
     envvar="DTRACK_RUN_S3",
     help="stable runs root; copy this local run to <root>/<run_id>/",
 )
-@click.option(
-    "--include-data",
-    is_flag=True,
-    help="with --run-s3, also upload the pulled rows (_local/data.duckdb)",
-)
 @log_level_option
 @emit_json
-def run_command(run, gate, run_s3, include_data):
-    outcome = pipeline.run_all(run, gate=gate, run_s3=run_s3, include_data=include_data)
+def run_command(run, gate, run_s3):
+    outcome = pipeline.run_all(run, gate=gate, run_s3=run_s3)
     return {
         key: outcome[key]
         for key in (

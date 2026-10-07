@@ -95,7 +95,9 @@ class SqlAudit:
                     if audit_key in seen:
                         continue
                     seen.add(audit_key)
-                    blocks.append(block)
+                    _header, separator, statement = block.partition(b"\n")
+                    sql = statement if separator else block
+                    blocks.append(sql.rstrip() + b"\n\n")
                 body = b"".join(blocks)
                 self.store.put_bytes("audit.txt", body, content_type="text/plain; charset=utf-8")
             return True
@@ -160,6 +162,29 @@ class SqlAudit:
             except Exception:
                 log.debug("could not persist SQL audit failure", exc_info=True)
             return None
+
+
+def prune_audit_history(runs_store, *, keep: int = 5) -> list[str]:
+    """Remove detailed SQL event files from older runs while retaining audit.txt."""
+    if keep < 1:
+        raise ValueError("audit history retention must keep at least one run")
+    try:
+        runs = []
+        for run_id in runs_store.list_prefixes():
+            run_store = runs_store.child(run_id)
+            keys = run_store.list_keys("audit/")
+            if keys:
+                runs.append((max(keys), run_id, run_store, keys))
+        removed = []
+        for _latest, run_id, run_store, keys in sorted(runs, reverse=True)[keep:]:
+            run_store.delete_keys(keys)
+            removed.append(run_id)
+        if removed:
+            log.info("pruned detailed SQL audit events from old runs: %s", ", ".join(removed))
+        return removed
+    except Exception:
+        log.debug("could not prune detailed SQL audit history", exc_info=True)
+        return []
 
 
 def attach_sql_audit(target, audit: SqlAudit):

@@ -21,9 +21,8 @@ from dtrack_left.checks.col_check import (
 from dtrack_left.checks.row_check import make_run_id
 from dtrack_left.checks.row_check import run_row_check as left_row_check
 from dtrack_left.cli.config import load_config
-from dtrack_left.common.audit import SqlAudit, attach_sql_audit
+from dtrack_left.common.audit import SqlAudit, attach_sql_audit, prune_audit_history
 from dtrack_left.common.dates import partition_where, quote_ident
-from dtrack_left.common.hashing import sample_csv
 from dtrack_left.common.stats import compute_csv_statistics
 from dtrack_right.backends.store import S3Store, VolumeStore
 from dtrack_right.backends.targets import SparkTarget
@@ -103,7 +102,7 @@ class Landing:
             }
 
 
-# >>> the Right side pulled to this machine: counts via GROUP BY on the warehouse, windows as raw rows, statistics local <<< #
+# >>> Right counts in the warehouse; only source-sampled rows transfer for local statistics <<< #
 class WarehouseTarget(SparkTarget):
     def __init__(
         self,
@@ -112,13 +111,11 @@ class WarehouseTarget(SparkTarget):
         work_dir: str | Path,
         *,
         landing: Landing | None = None,
-        push_sample: bool = True,
     ):
         super().__init__(None, config)
         self.warehouse = warehouse
         self.work_dir = Path(work_dir)
         self.landing = landing
-        self.push_sample = push_sample
 
     def _rows(self, sql: str, operation: str = "query") -> list[tuple]:
         return self.warehouse.rows(sql, operation=operation)
@@ -129,7 +126,7 @@ class WarehouseTarget(SparkTarget):
         predicate = partition_where(
             date_col, window["partitions"], dialect="spark", date_type=self.config.get("date_type")
         )
-        sample = self._sample_predicate(manifest, window) if self.push_sample else None
+        sample = self._sample_predicate(manifest, window)
         where = self._where(predicate if sample is None else f"{predicate} AND ({sample})")
         right_columns = [manifest["col_map"][column] for column in manifest["columns"]]
         selected = list(dict.fromkeys([date_col, *manifest["right_key_cols"], *right_columns]))
@@ -141,25 +138,12 @@ class WarehouseTarget(SparkTarget):
     ) -> dict[str, dict[str, Any]]:
         sql, selected = self.window_sql(manifest, window)
         output = self.work_dir / manifest["pair"] / window["bucket"] / "right.csv"
-        pulled = self.warehouse.to_csv(sql, output, selected, operation="pull_window")
+        self.warehouse.to_csv(sql, output, selected, operation="pull_sample")
         if self.landing:
             self.landing.land("right", manifest["pair"], window["bucket"], output)
-        plan = manifest["sample"]
-        sampled = output
-        if pulled and not self.push_sample:
-            sampled = sample_csv(
-                output,
-                key_columns=manifest["right_key_cols"],
-                mode=plan["mode"],
-                rate=plan.get("rate"),
-                count=plan.get("count"),
-                families=manifest["key_families"],
-                key_tuples=window.get("key_tuples"),
-                side="right",
-            )
         overrides = manifest.get("col_type_overrides") or {}
         return compute_csv_statistics(
-            sampled,
+            output,
             [manifest["col_map"][column] for column in manifest["columns"]],
             strict=manifest.get("strict", False),
             col_types={manifest["col_map"][k]: v for k, v in overrides.items()},
@@ -215,8 +199,7 @@ def open_run(
     out: str | Path = ".dtrack-local/runs",
     profile: str | None = None,
     warehouse_id: str | None = None,
-    disposition: str = "external_links",
-    push_sample: bool = True,
+    inline: bool = False,
     pairs: list[str] | None = None,
     target_factory: Callable[[dict[str, Any]], Any] | None = None,
 ) -> LocalRun:
@@ -236,13 +219,13 @@ def open_run(
         warehouse = Warehouse(
             client,
             warehouse_id or os.getenv("DTRACK_DBX_WAREHOUSE_ID", ""),
-            disposition=disposition,
+            inline=inline,
             sql_audit=SqlAudit(run_store, "right"),
         )
         work = folder / LOCAL / "right"
 
         def target_factory(right: dict[str, Any]):
-            return WarehouseTarget(warehouse, right, work, landing=landing, push_sample=push_sample)
+            return WarehouseTarget(warehouse, right, work, landing=landing)
 
     run = LocalRun(document, run_id, folder, target_factory, landing, pairs)
     log.info("local run %s at %s; errors -> %s", run_id, folder, run.error_log)
@@ -357,6 +340,7 @@ def _col_check(
 # >>> HTML, XLSX, CSVs and summary.json into <run>/report/ <<< #
 def report(run: LocalRun) -> dict[str, Any]:
     SqlAudit(run.store, "local").refresh()
+    prune_audit_history(VolumeStore(run.folder.parent), keep=5)
     files = build_report(run.store, run.folder / "report")
     summary = json.loads(files["summary.json"].read_text())
     run.store.put_json(
@@ -375,16 +359,15 @@ def report(run: LocalRun) -> dict[str, Any]:
 
 
 # >>> copy the run folder to s3://.../runs/<run_id>/, laid out like a distributed run; pulled data only when asked <<< #
-def backup(run: LocalRun, s3_root: str, *, include_data: bool = False) -> dict[str, Any]:
-    target = S3Store(f"{s3_root.rstrip('/')}/{run.run_id}")
+def backup(run: LocalRun, s3_root: str) -> dict[str, Any]:
+    runs_store = S3Store(s3_root.rstrip("/"))
+    target = runs_store.child(run.run_id)
     uploaded, skipped = [], 0
     for path in sorted(run.folder.rglob("*")):
         if not path.is_file() or path.name.endswith(".part"):
             continue
         relative = path.relative_to(run.folder).as_posix()
-        if relative.startswith(f"{LOCAL}/") and not (
-            include_data and relative == f"{LOCAL}/data.duckdb"
-        ):
+        if relative.startswith(f"{LOCAL}/"):
             skipped += 1
             continue
         content_type = "application/json" if path.suffix == ".json" else "application/octet-stream"
@@ -397,6 +380,7 @@ def backup(run: LocalRun, s3_root: str, *, include_data: bool = False) -> dict[s
         target.root_uri,
         skipped,
     )
+    prune_audit_history(runs_store, keep=5)
     return {"uri": target.root_uri, "files": len(uploaded), "skipped": skipped}
 
 
@@ -406,7 +390,6 @@ def run_all(
     *,
     gate: str = "auto",
     run_s3: str | None = None,
-    include_data: bool = False,
 ) -> dict[str, Any]:
     health = preflight(run)
     failed = [
@@ -421,7 +404,7 @@ def run_all(
     stage_two = col_check(run) if run.store.exists("row_check/_CLOSED") else None
     landing = run.landing.tables()
     built = report(run)
-    saved = backup(run, run_s3, include_data=include_data) if run_s3 else None
+    saved = backup(run, run_s3) if run_s3 else None
     return {
         "run_id": run.run_id,
         "folder": str(run.folder),

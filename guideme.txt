@@ -21,14 +21,15 @@ Stage 2 / col:
 
 All auxiliary commands are under `dtrack tools`; old root commands are intentionally absent.
 
-Debug either command tree without changing its runtime arguments:
+Debug the main workflows directly:
 
-  dtrack tools debug -- row-check --config config.json --run-s3 "$DTRACK_RUN_S3"
-  dtrack tools debug --local -- run --config config.json
-  dtrack tools debug --attach --local -- run --config config.json   # debugpy port 5678
+  dtrack row-check --config config.json --debug ipdb
+  dtrack col-check --config config.json --debug attach            # debugpy port 5678
+  dtrack local run --config config.json --debug ipdb
 
-Terminal mode uses ipdb and opens post-mortem on unhandled runtime errors. `--local` deliberately
-bypasses the local production error-log boundary so the original traceback remains debuggable.
+For a custom debugpy port, use `dtrack tools debug --attach PORT -- <command ...>`.
+
+Terminal mode uses ipdb and opens post-mortem on unhandled runtime errors.
 
 
 1. INSTALL + ENVIRONMENT
@@ -38,7 +39,7 @@ bypasses the local production error-log boundary so the original traceback remai
   uv sync --extra dbx          # Databricks operator/local helpers
   uv sync --extra confluence   # optional blog publisher
 
-Common environment variables (`.env` is loaded; shell values win):
+Common environment variables (`.env` is loaded):
 
   DTRACK_CONFIG=/absolute/path/config.json
   DTRACK_RUN_S3=s3://bucket/dtrack/runs     # stable root; never include run_id
@@ -46,11 +47,30 @@ Common environment variables (`.env` is loaded; shell values win):
   DTRACK_LOG_LEVEL=INFO
   DTRACK_DBX_PROFILE=corp
   DTRACK_DBX_WAREHOUSE_ID=<warehouse-id>   # local/key-check only
+  DTRACK_PAIRS=orders,customers
+  DTRACK_DEBUG=ipdb                        # ipdb | attach
+
+Every option with an environment binding shows its exact variable in `--help`.
 
 Keep passwords/tokens in environment variables or secret stores, never in shared payloads.
 The Left hand-off removes credentials, DSNs, hostnames, HTTP paths, and *_env fields.
 Executed SQL is intentionally retained and can contain configured predicates or fixed sample-key
 literals; restrict access to each run prefix accordingly.
+
+Command option precedence for `dtrack row-check`, `dtrack col-check`, and `dtrack local` is:
+
+  CLI > config command section > environment > built-in
+
+Use top-level `row-check` and `col-check` objects for their optional arguments. For example:
+
+  "row-check": {"run-s3": "s3://bucket/dtrack/runs", "workers": 4},
+  "col-check": {"run-s3": "s3://bucket/dtrack/runs", "pull-workers": 2}
+
+Display effective defaults with:
+
+  dtrack row-check --config config.json --help
+  dtrack col-check --config config.json --help
+  dtrack local run --config config.json --help
 
 
 2. CONFIG
@@ -199,16 +219,16 @@ A. Validate config and Left access
 `doctor` connects to Left and describes the Right relation; it does not prove the Right
 Databricks source is reachable. For a both-side connection check use local preflight:
 
-  python -m dtrack_local preflight --config config.json
+  dtrack local preflight --config config.json
 
 B. Optional: prove sample-key parity before a long run
 
-  dtrack tools key-check --config config.json --pair orders \
+  dtrack local key-check --config config.json --pair orders \
     --from-date 2026-01-01 --to-date 2026-01-03
 
 Temporary diagnostic overrides:
 
-  dtrack tools key-check --config config.json --pair orders \
+  dtrack local key-check --config config.json --pair orders \
     --key ORDER_ID --key LINE_ID \
     --family ORDER_ID=numeric --family LINE_ID=numeric \
     --sample 100
@@ -295,7 +315,7 @@ Expected report artifacts: summary.json, per-pair row/col CSVs, index.html, repo
 --------------------------------
 
 <run>/
-  audit.txt                     merged human-readable representative SQL for Left/Right/local
+  audit.txt                     representative SQL only, without metadata comment lines
   audit/<event_id>.txt          immutable first-per-shape records used for concurrent merging
   audit_errors/<event_id>.json  audit-write failures; the data query still executes
   _STATUS.json                  coarse state/role/run/result count
@@ -350,10 +370,11 @@ SQL audit contract:
   mutating statement is retained. Optional internal maintenance (`ATTACH`, `USE`, local landing
   CREATE/DELETE/INSERT/count, `SHOW TABLES`) is omitted by default.
 
-  Row/col/key-check checkpoints and final completion merge the bounded events once into
+  Row/col/key-check checkpoints and final completion merge SQL only into
   `audit.txt`, avoiding an O(n^2) rewrite for every S3 query. Audit I/O failure never blocks the
-  statement; when the run store is still writable the failure goes under `audit_errors/`. Local
-  backup includes both the events and merged file.
+  statement; when the run store is still writable the failure goes under `audit_errors/`. Detailed
+  `audit/` events are retained for the latest five runs; older runs keep `audit.txt`. Local backup
+  includes the current run's events and merged file, but never uploads `_local/`.
 
 Industrial operating pattern for very large object counts:
   1. Keep S3 payloads immutable and authoritative; never hand-edit unit JSON in place.
@@ -455,19 +476,22 @@ Local run folders are accepted in place of S3 URLs:
 6. LOCAL EQUIVALENT
 -------------------
 
-  python -m dtrack_local preflight --config config.json
-  python -m dtrack_local run --config config.json --pair orders --run-s3 "$RUN_S3"
+  dtrack local preflight --config config.json
+  dtrack local run --config config.json --pair orders --run-s3 "$RUN_S3"
 
 Useful options:
   --run-id ID             resume the same local run
   --out DIR               default .dtrack-local/runs
   --gate POLICY           same row gate
-  --no-push-sample        retain/pull the full Right window, then sample locally
-  --disposition inline    use when presigned result downloads are unavailable
+  --inline                use when presigned result downloads are unavailable
   --run-s3 URI            stable runs root; backup to URI/<run_id>, including report/
-  --include-data          also back up _local/data.duckdb
 
-Local col-check runs the Left producer and Right consumer concurrently over the same directory
+Local option precedence is CLI > config `local` section > environment > built-in. Running
+`dtrack local run --config config.json --help` reads that config and displays the effective defaults.
+
+Sampling always runs in each source/warehouse before transfer; full-window download followed by
+local sampling is unsupported. `_local/` is never uploaded. Local col-check runs the Left producer
+and Right consumer concurrently over the same directory
 store. Errors go to `<run>/_local/logs/errors.log`; normal CLI JSON remains on stdout.
 Representative submitted SQL shapes are retained in `<run>/audit.txt`; key-check uses
 `.dtrack-local/keycheck/<pair>/audit.txt`.
@@ -484,7 +508,7 @@ Config/load failure:
   run `dtrack tools doctor`; verify source, date_col, col_map, relation fields, and env names.
 
 Left/right sample mismatch:
-  run `dtrack tools key-check`; inspect key order, col_map, key_families, nulls, dates, and zeros.
+  run `dtrack local key-check`; inspect key order, col_map, key_families, nulls, dates, and zeros.
 
 col-check waits forever:
   inspect _STATUS.json, row_check/_CLOSED, Right Job state, gate decision, and wait_timeout.

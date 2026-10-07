@@ -7,7 +7,8 @@ import pytest
 from support import pairs_config
 
 from dtrack_left import cli as cli_package
-from dtrack_left.cli import main, tools
+from dtrack_left.cli import debugging, main, tools
+from dtrack_left.cli.options import debug_option
 
 
 @pytest.fixture
@@ -119,43 +120,10 @@ def test_debug_forwards_the_command_and_attach_port(monkeypatch, argv, attach):
     assert seen == {"rest": ["tools", "doctor", "--config", "c.json"], "attach": attach}
 
 
-@pytest.mark.parametrize(
-    ("debug_options", "attach"),
-    [(["--local"], None), (["--attach", "--local"], 5678), (["--attach", "6000", "--local"], 6000)],
-)
-def test_debug_local_routes_the_local_command_tree_through_the_debugger(
-    monkeypatch, debug_options, attach
-):
-    seen = {}
-    monkeypatch.setattr(
-        tools,
-        "run_under_debugger",
-        lambda target, rest, attach: seen.update(target=target, rest=rest, attach=attach),
-    )
-    argv = ["tools", "debug", *debug_options, "--", "run", "--config", "c.json"]
-    assert main(argv) == 0
-    assert seen == {
-        "target": tools._local_debug_main,
-        "rest": ["run", "--config", "c.json"],
-        "attach": attach,
-    }
-
-
-def test_local_debug_main_does_not_swallow_runtime_exceptions(monkeypatch):
-    from dtrack_local import cli as local_cli
-
-    def fail(**_kwargs):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(local_cli.cli, "main", fail)
-    with pytest.raises(RuntimeError, match="boom"):
-        tools._local_debug_main(["run"])
-
-
-def test_debug_help_documents_local_and_attach(capsys):
+def test_debug_help_documents_attach(capsys):
     assert main(["tools", "debug", "-h"]) == 0
     output = capsys.readouterr().out
-    assert "--local" in output and "--attach" in output
+    assert "--local" not in output and "--attach" in output
 
 
 def test_version_and_abort_map_to_exit_codes(monkeypatch, capsys):
@@ -225,10 +193,10 @@ def test_run_under_debugger_uses_ipdb_and_opens_post_mortem_on_errors(monkeypatc
     assert bad.calls == [("runcall", ["doctor"]), ("post_mortem", True)]
 
 
-def test_run_under_debugger_falls_back_to_pdb(monkeypatch):
+def test_run_under_debugger_requires_ipdb_instead_of_falling_back_to_pdb(monkeypatch):
     monkeypatch.setitem(sys.modules, "ipdb", None)
-    monkeypatch.setitem(sys.modules, "pdb", FakeDebugger())
-    assert tools.run_under_debugger(lambda argv: 3, []) == 3
+    with pytest.raises(RuntimeError, match="ipdb is required"):
+        tools.run_under_debugger(lambda argv: 3, [])
 
 
 def test_attach_waits_for_vs_code_before_running(monkeypatch):
@@ -241,6 +209,25 @@ def test_attach_waits_for_vs_code_before_running(monkeypatch):
     monkeypatch.setitem(sys.modules, "debugpy", fake)
     assert tools.run_under_debugger(lambda argv: events.append(argv) or 0, ["x"], attach=5678) == 0
     assert events == [("listen", ("0.0.0.0", 5678)), "wait", "breakpoint", ["x"]]
+
+
+@pytest.mark.parametrize(("mode", "port"), [("ipdb", None), ("attach", 5678)])
+def test_debug_option_reuses_the_shared_debugger_runner(monkeypatch, mode, port):
+    seen = []
+
+    @click.command()
+    @debug_option
+    def command():
+        seen.append("command")
+        return 7
+
+    def run(target, argv, *, attach):
+        seen.append((argv, attach))
+        return target(argv)
+
+    monkeypatch.setattr(debugging, "run_under_debugger", run)
+    assert command.main(["--debug", mode], standalone_mode=False) == 7
+    assert seen == [([], port), "command"]
 
 
 def test_dotenv_feeds_fetch_report_run_and_the_shell_wins(tmp_path, monkeypatch):

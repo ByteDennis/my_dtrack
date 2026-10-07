@@ -70,7 +70,7 @@ from .. import __version__
 from .blog import blog_command, blog_delete_command
 from .checks import col_check_command, row_check_command
 from .ops import dbx_group
-from .options import CONTEXT_SETTINGS
+from .options import CONTEXT_SETTINGS, DistributedGroup
 from .tools import (
     debug_command,
     doctor_command,
@@ -81,7 +81,7 @@ from .tools import (
 
 
 # >>> dtrack: the Left-side CLI; .env loads before any subcommand parses its options (shell variables win) <<< #
-@click.group(context_settings=CONTEXT_SETTINGS)
+@click.group(cls=DistributedGroup, context_settings=CONTEXT_SETTINGS)
 @click.version_option(__version__, "-v", "--version", prog_name="dtrack")
 def cli():
     load_dotenv(find_dotenv(usecwd=True))

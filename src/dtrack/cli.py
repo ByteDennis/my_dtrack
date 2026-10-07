@@ -7,21 +7,20 @@ from dtrack_left import __version__
 from dtrack_left.cli.blog import blog_command, blog_delete_command
 from dtrack_left.cli.checks import col_check_command, row_check_command
 from dtrack_left.cli.ops import dbx_group
-from dtrack_left.cli.options import CONTEXT_SETTINGS
+from dtrack_left.cli.options import CONTEXT_SETTINGS, DistributedGroup
 from dtrack_left.cli.tools import (
     debug_command,
     doctor_command,
     fetch_report_command,
     rollback_command,
 )
-from dtrack_local.cli import key_check_command
+from dtrack_local.cli import cli as local_group
 
 AUXILIARY_COMMANDS = (
     fetch_report_command,
     doctor_command,
     rollback_command,
     debug_command,
-    key_check_command,
     blog_command,
     blog_delete_command,
     dbx_group,
@@ -37,13 +36,13 @@ for command in AUXILIARY_COMMANDS:
     tools_group.add_command(command)
 
 
-@click.group(context_settings=CONTEXT_SETTINGS)
+@click.group(cls=DistributedGroup, context_settings=CONTEXT_SETTINGS)
 @click.version_option(__version__, "-v", "--version", prog_name="dtrack")
 def cli():
     load_dotenv(find_dotenv(usecwd=True))
 
 
-for command in (row_check_command, col_check_command, tools_group):
+for command in (row_check_command, col_check_command, local_group, tools_group):
     cli.add_command(command)
 
 

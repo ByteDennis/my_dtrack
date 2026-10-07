@@ -127,6 +127,22 @@ class S3Store:
     def child(self, name: str) -> S3Store:
         return S3Store(self.root_uri.rstrip("/") + "/" + name, client=self.client)
 
+    def delete_keys(self, keys: list[str]) -> int:
+        deleted = 0
+        for offset in range(0, len(keys), 1000):
+            batch = keys[offset : offset + 1000]
+            if not batch:
+                continue
+            response = self.client.delete_objects(
+                Bucket=self.bucket,
+                Delete={"Objects": [{"Key": self._key(key)} for key in batch], "Quiet": True},
+            )
+            errors = response.get("Errors") or []
+            if errors:
+                raise RuntimeError(f"failed to delete audit objects: {errors}")
+            deleted += len(batch)
+        return deleted
+
     def list_json(self, prefix: str, *, start_after: str | None = None) -> list[tuple[str, Any]]:
         return [
             (key, self.get_json(key)) for key in self.list_keys(prefix, start_after=start_after)
@@ -234,6 +250,23 @@ class VolumeStore:
 
     def child(self, name: str) -> VolumeStore:
         return VolumeStore(self.root / name)
+
+    def delete_keys(self, keys: list[str]) -> int:
+        deleted = 0
+        parents = set()
+        for key in keys:
+            path = self._path(key)
+            if path.is_file():
+                path.unlink()
+                parents.add(path.parent)
+                deleted += 1
+        for parent in sorted(parents, key=lambda item: len(item.parts), reverse=True):
+            if parent != self.root:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    pass
+        return deleted
 
     def list_json(self, prefix: str, *, start_after: str | None = None) -> list[tuple[str, Any]]:
         return [
