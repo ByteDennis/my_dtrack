@@ -6,9 +6,16 @@ import os
 import posixpath
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
+
+
+def validate_run_id(value: object) -> str:
+    run_id = str(value or "")
+    if not run_id or run_id in {".", ".."} or "/" in run_id or "\\" in run_id or "\0" in run_id:
+        raise ValueError("run_id must be one non-empty folder name below the runs root")
+    return run_id
 
 
 @dataclass(frozen=True)
@@ -105,6 +112,24 @@ class S3Store:
             kwargs.pop("StartAfter", None)
             kwargs["ContinuationToken"] = response["NextContinuationToken"]
 
+    def list_prefixes(self, prefix: str = "") -> list[str]:
+        base = self._key(prefix)
+        base = base + "/" if base and not base.endswith("/") else base
+        kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": base, "Delimiter": "/"}
+        result = []
+        while True:
+            response = self.client.list_objects_v2(**kwargs)
+            result.extend(
+                row["Prefix"].removeprefix(base).strip("/")
+                for row in response.get("CommonPrefixes") or []
+            )
+            if not response.get("IsTruncated"):
+                return sorted(result)
+            kwargs["ContinuationToken"] = response["NextContinuationToken"]
+
+    def child(self, name: str) -> S3Store:
+        return S3Store(self.root_uri.rstrip("/") + "/" + name, client=self.client)
+
     def list_json(self, prefix: str, *, start_after: str | None = None) -> list[tuple[str, Any]]:
         return [
             (key, self.get_json(key)) for key in self.list_keys(prefix, start_after=start_after)
@@ -160,30 +185,57 @@ class S3Store:
 log = logging.getLogger("dtrack.left.fetch")
 
 
-# >>> download one run's report set from the report store; latest/pointer.json picks the run when none is given <<< #
-def fetch_report(report_store, out_dir: str | Path, *, run_id: str | None = None) -> dict:
-    if run_id is None:
-        if not report_store.exists("latest/pointer.json"):
-            raise FileNotFoundError("report store has no latest/pointer.json yet")
-        pointer = report_store.get_json("latest/pointer.json")
-        run_id = pointer["run_id"]
-        log.info(
-            "latest/pointer.json -> run %s (%s, %s findings)",
-            run_id,
-            pointer.get("status"),
-            pointer.get("findings"),
-        )
-    base = f"history/{run_id}/"
-    keys = report_store.list_keys(base)
+# >>> resolve one completed run below the stable runs root, then download its report/ <<< #
+def fetch_report(runs_store, out_dir: str | Path, *, run_id: str | None = None) -> dict:
+    if run_id:
+        run_id = validate_run_id(run_id)
+        run_store = runs_store.child(run_id)
+    else:
+        completed = []
+        for candidate in runs_store.list_prefixes():
+            child = runs_store.child(candidate)
+            if (
+                child.exists("_STATUS.json")
+                and child.get_json("_STATUS.json").get("state") == "complete"
+                and child.list_keys("report/")
+            ):
+                completed.append(candidate)
+        if not completed:
+            raise FileNotFoundError("runs root has no completed run with report/")
+        run_id = completed[-1]
+        run_store = runs_store.child(run_id)
+        log.info("latest completed run -> %s", run_id)
+    if (
+        not run_store.exists("_STATUS.json")
+        or run_store.get_json("_STATUS.json").get("state") != "complete"
+    ):
+        raise FileNotFoundError(f"run {run_id!r} is not complete; refusing stale report download")
+    base = "report/"
+    keys = run_store.list_keys(base)
     if not keys:
         raise FileNotFoundError(f"no report under {base}")
     out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    files = {}
+    out_root = out.resolve()
+    downloads = []
     for key in keys:
         name = key.removeprefix(base)
-        target = out / name
-        target.write_bytes(report_store.get_bytes(key))
+        path = PurePosixPath(name)
+        if (
+            not name
+            or path.is_absolute()
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or "\\" in name
+        ):
+            raise ValueError(f"unsafe report object key: {key!r}")
+        target = out.joinpath(*path.parts)
+        if not target.resolve().is_relative_to(out_root):
+            raise ValueError(f"unsafe report object key: {key!r}")
+        downloads.append((key, name, target))
+    out.mkdir(parents=True, exist_ok=True)
+    files = {}
+    for key, name, target in downloads:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(run_store.get_bytes(key))
         files[name] = target
         log.info("fetched %s -> %s (%d bytes)", key, target, target.stat().st_size)
     return {"run_id": run_id, "files": files}

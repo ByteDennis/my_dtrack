@@ -15,9 +15,12 @@ def test_row_check_from_oracle_lands_on_real_s3(s3_scratch, oracle, tmp_path, ca
     path.write_text(json.dumps(oracle_config(oracle)))
     assert main(["tools", "doctor", "--config", str(path)]) == 0
     capsys.readouterr()
-    uri = f"{s3_scratch}/runs/oracle"
-    assert main(["row-check", "--config", str(path), "--s3", uri, "--run-id", "oracle"]) == 0
-    store = S3Store(uri)
+    runs = f"{s3_scratch}/runs"
+    assert (
+        main(["row-check", "--config", str(path), "--run-s3", runs, "--run-id", "oracle"])
+        == 0
+    )
+    store = S3Store(f"{runs}/oracle")
     orders = store.get_json("row_check/orders.left.json")
     assert len(orders["counts"]) == 58 and orders["counts"]["2026-01-15"] == 30
     assert "password" not in json.dumps(orders) and "dsn" not in orders["left"]

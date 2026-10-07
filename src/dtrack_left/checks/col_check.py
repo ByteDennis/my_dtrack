@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from ..backends.sources import source_from_config
+from ..common.audit import SqlAudit, attach_sql_audit
 from ..common.manifest import unit_id, validate_manifest
 from ..common.stats import compute_csv_statistics
 
@@ -53,7 +54,10 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
         f"manifest/{manifest['pair']}.keys.json"
     ):
         return None
-    source = source_from_config(manifest["left"])
+    source = attach_sql_audit(
+        source_from_config(manifest["left"]),
+        SqlAudit(store, "left", pair=manifest["pair"]),
+    )
     windows = {}
     for window in manifest["windows"]:
         output = Path(work_dir) / manifest["pair"] / window["bucket"] / "keys.csv"
@@ -217,6 +221,7 @@ class ColCheckPipeline:
                 "indexed_units": indexed,
             },
         )
+        SqlAudit(self.store, "left").refresh()
         return sequence - first_sequence
 
 
@@ -237,7 +242,10 @@ class LeftRuntime:
         pair = manifest["pair"]
         with self.sources_lock:
             if pair not in self.sources:
-                self.sources[pair] = source_from_config(manifest["left"])
+                self.sources[pair] = attach_sql_audit(
+                    source_from_config(manifest["left"]),
+                    SqlAudit(self.store, "left", pair=pair),
+                )
             return self.sources[pair]
 
     def pull_window(self, manifest, window):

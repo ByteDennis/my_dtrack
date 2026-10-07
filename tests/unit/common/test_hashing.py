@@ -3,6 +3,8 @@ import hashlib
 import pandas as pd
 import pytest
 
+from dtrack_left.common import hashing as csv_hashing
+
 
 @pytest.mark.parametrize(
     ("text", "expected"),
@@ -55,56 +57,54 @@ def _keys_csv(tmp_path, rows):
     return path
 
 
-def test_sample_csv_all_mode_returns_the_input_untouched(common, tmp_path):
+def test_sample_csv_all_mode_returns_the_input_untouched(tmp_path):
     path = _keys_csv(tmp_path, [["1", "a"]])
-    assert common.hashing.sample_csv(path, key_columns=[], mode="all") == path
+    assert csv_hashing.sample_csv(path, key_columns=[], mode="all") == path
 
 
-def test_sample_csv_rejects_missing_keys_and_unknown_modes(common, tmp_path):
+def test_sample_csv_rejects_missing_keys_and_unknown_modes(tmp_path):
     path = _keys_csv(tmp_path, [["1", "a"]])
     with pytest.raises(ValueError, match="requires key columns"):
-        common.hashing.sample_csv(path, key_columns=[], mode="fraction", rate=0.5)
+        csv_hashing.sample_csv(path, key_columns=[], mode="fraction", rate=0.5)
     with pytest.raises(ValueError, match="unsupported sample mode"):
-        common.hashing.sample_csv(path, key_columns=["id"], mode="stratified")
+        csv_hashing.sample_csv(path, key_columns=["id"], mode="stratified")
 
 
-def test_sample_csv_fraction_hashes_the_normalised_key_and_keeps_raw_rows(common, tmp_path):
+def test_sample_csv_fraction_hashes_the_normalised_key_and_keeps_raw_rows(tmp_path):
     rows = [[f"{i:05d}", "x"] for i in range(400)]
     path = _keys_csv(tmp_path, rows)
     sampled = pd.read_csv(
-        common.hashing.sample_csv(
+        csv_hashing.sample_csv(
             path, key_columns=["id"], mode="fraction", rate=0.25, families=["numeric"]
         ),
         dtype=object,
     )
     threshold = round(0.25 * 2**32)
-    expected = [key for key, _ in rows if common.hashing.hash32(str(int(key))) < threshold]
+    expected = [key for key, _ in rows if csv_hashing.hash32(str(int(key))) < threshold]
     assert list(sampled["id"]) == expected and 60 < len(expected) < 140
 
 
-def test_sample_csv_fixed_with_key_tuples_matches_normalised_keys(common, tmp_path):
+def test_sample_csv_fixed_with_key_tuples_matches_normalised_keys(tmp_path):
     path = _keys_csv(tmp_path, [["1", "a"], ["2.0", "b"], ["3", "c"]])
-    sampled = common.hashing.sample_csv(
+    sampled = csv_hashing.sample_csv(
         path, key_columns=["id"], mode="fixed", count=1, key_tuples=[["2"]], families=["numeric"]
     )
     assert sampled.read_text().splitlines() == ["id,value", "2.0,b"]
 
 
 def test_sample_csv_fixed_without_tuples_picks_n_keys_by_hash_rank_with_all_their_rows(
-    common, tmp_path
+    tmp_path,
 ):
     path = _keys_csv(tmp_path, [["1", "a"], ["1", "b"], ["2", "c"], ["3", "d"], ["4", "e"]])
     sampled = pd.read_csv(
-        common.hashing.sample_csv(path, key_columns=["id"], mode="fixed", count=2), dtype=object
+        csv_hashing.sample_csv(path, key_columns=["id"], mode="fixed", count=2), dtype=object
     )
     ranked = sorted("1234", key=lambda key: hashlib.md5(key.encode()).hexdigest())[:2]
     assert sorted(set(sampled["id"])) == sorted(ranked)
     assert len(sampled) == sum(2 if key == "1" else 1 for key in ranked)
 
 
-def test_fraction_sampling_picks_the_same_keys_on_left_and_right_real_files(
-    common, synthetic, tmp_path
-):
+def test_fraction_sampling_picks_the_same_keys_on_left_and_right_real_files(synthetic, tmp_path):
     left = pd.read_csv(synthetic.left / "ORDERS.csv", dtype=object)
     right = pd.read_csv(synthetic.right / "orders.csv", dtype=object)
     common_days = sorted(set(left["BUSINESS_DATE"]) & set(right["business_date"]))
@@ -114,9 +114,9 @@ def test_fraction_sampling_picks_the_same_keys_on_left_and_right_real_files(
     )
     options = {"key_columns": ["ORDER_ID"], "mode": "fraction", "rate": 0.25}
     options["families"] = ["numeric"]
-    first = pd.read_csv(common.hashing.sample_csv(tmp_path / "l.csv", **options), dtype=object)
-    again = pd.read_csv(common.hashing.sample_csv(tmp_path / "l.csv", **options), dtype=object)
-    other = pd.read_csv(common.hashing.sample_csv(tmp_path / "r.csv", **options), dtype=object)
+    first = pd.read_csv(csv_hashing.sample_csv(tmp_path / "l.csv", **options), dtype=object)
+    again = pd.read_csv(csv_hashing.sample_csv(tmp_path / "l.csv", **options), dtype=object)
+    other = pd.read_csv(csv_hashing.sample_csv(tmp_path / "r.csv", **options), dtype=object)
     assert first.equals(again)
     kept = ~first["BUSINESS_DATE"].isin({"2026-01-15"})
     kept_other = ~other["BUSINESS_DATE"].isin({"2026-01-15"})

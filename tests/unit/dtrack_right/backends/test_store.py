@@ -7,6 +7,7 @@ from dtrack_right.backends.store import (
     open_store,
     resolve_run,
     run_is_complete,
+    validate_run_id,
 )
 
 
@@ -14,6 +15,13 @@ def test_volume_store_honours_the_store_contract(tmp_path):
     store = VolumeStore(tmp_path / "runs" / "r1")
     assert_store_contract(store)
     assert not list((tmp_path / "runs" / "r1").rglob("*.part"))
+
+
+def test_resolve_run_rejects_nested_or_parent_run_ids(tmp_path):
+    for run_id in ("../other", "a/b", r"a\b"):
+        with pytest.raises(ValueError, match="one non-empty folder"):
+            resolve_run(str(tmp_path), run_id)
+    assert validate_run_id("r1") == "r1"
 
 
 def test_volume_store_hides_partial_writes_and_normalises_prefixes(tmp_path):
@@ -53,9 +61,14 @@ def test_resolve_run_picks_newest_unfinished_run_under_a_root(runs_root):
     store, run_id = resolve_run(runs_root)
     assert run_id == "20260903T000000Z-ccc" and store.exists("row_check/p.left.json")
     assert resolve_run(runs_root, "20260902T000000Z-bbb")[1] == "20260902T000000Z-bbb"
-    assert resolve_run(f"{runs_root}/20260902T000000Z-bbb/")[1] == "20260902T000000Z-bbb"
     assert run_is_complete(root.child("20260901T000000Z-aaa"))
     assert not run_is_complete(root.child("20260902T000000Z-bbb"))
+
+
+def test_resolve_run_does_not_treat_a_run_folder_as_the_runs_root(runs_root):
+    run = open_store(runs_root).child("r1")
+    run.put_json("row_check/p.left.json", {"pair": "p"})
+    assert resolve_run(run.root_uri) == (None, None)
 
 
 def test_resolve_run_returns_nothing_when_every_run_is_complete(runs_root):

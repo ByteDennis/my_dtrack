@@ -104,6 +104,26 @@ def test_build_manifest_defaults_to_daily_windows_and_full_scan(common):
     assert manifest["sample"] == {"mode": "all"}
 
 
+def test_date_partition_key_reuses_each_sides_date_type_for_hashing(common):
+    pair = _variant(
+        key="DT",
+        key_families={},
+        left={**PAIR["left"], "date_type": {"type": "sas", "format": "days"}},
+        right={
+            **PAIR["right"],
+            "date_type": {"type": "string", "format": "dash"},
+        },
+    )
+    manifest = common.manifest.build_manifest("run", "p", pair, ROW_CHECK)
+    assert manifest["key_families"] == [
+        {
+            "family": "date_type",
+            "left_date_type": {"type": "sas", "format": "days"},
+            "right_date_type": {"type": "string", "format": "dash"},
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [

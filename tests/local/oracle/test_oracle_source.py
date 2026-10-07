@@ -148,9 +148,9 @@ def test_oracle_fixed_predicate_over_1000_keys_executes(oracle):
 @pytest.mark.parametrize(
     ("date_col", "date_type"),
     [
-        ("COMPACT_DAY", "string_compact"),
-        ("SAS_TEXT_DAY", "string_sas"),
-        ("SAS_NUMBER_DAY", "sas_days"),
+        ("COMPACT_DAY", "string"),
+        ("SAS_TEXT_DAY", "sas"),
+        ("SAS_NUMBER_DAY", "sas"),
     ],
 )
 def test_oracle_source_supports_compact_and_sas_dates(oracle, tmp_path, date_col, date_type):
@@ -167,7 +167,10 @@ def test_oracle_source_supports_compact_and_sas_dates(oracle, tmp_path, date_col
     )
     cursor.executemany(
         "INSERT INTO DTRACK_DATE_FORMATS VALUES (:1, :2, :3, :4)",
-        [(1, "20260101", " 01JAN2026", "24107"), (2, "20260102", "02JAN2026 ", "24108.0")],
+        [
+            (1, "20260101", " 01JAN2026", "24107"),
+            (2, "20260102", "02JAN2026 ", "24108.75"),
+        ],
     )
     connection.commit()
     cursor.close()

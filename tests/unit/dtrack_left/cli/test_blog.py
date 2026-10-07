@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dtrack_left import confluence
 from dtrack_left.cli import blog as blog_cli
 from dtrack_left.cli import main
 from dtrack_left.confluence import build_tracking_page, make_confluence_client
@@ -84,11 +85,15 @@ def test_blog_publish_uses_environment_auth_and_attaches_requested_files(
             calls.append(("publish", parent_id, title, representation, "Pair Results" in body))
             return {"id": "42"}
 
-        def attach_file(self, filename, page_id):
-            calls.append(("attach", Path(filename).name, page_id))
-
     monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.test")
     monkeypatch.setenv("CONFLUENCE_TOKEN", "secret")
+    monkeypatch.setattr(
+        confluence,
+        "upload_attachment",
+        lambda client, page_id, path: (
+            calls.append(("attach", Path(path).name, page_id)) or {"name": Path(path).name}
+        ),
+    )
     monkeypatch.setattr(
         blog_cli,
         "make_confluence_client",
@@ -138,3 +143,50 @@ def test_confluence_auth_distinguishes_server_pat_from_cloud_api_token(monkeypat
     }
     with pytest.raises(ValueError, match="CONFLUENCE_USERNAME"):
         make_confluence_client(url="https://cloud.atlassian.net", token="api", cloud=True)
+
+
+def test_blog_rejects_clearing_and_setting_restrictions_together(tmp_path, capsys):
+    report = _report(tmp_path)
+    argv = ["tools", "blog", "--report", str(report), "--clear-restrictions"]
+    assert main([*argv, "--restrict-read", "alice", "--publish"]) == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_blog_passes_version_and_restriction_options_through(tmp_path, monkeypatch, capsys):
+    report = _report(tmp_path)
+    seen = {}
+    monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.test")
+    monkeypatch.setenv("CONFLUENCE_TOKEN", "secret")
+    monkeypatch.setattr(blog_cli, "make_confluence_client", lambda **kwargs: object())
+    monkeypatch.setattr(
+        blog_cli,
+        "publish_tracking_page",
+        lambda client, page, **kwargs: seen.update(kwargs) or {"page_id": "7"},
+    )
+    argv = ["tools", "blog", "--report", str(report), "--space", "DT", "--publish"]
+    extra = ["--keep-versions", "3", "--delete-version", "2", "--delete-version", "4"]
+    extra += ["--restrict-read", "group:readers", "--detach", "old.csv"]
+    assert main([*argv, *extra]) == 0
+    assert seen["keep"] == 3 and seen["delete_version_numbers"] == [2, 4]
+    assert seen["restrict_read"] == ["group:readers"] and seen["restrict_edit"] is None
+    assert seen["detach"] == ["old.csv"]
+    assert main([*argv, "--clear-restrictions"]) == 0
+    assert seen["restrict_read"] == [] and seen["restrict_edit"] == []
+
+
+def test_blog_delete_is_a_dry_run_until_yes(monkeypatch, capsys):
+    deleted = []
+    monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.test")
+    monkeypatch.setenv("CONFLUENCE_TOKEN", "secret")
+    monkeypatch.setattr(blog_cli, "make_confluence_client", lambda **kwargs: object())
+    monkeypatch.setattr(blog_cli, "find_page", lambda client, space, title: "55")
+    monkeypatch.setattr(
+        blog_cli,
+        "delete_page",
+        lambda client, page_id, purge: deleted.append((page_id, purge)) or {"page_id": page_id},
+    )
+    assert main(["tools", "blog-delete", "--space", "DT", "--title", "t"]) == 0
+    assert json.loads(capsys.readouterr().out)["mode"] == "dry-run" and not deleted
+    assert main(["tools", "blog-delete", "--page-id", "55", "--purge", "--yes"]) == 0
+    assert deleted == [("55", True)]
+    assert main(["tools", "blog-delete", "--page-id", "55", "--space", "DT", "--title", "t"]) == 2

@@ -27,11 +27,11 @@ def test_work_volume_and_work_prefix_are_the_same_place(need, workspace, tag, ke
             workspace.files.delete(f"{volume}/{name}")
 
 
-# >>> step 7: the report Volume is writable by Databricks and readable from here as S3 <<< #
-def test_report_volume_maps_to_the_report_prefix(need, workspace, tag, keep):
-    s3_report, volume_report = need("DTRACK_LIVE_S3_REPORT", "DTRACK_LIVE_VOLUME_REPORT")
-    path = f"{volume_report}/_live/{tag}/probe.txt"
+# >>> step 7: report/ inside a run maps through the same work Volume and S3 prefix <<< #
+def test_report_folder_uses_the_work_volume(need, workspace, tag, keep):
+    s3_work, volume_work = need("DTRACK_LIVE_S3_WORK", "DTRACK_LIVE_VOLUME_WORK")
+    path = f"{volume_work}/runs/{tag}/report/probe.txt"
     workspace.files.upload(path, io.BytesIO(b"probe"), overwrite=True)
-    assert S3Store(f"{s3_report}/_live/{tag}").get_bytes("probe.txt") == b"probe"
+    assert S3Store(f"{s3_work}/runs/{tag}").get_bytes("report/probe.txt") == b"probe"
     if not keep:
         workspace.files.delete(path)

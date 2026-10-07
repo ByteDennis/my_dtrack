@@ -2,9 +2,9 @@ import pandas as pd
 import pytest
 from support import assert_stats_agree
 
+from dtrack_left.common.hashing import sample_csv
+from dtrack_left.common.stats import compute_csv_statistics
 from dtrack_right.backends.targets import SparkTarget
-from dtrack_right.common.hashing import sample_csv
-from dtrack_right.common.stats import compute_csv_statistics
 
 pytestmark = pytest.mark.live
 COLUMNS = ["order_id", "amount", "status", "region"]
@@ -13,7 +13,7 @@ COLUMNS = ["order_id", "amount", "status", "region"]
 def _target(spark, right_tables):
     catalog, schema, table = right_tables["orders"].split(".")
     config = {"source": "databricks", "catalog": catalog, "schema": schema, "table": table}
-    return SparkTarget(spark, config | {"date_col": "business_date", "date_type": "string_dash"})
+    return SparkTarget(spark, config | {"date_col": "business_date", "date_type": "string"})
 
 
 def _manifest(sample):
@@ -84,7 +84,7 @@ def test_query_and_files_kinds_count_like_the_table(
     expected = {k: int(v) for k, v in truth["business_date"].value_counts().items()}
     table = ".".join(f"`{part}`" for part in right_tables["orders"].split("."))
     query = SparkTarget(spark, {"kind": "query", "query": f"SELECT * FROM {table}"})
-    query.config |= {"date_col": "business_date", "date_type": "string_dash"}
+    query.config |= {"date_col": "business_date", "date_type": "string"}
     assert query.preflight()["ok"]
     assert query.partition_counts("2026-01-01", "2026-02-28") == expected
 
@@ -137,7 +137,7 @@ def test_col_type_overrides_line_up_text_files_with_the_left_statistics(
                 "format": "csv",
                 "options": {"header": "true", "inferColumnTypes": "false"},
                 "date_col": "business_date",
-                "date_type": "string_dash",
+                "date_type": "string",
             },
         )
         assert target.preflight()["ok"]

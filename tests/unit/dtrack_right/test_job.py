@@ -10,9 +10,9 @@ from dtrack_left.checks.col_check import (
     wait_for_manifests,
 )
 from dtrack_left.checks.row_check import run_row_check
-from dtrack_right.__main__ import main as right_main
+from dtrack_local.csv_target import CsvAnchorTarget
+from dtrack_local.right_job import main as local_right_main
 from dtrack_right.backends.store import VolumeStore
-from dtrack_right.backends.targets import CsvAnchorTarget
 from dtrack_right.checks.row_check import run_row_check as run_right_row_check
 from dtrack_right.job import run
 
@@ -37,11 +37,12 @@ def test_run_resolves_the_root_publishes_the_report_and_reruns_without_rework(sy
     runs = tmp_path / "runs"
     store, factory = _published_run(synthetic, runs, tmp_path / "work")
     options = {"poll_interval": 0, "idle_timeout": 5, "wait_timeout": 5}
-    first = run(
-        str(runs), factory, report=str(tmp_path / "report"), out_dir=tmp_path / "o1", **options
-    )
+    first = run(str(runs), factory, out_dir=tmp_path / "o1", **options)
     assert first["results"] == 11 and first["summary"]["status"] == "DONE"
-    assert VolumeStore(tmp_path / "report").get_json("latest/pointer.json")["run_id"] == "r1"
+    assert first["audit"] == "audit.txt" and store.exists("audit.txt")
+    assert store.list_keys("audit/")
+    assert store.get_json("report/summary.json")["run_id"] == "r1"
+    assert first["published"] == [f"report/{name}" for name in sorted(_report_files())]
     assert store.get_json("_STATUS.json") == {
         "state": "complete",
         "role": "right",
@@ -50,7 +51,7 @@ def test_run_resolves_the_root_publishes_the_report_and_reruns_without_rework(sy
     }
     again = run(str(runs), factory, run_id="r1", out_dir=tmp_path / "o2", **options)
     assert again["results"] == 0 and again["summary"]["units_completed"] == 11
-    assert again["published"] == []
+    assert again["published"] == first["published"]
 
 
 def test_run_gives_up_when_no_left_counts_arrive(tmp_path):
@@ -58,19 +59,44 @@ def test_run_gives_up_when_no_left_counts_arrive(tmp_path):
         run(str(tmp_path / "runs"), None, poll_interval=0, wait_timeout=0)
 
 
-def test_local_entry_point_runs_the_job_with_the_csv_anchor(synthetic, tmp_path, capsys):
+def test_local_right_launcher_runs_the_job_with_the_csv_anchor(synthetic, tmp_path, capsys):
     runs = tmp_path / "runs"
     _published_run(synthetic, runs, tmp_path / "work", run_id="r7")
-    argv = ["--work", str(runs), "--right-csv-dir", str(synthetic.right)]
+    argv = ["--run-s3", str(runs), "--right-csv-dir", str(synthetic.right)]
     argv += ["--out", str(tmp_path / "out"), "--work-dir", str(tmp_path / "rw")]
-    argv += ["--report", str(tmp_path / "report"), "--poll-interval", "0", "--log-level", "debug"]
-    assert right_main(argv) == 0
+    argv += ["--poll-interval", "0", "--log-level", "debug"]
+    assert local_right_main(argv) == 0
     assert json.loads(capsys.readouterr().out) == {
-        "published": [f"history/r7/{name}" for name in sorted(_report_files())]
-        + ["latest/pointer.json"],
+        "published": [f"report/{name}" for name in sorted(_report_files())],
         "results": 11,
         "status": "DONE",
     }
+
+
+def test_local_right_launcher_honours_run_id_when_multiple_runs_are_ready(
+    synthetic, tmp_path, capsys
+):
+    runs = tmp_path / "runs"
+    selected, _ = _published_run(synthetic, runs, tmp_path / "work-r7", run_id="r7")
+    other, _ = _published_run(synthetic, runs, tmp_path / "work-r8", run_id="r8")
+    argv = [
+        "--run-s3",
+        str(runs),
+        "--run-id",
+        "r7",
+        "--right-csv-dir",
+        str(synthetic.right),
+        "--out",
+        str(tmp_path / "out"),
+        "--work-dir",
+        str(tmp_path / "rw"),
+        "--poll-interval",
+        "0",
+    ]
+    assert local_right_main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "DONE"
+    assert selected.get_json("_STATUS.json")["state"] == "complete"
+    assert other.get_json("_STATUS.json")["state"] != "complete"
 
 
 def _report_files():

@@ -13,7 +13,7 @@ PAIRS_CONFIG = {
                 "source": "csv",
                 "path": "<left>/ORDERS.csv",
                 "date_col": "BUSINESS_DATE",
-                "date_type": "string_dash",
+                "date_type": "string",
             },
             "right": {
                 "source": "databricks",
@@ -21,7 +21,7 @@ PAIRS_CONFIG = {
                 "schema": "sales",
                 "table": "orders",
                 "date_col": "business_date",
-                "date_type": "string_dash",
+                "date_type": "string",
             },
             "fromDate": "2026-01-01",
             "toDate": "2026-02-28",
@@ -41,7 +41,7 @@ PAIRS_CONFIG = {
                 "source": "csv",
                 "path": "<left>/CUSTOMERS.csv",
                 "date_col": "SNAPSHOT_DT",
-                "date_type": "string_dash",
+                "date_type": "string",
             },
             "right": {
                 "source": "databricks",
@@ -49,7 +49,7 @@ PAIRS_CONFIG = {
                 "schema": "crm",
                 "table": "customers",
                 "date_col": "snapshot_dt",
-                "date_type": "string_dash",
+                "date_type": "string",
             },
             "fromDate": "2026-01-01",
             "toDate": "2026-01-31",
@@ -436,7 +436,7 @@ def oracle_config(oracle, right_tables=None):
             "orders": {
                 "left": {"source": "oracle", "table": "ORDERS", "date_col": "BUSINESS_DATE"}
                 | {"date_type": "date", **oracle},
-                "right": side("orders") | {"date_col": "business_date", "date_type": "string_dash"},
+                "right": side("orders") | {"date_col": "business_date", "date_type": "string"},
                 "fromDate": "2026-01-01",
                 "toDate": "2026-02-28",
                 "vintage": "month",
@@ -454,7 +454,7 @@ def oracle_config(oracle, right_tables=None):
                 "left": {"source": "oracle", "table": "CUSTOMERS", "date_col": "SNAPSHOT_DT"}
                 | {"date_type": "date", **oracle},
                 "right": side("customers")
-                | {"date_col": "snapshot_dt", "date_type": "string_dash"},
+                | {"date_col": "snapshot_dt", "date_type": "string"},
                 "fromDate": "2026-01-01",
                 "toDate": "2026-01-31",
                 "vintage": "month",

@@ -1,0 +1,516 @@
+DTRACK CLI GUIDE — config -> row -> col (compact complete edition)
+================================================================
+
+0. MODEL
+--------
+
+Distributed:
+  dtrack_left (on-prem) <---- S3 run payloads ----> dtrack_right (Databricks Job)
+
+Local fallback:
+  python -m dtrack_local uses a local directory with the same payload layout.
+  `_local/data.duckdb` is for inspection; it is not the protocol source of truth.
+
+Stage 1 / row:
+  Left counts each date partition. Right counts the same partitions, reconciles them,
+  applies the gate, and publishes manifests only for admitted pairs.
+
+Stage 2 / col:
+  Left and Right independently select the same records, compute per-column statistics,
+  and Right writes one comparison result per pair x vintage window x mapped value column.
+
+All auxiliary commands are under `dtrack tools`; old root commands are intentionally absent.
+
+Debug either command tree without changing its runtime arguments:
+
+  dtrack tools debug -- row-check --config config.json --run-s3 "$DTRACK_RUN_S3"
+  dtrack tools debug --local -- run --config config.json
+  dtrack tools debug --attach --local -- run --config config.json   # debugpy port 5678
+
+Terminal mode uses ipdb and opens post-mortem on unhandled runtime errors. `--local` deliberately
+bypasses the local production error-log boundary so the original traceback remains debuggable.
+
+
+1. INSTALL + ENVIRONMENT
+------------------------
+
+  uv sync
+  uv sync --extra dbx          # Databricks operator/local helpers
+  uv sync --extra confluence   # optional blog publisher
+
+Common environment variables (`.env` is loaded; shell values win):
+
+  DTRACK_CONFIG=/absolute/path/config.json
+  DTRACK_RUN_S3=s3://bucket/dtrack/runs     # stable root; never include run_id
+  DTRACK_RUN_ID=20261007T150000Z-orders     # optional; row-check can generate it
+  DTRACK_LOG_LEVEL=INFO
+  DTRACK_DBX_PROFILE=corp
+  DTRACK_DBX_WAREHOUSE_ID=<warehouse-id>   # local/key-check only
+
+Keep passwords/tokens in environment variables or secret stores, never in shared payloads.
+The Left hand-off removes credentials, DSNs, hostnames, HTTP paths, and *_env fields.
+Executed SQL is intentionally retained and can contain configured predicates or fixed sample-key
+literals; restrict access to each run prefix accordingly.
+
+
+2. CONFIG
+---------
+
+Minimal pattern:
+
+{
+  "connections": {
+    "ora_main": {
+      "source": "oracle",
+      "dsn": "host:1521/SERVICE",
+      "user_env": "ORA_USER",
+      "password_env": "ORA_PASSWORD"
+    },
+    "dbx_main": {"source": "databricks"}
+  },
+  "pairs": {
+    "orders": {
+      "left": {
+        "conn_macro": "ora_main",
+        "table": "APP.ORDERS",
+        "date_col": "BUSINESS_DATE",
+        "date_type": "date"
+      },
+      "right": {
+        "conn_macro": "dbx_main",
+        "catalog": "main",
+        "schema": "sales",
+        "table": "orders",
+        "date_col": "business_date",
+        "date_type": "date"
+      },
+      "fromDate": "2026-01-01",
+      "toDate": "2026-01-31",
+      "vintage": "month",
+      "key": "ORDER_ID,LINE_ID",
+      "key_families": {
+        "ORDER_ID": "numeric",
+        "LINE_ID": "numeric"
+      },
+      "sample": 0.10,
+      "col_map": {
+        "ORDER_ID": "order_id",
+        "LINE_ID": "line_id",
+        "AMOUNT": "amount",
+        "STATUS": "status"
+      },
+      "col_type_overrides": {"AMOUNT": "numeric"},
+      "strict": true
+    }
+  }
+}
+
+Parameter choice:
+
+  left.source
+    oracle | file/csv | duckdb | athena
+    Hadoop is currently disabled; do not select it for production.
+
+  left relation
+    table, schema+table, or query. `where` adds a source-side filter.
+
+  right.kind
+    table (default): catalog/schema/table
+    query:            query
+    files:            path + format; query may reference {src}
+
+  date_col
+    Required on both sides. It defines Stage-1 partitions and Stage-2 windows.
+
+  date_type
+    date     native DATE/TIMESTAMP values
+    string   YYYY-MM-DD or YYYYMMDD text
+    number   numeric YYYYMMDD
+    sas      DATE9 (`31JAN2026`), SAS datetime (`01AUG2026:09:45:35`), or numeric SAS days
+
+    Those are the only configurable names; missing defaults to `string`. Left and Right may
+    differ. For `string` and `sas`, preflight selects at most 16 non-null values, requires one
+    consistent physical format, caches it, and writes its internal spec to row/manifest payloads.
+    Col filtering and date-key hashing then reuse that spec without probing again. If date_col is
+    also a key, its Left/Right specs are inherited automatically.
+
+    Platform SQL is isolated behind DateSqlPlatform: Left ships Oracle, Athena, Hadoop, DuckDB,
+    and Spark adapters; the standalone Databricks package ships only Spark/Databricks.
+
+  fromDate / toDate
+    Inclusive Stage-1 bounds. Prefer an intentionally limited first run.
+
+  date_synonyms
+    Maps exceptional partition labels before Left/Right count comparison, for example
+    {"3000-01-01": "2026-07-01"}. Do not use it to hide real data errors.
+
+  col_map
+    Left -> Right column names. Inline JSON or a config-relative CSV/JSON file.
+    CSV header: left,right[,type]. The date column is excluded from value statistics.
+
+  key
+    Record identity, comma-separated. Required when `sample` is not all rows.
+    Keys should be stable and jointly identify records inside the comparison window.
+
+  key_families
+    Normalization before deterministic hashing:
+      string  = trim + lowercase (default)
+      exact   = trim, preserve case/zeros
+      numeric = trim + remove numeric leading/trailing zeros (`007`, `+7.00` -> `7`)
+      date    = canonical YYYY-MM-DD
+      digits  = keep digits only
+    A custom step list/object is supported, but Left Python/SQL and Right Spark semantics
+    must remain identical. `CAST(... AS STRING)` inside key normalization is expected;
+    it should not appear as a blanket cast of all selected value columns.
+
+  sample
+    missing|false|"" = all rows
+    0 < float <= 1   = deterministic fraction by normalized composite-key MD5 bucket
+    positive integer = fixed N distinct keys per vintage window; Left publishes the
+                       selected key tuples in manifest/<pair>.keys.json for Right reuse
+
+  vintage
+    day | week | month | quarter | year. This groups admitted matching dates; it does
+    not fill missing dates and is not the job schedule.
+
+  strict
+    Normalizes compared text more aggressively. It does not replace key_families.
+
+  col_type_overrides
+    Mapped Left value column -> numeric|categorical. Use only when inference is wrong.
+
+  skip
+    true excludes the pair.
+
+
+3. DISTRIBUTED CLI WORKFLOW
+---------------------------
+
+Choose one stable runs root. dtrack creates/resolves RUN_S3/RUN_ID:
+
+  RUN_ID=20261007T150000Z-orders
+  RUN_S3=s3://my-bucket/dtrack/runs
+  RUN_URI=$RUN_S3/$RUN_ID
+
+A. Validate config and Left access
+
+  dtrack tools doctor --config config.json
+
+`doctor` connects to Left and describes the Right relation; it does not prove the Right
+Databricks source is reachable. For a both-side connection check use local preflight:
+
+  python -m dtrack_local preflight --config config.json
+
+B. Optional: prove sample-key parity before a long run
+
+  dtrack tools key-check --config config.json --pair orders \
+    --from-date 2026-01-01 --to-date 2026-01-03
+
+Temporary diagnostic overrides:
+
+  dtrack tools key-check --config config.json --pair orders \
+    --key ORDER_ID --key LINE_ID \
+    --family ORDER_ID=numeric --family LINE_ID=numeric \
+    --sample 100
+
+Exit 0 means the selected Left and Right key sets match. Artifacts default to
+`.dtrack-local/keycheck/<pair>/`.
+
+C. Start the Databricks Right notebook/Job
+
+It may start before or after row-check; it waits for `row_check/*.left.json`.
+
+  run_s3      = s3://my-bucket/dtrack/runs       # stable root; no run_id
+  run_id      = $RUN_ID                          # recommended: explicit
+  gate        = auto | manual | ratio:<0..1>
+  wait_timeout= 1800
+  idle_timeout= 900
+
+Gate selection:
+  auto        release a pair when at least one date partition matches
+  ratio:0.05  require a match and at most 5% excluded partitions
+  manual      record findings but release no manifest; after review, use row rollback/new run
+              and rerun the Right Job with auto or ratio policy to release Stage 2
+
+Monitor a submitted Job (this command monitors; it does not submit the notebook):
+
+  dtrack tools dbx runs --active --job-id <job-id>
+  dtrack tools dbx runs --run-id <databricks-run-id>
+
+D. Run Left Stage 1
+
+All active pairs:
+
+  dtrack row-check --config config.json --run-s3 "$RUN_S3" \
+    --run-id "$RUN_ID" --workers 4
+
+Selected pairs (`--pair` is repeatable):
+
+  dtrack row-check --config config.json --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
+    --pair orders --pair customers --workers 4
+
+Outputs include:
+  row_check/<pair>.left.json   Left counts + credential-free pair config
+  row_check/_LEFT_CLOSED      Left Stage-1 barrier
+  row_check/<pair>.json        Right verdicts
+  reports/<pair>_compare_row.csv
+  manifest/<pair>.json         Stage-2 plan only when the gate passes
+  row_check/_CLOSED            Right Stage-1 barrier
+  audit.txt                    representative best-effort SQL audit entries for this run
+
+E. Run Left Stage 2
+
+Start this without waiting manually for Right Stage 1; it waits for `row_check/_CLOSED`.
+The Right Job can drain units while Left continues producing them.
+
+  dtrack col-check --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
+    --pull-workers 2 --stat-workers 2 --wip 200 \
+    --wait-timeout 1800 --poll-interval 3
+
+Selected pairs:
+
+  dtrack col-check --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
+    --pair orders --pair customers
+
+If Stage 1 released more pairs than selected here, this is intentionally a partial Stage 2 run;
+`manifest/_CLOSED` is written only after units for all released manifests have been indexed.
+
+Parameter choice:
+  pull-workers  source query/file pulls; start 1-2 for Oracle or large extracts
+  stat-workers  local CPU/stat work; start 2, increase only after measuring
+  wip           maximum indexed-but-not-finished backlog; backpressure, not object count
+  wait-timeout  maximum wait for Right Stage-1 closure
+  poll-interval S3 polling interval; 2-5 seconds is usually sufficient
+
+F. Fetch reports
+
+  dtrack tools fetch-report --run-s3 "$RUN_S3" --run-id "$RUN_ID" --out ./report
+
+Without `--run-id`, fetch-report selects the newest completed run having `report/`.
+
+Expected report artifacts: summary.json, per-pair row/col CSVs, index.html, report.xlsx.
+
+
+4. PAYLOAD LAYOUT AND MONITORING
+--------------------------------
+
+<run>/
+  audit.txt                     merged human-readable representative SQL for Left/Right/local
+  audit/<event_id>.txt          immutable first-per-shape records used for concurrent merging
+  audit_errors/<event_id>.json  audit-write failures; the data query still executes
+  _STATUS.json                  coarse state/role/run/result count
+  _HEARTBEAT                    Left producer liveness
+  row_check/                    Stage-1 inputs, verdicts, barriers
+  manifest/                     immutable Stage-2 plans + optional fixed keys + _CLOSED
+  units/<unit_id>.json          Left statistics payload for one pair/window/column
+  _INDEX/<seq>-<unit_id>.json   small readiness pointer to the unit payload
+  results/<unit_id>.json        final Left/Right comparison
+  dead/<unit_id>.json           terminal failure + traceback
+  reports/                      intermediate comparison CSVs
+  report/                       final report set; always bound to this run
+
+Why both `units/` and `_INDEX/` exist:
+  units = data payload; _INDEX = ordered commit/readiness event.
+  Producer always writes payload first, pointer second. Therefore every visible pointer should
+  reference a complete payload. Right incrementally lists `_INDEX/` with StartAfter and reads the
+  pointer's payload_key. Do not merge or delete one side independently.
+
+Unit identity:
+  deterministic SHA-256-derived id from pair + vintage window + column. Existing ids are skipped,
+  so reruns are idempotent. Sequence-prefixed index names give an ordered polling cursor.
+
+Core monitoring invariants:
+  expected = manifest/_CLOSED.expected_units
+  indexed  = count(_INDEX/)
+  done     = count(results/) + count(dead/)
+  backlog  = indexed - done
+
+Healthy completion:
+  row_check/_CLOSED exists
+  manifest/_CLOSED exists
+  indexed >= expected
+  done >= expected
+  dead == 0 (or every dead unit is explicitly accepted)
+  _STATUS.json.state == complete
+
+Current implementation already provides:
+  paginated S3 listing; incremental _INDEX cursor; payload-before-pointer commit;
+  heartbeat timeout; WIP backpressure; deterministic unit ids; per-unit retries/dead letters;
+  exact rollback target resolution; S3 deletion batches of at most 1000 objects.
+
+SQL audit contract:
+  Before a source/warehouse/Spark/DuckDB statement is submitted, dtrack fingerprints its SQL.
+  The first query for each run + stage operation + pair + side + backend + SQL shape wins a lock
+  and best-effort writes one immutable `audit/<event_id>.txt`; repetitive vintage windows,
+  multithread siblings, and retries with the same shape are not written again. A changed relation,
+  projection, predicate structure, or sampling strategy creates a new shape and is retained.
+
+  Always representative: custom relation query, preflight, partition counts, key-type probes,
+  fixed-key selection, sampled window pulls, key-check, and Right statistics. Every future remote
+  mutating statement is retained. Optional internal maintenance (`ATTACH`, `USE`, local landing
+  CREATE/DELETE/INSERT/count, `SHOW TABLES`) is omitted by default.
+
+  Row/col/key-check checkpoints and final completion merge the bounded events once into
+  `audit.txt`, avoiding an O(n^2) rewrite for every S3 query. Audit I/O failure never blocks the
+  statement; when the run store is still writable the failure goes under `audit_errors/`. Local
+  backup includes both the events and merged file.
+
+Industrial operating pattern for very large object counts:
+  1. Keep S3 payloads immutable and authoritative; never hand-edit unit JSON in place.
+  2. Emit CloudWatch metrics for expected/indexed/done/dead/backlog/heartbeat age and alarm on
+     stale heartbeat, growing backlog, dead > 0, or closure/count mismatch.
+  3. Enable S3 Inventory and query it with Athena for fleet-wide audits/search by prefix, size,
+     age, and orphan status. Interactive full-prefix JSON scans are acceptable only at modest size.
+  4. Maintain a secondary searchable control catalog (DynamoDB, Delta, or PostgreSQL) keyed by
+     run_id/pair/window/column/unit_id/status. S3 remains truth; the catalog is an index.
+  5. Use S3 Versioning plus lifecycle rules: retain reports longer, expire old units/index/results
+     after the audit window, and keep noncurrent versions long enough to recover operator errors.
+  6. Use this rollback planner or S3 Batch Operations for reviewed bulk deletion. Never use a
+     broad recursive `aws s3 rm` against a runs root.
+  7. At million-unit scale, evolve the protocol to immutable Parquet packs plus a transactional
+     queue/catalog. Do not use one shared DuckDB file as the distributed multi-writer queue.
+
+Modification rule:
+  Stage-2-only change (col_map, key, key_families, sample, vintage, strict, type override):
+    reviewed col rollback, optionally rebuild manifest with --config, then rerun col.
+  Stage-1 change (left/right relation, date types, date bounds, date synonyms):
+    row rollback or, preferably after unit production, a new immutable run_id.
+
+
+5. ROLLBACK
+-----------
+
+Always stop/pause the Right Job first. Rollback is a dry run unless `--yes` is supplied.
+
+One pair:
+
+  dtrack tools rollback --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
+    --pair orders --stage col
+
+Multiple pairs:
+
+  dtrack tools rollback --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
+    --pair orders --pair customers --stage col
+
+Comma-separated also works:
+
+  dtrack tools rollback --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
+    --pair orders,customers --stage col
+
+Every pair discovered in the run:
+
+  dtrack tools rollback --run-s3 "$RUN_S3" --run-id "$RUN_ID" --pair all --stage col
+
+`--pair all` must be used alone. Unknown/typo pair names fail before any target is deleted.
+Batch mode resolves all pairs first, freezes and deduplicates exact targets, then deletes.
+
+Stages:
+  dead  delete selected dead records so Right retries them
+  col   delete selected Stage-2 pointers/payloads/results/dead + global closure/status/final report
+  row   col reset plus selected row verdict/count/manifest/intermediate report + Stage-1 barriers
+
+Any `col` or `row` rollback invalidates and deletes the run-level `report/` set, even for
+one pair, because summary.json/index.html/report.xlsx describe the whole run. `fetch-report`
+refuses a run unless `_STATUS.json.state` is `complete`; restart Right to publish a fresh set.
+
+Inspect the dry-run JSON:
+  pairs, by_pair, planned, keys, targets, next
+
+Apply exactly that logical plan (targets are resolved again at command start):
+
+  dtrack tools rollback --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
+    --pair all --stage col --yes
+
+Stage-2 config update and manifest rebuild:
+
+  dtrack tools rollback --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
+    --pair orders --stage col \
+    --config config.json --yes
+
+Stage-1 config update and immediate Left recount in the same run:
+
+  dtrack tools rollback --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
+    --pair orders --stage row \
+    --config config.json --yes
+
+`col + --config` keeps the Stage-1 left counts and pair verdict, validates every new
+manifest before deleting anything, then rebuilds Stage 2. It refuses changes to
+left/right source settings (including date_col and date_type), fromDate, toDate, or
+date_synonyms so old counts cannot be paired with a new Stage-1 definition.
+
+`row + --config` permits those Stage-1 changes. Its dry-run validates pair selection,
+config serialization, and the preserved run_id without querying a source. With `--yes`
+it deletes the selected pair's old Stage-1/2 artifacts and immediately reruns Left
+row-check for those pairs with the supplied config and same run_id. Restart the Right
+job to rebuild verdicts/manifests, then run col-check. Without `--config`, row rollback
+only resets artifacts and the next step is a separate `row-check --config ...` command.
+`dead + --config` is invalid because dead rollback only releases failed units.
+
+Local run folders are accepted in place of S3 URLs:
+
+  dtrack tools rollback --run-s3 .dtrack-local/runs --run-id <run_id> \
+    --pair all --stage col
+
+
+6. LOCAL EQUIVALENT
+-------------------
+
+  python -m dtrack_local preflight --config config.json
+  python -m dtrack_local run --config config.json --pair orders --run-s3 "$RUN_S3"
+
+Useful options:
+  --run-id ID             resume the same local run
+  --out DIR               default .dtrack-local/runs
+  --gate POLICY           same row gate
+  --no-push-sample        retain/pull the full Right window, then sample locally
+  --disposition inline    use when presigned result downloads are unavailable
+  --run-s3 URI            stable runs root; backup to URI/<run_id>, including report/
+  --include-data          also back up _local/data.duckdb
+
+Local col-check runs the Left producer and Right consumer concurrently over the same directory
+store. Errors go to `<run>/_local/logs/errors.log`; normal CLI JSON remains on stdout.
+Representative submitted SQL shapes are retained in `<run>/audit.txt`; key-check uses
+`.dtrack-local/keycheck/<pair>/audit.txt`.
+
+The CSV Right stand-in and pandas reference statistics live only in `dtrack_local`. The uploaded
+`dtrack_right` package contains the Spark target, Spark sampling SQL, comparison, store, audit,
+and report code; it does not ship local CSV execution or source-platform sampling adapters.
+
+
+7. QUICK FAILURE ROUTING
+------------------------
+
+Config/load failure:
+  run `dtrack tools doctor`; verify source, date_col, col_map, relation fields, and env names.
+
+Left/right sample mismatch:
+  run `dtrack tools key-check`; inspect key order, col_map, key_families, nulls, dates, and zeros.
+
+col-check waits forever:
+  inspect _STATUS.json, row_check/_CLOSED, Right Job state, gate decision, and wait_timeout.
+
+Large backlog:
+  compare indexed/done, inspect _HEARTBEAT, Right Job logs and dead/, then tune producer WIP or
+  Right capacity from measurements. More pull/stat workers do not fix a stalled Right consumer.
+
+Dead units:
+  read dead/<unit_id>.json and the dedicated job/local error log; fix the cause; dry-run
+  `rollback --stage dead`; apply; restart the Right Job with the same run_id.
+
+Wrong config after Stage 2 started:
+  preserve report/evidence, stop Right, create a new run when in doubt. A new run is safer than
+  mutating an audit trail.
+
+
+8. DONE CHECKLIST
+-----------------
+
+  [ ] doctor/preflight passed
+  [ ] key-check passed when sampling is enabled
+  [ ] run_id and exact run S3 prefix recorded
+  [ ] row_check/_CLOSED exists and findings reviewed
+  [ ] manifest/_CLOSED expected count recorded
+  [ ] indexed == expected; results + dead == expected
+  [ ] dead == 0 or approved
+  [ ] summary.json/index.html/report.xlsx archived
+  [ ] config, run_id, report URL, and operator decision recorded

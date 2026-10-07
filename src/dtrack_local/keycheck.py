@@ -8,10 +8,15 @@ from typing import Any
 
 import pandas as pd
 
+from dtrack_left.common.dates import (
+    canonical_date,
+    partition_where,
+    portable_date_type,
+    quote_ident,
+)
+from dtrack_left.common.hashing import FAMILIES, NULL, KeyFamily, collapse_decimal, key_family
 from dtrack_left.common.manifest import sample_plan as resolve_sample_plan
-from dtrack_right.common.dates import canonical_date, partition_where, quote_ident
-from dtrack_right.common.hashing import FAMILIES, NULL, KeyFamily, collapse_decimal, key_family
-from dtrack_right.common.sampling import sample_predicate_sql
+from dtrack_left.common.sampling import sample_predicate_sql
 
 NORM_SQL = "dtrack_norm_sql"
 
@@ -23,7 +28,18 @@ def key_spec(pair: dict[str, Any], families: dict[str, Any] | None = None):
         raise ValueError("the pair has no key; set pair['key'] (e.g. 'ACCT_ID' or 'A,B')")
     configured = {**(pair.get("key_families") or {}), **(families or {})}
     right = [pair["col_map"].get(key, key) for key in keys]
-    return keys, right, [key_family(configured.get(key)) for key in keys]
+    resolved = []
+    date_col = str(pair["left"].get("date_col") or "").lower()
+    for key in keys:
+        family = configured.get(key)
+        if family is None and key.lower() == date_col:
+            family = {
+                "family": "date_type",
+                "left_date_type": portable_date_type(pair["left"].get("date_type")),
+                "right_date_type": portable_date_type(pair["right"].get("date_type")),
+            }
+        resolved.append(key_family(family))
+    return keys, right, resolved
 
 
 # >>> Left keys selected by the same query-side sample predicate as production Stage 2 <<< #
@@ -86,7 +102,9 @@ def pull_right_keys(
     sql = (
         f"SELECT {', '.join(projection)} FROM {target.relation()} WHERE {target._where(predicate)}"
     )
-    target.warehouse.to_csv(sql, output, [*selected, NORM_SQL])
+    target.warehouse.to_csv(
+        sql, output, [*selected, NORM_SQL], operation="key_check"
+    )
     return Path(output)
 
 

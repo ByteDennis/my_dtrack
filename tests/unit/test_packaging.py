@@ -27,6 +27,26 @@ def test_right_package_never_imports_the_left_package():
         assert "dtrack_left" not in path.read_text(), path
 
 
+def test_right_package_contains_only_databricks_runtime_code():
+    right = ROOT / "src/dtrack_right"
+    common = {path.name for path in (right / "common").glob("*.py")}
+    assert common == {
+        "__init__.py",
+        "audit.py",
+        "date_platforms.py",
+        "dates.py",
+        "hashing.py",
+        "manifest.py",
+        "sampling.py",
+    }
+    source = "\n".join(path.read_text() for path in right.rglob("*.py"))
+    assert "CsvAnchorTarget" not in source
+    assert "import pandas" not in source
+    assert "sample_csv" not in source
+    assert "compute_csv_statistics" not in source
+    assert not (right / "__main__.py").exists()
+
+
 # >>> the pipeline never touches Databricks; only `dtrack tools dbx` may, lazily <<< #
 def test_left_pipeline_never_touches_databricks_and_dbx_imports_the_sdk_lazily():
     left = ROOT / "src/dtrack_left"

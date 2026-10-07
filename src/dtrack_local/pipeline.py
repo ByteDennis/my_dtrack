@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from dtrack_left.backends.sources import source_from_config
+from dtrack_left.backends.store import validate_run_id
 from dtrack_left.checks.col_check import (
     ColCheckPipeline,
     LeftRuntime,
@@ -20,14 +21,15 @@ from dtrack_left.checks.col_check import (
 from dtrack_left.checks.row_check import make_run_id
 from dtrack_left.checks.row_check import run_row_check as left_row_check
 from dtrack_left.cli.config import load_config
-from dtrack_right.backends.store import S3Store, VolumeStore, open_store
+from dtrack_left.common.audit import SqlAudit, attach_sql_audit
+from dtrack_left.common.dates import partition_where, quote_ident
+from dtrack_left.common.hashing import sample_csv
+from dtrack_left.common.stats import compute_csv_statistics
+from dtrack_right.backends.store import S3Store, VolumeStore
 from dtrack_right.backends.targets import SparkTarget
 from dtrack_right.checks.col_check import ColCheck
 from dtrack_right.checks.row_check import run_row_check as right_row_check
-from dtrack_right.common.dates import partition_where, quote_ident
-from dtrack_right.common.hashing import sample_csv
-from dtrack_right.common.stats import compute_csv_statistics
-from dtrack_right.report import build_report, publish_report
+from dtrack_right.report import build_report
 
 from .run_logging import configure_run_logging, log_exception_once
 from .warehouse import Warehouse
@@ -39,10 +41,16 @@ NEVER_BLOCK = 10**9
 
 # >>> every pulled window, Left and Right, kept in one local DuckDB file for ad-hoc queries <<< #
 class Landing:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, sql_audit=None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
+        self.sql_audit = sql_audit
+
+    def _execute(self, connection, sql: str, operation: str):
+        if self.sql_audit is not None:
+            self.sql_audit.record(sql, backend="duckdb-landing", operation=operation)
+        return connection.execute(sql)
 
     def land(self, side: str, pair: str, bucket: str, csv_path: str | Path) -> int:
         import duckdb
@@ -53,16 +61,26 @@ class Landing:
         )
         label = "'" + bucket.replace("'", "''") + "'"
         with self.lock, duckdb.connect(str(self.path)) as connection:
-            connection.execute(
+            self._execute(
+                connection,
                 f"CREATE TABLE IF NOT EXISTS {table} AS "
-                f"SELECT *, {label} AS dtrack_bucket FROM {source} LIMIT 0"
+                f"SELECT *, {label} AS dtrack_bucket FROM {source} LIMIT 0",
+                "landing_create",
             )
-            connection.execute(f"DELETE FROM {table} WHERE dtrack_bucket = {label}")
-            connection.execute(
-                f"INSERT INTO {table} BY NAME SELECT *, {label} AS dtrack_bucket FROM {source}"
+            self._execute(
+                connection,
+                f"DELETE FROM {table} WHERE dtrack_bucket = {label}",
+                "landing_replace",
             )
-            return connection.execute(
-                f"SELECT count(*) FROM {table} WHERE dtrack_bucket = {label}"
+            self._execute(
+                connection,
+                f"INSERT INTO {table} BY NAME SELECT *, {label} AS dtrack_bucket FROM {source}",
+                "landing_insert",
+            )
+            return self._execute(
+                connection,
+                f"SELECT count(*) FROM {table} WHERE dtrack_bucket = {label}",
+                "landing_count",
             ).fetchone()[0]
 
     def tables(self) -> dict[str, int]:
@@ -71,10 +89,15 @@ class Landing:
         if not self.path.exists():
             return {}
         with self.lock, duckdb.connect(str(self.path), read_only=True) as connection:
-            names = [row[0] for row in connection.execute("SHOW TABLES").fetchall()]
+            names = [
+                row[0]
+                for row in self._execute(connection, "SHOW TABLES", "landing_inspect").fetchall()
+            ]
             return {
-                name: connection.execute(
-                    f"SELECT count(*) FROM {quote_ident(name, 'sql')}"
+                name: self._execute(
+                    connection,
+                    f"SELECT count(*) FROM {quote_ident(name, 'sql')}",
+                    "landing_inspect",
                 ).fetchone()[0]
                 for name in names
             }
@@ -97,10 +120,11 @@ class WarehouseTarget(SparkTarget):
         self.landing = landing
         self.push_sample = push_sample
 
-    def _rows(self, sql: str) -> list[tuple]:
-        return self.warehouse.rows(sql)
+    def _rows(self, sql: str, operation: str = "query") -> list[tuple]:
+        return self.warehouse.rows(sql, operation=operation)
 
     def window_sql(self, manifest: dict[str, Any], window: dict[str, Any]) -> tuple[str, list[str]]:
+        self.date_type()
         date_col = self.config["date_col"]
         predicate = partition_where(
             date_col, window["partitions"], dialect="spark", date_type=self.config.get("date_type")
@@ -117,7 +141,7 @@ class WarehouseTarget(SparkTarget):
     ) -> dict[str, dict[str, Any]]:
         sql, selected = self.window_sql(manifest, window)
         output = self.work_dir / manifest["pair"] / window["bucket"] / "right.csv"
-        pulled = self.warehouse.to_csv(sql, output, selected)
+        pulled = self.warehouse.to_csv(sql, output, selected, operation="pull_window")
         if self.landing:
             self.landing.land("right", manifest["pair"], window["bucket"], output)
         plan = manifest["sample"]
@@ -197,10 +221,14 @@ def open_run(
     target_factory: Callable[[dict[str, Any]], Any] | None = None,
 ) -> LocalRun:
     document = config if isinstance(config, dict) else load_config(config)
-    run_id = run_id or make_run_id(document)
+    run_id = validate_run_id(run_id or make_run_id(document))
     folder = Path(out) / run_id
     configure_run_logging(folder)
-    landing = Landing(folder / LOCAL / "data.duckdb")
+    run_store = VolumeStore(folder)
+    landing = Landing(
+        folder / LOCAL / "data.duckdb",
+        sql_audit=SqlAudit(run_store, "local"),
+    )
     if target_factory is None:
         from dtrack_left.backends.databricks import DEFAULT_PROFILE, workspace
 
@@ -209,6 +237,7 @@ def open_run(
             client,
             warehouse_id or os.getenv("DTRACK_DBX_WAREHOUSE_ID", ""),
             disposition=disposition,
+            sql_audit=SqlAudit(run_store, "right"),
         )
         work = folder / LOCAL / "right"
 
@@ -226,16 +255,20 @@ def preflight(run: LocalRun) -> dict[str, dict[str, Any]]:
     for name, pair in run.config["pairs"].items():
         if pair.get("skip") or (run.pairs and name not in run.pairs):
             continue
-        result[name] = {
-            "left": source_from_config(pair["left"]).preflight(),
-            "right": run.target_factory(pair["right"]).preflight(),
-        }
+        source = attach_sql_audit(
+            source_from_config(pair["left"]), SqlAudit(run.store, "left", pair=name)
+        )
+        target = attach_sql_audit(
+            run.target_factory(pair["right"]), SqlAudit(run.store, "right", pair=name)
+        )
+        result[name] = {"left": source.preflight(), "right": target.preflight()}
         log.info(
             "preflight %s: left=%s right=%s",
             name,
             result[name]["left"].get("ok"),
             result[name]["right"].get("ok"),
         )
+    SqlAudit(run.store, "local").refresh()
     return result
 
 
@@ -321,13 +354,11 @@ def _col_check(
     }
 
 
-# >>> HTML, XLSX, CSVs and summary.json into <run>/report/; optionally published to the report store <<< #
-def report(run: LocalRun, *, report_s3: str | None = None) -> dict[str, Any]:
+# >>> HTML, XLSX, CSVs and summary.json into <run>/report/ <<< #
+def report(run: LocalRun) -> dict[str, Any]:
+    SqlAudit(run.store, "local").refresh()
     files = build_report(run.store, run.folder / "report")
     summary = json.loads(files["summary.json"].read_text())
-    published = []
-    if report_s3:
-        published = publish_report(open_store(report_s3), run.run_id, files, summary)
     run.store.put_json(
         "_STATUS.json",
         {
@@ -340,7 +371,6 @@ def report(run: LocalRun, *, report_s3: str | None = None) -> dict[str, Any]:
     return {
         "summary": summary,
         "files": {k: str(v) for k, v in files.items()},
-        "published": published,
     }
 
 
@@ -375,8 +405,7 @@ def run_all(
     run: LocalRun,
     *,
     gate: str = "auto",
-    report_s3: str | None = None,
-    backup_s3: str | None = None,
+    run_s3: str | None = None,
     include_data: bool = False,
 ) -> dict[str, Any]:
     health = preflight(run)
@@ -390,8 +419,9 @@ def run_all(
         raise RuntimeError("preflight failed: " + "; ".join(failed))
     stage_one = row_check(run, gate=gate)
     stage_two = col_check(run) if run.store.exists("row_check/_CLOSED") else None
-    built = report(run, report_s3=report_s3)
-    saved = backup(run, backup_s3, include_data=include_data) if backup_s3 else None
+    landing = run.landing.tables()
+    built = report(run)
+    saved = backup(run, run_s3, include_data=include_data) if run_s3 else None
     return {
         "run_id": run.run_id,
         "folder": str(run.folder),
@@ -399,8 +429,7 @@ def run_all(
         "col_check": stage_two,
         "status": built["summary"]["status"],
         "findings": built["summary"]["findings"],
-        "published": built["published"],
         "backup": saved,
-        "landing": run.landing.tables(),
+        "landing": landing,
         "error_log": str(run.error_log),
     }

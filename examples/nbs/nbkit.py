@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import filecmp
 import html
 import importlib.util
 import io
@@ -27,8 +26,8 @@ from dtrack_left.checks.col_check import (
     wait_for_manifests,
 )
 from dtrack_left.checks.row_check import run_row_check as left_row_check
+from dtrack_local.csv_target import CsvAnchorTarget
 from dtrack_right.backends.store import VolumeStore
-from dtrack_right.backends.targets import CsvAnchorTarget
 from dtrack_right.checks.col_check import ColCheck
 from dtrack_right.checks.row_check import run_row_check as right_row_check
 
@@ -202,12 +201,47 @@ def impact(term: str, roots=("src", "tests", "docs/notes", "examples/nbs")) -> N
 def guardrails() -> None:
     import pandas as pd
 
+    from dtrack_left.common import hashing as left_hashing
+    from dtrack_left.common.sampling import sample_predicate_sql as left_sample_predicate
+    from dtrack_right.common import hashing as right_hashing
+    from dtrack_right.common.sampling import sample_predicate_sql as right_sample_predicate
+
     src = ROOT / "src"
     folders = [d for d in src.rglob("*") if d.is_dir() and "__pycache__" not in d.parts]
     widest = max(folders, key=lambda d: len(list(d.glob("*.py"))))
     longest = max(src.rglob("*.py"), key=lambda p: len(p.read_text().splitlines()))
-    left, right = src / "dtrack_left/common", src / "dtrack_right/common"
-    drift = [p.name for p in left.glob("*.py") if not filecmp.cmp(p, right / p.name, shallow=False)]
+    right = src / "dtrack_right/common"
+    expected_right = {
+        "__init__.py",
+        "audit.py",
+        "date_platforms.py",
+        "dates.py",
+        "hashing.py",
+        "manifest.py",
+        "sampling.py",
+    }
+    actual_right = {path.name for path in right.glob("*.py")}
+    inventory_delta = sorted(expected_right ^ actual_right)
+    normalization_cases = [
+        ("  Ab C  ", "string", "left"),
+        ("001.0", "numeric", "left"),
+        (None, "string", "right"),
+    ]
+    normalization_parity = all(
+        left_hashing.normalize_value(value, family, side)
+        == right_hashing.normalize_value(value, family, side)
+        for value, family, side in normalization_cases
+    )
+    sample_plans = [
+        ({"mode": "fraction", "rate": 0.25}, None),
+        ({"mode": "fixed"}, [["001.0"], ["2"]]),
+    ]
+    sampling_parity = all(
+        left_sample_predicate(plan, ["id"], ["numeric"], "spark", side, key_tuples)
+        == right_sample_predicate(plan, ["id"], ["numeric"], "spark", side, key_tuples)
+        for plan, key_tuples in sample_plans
+        for side in ("left", "right")
+    )
     comments, docstrings = [], []
     for path in src.rglob("*.py"):
         text = path.read_text()
@@ -232,9 +266,14 @@ def guardrails() -> None:
             "ok": str(len(longest.read_text().splitlines()) < 500),
         },
         {
-            "rule": "common/ byte-identical on both sides",
-            "measured": ", ".join(drift) or "identical",
-            "ok": str(not drift),
+            "rule": "Right common/ contains only the Spark runtime subset",
+            "measured": ", ".join(inventory_delta) or "expected inventory",
+            "ok": str(not inventory_delta),
+        },
+        {
+            "rule": "normalisation and Spark sampling behavior match Left",
+            "measured": f"normalize={normalization_parity}, sample={sampling_parity}",
+            "ok": str(normalization_parity and sampling_parity),
         },
         {
             "rule": "only `# >>> ... <<< #` comments (notebook.py exempt)",

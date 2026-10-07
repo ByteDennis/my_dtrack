@@ -13,7 +13,15 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ..common import disabled
-from ..common.dates import bounds_where, canonical_date, day_expr, partition_where, quote_ident
+from ..common.dates import (
+    bounds_where,
+    canonical_date,
+    day_expr,
+    detect_date_type,
+    partition_where,
+    quote_ident,
+    resolve_date_type,
+)
 from ..common.sampling import fixed_keys_sql, sample_predicate_sql
 
 
@@ -29,9 +37,21 @@ def write_rows(path: str | Path, columns: list[str], rows: Iterable[Iterable[obj
 
 class SqlSource(ABC):
     dialect = "sql"
+    date_probe_size = 16
 
     def __init__(self, config: dict[str, Any]):
         self.config = dict(config)
+        self.sql_audit = None
+        self._date_type = None
+        self._date_type_lock = threading.Lock()
+
+    def set_sql_audit(self, audit):
+        self.sql_audit = audit
+        return self
+
+    def _audit(self, sql: str, operation: str = "query") -> None:
+        if self.sql_audit is not None:
+            self.sql_audit.record(sql, backend=self.dialect, operation=operation)
 
     @abstractmethod
     def connect(self): ...
@@ -49,10 +69,13 @@ class SqlSource(ABC):
         clauses = [item for item in (self.config.get("where"), extra) if item]
         return " AND ".join(f"({item})" for item in clauses) or "1=1"
 
-    def query(self, sql: str) -> tuple[list[str], list[tuple[Any, ...]]]:
+    def query(
+        self, sql: str, *, operation: str = "query"
+    ) -> tuple[list[str], list[tuple[Any, ...]]]:
         connection = self.connect()
         cursor = connection.cursor()
         try:
+            self._audit(sql, operation)
             cursor.execute(sql)
             columns = [str(item[0]) for item in (cursor.description or [])]
             rows = cursor.fetchall() or [] if cursor.description else []
@@ -61,9 +84,32 @@ class SqlSource(ABC):
             cursor.close()
             connection.close()
 
+    def date_type(self):
+        with self._date_type_lock:
+            if self._date_type is not None:
+                return self._date_type
+            resolved = resolve_date_type(self.config.get("date_type"))
+            if resolved.requires_probe:
+                column = quote_ident(self.config["date_col"], self.dialect)
+                limit = (
+                    f"FETCH FIRST {self.date_probe_size} ROWS ONLY"
+                    if self.dialect == "oracle"
+                    else f"LIMIT {self.date_probe_size}"
+                )
+                sql = (
+                    f"SELECT {column} FROM {self.relation()} "
+                    f"WHERE {self._where(f'{column} IS NOT NULL')} {limit}"
+                )
+                _columns, rows = self.query(sql, operation="date_type_probe")
+                resolved = detect_date_type(resolved, [row[0] for row in rows])
+            self._date_type = resolved
+            self.config["date_type"] = resolved.spec(portable=True)
+            return resolved
+
     def preflight(self) -> dict[str, Any]:
         try:
-            self.query(f"SELECT * FROM {self.relation()} WHERE 1=0")
+            self.query(f"SELECT * FROM {self.relation()} WHERE 1=0", operation="preflight")
+            self.date_type()
             return {"ok": True, "source": self.config.get("source")}
         except Exception as exc:
             return {"ok": False, "source": self.config.get("source"), "error": str(exc)}
@@ -74,6 +120,7 @@ class SqlSource(ABC):
     def partition_counts(
         self, from_date: str | None = None, to_date: str | None = None
     ) -> dict[str, int]:
+        self.date_type()
         date_col = self.config["date_col"]
         date_ref = day_expr(date_col, self.dialect, self.config.get("date_type"))
         bounds = bounds_where(
@@ -87,7 +134,7 @@ class SqlSource(ABC):
             f"SELECT {date_ref} AS dtrack_partition, COUNT(*) AS dtrack_count "
             f"FROM {self.relation()} WHERE {self._where(bounds)} GROUP BY {date_ref}"
         )
-        _columns, rows = self.query(sql)
+        _columns, rows = self.query(sql, operation="partition_counts")
         counts: dict[str, int] = {}
         for value, count in rows:
             day = canonical_date(value)
@@ -106,6 +153,7 @@ class SqlSource(ABC):
         side: str = "left",
         key_tuples: list[list[object]] | None = None,
     ) -> Path:
+        self.date_type()
         selected = list(dict.fromkeys([self.config["date_col"], *(key_columns or []), *columns]))
         predicate = partition_where(
             self.config["date_col"],
@@ -129,7 +177,7 @@ class SqlSource(ABC):
             f"SELECT {', '.join(quote_ident(column, self.dialect) for column in selected)} "
             f"FROM {self.relation()} WHERE {self._where(predicate)}"
         )
-        _columns, rows = self.query(sql)
+        _columns, rows = self.query(sql, operation="pull_window")
         return write_rows(output, selected, rows)
 
     def sample_keys(
@@ -141,6 +189,7 @@ class SqlSource(ABC):
         count: int,
         key_families: list[Any] | None = None,
     ) -> Path:
+        self.date_type()
         predicate = partition_where(
             self.config["date_col"],
             partitions,
@@ -156,7 +205,7 @@ class SqlSource(ABC):
             count,
             self.key_types(key_columns),
         )
-        _columns, rows = self.query(sql)
+        _columns, rows = self.query(sql, operation="sample_keys")
         return write_rows(output, key_columns, rows)
 
 
@@ -217,9 +266,12 @@ class FileSource(SqlSource):
 
     def preflight(self) -> dict[str, Any]:
         try:
-            columns, _rows = self.query(f"SELECT * FROM {self.relation()} WHERE 1=0")
+            columns, _rows = self.query(
+                f"SELECT * FROM {self.relation()} WHERE 1=0", operation="preflight"
+            )
             if self.config.get("date_col") not in columns:
                 raise ValueError(f"missing columns: {self.config.get('date_col')}")
+            self.date_type()
             return {"ok": True, "source": "file", "columns": columns}
         except Exception as exc:
             return {"ok": False, "source": "file", "error": str(exc)}
@@ -268,8 +320,10 @@ class DuckDBSource(SqlSource):
 
         connection = duckdb.connect()
         alias = quote_ident(self.alias, self.dialect)
+        attach = f"ATTACH {_duckdb_value(self.database())} AS {alias} (READ_ONLY)"
         try:
-            connection.execute(f"ATTACH {_duckdb_value(self.database())} AS {alias} (READ_ONLY)")
+            self._audit(attach, "attach")
+            connection.execute(attach)
         except duckdb.IOException as exc:
             connection.close()
             if "lock" not in str(exc).lower():
@@ -278,12 +332,17 @@ class DuckDBSource(SqlSource):
                 f"{self.path} is open read-write in another process; "
                 'set "snapshot": true to read a copy, or open it read-only there'
             ) from exc
-        connection.execute(f"USE {alias}")
+        use = f"USE {alias}"
+        self._audit(use, "session")
+        connection.execute(use)
         return connection
 
-    def query(self, sql: str) -> tuple[list[str], list[tuple[Any, ...]]]:
+    def query(
+        self, sql: str, *, operation: str = "query"
+    ) -> tuple[list[str], list[tuple[Any, ...]]]:
         connection = self.connect()
         try:
+            self._audit(sql, operation)
             connection.execute(sql)
             columns = [str(item[0]) for item in connection.description or []]
             return columns, connection.fetchall() if connection.description else []
@@ -360,9 +419,9 @@ class OracleSource(SqlSource):
                     selected = ", ".join(
                         quote_ident(column, self.dialect) for column in key_columns
                     )
-                    cursor.execute(
-                        f"SELECT {selected} FROM {self.relation()} WHERE {self._where('1=0')}"
-                    )
+                    sql = f"SELECT {selected} FROM {self.relation()} WHERE {self._where('1=0')}"
+                    self._audit(sql, "describe_keys")
+                    cursor.execute(sql)
                     found = {}
                     for item in cursor.description or []:
                         name = str(item[0]).lower()

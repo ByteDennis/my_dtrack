@@ -3,25 +3,38 @@ from pathlib import Path
 import pytest
 
 from dtrack_left.common import hashing
+from dtrack_left.common import sampling as left_sampling
 from dtrack_right.checks import col_check as cloud_col_check
 from dtrack_right.common import hashing as cloud_hashing
+from dtrack_right.common import sampling as right_sampling
 
 SRC = Path(__file__).resolve().parents[3] / "src"
-SHARED = ["__init__.py", "dates.py", "hashing.py", "sampling.py", "stats.py", "manifest.py"]
+RIGHT_COMMON = {
+    "__init__.py",
+    "audit.py",
+    "date_platforms.py",
+    "dates.py",
+    "hashing.py",
+    "manifest.py",
+    "sampling.py",
+}
 
 
-def test_shared_common_modules_are_byte_identical_on_both_sides():
-    left, right = SRC / "dtrack_left/common", SRC / "dtrack_right/common"
-    for name in SHARED:
-        assert (left / name).read_bytes() == (right / name).read_bytes(), f"{name} drifted"
-    assert sorted(p.name for p in left.glob("*.py")) == sorted(p.name for p in right.glob("*.py"))
+def test_right_common_contains_only_databricks_protocol_modules():
+    right = SRC / "dtrack_right/common"
+    assert {path.name for path in right.glob("*.py")} == RIGHT_COMMON
 
 
-@pytest.mark.parametrize("side", ["dtrack_left", "dtrack_right"])
-def test_disabled_classes_refuse_to_instantiate_but_keep_their_attributes(side):
-    import importlib
+def test_right_date_sql_runtime_contains_only_databricks_platforms():
+    from dtrack_left.common.date_platforms import DATE_SQL_PLATFORMS as left_platforms
+    from dtrack_right.common.date_platforms import DATE_SQL_PLATFORMS as right_platforms
 
-    disabled = importlib.import_module(f"{side}.common").disabled
+    assert set(right_platforms) == {"spark", "databricks"}
+    assert set(left_platforms) == {"oracle", "spark", "databricks", "hadoop", "athena", "duckdb"}
+
+
+def test_left_disabled_classes_refuse_to_instantiate_but_keep_their_attributes():
+    from dtrack_left.common import disabled
 
     @disabled("not fixed")
     class Broken:
@@ -40,11 +53,8 @@ def test_disabled_classes_refuse_to_instantiate_but_keep_their_attributes(side):
         Child(1)
 
 
-@pytest.mark.parametrize("side", ["dtrack_left", "dtrack_right"])
-def test_disabled_functions_and_methods_refuse_to_run_but_keep_their_names(side):
-    import importlib
-
-    disabled = importlib.import_module(f"{side}.common").disabled
+def test_left_disabled_functions_and_methods_refuse_to_run_but_keep_their_names():
+    from dtrack_left.common import disabled
 
     @disabled("not fixed")
     def pull(table):
@@ -99,3 +109,26 @@ def test_key_normalisation_strips_numeric_zeros_but_string_keeps_them():
     for (value, family), expected in cases.items():
         assert cloud_hashing.normalize_value(value, family) == expected, (value, family)
         assert hashing.normalize_value(value, family) == expected, (value, family)
+
+
+@pytest.mark.parametrize(
+    ("plan", "key_tuples"),
+    [
+        ({"mode": "all"}, None),
+        ({"mode": "fraction", "threshold": 123456}, None),
+        ({"mode": "fixed", "count": 2}, [["007", " AbC "], ["2.0", "O'K"]]),
+    ],
+)
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_left_and_right_compile_identical_spark_sample_predicates(plan, key_tuples, side):
+    arguments = (
+        plan,
+        ["`id`", "`label`"],
+        ["numeric", "string"],
+        "spark",
+        side,
+        key_tuples,
+    )
+    assert right_sampling.sample_predicate_sql(*arguments) == left_sampling.sample_predicate_sql(
+        *arguments
+    )

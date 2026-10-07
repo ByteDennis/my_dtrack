@@ -8,7 +8,12 @@ from dtrack_local import keycheck
 
 PAIR = {
     "left": {"source": "csv", "date_col": "EFF_DT"},
-    "right": {"source": "databricks", "table": "t", "date_col": "dw_dt", "date_type": "int"},
+    "right": {
+        "source": "databricks",
+        "table": "t",
+        "date_col": "dw_dt",
+        "date_type": "number",
+    },
     "key": "ACCT_ID,OPEN_DT",
     "col_map": {"ACCT_ID": "acct_id", "OPEN_DT": "open_dt", "BAL": "bal"},
     "key_families": {"ACCT_ID": "numeric", "OPEN_DT": "date"},
@@ -97,7 +102,9 @@ def test_explain_names_the_difference(left, right, reason):
 def test_pull_right_keys_selects_raw_keys_and_the_spark_composite(tmp_path):
     seen = {}
     warehouse = SimpleNamespace(
-        to_csv=lambda sql, output, columns: seen.update(sql=sql, cols=columns)
+        to_csv=lambda sql, output, columns, **kwargs: seen.update(
+            sql=sql, cols=columns, operation=kwargs.get("operation")
+        )
     )
     target = SimpleNamespace(
         config=PAIR["right"], relation=lambda: "`t`", _where=lambda predicate: predicate
@@ -106,6 +113,7 @@ def test_pull_right_keys_selects_raw_keys_and_the_spark_composite(tmp_path):
     _, right_keys, families = keycheck.key_spec(PAIR)
     keycheck.pull_right_keys(target, ["2026-01-31"], tmp_path / "r.csv", right_keys, families)
     assert seen["cols"] == ["dw_dt", "acct_id", "open_dt", keycheck.NORM_SQL]
+    assert seen["operation"] == "key_check"
     assert "`dw_dt` IN (20260131)" in seen["sql"] or "20260131" in seen["sql"]
     assert f"concat_ws('|', {families[0].sql('`acct_id`', 'right')}" in seen["sql"]
     assert "CAST(`dw_dt` AS STRING)" not in seen["sql"]
@@ -123,7 +131,7 @@ def test_fraction_sample_is_pushed_into_both_key_queries(tmp_path):
             return output
 
     warehouse = SimpleNamespace(
-        to_csv=lambda sql, output, columns: (
+        to_csv=lambda sql, output, columns, **_kwargs: (
             seen.update(right_sql=sql),
             pd.DataFrame(
                 {
@@ -170,7 +178,7 @@ def test_fixed_sample_uses_left_selected_keys_on_both_sides(tmp_path):
             return output
 
     warehouse = SimpleNamespace(
-        to_csv=lambda sql, output, columns: (
+        to_csv=lambda sql, output, columns, **_kwargs: (
             seen.update(right_sql=sql),
             pd.DataFrame(
                 {
@@ -206,10 +214,10 @@ def test_real_left_source_accepts_the_resolved_families_for_fixed_sampling(tmp_p
     pair = {
         **PAIR,
         "sample": 1,
-        "left": {**PAIR["left"], "path": str(left_path), "date_type": "string_dash"},
+        "left": {**PAIR["left"], "path": str(left_path), "date_type": "string"},
     }
 
-    def right_csv(_sql, output, _columns):
+    def right_csv(_sql, output, _columns, **_kwargs):
         pd.DataFrame(
             {
                 "dw_dt": ["20260131"],
@@ -234,3 +242,24 @@ def test_real_left_source_accepts_the_resolved_families_for_fixed_sampling(tmp_p
 def test_key_spec_needs_a_key():
     with pytest.raises(ValueError, match="no key"):
         keycheck.key_spec({**PAIR, "key": ""})
+
+
+def test_partition_date_key_automatically_reuses_side_date_types():
+    pair = {
+        **PAIR,
+        "key": "EFF_DT",
+        "left": {
+            **PAIR["left"],
+            "date_type": {"type": "sas", "format": "days"},
+        },
+        "right": {
+            **PAIR["right"],
+            "date_type": {"type": "string", "format": "dash"},
+        },
+        "col_map": {**PAIR["col_map"], "EFF_DT": "dw_dt"},
+        "key_families": {},
+    }
+    left, right, families = keycheck.key_spec(pair)
+    assert left == ["EFF_DT"] and right == ["dw_dt"]
+    assert families[0].normalize("24108", "left") == "2026-01-02"
+    assert families[0].normalize("2026-01-02", "right") == "2026-01-02"

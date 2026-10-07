@@ -170,7 +170,7 @@ def databricks_login(session: Session) -> None:
     print(f"   signed in as {me.user_name} on {session.workspace.config.host}")
 
 
-# >>> step 3: the bucket that holds work/ and report/, private and encrypted <<< #
+# >>> step 3: the private encrypted bucket that holds the shared runs root <<< #
 def s3_bucket(session: Session) -> None:
     import boto3
 
@@ -209,7 +209,6 @@ def s3_bucket(session: Session) -> None:
     base = f"s3://{bucket}"
     session.env["DTRACK_LIVE_S3"] = f"{base}/dtrack-live"
     session.env["DTRACK_LIVE_S3_WORK"] = f"{base}/dtrack/work"
-    session.env["DTRACK_LIVE_S3_REPORT"] = f"{base}/dtrack/report"
 
 
 # >>> step 4: a catalog.schema the tests may create tables in <<< #
@@ -232,7 +231,7 @@ def uc_schema(session: Session) -> None:
         session.remember("schemas", f"{catalog}.{name}")
 
 
-# >>> step 5: make the job able to reach work/ and report/ in one of three ways <<< #
+# >>> step 5: make the job able to reach the runs root in one of three ways <<< #
 def storage(session: Session) -> None:
     try:
         list(session.workspace.storage_credentials.list())
@@ -249,11 +248,8 @@ def storage(session: Session) -> None:
 
 
 def _existing(session: Session) -> None:
-    for kind in ("WORK", "REPORT"):
-        session.ask(
-            f"DTRACK_LIVE_VOLUME_{kind}", f"{kind.lower()} Volume path (/Volumes/c/s/v/...)"
-        )
-        session.ask(f"DTRACK_LIVE_S3_{kind}", f"the S3 URL behind that {kind.lower()} Volume")
+    session.ask("DTRACK_LIVE_VOLUME_WORK", "work Volume path (/Volumes/c/s/v/...)")
+    session.ask("DTRACK_LIVE_S3_WORK", "the S3 URL behind that work Volume")
     session.env["DTRACK_LIVE_AWS_SECRET_SCOPE"] = ""
     verify_volume_mapping(session)
 
@@ -272,7 +268,7 @@ def _external(session: Session) -> None:
         f"storage_credentials.create(dtrack_live, role={role_arn})",
         "iam.update_assume_role_policy(real external id + self-assume)",
         f"external_locations.create(dtrack_live, s3://{bucket}/dtrack)",
-        "volumes.create(work, report) as EXTERNAL Volumes",
+        "volumes.create(work) as an EXTERNAL Volume",
     ]
     if not session.confirm(
         "External storage (IAM role -> credential -> location -> Volumes)", calls
@@ -331,7 +327,7 @@ def _external(session: Session) -> None:
     session.remember("external_locations", "dtrack_live")
     catalog, schema = session.env["DTRACK_LIVE_SCHEMA"].split(".")
     volumes = {v.name for v in session.workspace.volumes.list(catalog, schema)}
-    for kind in ("work", "report"):
+    for kind in ("work",):
         if kind in volumes:
             print(f"   volume {catalog}.{schema}.{kind} exists")
         else:
@@ -414,7 +410,6 @@ def _bridge(session: Session) -> None:
     ):
         session.workspace.secrets.put_secret(scope=scope, key=name, string_value=value)
     session.env["DTRACK_LIVE_VOLUME_WORK"] = ""
-    session.env["DTRACK_LIVE_VOLUME_REPORT"] = ""
     print(
         f"   key {key['AccessKeyId']} stored in secret scope {scope}; the secret never touches disk here"
     )
@@ -425,7 +420,7 @@ def verify_volume_mapping(session: Session) -> None:
     import boto3
 
     probe = f"_probe/{uuid.uuid4().hex[:8]}.json"
-    for kind in ("WORK", "REPORT"):
+    for kind in ("WORK",):
         volume, s3 = (
             session.env[f"DTRACK_LIVE_VOLUME_{kind}"],
             session.env[f"DTRACK_LIVE_S3_{kind}"],

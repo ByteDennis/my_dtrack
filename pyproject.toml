@@ -63,6 +63,7 @@ markers = [
     "oracle: tests/local/oracle, Oracle via testcontainers (run with --run-oracle)",
     "e2e: tests/local/e2e, runs examples/e2e/run_e2e.sh (run with --run-e2e)",
     "live: tests/live, real AWS S3 and Databricks (run with --run-live)",
+    "confluence: tests/local/confluence, local Confluence DC 9.2 (just confluence up; run with --run-confluence)",
     "docker: needs a local Docker daemon; skipped when none is reachable (select with -m 'not docker')",
 ]
 

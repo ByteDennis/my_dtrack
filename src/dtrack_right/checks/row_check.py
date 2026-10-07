@@ -7,6 +7,7 @@ import time
 from collections import Counter
 from typing import Any
 
+from ..common.audit import SqlAudit, attach_sql_audit
 from ..common.dates import apply_synonyms
 from ..common.manifest import build_manifest
 
@@ -115,12 +116,17 @@ def reconcile_pair(
     store, left_doc: dict[str, Any], target, *, gate: str = "auto"
 ) -> dict[str, Any]:
     pair = left_doc["pair"]
+    attach_sql_audit(target, SqlAudit(store, "right", pair=pair))
     started = time.monotonic()
     health = target.preflight()
     preflight_s = round(time.monotonic() - started, 6)
     if not health.get("ok"):
         log.error("preflight %s failed: %s", pair, health.get("error"))
         raise RuntimeError(f"Right-side preflight failed for {pair}: {health.get('error')}")
+    right_date_type = getattr(target, "config", {}).get("date_type")
+    if right_date_type is not None:
+        left_doc["right"]["date_type"] = right_date_type
+        left_doc["pair_config"]["right"]["date_type"] = right_date_type
     started = time.monotonic()
     right_counts = target.partition_counts(
         left_doc["bounds"].get("from"), left_doc["bounds"].get("to")
@@ -194,4 +200,6 @@ def run_row_check(store, target_factory, *, gate: str = "auto") -> int:
             store.close_row_check(pairs)
             released = [pair for pair in pairs if store.exists(f"manifest/{pair}.json")]
             log.info("row_check closed: %d/%d pairs released", len(released), len(pairs))
+    if processed:
+        SqlAudit(store, "right").refresh()
     return processed

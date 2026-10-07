@@ -36,6 +36,25 @@ def test_inline_rows_follow_every_chunk_after_polling():
     assert calls[0]["disposition"].value == "INLINE" and calls[0]["format"].value == "JSON_ARRAY"
 
 
+def test_statement_is_audited_before_submission():
+    events = []
+    response = _response("SUCCEEDED", rows=[])
+    api = NS(
+        execute_statement=lambda **kwargs: events.append(("execute", kwargs["statement"]))
+        or response,
+    )
+    audit = NS(record=lambda sql, **meta: events.append(("audit", sql, meta)))
+    Warehouse(NS(statement_execution=api), "wh", sql_audit=audit).rows("SELECT * FROM huge_table")
+    assert events == [
+        (
+            "audit",
+            "SELECT * FROM huge_table",
+            {"backend": "databricks-sql", "operation": "query"},
+        ),
+        ("execute", "SELECT * FROM huge_table"),
+    ]
+
+
 def test_external_links_are_downloaded_in_order_and_written_like_a_left_pull(tmp_path):
     links = [NS(external_link="u0", next_chunk_index=1)]
     client, _ = _client(

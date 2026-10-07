@@ -3,11 +3,10 @@ import pytest
 from support import assert_stats_agree, synthetic_data
 
 from dtrack_left.backends.sources import FileSource
-from dtrack_left.common.hashing import normalize_value
+from dtrack_left.common.hashing import normalize_value, sample_csv
+from dtrack_left.common.stats import compute_csv_statistics
 from dtrack_local.pipeline import WarehouseTarget
 from dtrack_right.backends.targets import SparkTarget
-from dtrack_right.common.hashing import sample_csv
-from dtrack_right.common.stats import compute_csv_statistics
 
 pytestmark = pytest.mark.spark
 
@@ -80,7 +79,7 @@ def test_partition_counts_match_the_file(spark, orders):
             "source": "databricks",
             "table": "orders",
             "date_col": "business_date",
-            "date_type": "string_dash",
+            "date_type": "string",
         },
     )
     health = target.preflight()
@@ -94,9 +93,10 @@ def test_partition_counts_match_the_file(spark, orders):
 @pytest.mark.parametrize(
     ("date_type", "raw_days"),
     [
-        ("string_compact", ["20260101", "20260102"]),
-        ("string_sas", [" 01JAN2026", "02JAN2026 "]),
-        ("sas_days", ["24107", "24108.0"]),
+        ("string", ["20260101", "20260102"]),
+        ("sas", [" 01JAN2026", "02JAN2026 "]),
+        ("sas", ["24107", "24108.75"]),
+        ("sas", ["01JAN2026:09:45:35", "02JAN2026:00:00:00"]),
     ],
 )
 def test_partition_counts_support_compact_and_sas_dates(spark, date_type, raw_days):
@@ -118,6 +118,25 @@ def test_partition_counts_support_compact_and_sas_dates(spark, date_type, raw_da
     }
 
 
+def test_sas_fractional_days_truncate_toward_zero_in_spark(spark):
+    spark.createDataFrame(
+        [("-1.75",), ("24108.75",)], "raw_day STRING"
+    ).createOrReplaceTempView("sas_fractional_days")
+    target = SparkTarget(
+        spark,
+        {
+            "source": "databricks",
+            "table": "sas_fractional_days",
+            "date_col": "raw_day",
+            "date_type": "sas",
+        },
+    )
+    assert target.partition_counts("1959-12-31", "2026-01-02") == {
+        "1959-12-31": 1,
+        "2026-01-02": 1,
+    }
+
+
 # >>> the hash-bucket predicate in SQL selects exactly the rows pandas selects, and every statistic agrees <<< #
 @pytest.mark.parametrize("strict", [False, True])
 def test_window_statistics_agree_with_pandas_on_a_fraction_sample(spark, orders, tmp_path, strict):
@@ -129,7 +148,7 @@ def test_window_statistics_agree_with_pandas_on_a_fraction_sample(spark, orders,
             "source": "databricks",
             "table": "orders",
             "date_col": "business_date",
-            "date_type": "string_dash",
+            "date_type": "string",
         },
     )
     spark_stats = target.window_statistics(
@@ -150,7 +169,7 @@ def test_window_statistics_agree_with_pandas_on_fixed_keys(spark, orders, tmp_pa
             "source": "databricks",
             "table": "orders",
             "date_col": "business_date",
-            "date_type": "string_dash",
+            "date_type": "string",
         },
     )
     spark_stats = target.window_statistics(
@@ -181,7 +200,7 @@ def test_local_databricks_query_selects_the_same_fraction_keys_as_left(spark, tm
             "source": "csv",
             "path": str(left),
             "date_col": "day",
-            "date_type": "string_dash",
+            "date_type": "string",
         }
     ).pull_window(
         ["2026-01-01"],
@@ -203,10 +222,10 @@ def test_local_databricks_query_selects_the_same_fraction_keys_as_left(spark, tm
     query, _columns = WarehouseTarget(
         None,
         {
-            "source": "databricks",
-            "table": "local_sample_parity",
-            "date_col": "day",
-            "date_type": "string_dash",
+                "source": "databricks",
+                "table": "local_sample_parity",
+                "date_col": "day",
+                "date_type": {"type": "string", "format": "dash"},
         },
         tmp_path,
     ).window_sql(manifest, {"bucket": "2026-01-01", "partitions": ["2026-01-01"]})

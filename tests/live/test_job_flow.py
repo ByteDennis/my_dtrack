@@ -41,30 +41,26 @@ def submit_right_job(workspace, notebook: str, parameters: dict[str, str]):
 # >>> every setting the flow needs, checked before any container or cluster is started <<< #
 @pytest.fixture(scope="module")
 def settings(need):
-    names = ["DTRACK_LIVE_S3_WORK", "DTRACK_LIVE_S3_REPORT"]
-    names += ["DTRACK_LIVE_WORKSPACE_DIR", "DTRACK_LIVE_SCHEMA"]
+    names = ["DTRACK_LIVE_S3_WORK", "DTRACK_LIVE_WORKSPACE_DIR", "DTRACK_LIVE_SCHEMA"]
     values = dict(zip(names, need(*names), strict=True))
-    for kind in ("WORK", "REPORT"):
-        volume = os.environ.get(f"DTRACK_LIVE_VOLUME_{kind}", "").rstrip("/")
-        values[f"RIGHT_{kind}"] = volume or values[f"DTRACK_LIVE_S3_{kind}"]
+    volume = os.environ.get("DTRACK_LIVE_VOLUME_WORK", "").rstrip("/")
+    values["RIGHT_WORK"] = volume or values["DTRACK_LIVE_S3_WORK"]
     values["SCOPE"] = os.environ.get("DTRACK_LIVE_AWS_SECRET_SCOPE", "")
     if values["RIGHT_WORK"].startswith("s3://") and not values["SCOPE"]:
         pytest.skip("no work Volume and no DTRACK_LIVE_AWS_SECRET_SCOPE: the job cannot reach S3")
     return values
 
 
-# >>> step 8, the whole thing: Oracle -> dtrack (this PC) -> S3 = Volume -> Databricks job -> report on S3 <<< #
+# >>> step 8: Oracle -> Left/S3 -> Databricks Right; report stays under the same run <<< #
 def test_left_on_this_machine_and_right_as_a_databricks_job(
     settings, workspace, right_tables, oracle, tag, keep, tmp_path, capsys, monkeypatch
 ):
     s3_work, right_work = settings["DTRACK_LIVE_S3_WORK"], settings["RIGHT_WORK"]
-    s3_report, right_report = settings["DTRACK_LIVE_S3_REPORT"], settings["RIGHT_REPORT"]
     folder = f"{settings['DTRACK_LIVE_WORKSPACE_DIR']}/{tag}"
     notebook = upload_right_package(workspace, folder)
     parameters = {
-        "work": f"{right_work}/runs",
+        "run_s3": f"{right_work}/runs",
         "run_id": tag,
-        "report": f"{right_report}/{tag}",
         "aws_secret_scope": settings["SCOPE"],
         "gate": "auto",
         "idle_timeout": "900",
@@ -84,21 +80,30 @@ def test_left_on_this_machine_and_right_as_a_databricks_job(
         pair["left"]["conn_macro"] = "live_ora"
     config = tmp_path / "config.json"
     config.write_text(json.dumps(document))
-    work = f"{s3_work}/runs/{tag}"
-    assert main(["row-check", "--config", str(config), "--s3", work, "--run-id", tag]) == 0
-    col_check = ["col-check", "--s3", work, "--work-dir", str(tmp_path / "work")]
+    runs = f"{s3_work}/runs"
+    run_uri = f"{runs}/{tag}"
+    assert (
+        main(["row-check", "--config", str(config), "--run-s3", runs, "--run-id", tag]) == 0
+    )
+    col_check = [
+        "col-check",
+        "--run-s3",
+        runs,
+        "--run-id",
+        tag,
+        "--work-dir",
+        str(tmp_path / "work"),
+    ]
     assert main([*col_check, "--wait-timeout", "1800", "--poll-interval", "5"]) == 0
     waiter.join(timeout=45 * 60)
     assert finished["run"].state.result_state.value == "SUCCESS", finished["run"].state
 
     capsys.readouterr()
     out = tmp_path / "report"
-    assert (
-        main(["tools", "fetch-report", "--report-s3", f"{s3_report}/{tag}", "--out", str(out)]) == 0
-    )
+    assert main(["tools", "fetch-report", "--run-s3", runs, "--run-id", tag, "--out", str(out)]) == 0
     summary = json.loads((out / "summary.json").read_text())
     assert summary["run_id"] == tag and summary["status"] == "DONE"
     assert summary["findings"] == {"row_count_diff": 1, "partition_missing": 2, "col_stat_diff": 2}
-    assert S3Store(work).get_json("_STATUS.json")["state"] == "complete"
+    assert S3Store(run_uri).get_json("_STATUS.json")["state"] == "complete"
     if not keep:
         workspace.workspace.delete(folder, recursive=True)

@@ -7,20 +7,20 @@ import sys
 import time
 from pathlib import Path
 
-from .backends.targets import CsvAnchorTarget
-from .job import run
+from dtrack_right.job import run
+
+from .csv_target import CsvAnchorTarget
 
 
-# >>> local stand-in for the Databricks notebook: same loop, CSV anchor instead of spark <<< #
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="dtrack_right")
+    parser = argparse.ArgumentParser(prog="python -m dtrack_local.right_job")
     parser.add_argument(
-        "--work",
+        "--run-s3",
+        dest="run_s3",
         required=True,
-        help="a run folder, or the runs root (newest unfinished run is picked)",
+        help="stable runs root; --run-id is appended (newest unfinished by default)",
     )
     parser.add_argument("--run-id")
-    parser.add_argument("--report")
     parser.add_argument("--right-csv-dir", required=True)
     parser.add_argument("--out", default=".dtrack-right/report")
     parser.add_argument("--work-dir", default=".dtrack-right/work")
@@ -40,9 +40,9 @@ def main(argv=None) -> int:
     )
     factory = lambda config: CsvAnchorTarget(config, args.right_csv_dir, Path(args.work_dir))
     outcome = run(
-        args.work,
+        args.run_s3,
         factory,
-        report=args.report,
+        run_id=args.run_id,
         out_dir=args.out,
         gate=args.gate,
         poll_interval=args.poll_interval,

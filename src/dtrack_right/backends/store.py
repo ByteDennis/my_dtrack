@@ -10,6 +10,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 
+def validate_run_id(value: object) -> str:
+    run_id = str(value or "")
+    if not run_id or run_id in {".", ".."} or "/" in run_id or "\\" in run_id or "\0" in run_id:
+        raise ValueError("run_id must be one non-empty folder name below the runs root")
+    return run_id
+
+
 @dataclass(frozen=True)
 class S3Location:
     bucket: str
@@ -289,14 +296,17 @@ def run_is_complete(store) -> bool:
     )
 
 
-# >>> resolve the run folder: an explicit run_id, a location that already is a run, or the newest unfinished run under a runs root <<< #
+# >>> resolve an explicit run_id or the newest unfinished run below the stable runs root <<< #
 def resolve_run(location: str, run_id: str | None = None):
     root = open_store(location)
     if run_id:
+        run_id = validate_run_id(run_id)
         return root.child(run_id), run_id
-    if root.list_keys("row_check/") or root.exists("_STATUS.json"):
-        return root, location.rstrip("/").rsplit("/", 1)[-1]
-    candidates = [name for name in root.list_prefixes() if not run_is_complete(root.child(name))]
+    candidates = []
+    for name in root.list_prefixes():
+        child = root.child(name)
+        if child.list_keys("row_check/") and not run_is_complete(child):
+            candidates.append(name)
     if not candidates:
         return None, None
     return root.child(candidates[-1]), candidates[-1]

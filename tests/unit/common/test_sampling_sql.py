@@ -121,3 +121,17 @@ def test_oracle_native_types_use_explicit_nls_independent_formats():
 def test_oracle_timezone_keys_require_an_explicit_canonical_expression():
     with pytest.raises(SamplingSqlNotSupported, match="timezone-bearing Oracle keys"):
         normalize_sql("ts", key_family("date"), "oracle", "left", "DB_TYPE_TIMESTAMP_TZ")
+
+
+def test_date_type_family_generates_dialect_sql_for_the_hash_key():
+    family = key_family(
+        {
+            "family": "date_type",
+            "left_date_type": {"type": "sas", "format": "days"},
+            "right_date_type": {"type": "string", "format": "dash"},
+        }
+    )
+    left = normalize_sql("DT", family, "oracle", "left")
+    right = normalize_sql("`dt`", family, "spark", "right")
+    assert "1960-01-01" in left and "YYYY-MM-DD" in left
+    assert "date_format" in right and "yyyy-MM-dd" in right

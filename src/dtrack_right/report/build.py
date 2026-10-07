@@ -170,31 +170,3 @@ CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
-
-
-# >>> immutable history/<run_id>/ first, then the single latest/pointer.json <<< #
-def publish_report(
-    report_store, run_id: str, files: dict[str, Path], summary: dict[str, Any]
-) -> list[str]:
-    base = f"history/{run_id}/"
-    keys = []
-    for name, path in sorted(files.items()):
-        key = base + name
-        report_store.put_bytes(
-            key,
-            path.read_bytes(),
-            content_type=CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
-        )
-        keys.append(key)
-        log.info("published %s", key)
-    pointer = {
-        "run_id": run_id,
-        "finished_at": datetime.now(UTC).isoformat(),
-        "status": summary["status"],
-        "findings": sum(summary["findings"].values()),
-        "base": base,
-    }
-    report_store.put_json("latest/pointer.json", pointer)
-    keys.append("latest/pointer.json")
-    log.info("published latest/pointer.json -> %s", base)
-    return keys

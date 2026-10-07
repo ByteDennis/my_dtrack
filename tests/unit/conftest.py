@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from support import mock_aws_env, synthetic_data
 
-COMMON = ("dates", "hashing", "stats", "manifest")
+COMMON = ("dates", "hashing", "manifest")
 REPO = Path(__file__).resolve().parents[2]
 DOTENV_MODULES = (
     "dtrack_left.cli",

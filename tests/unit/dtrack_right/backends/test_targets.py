@@ -1,10 +1,11 @@
 import re
+from types import SimpleNamespace
 
 import pytest
-from support import FakeRow, FakeSpark, pairs_config
+from support import FakeRow, FakeSpark
 
 from dtrack_right.backends import targets
-from dtrack_right.backends.targets import CsvAnchorTarget, SparkTarget
+from dtrack_right.backends.targets import SparkTarget
 from dtrack_right.common.hashing import collapse_decimal, key_family
 
 ORDERS = {"source": "databricks", "catalog": "main", "schema": "sales", "table": "orders"}
@@ -91,6 +92,22 @@ def test_preflight_describes_the_relation_and_needs_the_date_column():
     assert missing["ok"] is False and "'dt'" in missing["error"]
 
 
+def test_spark_preflight_probes_and_caches_sas_datetime_text():
+    def respond(sql):
+        if sql.startswith("DESCRIBE"):
+            return DESCRIBE
+        if "LIMIT 16" in sql:
+            return [("01AUG2026:09:45:35",), ("02AUG2026:00:00:00",)]
+        return [("2026-08-01", 1)]
+
+    spark = FakeSpark(respond)
+    target = SparkTarget(spark, {**ORDERS, "date_type": "sas"})
+    assert target.preflight()["ok"]
+    assert target.config["date_type"] == {"type": "sas", "format": "datetime"}
+    assert target.partition_counts() == {"2026-08-01": 1}
+    assert len([sql for sql in spark.statements if "LIMIT 16" in sql]) == 1
+
+
 def test_partition_counts_run_one_grouped_query_with_bounds_and_where():
     spark = FakeSpark(lambda sql: [("2026-01-01", 3), ("2026-01-02", 4)])
     target = SparkTarget(spark, {**ORDERS, "where": "region = 'EU'"})
@@ -105,6 +122,22 @@ def test_partition_counts_run_one_grouped_query_with_bounds_and_where():
             "(`business_date` >= DATE '2026-01-01' AND `business_date` < DATE '2026-02-01') "
             "GROUP BY to_date(`business_date`)"
         )
+    ]
+
+
+def test_spark_query_is_audited_before_submission():
+    events = []
+
+    class Spark:
+        def sql(self, sql):
+            events.append(("execute", sql))
+            return SimpleNamespace(collect=list)
+
+    audit = SimpleNamespace(record=lambda sql, **meta: events.append(("audit", sql, meta)))
+    SparkTarget(Spark(), ORDERS).set_sql_audit(audit)._rows("SELECT * FROM huge_table")
+    assert events == [
+        ("audit", "SELECT * FROM huge_table", {"backend": "spark", "operation": "query"}),
+        ("execute", "SELECT * FROM huge_table"),
     ]
 
 
@@ -214,32 +247,6 @@ def test_strict_mode_lowercases_and_collapses_text_columns():
         _manifest({"mode": "all"}, strict=True), {"partitions": ["2026-01-01"]}
     )
     assert "count(DISTINCT lower(CASE WHEN trim(cast(`status` as string))" in spark.statements[1]
-
-
-def test_csv_anchor_target_counts_and_summarises_the_right_csv(synthetic, tmp_path):
-    config = pairs_config(synthetic.left)["pairs"]["orders"]["right"]
-    target = CsvAnchorTarget(config, synthetic.right, tmp_path)
-    assert target.preflight()["ok"]
-    counts = target.partition_counts("2026-01-01", "2026-01-31")
-    assert counts["2026-01-15"] == 27 and max(counts) <= "2026-01-31"
-    manifest = _manifest({"mode": "fraction", "rate": 0.25}, keys=("order_id",))
-    manifest["columns"], manifest["col_map"] = ["AMOUNT"], {"AMOUNT": "amount"}
-    stats = target.window_statistics(
-        manifest, {"bucket": "2026-01-01", "partitions": ["2026-01-02"]}
-    )
-    assert 0 < stats["amount"]["n_total"] < 30
-    manifest["col_type_overrides"] = {"AMOUNT": "categorical"}
-    stats = target.window_statistics(
-        manifest, {"bucket": "2026-01-01", "partitions": ["2026-01-02"]}
-    )
-    assert stats["amount"]["col_type"] == "categorical"
-
-
-def test_csv_anchor_target_preflight_reports_problems(tmp_path):
-    missing = CsvAnchorTarget({"table": "t", "date_col": "d"}, tmp_path, tmp_path)
-    assert missing.preflight()["ok"] is False
-    (tmp_path / "t.csv").write_text("x\n1\n")
-    assert "missing column d" in missing.preflight()["error"]
 
 
 def test_fixed_sample_normalizes_left_key_tuples_per_family():

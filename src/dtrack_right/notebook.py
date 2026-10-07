@@ -7,7 +7,8 @@
 # MAGIC A job cluster is a fresh environment: the first cell installs the two packages the runtime may lack
 # MAGIC (`openpyxl` for the Excel report, `boto3` only when `work` is an `s3://` location). Alternatively
 # MAGIC attach `src/dtrack_right/requirements.txt` as a job library and delete that cell.
-# MAGIC `work`/`report` are Volume paths, or `s3://` URLs read with boto3; for the latter on compute without an
+# MAGIC `run_s3` is the stable runs root on a Volume, or an `s3://` URL read with boto3. The report is
+# MAGIC always published under the resolved run's `report/`. For S3 on compute without an
 # MAGIC instance profile, `aws_secret_scope` names a secret scope holding the AWS key (see tests/live/provision.py).
 
 # COMMAND ----------
@@ -29,9 +30,8 @@ sys.path.insert(0, os.path.dirname(os.getcwd()))
 from dtrack_right.job import run
 from dtrack_right.backends.targets import SparkTarget
 
-dbutils.widgets.text("work", "/Volumes/main/dtrack/work/dtrack/v1/runs")
+dbutils.widgets.text("run_s3", "/Volumes/main/dtrack/work/dtrack/v1/runs")
 dbutils.widgets.text("run_id", "")
-dbutils.widgets.text("report", "/Volumes/main/dtrack/report")
 dbutils.widgets.text("gate", "auto")
 dbutils.widgets.text("idle_timeout", "900")
 dbutils.widgets.text("wait_timeout", "1800")
@@ -48,10 +48,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s.%(msecs)03dZ %(level
 # COMMAND ----------
 
 outcome = run(
-    dbutils.widgets.get("work"),
+    dbutils.widgets.get("run_s3"),
     lambda config: SparkTarget(spark, config),
     run_id=dbutils.widgets.get("run_id") or None,
-    report=dbutils.widgets.get("report") or None,
     out_dir="/tmp/dtrack-report",
     gate=dbutils.widgets.get("gate"),
     idle_timeout=float(dbutils.widgets.get("idle_timeout")),

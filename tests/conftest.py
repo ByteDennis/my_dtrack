@@ -11,6 +11,10 @@ GATES = {
     "oracle": ("--run-oracle", "starts an Oracle container via testcontainers; pass --run-oracle"),
     "e2e": ("--run-e2e", "runs the full examples/e2e script; pass --run-e2e"),
     "live": ("--run-live", "talks to real AWS S3 and Databricks; pass --run-live"),
+    "confluence": (
+        "--run-confluence",
+        "needs the local Confluence DC (just confluence up); pass --run-confluence",
+    ),
 }
 
 

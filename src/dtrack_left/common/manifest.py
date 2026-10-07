@@ -7,7 +7,7 @@ from collections import defaultdict
 from typing import Any
 
 from .. import PROTOCOL_VERSION
-from .dates import bucket_date
+from .dates import bucket_date, portable_date_type
 from .hashing import HASH_BUCKET_SPACE, key_family
 
 
@@ -80,8 +80,18 @@ def build_manifest(
         raise ValueError(
             f"{pair_name}: key_families names non-key columns: {', '.join(unknown_keys)}"
         )
+    def family_spec(key: str):
+        configured = key_family_config.get(key)
+        if configured is None and key.lower() == date_col:
+            configured = {
+                "family": "date_type",
+                "left_date_type": portable_date_type(pair["left"].get("date_type")),
+                "right_date_type": portable_date_type(pair["right"].get("date_type")),
+            }
+        return key_family(configured).spec()
+
     try:
-        key_families = [key_family(key_family_config.get(key)).spec() for key in keys]
+        key_families = [family_spec(key) for key in keys]
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{pair_name}: unsupported key families: {exc}") from None
     overrides = dict(pair.get("col_type_overrides") or {})

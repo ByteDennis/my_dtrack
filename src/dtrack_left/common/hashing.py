@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 
 import pandas as pd
 
-from .dates import canonical_date
+from .dates import DateType, canonical_date, portable_date_type, resolve_date_type
 
 NULL = "<<NULL>>"
 PURE_DECIMAL = re.compile(r"^-?[0-9]+\.[0-9]+$")
@@ -239,6 +239,50 @@ class KeyFamily:
         return f"KeyFamily({self.name!r}, {self.spec()!r})"
 
 
+class DateKeyFamily(KeyFamily):
+    """A hash family backed by the two sides' physical DateType rules."""
+
+    name = "date_type"
+
+    def __init__(self, date_type=None, left_date_type=None, right_date_type=None):
+        base = date_type or DateType("date_key")
+        self.left_date_type = resolve_date_type(left_date_type or base)
+        self.right_date_type = resolve_date_type(right_date_type or base)
+        self.steps = ()
+        self.left_steps = self.right_steps = None
+        self._parsed = self._left = self._right = ()
+
+    def normalize(self, value: object, side: str = "left") -> str:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return NULL
+        kind = self.left_date_type if side == "left" else self.right_date_type
+        try:
+            return kind.normalize(value)
+        except (TypeError, ValueError, OverflowError):
+            return NULL
+
+    def sql_dialect(self, expr: str, dialect: str, side: str) -> str:
+        kind = self.left_date_type if side == "left" else self.right_date_type
+        body = kind.normalize_sql(expr, dialect)
+        return f"coalesce(nullif({body}, ''), '{NULL}')"
+
+    def sql(self, expr: str, side: str = "right") -> str:
+        return self.sql_dialect(expr, "spark", side)
+
+    def spec(self) -> dict[str, Any]:
+        return {
+            "family": self.name,
+            "left_date_type": portable_date_type(self.left_date_type),
+            "right_date_type": portable_date_type(self.right_date_type),
+        }
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, DateKeyFamily) and self.spec() == other.spec()
+
+    def __repr__(self) -> str:
+        return f"DateKeyFamily({self.spec()!r})"
+
+
 FAMILIES: dict[str, KeyFamily] = {}
 
 
@@ -260,6 +304,7 @@ register_family("exact", ["trim"])
 register_family("numeric", ["trim", "strip_leading_zeros", "collapse_decimal"])
 register_family("date", ["trim", "date"])
 register_family("digits", ["digits"])
+FAMILIES["date_type"] = DateKeyFamily()
 
 
 # >>> config value -> KeyFamily: "name" | ["step", ...] | {"family"?, "transform"?, "left_transform"?, "right_transform"?} <<< #
@@ -276,6 +321,16 @@ def key_family(spec: Any = "string") -> KeyFamily:
     if isinstance(spec, list | tuple):
         return KeyFamily(spec)
     if isinstance(spec, Mapping):
+        date_fields = {"date_type", "left_date_type", "right_date_type"}
+        if spec.get("family") == "date_type" or set(spec) & date_fields:
+            unknown = set(spec) - {"family", *date_fields}
+            if unknown:
+                raise ValueError(f"unsupported date key family fields: {', '.join(sorted(unknown))}")
+            return DateKeyFamily(
+                spec.get("date_type"),
+                spec.get("left_date_type"),
+                spec.get("right_date_type"),
+            )
         unknown = set(spec) - {"family", "transform", "left_transform", "right_transform"}
         if unknown:
             raise ValueError(f"unsupported key family fields: {', '.join(sorted(unknown))}")

@@ -85,6 +85,27 @@ def test_preflight_runs_an_empty_select_and_reports_failures(monkeypatch):
     }
 
 
+def test_oracle_preflight_probes_and_caches_the_string_date_format(monkeypatch):
+    def respond(sql):
+        if "FETCH FIRST 16 ROWS ONLY" in sql:
+            return ["BUSINESS_DATE"], [("20260101",), ("20260102",)]
+        if "COUNT(*)" in sql:
+            return ["D", "N"], [("20260101", 1)]
+        return ["BUSINESS_DATE"], []
+
+    source, connection, _ = _oracle(monkeypatch, respond, date_type="string")
+    assert source.preflight()["ok"]
+    assert source.config["date_type"] == {"type": "string", "format": "compact"}
+    assert source.partition_counts() == {"2026-01-01": 1}
+    probes = [sql for sql in connection.statements if "FETCH FIRST 16 ROWS ONLY" in sql]
+    assert probes == [
+        (
+            "SELECT BUSINESS_DATE FROM ORDERS WHERE (BUSINESS_DATE IS NOT NULL) "
+            "FETCH FIRST 16 ROWS ONLY"
+        )
+    ]
+
+
 def test_partition_counts_groups_by_day_within_bounds_and_extra_where(monkeypatch):
     rows = [
         (pd.Timestamp("2026-01-01"), 1),
@@ -110,6 +131,19 @@ def test_partition_counts_groups_by_day_within_bounds_and_extra_where(monkeypatc
 def test_query_without_a_result_set_returns_no_rows(monkeypatch):
     source, _, _ = _oracle(monkeypatch, lambda sql: ([], [("ignored",)]))
     assert source.query("BEGIN NULL; END;") == ([], [])
+
+
+def test_oracle_query_is_audited_before_cursor_execute(monkeypatch):
+    events = []
+    source, _, _ = _oracle(monkeypatch, lambda sql: events.append(("execute", sql)) or ([], []))
+    source.set_sql_audit(
+        SimpleNamespace(record=lambda sql, **meta: events.append(("audit", sql, meta)))
+    )
+    source.query("SELECT * FROM HUGE_TABLE")
+    assert events == [
+        ("audit", "SELECT * FROM HUGE_TABLE", {"backend": "oracle", "operation": "query"}),
+        ("execute", "SELECT * FROM HUGE_TABLE"),
+    ]
 
 
 def test_pull_window_selects_date_keys_and_columns_once_over_the_admitted_days(
@@ -170,7 +204,7 @@ def test_unsupported_custom_sampling_sql_fails_before_pulling_a_window(synthetic
 
     output = tmp_path / "must-not-exist.csv"
     with pytest.raises(SamplingSqlNotSupported, match="needs duckdb SQL"):
-        _orders(synthetic, date_type="string_dash").pull_window(
+            _orders(synthetic, date_type="string").pull_window(
             ["2026-01-01"],
             ["AMOUNT"],
             output,
@@ -234,7 +268,7 @@ def _orders(synthetic, **config):
 
 
 def test_file_source_counts_every_real_partition_exactly(synthetic):
-    source = _orders(synthetic, date_type="string_dash")
+    source = _orders(synthetic, date_type="string")
     assert source.preflight()["ok"]
     counts = source.partition_counts("2026-01-01", "2026-02-28")
     assert len(counts) == 58 and sum(counts.values()) == synthetic.summary["orders"]["left_rows"]
@@ -248,7 +282,7 @@ def test_file_source_counts_every_real_partition_exactly(synthetic):
 def test_file_source_pull_window_matches_the_old_pandas_reader_byte_for_byte(synthetic, tmp_path):
     days = [f"2026-01-{d:02d}" for d in range(1, 31) if d not in (15, 31)]
     columns = ["BUSINESS_DATE", "ORDER_ID", "AMOUNT", "STATUS"]
-    out = _orders(synthetic, date_type="string_dash").pull_window(
+    out = _orders(synthetic, date_type="string").pull_window(
         days, ["AMOUNT", "STATUS"], tmp_path / "x" / "w.csv", key_columns=["ORDER_ID"]
     )
     frame = pd.read_csv(synthetic.left / "ORDERS.csv", dtype=object)
@@ -259,7 +293,7 @@ def test_file_source_pull_window_matches_the_old_pandas_reader_byte_for_byte(syn
 
 
 def test_file_source_fraction_pushdown_matches_the_python_reference(synthetic, tmp_path):
-    source = _orders(synthetic, date_type="string_dash")
+    source = _orders(synthetic, date_type="string")
     days = ["2026-01-01", "2026-01-02", "2026-01-03"]
     full = source.pull_window(days, ["AMOUNT"], tmp_path / "full.csv", key_columns=["ORDER_ID"])
     expected = sample_csv(
@@ -277,7 +311,7 @@ def test_file_source_fraction_pushdown_matches_the_python_reference(synthetic, t
 
 
 def test_file_source_selects_fixed_keys_in_duckdb_before_writing_csv(synthetic, tmp_path):
-    source = _orders(synthetic, date_type="string_dash")
+    source = _orders(synthetic, date_type="string")
     days = ["2026-01-01", "2026-01-02", "2026-01-03"]
     full = source.pull_window(days, [], tmp_path / "all.csv", key_columns=["ORDER_ID"])
     expected = sample_csv(
@@ -373,10 +407,10 @@ def test_query_patch_and_date_format_over_a_glob_of_files(tmp_path):
 @pytest.mark.parametrize(
     ("date_type", "raw_days"),
     [
-        ("string_compact", ["20260101", "20260102"]),
-        ("string_sas", [" 01JAN2026", "02JAN2026 "]),
-        ("string_sas_date9", ["01JAN2026", "02JAN2026"]),
-        ("sas_days", ["24107", "24108.0"]),
+        ("string", ["20260101", "20260102"]),
+        ("sas", [" 01JAN2026", "02JAN2026 "]),
+        ("sas", ["24107", "24108.0"]),
+        ("sas", ["01JAN2026:09:45:35", "02JAN2026:00:00:00"]),
     ],
 )
 def test_file_source_filters_supported_text_and_sas_dates(tmp_path, date_type, raw_days):
@@ -391,6 +425,17 @@ def test_file_source_filters_supported_text_and_sas_dates(tmp_path, date_type, r
     }
     pulled = source.pull_window(["2026-01-02"], ["V"], tmp_path / f"{date_type}-out.csv")
     assert pulled.read_text().splitlines() == ["D,V", f"{raw_days[1]},b"]
+
+
+def test_file_source_rejects_mixed_date_formats(tmp_path):
+    path = tmp_path / "mixed.csv"
+    path.write_text("D,V\n01JAN2026,a\n24108,b\n")
+    source = FileSource(
+        {"source": "file", "path": str(path), "date_col": "D", "date_type": "sas"}
+    )
+    health = source.preflight()
+    assert health["ok"] is False
+    assert "mixed SAS date formats" in health["error"]
 
 
 def test_file_formats_come_from_the_suffix_or_config_and_unknown_ones_fail():

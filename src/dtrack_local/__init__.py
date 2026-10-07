@@ -6,12 +6,13 @@
 #   preflight(run)            Left SELECT ... WHERE 1=0, Right DESCRIBE QUERY
 #   row_check(run, gate="auto"|"manual"|"ratio:x")   Stage 1: counts, reconcile, gate, manifests
 #   col_check(run)            Stage 2: pull, statistics, compare (units skipped when already done)
-#   report(run, report_s3=None)                      <run>/report/, optional report store publish
+#   report(run)                                      <run>/report/
 #   backup(run, s3_root, include_data=False)         <run> -> s3_root/<run_id>/ (not _local/)
-#   run_all(run, gate=, report_s3=, backup_s3=, include_data=)
+#   run_all(run, gate=, run_s3=, include_data=)
 #
-# Run folder <out>/<run_id>/ (same layout as S3, so `dtrack tools rollback --run` works on it)
-#   row_check/  manifest/  _INDEX/  units/  results/  dead/  reports/  report/  _STATUS.json
+# Run folder <out>/<run_id>/ (same layout as S3, so `rollback --run-s3 <out> --run-id` works)
+#   row_check/  manifest/  _INDEX/  units/  results/  dead/  reports/  report/  audit.txt
+#   audit/ immutable per-statement events; audit_errors/ best-effort write failures; _STATUS.json
 #   _local/left/  _local/right/   pulled window CSVs;  _local/data.duckdb   every pulled window
 #   _local/logs/errors.log         ERROR/CRITICAL records and unexpected tracebacks; not console
 #   (tables left__<pair>, right__<pair>, column dtrack_bucket)

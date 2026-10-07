@@ -81,3 +81,21 @@ def test_bad_family_specs_are_refused(common, spec, message):
 
 def test_spark_literal_escapes_quotes_and_backslashes(common):
     assert common.hashing.spark_literal("o'k\\") == "'o\\'k\\\\'"
+
+
+def test_date_type_family_reuses_different_left_and_right_physical_dates(common):
+    family = common.hashing.key_family(
+        {
+            "family": "date_type",
+            "left_date_type": {"type": "sas", "format": "days"},
+            "right_date_type": {"type": "string", "format": "dash"},
+        }
+    )
+    assert family.normalize("24108.0", "left") == "2026-01-02"
+    assert family.normalize("2026-01-02", "right") == "2026-01-02"
+    assert family.spec() == {
+        "family": "date_type",
+        "left_date_type": {"type": "sas", "format": "days"},
+        "right_date_type": {"type": "string", "format": "dash"},
+    }
+    assert common.hashing.key_family(family.spec()) == family

@@ -20,6 +20,14 @@ _Avoid_: Target, cloud copy
 The canonical date-valued reconciliation identity on which exact row-count equality is decided.
 _Avoid_: Bucket, Window
 
+**Date type**:
+The configured family of a side's partition-column encoding: date, string, number, or SAS. A probe resolves string and SAS families to one concrete format before reconciliation.
+_Avoid_: Timestamp type, date format name
+
+**Canonical day**:
+The ISO calendar date to which side-specific date encodings are normalized before partition comparison or date-key hashing.
+_Avoid_: Raw date, timestamp
+
 **Window**:
 A collection of admitted Partitions scanned together for sampled column statistics.
 _Avoid_: Partition, batch
@@ -51,4 +59,3 @@ _Avoid_: Report store, archive
 **Report store**:
 The long-lived destination for finalized reconciliation evidence.
 _Avoid_: Work store, queue
-

@@ -4,8 +4,9 @@ import pytest
 from support import MemoryStore
 
 from dtrack_left.backends.store import fetch_report
+from dtrack_right.backends.store import VolumeStore
 from dtrack_right.checks.col_check import compare_statistics
-from dtrack_right.report import build_report, publish_report
+from dtrack_right.report import build_report
 from dtrack_right.report.build import compare_col_csv_bytes
 
 LEFT = {
@@ -93,16 +94,14 @@ def test_build_report_ignores_left_documents_and_key_files(tmp_path):
     )
 
 
-def test_publish_then_fetch_round_trips_the_report_set(tmp_path):
+def test_report_files_can_be_fetched_from_a_run_store(tmp_path):
     files = build_report(_store(), tmp_path / "out")
-    summary = json.loads(files["summary.json"].read_text())
-    report_store = MemoryStore()
-    keys = publish_report(report_store, "run", files, summary)
-    assert keys[-1] == "latest/pointer.json" and report_store.events[-1] == (
-        "put",
-        "latest/pointer.json",
-    )
-    fetched = fetch_report(report_store, tmp_path / "fetched")
+    runs_store = VolumeStore(tmp_path / "runs")
+    run_store = runs_store.child("run")
+    for name, path in files.items():
+        run_store.put_bytes(f"report/{name}", path.read_bytes(), content_type="")
+    run_store.put_json("_STATUS.json", {"state": "complete"})
+    fetched = fetch_report(runs_store, tmp_path / "fetched")
     assert fetched["run_id"] == "run"
     assert sorted(fetched["files"]) == sorted(files)
     assert (tmp_path / "fetched" / "report.xlsx").read_bytes() == files["report.xlsx"].read_bytes()
@@ -144,22 +143,3 @@ def test_a_run_without_col_results_still_reports_row_counts(tmp_path):
 def test_build_report_needs_at_least_one_row_check_document(tmp_path):
     with pytest.raises(ValueError, match="no row_check documents"):
         build_report(MemoryStore(), tmp_path)
-
-
-def test_publish_uses_a_content_type_per_file(tmp_path):
-    (tmp_path / "blob.bin").write_bytes(b"x")
-    (tmp_path / "s.json").write_text("{}")
-    report_store = MemoryStore()
-    seen = []
-    report_store.put_bytes = lambda key, body, content_type: seen.append((key, content_type))
-    publish_report(
-        report_store,
-        "r",
-        {"blob.bin": tmp_path / "blob.bin", "s.json": tmp_path / "s.json"},
-        {"status": "DONE", "findings": {"a": 1, "b": 2}},
-    )
-    assert seen == [
-        ("history/r/blob.bin", "application/octet-stream"),
-        ("history/r/s.json", "application/json"),
-    ]
-    assert report_store.get_json("latest/pointer.json")["findings"] == 3

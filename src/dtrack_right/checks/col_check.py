@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any
 
+from ..common.audit import SqlAudit, attach_sql_audit
 from ..common.manifest import unit_id
 
 
@@ -182,7 +183,10 @@ class ColCheck:
     def _target(self, manifest):
         pair = manifest["pair"]
         if pair not in self.targets:
-            self.targets[pair] = self.target_factory(manifest["right"])
+            self.targets[pair] = attach_sql_audit(
+                self.target_factory(manifest["right"]),
+                SqlAudit(self.store, "right", pair=pair),
+            )
         return self.targets[pair]
 
     def poll(self):

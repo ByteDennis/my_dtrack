@@ -3,6 +3,7 @@ set shell := ["bash", "-cu"]
 moto_env := "AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 DTRACK_S3_ENDPOINT_URL=http://127.0.0.1:4566"
 live_py := "UV_PROJECT_ENVIRONMENT=.venv-live uv run --python 3.12 --group live"
 compose := "docker compose -p dtrack -f docker/compose.s3.yaml"
+confluence_compose := "docker compose -p dtrack-confluence -f docker/compose.confluence.yaml"
 
 # show this list
 default:
@@ -20,7 +21,7 @@ dev action="sync":
       *)     echo "usage: just dev sync|lint|fmt|build|hooks" >&2; exit 2 ;; \
     esac
 
-# unit | cov | moto | spark | oracle | e2e | local | all | debug | attach  [pytest args]
+# unit | cov | moto | spark | oracle | e2e | confluence | local | all | debug | attach  [pytest args]
 [group('test')]
 [positional-arguments]
 test kind="unit" *args:
@@ -31,11 +32,12 @@ test kind="unit" *args:
       spark)  uv run --group spark pytest -q --run-spark tests/local/spark "$@" ;; \
       oracle) uv run pytest -q --run-oracle tests/local/oracle "$@" ;; \
       e2e)    just s3 up && {{moto_env}} uv run pytest -q --run-e2e tests/local/e2e "$@" ;; \
+      confluence) uv run --extra confluence pytest -q --run-confluence tests/local/confluence "$@" ;; \
       local)  just test moto && just test spark && just test oracle ;; \
       all)    just test unit && just test local ;; \
       debug)  uv run pytest -x -s --pdb --pdbcls=IPython.terminal.debugger:TerminalPdb "$@" ;; \
       attach) uv run python -m debugpy --listen 5678 --wait-for-client -m pytest -x -s "$@" ;; \
-      *)      echo "usage: just test unit|cov|moto|spark|oracle|e2e|local|all|debug|attach [args]" >&2; exit 2 ;; \
+      *)      echo "usage: just test unit|cov|moto|spark|oracle|e2e|confluence|local|all|debug|attach [args]" >&2; exit 2 ;; \
     esac
 
 # sync | setup | test | teardown  [args]   real S3 + Databricks (tests/live/README.md)
@@ -60,6 +62,16 @@ s3 action="up":
       down)   {{compose}} down ;; \
       status) {{compose}} ps ;; \
       *)      echo "usage: just s3 up|down|status" >&2; exit 2 ;; \
+    esac
+
+# up | down | status   local Confluence Data Center 9.2 on 127.0.0.1:8090 (3-hour timebomb license; up again to renew)
+[group('services')]
+confluence action="up":
+    @case "{{action}}" in \
+      up)     {{confluence_compose}} up -d --wait && uv run --no-sync python tests/local/confluence/provision.py ;; \
+      down)   {{confluence_compose}} down -v ;; \
+      status) {{confluence_compose}} ps ;; \
+      *)      echo "usage: just confluence up|down|status" >&2; exit 2 ;; \
     esac
 
 # both processes against Moto -> examples/e2e/{execution.txt,logs,output}

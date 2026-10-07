@@ -8,7 +8,7 @@ import pytest
 from support import MemoryStore, pairs_config
 
 from dtrack_local import pipeline
-from dtrack_right.backends.targets import CsvAnchorTarget
+from dtrack_local.csv_target import CsvAnchorTarget
 
 
 # >>> the full local plan on the e2e synthetic files: CSV anchor as the Right side, report and backup to S3 <<< #
@@ -21,11 +21,7 @@ def test_run_all_matches_the_distributed_protocol_and_backs_up(synthetic, tmp_pa
             pairs_config(synthetic.left), run_id="r1", out=tmp_path / "runs", target_factory=anchor
         )
 
-    outcome = pipeline.run_all(
-        open_local(),
-        report_s3=f"s3://{s3_bucket}/report",
-        backup_s3=f"s3://{s3_bucket}/runs",
-    )
+    outcome = pipeline.run_all(open_local(), run_s3=f"s3://{s3_bucket}/runs")
     assert outcome["status"] == "DONE" and outcome["findings"] == {
         "row_count_diff": 1,
         "partition_missing": 2,
@@ -40,9 +36,13 @@ def test_run_all_matches_the_distributed_protocol_and_backs_up(synthetic, tmp_pa
     assert outcome["col_check"]["compared"] == 11 and outcome["col_check"]["dead"] == 0
     assert set(outcome["landing"]) == {"left__orders", "left__customers"}
     assert outcome["error_log"].endswith("r1/_local/logs/errors.log")
+    audit = (tmp_path / "runs/r1/audit.txt").read_text()
+    assert "side=left backend=duckdb" in audit and "SELECT" in audit
+    assert list((tmp_path / "runs/r1/audit").glob("*.txt"))
     keys = {row["Key"] for row in boto3.client("s3").list_objects_v2(Bucket=s3_bucket)["Contents"]}
     assert "runs/r1/row_check/orders.json" in keys and "runs/r1/report/index.html" in keys
-    assert "report/latest/pointer.json" in keys
+    assert "runs/r1/report/summary.json" in keys
+    assert "runs/r1/audit.txt" in keys and any(key.startswith("runs/r1/audit/") for key in keys)
     assert not any(key.startswith("runs/r1/_local/") for key in keys)
 
     again = pipeline.run_all(open_local())
@@ -55,12 +55,16 @@ class FakeWarehouse:
         self.sql = []
         self.rows_out = rows
 
-    def to_csv(self, sql, output, columns):
+    def to_csv(self, sql, output, columns, **_kwargs):
         from dtrack_left.backends.sources import write_rows
 
         self.sql.append(sql)
         write_rows(output, columns, self.rows_out)
         return len(self.rows_out)
+
+    def rows(self, sql, **_kwargs):
+        self.sql.append(sql)
+        return [(row[0],) for row in self.rows_out[:16]]
 
 
 MANIFEST = {
@@ -87,7 +91,7 @@ def test_warehouse_target_pulls_native_columns_and_computes_statistics_locally(t
     stats = target.window_statistics(MANIFEST, window)
     assert set(stats) == {"amount", "status"} and stats["amount"]["n_total"] == 2
     assert stats["status"]["n_missing"] == 1
-    sql = warehouse.sql[0]
+    sql = next(item for item in warehouse.sql if item.startswith("SELECT `business_date`,"))
     assert sql.startswith("SELECT `business_date`, `order_id`, `amount`, `status`")
     assert " AS STRING) AS " not in sql
     assert "FROM `c`.`s`.`orders` WHERE" in sql and "md5" not in sql
@@ -105,7 +109,8 @@ def test_pushed_sample_filters_in_the_warehouse_by_default(tmp_path):
         "sample": {"mode": "fraction", "threshold": 2**32, "rate": 1.0},
     }
     stats = target.window_statistics(manifest, {"bucket": "b", "partitions": ["2026-01-01"]})
-    assert "md5(" in warehouse.sql[0] and stats["amount"]["n_total"] == 1
+    pulled = next(item for item in warehouse.sql if item.startswith("SELECT `dt`,"))
+    assert "md5(" in pulled and stats["amount"]["n_total"] == 1
     assert not (tmp_path / "orders" / "b" / "right.sampled.csv").exists()
 
 
@@ -121,7 +126,8 @@ def test_disabled_pushdown_samples_once_after_the_full_window_is_landed(tmp_path
     )
     manifest = {**MANIFEST, "sample": {"mode": "fraction", "threshold": 2**31, "rate": 0.5}}
     stats = target.window_statistics(manifest, {"bucket": "b", "partitions": ["2026-01-01"]})
-    assert "md5(" not in warehouse.sql[0]
+    pulled = next(item for item in warehouse.sql if item.startswith("SELECT `dt`,"))
+    assert "md5(" not in pulled
     assert (tmp_path / "orders" / "b" / "right.sampled.csv").exists()
     assert 0 < stats["amount"]["n_total"] < 8
     assert landing.tables() == {"right__orders": 8}

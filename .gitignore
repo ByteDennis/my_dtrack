@@ -14,6 +14,7 @@ reports/
 .dtrack-work/
 .venv-live/
 tests/live/live.env
+tests/local/confluence/confluence.env
 .coverage-html/
 .coverage
 tests/live/.provision.json

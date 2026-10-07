@@ -14,12 +14,26 @@ def _config(synthetic, tmp_path):
 
 
 def test_row_check_command_writes_left_counts_to_s3(s3_bucket, synthetic, tmp_path, capsys):
-    uri = f"s3://{s3_bucket}/runs/r1"
+    root = f"s3://{s3_bucket}/runs"
     config = _config(synthetic, tmp_path)
-    argv = ["row-check", "--config", config, "--s3", uri, "--run-id", "r1", "--pair", "orders"]
+    argv = [
+        "row-check",
+        "--config",
+        config,
+        "--run-s3",
+        root,
+        "--run-id",
+        "r1",
+        "--pair",
+        "orders",
+    ]
     assert main([*argv, "--workers", "1", "--log-level", "debug"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"pairs": 1, "run_id": "r1"}
-    store = S3Store(uri)
+    assert json.loads(capsys.readouterr().out) == {
+        "pairs": 1,
+        "run": f"{root}/r1",
+        "run_id": "r1",
+    }
+    store = S3Store(f"{root}/r1")
     assert store.get_json("row_check/_LEFT_CLOSED") == {"pairs": ["orders"], "run_id": "r1"}
     assert store.get_json("row_check/orders.left.json")["counts"]["2026-01-15"] == 30
 
@@ -27,11 +41,21 @@ def test_row_check_command_writes_left_counts_to_s3(s3_bucket, synthetic, tmp_pa
 def test_col_check_command_publishes_units_once_manifests_are_released(
     s3_bucket, synthetic, tmp_path, capsys, monkeypatch
 ):
-    uri = f"s3://{s3_bucket}/runs/r2"
-    monkeypatch.setenv("DTRACK_S3", uri)
-    assert main(["row-check", "--config", _config(synthetic, tmp_path), "--pair", "orders"]) == 0
+    root = f"s3://{s3_bucket}/runs"
+    monkeypatch.setenv("DTRACK_RUN_S3", root)
+    assert main(
+        [
+            "row-check",
+            "--config",
+            _config(synthetic, tmp_path),
+            "--run-id",
+            "r2",
+            "--pair",
+            "orders",
+        ]
+    ) == 0
     capsys.readouterr()
-    store = S3Store(uri)
+    store = S3Store(f"{root}/r2")
     left = store.get_json("row_check/orders.left.json")
     assert left["run_id"] == "r2"
     manifest = all_match_manifest(
@@ -41,14 +65,38 @@ def test_col_check_command_publishes_units_once_manifests_are_released(
     store.close_row_check(["orders"])
     argv = ["col-check", "--work-dir", str(tmp_path / "work"), "--wait-timeout", "1"]
     assert main([*argv, "--poll-interval", "0", "--pull-workers", "1", "--wip", "50"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"pairs": ["orders"], "published_units": 8}
+    assert json.loads(capsys.readouterr().out) == {
+        "pairs": ["orders"],
+        "published_units": 8,
+        "run": f"{root}/r2",
+        "run_id": "r2",
+    }
     assert store.get_json("manifest/_CLOSED")["expected_units"] == 8
 
 
-# >>> the run id is the --s3 folder, so data, documents and report always share one name <<< #
-def test_row_check_refuses_a_run_id_that_differs_from_the_run_folder(synthetic, tmp_path, capsys):
+# >>> --run-s3 stays stable; row-check appends either the supplied or generated run id <<< #
+def test_row_check_appends_a_generated_run_id_to_the_runs_root(
+    s3_bucket, synthetic, tmp_path, capsys
+):
+    root = f"s3://{s3_bucket}/runs"
     config = _config(synthetic, tmp_path)
-    assert main(["row-check", "--config", config, "--s3", "s3://b/runs/A", "--run-id", "B"]) == 2
-    assert "differs from the --s3 run folder 'A'" in capsys.readouterr().err
-    assert main(["row-check", "--config", config, "--s3", "s3://b"]) == 2
-    assert "must name the run folder" in capsys.readouterr().err
+    assert main(["row-check", "--config", config, "--run-s3", root, "--pair", "orders"]) == 0
+    outcome = json.loads(capsys.readouterr().out)
+    assert outcome["run"] == f"{root}/{outcome['run_id']}"
+    assert S3Store(outcome["run"]).exists("row_check/orders.left.json")
+
+
+def test_row_check_rejects_a_nested_run_id(s3_bucket, synthetic, tmp_path, capsys):
+    root = f"s3://{s3_bucket}/runs"
+    assert main(
+        [
+            "row-check",
+            "--config",
+            _config(synthetic, tmp_path),
+            "--run-s3",
+            root,
+            "--run-id",
+            "../other",
+        ]
+    ) == 2
+    assert "one non-empty folder" in capsys.readouterr().err

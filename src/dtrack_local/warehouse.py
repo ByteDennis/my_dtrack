@@ -36,6 +36,7 @@ class Warehouse:
         disposition: str = "external_links",
         poll: float = 2.0,
         fetch=download_chunk,
+        sql_audit=None,
     ):
         if disposition not in DISPOSITIONS:
             raise ValueError(
@@ -48,8 +49,13 @@ class Warehouse:
         self.disposition = disposition
         self.poll = poll
         self.fetch = fetch
+        self.sql_audit = sql_audit
 
-    def execute(self, sql: str):
+    def set_sql_audit(self, audit):
+        self.sql_audit = audit
+        return self
+
+    def execute(self, sql: str, *, operation: str = "statement"):
         from databricks.sdk.service.sql import (
             Disposition,
             ExecuteStatementRequestOnWaitTimeout,
@@ -57,6 +63,8 @@ class Warehouse:
         )
 
         log.debug("warehouse %s: %s", self.warehouse_id, sql)
+        if self.sql_audit is not None:
+            self.sql_audit.record(sql, backend="databricks-sql", operation=operation)
         api = self.client.statement_execution
         response = api.execute_statement(
             statement=sql,
@@ -93,13 +101,20 @@ class Warehouse:
                 )
             )
 
-    def rows(self, sql: str) -> list[tuple[Any, ...]]:
-        response = self.execute(sql)
+    def rows(self, sql: str, *, operation: str = "query") -> list[tuple[Any, ...]]:
+        response = self.execute(sql, operation=operation)
         return [tuple(row) for chunk in self.chunks(response) for row in chunk]
 
     # >>> stream a query into a CSV with the same writer as every Left pull; returns the data row count <<< #
-    def to_csv(self, sql: str, output: str | Path, columns: list[str]) -> int:
-        response = self.execute(sql)
+    def to_csv(
+        self,
+        sql: str,
+        output: str | Path,
+        columns: list[str],
+        *,
+        operation: str = "pull_window",
+    ) -> int:
+        response = self.execute(sql, operation=operation)
         counted = [0]
 
         def rows():

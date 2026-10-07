@@ -73,7 +73,7 @@ login you already use is enough. Databricks Connect additionally needs *compute*
 | 4 | `dtrack_right/test_databricks_target.py::…counts…` | Databricks Connect works; the synthetic Right tables were created in your schema | profile, compute, `DTRACK_LIVE_SCHEMA` |
 | 5 | `dtrack_right/test_databricks_target.py::…statistics…` | `SparkTarget`'s one query on the cluster equals the pandas rule | same |
 | 6 | `dtrack_right/test_volume.py::…work…` | the work Volume **is** the work S3 prefix, both directions | `DTRACK_LIVE_S3_WORK`, `DTRACK_LIVE_VOLUME_WORK` |
-| 7 | `dtrack_right/test_volume.py::…report…` | the report Volume is the report S3 prefix | `DTRACK_LIVE_S3_REPORT`, `DTRACK_LIVE_VOLUME_REPORT` |
+| 7 | `dtrack_right/test_volume.py::…report…` | `<run>/report/` uses the same work Volume and S3 prefix | `DTRACK_LIVE_S3_WORK`, `DTRACK_LIVE_VOLUME_WORK` |
 | 8 | `test_job_flow.py` | the whole run: package uploaded to the workspace, one-time job on `notebook.py`, `row-check` + `col-check` here, report fetched from S3 with the expected findings | all of the above + `DTRACK_LIVE_WORKSPACE_DIR` |
 
 ```bash
@@ -95,7 +95,7 @@ just live test                              # everything
   synthetic Right CSVs and drop them afterwards.
 - **Workspace folder** `DTRACK_LIVE_WORKSPACE_DIR`: step 8 uploads `src/dtrack_right` there
   (`notebook.py` becomes a notebook, the rest plain files) and submits a one-time run with the same
-  parameters a scheduled Job would pass: `work`, `run_id`, `report`, `gate`, `idle_timeout`,
+  parameters a scheduled Job would pass: `run_s3`, `run_id`, `gate`, `idle_timeout`,
   `wait_timeout`.
 
 ## 4. Clean-up

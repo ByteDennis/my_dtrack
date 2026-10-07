@@ -6,10 +6,10 @@ import sys
 import click
 
 from ..backends.sources import source_from_config
-from ..backends.store import fetch_report
+from ..backends.store import fetch_report, validate_run_id
 from ..checks import rollback as rollbacks
 from .config import load_config
-from .options import CONTEXT_SETTINGS, config_option, emit_json, log_level_option, store_option
+from .options import CONTEXT_SETTINGS, config_option, emit_json, log_level_option
 
 log = logging.getLogger("dtrack.left.debug")
 
@@ -23,19 +23,30 @@ def tools_group():
     pass
 
 
-# >>> dtrack tools fetch-report: download a finished run's report set from the report store <<< #
+# >>> dtrack tools fetch-report: download report/ from one run folder <<< #
 @click.command(
     "fetch-report",
-    help="download a finished run's report set from the report store",
+    help="download report/ from a finished run folder",
     context_settings=CONTEXT_SETTINGS,
 )
-@store_option("--report-s3", "DTRACK_REPORT_S3", "report location, s3://bucket/prefix")
+@click.option(
+    "--run-s3",
+    "runs_uri",
+    required=True,
+    envvar="DTRACK_RUN_S3",
+    help="stable runs root: s3://bucket/.../runs or a local/Volume path",
+)
+@click.option("--run-id", help="run below --run-s3; defaults to the newest completed run")
 @click.option("--out", required=True, type=click.Path(file_okay=False), help="local folder")
-@click.option("--run-id", help="defaults to the run named by latest/pointer.json")
 @log_level_option
 @emit_json
-def fetch_report_command(store, out, run_id):
-    outcome = fetch_report(store, out, run_id=run_id)
+def fetch_report_command(runs_uri, run_id, out):
+    from dtrack_right.backends.store import open_store
+
+    try:
+        outcome = fetch_report(open_store(runs_uri), out, run_id=run_id)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
     files = {name: str(path) for name, path in sorted(outcome["files"].items())}
     return {"run_id": outcome["run_id"], "files": files}
 
@@ -78,20 +89,27 @@ def doctor_command(config):
     return {**results, "exit_code": 0 if all(row["ok"] for row in results.values()) else 1}
 
 
-# >>> dtrack tools rollback: delete one pair's signals so a stage is produced again (dry run unless --yes) <<< #
+# >>> dtrack tools rollback: safely reset one, several, or all pairs (dry run unless --yes) <<< #
 @click.command(
     "rollback",
-    help="delete one pair's Stage 1/2 signals so they are produced again; dry run unless --yes",
+    help="delete selected pairs' Stage 1/2 signals so they are produced again; dry run unless --yes",
     context_settings=CONTEXT_SETTINGS,
 )
 @click.option(
-    "--run",
-    "location",
+    "--run-s3",
+    "runs_uri",
     required=True,
-    envvar="DTRACK_S3",
-    help="run folder: s3://bucket/.../runs/<run_id> or a local run folder",
+    envvar="DTRACK_RUN_S3",
+    help="stable runs root (S3, Volume, or local directory)",
 )
-@click.option("--pair", required=True, help="the pair to roll back")
+@click.option("--run-id", required=True, envvar="DTRACK_RUN_ID", help="exact run to modify")
+@click.option(
+    "--pair",
+    "pairs",
+    multiple=True,
+    required=True,
+    help="pair to roll back (repeatable or comma-separated); use 'all' alone for every run pair",
+)
 @click.option(
     "--stage",
     type=click.Choice(rollbacks.STAGES),
@@ -102,15 +120,23 @@ def doctor_command(config):
     "--config",
     "config_path",
     type=click.Path(exists=True, dir_okay=False),
-    help="with --stage col: rebuild the manifest from this config (Stage 2 settings only)",
+    help="col: rebuild manifests; row: immediately rerun Left row-check with this config",
 )
 @click.option("--yes", "apply", is_flag=True, help="delete; without it only the plan is printed")
 @log_level_option
 @emit_json
-def rollback_command(location, pair, stage, config_path, apply):
+def rollback_command(runs_uri, run_id, pairs, stage, config_path, apply):
+    try:
+        run_id = validate_run_id(run_id)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
+    location = runs_uri.rstrip("/\\") + "/" + run_id
     config = load_config(config_path) if config_path else None
     store = rollbacks.open_location(location)
-    outcome = rollbacks.rollback(store, pair, stage, config=config, apply=apply)
+    try:
+        outcome = rollbacks.rollback_many(store, pairs, stage, config=config, apply=apply)
+    except (KeyError, ValueError) as exc:
+        raise click.UsageError(str(exc)) from None
     if not apply:
         outcome["dry_run"] = "nothing deleted; add --yes (stop the Right job first)"
     elif outcome["failed"]:
@@ -141,10 +167,22 @@ def run_under_debugger(main, argv: list[str], *, attach: int | None = None) -> i
         return 1
 
 
-# >>> dtrack tools debug [--attach [PORT]] -- <command ...>: the same CLI under a debugger <<< #
+# >>> local Click runner without the production exception boundary, so ipdb keeps the traceback <<< #
+def _local_debug_main(argv: list[str]) -> int:
+    from dtrack_local.cli import cli as local_cli
+
+    code = local_cli.main(
+        args=argv,
+        prog_name="python -m dtrack_local",
+        standalone_mode=False,
+    )
+    return code if isinstance(code, int) else 0
+
+
+# >>> dtrack tools debug [--local] [--attach [PORT]] -- <command ...>: either CLI in a debugger <<< #
 @click.command(
     "debug",
-    help="run a dtrack command under ipdb, or wait for a VS Code attach",
+    help="run a dtrack or local command under ipdb, or wait for a VS Code attach",
     context_settings={
         **CONTEXT_SETTINGS,
         "ignore_unknown_options": True,
@@ -159,14 +197,22 @@ def run_under_debugger(main, argv: list[str], *, attach: int | None = None) -> i
     default=None,
     help="wait for VS Code on this port (bare --attach = 5678) instead of ipdb",
 )
+@click.option(
+    "--local",
+    "local_mode",
+    is_flag=True,
+    help="debug the python -m dtrack_local command tree",
+)
 @click.argument("argv", nargs=-1, type=click.UNPROCESSED)
-def debug_command(attach, argv):
+def debug_command(attach, local_mode, argv):
     from . import main
 
     argv = [item for item in argv if item != "--"]
     if not argv:
         raise click.UsageError(
-            "give the command to debug, e.g. dtrack tools debug -- row-check ..."
+            "give the command to debug, e.g. dtrack tools debug -- row-check ... "
+            "or dtrack tools debug --local -- run ..."
         )
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    return run_under_debugger(main, argv, attach=attach)
+    target = _local_debug_main if local_mode else main
+    return run_under_debugger(target, argv, attach=attach)

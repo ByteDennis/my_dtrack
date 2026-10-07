@@ -1,8 +1,8 @@
 # dtrack: the Left-side CLI (python -m dtrack / python -m dtrack_left / dtrack)
 #
 # Commands
-#   row-check     --config c.json --s3 s3://.../runs/<run_id> [--run-id] [--pair P ...] [--workers 4]
-#   col-check     --s3 s3://.../runs/<run_id> [--pair P] [--work-dir] [--pull-workers 2]
+#   row-check     --config c.json --run-s3 s3://.../runs [--run-id] [--pair P ...] [--workers 4]
+#   col-check     --run-s3 s3://.../runs [--run-id] [--pair P] [--work-dir] [--pull-workers 2]
 #                 [--stat-workers 2] [--wip 200] [--wait-timeout 1800] [--poll-interval 3]
 #   tools         fetch-report, doctor, rollback, debug, blog, and dbx helpers
 #                 (the installed dtrack CLI also adds the local key-check helper)
@@ -33,14 +33,12 @@
 #   the DESCRIBE spelling (column types are looked up by exact name)
 #
 # Both sides: date_col (required) and date_type
-#   date | timestamp | datetime   DATE 'YYYY-MM-DD' literals; counted and filtered per calendar day
-#                                 (TRUNC / to_date / CAST AS DATE; col >= day AND col < day + 1)
-#   string_dash                    'YYYY-MM-DD' strings
-#   string_compact                 'YYYYMMDD' strings
-#   string_sas | string_sas_date9  SAS DATE9 strings such as '31JAN2026' (English month names)
-#   sas_days | sas_date            numeric days since 1960-01-01 (including text exports like '24108.0')
-#   num | integer | int | number  20260131 literals
-#   anything else / missing       'YYYY-MM-DD' string literals (the column must hold that text)
+#   date     native DATE/TIMESTAMP values, compared by calendar day
+#   string   probes YYYY-MM-DD or YYYYMMDD text
+#   number   numeric YYYYMMDD values
+#   sas      probes DATE9, SAS datetime text, or numeric days since 1960-01-01
+#   Left and Right may differ. Preflight reads at most 16 non-null values for string/sas,
+#   rejects empty or mixed formats, then publishes the concrete internal spec for later stages.
 #
 # Stage 1 settings (changing them needs rollback --stage row, or a new run):
 #   left, right, fromDate, toDate ("YYYY-MM-DD", inclusive), date_synonyms {"3000-01-01": "2026-07-01"}
@@ -55,6 +53,8 @@
 #                        a name: string (default, trim+lower) | exact | numeric (007, +7.00 -> 7) |
 #                        date | digits, or a step list ["trim", "upper", "strip_prefix:ID-"], or
 #                        {"family"?, "transform"?, "left_transform"?, "right_transform"?}
+#                        date keys may use {"family":"date_type", "left_date_type":...,
+#                        "right_date_type":...}; date_col keys inherit the side date types automatically
 #                        (sides default to transform; steps and families: common/hashing.py)
 #   sample               missing / "" / false = all rows | 0 < x <= 1 fraction by key hash |
 #                        N > 0 fixed N keys per window chosen by the Left side (both need key)
@@ -67,7 +67,7 @@ import click
 from dotenv import find_dotenv, load_dotenv
 
 from .. import __version__
-from .blog import blog_command
+from .blog import blog_command, blog_delete_command
 from .checks import col_check_command, row_check_command
 from .ops import dbx_group
 from .options import CONTEXT_SETTINGS
@@ -100,6 +100,7 @@ for command in (
     rollback_command,
     debug_command,
     blog_command,
+    blog_delete_command,
     dbx_group,
 ):
     tools_group.add_command(command)

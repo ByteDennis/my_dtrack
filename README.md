@@ -6,9 +6,9 @@ directory with the same run layout:
 
 | Package | Runs on | Commands / entry | Needs |
 | --- | --- | --- | --- |
-| `src/dtrack_left` | on-prem PC | `dtrack row-check`, `dtrack col-check`, `dtrack tools ...` | Left-side DB access, S3 write on one prefix, S3 read on the report store |
-| `src/dtrack_right` | a Databricks job, started once | `src/dtrack_right/notebook.py` (`python -m dtrack_right` locally) | table or Volume read, work/report locations |
-| `src/dtrack_local` | one operator machine | `python -m dtrack_local ...` | both source connections; S3 is optional for backup/report publishing |
+| `src/dtrack_left` | on-prem PC | `dtrack row-check`, `dtrack col-check`, `dtrack tools ...` | Left DB access; shared runs root |
+| `src/dtrack_right` | a Databricks job, started once | `src/dtrack_right/notebook.py` | table/Volume read; same runs root |
+| `src/dtrack_local` | one operator machine | `python -m dtrack_local ...` | both connections; runs root optional for backup |
 
 - **row check** (stage 1): exact row counts per day on both sides; only days whose counts agree
   go on. Left writes `row_check/<pair>.left.json`; Right reconciles and writes the verdicts and the
@@ -18,11 +18,19 @@ directory with the same run layout:
   side, compares, writes `results/`, builds and publishes the report.
 
 The on-prem side holds no Databricks credential and installs no Databricks package. The Right
-side never imports the Left package. Oracle is installed by default; Athena and Hadoop are extras.
+side never imports the Left package and contains no CSV/pandas fallback or source-platform sampling
+SQL. Oracle is installed by default; Athena and Hadoop are extras.
 `dtrack_local` deliberately combines both packages, but writes the same `row_check/`, `manifest/`,
-`units/`, `_INDEX/`, `results/`, `dead/`, and report payloads through a directory-backed store.
+`units/`, `_INDEX/`, `results/`, `dead/`, representative SQL `audit.txt`, and report payloads
+through a directory-backed store.
 That keeps sampling/hash behavior and rollback semantics common without making local runs depend
 on S3 or making the distributed packages depend on the local runner.
+
+`date_type` has four values only: `date`, `string`, `number`, and `sas`. For example,
+`2025-04-02` uses `string`, while `01AUG2026:09:45:35` uses `sas`. Preflight probes a small
+non-null sample for `string`/`sas`, then carries the detected internal format through the row and
+manifest payloads. The standalone Right package contains only the Spark/Databricks SQL adapter;
+source-platform adapters stay on the Left.
 
 ```bash
 uv sync
@@ -35,6 +43,9 @@ just e2e            # both sides against a local Moto S3
 `dtrack tools key-check` can override `--key`, `--family KEY=...`, and `--sample` to compare
 the exact sampled key set selected by the Left source and Databricks. `dtrack tools blog` renders
 a Confluence tracking-page preview from a report directory; add `--publish` for an explicit write.
+Use `dtrack tools debug -- <command>` for the distributed CLI, or add `--local` before `--` to
+debug `python -m dtrack_local` commands. Add bare `--attach` (port 5678) or `--attach PORT` for
+debugpy/IDE attach instead of terminal ipdb.
 Install that optional integration with `uv sync --extra confluence`. Server/Data Center PAT auth uses
 `CONFLUENCE_URL` + `CONFLUENCE_TOKEN`; Cloud additionally needs `CONFLUENCE_USERNAME` and `--cloud`.
 The integration is pinned to `atlassian-python-api==5.0.5` and uses Confluence REST API v1 by
@@ -48,9 +59,9 @@ See `docs/workflow.md` for commands and the S3 contract, `docs/notes/` for the w
 ```text
 src/dtrack_left/     cli, config, sources (oracle/csv/athena/hadoop), s3, row_check, col_check, fetch, debug,
                      manifest, sampling, statistics, normalization, dates, sql
-src/dtrack_right/    notebook.py, app, row_check, col_check, scheduler, comparison, targets (SparkTarget, CsvAnchorTarget),
-                     store (S3 / Volume), report, report_html, report_excel, gates, manifest, sampling, statistics, ...
-tests/               left tests; tests/right for the right side and the vendored-module parity test
+src/dtrack_right/    notebook, Spark-only target/sampling, row/col comparison, scheduler,
+                     S3/Volume store, and report
+tests/               backend, protocol, behavioral parity, local Spark, and live integration tests
 examples/e2e/        two-process end-to-end run with synthetic data
 docker/              Moto S3 simulator
 docs/                workflow, ADRs, plans, notes, slides

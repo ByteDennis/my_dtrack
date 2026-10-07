@@ -4,21 +4,21 @@ import logging
 import time
 from pathlib import Path
 
-from .backends.store import open_store, resolve_run
+from .backends.store import resolve_run
 from .checks.col_check import ColCheck
 from .checks.row_check import run_row_check
-from .report.build import build_report, publish_report
+from .common.audit import SqlAudit
+from .report.build import CONTENT_TYPES, build_report
 
 log = logging.getLogger("dtrack.right")
 
 
 # >>> the whole Right-side job: watch for left counts, reconcile, drain, report; started by hand, exits by itself <<< #
 def run(
-    work: str,
+    run_s3: str,
     target_factory,
     *,
     run_id: str | None = None,
-    report: str | None = None,
     out_dir: str | Path = "/tmp/dtrack-report",
     gate: str = "auto",
     poll_interval: float = 2,
@@ -29,15 +29,14 @@ def run(
     wait_timeout: float = 1800,
 ) -> dict:
     log.info(
-        "right job start: work=%s run_id=%s report=%s gate=%s",
-        work,
+        "right job start: run_s3=%s run_id=%s gate=%s",
+        run_s3,
         run_id or "<auto>",
-        report,
         gate,
     )
     started = time.monotonic()
     while True:
-        store, resolved = resolve_run(work, run_id)
+        store, resolved = resolve_run(run_s3, run_id)
         if store is not None and store.list_keys("row_check/"):
             break
         if time.monotonic() - started > wait_timeout:
@@ -65,11 +64,24 @@ def run(
     files = build_report(store, out_dir)
     summary = __import__("json").loads(files["summary.json"].read_text())
     published = []
-    if report:
-        published = publish_report(open_store(report), summary["run_id"], files, summary)
+    for name, path in sorted(files.items()):
+        key = f"report/{name}"
+        store.put_bytes(
+            key,
+            path.read_bytes(),
+            content_type=CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
+        )
+        published.append(key)
+        log.info("published %s", key)
+    audit_written = SqlAudit(store, "right").refresh()
     store.put_json(
         "_STATUS.json",
         {"state": "complete", "role": "right", "run_id": resolved, "results": len(results)},
     )
-    log.info("right job done: %d result(s), report -> %s", len(results), report or out_dir)
-    return {"results": len(results), "summary": summary, "published": published}
+    log.info("right job done: %d result(s), report -> %s/report/", len(results), store.root_uri)
+    return {
+        "results": len(results),
+        "summary": summary,
+        "published": published,
+        "audit": "audit.txt" if audit_written else None,
+    }

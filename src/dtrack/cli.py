@@ -4,7 +4,7 @@ import click
 from dotenv import find_dotenv, load_dotenv
 
 from dtrack_left import __version__
-from dtrack_left.cli.blog import blog_command
+from dtrack_left.cli.blog import blog_command, blog_delete_command
 from dtrack_left.cli.checks import col_check_command, row_check_command
 from dtrack_left.cli.ops import dbx_group
 from dtrack_left.cli.options import CONTEXT_SETTINGS
@@ -23,6 +23,7 @@ AUXILIARY_COMMANDS = (
     debug_command,
     key_check_command,
     blog_command,
+    blog_delete_command,
     dbx_group,
 )
 

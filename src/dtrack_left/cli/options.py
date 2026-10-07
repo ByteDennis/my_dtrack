@@ -59,9 +59,9 @@ def config_option(func):
 
 # >>> an S3 location option (named by `flag`) opened as a `store` <<< #
 def store_option(
-    flag: str = "--s3",
-    envvar: str = "DTRACK_S3",
-    help: str = "run location, s3://bucket/prefix/<run>",
+    flag: str = "--run-s3",
+    envvar: str = "DTRACK_RUN_S3",
+    help: str = "runs root, s3://bucket/prefix/runs (run_id is appended)",
 ):
     def decorator(func):
         @click.option(flag, "store_uri", required=True, envvar=envvar, help=help)

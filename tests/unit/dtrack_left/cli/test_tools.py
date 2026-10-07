@@ -80,7 +80,7 @@ def test_doctor_fails_with_exit_code_one_when_a_source_is_missing(config_path, t
 
 
 def test_usage_errors_exit_two(capsys):
-    assert main(["row-check", "--config", "nope.json", "--s3", "s3://b/p"]) == 2
+    assert main(["row-check", "--config", "nope.json", "--run-s3", "s3://b/runs"]) == 2
     assert main(["tools", "debug"]) == 2
 
 
@@ -119,6 +119,45 @@ def test_debug_forwards_the_command_and_attach_port(monkeypatch, argv, attach):
     assert seen == {"rest": ["tools", "doctor", "--config", "c.json"], "attach": attach}
 
 
+@pytest.mark.parametrize(
+    ("debug_options", "attach"),
+    [(["--local"], None), (["--attach", "--local"], 5678), (["--attach", "6000", "--local"], 6000)],
+)
+def test_debug_local_routes_the_local_command_tree_through_the_debugger(
+    monkeypatch, debug_options, attach
+):
+    seen = {}
+    monkeypatch.setattr(
+        tools,
+        "run_under_debugger",
+        lambda target, rest, attach: seen.update(target=target, rest=rest, attach=attach),
+    )
+    argv = ["tools", "debug", *debug_options, "--", "run", "--config", "c.json"]
+    assert main(argv) == 0
+    assert seen == {
+        "target": tools._local_debug_main,
+        "rest": ["run", "--config", "c.json"],
+        "attach": attach,
+    }
+
+
+def test_local_debug_main_does_not_swallow_runtime_exceptions(monkeypatch):
+    from dtrack_local import cli as local_cli
+
+    def fail(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(local_cli.cli, "main", fail)
+    with pytest.raises(RuntimeError, match="boom"):
+        tools._local_debug_main(["run"])
+
+
+def test_debug_help_documents_local_and_attach(capsys):
+    assert main(["tools", "debug", "-h"]) == 0
+    output = capsys.readouterr().out
+    assert "--local" in output and "--attach" in output
+
+
 def test_version_and_abort_map_to_exit_codes(monkeypatch, capsys):
     assert main(["--version"]) == 0 and "dtrack, version" in capsys.readouterr().out
     monkeypatch.setattr(cli_package.cli, "main", lambda **_: (_ for _ in ()).throw(click.Abort()))
@@ -129,14 +168,20 @@ def test_fetch_report_command_downloads_the_latest_run(s3_bucket, tmp_path, caps
     import boto3
 
     client = boto3.client("s3")
-    client.put_object(Bucket=s3_bucket, Key="rep/history/r9/index.html", Body=b"<html>")
-    client.put_object(Bucket=s3_bucket, Key="rep/latest/pointer.json", Body=b'{"run_id": "r9"}')
+    client.put_object(Bucket=s3_bucket, Key="runs/r9/report/index.html", Body=b"<html>")
+    client.put_object(
+        Bucket=s3_bucket, Key="runs/r9/report/summary.json", Body=b'{"run_id": "r9"}'
+    )
+    client.put_object(Bucket=s3_bucket, Key="runs/r9/_STATUS.json", Body=b'{"state":"complete"}')
     code = main(
-        ["tools", "fetch-report", "--report-s3", f"s3://{s3_bucket}/rep", "--out", str(tmp_path)]
+        ["tools", "fetch-report", "--run-s3", f"s3://{s3_bucket}/runs", "--out", str(tmp_path)]
     )
     assert code == 0
     assert json.loads(capsys.readouterr().out) == {
-        "files": {"index.html": str(tmp_path / "index.html")},
+        "files": {
+            "index.html": str(tmp_path / "index.html"),
+            "summary.json": str(tmp_path / "summary.json"),
+        },
         "run_id": "r9",
     }
     nested = tmp_path / "nested"
@@ -144,8 +189,10 @@ def test_fetch_report_command_downloads_the_latest_run(s3_bucket, tmp_path, caps
         [
             "tools",
             "fetch-report",
-            "--report-s3",
-            f"s3://{s3_bucket}/rep",
+            "--run-s3",
+            f"s3://{s3_bucket}/runs",
+            "--run-id",
+            "r9",
             "--out",
             str(nested),
         ]
@@ -196,15 +243,12 @@ def test_attach_waits_for_vs_code_before_running(monkeypatch):
     assert events == [("listen", ("0.0.0.0", 5678)), "wait", "breakpoint", ["x"]]
 
 
-def test_dotenv_feeds_option_envvars_of_every_command_and_the_shell_wins(
-    tmp_path, monkeypatch, capsys
-):
+def test_dotenv_feeds_fetch_report_run_and_the_shell_wins(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("DTRACK_S3", raising=False)
-    monkeypatch.delenv("DTRACK_REPORT_S3", raising=False)
-    (tmp_path / ".env").write_text("DTRACK_REPORT_S3=not-an-s3-uri\n")
-    with pytest.raises(ValueError, match="not-an-s3-uri"):
+    monkeypatch.delenv("DTRACK_RUN_S3", raising=False)
+    (tmp_path / ".env").write_text("DTRACK_RUN_S3=missing-runs\n")
+    with pytest.raises(FileNotFoundError, match="no completed run"):
         main(["tools", "fetch-report", "--out", str(tmp_path / "out")])
-    monkeypatch.setenv("DTRACK_REPORT_S3", "shell-wins")
-    with pytest.raises(ValueError, match="shell-wins"):
+    monkeypatch.setenv("DTRACK_RUN_S3", "also-missing")
+    with pytest.raises(FileNotFoundError, match="no completed run"):
         main(["tools", "fetch-report", "--out", str(tmp_path / "out")])

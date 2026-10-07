@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..backends.sources import source_from_config
+from ..common.audit import SqlAudit, attach_sql_audit
+from ..common.dates import portable_date_type
 
 log = logging.getLogger("dtrack.left.row_check")
 SECRET_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
@@ -30,6 +32,8 @@ def public_pair_config(pair: dict[str, Any]) -> dict[str, Any]:
         result[side] = {
             k: v for k, v in pair[side].items() if k not in SECRET_FIELDS and not k.endswith("_env")
         }
+        if "date_type" in result[side]:
+            result[side]["date_type"] = portable_date_type(result[side]["date_type"])
     return result
 
 
@@ -54,7 +58,12 @@ def run_row_check(
     log.info("run_id=%s work=%s pairs=%s", run_id, store.root_uri, list(pairs))
     store.put_json("_STATUS.json", {"state": "left_row_check", "run_id": run_id, "role": "left"})
     started = time.monotonic()
-    sources = {name: source_factory(pair["left"]) for name, pair in pairs.items()}
+    sources = {
+        name: attach_sql_audit(
+            source_factory(pair["left"]), SqlAudit(store, "left", pair=name)
+        )
+        for name, pair in pairs.items()
+    }
     health = {name: source.preflight() for name, source in sources.items()}
     for name, row in health.items():
         log.info(
@@ -63,6 +72,10 @@ def run_row_check(
     failed = [name for name, row in health.items() if not row.get("ok")]
     if failed:
         raise RuntimeError(f"left preflight failed: {', '.join(failed)}")
+    for name, source in sources.items():
+        detected = getattr(source, "config", {}).get("date_type")
+        if detected is not None:
+            pairs[name]["left"]["date_type"] = detected
 
     def count(name: str):
         pair = pairs[name]
@@ -109,4 +122,5 @@ def run_row_check(
         len(pairs),
         time.monotonic() - started,
     )
+    SqlAudit(store, "left").refresh()
     return run_id, documents

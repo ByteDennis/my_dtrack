@@ -7,6 +7,8 @@ from typing import Any
 
 from dotenv import find_dotenv, load_dotenv
 
+from ..common.dates import resolve_date_type
+
 LEFT_SOURCES = {"oracle", "athena", "aws", "hadoop", "csv", "file", "duckdb"}
 COL_TYPES = {"numeric", "categorical"}
 RIGHT_KINDS = {"table": ("table",), "query": ("query",), "files": ("path", "format")}
@@ -53,6 +55,11 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{name}: {{src}} in a Right query needs kind 'files'")
         if not left.get("date_col") or not right.get("date_col"):
             raise ValueError(f"{name}: both sides require date_col")
+        for side_name, side in (("Left", left), ("Right", right)):
+            try:
+                resolve_date_type(side.get("date_type"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{name}: invalid {side_name} date_type: {exc}") from None
         if not isinstance(pair.get("col_map"), dict) or not pair["col_map"]:
             raise ValueError(f"{name}: col_map must be non-empty")
         overrides = pair.get("col_type_overrides") or {}

@@ -3,14 +3,14 @@
 #   key-check --config c.json --pair P [--from-date D --to-date D] production sample key parity
 #   preflight --config c.json [run options]                        both sides reachable?
 #   run       --config c.json [run options] [--gate auto|manual|ratio:x]
-#             [--report-s3 s3://.../report] [--backup-s3 s3://.../runs] [--include-data]
+#             [--run-s3 s3://.../runs] [--include-data]
 #
 # Run options: --run-id (resume; default <UTC stamp>-<config hash>), --out (.dtrack-local/runs),
 #   --profile (corp), --warehouse-id, --disposition external_links|inline, --no-push-sample,
 #   --pair P (repeatable), --log-level.
 # Environment (.env works): DTRACK_DBX_PROFILE, DTRACK_DBX_WAREHOUSE_ID, DTRACK_LOCAL_OUT,
-#   DTRACK_LOCAL_DISPOSITION, DTRACK_REPORT_S3, DTRACK_LOCAL_BACKUP_S3, Left credentials.
-# Roll one pair back: dtrack tools rollback --run <out>/<run_id> --pair P --stage dead|col|row [--yes]
+#   DTRACK_LOCAL_DISPOSITION, DTRACK_RUN_S3, Left credentials.
+# Roll back: dtrack tools rollback --run-s3 <out> --run-id ID --pair P [--pair Q|--pair all]
 
 from __future__ import annotations
 
@@ -27,6 +27,8 @@ from dotenv import find_dotenv, load_dotenv
 from dtrack_left.backends.sources import source_from_config
 from dtrack_left.cli.config import load_config
 from dtrack_left.cli.options import CONTEXT_SETTINGS, emit_json, log_level_option, pair_option
+from dtrack_left.common.audit import SqlAudit, attach_sql_audit
+from dtrack_right.backends.store import VolumeStore
 
 from . import keycheck, pipeline
 from .run_logging import current_error_log, log_exception_once
@@ -109,7 +111,7 @@ def cli():
     load_dotenv(find_dotenv(usecwd=True))
 
 
-def _keycheck_target(pair, work, *, profile, warehouse_id, disposition):
+def _keycheck_target(pair, work, *, profile, warehouse_id, disposition, sql_audit=None):
     from dtrack_left.backends.databricks import DEFAULT_PROFILE, workspace
 
     client = workspace(profile or os.getenv("DTRACK_DBX_PROFILE") or DEFAULT_PROFILE)
@@ -117,6 +119,7 @@ def _keycheck_target(pair, work, *, profile, warehouse_id, disposition):
         client,
         warehouse_id or os.getenv("DTRACK_DBX_WAREHOUSE_ID", ""),
         disposition=disposition,
+        sql_audit=sql_audit,
     )
     return pipeline.WarehouseTarget(warehouse, pair["right"], work)
 
@@ -236,12 +239,20 @@ def key_check_command(
     if sample is not None:
         pair["sample"] = sample
     start, end = _keycheck_window(from_date, to_date, days)
-    source = source_from_config(pair["left"])
+    work = Path(out) / pair_name
+    audit_store = VolumeStore(work)
+    source = attach_sql_audit(
+        source_from_config(pair["left"]), SqlAudit(audit_store, "left", pair=pair_name)
+    )
     counts = source.partition_counts(start, end)
     partitions = sorted(counts)
-    work = Path(out) / pair_name
     target = _keycheck_target(
-        pair, work, profile=profile, warehouse_id=warehouse_id, disposition=disposition
+        pair,
+        work,
+        profile=profile,
+        warehouse_id=warehouse_id,
+        disposition=disposition,
+        sql_audit=SqlAudit(audit_store, "right", pair=pair_name),
     )
     check = keycheck.run_sample_check(
         pair_name,
@@ -253,6 +264,7 @@ def key_check_command(
         window=(start, end),
         max_examples=max_examples,
     )
+    SqlAudit(audit_store, "key-check").refresh()
     summary = check.summary()
     return {
         **summary,
@@ -276,7 +288,7 @@ def preflight_command(run):
     return {**health, "exit_code": 0 if ok else 1}
 
 
-# >>> run: preflight, row check, col check, report, then optional report publish and S3 backup <<< #
+# >>> run: preflight, row check, col check, report, then optional S3 backup <<< #
 @cli.command("run", help="the whole comparison on this machine", context_settings=CONTEXT_SETTINGS)
 @run_options
 @click.option(
@@ -285,21 +297,20 @@ def preflight_command(run):
     show_default=True,
     help="Stage 1 gate: auto | manual | ratio:<max excluded share>",
 )
-@click.option("--report-s3", envvar="DTRACK_REPORT_S3", help="also publish the report here")
 @click.option(
-    "--backup-s3", envvar="DTRACK_LOCAL_BACKUP_S3", help="copy the run folder to <this>/<run_id>/"
+    "--run-s3",
+    envvar="DTRACK_RUN_S3",
+    help="stable runs root; copy this local run to <root>/<run_id>/",
 )
 @click.option(
     "--include-data",
     is_flag=True,
-    help="with --backup-s3, also upload the pulled rows (_local/data.duckdb)",
+    help="with --run-s3, also upload the pulled rows (_local/data.duckdb)",
 )
 @log_level_option
 @emit_json
-def run_command(run, gate, report_s3, backup_s3, include_data):
-    outcome = pipeline.run_all(
-        run, gate=gate, report_s3=report_s3, backup_s3=backup_s3, include_data=include_data
-    )
+def run_command(run, gate, run_s3, include_data):
+    outcome = pipeline.run_all(run, gate=gate, run_s3=run_s3, include_data=include_data)
     return {
         key: outcome[key]
         for key in (
@@ -307,7 +318,6 @@ def run_command(run, gate, report_s3, backup_s3, include_data):
             "folder",
             "status",
             "findings",
-            "published",
             "backup",
             "landing",
             "error_log",

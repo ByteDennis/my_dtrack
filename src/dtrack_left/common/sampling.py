@@ -179,6 +179,8 @@ def normalize_sql(
         raise SamplingSqlNotSupported(
             "timezone-bearing Oracle keys need an explicit canonical source expression"
         )
+    if hasattr(family, "sql_dialect"):
+        return family.sql_dialect(expr, dialect, side)
     if dialect == "spark":
         return family.sql(expr, side)
     methods = ("transform", "transform_sql", f"{side}_transform", f"{side}_transform_sql")

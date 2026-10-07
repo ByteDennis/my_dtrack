@@ -11,11 +11,11 @@ from dtrack_left.checks.col_check import (
     wait_for_manifests,
 )
 from dtrack_left.checks.row_check import run_row_check
+from dtrack_local.csv_target import CsvAnchorTarget
 from dtrack_right.backends.store import VolumeStore
-from dtrack_right.backends.targets import CsvAnchorTarget
 from dtrack_right.checks.col_check import ColCheck
 from dtrack_right.checks.row_check import run_row_check as run_right_row_check
-from dtrack_right.report import build_report, publish_report
+from dtrack_right.report import build_report
 
 
 def _target_factory(root: Path, work: Path):
@@ -26,7 +26,6 @@ def _target_factory(root: Path, work: Path):
 def test_full_pipeline_on_real_files(synthetic, tmp_path):
     root = synthetic.root
     store = VolumeStore(tmp_path / "runs" / "real")
-    report_store = VolumeStore(tmp_path / "report")
     run_id, _ = run_row_check(pairs_config(root / "left"), store, run_id="real")
 
     assert run_right_row_check(store, _target_factory(root, tmp_path / "rw")) == 2
@@ -40,6 +39,9 @@ def test_full_pipeline_on_real_files(synthetic, tmp_path):
     }
     assert store.exists("row_check/_CLOSED") and store.exists("reports/orders_compare_row.csv")
     manifest = store.get_json("manifest/orders.json")
+    detected = {"type": "string", "format": "dash"}
+    assert manifest["left"]["date_type"] == detected
+    assert manifest["right"]["date_type"] == detected
     for hole in ("2026-01-15", "2026-01-31", "2026-02-10"):
         assert all(hole not in window["partitions"] for window in manifest["windows"])
 
@@ -77,6 +79,8 @@ def test_full_pipeline_on_real_files(synthetic, tmp_path):
         "partition_missing": 2,
         "col_stat_diff": 2,
     }
-    publish_report(report_store, run_id, files, summary)
-    fetched = fetch_report(report_store, tmp_path / "fetched")
+    for name, path in files.items():
+        store.put_bytes(f"report/{name}", path.read_bytes())
+    store.put_json("_STATUS.json", {"state": "complete"})
+    fetched = fetch_report(VolumeStore(tmp_path / "runs"), tmp_path / "fetched")
     assert fetched["run_id"] == run_id and (tmp_path / "fetched" / "report.xlsx").stat().st_size > 0

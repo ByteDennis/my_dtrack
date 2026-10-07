@@ -114,3 +114,32 @@ def test_public_pair_config_strips_every_credential_field():
     side = {name: "x" for name in SECRET_FIELDS} | {"token_env": "T", "table": "t"}
     public = public_pair_config({"left": side, "right": side, "sample": 5})
     assert public == {"sample": 5, "left": {"table": "t"}, "right": {"table": "t"}}
+
+
+def test_public_pair_config_keeps_different_side_date_types_and_expands_custom_names():
+    from dtrack_left.common import dates
+
+    dates.register_date_type(
+        "test_slash",
+        predicate_sql={"oracle": "TO_DATE({column}, 'YYYY/MM/DD')"},
+        literal_sql="DATE '{iso}'",
+        range="day",
+    )
+    try:
+        public = public_pair_config(
+            {
+                "left": {"table": "a", "date_type": "test_slash"},
+                "right": {
+                    "table": "b",
+                    "date_type": {"type": "string", "format": "compact"},
+                },
+            }
+        )
+        assert public["left"]["date_type"] == {
+            "predicate_sql": {"oracle": "TO_DATE({column}, 'YYYY/MM/DD')"},
+            "literal_sql": "DATE '{iso}'",
+            "range": "day",
+        }
+        assert public["right"]["date_type"] == {"type": "string", "format": "compact"}
+    finally:
+        dates.DATE_TYPES.pop("test_slash")
