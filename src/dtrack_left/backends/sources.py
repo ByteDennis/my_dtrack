@@ -35,6 +35,19 @@ def write_rows(path: str | Path, columns: list[str], rows: Iterable[Iterable[obj
     return target
 
 
+def _resolve_column_name(columns: Iterable[str], requested: str) -> str:
+    """Prefer an exact column name, then accept one unambiguous case-insensitive match."""
+    names = [str(column) for column in columns]
+    if requested in names:
+        return requested
+    matches = [name for name in names if name.casefold() == requested.casefold()]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(f"ambiguous column {requested!r}: {', '.join(matches)}")
+    raise ValueError(f"missing columns: {requested}")
+
+
 class SqlSource(ABC):
     dialect = "sql"
     date_probe_size = 16
@@ -269,8 +282,9 @@ class FileSource(SqlSource):
             columns, _rows = self.query(
                 f"SELECT * FROM {self.relation()} WHERE 1=0", operation="preflight"
             )
-            if self.config.get("date_col") not in columns:
-                raise ValueError(f"missing columns: {self.config.get('date_col')}")
+            requested = self.config.get("date_col")
+            if requested:
+                self.config["date_col"] = _resolve_column_name(columns, str(requested))
             self.date_type()
             return {"ok": True, "source": "file", "columns": columns}
         except Exception as exc:

@@ -339,6 +339,19 @@ def test_file_source_preflight_reports_missing_file_and_missing_date_column(tmp_
     assert FileSource({"source": "csv", "conn_macro": str(path)}).path == str(path)
 
 
+def test_file_source_preflight_resolves_date_column_case_insensitively(tmp_path):
+    path = tmp_path / "case.csv"
+    path.write_text("TRIGGER_DT,VALUE\n2026-01-01,1\n")
+    source = FileSource(
+        {"source": "csv", "path": str(path), "date_col": "trigger_dt", "date_type": "date"}
+    )
+
+    health = source.preflight()
+
+    assert health["ok"] is True
+    assert source.config["date_col"] == "TRIGGER_DT"
+
+
 @pytest.mark.parametrize(
     ("name", "write", "config"),
     [

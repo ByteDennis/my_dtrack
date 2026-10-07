@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 from types import SimpleNamespace
 
@@ -241,6 +242,54 @@ def test_cli_runs_the_plan_and_preflight_reports_failures(synthetic, tmp_path, m
     assert json.loads(capsys.readouterr().out)["orders"]["right"]["ok"] is False
 
 
+def test_preflight_logs_returned_failures_to_the_private_error_log(
+    synthetic, tmp_path, monkeypatch
+):
+    from dtrack_local.run_logging import configure_run_logging
+
+    config = pairs_config(synthetic.left)
+    run = pipeline.LocalRun(
+        config,
+        "preflight-log",
+        tmp_path / "runs" / "preflight-log",
+        lambda spec: CsvAnchorTarget(spec, tmp_path / "missing", tmp_path / "rw"),
+        pipeline.Landing(tmp_path / "d.duckdb"),
+    )
+    path = configure_run_logging(run.folder)
+    root = logging.getLogger()
+    try:
+        health = pipeline.preflight(run)
+        for handler in root.handlers:
+            handler.flush()
+
+        assert health["orders"]["right"]["ok"] is False
+        logged = path.read_text()
+        assert "preflight orders right failed" in logged
+        assert "orders.csv" in logged
+    finally:
+        for handler in list(root.handlers):
+            if getattr(handler, "dtrack_error_handler", False):
+                root.removeHandler(handler)
+                handler.close()
+
+
+def test_preflight_cli_compacts_long_column_lists():
+    from dtrack_local.cli import _compact_preflight_health
+
+    columns = [f"COL_{number}" for number in range(1_000)]
+    compact = _compact_preflight_health(
+        {"orders": {"left": {"ok": True}, "right": {"ok": True, "columns": columns}}}
+    )
+
+    right = compact["orders"]["right"]
+    assert right["column_count"] == 1_000
+    assert right["columns"] == [
+        *columns[:10],
+        "... (980 omitted) ...",
+        *columns[-10:],
+    ]
+
+
 def test_local_config_supplies_every_optional_run_value(tmp_path, monkeypatch, capsys):
     import dtrack_local.cli as local_cli
 
@@ -434,3 +483,89 @@ def test_key_check_cli_runs_the_production_sample_for_one_window(
     checked_pair = seen["args"][1]
     assert checked_pair["key"] == "ACCT_ID" and checked_pair["sample"] == "25"
     assert checked_pair["key_families"]["ACCT_ID"] == "numeric"
+
+
+def test_key_check_inherits_pair_window_before_environment_defaults(
+    synthetic, tmp_path, monkeypatch, capsys
+):
+    import dtrack_local.cli as local_cli
+
+    document = pairs_config(synthetic.left)
+    document["pairs"]["orders"]["fromDate"] = "2026-08-01"
+    document["pairs"]["orders"]["toDate"] = "2026-08-03"
+    config = tmp_path / "c.json"
+    config.write_text(json.dumps(document))
+    seen = {}
+    source = SimpleNamespace(
+        partition_counts=lambda start, end: seen.update(window=(start, end)) or {}
+    )
+    check = SimpleNamespace(
+        sample={"mode": "fraction", "rate": 0.1, "threshold": 1},
+        selected_keys=[],
+        artifacts={"report": str(tmp_path / "keys.txt")},
+        summary=lambda: {"pair": "orders", "sample mode": "fraction", "ok": True},
+    )
+    monkeypatch.setenv("DTRACK_KEY_CHECK_FROM_DATE", "2026-10-04")
+    monkeypatch.setenv("DTRACK_KEY_CHECK_TO_DATE", "2026-10-06")
+    monkeypatch.setattr(local_cli, "source_from_config", lambda _spec: source)
+    monkeypatch.setattr(local_cli, "_keycheck_target", lambda *_args, **_kwargs: "target")
+    monkeypatch.setattr(local_cli.keycheck, "run_sample_check", lambda *_args, **_kwargs: check)
+
+    code = local_cli.main(
+        [
+            "key-check",
+            "--config",
+            str(config),
+            "--pair",
+            "orders",
+            "--out",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["partitions"] == []
+    assert seen["window"] == ("2026-08-01", "2026-08-03")
+
+
+def test_key_check_does_not_mix_a_partial_pair_window_with_environment(
+    synthetic, tmp_path, monkeypatch, capsys
+):
+    import dtrack_local.cli as local_cli
+
+    document = pairs_config(synthetic.left)
+    document["pairs"]["orders"]["fromDate"] = "2020-08-01"
+    document["pairs"]["orders"].pop("toDate")
+    config = tmp_path / "c.json"
+    config.write_text(json.dumps(document))
+    seen = {}
+    source = SimpleNamespace(
+        partition_counts=lambda start, end: seen.update(window=(start, end)) or {}
+    )
+    check = SimpleNamespace(
+        sample={"mode": "fraction", "rate": 0.1, "threshold": 1},
+        selected_keys=[],
+        artifacts={"report": str(tmp_path / "keys.txt")},
+        summary=lambda: {"pair": "orders", "sample mode": "fraction", "ok": True},
+    )
+    monkeypatch.setenv("DTRACK_KEY_CHECK_TO_DATE", "2019-08-03")
+    monkeypatch.setattr(local_cli, "source_from_config", lambda _spec: source)
+    monkeypatch.setattr(local_cli, "_keycheck_target", lambda *_args, **_kwargs: "target")
+    monkeypatch.setattr(local_cli.keycheck, "run_sample_check", lambda *_args, **_kwargs: check)
+
+    code = local_cli.main(
+        [
+            "key-check",
+            "--config",
+            str(config),
+            "--pair",
+            "orders",
+            "--out",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["partitions"] == []
+    assert seen["window"][0] == "2020-08-01"
+    assert seen["window"][1] != "2019-08-03"

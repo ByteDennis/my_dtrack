@@ -20,8 +20,10 @@ import logging
 import os
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import click
+from click.core import ParameterSource
 from dotenv import find_dotenv, load_dotenv
 
 from dtrack_left.backends.sources import source_from_config
@@ -227,6 +229,45 @@ def _keycheck_window(from_date: str | None, to_date: str | None, days: int) -> t
     return start.isoformat(), end.isoformat()
 
 
+def _keycheck_bounds(
+    from_date: str | None, to_date: str | None, pair: dict[str, Any]
+) -> tuple[str | None, str | None]:
+    """Resolve both bounds from one precedence layer so unrelated windows never get mixed."""
+    context = click.get_current_context()
+    explicit = {ParameterSource.COMMANDLINE, ParameterSource.DEFAULT_MAP}
+    from_source = context.get_parameter_source("from_date")
+    to_source = context.get_parameter_source("to_date")
+    if from_source in explicit or to_source in explicit:
+        return (
+            from_date if from_source in explicit else None,
+            to_date if to_source in explicit else None,
+        )
+    pair_bounds = pair.get("fromDate"), pair.get("toDate")
+    return pair_bounds if any(pair_bounds) else (from_date, to_date)
+
+
+def _compact_preflight_health(
+    health: dict[str, dict[str, Any]], *, column_limit: int = 20
+) -> dict[str, dict[str, Any]]:
+    compact = {}
+    edge = max(1, column_limit // 2)
+    for pair, sides in health.items():
+        compact[pair] = {}
+        for side, result in sides.items():
+            rendered = dict(result)
+            columns = rendered.get("columns")
+            if isinstance(columns, list) and len(columns) > column_limit:
+                omitted = len(columns) - edge * 2
+                rendered["column_count"] = len(columns)
+                rendered["columns"] = [
+                    *columns[:edge],
+                    f"... ({omitted} omitted) ...",
+                    *columns[-edge:],
+                ]
+            compact[pair][side] = rendered
+    return compact
+
+
 def _key_overrides(values: tuple[str, ...]) -> list[str]:
     return [item.strip() for value in values for item in value.split(",") if item.strip()]
 
@@ -357,6 +398,7 @@ def key_check_command(
         pair["key_families"] = {**(pair.get("key_families") or {}), **family_overrides}
     if sample is not None:
         pair["sample"] = sample
+    from_date, to_date = _keycheck_bounds(from_date, to_date, pair)
     start, end = _keycheck_window(from_date, to_date, days)
     work = Path(out) / pair_name
     audit_store = VolumeStore(work)
@@ -405,7 +447,11 @@ def key_check_command(
 def preflight_command(run):
     health = pipeline.preflight(run)
     ok = all(row["left"].get("ok") and row["right"].get("ok") for row in health.values())
-    return {**health, "exit_code": 0 if ok else 1}
+    return {
+        **_compact_preflight_health(health),
+        "error_log": str(run.error_log),
+        "exit_code": 0 if ok else 1,
+    }
 
 
 # >>> run: preflight, row check, col check, report, then optional S3 backup <<< #

@@ -245,6 +245,16 @@ def preflight(run: LocalRun) -> dict[str, dict[str, Any]]:
             run.target_factory(pair["right"]), SqlAudit(run.store, "right", pair=name)
         )
         result[name] = {"left": source.preflight(), "right": target.preflight()}
+        for side in ("left", "right"):
+            health = result[name][side]
+            if not health.get("ok"):
+                log.error(
+                    "preflight %s %s failed (%s): %s",
+                    name,
+                    side,
+                    health.get("source", "unknown source"),
+                    health.get("error", "unknown error"),
+                )
         log.info(
             "preflight %s: left=%s right=%s",
             name,
