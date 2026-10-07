@@ -1,3 +1,71 @@
+Commit: d56a7bfeadbdf9fd4b0f1577a9b6fa801b3adf6d
+examples/nbs/00_pipeline_end_to_end.ipynb — Deleted: replaced the broad legacy tutorial with focused executable workflow notebooks.
+examples/nbs/00_row_check.ipynb — Added: demonstrated distributed row-check and direct row reconciliation assertions on real CSV data.
+examples/nbs/01_col_check.ipynb — Added: demonstrated distributed col-check, deterministic cross-side sampling, and statistics assertions.
+examples/nbs/01_left_sources.ipynb — Deleted: consolidated source learning into the current row-check and common notebooks.
+examples/nbs/02_local.ipynb — Added: demonstrated SQL Warehouse local commands and the complete offline protocol with direct assertions.
+examples/nbs/02_store_protocol.ipynb — Deleted: consolidated the store protocol into the executable local workflow notebook.
+examples/nbs/03_row_check_and_gate.ipynb — Deleted: replaced by the current row-check notebook.
+examples/nbs/03_tools.ipynb — Added: demonstrated doctor, materialize, rollback, debug, Databricks, and blog tools with safety assertions.
+examples/nbs/04_common.ipynb — Added: grouped every unit-test module and demonstrated date, hash, manifest, and statistics contracts.
+examples/nbs/04_databricks_reads.ipynb — Deleted: moved current Databricks boundaries into the focused workflow notebooks.
+examples/nbs/05_col_check_statistics.ipynb — Deleted: replaced by the current col-check and common contract notebooks.
+examples/nbs/06_job_and_report.ipynb — Deleted: consolidated job and report behavior into the local protocol notebook.
+examples/nbs/07_dtrack_cli.ipynb — Deleted: replaced by the four current CLI-layout notebooks.
+examples/nbs/08_databricks_sdk_and_ui.ipynb — Deleted: removed the obsolete Databricks SDK tutorial.
+examples/nbs/09_manual_handoff.ipynb — Deleted: removed the obsolete manual handoff workflow.
+examples/nbs/10_preload_left.ipynb — Deleted: replaced preload guidance with reusable file materialization.
+examples/nbs/11_adopt_preload.ipynb — Deleted: replaced preload adoption with atomic config materialization.
+examples/nbs/12_developer_workflow.ipynb — Deleted: consolidated current developer behavior into the five executable notebooks.
+examples/nbs/13_change_recipes.ipynb — Deleted: removed recipes superseded by current CLI and registered types.
+examples/nbs/handoff.py — Deleted: removed the obsolete manual notebook handoff helper.
+examples/nbs/nbkit.py — Deleted: removed the unused notebook presentation helper.
+guideme.txt — Modified: documented materialization, registered column types, and the five executable learning notebooks.
+src/dtrack/cli.py — Modified: registered the materialize operator command in the public tools group.
+src/dtrack_left/backends/materialize.py — Added: atomically converted large CSV sources to validated hash-sorted partitioned Parquet.
+src/dtrack_left/backends/sources.py — Modified: added streaming file export, stored-hash sampling, case-insensitive columns, and Parquet support.
+src/dtrack_left/checks/col_check.py — Modified: propagated registered column comparison types into Left statistics.
+src/dtrack_left/cli/__init__.py — Modified: exposed the materialize command through the grouped CLI.
+src/dtrack_left/cli/config.py — Modified: parsed typed column mappings and validated registered comparison types.
+src/dtrack_left/cli/tools.py — Modified: added the safe materialize command and simplified current tool options.
+src/dtrack_left/common/column_types.py — Added: registered reusable cross-side attribute comparison normalizers.
+src/dtrack_left/common/manifest.py — Modified: serialized typed column comparison rules into distributed manifests.
+src/dtrack_left/common/stats.py — Modified: computed streaming DuckDB statistics and normalized registered column types.
+src/dtrack_local/__init__.py — Modified: exported the current local workflow without obsolete inline transfer options.
+src/dtrack_local/__main__.py — Modified: pointed users to the consolidated local notebook and current sampling contract.
+src/dtrack_local/cli.py — Modified: removed inline disposition and propagated current typed comparison settings.
+src/dtrack_local/csv_target.py — Modified: reused registered date and column comparison rules in the local Right adapter.
+src/dtrack_local/notebooks/00_setup_and_preflight.ipynb — Deleted: consolidated local notebooks under examples/nbs.
+src/dtrack_local/notebooks/01_row_check.ipynb — Deleted: consolidated local notebooks under examples/nbs.
+src/dtrack_local/notebooks/02_col_check.ipynb — Deleted: consolidated local notebooks under examples/nbs.
+src/dtrack_local/notebooks/03_report_and_backup.ipynb — Deleted: consolidated local notebooks under examples/nbs.
+src/dtrack_local/notebooks/04_rollback.ipynb — Deleted: consolidated local notebooks under examples/nbs.
+src/dtrack_local/notebooks/05_key_families.ipynb — Deleted: consolidated local notebooks under examples/nbs.
+src/dtrack_local/pipeline.py — Modified: propagated registered column comparison types through local Left and Right statistics.
+src/dtrack_local/warehouse.py — Modified: streamed Databricks SQL results without obsolete inline disposition selection.
+src/dtrack_right/backends/targets.py — Modified: normalized registered comparison columns directly in Spark statistics SQL.
+src/dtrack_right/common/column_types.py — Added: provided the Databricks-side registered attribute comparison rules.
+src/dtrack_right/common/manifest.py — Modified: validated typed column comparison rules received from Left.
+tests/unit/common/test_manifest.py — Modified: covered registered column types in portable manifests.
+tests/unit/common/test_parity.py — Modified: verified Left and Right registered type parity.
+tests/unit/common/test_stats.py — Modified: covered DuckDB aggregation and SAS-datetime attribute normalization.
+tests/unit/dtrack/test_cli.py — Modified: covered the current grouped materialize command.
+tests/unit/dtrack_left/backends/test_materialize.py — Added: covered validated Parquet conversion, stored hashes, config updates, and safe deletion.
+tests/unit/dtrack_left/backends/test_sources.py — Modified: covered streaming exports, case-insensitive CSV columns, Parquet, and stored sampling hashes.
+tests/unit/dtrack_left/cli/test_config.py — Modified: covered typed CSV and JSON column mappings.
+tests/unit/dtrack_left/cli/test_tools.py — Modified: covered the renamed materialize command and removed obsolete options.
+tests/unit/dtrack_local/test_pipeline.py — Modified: covered registered comparison types throughout local execution.
+tests/unit/dtrack_local/test_warehouse.py — Modified: covered streamed Databricks SQL result downloads.
+tests/unit/dtrack_right/backends/test_targets.py — Modified: covered Spark registered-type normalization and sampling parity.
+tests/unit/test_packaging.py — Modified: enforced the five-notebook layout and direct production-API assertions.
+
+Commit: 65267cad21e31f59d7fe336dd586d9c126a1d420
+src/dtrack_left/backends/sources.py — Modified: streamed file exports in bounded batches and reused compatible materialized sample hashes.
+src/dtrack_local/cli.py — Modified: removed the obsolete inline result-disposition option from local commands.
+src/dtrack_local/pipeline.py — Modified: removed inline disposition and applied registered column comparison types on Right results.
+tests/unit/dtrack_left/backends/test_sources.py — Modified: covered bounded CSV export and stored materialized hash reuse.
+tests/unit/dtrack_local/test_pipeline.py — Modified: covered local option removal and registered comparison-type propagation.
+
 Commit: 6130721140a9735ec0225c716e0c60d1f1fb3de7
 .gitignore — Modified: ignored local audit, report, and Confluence runtime artifacts.
 CONTEXT.md — Modified: updated the distributed reconciliation domain language and boundaries.
