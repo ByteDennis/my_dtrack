@@ -38,6 +38,7 @@ Executable learning cases live only in `examples/nbs`:
   02_local.ipynb       one-process run through Databricks SQL Warehouse
   03_tools.ipynb       doctor, materialize, report, rollback, debug, dbx, blog
   04_common.ipynb      date, hash, manifest, sampling, and statistics contracts
+  05_reuse_pulled.ipynb statistics + report from the windows an earlier local run already pulled
 
 They load `examples/e2e/config.json` and its deterministic generated data. The five notebooks also
 group every current unit-test module by domain and demonstrate its important contracts through
@@ -585,7 +586,7 @@ Local run folders are accepted in place of S3 URLs:
   dtrack local run --config config.json --pair orders --run-s3 "$RUN_S3"
 
 Useful options:
-  --run-id ID             resume the same local run
+  --run-id ID             resume the same local run; windows whose units are all indexed are skipped
   --out DIR               default .dtrack-local/runs
   --gate POLICY           same row gate
   --run-s3 URI            stable runs root; backup to URI/<run_id>, including report/
@@ -597,6 +598,14 @@ Sampling always runs in each source/warehouse before transfer; full-window downl
 local sampling is unsupported. `_local/` is never uploaded. Local col-check runs the Left producer
 and Right consumer concurrently over the same directory
 store. Errors go to `<run>/_local/logs/errors.log`; normal CLI JSON remains on stdout.
+
+Reuse pulled windows without touching either source (interrupted run, statistics-only rerun):
+`examples/nbs/05_reuse_pulled.ipynb` opens the existing `<out>/<run_id>` with
+`open_run(..., reuse_pulled=True, land=False)` and a `WarehouseTarget(None, ..., reuse=True)`.
+Left returns `_local/left/<pair>/<bucket>/left.csv`, Right computes from
+`_local/right/<pair>/<bucket>/right.csv`, a missing file raises instead of pulling, dead units are
+released first, and `report()` then writes `<run>/report/`. Pulls write `<name>.part` and rename, so
+every CSV that exists is complete.
 
 Right windows are pulled from the SQL warehouse with `disposition=EXTERNAL_LINKS` (the INLINE
 default caps a statement result at 25 MiB) and downloaded with `requests` through the proxy in

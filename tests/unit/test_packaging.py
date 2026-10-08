@@ -124,6 +124,7 @@ def test_learning_notebooks_match_the_public_cli_layout():
         "02_local.ipynb",
         "03_tools.ipynb",
         "04_common.ipynb",
+        "05_reuse_pulled.ipynb",
     ]
     assert sorted(path.name for path in notebooks.glob("*.ipynb")) == expected
     assert not list((ROOT / "src").rglob("*.ipynb"))
@@ -131,12 +132,11 @@ def test_learning_notebooks_match_the_public_cli_layout():
     sources = {}
     for name in expected:
         document = json.loads((notebooks / name).read_text())
-        assert sum(cell["cell_type"] == "markdown" for cell in document["cells"]) == 1
+        markdown = sum(cell["cell_type"] == "markdown" for cell in document["cells"])
+        assert markdown == (0 if name.startswith("05_") else 1)
         assert all(not cell.get("outputs") for cell in document["cells"])
         code = "\n".join(
-            "".join(cell["source"])
-            for cell in document["cells"]
-            if cell["cell_type"] == "code"
+            "".join(cell["source"]) for cell in document["cells"] if cell["cell_type"] == "code"
         )
         ast.parse(code)
         sources[name] = code
@@ -149,6 +149,7 @@ def test_learning_notebooks_match_the_public_cli_layout():
     assert "build_manifest" in sources[expected[4]]
     assert "src/dtrack_right/notebook.py" in sources[expected[0]]
     assert "SQL Warehouse" in sources[expected[1]] + sources[expected[2]]
+    assert "reuse_pulled=True" in sources[expected[5]]
     assert all("assert " in sources[name] for name in expected)
     assert all("pytest.main" not in sources[name] for name in expected)
     assert all("subprocess.run(['pytest'" not in sources[name] for name in expected)

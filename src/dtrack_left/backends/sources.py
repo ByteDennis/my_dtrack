@@ -27,13 +27,16 @@ from ..common.query_windows import normalize_query_windows, render_query_windows
 from ..common.sampling import fixed_keys_sql, sample_predicate_sql
 
 
+# >>> CSV written to <path>.part and renamed, so a file that exists is a complete pull <<< #
 def write_rows(path: str | Path, columns: list[str], rows: Iterable[Iterable[object]]) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", newline="", encoding="utf-8") as handle:
+    part = target.with_name(target.name + ".part")
+    with part.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(columns)
         writer.writerows(rows)
+    os.replace(part, target)
     return target
 
 
@@ -210,7 +213,9 @@ class SqlSource(ABC):
         key_types = self.key_types(key_columns or []) if needs_sample else []
         stored_hash = self.config.get("sample_hash") or {}
         if stored_hash and stored_hash.get("version") != 1:
-            raise ValueError(f"unsupported materialized sample hash version: {stored_hash.get('version')}")
+            raise ValueError(
+                f"unsupported materialized sample hash version: {stored_hash.get('version')}"
+            )
         family_specs = [key_family(spec).spec() for spec in key_families or []]
         use_stored_hash = (
             sample_plan
@@ -335,15 +340,17 @@ class FileSource(SqlSource):
     ) -> Path:
         target = Path(output)
         target.parent.mkdir(parents=True, exist_ok=True)
+        part = target.with_name(target.name + ".part")
         connection = self.connect()
         try:
             self._audit(sql, operation)
             cursor = connection.execute(sql)
-            with target.open("w", newline="", encoding="utf-8") as handle:
+            with part.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle, lineterminator="\n")
                 writer.writerow(columns)
                 while rows := cursor.fetchmany(10_000):
                     writer.writerows(rows)
+            os.replace(part, target)
             return target
         finally:
             connection.close()
@@ -399,9 +406,7 @@ class DuckDBSource(SqlSource):
         to_date: str | None = None,
     ) -> str:
         if self.config.get("query"):
-            return super().relation(
-                partitions=partitions, from_date=from_date, to_date=to_date
-            )
+            return super().relation(partitions=partitions, from_date=from_date, to_date=to_date)
         parts = [self.config.get(name) for name in ("catalog", "schema", "table")]
         names = [name for part in parts if part for name in str(part).split(".")]
         if not names:

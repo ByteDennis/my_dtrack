@@ -99,20 +99,36 @@ class Landing:
             }
 
 
-# >>> Right counts in the warehouse; only source-sampled rows transfer for local statistics <<< #
+# >>> Right statistics over a pulled window CSV, keyed by the Right column names <<< #
+def right_csv_statistics(manifest: dict[str, Any], path: str | Path) -> dict[str, dict[str, Any]]:
+    overrides = manifest.get("col_type_overrides") or {}
+    column_types = manifest.get("column_types") or {}
+    return compute_csv_statistics(
+        path,
+        [manifest["col_map"][column] for column in manifest["columns"]],
+        strict=manifest.get("strict", False),
+        col_types={manifest["col_map"][k]: v for k, v in overrides.items()},
+        column_types={manifest["col_map"][k]: v for k, v in column_types.items()},
+        side="right",
+    )
+
+
+# >>> Right counts in the warehouse; only source-sampled rows transfer for local statistics; reuse keeps a pulled right.csv <<< #
 class WarehouseTarget(SparkTarget):
     def __init__(
         self,
-        warehouse: Warehouse,
+        warehouse: Warehouse | None,
         config: dict[str, Any],
         work_dir: str | Path,
         *,
         landing: Landing | None = None,
+        reuse: bool = False,
     ):
         super().__init__(None, config)
         self.warehouse = warehouse
         self.work_dir = Path(work_dir)
         self.landing = landing
+        self.reuse = reuse
 
     def _rows(self, sql: str, operation: str = "query") -> list[tuple]:
         return self.warehouse.rows(sql, operation=operation)
@@ -133,33 +149,35 @@ class WarehouseTarget(SparkTarget):
     def window_statistics(
         self, manifest: dict[str, Any], window: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
-        sql, selected = self.window_sql(manifest, window)
         output = self.work_dir / manifest["pair"] / window["bucket"] / "right.csv"
+        if self.reuse and output.is_file():
+            log.info("reuse right %s %s: %s", manifest["pair"], window["bucket"], output)
+            return right_csv_statistics(manifest, output)
+        if self.warehouse is None:
+            raise FileNotFoundError(f"{output} is not pulled and no warehouse is attached")
+        sql, selected = self.window_sql(manifest, window)
         self.warehouse.to_csv(sql, output, selected, operation="pull_sample")
         if self.landing:
             self.landing.land("right", manifest["pair"], window["bucket"], output)
-        overrides = manifest.get("col_type_overrides") or {}
-        column_types = manifest.get("column_types") or {}
-        return compute_csv_statistics(
-            output,
-            [manifest["col_map"][column] for column in manifest["columns"]],
-            strict=manifest.get("strict", False),
-            col_types={manifest["col_map"][k]: v for k, v in overrides.items()},
-            column_types={manifest["col_map"][k]: v for k, v in column_types.items()},
-            side="right",
-        )
+        return right_csv_statistics(manifest, output)
 
 
-# >>> Left pulls exactly as `dtrack col-check`, plus its query-filtered window in the landing DuckDB <<< #
+# >>> Left pulls exactly as `dtrack col-check`, plus its query-filtered window in the landing DuckDB; reuse keeps a pulled left.csv <<< #
 class LandingLeftRuntime(LeftRuntime):
-    def __init__(self, work_dir: str | Path, store, landing: Landing | None = None):
+    def __init__(
+        self, work_dir: str | Path, store, landing: Landing | None = None, *, reuse: bool = False
+    ):
         super().__init__(work_dir, store)
         self.landing = landing
+        self.reuse = reuse
 
     def pull_window(self, manifest, window):
+        raw = self.work_dir / manifest["pair"] / window["bucket"] / "left.csv"
+        if self.reuse and raw.is_file():
+            log.info("reuse left %s %s: %s", manifest["pair"], window["bucket"], raw)
+            return raw
         sampled = super().pull_window(manifest, window)
         if self.landing:
-            raw = self.work_dir / manifest["pair"] / window["bucket"] / "left.csv"
             self.landing.land("left", manifest["pair"], window["bucket"], raw)
         return sampled
 
@@ -173,6 +191,8 @@ class LocalRun:
     target_factory: Callable[[dict[str, Any]], Any]
     landing: Landing
     pairs: list[str] | None = None
+    reuse_pulled: bool = False
+    land: bool = True
     store: VolumeStore = field(init=False)
 
     def __post_init__(self):
@@ -191,7 +211,7 @@ class LocalRun:
         return self.store.get_json("_STATUS.json") if self.store.exists("_STATUS.json") else {}
 
 
-# >>> open (or resume) a run under `out`: config file or dict, warehouse from profile + id, landing DuckDB in _local/ <<< #
+# >>> open (or resume) a run under `out`: config file or dict, warehouse from profile + id, landing DuckDB in _local/; reuse_pulled keeps every pulled window CSV <<< #
 def open_run(
     config: str | Path | dict[str, Any],
     *,
@@ -201,6 +221,8 @@ def open_run(
     warehouse_id: str | None = None,
     pairs: list[str] | None = None,
     target_factory: Callable[[dict[str, Any]], Any] | None = None,
+    reuse_pulled: bool = False,
+    land: bool = True,
 ) -> LocalRun:
     document = config if isinstance(config, dict) else load_config(config)
     run_id = validate_run_id(run_id or make_run_id(document))
@@ -224,9 +246,11 @@ def open_run(
         work = folder / LOCAL / "right"
 
         def target_factory(right: dict[str, Any]):
-            return WarehouseTarget(warehouse, right, work, landing=landing)
+            return WarehouseTarget(
+                warehouse, right, work, landing=landing if land else None, reuse=reuse_pulled
+            )
 
-    run = LocalRun(document, run_id, folder, target_factory, landing, pairs)
+    run = LocalRun(document, run_id, folder, target_factory, landing, pairs, reuse_pulled, land)
     log.info("local run %s at %s; errors -> %s", run_id, folder, run.error_log)
     return run
 
@@ -307,7 +331,12 @@ def _col_check(
     left_work = run.local / "left"
     for manifest in manifests:
         publish_fixed_keys(run.store, manifest, left_work)
-    runtime = LandingLeftRuntime(left_work, run.store, run.landing)
+    runtime = LandingLeftRuntime(
+        left_work,
+        run.store,
+        run.landing if getattr(run, "land", True) else None,
+        reuse=getattr(run, "reuse_pulled", False),
+    )
     producer = ColCheckPipeline(
         run.store,
         pull_window=runtime.pull_window,

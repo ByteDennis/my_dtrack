@@ -85,9 +85,7 @@ def test_warehouse_target_pulls_native_columns_and_computes_statistics_locally(t
     warehouse = FakeWarehouse(rows)
     landing = pipeline.Landing(tmp_path / "data.duckdb")
     config = {"catalog": "c", "schema": "s", "table": "orders", "date_col": "business_date"}
-    target = pipeline.WarehouseTarget(
-        warehouse, config, tmp_path / "w", landing=landing
-    )
+    target = pipeline.WarehouseTarget(warehouse, config, tmp_path / "w", landing=landing)
     window = {"bucket": "2026-01-01", "partitions": ["2026-01-01", "2026-01-02"]}
     stats = target.window_statistics(MANIFEST, window)
     assert set(stats) == {"amount", "status"} and stats["amount"]["n_total"] == 2
@@ -316,16 +314,18 @@ def test_local_config_supplies_every_optional_run_value(tmp_path, monkeypatch, c
     monkeypatch.setattr(
         pipeline,
         "run_all",
-        lambda run, **kwargs: seen.update(run=run, execute=kwargs)
-        or {
-            "run_id": "config-run",
-            "folder": "folder",
-            "status": "DONE",
-            "findings": {},
-            "backup": {},
-            "landing": {},
-            "error_log": "errors.log",
-        },
+        lambda run, **kwargs: (
+            seen.update(run=run, execute=kwargs)
+            or {
+                "run_id": "config-run",
+                "folder": "folder",
+                "status": "DONE",
+                "findings": {},
+                "backup": {},
+                "landing": {},
+                "error_log": "errors.log",
+            }
+        ),
     )
 
     assert local_cli.main(["run", "--config", str(config)]) == 0
@@ -359,16 +359,18 @@ def test_cli_then_config_then_environment_precedence(tmp_path, monkeypatch, caps
     monkeypatch.setattr(
         pipeline,
         "run_all",
-        lambda _run, **kwargs: executed.append(kwargs)
-        or {
-            "run_id": kwargs.get("run_id", "r"),
-            "folder": "folder",
-            "status": "DONE",
-            "findings": {},
-            "backup": {},
-            "landing": {},
-            "error_log": "errors.log",
-        },
+        lambda _run, **kwargs: (
+            executed.append(kwargs)
+            or {
+                "run_id": kwargs.get("run_id", "r"),
+                "folder": "folder",
+                "status": "DONE",
+                "findings": {},
+                "backup": {},
+                "landing": {},
+                "error_log": "errors.log",
+            }
+        ),
     )
     monkeypatch.setenv("DTRACK_RUN_ID", "env-run")
     monkeypatch.setenv("DTRACK_RUN_S3", "s3://env/runs")
@@ -563,3 +565,58 @@ def test_key_check_does_not_mix_a_partial_pair_window_with_environment(
     assert json.loads(capsys.readouterr().out)["partitions"] == []
     assert seen["window"][0] == "2020-08-01"
     assert seen["window"][1] != "2019-08-03"
+
+
+def test_reuse_pulled_windows_skips_source_and_warehouse(tmp_path):
+    from dtrack_left.backends.sources import write_rows
+
+    window = {"bucket": "2026-01-01", "partitions": ["2026-01-01"]}
+    left = write_rows(
+        tmp_path / "left" / "orders" / "2026-01-01" / "left.csv",
+        ["dt", "ORDER_ID", "AMOUNT", "STATUS"],
+        [("2026-01-01", "1", "10.50", "OPEN"), ("2026-01-01", "2", "3", None)],
+    )
+    write_rows(
+        tmp_path / "right" / "orders" / "2026-01-01" / "right.csv",
+        ["dt", "order_id", "amount", "status"],
+        [("2026-01-01", "1", "10.5", "OPEN"), ("2026-01-01", "2", "3.0", None)],
+    )
+    assert not list(tmp_path.rglob("*.part"))
+    manifest = {**MANIFEST, "left": {"source": "nope"}, "key_cols": ["ORDER_ID"]}
+    runtime = pipeline.LandingLeftRuntime(tmp_path / "left", MemoryStore(), None, reuse=True)
+    assert runtime.pull_window(manifest, window) == left
+    target = pipeline.WarehouseTarget(
+        None, {"table": "orders", "date_col": "dt"}, tmp_path / "right", reuse=True
+    )
+    stats = target.window_statistics(manifest, window)
+    assert stats["amount"]["n_total"] == 2 and stats["status"]["n_missing"] == 1
+    assert (
+        stats["amount"]["hash_sum"]
+        == runtime.compute_stats(manifest, window, left)["AMOUNT"]["hash_sum"]
+    )
+    with pytest.raises(FileNotFoundError):
+        target.window_statistics(manifest, {"bucket": "2026-02-01", "partitions": ["2026-02-01"]})
+
+
+def test_open_run_threads_reuse_and_landing_flags(tmp_path):
+    config = {
+        "pairs": {
+            "orders": {
+                "left": {"source": "csv", "date_col": "dt"},
+                "right": {"source": "databricks", "date_col": "dt"},
+            }
+        }
+    }
+    run = pipeline.open_run(
+        config,
+        run_id="r",
+        out=tmp_path,
+        reuse_pulled=True,
+        land=False,
+        target_factory=lambda right: pipeline.WarehouseTarget(None, right, tmp_path, reuse=True),
+    )
+    assert (
+        run.reuse_pulled
+        and not run.land
+        and run.target_factory({"table": "t", "date_col": "dt"}).reuse
+    )

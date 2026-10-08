@@ -271,6 +271,12 @@ A, B, F implemented; 767 unit tests pass.
   mode the numeric re-collapse is skipped (collapse is idempotent). Payload unchanged
   (`test_batched_aggregates_match_the_single_query_payload`, tie-order test).
 - F: `ColCheckPipeline.run` skips a window up front when every unit is already in `_INDEX/`.
+- C (partial): `WarehouseTarget(reuse=True)` / `LandingLeftRuntime(reuse=True)` keep an existing
+  `right.csv` / `left.csv`; `open_run(reuse_pulled=True, land=False)` threads it, and
+  `examples/nbs/05_reuse_pulled.ipynb` finishes an interrupted run from its pulled windows.
+  `write_rows` and `FileSource.query_to_csv` now write `.part` and rename, so an existing CSV is
+  complete. Still open: the `dtrack local run` CLI does not expose the flag, and a stat OOM still
+  burns `max_attempts` (each attempt re-pulls unless reuse is on).
 
 Findings while benchmarking (dev box, 4 threads, 4 GiB budget):
 
