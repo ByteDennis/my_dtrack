@@ -23,6 +23,7 @@ from dtrack_left.checks.row_check import run_row_check as left_row_check
 from dtrack_left.cli.config import load_config
 from dtrack_left.common.audit import SqlAudit, attach_sql_audit, prune_audit_history
 from dtrack_left.common.dates import partition_where, quote_ident
+from dtrack_left.common.duck import connect, use_temp
 from dtrack_left.common.stats import compute_csv_statistics
 from dtrack_right.backends.store import S3Store, VolumeStore
 from dtrack_right.backends.targets import SparkTarget
@@ -52,14 +53,12 @@ class Landing:
         return connection.execute(sql)
 
     def land(self, side: str, pair: str, bucket: str, csv_path: str | Path) -> int:
-        import duckdb
-
         table = quote_ident(f"{side}__{pair}", "sql")
         source = (
             "read_csv('" + str(csv_path).replace("'", "''") + "', all_varchar=true, header=true)"
         )
         label = "'" + bucket.replace("'", "''") + "'"
-        with self.lock, duckdb.connect(str(self.path)) as connection:
+        with self.lock, connect(str(self.path), ordered=False) as connection:
             self._execute(
                 connection,
                 f"CREATE TABLE IF NOT EXISTS {table} AS "
@@ -83,11 +82,9 @@ class Landing:
             ).fetchone()[0]
 
     def tables(self) -> dict[str, int]:
-        import duckdb
-
         if not self.path.exists():
             return {}
-        with self.lock, duckdb.connect(str(self.path), read_only=True) as connection:
+        with self.lock, connect(str(self.path), read_only=True) as connection:
             names = [
                 row[0]
                 for row in self._execute(connection, "SHOW TABLES", "landing_inspect").fetchall()
@@ -209,6 +206,7 @@ def open_run(
     run_id = validate_run_id(run_id or make_run_id(document))
     folder = Path(out) / run_id
     configure_run_logging(folder)
+    use_temp(folder / LOCAL / "duckdb")
     run_store = VolumeStore(folder)
     landing = Landing(
         folder / LOCAL / "data.duckdb",

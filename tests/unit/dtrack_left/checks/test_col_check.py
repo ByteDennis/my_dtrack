@@ -190,3 +190,17 @@ def test_row_check_then_col_check_on_real_files(synthetic, tmp_path):
     assert unit["n_total"] > 0 and {"n_unique", "hash_sum", "min_val"} <= set(unit)
     assert sorted({row["column"] for row in pointers}) == ["AMOUNT", "ORDER_ID", "REGION", "STATUS"]
     assert store.get_json("_STATUS.json")["state"] == "left_col_check_closed"
+
+
+def test_pipeline_skips_pulling_windows_whose_units_are_all_indexed():
+    store = MemoryStore()
+    row = manifest()
+    store.put_json("manifest/pair.json", row)
+    pulled = []
+    args = {
+        "pull_window": lambda _m, window: pulled.append(window["bucket"]) or "pulled",
+        "compute_stats": lambda _m, _w, _p: {"amount": STATS},
+    }
+    assert ColCheckPipeline(store, **args).run([row]) == 1
+    assert ColCheckPipeline(store, **args).run([row]) == 0
+    assert pulled == ["2026-01"]

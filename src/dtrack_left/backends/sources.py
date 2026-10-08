@@ -326,9 +326,9 @@ class FileSource(SqlSource):
         return f"(SELECT * REPLACE ({parsed} AS {column}) FROM {source}) dtrack_source"
 
     def connect(self):
-        import duckdb
+        from ..common.duck import connect
 
-        return duckdb.connect()
+        return connect(ordered=False)
 
     def query_to_csv(
         self, sql: str, output: Path, columns: list[str], *, operation: str = "query"
@@ -411,7 +411,9 @@ class DuckDBSource(SqlSource):
     def connect(self):
         import duckdb
 
-        connection = duckdb.connect()
+        from ..common.duck import connect
+
+        connection = connect(ordered=False)
         alias = quote_ident(self.alias, self.dialect)
         attach = f"ATTACH {_duckdb_value(self.database())} AS {alias} (READ_ONLY)"
         try:

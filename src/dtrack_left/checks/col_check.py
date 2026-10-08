@@ -14,6 +14,7 @@ import pandas as pd
 
 from ..backends.sources import source_from_config
 from ..common.audit import SqlAudit, attach_sql_audit
+from ..common.duck import use_temp
 from ..common.manifest import unit_id, validate_manifest
 from ..common.stats import compute_csv_statistics
 
@@ -143,6 +144,16 @@ class ColCheckPipeline:
                     except StopIteration:
                         exhausted = True
                         break
+                    if all(
+                        unit_id(manifest["pair"], window["bucket"], column) in existing
+                        for column in manifest["columns"]
+                    ):
+                        log.info(
+                            "skip %s %s: every unit already indexed",
+                            manifest["pair"],
+                            window["bucket"],
+                        )
+                        continue
                     log.info(
                         "pull %s %s: %d partition(s)",
                         manifest["pair"],
@@ -234,6 +245,7 @@ def _row_count(path: str | Path) -> int:
 class LeftRuntime:
     def __init__(self, work_dir: str | Path, store=None):
         self.work_dir = Path(work_dir)
+        use_temp(self.work_dir / "duckdb")
         self.store = store
         self.sources = {}
         self.sources_lock = threading.Lock()

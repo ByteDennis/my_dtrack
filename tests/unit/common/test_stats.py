@@ -122,3 +122,40 @@ def test_registered_date_column_type_normalizes_each_side_before_hashing(tmp_pat
     )
     assert left_stats == right_stats
     assert left_stats["D"]["min_val"] == "2026-08-01"
+
+
+def test_batched_aggregates_match_the_single_query_payload(tmp_path, monkeypatch):
+    import random
+
+    random.seed(7)
+    width = 150
+    columns = [f"c{i}" for i in range(width)]
+    rows = []
+    for row in range(40):
+        values = []
+        for i in range(width):
+            if i % 3 == 0:
+                values.append("" if row % 7 == 0 else str(random.randint(-50, 50)))
+            elif i % 3 == 1:
+                values.append(f"{random.random() * 100:.3f}0")
+            else:
+                values.append(random.choice(["a", "b", "c", "", "ä"]))
+        rows.append(values)
+    path = tmp_path / "wide.csv"
+    path.write_text(
+        "\n".join([",".join(columns), *(",".join(values) for values in rows)]) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DTRACK_STATS_BATCH", "1000")
+    single = stats.compute_csv_statistics(path, columns, strict=True)
+    monkeypatch.setenv("DTRACK_STATS_BATCH", "7")
+    batched = stats.compute_csv_statistics(path, columns, strict=True)
+    assert batched == single
+    assert single["c0"]["col_type"] == "numeric" and single["c2"]["col_type"] == "categorical"
+
+
+def test_top_10_ties_keep_first_appearance_order(tmp_path):
+    path = tmp_path / "ties.csv"
+    path.write_text("K\nz\ny\nx\ny\nz\nx\nw\n")
+    result = stats.compute_csv_statistics(path, ["K"])
+    assert [item["value"] for item in json.loads(result["K"]["top_10"])] == ["z", "y", "x", "w"]

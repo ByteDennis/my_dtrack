@@ -63,6 +63,29 @@ Common environment variables (`.env` is loaded):
   DTRACK_PAIRS=orders,customers
   DTRACK_DEBUG=ipdb                        # ipdb | attach
 
+DuckDB budget (every Left/local DuckDB connection: file sources, statistics, local landing):
+
+  DTRACK_DUCKDB_MEMORY=16GB                # process budget; default 60% of physical RAM
+  DTRACK_DUCKDB_SHARE=4                    # concurrent connections the budget is split across
+                                           # (pull-workers + stat-workers; local adds Right + landing)
+  DTRACK_DUCKDB_THREADS=4                  # per connection; default cpu_count / SHARE
+  DTRACK_DUCKDB_TEMP=D:\dtrack-spill       # spill + statistics scratch; default <work-dir>/duckdb
+                                           # (col-check) or <run>/_local/duckdb (local), then
+                                           # <system temp>/dtrack-duckdb when that is not writable
+  DTRACK_STATS_BATCH=64                    # columns per statistics aggregate query
+
+Set DTRACK_DUCKDB_MEMORY to what the machine can really give dtrack: each connection gets
+MEMORY / SHARE and spills to DTRACK_DUCKDB_TEMP above that instead of failing. A 1715-column
+window of 70k rows completes inside 4 GiB per connection; without a budget DuckDB assumes 80%
+of RAM (on Windows including the page file) for every connection at once.
+
+Local-only (Databricks SQL warehouse pulls through a corporate proxy):
+
+  USERNAME / PASSWORD / AWS_HOST           # proxy http://USERNAME:PASSWORD@AWS_HOST:8080 for
+                                           # presigned EXTERNAL_LINKS chunk downloads; unset ->
+                                           # HTTPS_PROXY. Windows pre-sets USERNAME to the login
+                                           # name, and .env never overrides a set variable.
+
 Every option with an environment binding shows its exact variable in `--help`.
 
 Keep passwords/tokens in environment variables or secret stores, never in shared payloads.
@@ -368,6 +391,22 @@ Parameter choice:
   wip           maximum indexed-but-not-finished backlog; backpressure, not object count
   wait-timeout  maximum wait for Right Stage-1 closure
   poll-interval S3 polling interval; 2-5 seconds is usually sufficient
+  work-dir      pulled window CSVs and the DuckDB scratch/spill directory (default
+                .dtrack-work/col_check); put it on the disk with the most free space
+
+Each window is pulled, summarized, and published before the next one; nothing accumulates in
+memory across windows. Statistics load the window CSV once into a scratch DuckDB file under
+work-dir (single-threaded load: the parallel CSV reader buffers every column), then aggregate
+DTRACK_STATS_BATCH columns per query, so memory is bounded by the budget in section 1 rather
+than by column count. Size DTRACK_DUCKDB_SHARE = pull-workers + stat-workers.
+
+Resume: rerun the same `--run-id`. Windows whose units are all already in `_INDEX/` are skipped
+before any pull; a partially published window is pulled again and only its missing units are
+written.
+
+Wide tables (hundreds to thousands of columns, 100k+ rows per window) belong in this
+distributed workflow, not in `dtrack local`: the Right statistics then run on the cluster
+instead of a second time on the Left machine, and the window data never crosses the proxy.
 
 F. Reports
 
@@ -402,7 +441,8 @@ Why both `units/` and `_INDEX/` exist:
 
 Unit identity:
   deterministic SHA-256-derived id from pair + vintage window + column. Existing ids are skipped,
-  so reruns are idempotent. Sequence-prefixed index names give an ordered polling cursor.
+  and a window whose ids all exist is not pulled again, so reruns are idempotent.
+  Sequence-prefixed index names give an ordered polling cursor.
 
 Core monitoring invariants:
   expected = manifest/_CLOSED.expected_units
@@ -557,6 +597,13 @@ Sampling always runs in each source/warehouse before transfer; full-window downl
 local sampling is unsupported. `_local/` is never uploaded. Local col-check runs the Left producer
 and Right consumer concurrently over the same directory
 store. Errors go to `<run>/_local/logs/errors.log`; normal CLI JSON remains on stdout.
+
+Right windows are pulled from the SQL warehouse with `disposition=EXTERNAL_LINKS` (the INLINE
+default caps a statement result at 25 MiB) and downloaded with `requests` through the proxy in
+section 1; counts and DESCRIBE stay inline. The local runner opens up to five DuckDB connections
+(Left pulls, Left statistics, Right statistics, landing), so set DTRACK_DUCKDB_SHARE accordingly
+and run one local run per machine. It is the fallback for small pairs; see section 3E for
+wide tables.
 Representative submitted SQL shapes are retained in `<run>/audit.txt`; key-check uses
 `.dtrack-local/keycheck/<pair>/audit.txt`.
 
@@ -593,9 +640,10 @@ it never appends raw XHTML. Use `Orders=PASS` for overall status and
 
 For very large `source=file` CSVs, DuckDB scans the file in place and applies partition/sample
 predicates before export. DTrack writes matching rows in 10,000-row batches and computes statistics
-with DuckDB aggregates, so it does not materialize the whole CSV in Python RAM. DuckDB parallel scan
-is enabled by default and may spill blocking aggregates to disk. Prefer partitioned Parquet for
-repeated runs because projection/filter pushdown avoids reparsing the full CSV.
+with batched DuckDB aggregates over a scratch table, so it does not materialize the whole CSV in
+Python RAM. Every connection runs under the DuckDB budget in section 1 and spills to
+DTRACK_DUCKDB_TEMP. Prefer partitioned Parquet for repeated runs because projection/filter
+pushdown avoids reparsing the full CSV.
 
 After `dtrack tools materialize`, fraction sampling uses the stored versioned `dtrack_hash` when
 the configured keys and key families still match. If that contract changes, DTrack falls back to
@@ -625,6 +673,17 @@ Large backlog:
 Dead units:
   read dead/<unit_id>.json and the dedicated job/local error log; fix the cause; dry-run
   `rollback --stage dead`; apply; restart the Right Job with the same run_id.
+
+Out of Memory Error / statistics take tens of minutes per window:
+  set DTRACK_DUCKDB_MEMORY to the RAM the machine can spare and DTRACK_DUCKDB_SHARE to the
+  number of concurrent connections; point DTRACK_DUCKDB_TEMP at a disk with room to spill; run one
+  dtrack process per machine. Lower DTRACK_STATS_BATCH only if a single batch still exceeds the
+  per-connection limit. Wide tables go through the distributed workflow (section 3E).
+
+Local run: "inline byte limit exceeded" or presigned chunk download hangs:
+  the window exceeds 25 MiB inline; dtrack already requests EXTERNAL_LINKS, so verify the proxy
+  variables in section 1 (USERNAME/PASSWORD/AWS_HOST) and that the presigned storage host is
+  reachable through that proxy.
 
 Wrong config after Stage 2 started:
   preserve report/evidence, stop Right, create a new run when in doubt. A new run is safer than

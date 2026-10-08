@@ -1,5 +1,17 @@
-Commit: 64eb0a7be0aa068f0eb553782bc1608a0defe23f
+Commit: 4af9b49236380d1905719d381de3b52c7bc9abf8
+plans/local-run-memory-and-wide-table-stats.md — Added: documented the concurrent local-run OOM evidence, bounded DuckDB design, wide-table batching strategy, resume behavior, benchmarks, and verification plan.
+src/dtrack_left/backends/sources.py — Modified: routed file and DuckDB sources through shared memory, thread, spill-directory, and insertion-order settings.
+src/dtrack_left/checks/col_check.py — Modified: registered run-scoped DuckDB scratch space and skipped pulling windows whose units were already fully indexed.
+src/dtrack_left/common/duck.py — Added: centralized physical-memory detection, configurable DuckDB resource budgets, spill-directory fallback, and connection settings.
+src/dtrack_left/common/stats.py — Modified: parsed each CSV once and computed inference, exact aggregates, and stable top values in bounded column batches without changing statistics payloads.
+src/dtrack_local/pipeline.py — Modified: applied the shared DuckDB resource budget to local landing databases and placed spill files beneath each local run.
+tests/unit/common/test_duck.py — Added: covered size parsing, budget splitting, physical-memory defaults, spill settings, work-directory precedence, and fallback behavior.
+tests/unit/common/test_stats.py — Modified: verified batched statistics match the prior single-query payload and preserve first-appearance ordering for tied top values.
+tests/unit/dtrack_left/checks/test_col_check.py — Modified: verified resumed column checks do not repull fully indexed windows.
+
+Commit: a9e3cbcc7635e1ad1c32acbb9f6cba78ea717058
 README.md — Modified: documented config-relative Oracle query files, controlled query-window pushdown, and structured Confluence page updates.
+changelog.txt — Modified: recorded the config-relative query, Confluence update, and Databricks result-streaming changes under the final amended commit identity.
 examples/nbs/03_tools.ipynb — Modified: added the current Confluence blog update command to the tools notebook.
 guideme.txt — Modified: documented multi-view Oracle query-window markers and incremental Confluence template updates.
 src/dtrack_left/backends/sources.py — Modified: rendered row bounds and admitted partitions inside Oracle consolidation queries while retaining outer filtering and final-result sampling.

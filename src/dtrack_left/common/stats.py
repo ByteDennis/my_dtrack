@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +87,36 @@ def column_statistics(
     return common
 
 
+DEFAULT_BATCH = 64
+
+
+# >>> DTRACK_STATS_BATCH columns per aggregate query, so at most that many DISTINCT hash tables live at once <<< #
+def stats_batch() -> int:
+    return max(1, int(os.getenv("DTRACK_STATS_BATCH") or DEFAULT_BATCH))
+
+
+def _batches(items: list, size: int):
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def _quote(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+# >>> trim, then drop trailing decimal zeros ("1.50" -> "1.5", "2.0" -> "2"); idempotent <<< #
+def _collapse(expr: str) -> str:
+    trimmed = f"trim({expr})"
+    collapsed = (
+        f"regexp_replace(regexp_replace({trimmed}, '(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')"
+    )
+    return (
+        f"CASE WHEN regexp_matches({trimmed}, '^-?[0-9]+\\.[0-9]+$') "
+        f"THEN {collapsed} ELSE {trimmed} END"
+    )
+
+
+# >>> one single-threaded CSV load into a file-backed table (parallel readers buffer every column; rowid = file order), then batched aggregates <<< #
 def compute_csv_statistics(
     path: str | Path,
     columns: list[str],
@@ -93,103 +126,99 @@ def compute_csv_statistics(
     column_types: dict[str, Any] | None = None,
     side: str = "left",
 ) -> dict[str, dict[str, Any]]:
-    import duckdb
+    from .duck import connect, settings, temp_directory
 
-    def quote(name: str) -> str:
-        return '"' + name.replace('"', '""') + '"'
-
-    def collapse(expr: str) -> str:
-        trimmed = f"trim({expr})"
-        collapsed = (
-            f"regexp_replace(regexp_replace({trimmed}, "
-            "'(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')"
-        )
-        return (
-            f"CASE WHEN regexp_matches({trimmed}, '^-?[0-9]+\\.[0-9]+$') "
-            f"THEN {collapsed} ELSE {trimmed} END"
-        )
-
+    with Path(path).open(encoding="utf-8", newline="") as handle:
+        available = next(csv.reader(handle), [])
+    missing = [column for column in columns if column not in available]
+    if missing:
+        raise ValueError(f"CSV is missing columns: {', '.join(missing)}")
     path_sql = "'" + str(Path(path)).replace("'", "''") + "'"
     scan = f"read_csv({path_sql}, all_varchar=true, header=true)"
-    requested_types = col_types or {}
-    comparisons = column_types or {}
-    with duckdb.connect() as connection:
-        available = [row[0] for row in connection.execute(f"DESCRIBE SELECT * FROM {scan}").fetchall()]
-        missing = [column for column in columns if column not in available]
-        if missing:
-            raise ValueError(f"CSV is missing columns: {', '.join(missing)}")
+    workspace = Path(temp_directory()) / f"stats-{uuid.uuid4().hex}.duckdb"
+    try:
+        workspace.parent.mkdir(parents=True, exist_ok=True)
+        with connect(str(workspace)) as connection:
+            projection = ", ".join(_quote(column) for column in dict.fromkeys(columns))
+            connection.execute("SET threads = 1")
+            connection.execute(f"CREATE TABLE scanned AS SELECT {projection} FROM {scan}")
+            connection.execute(f"SET threads = {settings()['threads']}")
+            return _statistics(
+                connection, columns, strict, col_types or {}, column_types or {}, side
+            )
+    finally:
+        for suffix in ("", ".wal"):
+            Path(str(workspace) + suffix).unlink(missing_ok=True)
 
-        base = {}
-        for column in columns:
-            ref = quote(column)
-            value = ref
-            if column in comparisons:
-                normalized = resolve_column_type(comparisons[column]).normalize_sql(
-                    ref, "duckdb", side
-                )
-                value = f"CASE WHEN {ref} IS NULL THEN NULL ELSE {normalized} END"
-            if strict:
-                value = f"lower({collapse(value)})"
-            base[column] = value
 
+def _statistics(connection, columns, strict, requested_types, comparisons, side):
+    batch = stats_batch()
+    base = {}
+    for column in columns:
+        ref = _quote(column)
+        value = ref
+        if column in comparisons:
+            normalized = resolve_column_type(comparisons[column]).normalize_sql(ref, "duckdb", side)
+            value = f"CASE WHEN {ref} IS NULL THEN NULL ELSE {normalized} END"
+        if strict:
+            value = f"lower({_collapse(value)})"
+        base[column] = value
+
+    indexed = list(enumerate(columns))
+    inferred: dict[int, tuple] = {}
+    for group in _batches(indexed, batch):
         infer_selects = []
-        for index, column in enumerate(columns):
+        for index, column in group:
             value = base[column]
             infer_selects += [
                 f"count({value}) AS present_{index}",
                 f"count(try_cast({value} AS double)) AS numeric_{index}",
-                (
-                    f"count_if(regexp_matches({value}, '^[+-]?[0-9]+$')) "
-                    f"AS integral_{index}"
-                ),
+                f"count_if(regexp_matches({value}, '^[+-]?[0-9]+$')) AS integral_{index}",
             ]
         inferred_row = connection.execute(
-            f"SELECT {', '.join(infer_selects)} FROM {scan}"
+            f"SELECT {', '.join(infer_selects)} FROM scanned"
         ).fetchone()
-        numeric, integral = {}, {}
-        for index, column in enumerate(columns):
-            forced = requested_types.get(column)
-            present, parsed, integers = inferred_row[index * 3 : index * 3 + 3]
-            numeric[column] = (
-                forced == "numeric"
-                if forced
-                else column not in comparisons and present > 0 and present == parsed
-            )
-            integral[column] = numeric[column] and present == parsed == integers
+        for offset, (index, _column) in enumerate(group):
+            inferred[index] = inferred_row[offset * 3 : offset * 3 + 3]
+    numeric, integral = {}, {}
+    for index, column in indexed:
+        forced = requested_types.get(column)
+        present, parsed, integers = inferred[index]
+        numeric[column] = (
+            forced == "numeric"
+            if forced
+            else column not in comparisons and present > 0 and present == parsed
+        )
+        integral[column] = numeric[column] and present == parsed == integers
 
+    row: dict[str, Any] = {}
+    values = {}
+    for group in _batches(indexed, batch):
         selects = ["count(*) AS n_total"]
-        values = {}
-        for index, column in enumerate(columns):
-            raw, value = quote(column), base[column]
-            if numeric[column]:
-                value = collapse(value)
+        for index, column in group:
+            raw, value = _quote(column), base[column]
+            if numeric[column] and not strict:
+                value = _collapse(value)
             values[column] = value
             number = f"try_cast({value} AS double)"
             extreme = f"try_cast({value} AS hugeint)" if integral[column] else number
             hash_value = (
-                f"cast('0x' || substr(sha256(coalesce({value}, '<<NULL>>')), 1, 16) "
-                "as ubigint)"
+                f"cast('0x' || substr(sha256(coalesce({value}, '<<NULL>>')), 1, 16) as ubigint)"
             )
             selects += [
                 f"count_if({raw} IS NULL) AS n_missing_{index}",
                 f"count(DISTINCT {value}) AS n_unique_{index}",
                 f"sum(cast({hash_value} AS hugeint)) AS hash_sum_{index}",
                 f"avg({number}) AS mean_{index}" if numeric[column] else f"NULL AS mean_{index}",
-                (
-                    f"stddev_samp({number}) AS std_{index}"
-                    if numeric[column]
-                    else f"NULL AS std_{index}"
-                ),
-                (
-                    f"min({extreme}) AS min_{index}"
-                    if numeric[column]
-                    else f"min({value}) AS min_{index}"
-                ),
-                (
-                    f"max({extreme}) AS max_{index}"
-                    if numeric[column]
-                    else f"max({value}) AS max_{index}"
-                ),
+                f"stddev_samp({number}) AS std_{index}"
+                if numeric[column]
+                else f"NULL AS std_{index}",
+                f"min({extreme}) AS min_{index}"
+                if numeric[column]
+                else f"min({value}) AS min_{index}",
+                f"max({extreme}) AS max_{index}"
+                if numeric[column]
+                else f"max({value}) AS max_{index}",
                 (
                     f"NULL AS length_avg_{index}"
                     if numeric[column]
@@ -201,47 +230,42 @@ def compute_csv_statistics(
                     else f"max(length({value})) AS length_max_{index}"
                 ),
             ]
-        cursor = connection.execute(f"SELECT {', '.join(selects)} FROM {scan}")
-        row = dict(zip([item[0] for item in cursor.description], cursor.fetchone()))
-        result = {}
-        for index, column in enumerate(columns):
-            is_numeric = numeric[column]
-            minimum, maximum = row[f"min_{index}"], row[f"max_{index}"]
-            top = ""
-            if not is_numeric:
-                value = values[column]
-                top_rows = connection.execute(
-                    "WITH numbered AS ("
-                    f"SELECT {value} AS value, row_number() OVER () AS position FROM {scan}), "
-                    "counts AS (SELECT value, count(*) AS n, min(position) AS position "
-                    "FROM numbered WHERE value IS NOT NULL GROUP BY value) "
-                    "SELECT value, n FROM counts ORDER BY n DESC, position LIMIT 10"
-                ).fetchall()
-                top = json.dumps(
-                    [{"value": value, "count": int(count)} for value, count in top_rows],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            result[column] = {
-                "col_type": "numeric" if is_numeric else "categorical",
-                "n_total": int(row["n_total"]),
-                "n_missing": int(row[f"n_missing_{index}"] or 0),
-                "n_unique": int(row[f"n_unique_{index}"] or 0),
-                "hash_sum": str(int(row[f"hash_sum_{index}"] or 0)),
-                "mean": None if row[f"mean_{index}"] is None else float(row[f"mean_{index}"]),
-                "std": None if row[f"std_{index}"] is None else float(row[f"std_{index}"]),
-                "min_val": None if minimum is None else str(minimum),
-                "max_val": None if maximum is None else str(maximum),
-                "length_avg": (
-                    None
-                    if row[f"length_avg_{index}"] is None
-                    else float(row[f"length_avg_{index}"])
-                ),
-                "length_max": (
-                    None
-                    if row[f"length_max_{index}"] is None
-                    else int(row[f"length_max_{index}"])
-                ),
-                "top_10": top,
-            }
-        return result
+        cursor = connection.execute(f"SELECT {', '.join(selects)} FROM scanned")
+        row.update(zip([item[0] for item in cursor.description], cursor.fetchone()))
+
+    result = {}
+    for index, column in indexed:
+        is_numeric = numeric[column]
+        minimum, maximum = row[f"min_{index}"], row[f"max_{index}"]
+        top = ""
+        if not is_numeric:
+            top_rows = connection.execute(
+                "WITH counts AS (SELECT value, count(*) AS n, min(position) AS position "
+                f"FROM (SELECT {values[column]} AS value, rowid AS position FROM scanned) "
+                "WHERE value IS NOT NULL GROUP BY value) "
+                "SELECT value, n FROM counts ORDER BY n DESC, position LIMIT 10"
+            ).fetchall()
+            top = json.dumps(
+                [{"value": value, "count": int(count)} for value, count in top_rows],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        result[column] = {
+            "col_type": "numeric" if is_numeric else "categorical",
+            "n_total": int(row["n_total"]),
+            "n_missing": int(row[f"n_missing_{index}"] or 0),
+            "n_unique": int(row[f"n_unique_{index}"] or 0),
+            "hash_sum": str(int(row[f"hash_sum_{index}"] or 0)),
+            "mean": None if row[f"mean_{index}"] is None else float(row[f"mean_{index}"]),
+            "std": None if row[f"std_{index}"] is None else float(row[f"std_{index}"]),
+            "min_val": None if minimum is None else str(minimum),
+            "max_val": None if maximum is None else str(maximum),
+            "length_avg": (
+                None if row[f"length_avg_{index}"] is None else float(row[f"length_avg_{index}"])
+            ),
+            "length_max": (
+                None if row[f"length_max_{index}"] is None else int(row[f"length_max_{index}"])
+            ),
+            "top_10": top,
+        }
+    return result
