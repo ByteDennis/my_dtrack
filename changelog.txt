@@ -1,3 +1,38 @@
+Commit: ef1c5fd0b95c5274324080ad5b9f9ad615360ca7
+README.md — Modified: documented editable Confluence templates, private publishing, and direct command debugging.
+examples/e2e/README.md — Modified: removed fetch-report guidance and documented run-bound report access.
+examples/e2e/run_e2e.sh — Modified: removed the obsolete fetch-report execution step.
+examples/nbs/00_row_check.ipynb — Modified: linked the distributed handoff directly to the run report prefix.
+examples/nbs/01_col_check.ipynb — Modified: replaced report downloading with exact run status and report locations.
+examples/nbs/02_local.ipynb — Modified: verified locally published report bytes without the removed fetch helper.
+examples/nbs/03_tools.ipynb — Modified: demonstrated current tools and direct local debug options.
+guideme.txt — Modified: documented Confluence templates, private pages, materialization progress, direct debugging, and report locations.
+src/dtrack/cli.py — Modified: removed the obsolete debug and fetch-report commands from the unified tools group.
+src/dtrack_left/__main__.py — Modified: directed report consumers to the resolved run folder or Confluence publisher.
+src/dtrack_left/backends/materialize.py — Modified: added interactive DuckDB progress, non-interactive heartbeats, and validated config replacement.
+src/dtrack_left/backends/store.py — Modified: removed the obsolete report download helper.
+src/dtrack_left/cli/__init__.py — Modified: removed obsolete debug and fetch-report command registration.
+src/dtrack_left/cli/blog.py — Modified: grouped page lifecycle commands and added template-backed private publishing.
+src/dtrack_left/cli/tools.py — Modified: removed obsolete debug and fetch-report implementations.
+src/dtrack_left/confluence.py — Modified: added page inspection and current-user default restrictions.
+src/dtrack_left/confluence_templates.py — Added: safely rendered editable business-validation Confluence templates and derived status metrics.
+templates/confluence/README.md — Added: documented template preview, publishing, visibility, and artifact inputs.
+templates/confluence/business-validation-overall.example.json — Added: provided example validation tables, phases, statuses, links, and attachments.
+templates/confluence/business-validation-overall.xhtml — Added: provided the clean overall business-validation status page layout.
+tests/live/README.md — Modified: replaced fetch-report coverage with exact-run report readability.
+tests/live/dtrack_left/test_s3.py — Modified: verified completed report artifacts directly through the run store.
+tests/live/test_job_flow.py — Modified: read the published summary directly from the completed run.
+tests/local/confluence/test_confluence_dc.py — Modified: covered the grouped Confluence page lifecycle.
+tests/unit/dtrack/test_cli.py — Modified: enforced removal of obsolete tools from the unified CLI.
+tests/unit/dtrack_left/backends/test_materialize.py — Modified: covered materialization progress, stored hashes, config replacement, and safe deletion.
+tests/unit/dtrack_left/backends/test_store.py — Modified: removed obsolete report-download behavior coverage.
+tests/unit/dtrack_left/cli/test_blog.py — Modified: covered template preview, private publication, and grouped blog operations.
+tests/unit/dtrack_left/cli/test_tools.py — Modified: enforced the reduced tools command surface and retained direct debugger coverage.
+tests/unit/dtrack_left/test_confluence_admin.py — Modified: covered default publishing-user restrictions.
+tests/unit/dtrack_left/test_confluence_templates.py — Added: covered metrics, escaping, links, attachments, statuses, and safe XHTML rendering.
+tests/unit/dtrack_right/report/test_build.py — Modified: verified report publication directly inside a resolved run store.
+tests/unit/test_protocol_flow.py — Modified: verified the published report directly without the removed fetch helper.
+
 Commit: d56a7bfeadbdf9fd4b0f1577a9b6fa801b3adf6d
 examples/nbs/00_pipeline_end_to_end.ipynb — Deleted: replaced the broad legacy tutorial with focused executable workflow notebooks.
 examples/nbs/00_row_check.ipynb — Added: demonstrated distributed row-check and direct row reconciliation assertions on real CSV data.
