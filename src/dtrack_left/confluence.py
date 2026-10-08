@@ -156,6 +156,7 @@ def make_confluence_client(
 
 API_ROOTS = ("rest/api", "rest/experimental")
 UPLOAD_HEADERS = {"X-Atlassian-Token": "no-check", "Accept": "application/json"}
+TEMPLATE_STATE_PROPERTY = "dtrack.template-state"
 
 
 class ConfluenceError(RuntimeError):
@@ -292,6 +293,60 @@ def _attachment(client, page_id: str, name: str) -> dict[str, Any] | None:
     return next((row for row in (found or {}).get("results") or [] if row["title"] == name), None)
 
 
+def attachment_names(client, page_id: str) -> list[str]:
+    return sorted(
+        str(row.get("title") or "")
+        for row in _results(client, f"content/{page_id}/child/attachment")
+        if row.get("title")
+    )
+
+
+def get_template_state(client, page_id: str) -> dict[str, Any]:
+    properties = _results(
+        client,
+        f"content/{page_id}/property",
+        {"expand": "version"},
+    )
+    found = next((row for row in properties if row.get("key") == TEMPLATE_STATE_PROPERTY), None)
+    if not found or not isinstance(found.get("value"), dict):
+        raise ValueError(
+            f"page {page_id} has no DTrack template state; publish it once with --template and --data"
+        )
+    return {
+        "value": found["value"],
+        "version": int((found.get("version") or {}).get("number") or 1),
+    }
+
+
+def set_template_state(client, page_id: str, state: dict[str, Any]) -> int:
+    properties = _results(
+        client,
+        f"content/{page_id}/property",
+        {"expand": "version"},
+    )
+    found = next((row for row in properties if row.get("key") == TEMPLATE_STATE_PROPERTY), None)
+    if found:
+        version = int((found.get("version") or {}).get("number") or 1) + 1
+        confluence_call(
+            client,
+            "PUT",
+            f"content/{page_id}/property/{TEMPLATE_STATE_PROPERTY}",
+            json={
+                "key": TEMPLATE_STATE_PROPERTY,
+                "value": state,
+                "version": {"number": version},
+            },
+        )
+        return version
+    confluence_call(
+        client,
+        "POST",
+        f"content/{page_id}/property",
+        json={"key": TEMPLATE_STATE_PROPERTY, "value": state},
+    )
+    return 1
+
+
 # >>> upload a file; an attachment with the same name gets a new version instead of a duplicate <<< #
 def upload_attachment(client, page_id: str, path: str | Path, comment: str | None = None):
     path = Path(path)
@@ -415,4 +470,54 @@ def publish_tracking_page(
         outcome["restrictions"] = set_restrictions(
             client, page_id, read=restrict_read, edit=restrict_edit, me=me
         )
+    if page.get("template_state"):
+        outcome["template_state_version"] = set_template_state(
+            client, page_id, page["template_state"]
+        )
     return outcome
+
+
+def update_template_page(
+    client,
+    page_id: str,
+    page: dict[str, Any],
+    *,
+    attachments: list[str | Path] | None = None,
+) -> dict[str, Any]:
+    """Update one exact page id and advance its structured template state."""
+
+    current = confluence_call(
+        client,
+        "GET",
+        f"content/{page_id}",
+        params={"expand": "version"},
+    )
+    version = int(current["version"]["number"]) + 1
+    result = confluence_call(
+        client,
+        "PUT",
+        f"content/{page_id}",
+        json={
+            "id": str(page_id),
+            "type": "page",
+            "title": page["title"],
+            "version": {"number": version},
+            "body": {
+                "storage": {
+                    "value": page["body"],
+                    "representation": "storage",
+                }
+            },
+        },
+    )
+    returned = str((result or {}).get("id") or page_id)
+    if returned != str(page_id):
+        raise ConfluenceError(f"updated page {returned}, expected {page_id}")
+    uploaded = [upload_attachment(client, page_id, item) for item in attachments or []]
+    state_version = set_template_state(client, page_id, page["template_state"])
+    return {
+        "page_id": str(page_id),
+        "version": version,
+        "template_state_version": state_version,
+        "attachments": uploaded,
+    }

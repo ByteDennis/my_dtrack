@@ -13,6 +13,7 @@ class FakeConfluence:
         self.versions = {"1": [1, 2, 3, 4, 5, 6]}
         self.restrictions = {}
         self.attachments = {}
+        self.properties = {}
         self.calls = []
 
     def _reply(self, status, body=None):
@@ -39,6 +40,9 @@ class FakeConfluence:
             )
         if method == "GET" and len(parts) == 1 and parts[0] in self.versions:
             return self._reply(200, {"version": {"number": max(self.versions[parts[0]])}})
+        if method == "PUT" and len(parts) == 1 and parts[0] in self.versions:
+            self.versions[parts[0]].append(kwargs["json"]["version"]["number"])
+            return self._reply(200, {"id": parts[0]})
         if method == "DELETE" and parts[1:2] == ["version"]:
             page, number = parts[0], int(parts[2])
             if number not in self.versions[page] or number == max(self.versions[page]):
@@ -61,6 +65,18 @@ class FakeConfluence:
                 for op in ("read", "update")
             }
             return self._reply(200, out)
+        if parts[1:2] == ["property"]:
+            page = parts[0]
+            if method == "GET":
+                return self._reply(200, {"results": list(self.properties.get(page, {}).values())})
+            body = kwargs["json"]
+            if method == "POST":
+                row = {**body, "version": {"number": 1}}
+                self.properties.setdefault(page, {})[body["key"]] = row
+                return self._reply(200, row)
+            if method == "PUT":
+                self.properties.setdefault(page, {})[body["key"]] = body
+                return self._reply(200, body)
         if parts[1:3] == ["child", "attachment"]:
             name = (kwargs.get("params") or {}).get("filename")
             if method == "GET":
@@ -186,6 +202,29 @@ def test_publish_applies_attach_detach_versions_then_restrictions(tmp_path):
     assert outcome["restrictions"]["update"] == {"users": ["me"], "groups": []}
     methods = [method for method, *_ in client.calls]
     assert methods.index("POST") < methods.index("DELETE") < methods.index("PUT")
+
+
+def test_template_state_is_versioned_and_exact_page_update_preserves_identity():
+    client = FakeConfluence()
+    state = {
+        "version": 1,
+        "template_name": "page.xhtml",
+        "template_xhtml": "<h1>{{title}}</h1>",
+        "data": {"title": "Validation", "tables": []},
+    }
+    page = {"title": "Validation", "body": "<h1>Validation</h1>", "template_state": state}
+    assert confluence.set_template_state(client, "1", state) == 1
+    assert confluence.get_template_state(client, "1") == {"value": state, "version": 1}
+    outcome = confluence.update_template_page(client, "1", page)
+    assert outcome == {
+        "page_id": "1",
+        "version": 7,
+        "template_state_version": 2,
+        "attachments": [],
+    }
+    assert client.properties["1"][confluence.TEMPLATE_STATE_PROPERTY]["version"] == {
+        "number": 2
+    }
 
 
 def test_delete_page_trashes_and_optionally_purges():

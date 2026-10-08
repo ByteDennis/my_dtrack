@@ -217,6 +217,136 @@ def test_inline_col_map_is_untouched(tmp_path):
     assert load_config(path)["pairs"]["p"]["col_map"] == {"amount": "amount"}
 
 
+def test_query_sql_file_is_relative_to_config_and_normalizes_query_windows(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "queries").mkdir()
+    (tmp_path / "queries" / "consolidated.sql").write_text(
+        "SELECT d1.dt AS FINAL_DT, d1.amount\n"
+        "FROM driver_one d1 WHERE {{query_windows:driver_one}};\n"
+    )
+    document = {"pairs": {"p": pair()}}
+    document["pairs"]["p"]["left"] = {
+        "source": "oracle",
+        "query": "queries/consolidated.sql",
+        "date_col": "FINAL_DT",
+        "date_type": "date",
+        "query_windows": {
+            "driver_one": {"expression": "d1.dt", "date_type": "date"}
+        },
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(document))
+    monkeypatch.chdir(tmp_path / "queries")
+
+    left = load_config(path)["pairs"]["p"]["left"]
+
+    assert left["query"].endswith("WHERE {{query_windows:driver_one}}")
+    assert left["query_windows"] == {
+        "driver_one": {"expression": "d1.dt", "date_type": "date"}
+    }
+
+
+def test_query_sql_file_can_come_from_a_connection_profile(tmp_path):
+    (tmp_path / "driver.sql").write_text("SELECT dt, amount FROM driver")
+    document = {
+        "connections": {
+            "left_query": {
+                "source": "oracle",
+                "query": "driver.sql",
+                "date_col": "dt",
+            }
+        },
+        "pairs": {
+            "p": {
+                **pair(),
+                "left": {"conn_macro": "left_query"},
+            }
+        },
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(document))
+
+    assert load_config(path)["pairs"]["p"]["left"]["query"] == (
+        "SELECT dt, amount FROM driver"
+    )
+
+
+def test_right_query_sql_file_is_also_relative_to_config(tmp_path):
+    (tmp_path / "queries").mkdir()
+    (tmp_path / "queries" / "right.sql").write_text("SELECT * FROM main.sales.orders;\n")
+    document = {"pairs": {"p": pair()}}
+    document["pairs"]["p"]["right"] = {
+        "source": "databricks",
+        "kind": "query",
+        "query": "queries/right.sql",
+        "date_col": "dt",
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(document))
+
+    assert load_config(path)["pairs"]["p"]["right"]["query"] == (
+        "SELECT * FROM main.sales.orders"
+    )
+
+
+def test_missing_query_sql_file_fails_with_resolved_path(tmp_path):
+    document = {"pairs": {"p": pair()}}
+    document["pairs"]["p"]["left"]["query"] = "queries/missing.sql"
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(document))
+
+    with pytest.raises(FileNotFoundError, match=r"left query file not found: .*missing\.sql"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("query", "windows", "error"),
+    [
+        (
+            "SELECT * FROM d WHERE {{query_windows:driver}}",
+            None,
+            "must be a non-empty object",
+        ),
+        (
+            "SELECT * FROM d WHERE {{query_windows:driver}}",
+            {"other": {"expression": "d.dt"}},
+            "lack declarations: driver",
+        ),
+        (
+            "SELECT * FROM d",
+            {"driver": {"expression": "d.dt"}},
+            "lack markers: driver",
+        ),
+        (
+            "SELECT * FROM d WHERE {{query_windows:bad name}}",
+            {"bad name": {"expression": "d.dt"}},
+            "malformed",
+        ),
+        (
+            "SELECT * FROM d WHERE {{query_windows:driver}}",
+            {"driver": {"expression": ""}},
+            "expression must be a non-empty string",
+        ),
+    ],
+)
+def test_query_windows_fail_closed(query, windows, error):
+    row = pair()
+    row["left"].update(query=query, query_windows=windows)
+    with pytest.raises(ValueError, match=error):
+        validate_config({"pairs": {"p": row}})
+
+
+def test_query_windows_are_oracle_only():
+    row = pair(left="file")
+    row["left"].update(
+        query="SELECT * FROM {src} WHERE {{query_windows:driver}}",
+        query_windows={"driver": {"expression": "dt"}},
+    )
+    with pytest.raises(ValueError, match="only for Oracle"):
+        validate_config({"pairs": {"p": row}})
+
+
 @pytest.mark.parametrize(
     ("name", "body", "error"),
     [

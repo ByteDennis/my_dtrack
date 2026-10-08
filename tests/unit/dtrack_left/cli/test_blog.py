@@ -207,6 +207,96 @@ def test_blog_template_preview_uses_json_context_without_a_report(tmp_path, caps
     assert json.loads(capsys.readouterr().out)["title"] == "Validation"
 
 
+def test_blog_update_merges_saved_state_and_updates_one_exact_page(
+    tmp_path, monkeypatch, capsys
+):
+    stored = {
+        "version": 1,
+        "template_name": "page.xhtml",
+        "template_xhtml": (
+            "<h1>{{title}}</h1>{{#tables}}<p>{{name}} {{{tech_pvt.artifacts_xhtml}}} "
+            "{{{biz_pvt.status_xhtml}}}</p>{{/tables}}"
+        ),
+        "data": {
+            "title": "Validation",
+            "tables": [
+                {
+                    "name": "Orders",
+                    "table": "main.orders",
+                    "tech_pvt": {"artifacts": []},
+                    "biz_pvt": {},
+                }
+            ],
+        },
+    }
+    appended = tmp_path / "table.json"
+    appended.write_text(json.dumps({"name": "Customers", "table": "main.customers"}))
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "table": "Orders",
+                "phase": "tech_pvt",
+                "label": "Evidence",
+                "attachment": "orders.xlsx",
+            }
+        )
+    )
+    attachment = tmp_path / "orders.xlsx"
+    attachment.write_bytes(b"xlsx")
+    seen = {}
+    monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.test")
+    monkeypatch.setenv("CONFLUENCE_TOKEN", "secret")
+    monkeypatch.setattr(blog_cli, "make_confluence_client", lambda **kwargs: object())
+    monkeypatch.setattr(
+        blog_cli, "get_template_state", lambda client, page_id: {"value": stored, "version": 1}
+    )
+    monkeypatch.setattr(blog_cli, "attachment_names", lambda client, page_id: ["old.csv"])
+    monkeypatch.setattr(
+        blog_cli,
+        "update_template_page",
+        lambda client, page_id, page, attachments: (
+            seen.update(page_id=page_id, page=page, attachments=attachments)
+            or {"page_id": page_id, "version": 2, "template_state_version": 2}
+        ),
+    )
+    output = tmp_path / "merged.xhtml"
+    assert main(
+        [
+            "tools",
+            "blog",
+            "update",
+            "--page-id",
+            "42",
+            "--append-table",
+            str(appended),
+            "--add-evidence",
+            str(evidence),
+            "--set-status",
+            "Orders.business_pvt=PASS",
+            "--attach",
+            str(attachment),
+            "--out",
+            str(output),
+        ]
+    ) == 0
+    outcome = json.loads(capsys.readouterr().out)
+    assert outcome["mode"] == "updated" and outcome["tables"] == 2
+    assert seen["page_id"] == "42" and seen["attachments"] == [str(attachment)]
+    tables = seen["page"]["template_state"]["data"]["tables"]
+    assert tables[0]["biz_pvt"]["status"] == "PASS"
+    assert tables[0]["tech_pvt"]["artifacts"][0]["attachment"] == "orders.xlsx"
+    assert tables[1]["name"] == "Customers"
+    assert output.is_file() and "Orders" in output.read_text()
+
+
+def test_blog_update_requires_a_mutation(monkeypatch, capsys):
+    monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.test")
+    monkeypatch.setenv("CONFLUENCE_TOKEN", "secret")
+    assert main(["tools", "blog", "update", "--page-id", "42"]) == 2
+    assert "give --append-table" in capsys.readouterr().err
+
+
 def test_blog_delete_is_a_dry_run_until_yes(monkeypatch, capsys):
     deleted = []
     monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.test")

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import logging
+import os
 import time
-import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from dtrack_left.backends.sources import write_rows
 
@@ -19,10 +19,22 @@ def _value(item: Any) -> Any:
     return getattr(item, "value", item)
 
 
-# >>> one EXTERNAL_LINKS chunk: a presigned URL to a JSON array of rows, fetched without Databricks auth <<< #
-def download_chunk(url: str, timeout: float = 600) -> list[list[Any]]:
-    with urllib.request.urlopen(url, timeout=timeout) as response:
-        return json.loads(response.read())
+# >>> corporate proxy for presigned downloads from USERNAME/PASSWORD/AWS_HOST on :8080; None falls back to HTTPS_PROXY <<< #
+def chunk_proxies() -> dict[str, str] | None:
+    user, password, host = (os.getenv(name) for name in ("USERNAME", "PASSWORD", "AWS_HOST"))
+    if not (user and password and host):
+        return None
+    proxy = f"http://{quote(user, safe='')}:{quote(password, safe='')}@{host}:8080"
+    return {"http": proxy, "https": proxy}
+
+
+# >>> one EXTERNAL_LINKS chunk: a presigned URL to a JSON array of rows, fetched through the proxy without Databricks auth <<< #
+def download_chunk(url: str, timeout: tuple[float, float] = (30, 600)) -> list[list[Any]]:
+    import requests
+
+    response = requests.get(url, proxies=chunk_proxies(), timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
 
 # >>> a Databricks SQL warehouse read through the Statement Execution API; rows stream chunk by chunk <<< #
@@ -48,8 +60,9 @@ class Warehouse:
         self.sql_audit = audit
         return self
 
-    def execute(self, sql: str, *, operation: str = "statement"):
+    def execute(self, sql: str, *, operation: str = "statement", external: bool = False):
         from databricks.sdk.service.sql import (
+            Disposition,
             ExecuteStatementRequestOnWaitTimeout,
             Format,
         )
@@ -58,12 +71,14 @@ class Warehouse:
         if self.sql_audit is not None:
             self.sql_audit.record(sql, backend="databricks-sql", operation=operation)
         api = self.client.statement_execution
+        options = {"disposition": Disposition.EXTERNAL_LINKS} if external else {}
         response = api.execute_statement(
             statement=sql,
             warehouse_id=self.warehouse_id,
             wait_timeout="30s",
             on_wait_timeout=ExecuteStatementRequestOnWaitTimeout.CONTINUE,
             format=Format.JSON_ARRAY,
+            **options,
         )
         while _value(response.status.state) in RUNNING:
             time.sleep(self.poll)
@@ -96,7 +111,7 @@ class Warehouse:
         response = self.execute(sql, operation=operation)
         return [tuple(row) for chunk in self.chunks(response) for row in chunk]
 
-    # >>> stream a query into a CSV with the same writer as every Left pull; returns the data row count <<< #
+    # >>> stream a query into a CSV via EXTERNAL_LINKS (no 25 MiB INLINE cap) with the Left pull writer; returns the row count <<< #
     def to_csv(
         self,
         sql: str,
@@ -105,7 +120,7 @@ class Warehouse:
         *,
         operation: str = "pull_window",
     ) -> int:
-        response = self.execute(sql, operation=operation)
+        response = self.execute(sql, operation=operation, external=True)
         counted = [0]
 
         def rows():

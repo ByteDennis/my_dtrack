@@ -1,19 +1,27 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import click
 
 from ..confluence import (
+    attachment_names,
     build_tracking_page,
     delete_page,
     find_page,
+    get_template_state,
     inspect_page,
     make_confluence_client,
     publish_tracking_page,
+    update_template_page,
 )
-from ..confluence_templates import build_template_page
+from ..confluence_templates import (
+    build_stored_template_page,
+    build_template_page,
+    merge_template_data,
+)
 from .options import CONTEXT_SETTINGS, emit_json, log_level_option
 
 
@@ -139,9 +147,13 @@ def _resolve_page(client, page_id, space, title):
     return str(resolved)
 
 
+def _json_file(path: str) -> object:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
 @click.group(
     "blog",
-    help="preview, publish, inspect, or delete Confluence tracking pages",
+    help="preview, publish, update, inspect, or delete Confluence tracking pages",
     context_settings=CONTEXT_SETTINGS,
 )
 def blog_group():
@@ -243,6 +255,97 @@ def blog_publish_command(
         private=private_page and not clear_restrictions,
     )
     return {"mode": "published", **outcome, **published, "space": space}
+
+
+@blog_group.command(
+    "update",
+    help="merge structured changes into one template-backed page and redraw it",
+)
+@page_selector_options
+@connection_options
+@click.option(
+    "--append-table",
+    "append_table_paths",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="JSON table object or list to append (repeatable)",
+)
+@click.option(
+    "--add-evidence",
+    "evidence_paths",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="JSON evidence object or list to merge (repeatable)",
+)
+@click.option(
+    "--set-status",
+    "status_changes",
+    multiple=True,
+    help="TABLE[.tech_pvt|.business_pvt]=STATUS (repeatable)",
+)
+@click.option(
+    "--attach",
+    "attachments",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="upload evidence file; same name creates a new attachment version (repeatable)",
+)
+@click.option("--out", type=click.Path(dir_okay=False), help="write the merged XHTML locally")
+@log_level_option
+@emit_json
+def blog_update_command(
+    page_id,
+    space,
+    title,
+    url,
+    username,
+    cloud,
+    append_table_paths,
+    evidence_paths,
+    status_changes,
+    attachments,
+    out,
+):
+    if not (append_table_paths or evidence_paths or status_changes or attachments):
+        raise click.UsageError(
+            "give --append-table, --add-evidence, --set-status, or --attach"
+        )
+    client = connect(url, username, cloud)
+    resolved = _resolve_page(client, page_id, space, title)
+    try:
+        stored = get_template_state(client, resolved)["value"]
+        merged = merge_template_data(
+            stored["data"],
+            append_tables=[_json_file(path) for path in append_table_paths],
+            add_evidence=[_json_file(path) for path in evidence_paths],
+            set_status=list(status_changes),
+        )
+        state = {**stored, "data": merged}
+        known_attachments = set(attachment_names(client, resolved))
+        known_attachments.update(Path(path).name for path in attachments)
+        page = build_stored_template_page(
+            state,
+            attachment_names=sorted(known_attachments),
+        )
+        if out:
+            output = Path(out)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(page["body"], encoding="utf-8")
+        updated = update_template_page(
+            client,
+            resolved,
+            page,
+            attachments=list(attachments),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise click.UsageError(str(exc)) from None
+    return {
+        "mode": "updated",
+        "title": page["title"],
+        "tables": len(page["pairs"]),
+        **({"preview": str(Path(out).resolve())} if out else {}),
+        **updated,
+    }
 
 
 @blog_group.command("inspect", help="show page metadata, versions, restrictions, and attachments")

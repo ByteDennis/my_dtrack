@@ -1,3 +1,24 @@
+Commit: 64eb0a7be0aa068f0eb553782bc1608a0defe23f
+README.md — Modified: documented config-relative Oracle query files, controlled query-window pushdown, and structured Confluence page updates.
+examples/nbs/03_tools.ipynb — Modified: added the current Confluence blog update command to the tools notebook.
+guideme.txt — Modified: documented multi-view Oracle query-window markers and incremental Confluence template updates.
+src/dtrack_left/backends/sources.py — Modified: rendered row bounds and admitted partitions inside Oracle consolidation queries while retaining outer filtering and final-result sampling.
+src/dtrack_left/cli/blog.py — Modified: added structured page updates for appended tables, evidence, statuses, attachments, and local XHTML previews.
+src/dtrack_left/cli/config.py — Modified: loaded Left and Right SQL files relative to the config and validated Oracle query-window declarations.
+src/dtrack_left/common/dates.py — Modified: added reusable date predicates for configured SQL expressions without identifier quoting.
+src/dtrack_left/common/query_windows.py — Added: validated and rendered controlled query-window markers for bounds, exact partitions, and metadata probes.
+src/dtrack_left/confluence.py — Modified: stored versioned template state, listed attachments, and safely updated an exact Confluence page id.
+src/dtrack_left/confluence_templates.py — Modified: rebuilt pages from stored template state and merged tables, evidence, and phase or overall statuses.
+src/dtrack_local/cli.py — Modified: documented proxy environment variables used for Databricks result-chunk downloads.
+src/dtrack_local/warehouse.py — Modified: streamed large Databricks SQL results through EXTERNAL_LINKS with optional authenticated corporate proxy support.
+templates/confluence/README.md — Modified: documented structured template-state updates and evidence or status merge inputs.
+tests/unit/dtrack_left/backends/test_sources.py — Modified: covered Oracle query-window bounds, exact admitted dates, metadata probes, and post-join sampling.
+tests/unit/dtrack_left/cli/test_blog.py — Modified: covered structured Confluence update options, output, and validation errors.
+tests/unit/dtrack_left/cli/test_config.py — Modified: covered config-relative query files and fail-closed query-window validation.
+tests/unit/dtrack_left/test_confluence_admin.py — Modified: covered versioned template-state storage and exact-page updates.
+tests/unit/dtrack_left/test_confluence_templates.py — Modified: covered stored-template rebuilding and table, evidence, and status merges.
+tests/unit/dtrack_local/test_warehouse.py — Modified: covered EXTERNAL_LINKS disposition and escaped corporate proxy credentials.
+
 Commit: ef1c5fd0b95c5274324080ad5b9f9ad615360ca7
 README.md — Modified: documented editable Confluence templates, private publishing, and direct command debugging.
 examples/e2e/README.md — Modified: removed fetch-report guidance and documented run-bound report access.

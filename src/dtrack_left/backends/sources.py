@@ -23,6 +23,7 @@ from ..common.dates import (
     resolve_date_type,
 )
 from ..common.hashing import HASH_BUCKET_SPACE, key_family
+from ..common.query_windows import normalize_query_windows, render_query_windows
 from ..common.sampling import fixed_keys_sql, sample_predicate_sql
 
 
@@ -55,6 +56,15 @@ class SqlSource(ABC):
 
     def __init__(self, config: dict[str, Any]):
         self.config = dict(config)
+        windows = normalize_query_windows(
+            self.config.get("query"),
+            self.config.get("query_windows"),
+            source=str(self.config.get("source") or self.dialect),
+        )
+        if windows:
+            self.config["query_windows"] = windows
+        else:
+            self.config.pop("query_windows", None)
         self.sql_audit = None
         self._date_type = None
         self._date_type_lock = threading.Lock()
@@ -70,9 +80,23 @@ class SqlSource(ABC):
     @abstractmethod
     def connect(self): ...
 
-    def relation(self) -> str:
+    def relation(
+        self,
+        *,
+        partitions: list[str] | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> str:
         if self.config.get("query"):
-            return f"({self.config['query']}) dtrack_source"
+            query = render_query_windows(
+                self.config["query"],
+                self.config.get("query_windows") or {},
+                dialect=self.dialect,
+                partitions=partitions,
+                from_date=from_date,
+                to_date=to_date,
+            )
+            return f"({query}) dtrack_source"
         parts = [self.config.get(name) for name in ("catalog", "schema", "table")]
         parts = [str(part) for part in parts if part]
         if not parts:
@@ -152,7 +176,8 @@ class SqlSource(ABC):
         )
         sql = (
             f"SELECT {date_ref} AS dtrack_partition, COUNT(*) AS dtrack_count "
-            f"FROM {self.relation()} WHERE {self._where(bounds)} GROUP BY {date_ref}"
+            f"FROM {self.relation(from_date=from_date, to_date=to_date)} "
+            f"WHERE {self._where(bounds)} GROUP BY {date_ref}"
         )
         _columns, rows = self.query(sql, operation="partition_counts")
         counts: dict[str, int] = {}
@@ -211,7 +236,7 @@ class SqlSource(ABC):
         predicate = " AND ".join(f"({item})" for item in (predicate, sample) if item)
         sql = (
             f"SELECT {', '.join(quote_ident(column, self.dialect) for column in selected)} "
-            f"FROM {self.relation()} WHERE {self._where(predicate)}"
+            f"FROM {self.relation(partitions=partitions)} WHERE {self._where(predicate)}"
         )
         return self.query_to_csv(sql, output, selected, operation="pull_window")
 
@@ -232,7 +257,7 @@ class SqlSource(ABC):
             date_type=self.config.get("date_type"),
         )
         sql = fixed_keys_sql(
-            self.relation(),
+            self.relation(partitions=partitions),
             self._where(predicate),
             [quote_ident(column, self.dialect) for column in key_columns],
             key_families or [],
@@ -283,7 +308,13 @@ class FileSource(SqlSource):
         arguments += [f"{key} = {_duckdb_value(value)}" for key, value in options.items()]
         return f"{READERS[self.format]}({', '.join(arguments)})"
 
-    def relation(self) -> str:
+    def relation(
+        self,
+        *,
+        partitions: list[str] | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> str:
         source = self.reader()
         if self.config.get("query"):
             source = f"({self.config['query'].replace('{src}', source)})"
@@ -360,9 +391,17 @@ class DuckDBSource(SqlSource):
                 self._copy = str(target)
         return self._copy
 
-    def relation(self) -> str:
+    def relation(
+        self,
+        *,
+        partitions: list[str] | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> str:
         if self.config.get("query"):
-            return super().relation()
+            return super().relation(
+                partitions=partitions, from_date=from_date, to_date=to_date
+            )
         parts = [self.config.get(name) for name in ("catalog", "schema", "table")]
         names = [name for part in parts if part for name in str(part).split(".")]
         if not names:

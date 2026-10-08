@@ -32,6 +32,12 @@ non-null sample for `string`/`sas`, then carries the detected internal format th
 manifest payloads. The standalone Right package contains only the Spark/Databricks SQL adapter;
 source-platform adapters stay on the Left.
 
+An Oracle `query` may be inline or a `.sql` path relative to the config file. Large consolidation
+queries can push the selected DTrack window into each dated driver before the join with controlled
+markers such as `{{query_windows:driver_one}}`; declare each marker under the Left
+`query_windows` map. DTrack still applies the final-result date predicate and samples only after
+the consolidated relation is built.
+
 ```bash
 uv sync
 uv run pytest
@@ -45,7 +51,8 @@ the exact sampled key set selected by the Left source and Databricks. `dtrack to
 renders a local tracking-page preview; `blog publish`, `inspect`, and `delete` make the Confluence
 lifecycle explicit. Editable storage-XHTML templates and JSON examples live under
 `templates/confluence/`; publishing is view/edit restricted to the current user unless
-`--space-visible` is given.
+`--space-visible` is given. `blog update` merges table, evidence, and status changes into the
+page's versioned structured state before redrawing the exact page id.
 Add `--debug ipdb` or `--debug attach` directly to `row-check`, `col-check`, or any
 `dtrack local` subcommand. Attach mode waits for debugpy on port 5678.
 Install that optional integration with `uv sync --extra confluence`. Server/Data Center PAT auth uses

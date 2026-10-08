@@ -9,6 +9,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from ..common.column_types import portable_column_type
 from ..common.dates import resolve_date_type
+from ..common.query_windows import normalize_query_windows
 
 LEFT_SOURCES = {"oracle", "athena", "aws", "hadoop", "csv", "file", "duckdb"}
 COL_TYPES = {"numeric", "categorical"}
@@ -56,6 +57,14 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{name}: {{src}} in a Right query needs kind 'files'")
         if not left.get("date_col") or not right.get("date_col"):
             raise ValueError(f"{name}: both sides require date_col")
+        try:
+            left["query_windows"] = normalize_query_windows(
+                left.get("query"), left.get("query_windows"), source=left_source
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name}: invalid Left query_windows: {exc}") from None
+        if not left["query_windows"]:
+            left.pop("query_windows", None)
         for side_name, side in (("Left", left), ("Right", right)):
             try:
                 resolve_date_type(side.get("date_type"))
@@ -176,8 +185,34 @@ def expand_col_maps(config: dict[str, Any], base: Path) -> dict[str, Any]:
     return config
 
 
+def expand_query_files(config: dict[str, Any], base: Path) -> dict[str, Any]:
+    for name, pair in (config.get("pairs") or {}).items():
+        for side_name in ("left", "right"):
+            spec = pair.get(side_name)
+            if not isinstance(spec, dict):
+                continue
+            query = spec.get("query")
+            if not isinstance(query, str) or "\n" in query or not query.lower().endswith(".sql"):
+                continue
+            path = base / query
+            if not path.is_file():
+                raise FileNotFoundError(f"{name}: {side_name} query file not found: {path}")
+            text = path.read_text(encoding="utf-8").strip()
+            while text.endswith(";"):
+                text = text[:-1].rstrip()
+            if not text:
+                raise ValueError(f"{name}: {side_name} query file is empty: {path}")
+            spec["query"] = text
+    return config
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     load_dotenv(find_dotenv(usecwd=True))
     path = Path(path)
     with path.open(encoding="utf-8") as handle:
-        return validate_config(expand_col_maps(json.load(handle), path.resolve().parent))
+        config = json.load(handle)
+    base = path.resolve().parent
+    resolve_connections(config)
+    expand_query_files(config, base)
+    expand_col_maps(config, base)
+    return validate_config(config)

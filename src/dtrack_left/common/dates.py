@@ -548,8 +548,33 @@ def partition_where(
     dialect: str,
     date_type: Any = None,
 ) -> str:
+    return _partition_where(
+        _predicate_expr(date_col, dialect, date_type),
+        partitions,
+        dialect=dialect,
+        date_type=date_type,
+    )
+
+
+def partition_expression_where(
+    expression: str,
+    partitions: list[str],
+    *,
+    dialect: str,
+    date_type: Any = None,
+) -> str:
+    column = resolve_date_type(date_type).predicate(expression, dialect)
+    return _partition_where(column, partitions, dialect=dialect, date_type=date_type)
+
+
+def _partition_where(
+    column: str,
+    partitions: list[str],
+    *,
+    dialect: str,
+    date_type: Any,
+) -> str:
     resolved = resolve_date_type(date_type)
-    column = _predicate_expr(date_col, dialect, date_type)
     clauses = []
     for start, end in contiguous_runs(partitions):
         lo = date_literal(start, dialect, date_type)
@@ -572,8 +597,42 @@ def bounds_where(
     from_date: str | None,
     to_date: str | None,
 ) -> str | None:
+    return _bounds_where(
+        _predicate_expr(date_col, dialect, date_type),
+        dialect=dialect,
+        date_type=date_type,
+        from_date=from_date,
+        to_date=to_date,
+    )
+
+
+def bounds_expression_where(
+    expression: str,
+    *,
+    dialect: str,
+    date_type: Any,
+    from_date: str | None,
+    to_date: str | None,
+) -> str | None:
+    column = resolve_date_type(date_type).predicate(expression, dialect)
+    return _bounds_where(
+        column,
+        dialect=dialect,
+        date_type=date_type,
+        from_date=from_date,
+        to_date=to_date,
+    )
+
+
+def _bounds_where(
+    column: str,
+    *,
+    dialect: str,
+    date_type: Any,
+    from_date: str | None,
+    to_date: str | None,
+) -> str | None:
     resolved = resolve_date_type(date_type)
-    column = _predicate_expr(date_col, dialect, date_type)
     clauses = []
     if from_date:
         clauses.append(f"{column} >= {date_literal(from_date, dialect, date_type)}")

@@ -2,7 +2,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from dtrack_local.warehouse import Warehouse
+from dtrack_local.warehouse import Warehouse, chunk_proxies
 
 
 def _response(state, *, rows=None, links=None, following=None, error=None):
@@ -58,7 +58,7 @@ def test_statement_is_audited_before_submission():
 
 def test_external_links_are_downloaded_in_order_and_written_like_a_left_pull(tmp_path):
     links = [NS(external_link="u0", next_chunk_index=1)]
-    client, _ = _client(
+    client, calls = _client(
         [_response("SUCCEEDED", links=links)],
         chunks={1: NS(external_links=[NS(external_link="u1", next_chunk_index=None)])},
     )
@@ -67,6 +67,7 @@ def test_external_links_are_downloaded_in_order_and_written_like_a_left_pull(tmp
     warehouse = Warehouse(client, "wh", fetch=lambda url: fetched.append(url) or pages[url])
     assert warehouse.to_csv("SELECT 1", tmp_path / "w" / "r.csv", ["a", "b"]) == 3
     assert fetched == ["u0", "u1"]
+    assert calls[0]["disposition"].value == "EXTERNAL_LINKS"
     assert (tmp_path / "w" / "r.csv").read_text() == "a,b\n1,x\n2,\n3,z\n"
 
 
@@ -76,3 +77,13 @@ def test_failures_carry_the_warehouse_error_and_bad_settings_fail_early():
         Warehouse(client, "wh").rows("SELECT * FROM nope")
     with pytest.raises(ValueError, match="DTRACK_DBX_WAREHOUSE_ID"):
         Warehouse(client, "")
+
+
+def test_chunk_proxy_comes_from_aws_proxy_credentials(monkeypatch):
+    for name in ("USERNAME", "PASSWORD", "AWS_HOST"):
+        monkeypatch.delenv(name, raising=False)
+    assert chunk_proxies() is None
+    monkeypatch.setenv("USERNAME", "me")
+    monkeypatch.setenv("PASSWORD", "p@ss:1")
+    monkeypatch.setenv("AWS_HOST", "proxy.corp")
+    assert chunk_proxies()["https"] == "http://me:p%40ss%3A1@proxy.corp:8080"

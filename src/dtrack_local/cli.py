@@ -9,7 +9,7 @@
 #   --profile (corp), --warehouse-id,
 #   --pair P (repeatable), --log-level.
 # Environment (.env works): DTRACK_DBX_PROFILE, DTRACK_DBX_WAREHOUSE_ID, DTRACK_LOCAL_OUT,
-#   DTRACK_RUN_S3, Left credentials.
+#   DTRACK_RUN_S3, USERNAME/PASSWORD/AWS_HOST (proxy for Right chunk downloads), Left credentials.
 # Roll back: dtrack tools rollback --run-s3 <out> --run-id ID --pair P [--pair Q|--pair all]
 
 from __future__ import annotations

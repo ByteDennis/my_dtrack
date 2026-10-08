@@ -7,6 +7,8 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+TEMPLATE_STATE_VERSION = 1
+
 
 class _SafeHtml(str):
     pass
@@ -139,6 +141,39 @@ def _enrich(document: dict[str, Any], attachment_names: list[str]) -> dict[str, 
     return data
 
 
+def _build_page(
+    template_text: str,
+    document: dict[str, Any],
+    *,
+    template_name: str,
+    data_name: str,
+    title: str | None = None,
+    attachment_names: list[str] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(document, dict):
+        raise TypeError("template data must be one JSON object")
+    context = _enrich(document, attachment_names or [])
+    page_title = title or str(context.get("title") or Path(template_name).stem.replace("-", " ").title())
+    context["title"] = page_title
+    return {
+        "title": page_title,
+        "body": _render(template_text, [context]),
+        "summary": {
+            "run_id": str(
+                context.get("run_id") or context.get("validation_id") or Path(data_name).stem
+            ),
+            "generated_at": str(context.get("generated_at") or ""),
+        },
+        "pairs": context.get("tables") or [],
+        "template_state": {
+            "version": TEMPLATE_STATE_VERSION,
+            "template_name": Path(template_name).name,
+            "template_xhtml": template_text,
+            "data": copy.deepcopy(document),
+        },
+    }
+
+
 def build_template_page(
     template_path: str | Path,
     data_path: str | Path,
@@ -149,19 +184,129 @@ def build_template_page(
     template = Path(template_path)
     source = Path(data_path)
     document = json.loads(source.read_text(encoding="utf-8"))
-    if not isinstance(document, dict):
-        raise TypeError("template data must be one JSON object")
-    context = _enrich(document, attachment_names or [])
-    page_title = title or str(context.get("title") or template.stem.replace("-", " ").title())
-    context["title"] = page_title
-    return {
-        "title": page_title,
-        "body": _render(template.read_text(encoding="utf-8"), [context]),
-        "summary": {
-            "run_id": str(context.get("run_id") or context.get("validation_id") or source.stem),
-            "generated_at": str(context.get("generated_at") or ""),
-        },
-        "pairs": context.get("tables") or [],
-        "template": str(template.resolve()),
-        "data": str(source.resolve()),
+    page = _build_page(
+        template.read_text(encoding="utf-8"),
+        document,
+        template_name=template.name,
+        data_name=source.name,
+        title=title,
+        attachment_names=attachment_names,
+    )
+    page.update(template=str(template.resolve()), data=str(source.resolve()))
+    return page
+
+
+def build_stored_template_page(
+    state: dict[str, Any],
+    *,
+    title: str | None = None,
+    attachment_names: list[str] | None = None,
+) -> dict[str, Any]:
+    if int(state.get("version") or 0) != TEMPLATE_STATE_VERSION:
+        raise ValueError(f"unsupported template state version: {state.get('version')!r}")
+    document = state.get("data")
+    template_text = state.get("template_xhtml")
+    if not isinstance(document, dict) or not isinstance(template_text, str):
+        raise TypeError("template state is missing data or template_xhtml")
+    return _build_page(
+        template_text,
+        document,
+        template_name=str(state.get("template_name") or "page.xhtml"),
+        data_name="stored-state.json",
+        title=title,
+        attachment_names=attachment_names,
+    )
+
+
+def _objects(value: Any, label: str) -> list[dict[str, Any]]:
+    rows = value if isinstance(value, list) else [value]
+    if not all(isinstance(row, dict) for row in rows):
+        raise TypeError(f"{label} must contain one object or a list of objects")
+    return rows
+
+
+def _table(document: dict[str, Any], identity: str) -> dict[str, Any]:
+    matches = [
+        row
+        for row in document.get("tables") or []
+        if identity in {str(row.get("name") or ""), str(row.get("table") or "")}
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"table selector {identity!r} matched {len(matches)} entries")
+    return matches[0]
+
+
+def merge_template_data(
+    document: dict[str, Any],
+    *,
+    append_tables: list[Any] | None = None,
+    add_evidence: list[Any] | None = None,
+    set_status: list[str] | None = None,
+) -> dict[str, Any]:
+    """Merge logical page changes; the rendered XHTML is always rebuilt afterward."""
+
+    merged = copy.deepcopy(document)
+    tables = merged.setdefault("tables", [])
+    if not isinstance(tables, list):
+        raise TypeError("template data field 'tables' must be a list")
+    identities = {
+        str(value)
+        for row in tables
+        for value in (row.get("name"), row.get("table"))
+        if value
     }
+    for payload in append_tables or []:
+        for row in _objects(payload, "--append-table"):
+            names = {str(value) for value in (row.get("name"), row.get("table")) if value}
+            if not names:
+                raise ValueError("an appended table requires name or table")
+            duplicate = sorted(names & identities)
+            if duplicate:
+                raise ValueError(f"table already exists: {duplicate[0]}")
+            tables.append(copy.deepcopy(row))
+            identities.update(names)
+
+    aliases = {"tech": "tech_pvt", "tech_pvt": "tech_pvt", "business": "biz_pvt", "business_pvt": "biz_pvt", "biz_pvt": "biz_pvt"}
+    for payload in add_evidence or []:
+        for entry in _objects(payload, "--add-evidence"):
+            identity = str(entry.get("table") or entry.get("name") or "")
+            phase = aliases.get(str(entry.get("phase") or "").lower())
+            if not identity or not phase:
+                raise ValueError("evidence requires table and phase=tech_pvt|business_pvt")
+            artifacts = entry.get("artifacts")
+            if artifacts is None:
+                artifact = entry.get("artifact")
+                if artifact is None:
+                    artifact = {
+                        key: entry[key]
+                        for key in ("label", "type", "url", "attachment")
+                        if key in entry
+                    }
+                artifacts = [artifact]
+            artifacts = _objects(artifacts, "evidence artifacts")
+            if any(not (artifact.get("url") or artifact.get("attachment")) for artifact in artifacts):
+                raise ValueError("every evidence artifact requires url or attachment")
+            phase_data = _table(merged, identity).setdefault(phase, {})
+            current = phase_data.setdefault("artifacts", [])
+            for artifact in artifacts:
+                if artifact not in current:
+                    current.append(copy.deepcopy(artifact))
+
+    for change in set_status or []:
+        target, separator, status = change.partition("=")
+        if not separator or not target.strip() or not status.strip():
+            raise ValueError("--set-status must be TABLE[.tech_pvt|.business_pvt]=STATUS")
+        identity = target.strip()
+        phase = None
+        for suffix, canonical in (
+            (".business_pvt", "biz_pvt"),
+            (".biz_pvt", "biz_pvt"),
+            (".tech_pvt", "tech_pvt"),
+        ):
+            if identity.endswith(suffix):
+                identity, phase = identity[: -len(suffix)], canonical
+                break
+        row = _table(merged, identity)
+        target_data = row.setdefault(phase, {}) if phase else row
+        target_data["status"] = status.strip().upper()
+    return merged

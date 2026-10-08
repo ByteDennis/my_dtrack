@@ -128,6 +128,90 @@ def test_partition_counts_groups_by_day_within_bounds_and_extra_where(monkeypatc
     ]
 
 
+def test_oracle_query_windows_render_bounds_before_join_and_keep_outer_guard(monkeypatch):
+    query = (
+        "WITH d1 AS (SELECT * FROM DRIVER_ONE a WHERE {{query_windows:driver_one}}), "
+        "d2 AS (SELECT * FROM DRIVER_TWO b WHERE {{query_windows:driver_two}}) "
+        "SELECT a.DT AS FINAL_DT, a.ID FROM d1 a LEFT JOIN d2 b "
+        "ON a.ID = b.ID AND a.DT = b.ACTIVITY_DT"
+    )
+    source, connection, _ = _oracle(
+        monkeypatch,
+        lambda sql: (["D", "N"], [("2026-08-01", 1)]),
+        query=query,
+        date_col="FINAL_DT",
+        query_windows={
+            "driver_one": {"expression": "a.DT", "date_type": "date"},
+            "driver_two": {"expression": "b.ACTIVITY_DT", "date_type": "date"},
+        },
+    )
+
+    assert source.partition_counts("2026-08-01", "2026-08-03") == {"2026-08-01": 1}
+    sql = connection.statements[-1]
+    assert "a.DT >= DATE '2026-08-01' AND a.DT < DATE '2026-08-04'" in sql
+    assert (
+        "b.ACTIVITY_DT >= DATE '2026-08-01' AND b.ACTIVITY_DT < DATE '2026-08-04'"
+        in sql
+    )
+    assert "FINAL_DT >= DATE '2026-08-01' AND FINAL_DT < DATE '2026-08-04'" in sql
+
+
+def test_oracle_query_windows_render_exact_admitted_days_before_sampling(
+    monkeypatch, tmp_path
+):
+    query = (
+        "SELECT a.DT AS FINAL_DT, a.ID, c.VALUE FROM DRIVER_ONE a "
+        "LEFT JOIN DRIVER_TWO b ON a.ID = b.ID AND a.DT = b.ACTIVITY_DT "
+        "AND {{query_windows:driver_two}} "
+        "LEFT JOIN ACCOUNT c ON a.ACCOUNT_ID = c.ACCOUNT_ID "
+        "WHERE {{query_windows:driver_one}}"
+    )
+    source, connection, _ = _oracle(
+        monkeypatch,
+        lambda sql: (["FINAL_DT", "ID", "VALUE"], []),
+        query=query,
+        date_col="FINAL_DT",
+        query_windows={
+            "driver_one": {"expression": "a.DT"},
+            "driver_two": {"expression": "b.ACTIVITY_DT"},
+        },
+    )
+
+    source.pull_window(
+        ["2026-08-01", "2026-08-03"],
+        ["VALUE"],
+        tmp_path / "sample.csv",
+        key_columns=["ID"],
+        sample_plan={"mode": "fraction", "threshold": 100},
+        key_families=["string"],
+    )
+
+    sql = connection.statements[-1]
+    assert "a.DT >= DATE '2026-08-01' AND a.DT < DATE '2026-08-02'" in sql
+    assert "a.DT >= DATE '2026-08-03' AND a.DT < DATE '2026-08-04'" in sql
+    assert "b.ACTIVITY_DT >= DATE '2026-08-01' AND b.ACTIVITY_DT < DATE '2026-08-02'" in sql
+    assert "b.ACTIVITY_DT >= DATE '2026-08-03' AND b.ACTIVITY_DT < DATE '2026-08-04'" in sql
+    assert "ACCOUNT c ON a.ACCOUNT_ID = c.ACCOUNT_ID" in sql
+    assert "STANDARD_HASH" in sql
+    assert "{{query_windows:" not in sql
+
+
+def test_oracle_query_windows_are_neutral_for_metadata_probes(monkeypatch):
+    source, connection, _ = _oracle(
+        monkeypatch,
+        lambda sql: (["FINAL_DT"], []),
+        query=(
+            "SELECT a.DT AS FINAL_DT FROM DRIVER_ONE a "
+            "WHERE {{query_windows:driver_one}}"
+        ),
+        date_col="FINAL_DT",
+        query_windows={"driver_one": {"expression": "a.DT"}},
+    )
+
+    assert source.preflight()["ok"]
+    assert "WHERE 1=1) dtrack_source WHERE 1=0" in connection.statements[0]
+
+
 def test_query_without_a_result_set_returns_no_rows(monkeypatch):
     source, _, _ = _oracle(monkeypatch, lambda sql: ([], [("ignored",)]))
     assert source.query("BEGIN NULL; END;") == ([], [])
