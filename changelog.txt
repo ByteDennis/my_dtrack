@@ -1,3 +1,12 @@
+Commit: 5ff56230a9efd598ae59fb38660fdc3fc8e12d3f
+examples/nbs/05_reuse_pulled.ipynb — Added: provided an executable recovery notebook that recomputes statistics and reports from previously pulled Left and Right window CSVs without contacting either source.
+guideme.txt — Modified: documented the reuse-pulled recovery workflow, including disabling landing writes and attaching no live warehouse.
+plans/local-run-memory-and-wide-table-stats.md — Modified: recorded the implemented per-window retry and reuse behavior, atomic partial-file handling, and remaining recovery gaps.
+src/dtrack_left/backends/sources.py — Modified: wrote CSV exports to temporary .part files and atomically renamed them so reusable pull files are always complete.
+src/dtrack_local/pipeline.py — Modified: added reusable Left and Right window pulls, statistics from existing sampled CSVs, optional landing, and clear failures when a required pull is missing.
+tests/unit/dtrack_local/test_pipeline.py — Modified: covered reuse of completed window files, missing-file failures, and propagation of reuse and landing controls.
+tests/unit/test_packaging.py — Modified: registered and validated the new reuse-pulled notebook in the packaged executable notebook inventory.
+
 Commit: 4af9b49236380d1905719d381de3b52c7bc9abf8
 plans/local-run-memory-and-wide-table-stats.md — Added: documented the concurrent local-run OOM evidence, bounded DuckDB design, wide-table batching strategy, resume behavior, benchmarks, and verification plan.
 src/dtrack_left/backends/sources.py — Modified: routed file and DuckDB sources through shared memory, thread, spill-directory, and insertion-order settings.
