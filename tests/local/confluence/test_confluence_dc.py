@@ -133,13 +133,23 @@ def _report(tmp_path):
     return report
 
 
-# >>> the CLI end to end: publish, republish with options, then blog-delete --purge <<< #
+# >>> the CLI end to end: publish, republish with options, then blog delete --purge <<< #
 def test_blog_cli_publishes_prunes_restricts_and_deletes(dc, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CONFLUENCE_URL", dc["base"])
     monkeypatch.setenv("CONFLUENCE_TOKEN", dc["token"])
     report, title = _report(tmp_path), f"dtrack cli it {time.time_ns()}"
-    argv = ["tools", "blog", "--report", str(report), "--title", title, "--space", "DT"]
-    argv += ["--out", str(tmp_path / "p.xhtml"), "--publish"]
+    argv = [
+        "tools",
+        "blog",
+        "publish",
+        "--report",
+        str(report),
+        "--title",
+        title,
+        "--space",
+        "DT",
+    ]
+    argv += ["--out", str(tmp_path / "p.xhtml")]
     assert main([*argv, "--attach", str(report / "report.xlsx")]) == 0
     page_id = json.loads(capsys.readouterr().out)["page_id"]
     try:
@@ -156,7 +166,9 @@ def test_blog_cli_publishes_prunes_restricts_and_deletes(dc, tmp_path, monkeypat
         assert outcome["detached"] == ["note.txt"]
         assert outcome["restrictions"]["read"]["users"] == []
     finally:
-        assert main(["tools", "blog-delete", "--page-id", page_id, "--purge", "--yes"]) == 0
+        assert main(
+            ["tools", "blog", "delete", "--page-id", page_id, "--purge", "--yes"]
+        ) == 0
     gone = dc["admin"].get(
         f"{dc['base']}/rest/api/content/{page_id}", params={"status": "any"}, timeout=30
     )

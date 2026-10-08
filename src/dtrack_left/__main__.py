@@ -12,7 +12,7 @@
 # 4. Stage 1, Left counts:    dtrack row-check --config c.json
 # 5. Stage 2, Left units:     dtrack col-check           (waits for row_check/_CLOSED)
 # 6. Follow the Right job:    dtrack tools dbx runs --active | dtrack tools dbx runs --run-id <job run>
-# 7. Report:                  dtrack tools fetch-report --out ./report [--run-id <run_id>]
+# 7. Report:                  read <run-s3>/<run-id>/report/ or publish it with tools blog
 #
 # Interrupted? Re-run the same step with the same run id; finished work is skipped.
 # Config fixed? dtrack tools rollback --pair P [--pair Q|--pair all] --stage col|row

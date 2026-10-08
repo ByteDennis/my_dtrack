@@ -24,7 +24,6 @@ resume semantics are the real code paths.
 | `execution.txt` | The complete timestamped record of the last run (with `logs/` and `output/`: written by `just e2e`, git-ignored) |
 | `logs/NN_<step>.log` | stderr of each step: UTC-stamped lines from `dtrack.left.*` and `dtrack.right.*`; each step's stdout JSON is inlined in `execution.txt` |
 | `output/report/` | The deliverables the Right job built: `summary.json`, `<pair>_compare_row.csv`, `<pair>_compare_col.csv`, `index.html`, `report.xlsx` |
-| `output/fetched_report/` | The same set downloaded on-prem with `fetch-report` from this run's `report/` prefix |
 | `output/s3_mirror/` | Byte copy of the work store `s3://dtrack-e2e-work/dtrack/v1/runs/<run_id>/` |
 | `work/` | Local scratch (git-ignored): window pulls, sampled CSVs, fixed-N key lists, checkpoint, gate-policy mirrors |
 
@@ -49,5 +48,5 @@ resume semantics are the real code paths.
 4. The Right job picks the left documents up, counts its side, reconciles, gates, writes `row_check/<pair>.json`, `manifest/<pair>.json`, `row_check/_CLOSED`, and immediately prefetches its own windows (B-queue).
 5. Left `col-check` waits for `row_check/_CLOSED`, writes `manifest/customers.keys.json` (fixed-N), pulls windows round-robin, commits `units/` before `_INDEX/`, and writes `manifest/_CLOSED`.
 6. The Right job compares Units as they land (A-queue), writes `results/`, builds the report under the same run's `report/` prefix, and exits.
-7. Re-running `col-check` publishes 0 Units; re-running the Right job (runs root + `--run-id`) returns 0 new results; `fetch-report` downloads the published set on-prem.
+7. Re-running `col-check` publishes 0 Units; re-running the Right job (runs root + `--run-id`) returns 0 new results; the published report remains under that run's `report/` prefix.
 8. `--gate manual` on the Right writes row-check verdicts and no manifest; `--gate ratio:0.02` blocks `orders` (5.08 % excluded) and releases `customers`. Those two Right runs end by idle timeout because nobody runs `col-check` for them, which is the expected exit.

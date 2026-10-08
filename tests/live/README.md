@@ -9,7 +9,7 @@ fails with a message that names the step, so run them in order and fix one thing
 this PC                                  AWS                         Databricks
 Oracle (container) -> dtrack row-check -> s3://.../work  ==========  /Volumes/.../work  -> notebook.py job
                       dtrack col-check                               (external Volume)     spark.sql on UC tables
-dtrack tools fetch-report <- s3://.../report  =====  /Volumes/.../report <- report published by the job
+s3://.../<run-id>/report  ===================  /Volumes/.../<run-id>/report
 ```
 
 ## 0. Two environments
@@ -68,7 +68,7 @@ login you already use is enough. Databricks Connect additionally needs *compute*
 | Step | Test | What it proves | Settings it needs |
 | --- | --- | --- | --- |
 | 1 | `dtrack_left/test_s3.py::…contract…` | this PC can put/list/get/delete on S3 | `DTRACK_LIVE_S3` |
-| 2 | `dtrack_left/test_s3.py::…fetch_report…` | `dtrack tools fetch-report` works against real S3 | `DTRACK_LIVE_S3` |
+| 2 | `dtrack_left/test_s3.py::…completed_report…` | completed report artifacts are readable from the exact run prefix | `DTRACK_LIVE_S3` |
 | 3 | `dtrack_left/test_oracle_to_s3.py` | `doctor` + `row-check` read Oracle and land counts on S3, no secrets in them | `DTRACK_LIVE_S3`, Docker |
 | 4 | `dtrack_right/test_databricks_target.py::…counts…` | Databricks Connect works; the synthetic Right tables were created in your schema | profile, compute, `DTRACK_LIVE_SCHEMA` |
 | 5 | `dtrack_right/test_databricks_target.py::…statistics…` | `SparkTarget`'s one query on the cluster equals the pandas rule | same |

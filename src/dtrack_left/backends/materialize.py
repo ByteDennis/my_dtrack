@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
+import sys
 import tempfile
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +21,53 @@ from .sources import FileSource, _duckdb_value
 HASH_VERSION = 1
 SAMPLE_RATES = (0.01, 0.02)
 DAY_PARTITION_MIN_BYTES = 128 * 1024 * 1024
+PROGRESS_INTERVAL_SECONDS = 30
+log = logging.getLogger("dtrack.left.materialize")
+
+
+def _enable_duckdb_progress(connection) -> None:
+    """Use DuckDB's query-plan progress only for an interactive terminal."""
+
+    if not sys.stderr.isatty():
+        return
+    connection.execute("SET enable_progress_bar = true")
+    connection.execute("SET enable_progress_bar_print = true")
+    connection.execute("SET progress_bar_time = 2000")
+
+
+def _size(path: Path | None) -> int:
+    if path is None or not path.exists():
+        return 0
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+@contextmanager
+def _stage(name: str, output: Path | None = None):
+    started = time.monotonic()
+    stopped = threading.Event()
+
+    def heartbeat():
+        while not stopped.wait(PROGRESS_INTERVAL_SECONDS):
+            written = _size(output)
+            suffix = f", written={written / (1024**3):.2f} GiB" if written else ""
+            log.info("materialize %s still running: elapsed=%.0fs%s", name, time.monotonic() - started, suffix)
+
+    log.info("materialize %s started", name)
+    worker = None
+    if not sys.stderr.isatty():
+        worker = threading.Thread(
+            target=heartbeat,
+            name=f"dtrack-materialize-{name}",
+            daemon=True,
+        )
+        worker.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        if worker is not None:
+            worker.join(timeout=1)
+        log.info("materialize %s finished: elapsed=%.2fs", name, time.monotonic() - started)
 
 
 def _keys(pair: dict[str, Any]) -> list[str]:
@@ -103,7 +155,8 @@ def materialize_pair(
     if partition not in {"auto", "day", "month"}:
         raise ValueError("partition must be auto, day, or month")
 
-    health = source.preflight()
+    with _stage("preflight"):
+        health = source.preflight()
     if not health.get("ok"):
         raise ValueError(f"source preflight failed: {health.get('error')}")
     columns = list(health["columns"])
@@ -124,7 +177,10 @@ def materialize_pair(
         f"count_if({hash_sql} < {thresholds[1]}) AS sample_2pct "
         f"FROM {source.relation()} WHERE {where} GROUP BY dtrack_day"
     )
-    _names, rows = source.query(summary_sql, operation="materialize_probe")
+    with _stage("source scan and hash probe"), source.connect() as connection:
+        _enable_duckdb_progress(connection)
+        source._audit(summary_sql, "materialize_probe")
+        rows = connection.execute(summary_sql).fetchall()
     if not rows:
         raise ValueError("source contains no rows to materialize")
     if any(row[0] is None for row in rows):
@@ -135,6 +191,13 @@ def materialize_pair(
     if partition == "auto":
         average_day_bytes = source_path.stat().st_size / max(1, len(before))
         chosen_partition = "day" if average_day_bytes >= DAY_PARTITION_MIN_BYTES else "month"
+    log.info(
+        "materialize plan: source=%.2f GiB rows=%d days=%d partition=%s",
+        source_path.stat().st_size / (1024**3),
+        total,
+        len(before),
+        chosen_partition,
+    )
 
     final = (
         Path(output).expanduser().resolve()
@@ -162,9 +225,11 @@ def materialize_pair(
     try:
         connection = source.connect()
         try:
+            _enable_duckdb_progress(connection)
             spill = workspace / "spill"
             connection.execute(f"SET temp_directory={_duckdb_value(str(spill))}")
-            connection.execute(copy_sql)
+            with _stage("Parquet write and hash sort", dataset):
+                connection.execute(copy_sql)
         finally:
             connection.close()
         parquet_glob = str(dataset / "**" / "*.parquet")
@@ -174,7 +239,8 @@ def materialize_pair(
             f"count_if(dtrack_hash < {thresholds[0]}), "
             f"count_if(dtrack_hash < {thresholds[1]}) FROM {reader} GROUP BY {date_ref}"
         )
-        with source.connect() as connection:
+        with _stage("Parquet validation", dataset), source.connect() as connection:
+            _enable_duckdb_progress(connection)
             after = _summary(connection.execute(validate_sql).fetchall())
             output_columns = [
                 row[0]
@@ -220,12 +286,14 @@ def materialize_pair(
         _write_json(dataset / "_dtrack_materialization.json", manifest)
         os.replace(dataset, final)
         _update_config(config_path, pair_name, new_left)
+        log.info("materialize committed dataset and config: %s", final)
         deleted = False
         if delete_source:
             source_path.unlink()
             deleted = True
             manifest["source_deleted"] = True
             _write_json(final / "_dtrack_materialization.json", manifest)
+            log.info("materialize deleted verified source: %s", source_path)
         return {
             "pair": pair_name,
             "source": str(source_path),

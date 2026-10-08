@@ -1,7 +1,6 @@
 import json
 
 from dtrack.cli import main
-from dtrack_left.cli import tools
 
 
 def test_unified_cli_has_a_local_workflow_group(capsys):
@@ -12,9 +11,9 @@ def test_unified_cli_has_a_local_workflow_group(capsys):
 
     assert main(["tools", "-h"]) == 0
     tools_help = capsys.readouterr().out
-    for command in ("fetch-report", "materialize", "doctor", "rollback", "debug", "dbx", "blog"):
+    for command in ("materialize", "doctor", "rollback", "dbx", "blog"):
         assert command in tools_help
-    assert "key-check" not in tools_help
+    assert all(command not in tools_help for command in ("fetch-report", "debug", "key-check"))
 
     assert main(["local", "-h"]) == 0
     local_help = capsys.readouterr().out
@@ -34,19 +33,6 @@ def test_auxiliary_commands_are_not_available_at_the_root(capsys):
     ):
         assert main([command, "-h"]) == 2
         assert f"No such command '{command}'" in capsys.readouterr().err
-
-
-def test_debug_can_invoke_the_root_local_group(monkeypatch, capsys):
-    seen = {}
-
-    def run(target, argv, *, attach):
-        seen.update(argv=argv, attach=attach)
-        return target(argv)
-
-    monkeypatch.setattr(tools, "run_under_debugger", run)
-    assert main(["tools", "debug", "--", "local", "-h"]) == 0
-    assert seen == {"argv": ["local", "-h"], "attach": None}
-    assert "Local execution against both connections" in capsys.readouterr().out
 
 
 def test_row_and_col_help_show_config_defaults_over_environment(tmp_path, monkeypatch, capsys):

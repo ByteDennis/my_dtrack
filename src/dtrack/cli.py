@@ -4,27 +4,22 @@ import click
 from dotenv import find_dotenv, load_dotenv
 
 from dtrack_left import __version__
-from dtrack_left.cli.blog import blog_command, blog_delete_command
+from dtrack_left.cli.blog import blog_group
 from dtrack_left.cli.checks import col_check_command, row_check_command
 from dtrack_left.cli.ops import dbx_group
 from dtrack_left.cli.options import CONTEXT_SETTINGS, DistributedGroup
 from dtrack_left.cli.tools import (
-    debug_command,
     doctor_command,
-    fetch_report_command,
     materialize_command,
     rollback_command,
 )
 from dtrack_local.cli import cli as local_group
 
 AUXILIARY_COMMANDS = (
-    fetch_report_command,
     materialize_command,
     doctor_command,
     rollback_command,
-    debug_command,
-    blog_command,
-    blog_delete_command,
+    blog_group,
     dbx_group,
 )
 

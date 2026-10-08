@@ -3,7 +3,6 @@ from pathlib import Path
 
 from support import pairs_config
 
-from dtrack_left.backends.store import fetch_report
 from dtrack_left.checks.col_check import (
     ColCheckPipeline,
     LeftRuntime,
@@ -26,7 +25,7 @@ def _target_factory(root: Path, work: Path):
 def test_full_pipeline_on_real_files(synthetic, tmp_path):
     root = synthetic.root
     store = VolumeStore(tmp_path / "runs" / "real")
-    run_id, _ = run_row_check(pairs_config(root / "left"), store, run_id="real")
+    _run_id, _ = run_row_check(pairs_config(root / "left"), store, run_id="real")
 
     assert run_right_row_check(store, _target_factory(root, tmp_path / "rw")) == 2
     orders = store.get_json("row_check/orders.json")
@@ -82,5 +81,4 @@ def test_full_pipeline_on_real_files(synthetic, tmp_path):
     for name, path in files.items():
         store.put_bytes(f"report/{name}", path.read_bytes())
     store.put_json("_STATUS.json", {"state": "complete"})
-    fetched = fetch_report(VolumeStore(tmp_path / "runs"), tmp_path / "fetched")
-    assert fetched["run_id"] == run_id and (tmp_path / "fetched" / "report.xlsx").stat().st_size > 0
+    assert store.get_bytes("report/report.xlsx") == files["report.xlsx"].read_bytes()

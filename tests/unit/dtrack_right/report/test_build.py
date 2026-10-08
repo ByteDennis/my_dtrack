@@ -3,7 +3,6 @@ import json
 import pytest
 from support import MemoryStore
 
-from dtrack_left.backends.store import fetch_report
 from dtrack_right.backends.store import VolumeStore
 from dtrack_right.checks.col_check import compare_statistics
 from dtrack_right.report import build_report
@@ -94,17 +93,15 @@ def test_build_report_ignores_left_documents_and_key_files(tmp_path):
     )
 
 
-def test_report_files_can_be_fetched_from_a_run_store(tmp_path):
+def test_report_files_can_be_published_to_a_run_store(tmp_path):
     files = build_report(_store(), tmp_path / "out")
     runs_store = VolumeStore(tmp_path / "runs")
     run_store = runs_store.child("run")
     for name, path in files.items():
         run_store.put_bytes(f"report/{name}", path.read_bytes(), content_type="")
     run_store.put_json("_STATUS.json", {"state": "complete"})
-    fetched = fetch_report(runs_store, tmp_path / "fetched")
-    assert fetched["run_id"] == "run"
-    assert sorted(fetched["files"]) == sorted(files)
-    assert (tmp_path / "fetched" / "report.xlsx").read_bytes() == files["report.xlsx"].read_bytes()
+    assert sorted(run_store.list_keys("report/")) == [f"report/{name}" for name in sorted(files)]
+    assert run_store.get_bytes("report/report.xlsx") == files["report.xlsx"].read_bytes()
 
 
 def test_compare_col_csv_orders_rows_and_unions_fields():

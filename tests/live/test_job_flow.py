@@ -99,11 +99,10 @@ def test_left_on_this_machine_and_right_as_a_databricks_job(
     assert finished["run"].state.result_state.value == "SUCCESS", finished["run"].state
 
     capsys.readouterr()
-    out = tmp_path / "report"
-    assert main(["tools", "fetch-report", "--run-s3", runs, "--run-id", tag, "--out", str(out)]) == 0
-    summary = json.loads((out / "summary.json").read_text())
+    run_store = S3Store(run_uri)
+    summary = run_store.get_json("report/summary.json")
     assert summary["run_id"] == tag and summary["status"] == "DONE"
     assert summary["findings"] == {"row_count_diff": 1, "partition_missing": 2, "col_stat_diff": 2}
-    assert S3Store(run_uri).get_json("_STATUS.json")["state"] == "complete"
+    assert run_store.get_json("_STATUS.json")["state"] == "complete"
     if not keep:
         workspace.workspace.delete(folder, recursive=True)

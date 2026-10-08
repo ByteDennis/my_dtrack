@@ -63,7 +63,7 @@ def test_blog_defaults_to_a_local_preview_without_credentials(tmp_path, monkeypa
     monkeypatch.delenv("CONFLUENCE_URL", raising=False)
     monkeypatch.delenv("CONFLUENCE_TOKEN", raising=False)
     output = tmp_path / "preview.xhtml"
-    assert main(["tools", "blog", "--report", str(report), "--out", str(output)]) == 0
+    assert main(["tools", "blog", "preview", "--report", str(report), "--out", str(output)]) == 0
     outcome = json.loads(capsys.readouterr().out)
     assert outcome["mode"] == "preview" and outcome["confluence_api"] == "v1"
     assert outcome["pairs"] == 2
@@ -95,6 +95,13 @@ def test_blog_publish_uses_environment_auth_and_attaches_requested_files(
         ),
     )
     monkeypatch.setattr(
+        confluence,
+        "set_restrictions",
+        lambda client, page_id, read, edit, me: (
+            calls.append(("restrict", page_id, read, edit, me)) or {"read": {}, "update": {}}
+        ),
+    )
+    monkeypatch.setattr(
         blog_cli,
         "make_confluence_client",
         lambda **kwargs: calls.append(("auth", kwargs)) or Client(),
@@ -102,6 +109,7 @@ def test_blog_publish_uses_environment_auth_and_attaches_requested_files(
     argv = [
         "tools",
         "blog",
+        "publish",
         "--report",
         str(report),
         "--space",
@@ -110,7 +118,6 @@ def test_blog_publish_uses_environment_auth_and_attaches_requested_files(
         "10",
         "--attach",
         str(report / "report.xlsx"),
-        "--publish",
     ]
     assert main(argv) == 0
     outcome = json.loads(capsys.readouterr().out)
@@ -118,6 +125,7 @@ def test_blog_publish_uses_environment_auth_and_attaches_requested_files(
     assert calls[0][0] == "auth" and calls[0][1]["token"] == "secret"
     assert ("publish", "10", "2026-10-07 — r-1", "storage", True) in calls
     assert ("attach", "report.xlsx", "42") in calls
+    assert ("restrict", "42", ["dtrack"], ["dtrack"], "dtrack") in calls
 
 
 def test_confluence_auth_distinguishes_server_pat_from_cloud_api_token(monkeypatch):
@@ -147,8 +155,8 @@ def test_confluence_auth_distinguishes_server_pat_from_cloud_api_token(monkeypat
 
 def test_blog_rejects_clearing_and_setting_restrictions_together(tmp_path, capsys):
     report = _report(tmp_path)
-    argv = ["tools", "blog", "--report", str(report), "--clear-restrictions"]
-    assert main([*argv, "--restrict-read", "alice", "--publish"]) == 2
+    argv = ["tools", "blog", "publish", "--report", str(report), "--space", "DT"]
+    assert main([*argv, "--clear-restrictions", "--restrict-read", "alice"]) == 2
     assert "cannot be combined" in capsys.readouterr().err
 
 
@@ -163,15 +171,40 @@ def test_blog_passes_version_and_restriction_options_through(tmp_path, monkeypat
         "publish_tracking_page",
         lambda client, page, **kwargs: seen.update(kwargs) or {"page_id": "7"},
     )
-    argv = ["tools", "blog", "--report", str(report), "--space", "DT", "--publish"]
+    argv = ["tools", "blog", "publish", "--report", str(report), "--space", "DT"]
     extra = ["--keep-versions", "3", "--delete-version", "2", "--delete-version", "4"]
     extra += ["--restrict-read", "group:readers", "--detach", "old.csv"]
     assert main([*argv, *extra]) == 0
     assert seen["keep"] == 3 and seen["delete_version_numbers"] == [2, 4]
     assert seen["restrict_read"] == ["group:readers"] and seen["restrict_edit"] is None
+    assert seen["private"] is True
     assert seen["detach"] == ["old.csv"]
     assert main([*argv, "--clear-restrictions"]) == 0
     assert seen["restrict_read"] == [] and seen["restrict_edit"] == []
+    assert seen["private"] is False
+
+
+def test_blog_template_preview_uses_json_context_without_a_report(tmp_path, capsys):
+    template = tmp_path / "page.xhtml"
+    template.write_text("<h1>{{title}}</h1>{{#tables}}<p>{{table}}</p>{{/tables}}")
+    data = tmp_path / "data.json"
+    data.write_text(json.dumps({"title": "Validation", "tables": [{"table": "a.b"}]}))
+    output = tmp_path / "preview.xhtml"
+    assert main(
+        [
+            "tools",
+            "blog",
+            "preview",
+            "--template",
+            str(template),
+            "--data",
+            str(data),
+            "--out",
+            str(output),
+        ]
+    ) == 0
+    assert output.read_text() == "<h1>Validation</h1><p>a.b</p>"
+    assert json.loads(capsys.readouterr().out)["title"] == "Validation"
 
 
 def test_blog_delete_is_a_dry_run_until_yes(monkeypatch, capsys):
@@ -185,8 +218,40 @@ def test_blog_delete_is_a_dry_run_until_yes(monkeypatch, capsys):
         "delete_page",
         lambda client, page_id, purge: deleted.append((page_id, purge)) or {"page_id": page_id},
     )
-    assert main(["tools", "blog-delete", "--space", "DT", "--title", "t"]) == 0
+    assert main(["tools", "blog", "delete", "--space", "DT", "--title", "t"]) == 0
     assert json.loads(capsys.readouterr().out)["mode"] == "dry-run" and not deleted
-    assert main(["tools", "blog-delete", "--page-id", "55", "--purge", "--yes"]) == 0
+    assert main(["tools", "blog", "delete", "--page-id", "55", "--purge", "--yes"]) == 0
     assert deleted == [("55", True)]
-    assert main(["tools", "blog-delete", "--page-id", "55", "--space", "DT", "--title", "t"]) == 2
+    assert main(
+        ["tools", "blog", "delete", "--page-id", "55", "--space", "DT", "--title", "t"]
+    ) == 2
+
+
+def test_blog_inspect_resolves_a_title_and_returns_the_read_only_snapshot(
+    monkeypatch, capsys
+):
+    monkeypatch.setenv("CONFLUENCE_URL", "https://confluence.test")
+    monkeypatch.setenv("CONFLUENCE_TOKEN", "secret")
+    client = object()
+    monkeypatch.setattr(blog_cli, "make_confluence_client", lambda **kwargs: client)
+    monkeypatch.setattr(blog_cli, "find_page", lambda found, space, title: "55")
+    monkeypatch.setattr(
+        blog_cli,
+        "inspect_page",
+        lambda found, page_id: {"page_id": page_id, "versions": [1, 2], "attachments": []},
+    )
+    assert main(["tools", "blog", "inspect", "--space", "DT", "--title", "t"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "mode": "inspect",
+        "page_id": "55",
+        "versions": [1, 2],
+        "attachments": [],
+    }
+
+
+def test_old_flat_blog_commands_are_removed(tmp_path, capsys):
+    report = _report(tmp_path)
+    assert main(["tools", "blog", "--report", str(report)]) == 2
+    assert main(["tools", "blog-delete", "--page-id", "55"]) == 2
+    errors = capsys.readouterr().err
+    assert "No such option" in errors and "No such command" in errors

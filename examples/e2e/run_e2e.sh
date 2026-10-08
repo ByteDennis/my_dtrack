@@ -102,7 +102,6 @@ show "$LOGS/05_right_job.log"
 section "8. idempotent re-runs (resume semantics)"
 run "08_col_check_again" uv run dtrack col-check --run-s3 "$RUNS" --run-id "$RUN_ID" --work-dir "$WORK/col_check" --wait-timeout 10
 run "09_right_again" $RIGHT_CMD --run-s3 "$RUNS" --run-id "$RUN_ID" --right-csv-dir "$RIGHT" --out "$WORK/report-rerun" --work-dir "$WORK/right" --poll-interval 1 --idle-timeout 20
-run "10_fetch_report" uv run dtrack tools fetch-report --run-s3 "$RUNS" --run-id "$RUN_ID" --out "$OUT/fetched_report"
 
 section "9. gate policies on the Right side (separate run prefixes)"
 for policy in manual ratio:0.02; do
@@ -124,7 +123,6 @@ show "$OUT/report/customers_compare_col.csv"
 log "html: $OUT/report/index.html ($(wc -c <"$OUT/report/index.html") bytes)"
 log "xlsx: $OUT/report/report.xlsx sheets=$(uv run python -c "from openpyxl import load_workbook; print(load_workbook('$OUT/report/report.xlsx').sheetnames)")"
 log "published in the run folder: $(ls "$OUT/s3_mirror/report" | tr '\n' ' ')"
-log "fetched on-prem via fetch-report: $(ls "$OUT/fetched_report" | tr '\n' ' ')"
 log "work store objects: left=$(ls "$OUT/s3_mirror/row_check" | grep -c left.json) verdicts=$(ls "$OUT/s3_mirror/row_check" | grep -v left | grep -vc _) manifests=$(ls "$OUT/s3_mirror/manifest" | grep -v _CLOSED | grep -vc keys.json) fixed_keys=$(ls "$OUT/s3_mirror/manifest" | grep -c keys.json) units=$(ls "$OUT/s3_mirror/units" | wc -l) index=$(ls "$OUT/s3_mirror/_INDEX" | wc -l) results=$(ls "$OUT/s3_mirror/results" | wc -l) dead=$(ls "$OUT/s3_mirror/dead" 2>/dev/null | wc -l)"
 log "scratch (git-ignored): $WORK"
 

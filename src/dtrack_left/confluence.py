@@ -329,6 +329,38 @@ def find_page(client, space: str, title: str) -> str | None:
     return str(rows[0]["id"]) if rows else None
 
 
+# >>> one read-only snapshot for operators: page identity, versions, restrictions and attachments <<< #
+def inspect_page(client, page_id: str) -> dict[str, Any]:
+    page = confluence_call(
+        client,
+        "GET",
+        f"content/{page_id}",
+        params={"expand": "version,space,ancestors"},
+    ) or {}
+    attachments = _results(
+        client,
+        f"content/{page_id}/child/attachment",
+        {"expand": "version"},
+    )
+    return {
+        "page_id": str(page_id),
+        "title": str(page.get("title") or ""),
+        "status": str(page.get("status") or ""),
+        "space": str((page.get("space") or {}).get("key") or ""),
+        "version": int((page.get("version") or {}).get("number") or 0),
+        "versions": page_versions(client, page_id),
+        "restrictions": get_restrictions(client, page_id),
+        "attachments": [
+            {
+                "id": str(row.get("id") or ""),
+                "name": str(row.get("title") or ""),
+                "version": int((row.get("version") or {}).get("number") or 0),
+            }
+            for row in attachments
+        ],
+    }
+
+
 # >>> move a page to the space trash; purge also empties it from the trash (cannot be undone) <<< #
 def delete_page(client, page_id: str, *, purge: bool = False) -> dict[str, Any]:
     confluence_call(client, "DELETE", f"content/{page_id}")
@@ -350,8 +382,12 @@ def publish_tracking_page(
     keep: int | None = None,
     restrict_read: list[str] | None = None,
     restrict_edit: list[str] | None = None,
+    private: bool = True,
 ) -> dict[str, Any]:
     me = _identity(client.get_current_user(), bool(getattr(client, "cloud", False)))
+    if private:
+        restrict_read = [me] if restrict_read is None else restrict_read
+        restrict_edit = [me] if restrict_edit is None else restrict_edit
     if parent_id:
         result = client.update_or_create(
             parent_id, page["title"], page["body"], representation="storage"

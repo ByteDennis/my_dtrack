@@ -4,7 +4,7 @@
 #   row-check     --config c.json --run-s3 s3://.../runs [--run-id] [--pair P ...] [--workers 4]
 #   col-check     --run-s3 s3://.../runs [--run-id] [--pair P] [--work-dir] [--pull-workers 2]
 #                 [--stat-workers 2] [--wip 200] [--wait-timeout 1800] [--poll-interval 3]
-#   tools         fetch-report, doctor, rollback, debug, blog, and dbx helpers
+#   tools         materialize, doctor, rollback, blog, and dbx helpers
 #                 (the installed dtrack CLI also adds the local key-check helper)
 #   Every command: --log-level debug|info|warning|error (stderr); stdout is one JSON line.
 #   .env is loaded (cwd upwards) before options parse; shell variables win over .env.
@@ -72,14 +72,12 @@ import click
 from dotenv import find_dotenv, load_dotenv
 
 from .. import __version__
-from .blog import blog_command, blog_delete_command
+from .blog import blog_group
 from .checks import col_check_command, row_check_command
 from .ops import dbx_group
 from .options import CONTEXT_SETTINGS, DistributedGroup
 from .tools import (
-    debug_command,
     doctor_command,
-    fetch_report_command,
     materialize_command,
     rollback_command,
     tools_group,
@@ -101,13 +99,10 @@ for command in (
     cli.add_command(command)
 
 for command in (
-    fetch_report_command,
     materialize_command,
     doctor_command,
     rollback_command,
-    debug_command,
-    blog_command,
-    blog_delete_command,
+    blog_group,
     dbx_group,
 ):
     tools_group.add_command(command)

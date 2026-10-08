@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import posixpath
 import time
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -196,62 +194,3 @@ class S3Store:
         ready = len(self.list_keys("_INDEX/"))
         done = len(self.list_keys("results/")) + len(self.list_keys("dead/"))
         return max(0, ready - done)
-
-
-log = logging.getLogger("dtrack.left.fetch")
-
-
-# >>> resolve one completed run below the stable runs root, then download its report/ <<< #
-def fetch_report(runs_store, out_dir: str | Path, *, run_id: str | None = None) -> dict:
-    if run_id:
-        run_id = validate_run_id(run_id)
-        run_store = runs_store.child(run_id)
-    else:
-        completed = []
-        for candidate in runs_store.list_prefixes():
-            child = runs_store.child(candidate)
-            if (
-                child.exists("_STATUS.json")
-                and child.get_json("_STATUS.json").get("state") == "complete"
-                and child.list_keys("report/")
-            ):
-                completed.append(candidate)
-        if not completed:
-            raise FileNotFoundError("runs root has no completed run with report/")
-        run_id = completed[-1]
-        run_store = runs_store.child(run_id)
-        log.info("latest completed run -> %s", run_id)
-    if (
-        not run_store.exists("_STATUS.json")
-        or run_store.get_json("_STATUS.json").get("state") != "complete"
-    ):
-        raise FileNotFoundError(f"run {run_id!r} is not complete; refusing stale report download")
-    base = "report/"
-    keys = run_store.list_keys(base)
-    if not keys:
-        raise FileNotFoundError(f"no report under {base}")
-    out = Path(out_dir)
-    out_root = out.resolve()
-    downloads = []
-    for key in keys:
-        name = key.removeprefix(base)
-        path = PurePosixPath(name)
-        if (
-            not name
-            or path.is_absolute()
-            or any(part in {"", ".", ".."} for part in path.parts)
-            or "\\" in name
-        ):
-            raise ValueError(f"unsafe report object key: {key!r}")
-        target = out.joinpath(*path.parts)
-        if not target.resolve().is_relative_to(out_root):
-            raise ValueError(f"unsafe report object key: {key!r}")
-        downloads.append((key, name, target))
-    out.mkdir(parents=True, exist_ok=True)
-    files = {}
-    for key, name, target in downloads:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(run_store.get_bytes(key))
-        files[name] = target
-        log.info("fetched %s -> %s (%d bytes)", key, target, target.stat().st_size)
-    return {"run_id": run_id, "files": files}

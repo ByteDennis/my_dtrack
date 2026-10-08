@@ -1,8 +1,9 @@
 import json
+import logging
 
 import pytest
 
-from dtrack_left.backends.materialize import materialize_pair
+from dtrack_left.backends.materialize import _enable_duckdb_progress, materialize_pair
 from dtrack_left.backends.sources import source_from_config
 from dtrack_left.cli.config import load_config
 
@@ -46,13 +47,14 @@ def _config(tmp_path, *, where=None):
     return config, csv
 
 
-def test_materialize_validates_updates_config_and_only_then_deletes_csv(tmp_path):
+def test_materialize_validates_updates_config_and_only_then_deletes_csv(tmp_path, caplog):
     config, csv = _config(tmp_path)
     output = tmp_path / "parquet"
 
-    result = materialize_pair(
-        config, "p", output=output, partition="day", delete_source=True
-    )
+    with caplog.at_level(logging.INFO, logger="dtrack.left.materialize"):
+        result = materialize_pair(
+            config, "p", output=output, partition="day", delete_source=True
+        )
 
     assert result["rows"] == 4 and result["source_deleted"] is True
     assert not csv.exists()
@@ -91,6 +93,10 @@ def test_materialize_validates_updates_config_and_only_then_deletes_csv(tmp_path
     pull_sql = next(sql for sql in audited if '"dtrack_hash" <' in sql)
     assert '"dtrack_hash" < 4294967296' in pull_sql and "md5(" not in pull_sql
     assert len(sampled.read_text().splitlines()) == 5
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("source scan and hash probe started" in message for message in messages)
+    assert any("Parquet write and hash sort started" in message for message in messages)
+    assert any("committed dataset and config" in message for message in messages)
 
 
 def test_delete_source_refuses_derived_views_before_writing_anything(tmp_path):
@@ -99,3 +105,25 @@ def test_delete_source_refuses_derived_views_before_writing_anything(tmp_path):
     with pytest.raises(ValueError, match="where/query"):
         materialize_pair(config, "p", output=output, delete_source=True)
     assert csv.exists() and not output.exists()
+
+
+def test_duckdb_progress_is_enabled_only_for_a_terminal(monkeypatch):
+    class Connection:
+        def __init__(self):
+            self.sql = []
+
+        def execute(self, sql):
+            self.sql.append(sql)
+
+    connection = Connection()
+    monkeypatch.setattr("sys.stderr.isatty", lambda: False)
+    _enable_duckdb_progress(connection)
+    assert connection.sql == []
+
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    _enable_duckdb_progress(connection)
+    assert connection.sql == [
+        "SET enable_progress_bar = true",
+        "SET enable_progress_bar_print = true",
+        "SET progress_bar_time = 2000",
+    ]

@@ -23,13 +23,14 @@ def test_help_lists_every_command(capsys):
     out = capsys.readouterr().out
     for command in ("row-check", "col-check", "tools"):
         assert command in out
-    for command in ("fetch-report", "materialize", "doctor", "rollback", "debug", "dbx"):
+    for command in ("materialize", "doctor", "rollback", "dbx"):
         assert f"  {command}" not in out
 
     assert main(["tools", "-h"]) == 0
     tools_help = capsys.readouterr().out
-    for command in ("fetch-report", "materialize", "doctor", "rollback", "debug", "dbx", "blog"):
+    for command in ("materialize", "doctor", "rollback", "dbx", "blog"):
         assert command in tools_help
+    assert "fetch-report" not in tools_help and "debug" not in tools_help
 
 
 @pytest.mark.parametrize(
@@ -84,90 +85,12 @@ def test_doctor_fails_with_exit_code_one_when_a_source_is_missing(config_path, t
 
 def test_usage_errors_exit_two(capsys):
     assert main(["row-check", "--config", "nope.json", "--run-s3", "s3://b/runs"]) == 2
-    assert main(["tools", "debug"]) == 2
-
-
-@pytest.mark.parametrize(
-    ("argv", "attach"),
-    [
-        (["tools", "debug", "--", "tools", "doctor", "--config", "c.json"], None),
-        (
-            ["tools", "debug", "--attach", "--", "tools", "doctor", "--config", "c.json"],
-            5678,
-        ),
-        (
-            [
-                "tools",
-                "debug",
-                "--attach",
-                "6000",
-                "--",
-                "tools",
-                "doctor",
-                "--config",
-                "c.json",
-            ],
-            6000,
-        ),
-    ],
-)
-def test_debug_forwards_the_command_and_attach_port(monkeypatch, argv, attach):
-    seen = {}
-    monkeypatch.setattr(
-        tools,
-        "run_under_debugger",
-        lambda main, rest, attach: seen.update(rest=rest, attach=attach),
-    )
-    main(argv)
-    assert seen == {"rest": ["tools", "doctor", "--config", "c.json"], "attach": attach}
-
-
-def test_debug_help_documents_attach(capsys):
-    assert main(["tools", "debug", "-h"]) == 0
-    output = capsys.readouterr().out
-    assert "--local" not in output and "--attach" in output
 
 
 def test_version_and_abort_map_to_exit_codes(monkeypatch, capsys):
     assert main(["--version"]) == 0 and "dtrack, version" in capsys.readouterr().out
     monkeypatch.setattr(cli_package.cli, "main", lambda **_: (_ for _ in ()).throw(click.Abort()))
     assert main(["tools", "doctor"]) == 1 and "Aborted!" in capsys.readouterr().err
-
-
-def test_fetch_report_command_downloads_the_latest_run(s3_bucket, tmp_path, capsys):
-    import boto3
-
-    client = boto3.client("s3")
-    client.put_object(Bucket=s3_bucket, Key="runs/r9/report/index.html", Body=b"<html>")
-    client.put_object(
-        Bucket=s3_bucket, Key="runs/r9/report/summary.json", Body=b'{"run_id": "r9"}'
-    )
-    client.put_object(Bucket=s3_bucket, Key="runs/r9/_STATUS.json", Body=b'{"state":"complete"}')
-    code = main(
-        ["tools", "fetch-report", "--run-s3", f"s3://{s3_bucket}/runs", "--out", str(tmp_path)]
-    )
-    assert code == 0
-    assert json.loads(capsys.readouterr().out) == {
-        "files": {
-            "index.html": str(tmp_path / "index.html"),
-            "summary.json": str(tmp_path / "summary.json"),
-        },
-        "run_id": "r9",
-    }
-    nested = tmp_path / "nested"
-    code = main(
-        [
-            "tools",
-            "fetch-report",
-            "--run-s3",
-            f"s3://{s3_bucket}/runs",
-            "--run-id",
-            "r9",
-            "--out",
-            str(nested),
-        ]
-    )
-    assert code == 0 and json.loads(capsys.readouterr().out)["run_id"] == "r9"
 
 
 class FakeDebugger:
@@ -189,16 +112,16 @@ class FakeDebugger:
 def test_run_under_debugger_uses_ipdb_and_opens_post_mortem_on_errors(monkeypatch):
     good, bad = FakeDebugger(), FakeDebugger(fail=True)
     monkeypatch.setitem(sys.modules, "ipdb", good)
-    assert tools.run_under_debugger(lambda argv: 7, ["doctor"]) == 7
+    assert debugging.run_under_debugger(lambda argv: 7, ["doctor"]) == 7
     monkeypatch.setitem(sys.modules, "ipdb", bad)
-    assert tools.run_under_debugger(lambda argv: 7, ["doctor"]) == 1
+    assert debugging.run_under_debugger(lambda argv: 7, ["doctor"]) == 1
     assert bad.calls == [("runcall", ["doctor"]), ("post_mortem", True)]
 
 
 def test_run_under_debugger_requires_ipdb_instead_of_falling_back_to_pdb(monkeypatch):
     monkeypatch.setitem(sys.modules, "ipdb", None)
     with pytest.raises(RuntimeError, match="ipdb is required"):
-        tools.run_under_debugger(lambda argv: 3, [])
+        debugging.run_under_debugger(lambda argv: 3, [])
 
 
 def test_attach_waits_for_vs_code_before_running(monkeypatch):
@@ -209,7 +132,9 @@ def test_attach_waits_for_vs_code_before_running(monkeypatch):
         breakpoint=lambda: events.append("breakpoint"),
     )
     monkeypatch.setitem(sys.modules, "debugpy", fake)
-    assert tools.run_under_debugger(lambda argv: events.append(argv) or 0, ["x"], attach=5678) == 0
+    assert debugging.run_under_debugger(
+        lambda argv: events.append(argv) or 0, ["x"], attach=5678
+    ) == 0
     assert events == [("listen", ("0.0.0.0", 5678)), "wait", "breakpoint", ["x"]]
 
 
@@ -230,14 +155,3 @@ def test_debug_option_reuses_the_shared_debugger_runner(monkeypatch, mode, port)
     monkeypatch.setattr(debugging, "run_under_debugger", run)
     assert command.main(["--debug", mode], standalone_mode=False) == 7
     assert seen == [([], port), "command"]
-
-
-def test_dotenv_feeds_fetch_report_run_and_the_shell_wins(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("DTRACK_RUN_S3", raising=False)
-    (tmp_path / ".env").write_text("DTRACK_RUN_S3=missing-runs\n")
-    with pytest.raises(FileNotFoundError, match="no completed run"):
-        main(["tools", "fetch-report", "--out", str(tmp_path / "out")])
-    monkeypatch.setenv("DTRACK_RUN_S3", "also-missing")
-    with pytest.raises(FileNotFoundError, match="no completed run"):
-        main(["tools", "fetch-report", "--out", str(tmp_path / "out")])

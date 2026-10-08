@@ -9,13 +9,14 @@ from ..confluence import (
     build_tracking_page,
     delete_page,
     find_page,
+    inspect_page,
     make_confluence_client,
     publish_tracking_page,
 )
+from ..confluence_templates import build_template_page
 from .options import CONTEXT_SETTINGS, emit_json, log_level_option
 
 
-# >>> --url / --username / --cloud shared by every command that talks to Confluence <<< #
 def connection_options(command):
     for option in reversed(
         (
@@ -35,7 +36,50 @@ def connection_options(command):
     return command
 
 
-# >>> client from CONFLUENCE_TOKEN (never a flag), failing early on whatever is missing <<< #
+def report_options(command):
+    for option in reversed(
+        (
+            click.option(
+                "--report",
+                "report_dir",
+                type=click.Path(exists=True, file_okay=False),
+                help="reconciliation report folder; omit when --template and --data are used",
+            ),
+            click.option(
+                "--template",
+                "template_path",
+                type=click.Path(exists=True, dir_okay=False),
+                help="editable Confluence storage-XHTML template",
+            ),
+            click.option(
+                "--data",
+                "data_path",
+                type=click.Path(exists=True, dir_okay=False),
+                help="JSON context for --template",
+            ),
+            click.option("--title", help="page title; default <generated date> — <run id>"),
+            click.option("--run-url", help="stable URL for the run-level index.html"),
+            click.option(
+                "--out", type=click.Path(dir_okay=False), help="storage-XHTML preview path"
+            ),
+        )
+    ):
+        command = option(command)
+    return command
+
+
+def page_selector_options(command):
+    for option in reversed(
+        (
+            click.option("--page-id", help="page id"),
+            click.option("--space", envvar="CONFLUENCE_SPACE", help="space key, with --title"),
+            click.option("--title", help="page title, with --space"),
+        )
+    ):
+        command = option(command)
+    return command
+
+
 def connect(url, username, cloud, **required):
     token = os.getenv("CONFLUENCE_TOKEN")
     missing = [
@@ -48,23 +92,74 @@ def connect(url, username, cloud, **required):
     return make_confluence_client(url=url, token=token, username=username, cloud=cloud)
 
 
-# >>> preview locally by default; --publish is the explicit external-write boundary <<< #
-@click.command(
+def _render(report_dir, template_path, data_path, title, run_url, out, attachments=()):
+    custom = bool(template_path or data_path)
+    if custom and not (template_path and data_path):
+        raise click.UsageError("--template and --data must be supplied together")
+    if custom and report_dir:
+        raise click.UsageError("use either --report or --template with --data")
+    if not custom and not report_dir:
+        raise click.UsageError("give --report, or both --template and --data")
+    if custom:
+        page = build_template_page(
+            template_path,
+            data_path,
+            title=title,
+            attachment_names=[Path(item).name for item in attachments],
+        )
+        base = Path(data_path).parent
+        default_name = f"{Path(template_path).stem}.preview.xhtml"
+    else:
+        report = Path(report_dir)
+        page = build_tracking_page(
+            report,
+            title=title,
+            run_url=run_url,
+            attachment_names=[Path(item).name for item in attachments],
+        )
+        base, default_name = report, "confluence.storage.xhtml"
+    output = Path(out) if out else base / default_name
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(page["body"], encoding="utf-8")
+    return page, {
+        "confluence_api": "v1",
+        "run_id": page["summary"]["run_id"],
+        "title": page["title"],
+        "pairs": len(page["pairs"]),
+        "preview": str(output.resolve()),
+    }
+
+
+def _resolve_page(client, page_id, space, title):
+    if bool(page_id) == bool(space and title):
+        raise click.UsageError("give either --page-id or both --space and --title")
+    resolved = page_id or find_page(client, space, title)
+    if not resolved:
+        raise click.UsageError(f"no page titled {title!r} in space {space}")
+    return str(resolved)
+
+
+@click.group(
     "blog",
-    help="preview or publish a Confluence tracking page for one report",
+    help="preview, publish, inspect, or delete Confluence tracking pages",
     context_settings=CONTEXT_SETTINGS,
 )
-@click.option(
-    "--report",
-    "report_dir",
-    required=True,
-    type=click.Path(exists=True, file_okay=False),
-    help="local report folder containing summary.json and pair CSVs",
-)
-@click.option("--title", help="page title; default <generated date> — <run id>")
-@click.option("--run-url", help="stable URL for the run-level index.html")
-@click.option("--out", type=click.Path(dir_okay=False), help="storage-XHTML preview path")
-@click.option("--space", envvar="CONFLUENCE_SPACE", help="Confluence space key")
+def blog_group():
+    pass
+
+
+@blog_group.command("preview", help="render one report as local Confluence storage XHTML")
+@report_options
+@log_level_option
+@emit_json
+def blog_preview_command(report_dir, template_path, data_path, title, run_url, out):
+    _page, outcome = _render(report_dir, template_path, data_path, title, run_url, out)
+    return {"mode": "preview", **outcome}
+
+
+@blog_group.command("publish", help="create or update one Confluence tracking page")
+@report_options
+@click.option("--space", envvar="CONFLUENCE_SPACE", required=True, help="Confluence space key")
 @click.option("--parent-id", envvar="CONFLUENCE_PARENT_ID", help="tracking parent page id")
 @connection_options
 @click.option(
@@ -98,11 +193,19 @@ def connect(url, username, cloud, **required):
     help="only these may edit: a user name or group:<name> (repeatable; you are always added)",
 )
 @click.option("--clear-restrictions", is_flag=True, help="remove every view and edit restriction")
-@click.option("--publish", is_flag=True, help="create or update the page; default is preview only")
+@click.option(
+    "--private/--space-visible",
+    "private_page",
+    default=True,
+    show_default=True,
+    help="default restricts view and edit to the publishing user",
+)
 @log_level_option
 @emit_json
-def blog_command(
+def blog_publish_command(
     report_dir,
+    template_path,
+    data_path,
     title,
     run_url,
     out,
@@ -118,31 +221,14 @@ def blog_command(
     restrict_read,
     restrict_edit,
     clear_restrictions,
-    publish,
+    private_page,
 ):
     if clear_restrictions and (restrict_read or restrict_edit):
         raise click.UsageError("--clear-restrictions cannot be combined with --restrict-read/-edit")
-    report = Path(report_dir)
-    output = Path(out) if out else report / "confluence.storage.xhtml"
-    page = build_tracking_page(
-        report,
-        title=title,
-        run_url=run_url,
-        attachment_names=[Path(item).name for item in attachments],
+    page, outcome = _render(
+        report_dir, template_path, data_path, title, run_url, out, attachments
     )
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(page["body"], encoding="utf-8")
-    outcome = {
-        "mode": "preview",
-        "confluence_api": "v1",
-        "run_id": page["summary"]["run_id"],
-        "title": page["title"],
-        "pairs": len(page["pairs"]),
-        "preview": str(output.resolve()),
-    }
-    if not publish:
-        return outcome
-    client = connect(url, username, cloud, **{"--space": space})
+    client = connect(url, username, cloud)
     published = publish_tracking_page(
         client,
         page,
@@ -154,31 +240,31 @@ def blog_command(
         keep=keep_versions,
         restrict_read=[] if clear_restrictions else list(restrict_read) or None,
         restrict_edit=[] if clear_restrictions else list(restrict_edit) or None,
+        private=private_page and not clear_restrictions,
     )
-    return {**outcome, **published, "mode": "published", "space": space}
+    return {"mode": "published", **outcome, **published, "space": space}
 
 
-# >>> trash (or purge) one tracking page; without --yes it only reports what it would delete <<< #
-@click.command(
-    "blog-delete",
-    help="delete a Confluence tracking page by id or by space + title",
-    context_settings=CONTEXT_SETTINGS,
-)
-@click.option("--page-id", help="page id to delete")
-@click.option("--space", envvar="CONFLUENCE_SPACE", help="space key, with --title")
-@click.option("--title", help="page title, with --space")
+@blog_group.command("inspect", help="show page metadata, versions, restrictions, and attachments")
+@page_selector_options
+@connection_options
+@log_level_option
+@emit_json
+def blog_inspect_command(page_id, space, title, url, username, cloud):
+    client = connect(url, username, cloud)
+    return {"mode": "inspect", **inspect_page(client, _resolve_page(client, page_id, space, title))}
+
+
+@blog_group.command("delete", help="trash or permanently purge one tracking page")
+@page_selector_options
 @connection_options
 @click.option("--purge", is_flag=True, help="also remove it from the space trash (permanent)")
 @click.option("--yes", is_flag=True, help="actually delete; default is a dry run")
 @log_level_option
 @emit_json
 def blog_delete_command(page_id, space, title, url, username, cloud, purge, yes):
-    if bool(page_id) == bool(space and title):
-        raise click.UsageError("give either --page-id or both --space and --title")
     client = connect(url, username, cloud)
-    page_id = page_id or find_page(client, space, title)
-    if not page_id:
-        raise click.UsageError(f"no page titled {title!r} in space {space}")
+    resolved = _resolve_page(client, page_id, space, title)
     if not yes:
-        return {"mode": "dry-run", "page_id": page_id, "purge": purge}
-    return {"mode": "deleted", **delete_page(client, page_id, purge=purge)}
+        return {"mode": "dry-run", "page_id": resolved, "purge": purge}
+    return {"mode": "deleted", **delete_page(client, resolved, purge=purge)}

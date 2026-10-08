@@ -27,7 +27,7 @@ Debug the main workflows directly:
   dtrack col-check --config config.json --debug attach            # debugpy port 5678
   dtrack local run --config config.json --debug ipdb
 
-For a custom debugpy port, use `dtrack tools debug --attach PORT -- <command ...>`.
+Debug row-check, col-check, or local directly with `--debug ipdb|attach`.
 
 Terminal mode uses ipdb and opens post-mortem on unhandled runtime errors.
 
@@ -231,6 +231,10 @@ Parameter choice:
     `--partition day|month` overrides auto selection; `--out` overrides the sibling
     `<csv-stem>.dtrack-parquet` destination. Deletion is refused for a source with `where` or
     `query`, because that would destroy rows outside the derived view.
+    Large inputs require a full probe scan, a hash-sort/compressed Parquet write, and a validation
+    scan. In a terminal DuckDB shows its query-plan progress and ETA after two seconds. Redirected
+    or non-interactive runs log elapsed time and bytes written every 30 seconds instead. The final
+    machine-readable result remains one JSON object on stdout.
 
 
 3. DISTRIBUTED CLI WORKFLOW
@@ -332,13 +336,11 @@ Parameter choice:
   wait-timeout  maximum wait for Right Stage-1 closure
   poll-interval S3 polling interval; 2-5 seconds is usually sufficient
 
-F. Fetch reports
+F. Reports
 
-  dtrack tools fetch-report --run-s3 "$RUN_S3" --run-id "$RUN_ID" --out ./report
-
-Without `--run-id`, fetch-report selects the newest completed run having `report/`.
-
-Expected report artifacts: summary.json, per-pair row/col CSVs, index.html, report.xlsx.
+Reports remain under `$RUN_S3/$RUN_ID/report/`; local runs expose the same directory directly.
+For S3 use the organization's standard object-store browser/sync tooling. Expected artifacts:
+summary.json, per-pair row/col CSVs, index.html, and report.xlsx.
 
 
 4. PAYLOAD LAYOUT AND MONITORING
@@ -461,8 +463,8 @@ Stages:
   row   col reset plus selected row verdict/count/manifest/intermediate report + Stage-1 barriers
 
 Any `col` or `row` rollback invalidates and deletes the run-level `report/` set, even for
-one pair, because summary.json/index.html/report.xlsx describe the whole run. `fetch-report`
-refuses a run unless `_STATUS.json.state` is `complete`; restart Right to publish a fresh set.
+one pair, because summary.json/index.html/report.xlsx describe the whole run. Restart Right to
+publish a fresh set and only consume it after `_STATUS.json.state` becomes `complete`.
 
 Inspect the dry-run JSON:
   pairs, by_pair, planned, keys, targets, next
@@ -524,6 +526,27 @@ and Right consumer concurrently over the same directory
 store. Errors go to `<run>/_local/logs/errors.log`; normal CLI JSON remains on stdout.
 Representative submitted SQL shapes are retained in `<run>/audit.txt`; key-check uses
 `.dtrack-local/keycheck/<pair>/audit.txt`.
+
+Confluence tracking pages use one grouped lifecycle:
+
+  dtrack tools blog preview --report <report-dir>
+  dtrack tools blog publish --report <report-dir> --space DTRACK
+  dtrack tools blog preview \
+    --template templates/confluence/business-validation-overall.xhtml \
+    --data templates/confluence/business-validation-overall.example.json
+  dtrack tools blog publish \
+    --template templates/confluence/business-validation-overall.xhtml \
+    --data validation-status.json --space DTRACK --attach evidence.xlsx
+  dtrack tools blog inspect --page-id <id>
+  dtrack tools blog delete --page-id <id>              # dry run
+  dtrack tools blog delete --page-id <id> --yes        # move to trash
+  dtrack tools blog delete --page-id <id> --purge --yes
+
+`inspect` returns page metadata, versions, restrictions, and attachments. Publish also manages
+attachments, version retention, and view/edit restrictions. New/updated pages default to view/edit
+access for the publishing user only; use `--space-visible` to inherit normal space visibility.
+Template artifacts may be web links or attachment names. The old flat `blog --publish` and
+`blog-delete` commands are intentionally absent.
 
 For very large `source=file` CSVs, DuckDB scans the file in place and applies partition/sample
 predicates before export. DTrack writes matching rows in 10,000-row batches and computes statistics

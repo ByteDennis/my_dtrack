@@ -41,11 +41,13 @@ just e2e            # both sides against a local Moto S3
 ```
 
 `dtrack local key-check` can override `--key`, `--family KEY=...`, and `--sample` to compare
-the exact sampled key set selected by the Left source and Databricks. `dtrack tools blog` renders
-a Confluence tracking-page preview from a report directory; add `--publish` for an explicit write.
+the exact sampled key set selected by the Left source and Databricks. `dtrack tools blog preview`
+renders a local tracking-page preview; `blog publish`, `inspect`, and `delete` make the Confluence
+lifecycle explicit. Editable storage-XHTML templates and JSON examples live under
+`templates/confluence/`; publishing is view/edit restricted to the current user unless
+`--space-visible` is given.
 Add `--debug ipdb` or `--debug attach` directly to `row-check`, `col-check`, or any
-`dtrack local` subcommand. Attach mode waits for debugpy on port 5678. `dtrack tools debug --
-<command>` remains useful when a custom attach port is needed.
+`dtrack local` subcommand. Attach mode waits for debugpy on port 5678.
 Install that optional integration with `uv sync --extra confluence`. Server/Data Center PAT auth uses
 `CONFLUENCE_URL` + `CONFLUENCE_TOKEN`; Cloud additionally needs `CONFLUENCE_USERNAME` and `--cloud`.
 The integration is pinned to `atlassian-python-api==5.0.5` and uses Confluence REST API v1 by

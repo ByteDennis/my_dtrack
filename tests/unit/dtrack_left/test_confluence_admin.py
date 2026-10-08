@@ -183,6 +183,7 @@ def test_publish_applies_attach_detach_versions_then_restrictions(tmp_path):
     assert outcome["attachments"][0]["name"] == "note.txt" and outcome["detached"] == []
     assert outcome["versions"]["remaining"] == [5, 6, 7]
     assert outcome["restrictions"]["read"] == {"users": ["me"], "groups": ["readers"]}
+    assert outcome["restrictions"]["update"] == {"users": ["me"], "groups": []}
     methods = [method for method, *_ in client.calls]
     assert methods.index("POST") < methods.index("DELETE") < methods.index("PUT")
 
@@ -192,3 +193,16 @@ def test_delete_page_trashes_and_optionally_purges():
     assert confluence.delete_page(client, "1") == {"page_id": "1", "state": "trashed"}
     assert confluence.delete_page(client, "1", purge=True)["state"] == "purged"
     assert client.calls[-1][2] == {"status": "trashed"}
+
+
+def test_inspect_page_combines_versions_restrictions_and_attachments():
+    client = FakeConfluence()
+    client.restrictions["read"] = {
+        "user": [{"type": "known", "username": "me"}],
+        "group": [],
+    }
+    outcome = confluence.inspect_page(client, "1")
+    assert outcome["page_id"] == "1" and outcome["version"] == 6
+    assert outcome["versions"] == [1, 2, 3, 4, 5, 6]
+    assert outcome["restrictions"]["read"]["users"] == ["me"]
+    assert outcome["attachments"] == []

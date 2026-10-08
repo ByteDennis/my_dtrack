@@ -2,8 +2,7 @@ import boto3
 import pytest
 from support import RecordingClient, assert_store_contract
 
-from dtrack_left.backends.store import S3Location, S3Store, fetch_report, validate_run_id
-from dtrack_right.backends.store import VolumeStore
+from dtrack_left.backends.store import S3Location, S3Store, validate_run_id
 
 
 def test_s3_location_parses_bucket_and_prefix():
@@ -75,53 +74,6 @@ def test_endpoint_override_switches_to_path_style_addressing(monkeypatch):
     client = S3Store("s3://b/p").client
     assert client.meta.endpoint_url == "http://127.0.0.1:4566"
     assert client.meta.config.s3["addressing_style"] == "path"
-
-
-def test_fetch_report_downloads_report_from_the_run_store(tmp_path):
-    runs = VolumeStore(tmp_path / "runs")
-    old = runs.child("r1")
-    old.put_json("_STATUS.json", {"state": "complete"})
-    old.put_bytes("report/index.html", b"<old>")
-    latest = runs.child("r2")
-    latest.put_json("_STATUS.json", {"state": "complete"})
-    latest.put_bytes("report/index.html", b"<html>")
-    fetched = fetch_report(runs, tmp_path / "fetched")
-    assert fetched["run_id"] == "r2"
-    assert (tmp_path / "fetched/index.html").read_bytes() == b"<html>"
-    assert fetch_report(runs, tmp_path / "old", run_id="r1")["run_id"] == "r1"
-
-
-def test_fetch_report_fails_clearly_without_report_files(tmp_path):
-    runs = VolumeStore(tmp_path / "runs")
-    with pytest.raises(FileNotFoundError, match="no completed run"):
-        fetch_report(runs, tmp_path)
-    runs.child("r1").put_json("_STATUS.json", {"state": "complete"})
-    with pytest.raises(FileNotFoundError, match="report/"):
-        fetch_report(runs, tmp_path, run_id="r1")
-
-
-def test_fetch_report_rejects_an_explicit_incomplete_run_with_stale_files(tmp_path):
-    runs = VolumeStore(tmp_path / "runs")
-    run = runs.child("r1")
-    run.put_json("_STATUS.json", {"state": "left_col_check"})
-    run.put_bytes("report/index.html", b"<stale>")
-    with pytest.raises(FileNotFoundError, match="not complete"):
-        fetch_report(runs, tmp_path / "out", run_id="r1")
-    assert not (tmp_path / "out").exists()
-
-
-@pytest.mark.parametrize("name", ["../escape.txt", r"..\escape.txt", "/absolute.txt"])
-def test_fetch_report_rejects_report_keys_that_escape_the_output_directory(
-    s3_bucket, tmp_path, name
-):
-    runs = S3Store(f"s3://{s3_bucket}/runs")
-    run = runs.child("r1")
-    run.put_json("_STATUS.json", {"state": "complete"})
-    run.put_bytes(f"report/{name}", b"bad", content_type="text/plain")
-
-    with pytest.raises(ValueError, match="unsafe report object key"):
-        fetch_report(runs, tmp_path / "out", run_id="r1")
-    assert not (tmp_path / "escape.txt").exists()
 
 
 # >>> Databricks mkdir on an S3-backed Volume leaves 0-byte "folder/" markers <<< #
