@@ -17,6 +17,6 @@ def test_completed_report_is_readable_from_the_real_bucket(s3_scratch):
     runs = S3Store(f"{s3_scratch}/runs")
     run = runs.child("r1")
     run.put_bytes("report/index.html", b"<html>", content_type="text/html")
-    run.put_json("_STATUS.json", {"state": "complete", "run_id": "r1"})
+    run.put_json("_status/run.json", {"state": "complete", "run_id": "r1"})
     assert run.get_bytes("report/index.html") == b"<html>"
-    assert run.get_json("_STATUS.json")["state"] == "complete"
+    assert run.get_json("_status/run.json")["state"] == "complete"

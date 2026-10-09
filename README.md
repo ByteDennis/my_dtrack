@@ -11,18 +11,18 @@ directory with the same run layout:
 | `src/dtrack_local` | one operator machine | `dtrack local ...` | both connections; runs root optional for backup |
 
 - **row check** (stage 1): exact row counts per day on both sides; only days whose counts agree
-  go on. Left writes `row_check/<pair>.left.json`; Right reconciles and writes the verdicts and the
-  `manifest/<pair>.json` plan.
+  go on. Left and Right publish Pair-scoped inputs/verdicts; a passed Pair receives an immutable
+  `pairs/<pair>/plan.json`.
 - **col check** (stage 2): deterministic sampling and per-column statistics on both sides,
-  compared on the Right. Left publishes `units/` + `_INDEX/` pointers; Right prefetches its own
-  side, compares, writes `results/`, builds and publishes the report.
+  compared on the Right. Left atomically publishes one statistics-bearing Unit object; Right
+  prefetches its own side, compares, writes Pair-scoped results, and builds the report.
 
 The on-prem side holds no Databricks credential and installs no Databricks package. The Right
 side never imports the Left package and contains no CSV/pandas fallback or source-platform sampling
 SQL. Oracle is installed by default; Athena and Hadoop are extras.
-`dtrack_local` deliberately combines both packages, but writes the same `row_check/`, `manifest/`,
-`units/`, `_INDEX/`, `results/`, `dead/`, representative SQL `audit.txt`, and report payloads
-through a directory-backed store.
+`dtrack_local` deliberately combines both packages, but writes the same `_status/`,
+`pairs/<pair>/`, and `report/` layout through a directory-backed store. `_status/units.csv` is the
+human-readable progress view; protocol JSON remains authoritative.
 That keeps sampling/hash behavior and rollback semantics common without making local runs depend
 on S3 or making the distributed packages depend on the local runner.
 

@@ -21,7 +21,10 @@ def test_row_check_from_oracle_lands_on_real_s3(s3_scratch, oracle, tmp_path, ca
         == 0
     )
     store = S3Store(f"{runs}/oracle")
-    orders = store.get_json("row_check/orders.left.json")
+    orders = store.get_json("pairs/orders/row_check/left.json")
     assert len(orders["counts"]) == 58 and orders["counts"]["2026-01-15"] == 30
     assert "password" not in json.dumps(orders) and "dsn" not in orders["left"]
-    assert store.get_json("row_check/_LEFT_CLOSED")["pairs"] == ["customers", "orders"]
+    assert store.get_json("_status/left_row_check.closed.json")["pairs"] == [
+        "customers",
+        "orders",
+    ]

@@ -301,6 +301,18 @@ class FileSource(SqlSource):
         ).lower()
         if self.format not in READERS:
             raise ValueError(f"unsupported file format: {self.format}")
+        if "nullstr" in self.config:
+            nullstr = self.config["nullstr"]
+            if self.format != "csv":
+                raise ValueError("nullstr is only supported for CSV file sources")
+            if not isinstance(nullstr, str | list | tuple) or (
+                isinstance(nullstr, list | tuple)
+                and not all(isinstance(value, str) for value in nullstr)
+            ):
+                raise TypeError("nullstr must be a string or a list of strings")
+            configured = (self.config.get("options") or {}).get("nullstr", nullstr)
+            if configured != nullstr:
+                raise ValueError("nullstr disagrees with options.nullstr")
         if config.get("date_format"):
             self.config["date_type"] = "date"
 
@@ -309,6 +321,8 @@ class FileSource(SqlSource):
         if self.format == "ndjson":
             options["format"] = "newline_delimited"
         options.update(self.config.get("options") or {})
+        if "nullstr" in self.config:
+            options["nullstr"] = self.config["nullstr"]
         arguments = [_duckdb_value(self.path)]
         arguments += [f"{key} = {_duckdb_value(value)}" for key, value in options.items()]
         return f"{READERS[self.format]}({', '.join(arguments)})"

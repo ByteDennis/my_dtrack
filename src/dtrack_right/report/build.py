@@ -9,6 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from ..checks.row_check import row_check_csv_bytes
+from ..common.protocol import (
+    col_check_close_document,
+    list_failures,
+    list_plans,
+    list_results,
+    list_row_results,
+    pair_segment,
+)
 from .excel import build_workbook
 from .html import (
     column_stats_section,
@@ -32,21 +40,13 @@ def compare_col_csv_bytes(rows: list[dict[str, Any]]) -> bytes:
     return output.getvalue().encode()
 
 
-# >>> read row_check/, results/, dead/ and manifest/_CLOSED from the work store <<< #
+# >>> read Pair row/column results and the col-check closure from the work store <<< #
 def collect(store) -> dict[str, Any]:
-    documents = [
-        value
-        for key, value in store.list_json("row_check/")
-        if key.endswith(".json") and not key.endswith(".left.json") and key != "row_check/_CLOSED"
-    ]
-    results = [value for _key, value in store.list_json("results/")]
-    dead = [value for _key, value in store.list_json("dead/")]
-    manifests = {
-        value["pair"]: value
-        for key, value in store.list_json("manifest/")
-        if key != "manifest/_CLOSED" and not key.endswith(".keys.json")
-    }
-    closed = store.get_json("manifest/_CLOSED") if store.exists("manifest/_CLOSED") else None
+    documents = [value for _key, value in list_row_results(store)]
+    results = [value for _key, value in list_results(store)]
+    dead = [value for _key, value in list_failures(store)]
+    manifests = {value["pair"]: value for _key, value in list_plans(store)}
+    closed = col_check_close_document(store)
     return {
         "documents": sorted(documents, key=lambda doc: doc["pair"]),
         "results": results,
@@ -112,12 +112,16 @@ def build_report(
     row_sections, col_sections = [], []
     for document in documents:
         pair = document["pair"]
-        files[f"{pair}_compare_row.csv"] = out / f"{pair}_compare_row.csv"
-        files[f"{pair}_compare_row.csv"].write_bytes(row_check_csv_bytes(document))
+        pair_dir = out / "pairs" / pair_segment(pair)
+        pair_dir.mkdir(parents=True, exist_ok=True)
+        row_name = f"pairs/{pair_segment(pair)}/row_check.csv"
+        files[row_name] = pair_dir / "row_check.csv"
+        files[row_name].write_bytes(row_check_csv_bytes(document))
         rows = results_by_pair.get(pair) or []
         if rows:
-            files[f"{pair}_compare_col.csv"] = out / f"{pair}_compare_col.csv"
-            files[f"{pair}_compare_col.csv"].write_bytes(compare_col_csv_bytes(rows))
+            col_name = f"pairs/{pair_segment(pair)}/col_check.csv"
+            files[col_name] = pair_dir / "col_check.csv"
+            files[col_name].write_bytes(compare_col_csv_bytes(rows))
         left_label = str(document["left"].get("source") or "left")
         right_label = str(document["right"].get("source") or "databricks")
         row_sections.append(row_count_section(document))

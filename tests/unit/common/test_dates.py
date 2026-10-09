@@ -246,7 +246,7 @@ def test_bounds_where_is_none_without_bounds(common):
     [
         ("oracle", "date", "TRUNC(DT)"),
         ("spark", "date", "to_date(`DT`)"),
-        ("duckdb", "date", 'CAST("DT" AS DATE)'),
+        ("duckdb", "date", 'try_cast("DT" AS DATE)'),
         ("oracle", {"type": "string", "format": "dash"}, "DT"),
         ("oracle", {"type": "string", "format": "compact"}, "DT"),
         (

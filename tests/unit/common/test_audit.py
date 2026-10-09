@@ -14,12 +14,12 @@ def test_left_and_right_sql_events_merge_into_one_run_audit(tmp_path):
 
     left_key = left.record("SELECT * FROM APP.ORDERS", backend="oracle")
     right_key = right.record("SELECT * FROM main.sales.orders", backend="spark")
-    assert not store.exists("audit.txt")
+    assert not store.exists("_status/audit.sql")
     right.refresh()
 
     assert left_key and right_key
-    assert len(store.list_keys("audit/")) == 2
-    text = store.get_bytes("audit.txt").decode()
+    assert len(store.list_keys("pairs/orders/audit/")) == 2
+    text = store.get_bytes("_status/audit.sql").decode()
     assert text == "SELECT * FROM APP.ORDERS\n\nSELECT * FROM main.sales.orders\n\n"
     assert "-- timestamp=" not in text
 
@@ -50,8 +50,22 @@ def test_sql_audit_metadata_is_plain_and_serializable(tmp_path):
     audit = LeftSqlAudit(store, "local")
     assert audit.record("SHOW TABLES", backend="duckdb", operation="inspect")
     assert audit.refresh()
-    assert SimpleNamespace(text=store.get_bytes("audit.txt").decode()).text.endswith(
+    assert SimpleNamespace(text=store.get_bytes("_status/audit.sql").decode()).text.endswith(
         "SHOW TABLES\n\n"
+    )
+
+
+def test_detailed_audit_header_is_minimal_and_uses_the_run_timezone(tmp_path):
+    store = VolumeStore(tmp_path / "run")
+    store.put_json("_status/run.json", {"timezone": "Asia/Tokyo"})
+    key = LeftSqlAudit(store, "left", pair="orders").record(
+        "SELECT * FROM APP.ORDERS", backend="oracle", operation="pull_window"
+    )
+    header = store.get_bytes(key).decode().splitlines()[0]
+    assert header.startswith("-- timestamp=") and "+09:00 side=left" in header
+    assert " backend=oracle operation=pull_window" in header
+    assert not any(
+        field in header for field in ("event_id=", "audit_key=", "shape=", "policy=", "pair=")
     )
 
 
@@ -74,9 +88,9 @@ def test_repeated_window_literals_keep_only_the_first_query_shape(tmp_path):
         operation="pull_window",
     )
     assert first and repeated is None and changed
-    assert len(store.list_keys("audit/")) == 2
+    assert len(store.list_keys("pairs/orders/audit/")) == 2
     audit.refresh()
-    text = store.get_bytes("audit.txt").decode()
+    text = store.get_bytes("_status/audit.sql").decode()
     assert "2026-01-01" in text and "2026-02-01" in text
 
 
@@ -95,7 +109,7 @@ def test_multithreaded_same_shape_has_one_first_winner(tmp_path):
             )
         )
     assert sum(result is not None for result in results) == 1
-    assert len(store.list_keys("audit/")) == 1
+    assert len(store.list_keys("pairs/orders/audit/")) == 1
 
 
 def test_mutating_sql_is_never_sampled_and_internal_maintenance_is_omitted(tmp_path):
@@ -104,7 +118,7 @@ def test_mutating_sql_is_never_sampled_and_internal_maintenance_is_omitted(tmp_p
     assert audit.record("DELETE FROM T WHERE ID = 1", backend="duckdb")
     assert audit.record("DELETE FROM T WHERE ID = 2", backend="duckdb")
     assert audit.record("SHOW TABLES", backend="duckdb", operation="landing_inspect") is None
-    assert len(store.list_keys("audit/")) == 2
+    assert len(store.list_keys("_status/audit/")) == 2
 
 
 def test_detailed_audit_events_are_retained_for_only_the_latest_five_runs(tmp_path):

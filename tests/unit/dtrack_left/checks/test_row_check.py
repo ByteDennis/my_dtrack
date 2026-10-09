@@ -50,7 +50,7 @@ def test_row_check_publishes_counts_and_public_config_without_secrets():
     run_id, documents = run_row_check(
         config, store, run_id="run", source_factory=lambda _row: Fake()
     )
-    doc = store.get_json("row_check/p.left.json")
+    doc = store.get_json("pairs/p/row_check/left.json")
     assert run_id == "run" and len(documents) == 1
     assert doc["counts"] == {"2026-01-01": 1, "20260102": 2}
     assert doc["pair_config"]["sample"] == 0.1
@@ -63,8 +63,8 @@ def test_row_check_publishes_counts_and_public_config_without_secrets():
         "table": "a",
         "date_col": "dt",
     }
-    assert store.get_json("row_check/_LEFT_CLOSED")["pairs"] == ["p"]
-    assert not any(key.startswith("manifest/") for key in store.objects)
+    assert store.get_json("_status/left_row_check.closed.json")["pairs"] == ["p"]
+    assert not any(key.endswith("/plan.json") for key in store.objects)
 
 
 def _config(**pairs):
@@ -92,8 +92,8 @@ def test_row_check_filters_pairs_and_skips_disabled_ones():
         config, store, pair_names=["b", "c"], source_factory=lambda _row: Fake()
     )
     assert [doc["pair"] for doc in documents] == ["b"] and run_id
-    assert store.get_json("_STATUS.json")["state"] == "left_row_check_closed"
-    assert store.exists("_HEARTBEAT")
+    assert store.get_json("_status/run.json")["state"] == "left_row_check_closed"
+    assert store.exists("_status/heartbeat.json")
 
 
 def test_row_check_refuses_an_empty_selection_and_failed_preflights():
@@ -107,7 +107,7 @@ def test_row_check_refuses_an_empty_selection_and_failed_preflights():
     store = MemoryStore()
     with pytest.raises(RuntimeError, match="left preflight failed: a"):
         run_row_check(_config(a={}), store, source_factory=lambda _r: Down())
-    assert not store.exists("row_check/a.left.json")
+    assert not store.exists("pairs/a/row_check/left.json")
 
 
 def test_public_pair_config_strips_every_credential_field():

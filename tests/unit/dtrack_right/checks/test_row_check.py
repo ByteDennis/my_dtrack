@@ -109,12 +109,14 @@ def test_right_row_check_reconciles_pending_left_documents_and_writes_manifest_w
     store.put_json("row_check/p.left.json", left_document())
     store.put_json("row_check/_LEFT_CLOSED", {"pairs": ["p"]})
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 1
-    doc = store.get_json("row_check/p.json")
+    doc = store.get_json("pairs/p/row_check/result.json")
     assert doc["summary"] == {"match": 1, "count_diff": 1, "left_only": 1, "right_only": 0}
     assert doc["timing"]["left_count_s"] == 0.1
-    manifest = store.get_json("manifest/p.json")
+    manifest = store.get_json("pairs/p/plan.json")
     assert manifest["windows"][0]["partitions"] == ["2026-01-01"]
-    assert store.exists("row_check/_CLOSED") and store.exists("reports/p_compare_row.csv")
+    assert store.exists("_status/row_check.closed.json")
+    assert store.exists("report/pairs/p/row_check.csv")
+    assert store.exists("_status/units.csv")
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 0
 
 
@@ -126,7 +128,7 @@ def test_a_crash_before_the_manifest_lands_is_redone_on_restart():
     real_put = store.put_json
 
     def crash_on_manifest(key, value):
-        if key.startswith("manifest/"):
+        if key.endswith("/plan.json"):
             raise ConnectionError("killed")
         return real_put(key, value)
 
@@ -134,9 +136,10 @@ def test_a_crash_before_the_manifest_lands_is_redone_on_restart():
     with pytest.raises(ConnectionError):
         run_row_check(store, lambda _cfg: FakeTarget())
     store.put_json = real_put
-    assert not store.exists("row_check/p.json")
+    assert not store.exists("pairs/p/row_check/result.json")
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 1
-    assert store.exists("manifest/p.json") and store.exists("row_check/_CLOSED")
+    assert store.exists("pairs/p/plan.json")
+    assert store.exists("_status/row_check.closed.json")
 
 
 def test_row_check_stays_open_until_every_announced_pair_is_reconciled():
@@ -144,18 +147,19 @@ def test_row_check_stays_open_until_every_announced_pair_is_reconciled():
     store.put_json("row_check/a.left.json", left_document("a"))
     store.put_json("row_check/_LEFT_CLOSED", {"pairs": ["a", "b"]})
     run_row_check(store, lambda _cfg: FakeTarget())
-    assert not store.exists("row_check/_CLOSED")
+    assert not store.exists("_status/row_check.closed.json")
 
 
 def test_manual_gate_reports_without_releasing_a_manifest():
     store = MemoryStore()
     store.put_json("row_check/p.left.json", left_document())
     run_row_check(store, lambda _cfg: FakeTarget(), gate="manual")
-    assert store.exists("row_check/p.json") and not store.exists("manifest/p.json")
+    assert store.exists("pairs/p/row_check/result.json")
+    assert not store.exists("pairs/p/plan.json")
 
 
 def test_a_failed_right_preflight_stops_the_pair():
     store = MemoryStore()
     with pytest.raises(RuntimeError, match="TABLE_OR_VIEW_NOT_FOUND"):
         reconcile_pair(store, left_document(), FakeTarget(healthy=False))
-    assert not store.exists("row_check/p.json")
+    assert not store.exists("pairs/p/row_check/result.json")

@@ -1,4 +1,4 @@
 """Distributed reconciliation package."""
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 __version__ = "0.1.0"

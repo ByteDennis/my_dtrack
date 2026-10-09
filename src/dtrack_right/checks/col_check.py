@@ -9,6 +9,18 @@ from typing import Any
 
 from ..common.audit import SqlAudit, attach_sql_audit
 from ..common.manifest import unit_id
+from ..common.protocol import (
+    col_check_close_document,
+    fixed_keys_document,
+    list_failures,
+    list_plans,
+    list_results,
+    refresh_units_status,
+    right_ready_path,
+    timestamp,
+    unit_prefix,
+    unit_statistics,
+)
 
 
 @dataclass(frozen=True)
@@ -168,17 +180,13 @@ class ColCheck:
         self.poll_interval = poll_interval
         self.on_idle = on_idle
         self.manifests = set()
-        self.cursor = None
-        self.seen = {
-            key.removeprefix("results/").removesuffix(".json")
-            for key in store.list_keys("results/")
-        }
-        self.seen |= {
-            key.removeprefix("dead/").removesuffix(".json") for key in store.list_keys("dead/")
-        }
+        self.seen = {value["unit_id"] for _key, value in list_results(store)}
+        self.seen |= {value["unit_id"] for _key, value in list_failures(store)}
         self.attempts = defaultdict(int)
         self.results = []
         self.targets = {}
+        self.unit_cursors = {}
+        self.legacy_unit_cursor = None
 
     def _target(self, manifest):
         pair = manifest["pair"]
@@ -191,14 +199,14 @@ class ColCheck:
 
     def poll(self):
         changed = 0
-        for key, manifest in self.store.list_json("manifest/"):
-            if key == "manifest/_CLOSED" or key.endswith(".keys.json") or key in self.manifests:
+        for key, manifest in list_plans(self.store):
+            if key in self.manifests:
                 continue
             if manifest["sample"]["mode"] == "fixed":
-                keys_key = f"manifest/{manifest['pair']}.keys.json"
-                if not self.store.exists(keys_key):
+                keys_document = fixed_keys_document(self.store, manifest["pair"])
+                if keys_document is None:
                     continue
-                key_tuples = self.store.get_json(keys_key)["windows"]
+                key_tuples = keys_document["windows"]
                 for window in manifest["windows"]:
                     window["key_tuples"] = key_tuples.get(window["bucket"], [])
             self.scheduler.add_manifest(manifest)
@@ -211,15 +219,24 @@ class ColCheck:
                 manifest["expected_units"],
             )
             changed += 1
-        for key, pointer in self.store.list_json("_INDEX/", start_after=self.cursor):
-            self.cursor = key
-            if pointer["unit_id"] in self.seen:
-                continue
-            self.seen.add(pointer["unit_id"])
-            self.scheduler.add_unit(pointer)
-            changed += 1
+        batches = [("_INDEX/", self.legacy_unit_cursor)]
+        batches.extend(
+            (unit_prefix(pair), self.unit_cursors.get(pair))
+            for pair in sorted(self.scheduler.manifests)
+        )
+        for prefix, cursor in batches:
+            for key, pointer in self.store.list_json(prefix, start_after=cursor):
+                if prefix == "_INDEX/":
+                    self.legacy_unit_cursor = key
+                else:
+                    self.unit_cursors[pointer["pair"]] = key
+                if pointer["unit_id"] in self.seen:
+                    continue
+                self.seen.add(pointer["unit_id"])
+                self.scheduler.add_unit(pointer)
+                changed += 1
         if changed:
-            log.info("poll: %d new object(s), cursor=%s", changed, self.cursor)
+            log.info("poll: %d new protocol object(s)", changed)
         return changed
 
     def _failure(self, task, exc):
@@ -251,6 +268,7 @@ class ColCheck:
                         "traceback": details,
                     },
                 )
+            refresh_units_status(self.store)
             return
         log.warning("retry %s attempt %d: %s", uid, self.attempts[uid], exc)
         if task.kind == "prefetch":
@@ -272,6 +290,15 @@ class ColCheck:
                 stats = self._target(manifest).window_statistics(manifest, task.payload)
                 mapped = {left: stats[right] for left, right in manifest["col_map"].items()}
                 self.scheduler.mark_right_ready(task.pair, task.window, mapped)
+                self.store.put_json(
+                    right_ready_path(task.pair, task.window),
+                    {
+                        "pair": task.pair,
+                        "window": task.window,
+                        "right_ready_at": timestamp(self.store),
+                    },
+                )
+                refresh_units_status(self.store)
                 log.info(
                     "B right stats ready %s %s (%.3fs) -> %d unit(s) promoted to A-queue",
                     task.pair,
@@ -281,7 +308,7 @@ class ColCheck:
                 )
                 return
             pointer = task.payload
-            left = self.store.get_json(pointer["payload_key"])
+            left = unit_statistics(self.store, pointer)
             right = self.scheduler.right_stats[(task.pair, task.window)][pointer["column"]]
             result = compare_statistics(
                 pair=task.pair, window=task.window, column=pointer["column"], left=left, right=right
@@ -289,6 +316,7 @@ class ColCheck:
             result["unit_id"] = pointer["unit_id"]
             result["right_col"] = pointer.get("right_column") or pointer["column"]
             self.store.put_result(pointer["unit_id"], result)
+            refresh_units_status(self.store)
             self.results.append(result)
             log.info(
                 "A compare %s %s %s -> %s",
@@ -301,12 +329,11 @@ class ColCheck:
             self._failure(task, exc)
 
     def complete(self):
-        if not self.store.exists("manifest/_CLOSED"):
+        closed = col_check_close_document(self.store)
+        if closed is None:
             return False
-        expected = int(self.store.get_json("manifest/_CLOSED")["expected_units"])
-        return (
-            len(self.store.list_keys("results/")) + len(self.store.list_keys("dead/")) >= expected
-        )
+        expected = int(closed["expected_units"])
+        return len(list_results(self.store)) + len(list_failures(self.store)) >= expected
 
     def run(self):
         last_progress = time.monotonic()
@@ -324,7 +351,7 @@ class ColCheck:
                 log.info(
                     "col_check complete: %d result(s), %d dead",
                     len(self.results),
-                    len(self.store.list_keys("dead/")),
+                    len(list_failures(self.store)),
                 )
                 return self.results
             if self.on_idle and self.on_idle():

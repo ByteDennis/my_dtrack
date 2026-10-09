@@ -16,6 +16,16 @@ from ..backends.sources import source_from_config
 from ..common.audit import SqlAudit, attach_sql_audit
 from ..common.duck import use_temp
 from ..common.manifest import unit_id, validate_manifest
+from ..common.protocol import (
+    fixed_keys_document,
+    fixed_keys_path,
+    get_run_status,
+    list_plans,
+    list_units,
+    refresh_units_status,
+    row_check_is_closed,
+    write_run_status,
+)
 from ..common.stats import compute_csv_statistics
 
 log = logging.getLogger("dtrack.left.col_check")
@@ -26,17 +36,15 @@ def wait_for_manifests(store, *, timeout: float = 1800, poll_interval: float = 3
     started = time.monotonic()
     last_state = None
     while True:
-        if store.exists("row_check/_CLOSED"):
+        if row_check_is_closed(store):
             manifests = [
                 value
-                for key, value in store.list_json("manifest/")
-                if key != "manifest/_CLOSED"
-                and not key.endswith(".keys.json")
-                and (not pair_names or value["pair"] in pair_names)
+                for _key, value in list_plans(store)
+                if not pair_names or value["pair"] in pair_names
             ]
-            log.info("row_check/_CLOSED seen: %d manifest(s) released", len(manifests))
+            log.info("row check closed: %d plan(s) released", len(manifests))
             return manifests
-        state = store.get_json("_STATUS.json") if store.exists("_STATUS.json") else {}
+        state = get_run_status(store)
         if state != last_state:
             log.info("waiting for the Right side: status=%s", state)
             last_state = state
@@ -49,11 +57,17 @@ def wait_for_manifests(store, *, timeout: float = 1800, poll_interval: float = 3
         time.sleep(poll_interval)
 
 
-# >>> fixed-N sampling: the left side chooses the keys once and shares them through manifest/<pair>.keys.json <<< #
+# >>> fixed-N sampling: the left side chooses the keys once and shares them through the Pair plan folder <<< #
 def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
-    if manifest["sample"]["mode"] != "fixed" or store.exists(
-        f"manifest/{manifest['pair']}.keys.json"
-    ):
+    key_path = fixed_keys_path(manifest["pair"])
+    if manifest["sample"]["mode"] != "fixed":
+        return None
+    existing = fixed_keys_document(store, manifest["pair"])
+    if existing is not None:
+        if not store.exists(key_path):
+            store.put_json(key_path, existing)
+        for window in manifest["windows"]:
+            window["key_tuples"] = existing["windows"].get(window["bucket"], [])
         return None
     source = attach_sql_audit(
         source_from_config(manifest["left"]),
@@ -72,12 +86,12 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
         rows = pd.read_csv(sampled, dtype=object)[manifest["key_cols"]]
         windows[window["bucket"]] = rows.drop_duplicates().values.tolist()
     document = {"pair": manifest["pair"], "windows": windows}
-    store.put_json(f"manifest/{manifest['pair']}.keys.json", document)
+    store.put_json(key_path, document)
     log.info(
-        "fixed sample keys %s: %s -> manifest/%s.keys.json",
+        "fixed sample keys %s: %s -> %s",
         manifest["pair"],
         {k: len(v) for k, v in windows.items()},
-        manifest["pair"],
+        key_path,
     )
     for window in manifest["windows"]:
         window["key_tuples"] = windows[window["bucket"]]
@@ -116,17 +130,18 @@ class ColCheckPipeline:
         manifests = list(manifests)
         for manifest in manifests:
             validate_manifest(manifest)
-        existing_rows = self.store.list_json("_INDEX/")
+        pair_names = [manifest["pair"] for manifest in manifests]
+        existing_rows = list_units(self.store, pair_names)
         existing = {row["unit_id"] for _key, row in existing_rows}
         sequence = max((row.get("sequence", 0) for _key, row in existing_rows), default=0) + 1
         first_sequence = sequence
         ready = deque()
         plans = iter(iter_windows_round_robin(manifests))
         exhausted = False
-        self.store.put_json("_STATUS.json", {"state": "left_col_check"})
+        write_run_status(self.store, {"state": "left_col_check", "role": "left"})
         self.store.heartbeat()
         log.info(
-            "col_check start: %d manifest(s), %d unit(s) already indexed, next sequence=%d, wip=%d",
+            "col_check start: %d plan(s), %d unit(s) already ready, next sequence=%d, wip=%d",
             len(manifests),
             len(existing),
             sequence,
@@ -199,39 +214,36 @@ class ColCheckPipeline:
                         )
                         sequence += 1
                     log.info(
-                        "committed %s %s: %d unit(s) _INDEX/%08d..%08d (data before pointer)",
+                        "committed %s %s: %d unit(s), sequence %08d..%08d",
                         manifest["pair"],
                         window["bucket"],
                         sequence - first,
                         first,
                         max(first, sequence - 1),
                     )
+                    refresh_units_status(self.store)
                     self.store.heartbeat()
-        published = {
-            row["pair"]: row
-            for key, row in self.store.list_json("manifest/")
-            if key != "manifest/_CLOSED" and not key.endswith(".keys.json")
-        }
+        published = {row["pair"]: row for _key, row in list_plans(self.store)}
         expected = sum(row["expected_units"] for row in published.values())
-        indexed = len(self.store.list_keys("_INDEX/"))
+        indexed = len(list_units(self.store, list(published)))
         if indexed >= expected:
             self.store.close_manifests(list(published), expected)
-            log.info(
-                "manifest/_CLOSED written: pairs=%s expected_units=%d", sorted(published), expected
-            )
+            log.info("col check closed: pairs=%s expected_units=%d", sorted(published), expected)
         else:
             log.warning(
-                "col_check partial: %d/%d units indexed, _CLOSED not written", indexed, expected
+                "col_check partial: %d/%d units ready, closure not written", indexed, expected
             )
-        self.store.put_json(
-            "_STATUS.json",
+        write_run_status(
+            self.store,
             {
                 "state": "left_col_check_closed"
                 if indexed >= expected
                 else "left_col_check_partial",
+                "role": "left",
                 "indexed_units": indexed,
             },
         )
+        refresh_units_status(self.store)
         SqlAudit(self.store, "left").refresh()
         return sequence - first_sequence
 
@@ -262,7 +274,7 @@ class LeftRuntime:
 
     def pull_window(self, manifest, window):
         if manifest["sample"]["mode"] == "fixed" and "key_tuples" not in window:
-            keys = self.store.get_json(f"manifest/{manifest['pair']}.keys.json")["windows"]
+            keys = fixed_keys_document(self.store, manifest["pair"])["windows"]
             window["key_tuples"] = keys.get(window["bucket"], [])
         output = self.work_dir / manifest["pair"] / window["bucket"] / "left.csv"
         path = self.source(manifest).pull_window(

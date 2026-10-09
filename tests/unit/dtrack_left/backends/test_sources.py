@@ -510,6 +510,39 @@ def test_raw_text_survives_csv_reads(tmp_path):
     assert out.read_text().splitlines()[1:] == ["2026-01-01,1.50", "2026-01-01,007"]
 
 
+def test_file_source_nullstr_converts_export_markers_before_queries(tmp_path):
+    path = tmp_path / "sas.csv"
+    path.write_text("D,K,V\n2026-01-01,NULL,NULL\n2026-01-01,7,x\n")
+    source = FileSource(
+        {
+            "source": "file",
+            "path": str(path),
+            "date_col": "D",
+            "nullstr": ["", "NULL"],
+        }
+    )
+
+    assert "nullstr = ['', 'NULL']" in source.reader()
+    _columns, rows = source.query(
+        f'SELECT count_if("K" IS NULL), count_if("V" IS NULL) FROM {source.relation()}'
+    )
+    assert rows == [(1, 1)]
+
+
+def test_file_source_nullstr_rejects_non_csv_and_conflicting_options():
+    with pytest.raises(ValueError, match="only supported for CSV"):
+        FileSource({"source": "file", "path": "a.parquet", "nullstr": "NULL"})
+    with pytest.raises(ValueError, match="disagrees"):
+        FileSource(
+            {
+                "source": "file",
+                "path": "a.csv",
+                "nullstr": "NULL",
+                "options": {"nullstr": "NA"},
+            }
+        )
+
+
 # >>> the patch hook: a DuckDB query over {src}, here deriving the partition from each file name <<< #
 def test_query_patch_and_date_format_over_a_glob_of_files(tmp_path):
     for day in ("20260101", "20260102"):

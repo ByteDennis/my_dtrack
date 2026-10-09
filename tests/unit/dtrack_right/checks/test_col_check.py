@@ -98,7 +98,7 @@ def _drained_store(sample_mode="all"):
     store.put_json("row_check/p.left.json", doc)
     store.put_json("row_check/_LEFT_CLOSED", {"pairs": ["p"]})
     run_row_check(store, lambda _cfg: FakeTarget())
-    manifest = store.get_json("manifest/p.json")
+    manifest = store.get_json("pairs/p/plan.json")
     uid = unit_id("p", "2026-01-01", "amount")
     pointer = {"pair": "p", "window": "2026-01-01", "column": "amount", "right_column": "amount"}
     store.commit_unit(1, uid, STATS, pointer)
@@ -112,7 +112,7 @@ def test_col_check_compares_a_unit_and_records_the_result():
     target = FakeTarget()
     results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert results[0]["verdict"] == "match" and results[0]["right_col"] == "amount"
-    assert store.exists(f"results/{uid}.json")
+    assert store.exists(f"pairs/p/col_check/results/{uid}.json")
     assert target.calls == [("p", "2026-01-01", None)]
 
 
@@ -122,7 +122,17 @@ def test_col_check_waits_for_fixed_sample_keys_before_prefetching():
     with pytest.raises(TimeoutError):
         ColCheck(store, lambda _cfg: target, poll_interval=0, idle_timeout=0).run()
     assert target.calls == []
+    store.put_json(
+        "pairs/p/fixed_keys.json", {"pair": "p", "windows": {"2026-01-01": [["7"]]}}
+    )
+    results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
+    assert results and target.calls[-1] == ("p", "2026-01-01", [["7"]])
+
+
+def test_col_check_accepts_v1_fixed_sample_keys():
+    store, _uid = _drained_store(sample_mode="fixed")
     store.put_json("manifest/p.keys.json", {"pair": "p", "windows": {"2026-01-01": [["7"]]}})
+    target = FakeTarget()
     results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert results and target.calls[-1] == ("p", "2026-01-01", [["7"]])
 
@@ -143,20 +153,22 @@ def test_a_failing_prefetch_dead_letters_every_unit_of_the_window():
             raise ValueError("boom")
 
     results = ColCheck(store, lambda _cfg: Broken(), poll_interval=0, max_attempts=2).run()
-    assert results == [] and store.get_json(f"dead/{uid}.json")["error"] == "boom"
+    failure = store.get_json(f"pairs/p/col_check/failures/{uid}.json")
+    assert results == [] and failure["error"] == "boom"
 
 
 def test_a_failing_compare_is_retried_then_dead_lettered():
     store, uid = _drained_store()
     target = FakeTarget(stats={"amount": STATS})
-    store.objects.pop(f"units/{uid}.json")
+    unit_key = next(key for key in store.objects if "/units/" in key)
+    store.objects[unit_key].pop("left_statistics")
     results = ColCheck(store, lambda _cfg: target, poll_interval=0, max_attempts=2).run()
-    assert results == [] and store.exists(f"dead/{uid}.json")
+    assert results == [] and store.exists(f"pairs/p/col_check/failures/{uid}.json")
 
 
 def test_col_check_calls_on_idle_before_giving_up():
     store, _uid = _drained_store()
-    store.objects.pop("manifest/_CLOSED")
+    store.objects.pop("_status/col_check.closed.json")
     calls = []
 
     def on_idle():
@@ -171,7 +183,7 @@ def test_col_check_calls_on_idle_before_giving_up():
 
 def test_col_check_stops_when_the_left_heartbeat_is_stale(monkeypatch):
     store, _uid = _drained_store()
-    store.objects.pop("manifest/_CLOSED")
+    store.objects.pop("_status/col_check.closed.json")
     monkeypatch.setattr(store, "heartbeat_age", lambda now=None: 999.0)
     monkeypatch.setattr(col_check.time, "sleep", lambda _s: None)
     with pytest.raises(RuntimeError, match="heartbeat is stale"):

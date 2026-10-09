@@ -6,8 +6,19 @@ import re
 import threading
 import traceback
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
+
+from .protocol import (
+    AUDIT_SUMMARY,
+    audit_error_prefix,
+    audit_prefix,
+    get_run_status,
+    timezone_from_name,
+)
+from .protocol import (
+    timestamp as protocol_timestamp,
+)
 
 log = logging.getLogger("dtrack.sql_audit")
 _LOCKS: dict[str, threading.RLock] = {}
@@ -47,7 +58,7 @@ def sql_shape(sql: str) -> str:
 
 
 class SqlAudit:
-    """Best-effort immutable SQL events plus a human-readable run-level audit.txt."""
+    """Best-effort immutable SQL events plus a human-readable run-level audit.sql."""
 
     def __init__(self, store, side: str, pair: str | None = None):
         self.store = store
@@ -59,39 +70,44 @@ class SqlAudit:
         self,
         sql: str,
         *,
-        event_id: str,
         timestamp: str,
         backend: str,
         operation: str,
-        audit_key: str,
-        shape: str,
     ) -> bytes:
         fields = [
             f"timestamp={timestamp}",
-            f"event_id={event_id}",
             f"side={self.side}",
             f"backend={backend}",
             f"operation={operation}",
-            f"audit_key={audit_key}",
-            f"shape={shape}",
-            "policy=first_per_shape",
         ]
-        if self.pair:
-            fields.append(f"pair={self.pair}")
         statement = str(sql).rstrip()
         return ("-- " + " ".join(fields) + "\n" + statement + "\n\n").encode("utf-8")
+
+    def _event_keys(self) -> list[str]:
+        current = [
+            key
+            for key in self.store.list_keys("pairs/")
+            if "/audit/" in key and key.endswith(".sql")
+        ]
+        current.extend(self.store.list_keys("_status/audit/"))
+        current.extend(self.store.list_keys("audit/"))
+        return sorted(set(current))
 
     def refresh(self) -> bool:
         try:
             with self.lock:
-                keys = self.store.list_keys("audit/")
+                keys = self._event_keys()
                 blocks = []
                 seen = set()
                 for key in keys:
                     block = self.store.get_bytes(key)
+                    name = key.rsplit("/", 1)[-1]
                     header = block.split(b"\n", 1)[0].decode("utf-8", errors="replace")
                     match = re.search(r"\baudit_key=([^\s]+)", header)
-                    audit_key = match.group(1) if match else key
+                    audit_key = (
+                        name.rsplit("--", 1)[1].removesuffix(".sql") if "--" in name else None
+                    )
+                    audit_key = audit_key or (match.group(1) if match else key)
                     if audit_key in seen:
                         continue
                     seen.add(audit_key)
@@ -99,18 +115,19 @@ class SqlAudit:
                     sql = statement if separator else block
                     blocks.append(sql.rstrip() + b"\n\n")
                 body = b"".join(blocks)
-                self.store.put_bytes("audit.txt", body, content_type="text/plain; charset=utf-8")
+                self.store.put_bytes(AUDIT_SUMMARY, body, content_type="text/plain; charset=utf-8")
             return True
         except Exception:
-            log.debug("could not refresh audit.txt", exc_info=True)
+            log.debug("could not refresh audit.sql", exc_info=True)
             return False
 
     def record(self, sql: str, *, backend: str, operation: str = "query") -> str | None:
         if operation in SKIPPED_OPERATIONS:
             return None
-        now = datetime.now(UTC)
-        timestamp = now.isoformat(timespec="microseconds").replace("+00:00", "Z")
-        event_id = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex}"
+        zone = get_run_status(self.store).get("timezone")
+        now = datetime.now(timezone_from_name(zone))
+        timestamp = protocol_timestamp(self.store)
+        event_id = f"{now.strftime('%Y%m%dT%H%M%S%f%z')}-{uuid.uuid4().hex}"
         shape = sql_shape(sql)
         root = str(getattr(self.store, "root_uri", id(self.store)))
         capture = (root, self.side, self.pair or "", backend, operation, shape)
@@ -123,15 +140,12 @@ class SqlAudit:
         audit_key = hashlib.sha256("|".join(capture).encode()).hexdigest()[:20]
         if mutating:
             audit_key = f"{audit_key}-{event_id}"
-        key = f"audit/{event_id}.txt"
+        key = f"{audit_prefix(self.pair)}{event_id}--{audit_key}.sql"
         block = self._block(
             sql,
-            event_id=event_id,
             timestamp=timestamp,
             backend=backend,
             operation=operation,
-            audit_key=audit_key,
-            shape=shape,
         )
         try:
             with self.lock:
@@ -158,21 +172,27 @@ class SqlAudit:
                 "traceback": "".join(traceback.format_exception(exc)),
             }
             try:
-                self.store.put_json(f"audit_errors/{event_id}.json", failure)
+                self.store.put_json(f"{audit_error_prefix(self.pair)}{event_id}.json", failure)
             except Exception:
                 log.debug("could not persist SQL audit failure", exc_info=True)
             return None
 
 
 def prune_audit_history(runs_store, *, keep: int = 5) -> list[str]:
-    """Remove detailed SQL event files from older runs while retaining audit.txt."""
+    """Remove detailed SQL event files from older runs while retaining audit.sql."""
     if keep < 1:
         raise ValueError("audit history retention must keep at least one run")
     try:
         runs = []
         for run_id in runs_store.list_prefixes():
             run_store = runs_store.child(run_id)
-            keys = run_store.list_keys("audit/")
+            keys = [
+                key
+                for key in run_store.list_keys("pairs/")
+                if "/audit/" in key and key.endswith(".sql")
+            ]
+            keys.extend(run_store.list_keys("_status/audit/"))
+            keys.extend(run_store.list_keys("audit/"))
             if keys:
                 runs.append((max(keys), run_id, run_store, keys))
         removed = []

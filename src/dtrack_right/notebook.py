@@ -1,7 +1,7 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # dtrack right job
-# MAGIC Start this notebook by hand (or as a Job). It watches the work location for `row_check/*.left.json`,
+# MAGIC Start this notebook by hand (or as a Job). It watches the work location for `pairs/*/row_check/left.json`,
 # MAGIC counts the Right side with `spark.sql`, reconciles, drains the queue, and publishes the report.
 # MAGIC The folder containing this notebook is on `sys.path` when it lives in a Repo or workspace folder.
 # MAGIC A job cluster is a fresh environment: the first cell installs the two packages the runtime may lack

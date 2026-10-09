@@ -203,7 +203,7 @@ class DuckDbDateSqlPlatform(DateSqlPlatform):
         return f"coalesce(strftime({day}, '%Y-%m-%d'), '')"
 
     def native_day(self, column: str) -> str:
-        return f"CAST({column} AS DATE)"
+        return f"try_cast({column} AS DATE)"
 
     def parse_text(self, column: str, format: str) -> str:
         pattern = {

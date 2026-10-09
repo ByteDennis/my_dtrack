@@ -100,6 +100,30 @@ def test_csv_sides_may_name_a_file_as_conn_macro_and_skipped_pairs_are_not_check
     assert validate_config(config)["pairs"]["p"]["left"]["conn_macro"] == "data/a.csv"
 
 
+def test_file_source_accepts_a_top_level_nullstr():
+    row = pair(left="file")
+    row["left"]["nullstr"] = ["", "NULL"]
+    assert validate_config({"pairs": {"p": row}})["pairs"]["p"]["left"]["nullstr"] == [
+        "",
+        "NULL",
+    ]
+
+
+@pytest.mark.parametrize("nullstr", [1, ["", 1]])
+def test_file_source_nullstr_must_be_text_or_a_text_list(nullstr):
+    row = pair(left="file")
+    row["left"]["nullstr"] = nullstr
+    with pytest.raises(TypeError, match="nullstr must be a string or a list of strings"):
+        validate_config({"pairs": {"p": row}})
+
+
+def test_nullstr_is_not_accepted_for_database_sources():
+    row = pair()
+    row["left"]["nullstr"] = "NULL"
+    with pytest.raises(ValueError, match="nullstr requires source file/csv"):
+        validate_config({"pairs": {"p": row}})
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [

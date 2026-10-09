@@ -9,13 +9,40 @@ from typing import Any
 from ..backends.store import S3Store
 from ..common.dates import resolve_date_type
 from ..common.manifest import build_manifest
+from ..common.protocol import (
+    COL_CHECK_CLOSED,
+    HEARTBEAT,
+    LEFT_ROW_CHECK_CLOSED,
+    ROW_CHECK_CLOSED,
+    RUN_STATUS,
+    UNITS_STATUS,
+    fixed_keys_path,
+    left_row_path,
+    list_failures,
+    list_results,
+    list_units,
+    pair_root,
+    pair_segment,
+    plan_path,
+    row_result_path,
+    timestamp,
+)
 from .row_check import public_pair_config, run_row_check
 
 log = logging.getLogger("dtrack.left.rollback")
 STAGES = ("dead", "col", "row")
 STAGE_ONE_FIELDS = ("left", "right", "fromDate", "toDate", "date_synonyms")
-COMMIT_MARKERS = ("row_check/_CLOSED", "manifest/_CLOSED", "row_check/_LEFT_CLOSED", "_STATUS.json")
-PAIR_PREFIXES = ("row_check/", "manifest/", "_INDEX/", "results/", "dead/")
+COMMIT_MARKERS = (
+    ROW_CHECK_CLOSED,
+    COL_CHECK_CLOSED,
+    LEFT_ROW_CHECK_CLOSED,
+    RUN_STATUS,
+    "row_check/_CLOSED",
+    "manifest/_CLOSED",
+    "row_check/_LEFT_CLOSED",
+    "_STATUS.json",
+)
+PAIR_PREFIXES = ("pairs/", "row_check/", "manifest/", "_INDEX/", "results/", "dead/")
 
 
 # >>> a local run folder (dtrack_local, or a downloaded S3 run) with the few store calls a rollback needs <<< #
@@ -61,7 +88,10 @@ class LocalFolder:
         return [(key, self.get_json(key)) for key in keys]
 
     def heartbeat(self, now: float | None = None) -> str:
-        return self.put_json("_HEARTBEAT", {"epoch_s": time.time() if now is None else now})
+        return self.put_json(
+            HEARTBEAT,
+            {"epoch_s": time.time() if now is None else now, "updated_at": timestamp(self)},
+        )
 
 
 # >>> s3://... opens the S3 run folder, anything else a local run folder <<< #
@@ -71,7 +101,14 @@ def open_location(location: str):
 
 # >>> one prefix snapshot supports pair discovery and batch planning without per-pair rescans <<< #
 def _documents(store, prefixes=PAIR_PREFIXES) -> dict[str, list[tuple[str, Any]]]:
-    return {prefix: store.list_json(prefix) for prefix in prefixes}
+    return {
+        prefix: [
+            (key, store.get_json(key))
+            for key in store.list_keys(prefix)
+            if key.endswith(".json")
+        ]
+        for prefix in prefixes
+    }
 
 
 # >>> discover pair names from durable run documents, never from an unchecked CLI spelling <<< #
@@ -110,30 +147,46 @@ def resolve_pairs(store, requested: list[str] | tuple[str, ...], documents=None)
 def plan_many(store, pairs: list[str], stage: str, documents=None) -> dict[str, list[str]]:
     if stage not in STAGES:
         raise ValueError(f"stage must be one of {', '.join(STAGES)}, got {stage!r}")
-    prefixes = ("dead/",) if stage == "dead" else ("_INDEX/", "results/", "dead/")
-    documents = documents or _documents(store, prefixes)
     selected = set(pairs)
     planned: dict[str, list[str]] = {pair: [] for pair in pairs}
-    for prefix in prefixes:
-        for key, document in documents[prefix]:
+    groups = [list_failures(store)]
+    if stage != "dead":
+        groups = [list_units(store), list_results(store), *groups]
+    for rows in groups:
+        for key, document in rows:
             pair = document.get("pair")
             if pair not in selected:
                 continue
             planned[pair].append(key)
-            if prefix == "_INDEX/" and document.get("payload_key"):
+            if document.get("payload_key"):
                 payload_key = document["payload_key"]
                 locate(store, payload_key)
                 planned[pair].append(payload_key)
     if stage != "dead":
         report_keys = store.list_keys("report/")
         for pair in pairs:
-            for key in ("manifest/_CLOSED", f"manifest/{pair}.keys.json", "_STATUS.json"):
+            for key in (
+                COL_CHECK_CLOSED,
+                fixed_keys_path(pair),
+                RUN_STATUS,
+                UNITS_STATUS,
+                "manifest/_CLOSED",
+                f"manifest/{pair}.keys.json",
+                "_STATUS.json",
+            ):
                 if store.exists(key):
                     planned[pair].append(key)
+            planned[pair].extend(store.list_keys(f"{pair_root(pair)}/col_check/right_ready/"))
             planned[pair].extend(report_keys)
     if stage == "row":
         for pair in pairs:
             for key in (
+                ROW_CHECK_CLOSED,
+                LEFT_ROW_CHECK_CLOSED,
+                row_result_path(pair),
+                left_row_path(pair),
+                plan_path(pair),
+                f"report/pairs/{pair_segment(pair)}/row_check.csv",
                 "row_check/_CLOSED",
                 "row_check/_LEFT_CLOSED",
                 f"row_check/{pair}.json",
@@ -240,7 +293,10 @@ def delete(store, targets: list[dict[str, str]]) -> dict[str, Any]:
 
 # >>> the pair's new public config, refused when a Stage 1 setting differs from what was counted <<< #
 def stage_two_config(store, config: dict[str, Any], pair: str) -> tuple[dict, dict]:
-    left_doc = store.get_json(f"row_check/{pair}.left.json")
+    key = (
+        left_row_path(pair) if store.exists(left_row_path(pair)) else f"row_check/{pair}.left.json"
+    )
+    left_doc = store.get_json(key)
     public = public_pair_config(config["pairs"][pair])
     counted = left_doc["pair_config"]
     for side in ("left", "right"):
@@ -264,7 +320,12 @@ def prepare_row_check(store, config: dict[str, Any], pairs: list[str]) -> str:
     for pair in pairs:
         public_pair_config(config["pairs"][pair])
     run_ids = {
-        store.get_json(f"row_check/{pair}.left.json").get("run_id") for pair in pairs
+        store.get_json(
+            left_row_path(pair)
+            if store.exists(left_row_path(pair))
+            else f"row_check/{pair}.left.json"
+        ).get("run_id")
+        for pair in pairs
     }
     if None in run_ids or len(run_ids) != 1:
         raise ValueError("selected pairs do not share one preserved run_id")
@@ -274,7 +335,8 @@ def prepare_row_check(store, config: dict[str, Any], pairs: list[str]) -> str:
 # >>> build and validate a replacement entirely in memory before rollback deletes anything <<< #
 def prepare_manifest(store, config: dict[str, Any], pair: str) -> dict[str, Any]:
     left_doc, public = stage_two_config(store, config, pair)
-    verdict = store.get_json(f"row_check/{pair}.json")
+    key = row_result_path(pair) if store.exists(row_result_path(pair)) else f"row_check/{pair}.json"
+    verdict = store.get_json(key)
     manifest = build_manifest(left_doc["run_id"], pair, public, verdict)
     return {
         "manifest": manifest,
@@ -285,9 +347,9 @@ def prepare_manifest(store, config: dict[str, Any], pair: str) -> dict[str, Any]
 # >>> publish the replacement and its matching preserved Stage 1 document after deletion succeeds <<< #
 def publish_manifest(store, pair: str, prepared: dict[str, Any]) -> dict[str, Any]:
     manifest = prepared["manifest"]
-    store.put_json(f"manifest/{pair}.json", manifest)
-    store.put_json(f"row_check/{pair}.left.json", prepared["left_doc"])
-    log.info("manifest/%s.json rebuilt: %d units", pair, manifest["expected_units"])
+    store.put_json(plan_path(pair), manifest)
+    store.put_json(left_row_path(pair), prepared["left_doc"])
+    log.info("%s rebuilt: %d units", plan_path(pair), manifest["expected_units"])
     return manifest
 
 
@@ -396,9 +458,7 @@ def rollback_many(
         pairs,
         store.root_uri,
         row_check_restarted=(
-            config is not None
-            and stage == "row"
-            and (not apply or "row_check" in outcome)
+            config is not None and stage == "row" and (not apply or "row_check" in outcome)
         ),
     )
     return outcome

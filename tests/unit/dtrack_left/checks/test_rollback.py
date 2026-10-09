@@ -7,6 +7,7 @@ from support import pairs_config
 
 from dtrack_left.checks import rollback
 from dtrack_left.cli import main
+from dtrack_left.common.protocol import list_results, list_units
 from dtrack_local import pipeline
 from dtrack_local.csv_target import CsvAnchorTarget
 
@@ -35,17 +36,21 @@ def test_col_rollback_rebuilds_the_manifest_from_stage_two_settings_only(finishe
     config = pairs_config(synthetic.left)
     config["pairs"]["orders"]["col_map"].pop("STATUS")
     dry = rollback.rollback(run.store, "orders", "col", config=config)
-    assert dry["keys"][:2] == ["_STATUS.json", "manifest/_CLOSED"] and "deleted" not in dry
+    assert dry["keys"][:2] == [
+        "_status/col_check.closed.json",
+        "_status/run.json",
+    ]
+    assert "deleted" not in dry
     assert set(report_keys).issubset(dry["keys"])
     assert all(Path(row["location"]).is_absolute() for row in dry["targets"])
     assert [row["key"] for row in dry["targets"]] == dry["keys"]
-    assert run.store.exists("manifest/_CLOSED")
+    assert run.store.exists("_status/col_check.closed.json")
     done = rollback.rollback(run.store, "orders", "col", config=config, apply=True)
     assert done["deleted"] == dry["planned"] and done["expected_units"] == 6
     assert done["failed"] == done["missing"] == 0
     assert {row["status"] for row in done["deletions"]} == {"deleted"}
     assert not run.store.list_keys("report/")
-    assert not any(document["pair"] == "orders" for _, document in run.store.list_json("results/"))
+    assert not any(document["pair"] == "orders" for _, document in list_results(run.store))
     run = finished(config, pairs=["orders"])
     pipeline.col_check(run)
     summary = pipeline.report(run)["summary"]
@@ -62,10 +67,10 @@ def test_col_rollback_rebuilds_the_manifest_from_stage_two_settings_only(finishe
 def test_row_rollback_recounts_one_pair_and_ends_where_it_started(finished):
     run = finished()
     done = rollback.rollback(run.store, "orders", "row", apply=True)
-    assert "row_check/orders.json" in done["keys"] and "manifest/orders.json" in done["keys"]
-    assert run.store.exists("row_check/customers.json") and not run.store.exists(
-        "row_check/_CLOSED"
-    )
+    assert "pairs/orders/row_check/result.json" in done["keys"]
+    assert "pairs/orders/plan.json" in done["keys"]
+    assert run.store.exists("pairs/customers/row_check/result.json")
+    assert not run.store.exists("_status/row_check.closed.json")
     run = finished(pairs=["orders"])
     pipeline.row_check(run)
     pipeline.col_check(run)
@@ -86,7 +91,7 @@ def test_row_rollback_with_config_restarts_selected_left_pairs_in_same_run(finis
         config=config,
     )
     assert "row_check" not in dry
-    assert run.store.get_json("row_check/orders.left.json")["bounds"]["from"] == "2026-01-01"
+    assert run.store.get_json("pairs/orders/row_check/left.json")["bounds"]["from"] == "2026-01-01"
 
     done = rollback.rollback_many(
         run.store,
@@ -96,10 +101,11 @@ def test_row_rollback_with_config_restarts_selected_left_pairs_in_same_run(finis
         apply=True,
     )
     assert done["row_check"] == {"run_id": "r", "pairs": 1}
-    assert run.store.get_json("row_check/orders.left.json")["bounds"]["from"] == "2026-01-02"
-    assert run.store.get_json("row_check/_LEFT_CLOSED") == {"pairs": ["orders"], "run_id": "r"}
-    assert run.store.exists("row_check/customers.left.json")
-    assert not run.store.exists("row_check/_CLOSED")
+    assert run.store.get_json("pairs/orders/row_check/left.json")["bounds"]["from"] == "2026-01-02"
+    left_closed = run.store.get_json("_status/left_row_check.closed.json")
+    assert left_closed["pairs"] == ["orders"] and left_closed["run_id"] == "r"
+    assert run.store.exists("pairs/customers/row_check/left.json")
+    assert not run.store.exists("_status/row_check.closed.json")
     assert all("dtrack row-check" not in step for step in done["next"])
 
 
@@ -120,13 +126,13 @@ def test_config_rejects_skipped_pair_before_deleting(finished, synthetic, stage)
     run = finished()
     config = pairs_config(synthetic.left)
     config["pairs"]["orders"]["skip"] = True
-    before = run.store.list_keys("results/")
+    before = list_results(run.store)
 
     with pytest.raises(ValueError, match="skips selected pair"):
         rollback.rollback(run.store, "orders", stage, config=config, apply=True)
 
-    assert run.store.list_keys("results/") == before
-    assert run.store.exists("row_check/_CLOSED")
+    assert list_results(run.store) == before
+    assert run.store.exists("_status/row_check.closed.json")
 
 
 def test_dead_rollback_only_touches_dead_units_of_the_pair(finished):
@@ -144,27 +150,15 @@ def test_batch_rollback_deduplicates_shared_markers_and_deletes_every_selected_p
 ):
     run = finished()
     pairs = ["orders", "customers"]
-    calls = {}
-    original = run.store.list_json
-
-    def counted(prefix, **kwargs):
-        calls[prefix] = calls.get(prefix, 0) + 1
-        return original(prefix, **kwargs)
-
-    monkeypatch.setattr(run.store, "list_json", counted)
     dry = rollback.rollback_many(run.store, pairs, "col")
     assert dry["pairs"] == pairs
-    assert dry["keys"].count("manifest/_CLOSED") == 1
+    assert dry["keys"].count("_status/col_check.closed.json") == 1
     assert set(dry["by_pair"]) == set(pairs)
     assert len(dry["keys"]) == len(set(dry["keys"]))
-    assert calls == {prefix: 1 for prefix in rollback.PAIR_PREFIXES}
-
-    monkeypatch.setattr(run.store, "list_json", original)
     done = rollback.rollback_many(run.store, pairs, "col", apply=True)
     assert done["deleted"] == dry["planned"] and done["failed"] == 0
-    assert not run.store.list_keys("results/")
-    assert not run.store.list_keys("_INDEX/")
-    assert not run.store.list_keys("units/")
+    assert not list_results(run.store)
+    assert not list_units(run.store)
 
 
 def test_batch_config_builds_every_manifest_before_deleting(finished, synthetic):
@@ -173,10 +167,10 @@ def test_batch_config_builds_every_manifest_before_deleting(finished, synthetic)
     config["pairs"]["orders"]["col_map"].pop("STATUS")
     config["pairs"]["customers"]["sample"] = 0
     before_left = {
-        pair: run.store.get_json(f"row_check/{pair}.left.json")
+        pair: run.store.get_json(f"pairs/{pair}/row_check/left.json")
         for pair in ("orders", "customers")
     }
-    before_results = run.store.list_keys("results/")
+    before_results = list_results(run.store)
 
     with pytest.raises(ValueError, match="fixed sample must be positive"):
         rollback.rollback_many(
@@ -187,10 +181,10 @@ def test_batch_config_builds_every_manifest_before_deleting(finished, synthetic)
             apply=True,
         )
 
-    assert run.store.exists("manifest/_CLOSED")
-    assert run.store.list_keys("results/") == before_results
+    assert run.store.exists("_status/col_check.closed.json")
+    assert list_results(run.store) == before_results
     for pair, left_doc in before_left.items():
-        assert run.store.get_json(f"row_check/{pair}.left.json") == left_doc
+        assert run.store.get_json(f"pairs/{pair}/row_check/left.json") == left_doc
 
 
 def test_pair_resolution_supports_all_and_refuses_typos_before_deleting(finished):
@@ -206,14 +200,14 @@ def test_pair_resolution_supports_all_and_refuses_typos_before_deleting(finished
         rollback.resolve_pairs(run.store, ["all", "orders"])
     with pytest.raises(ValueError, match="unknown pair"):
         rollback.resolve_pairs(run.store, ["ordres"])
-    assert run.store.exists("manifest/_CLOSED")
+    assert run.store.exists("_status/col_check.closed.json")
 
 
 def test_rollback_deletes_from_s3_run_folders(s3_bucket):
     store = rollback.open_location(f"s3://{s3_bucket}/runs/r")
     store.put_json("row_check/_CLOSED", {"pairs": ["p"]})
-    store.put_json("results/u.json", {"pair": "p"})
-    store.put_json("results/v.json", {"pair": "q"})
+    store.put_json("results/u.json", {"pair": "p", "unit_id": "u"})
+    store.put_json("results/v.json", {"pair": "q", "unit_id": "v"})
     outcome = rollback.rollback(store, "p", "col", apply=True)
     assert outcome["keys"] == ["results/u.json"] and outcome["deleted"] == 1
     assert outcome["targets"] == [
@@ -297,13 +291,13 @@ def test_rollback_command_accepts_repeated_pairs_and_all(finished, capsys):
 
     assert main([*base, "--pair", "ordres", "--yes"]) == 2
     assert "unknown pair" in capsys.readouterr().err
-    assert run.store.exists("manifest/_CLOSED")
+    assert run.store.exists("_status/col_check.closed.json")
 
 
 def test_local_target_rejects_paths_outside_the_run(tmp_path):
     store = rollback.LocalFolder(tmp_path / "run")
     store.heartbeat(now=123.0)
-    assert store.get_json("_HEARTBEAT") == {"epoch_s": 123.0}
+    assert store.get_json("_status/heartbeat.json")["epoch_s"] == 123.0
     with pytest.raises(ValueError, match="outside the run folder"):
         rollback.locate(store, "../other.json")
 

@@ -103,6 +103,6 @@ def test_left_on_this_machine_and_right_as_a_databricks_job(
     summary = run_store.get_json("report/summary.json")
     assert summary["run_id"] == tag and summary["status"] == "DONE"
     assert summary["findings"] == {"row_count_diff": 1, "partition_missing": 2, "col_stat_diff": 2}
-    assert run_store.get_json("_STATUS.json")["state"] == "complete"
+    assert run_store.get_json("_status/run.json")["state"] == "complete"
     if not keep:
         workspace.workspace.delete(folder, recursive=True)

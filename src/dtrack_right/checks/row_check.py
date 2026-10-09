@@ -10,6 +10,14 @@ from typing import Any
 from ..common.audit import SqlAudit, attach_sql_audit
 from ..common.dates import apply_synonyms
 from ..common.manifest import build_manifest
+from ..common.protocol import (
+    left_row_check_close_document,
+    list_left_documents,
+    pair_segment,
+    plan_path,
+    refresh_units_status,
+    row_result_path,
+)
 
 
 def reconcile_partitions(
@@ -102,10 +110,10 @@ def row_check_csv_bytes(document: dict[str, Any]) -> bytes:
 # >>> pending left-side count documents that have no Right-side verdict yet <<< #
 def pending_left_documents(store) -> list[dict[str, Any]]:
     pending = []
-    for key, document in store.list_json("row_check/"):
-        if not key.endswith(".left.json"):
-            continue
-        if store.exists(f"row_check/{document['pair']}.json"):
+    for _key, document in list_left_documents(store):
+        if store.exists(row_result_path(document["pair"])) or store.exists(
+            f"row_check/{document['pair']}.json"
+        ):
             continue
         pending.append(document)
     return pending
@@ -171,20 +179,23 @@ def reconcile_pair(
         decision["excluded_ratio"],
     )
     store.put_bytes(
-        f"reports/{pair}_compare_row.csv", row_check_csv_bytes(document), content_type="text/csv"
+        f"report/pairs/{pair_segment(pair)}/row_check.csv",
+        row_check_csv_bytes(document),
+        content_type="text/csv",
     )
     if decision["passed"]:
         manifest = build_manifest(left_doc["run_id"], pair, left_doc["pair_config"], document)
-        store.put_json(f"manifest/{pair}.json", manifest)
+        store.put_json(plan_path(pair), manifest)
+        refresh_units_status(store)
         log.info(
-            "manifest %s: %d windows x %d columns = %d units -> manifest/%s.json",
+            "plan %s: %d windows x %d columns = %d units -> %s",
             pair,
             len(manifest["windows"]),
             len(manifest["columns"]),
             manifest["expected_units"],
-            pair,
+            plan_path(pair),
         )
-    store.put_json(f"row_check/{pair}.json", document)
+    store.put_json(row_result_path(pair), document)
     return document
 
 
@@ -194,11 +205,15 @@ def run_row_check(store, target_factory, *, gate: str = "auto") -> int:
     for left_doc in pending_left_documents(store):
         reconcile_pair(store, left_doc, target_factory(left_doc["right"]), gate=gate)
         processed += 1
-    if store.exists("row_check/_LEFT_CLOSED") and not store.exists("row_check/_CLOSED"):
-        pairs = store.get_json("row_check/_LEFT_CLOSED")["pairs"]
-        if all(store.exists(f"row_check/{pair}.json") for pair in pairs):
+    closed = left_row_check_close_document(store)
+    if closed and not store.exists("_status/row_check.closed.json"):
+        pairs = closed["pairs"]
+        if all(
+            store.exists(row_result_path(pair)) or store.exists(f"row_check/{pair}.json")
+            for pair in pairs
+        ):
             store.close_row_check(pairs)
-            released = [pair for pair in pairs if store.exists(f"manifest/{pair}.json")]
+            released = [pair for pair in pairs if store.exists(plan_path(pair))]
             log.info("row_check closed: %d/%d pairs released", len(released), len(pairs))
     if processed:
         SqlAudit(store, "right").refresh()

@@ -37,13 +37,15 @@ def test_run_all_matches_the_distributed_protocol_and_backs_up(synthetic, tmp_pa
     assert outcome["col_check"]["compared"] == 11 and outcome["col_check"]["dead"] == 0
     assert set(outcome["landing"]) == {"left__orders", "left__customers"}
     assert outcome["error_log"].endswith("r1/_local/logs/errors.log")
-    audit = (tmp_path / "runs/r1/audit.txt").read_text()
+    audit = (tmp_path / "runs/r1/_status/audit.sql").read_text()
     assert "SELECT" in audit and "-- timestamp=" not in audit
-    assert list((tmp_path / "runs/r1/audit").glob("*.txt"))
+    assert list((tmp_path / "runs/r1/pairs/orders/audit").glob("*.sql"))
     keys = {row["Key"] for row in boto3.client("s3").list_objects_v2(Bucket=s3_bucket)["Contents"]}
-    assert "runs/r1/row_check/orders.json" in keys and "runs/r1/report/index.html" in keys
+    assert "runs/r1/pairs/orders/row_check/result.json" in keys
+    assert "runs/r1/report/index.html" in keys
     assert "runs/r1/report/summary.json" in keys
-    assert "runs/r1/audit.txt" in keys and any(key.startswith("runs/r1/audit/") for key in keys)
+    assert "runs/r1/_status/audit.sql" in keys
+    assert any(key.startswith("runs/r1/pairs/orders/audit/") for key in keys)
     assert not any(key.startswith("runs/r1/_local/") for key in keys)
 
     again = pipeline.run_all(open_local())

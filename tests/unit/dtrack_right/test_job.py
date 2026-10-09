@@ -39,11 +39,12 @@ def test_run_resolves_the_root_publishes_the_report_and_reruns_without_rework(sy
     options = {"poll_interval": 0, "idle_timeout": 5, "wait_timeout": 5}
     first = run(str(runs), factory, out_dir=tmp_path / "o1", **options)
     assert first["results"] == 11 and first["summary"]["status"] == "DONE"
-    assert first["audit"] == "audit.txt" and store.exists("audit.txt")
-    assert store.list_keys("audit/")
+    assert first["audit"] == "_status/audit.sql" and store.exists("_status/audit.sql")
+    assert any("/audit/" in key for key in store.list_keys("pairs/"))
     assert store.get_json("report/summary.json")["run_id"] == "r1"
     assert first["published"] == [f"report/{name}" for name in sorted(_report_files())]
-    assert store.get_json("_STATUS.json") == {
+    status = store.get_json("_status/run.json")
+    assert {key: status[key] for key in ("state", "role", "run_id", "results")} == {
         "state": "complete",
         "role": "right",
         "run_id": "r1",
@@ -52,6 +53,8 @@ def test_run_resolves_the_root_publishes_the_report_and_reruns_without_rework(sy
     again = run(str(runs), factory, run_id="r1", out_dir=tmp_path / "o2", **options)
     assert again["results"] == 0 and again["summary"]["units_completed"] == 11
     assert again["published"] == first["published"]
+    status = store.get_json("_status/run.json")
+    assert status["results"] == 11 and status["new_results"] == 0
 
 
 def test_run_gives_up_when_no_left_counts_arrive(tmp_path):
@@ -95,17 +98,17 @@ def test_local_right_launcher_honours_run_id_when_multiple_runs_are_ready(
     ]
     assert local_right_main(argv) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "DONE"
-    assert selected.get_json("_STATUS.json")["state"] == "complete"
-    assert other.get_json("_STATUS.json")["state"] != "complete"
+    assert selected.get_json("_status/run.json")["state"] == "complete"
+    assert other.get_json("_status/run.json")["state"] != "complete"
 
 
 def _report_files():
     return [
-        "customers_compare_col.csv",
-        "customers_compare_row.csv",
+        "pairs/customers/col_check.csv",
+        "pairs/customers/row_check.csv",
         "index.html",
-        "orders_compare_col.csv",
-        "orders_compare_row.csv",
+        "pairs/orders/col_check.csv",
+        "pairs/orders/row_check.csv",
         "report.xlsx",
         "summary.json",
     ]

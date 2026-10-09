@@ -17,6 +17,7 @@ RIGHT_COMMON = {
     "dates.py",
     "hashing.py",
     "manifest.py",
+    "protocol.py",
     "sampling.py",
 }
 
@@ -24,6 +25,14 @@ RIGHT_COMMON = {
 def test_right_common_contains_only_databricks_protocol_modules():
     right = SRC / "dtrack_right/common"
     assert {path.name for path in right.glob("*.py")} == RIGHT_COMMON
+
+
+def test_protocol_paths_and_compatibility_readers_are_identical_on_both_sides():
+    left = (SRC / "dtrack_left/common/protocol.py").read_text()
+    right = (SRC / "dtrack_right/common/protocol.py").read_text()
+    assert left.replace("from .. import PROTOCOL_VERSION", "") == right.replace(
+        "from .. import PROTOCOL_VERSION", ""
+    )
 
 
 def test_right_date_sql_runtime_contains_only_databricks_platforms():

@@ -6,6 +6,7 @@ from ..backends.store import validate_run_id
 from ..checks.col_check import ColCheckPipeline, LeftRuntime, publish_fixed_keys, wait_for_manifests
 from ..checks.row_check import make_run_id, run_row_check
 from ..common.audit import prune_audit_history
+from ..common.protocol import get_run_status, list_left_documents
 from .options import (
     CONTEXT_SETTINGS,
     config_option,
@@ -28,10 +29,9 @@ def _active_run(root, run_id: str | None):
     candidates = []
     for name in root.list_prefixes():
         store = root.child(name)
-        complete = store.exists("_STATUS.json") and store.get_json("_STATUS.json").get(
-            "state"
-        ) == "complete"
-        if not complete and (store.list_keys("row_check/") or store.exists("_STATUS.json")):
+        status = get_run_status(store)
+        complete = status.get("state") == "complete"
+        if not complete and (list_left_documents(store) or status):
             candidates.append(name)
     if not candidates:
         raise click.UsageError("--run-s3 has no unfinished run; pass --run-id")

@@ -29,6 +29,14 @@ from dtrack_right.backends.store import S3Store, VolumeStore
 from dtrack_right.backends.targets import SparkTarget
 from dtrack_right.checks.col_check import ColCheck
 from dtrack_right.checks.row_check import run_row_check as right_row_check
+from dtrack_right.common.protocol import (
+    col_check_close_document,
+    get_run_status,
+    list_failures,
+    list_row_results,
+    row_check_is_closed,
+    write_run_status,
+)
 from dtrack_right.report import build_report
 
 from .run_logging import configure_run_logging, log_exception_once
@@ -208,7 +216,7 @@ class LocalRun:
         return self.local / "logs" / "errors.log"
 
     def status(self) -> dict[str, Any]:
-        return self.store.get_json("_STATUS.json") if self.store.exists("_STATUS.json") else {}
+        return get_run_status(self.store)
 
 
 # >>> open (or resume) a run under `out`: config file or dict, warehouse from profile + id, landing DuckDB in _local/; reuse_pulled keeps every pulled window CSV <<< #
@@ -251,6 +259,12 @@ def open_run(
             )
 
     run = LocalRun(document, run_id, folder, target_factory, landing, pairs, reuse_pulled, land)
+    if not get_run_status(run.store):
+        write_run_status(
+            run.store,
+            {"state": "created", "role": "local", "run_id": run_id},
+            timezone_name=document.get("timezone"),
+        )
     log.info("local run %s at %s; errors -> %s", run_id, folder, run.error_log)
     return run
 
@@ -294,11 +308,7 @@ def row_check(run: LocalRun, *, gate: str = "auto", workers: int = 4) -> dict[st
         run.config, run.store, run_id=run.run_id, pair_names=run.pairs, pair_workers=workers
     )
     right_row_check(run.store, run.target_factory, gate=gate)
-    verdicts = {
-        key.removeprefix("row_check/").removesuffix(".json"): value
-        for key, value in run.store.list_json("row_check/")
-        if key.count(".") == 1 and not key.startswith("row_check/_")
-    }
+    verdicts = {value["pair"]: value for _key, value in list_row_results(run.store)}
     return {
         pair: {
             "summary": document.get("summary"),
@@ -352,8 +362,8 @@ def _col_check(
             if not producer_job.done():
                 return False
             producer_job.result()
-            if not run.store.exists("manifest/_CLOSED"):
-                raise RuntimeError("Left col-check finished without closing the manifest")
+            if col_check_close_document(run.store) is None:
+                raise RuntimeError("Left col-check finished without closing the Pair plans")
             return False
 
         results = ColCheck(
@@ -371,7 +381,7 @@ def _col_check(
         "published_units": published,
         "compared": len(results),
         "verdicts": verdicts,
-        "dead": len(run.store.list_keys("dead/")),
+        "dead": len(list_failures(run.store)),
     }
 
 
@@ -381,8 +391,8 @@ def report(run: LocalRun) -> dict[str, Any]:
     prune_audit_history(VolumeStore(run.folder.parent), keep=5)
     files = build_report(run.store, run.folder / "report")
     summary = json.loads(files["summary.json"].read_text())
-    run.store.put_json(
-        "_STATUS.json",
+    write_run_status(
+        run.store,
         {
             "state": "complete",
             "role": "local",
@@ -439,7 +449,7 @@ def run_all(
     if failed:
         raise RuntimeError("preflight failed: " + "; ".join(failed))
     stage_one = row_check(run, gate=gate)
-    stage_two = col_check(run) if run.store.exists("row_check/_CLOSED") else None
+    stage_two = col_check(run) if row_check_is_closed(run.store) else None
     landing = run.landing.tables()
     built = report(run)
     saved = backup(run, run_s3) if run_s3 else None

@@ -12,6 +12,7 @@ from typing import Any
 from ..backends.sources import source_from_config
 from ..common.audit import SqlAudit, attach_sql_audit
 from ..common.dates import portable_date_type
+from ..common.protocol import LEFT_ROW_CHECK_CLOSED, left_row_path, timestamp, write_run_status
 
 log = logging.getLogger("dtrack.left.row_check")
 SECRET_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
@@ -37,7 +38,7 @@ def public_pair_config(pair: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-# >>> row check, left half: preflight + exact per-Partition counts -> row_check/<pair>.left.json <<< #
+# >>> row check, left half: preflight + exact per-Partition counts -> pairs/<pair>/row_check/left.json <<< #
 def run_row_check(
     config: dict[str, Any],
     store,
@@ -56,12 +57,14 @@ def run_row_check(
     if not pairs:
         raise ValueError("no active pairs selected")
     log.info("run_id=%s work=%s pairs=%s", run_id, store.root_uri, list(pairs))
-    store.put_json("_STATUS.json", {"state": "left_row_check", "run_id": run_id, "role": "left"})
+    write_run_status(
+        store,
+        {"state": "left_row_check", "run_id": run_id, "role": "left"},
+        timezone_name=config.get("timezone"),
+    )
     started = time.monotonic()
     sources = {
-        name: attach_sql_audit(
-            source_factory(pair["left"]), SqlAudit(store, "left", pair=name)
-        )
+        name: attach_sql_audit(source_factory(pair["left"]), SqlAudit(store, "left", pair=name))
         for name, pair in pairs.items()
     }
     health = {name: source.preflight() for name, source in sources.items()}
@@ -109,14 +112,15 @@ def run_row_check(
             "preflight": health[name],
             "timing": {"left_count_s": took},
         }
-        store.put_json(f"row_check/{name}.left.json", document)
-        log.info("-> row_check/%s.left.json", name)
+        store.put_json(left_row_path(name), document)
+        log.info("-> %s", left_row_path(name))
         documents.append(document)
-    store.put_json("row_check/_LEFT_CLOSED", {"pairs": sorted(pairs), "run_id": run_id})
-    store.heartbeat()
     store.put_json(
-        "_STATUS.json", {"state": "left_row_check_closed", "run_id": run_id, "role": "left"}
+        LEFT_ROW_CHECK_CLOSED,
+        {"pairs": sorted(pairs), "run_id": run_id, "closed_at": timestamp(store)},
     )
+    store.heartbeat()
+    write_run_status(store, {"state": "left_row_check_closed", "run_id": run_id, "role": "left"})
     log.info(
         "left side closed: %d pair(s) in %.3fs; waiting on the Right side for row-check verdicts",
         len(pairs),

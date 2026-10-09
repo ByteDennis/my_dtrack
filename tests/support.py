@@ -4,6 +4,19 @@ import importlib.util
 import json
 from pathlib import Path
 
+from dtrack_right.common.protocol import (
+    COL_CHECK_CLOSED,
+    HEARTBEAT,
+    ROW_CHECK_CLOSED,
+    failure_path,
+    list_failures,
+    list_results,
+    list_units,
+    result_path,
+    timestamp,
+    unit_path,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 
 PAIRS_CONFIG = {
@@ -120,35 +133,76 @@ class MemoryStore:
             if isinstance(self.objects[key], dict)
         ]
 
+    def list_prefixes(self, prefix=""):
+        base = prefix.strip("/")
+        start = f"{base}/" if base else ""
+        return sorted(
+            {
+                key.removeprefix(start).split("/", 1)[0]
+                for key in self.objects
+                if key.startswith(start) and "/" in key.removeprefix(start)
+            }
+        )
+
     def heartbeat(self, now=None):
-        return self.put_json("_HEARTBEAT", {"epoch_s": 0 if now is None else now})
+        return self.put_json(
+            HEARTBEAT,
+            {"epoch_s": 0 if now is None else now, "updated_at": timestamp(self)},
+        )
 
     def heartbeat_age(self, now=None):
         return 0
 
     def commit_unit(self, sequence, unit_id, payload, pointer):
-        payload_key = f"units/{unit_id}.json"
-        self.put_json(payload_key, payload)
-        row = {**pointer, "unit_id": unit_id, "payload_key": payload_key, "sequence": sequence}
-        self.put_json(f"_INDEX/{sequence:08d}-{unit_id}.json", row)
+        row = {
+            **pointer,
+            "unit_id": unit_id,
+            "sequence": sequence,
+            "left_ready_at": timestamp(self),
+            "left_statistics": payload,
+        }
+        self.put_json(unit_path(pointer["pair"], sequence, unit_id), row)
         return row
 
     def ready_unclaimed(self):
-        return max(0, len(self.list_keys("_INDEX/")) - len(self.list_keys("results/")))
+        return max(
+            0,
+            len(list_units(self)) - len(list_results(self)) - len(list_failures(self)),
+        )
 
     def close_row_check(self, pairs):
-        return self.put_json("row_check/_CLOSED", {"pairs": sorted(pairs)})
+        return self.put_json(
+            ROW_CHECK_CLOSED,
+            {"pairs": sorted(pairs), "closed_at": timestamp(self)},
+        )
 
     def close_manifests(self, pairs, expected_units):
         return self.put_json(
-            "manifest/_CLOSED", {"pairs": sorted(pairs), "expected_units": expected_units}
+            COL_CHECK_CLOSED,
+            {
+                "pairs": sorted(pairs),
+                "expected_units": expected_units,
+                "closed_at": timestamp(self),
+            },
         )
 
     def put_result(self, unit_id, result):
-        return self.put_json(f"results/{unit_id}.json", result)
+        pair = result.get("pair") or next(
+            value["pair"] for _key, value in list_units(self) if value["unit_id"] == unit_id
+        )
+        return self.put_json(
+            result_path(pair, unit_id),
+            {**result, "unit_id": unit_id, "pair": pair, "completed_at": timestamp(self)},
+        )
 
     def put_dead(self, unit_id, result):
-        return self.put_json(f"dead/{unit_id}.json", result)
+        pair = result.get("pair") or next(
+            value["pair"] for _key, value in list_units(self) if value["unit_id"] == unit_id
+        )
+        return self.put_json(
+            failure_path(pair, unit_id),
+            {**result, "unit_id": unit_id, "pair": pair, "failed_at": timestamp(self)},
+        )
 
 
 class FakeCursor:
@@ -219,10 +273,17 @@ def assert_store_contract(store):
     assert store.list_keys("nothing/") == []
     first = store.commit_unit(1, "u1", {"v": 1}, {"pair": "p"})
     store.commit_unit(2, "u2", {"v": 2}, {"pair": "p"})
-    assert first == {"pair": "p", "unit_id": "u1", "payload_key": "units/u1.json", "sequence": 1}
-    assert [key for key, _ in store.list_json("_INDEX/")] == [
-        "_INDEX/00000001-u1.json",
-        "_INDEX/00000002-u2.json",
+    assert {
+        key: value for key, value in first.items() if key != "left_ready_at"
+    } == {
+        "pair": "p",
+        "unit_id": "u1",
+        "sequence": 1,
+        "left_statistics": {"v": 1},
+    }
+    assert [key for key, _ in store.list_json("pairs/p/units/")] == [
+        "pairs/p/units/00000001-u1.json",
+        "pairs/p/units/00000002-u2.json",
     ]
     assert store.ready_unclaimed() == 2
     store.put_result("u1", {"verdict": "match"})
@@ -234,8 +295,8 @@ def assert_store_contract(store):
     assert store.heartbeat_age() > 0
     store.close_row_check(["b", "a"])
     store.close_manifests(["b", "a"], 4)
-    assert store.get_json("row_check/_CLOSED") == {"pairs": ["a", "b"]}
-    assert store.get_json("manifest/_CLOSED") == {"pairs": ["a", "b"], "expected_units": 4}
+    assert store.get_json("_status/row_check.closed.json")["pairs"] == ["a", "b"]
+    assert store.get_json("_status/col_check.closed.json")["expected_units"] == 4
 
 
 # >>> a manifest whose every partition matched, built from real left counts <<< #
@@ -277,7 +338,7 @@ STATS = {
 }
 
 
-# >>> a row_check/<pair>.left.json as the Left side writes it <<< #
+# >>> a pairs/<pair>/row_check/left.json document as the Left side writes it <<< #
 def left_document(pair="p", counts=None, sample=0.5):
     side = {"left": {"source": "oracle", "table": "A", "date_col": "dt"}}
     side["right"] = {"source": "databricks", "table": "a", "date_col": "dt"}
@@ -453,8 +514,7 @@ def oracle_config(oracle, right_tables=None):
             "customers": {
                 "left": {"source": "oracle", "table": "CUSTOMERS", "date_col": "SNAPSHOT_DT"}
                 | {"date_type": "date", **oracle},
-                "right": side("customers")
-                | {"date_col": "snapshot_dt", "date_type": "string"},
+                "right": side("customers") | {"date_col": "snapshot_dt", "date_type": "string"},
                 "fromDate": "2026-01-01",
                 "toDate": "2026-01-31",
                 "vintage": "month",

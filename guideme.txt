@@ -172,6 +172,14 @@ Parameter choice:
     table, schema+table, or query. `query` may be inline SQL or a config-relative `.sql` file.
     `where` adds a source-side filter.
 
+  left.nullstr
+    CSV-only missing-value marker passed to DuckDB before date probing, sampling, and statistics.
+    It may be one string or a list; SAS-style exports commonly use
+    `"nullstr": ["", "NULL"]`. The existing `left.options.nullstr` form remains supported,
+    but do not set both forms to different values. If `NULL` can also be real text, preserve a
+    quoted/unquoted distinction with `options.allow_quoted_nulls`, or normalize selected columns
+    in a `{src}` query instead of applying a file-wide marker.
+
     For a multi-view Oracle query, place a controlled predicate marker inside each dated driver:
 
       -- queries/consolidated.sql
@@ -261,7 +269,7 @@ Parameter choice:
     missing|false|"" = all rows
     0 < float <= 1   = deterministic fraction by normalized composite-key MD5 bucket
     positive integer = fixed N distinct keys per vintage window; Left publishes the
-                       selected key tuples in manifest/<pair>.keys.json for Right reuse
+                       selected key tuples in pairs/<pair>/fixed_keys.json for Right reuse
 
   vintage
     day | week | month | quarter | year. This groups admitted matching dates; it does
@@ -329,7 +337,7 @@ Exit 0 means the selected Left and Right key sets match. Artifacts default to
 
 C. Start the Databricks Right notebook/Job
 
-It may start before or after row-check; it waits for `row_check/*.left.json`.
+It may start before or after row-check; it waits for `pairs/<pair>/row_check/left.json`.
 
   run_s3      = s3://my-bucket/dtrack/runs       # stable root; no run_id
   run_id      = $RUN_ID                          # recommended: explicit
@@ -342,6 +350,10 @@ Gate selection:
   ratio:0.05  require a match and at most 5% excluded partitions
   manual      record findings but release no manifest; after review, use row rollback/new run
               and rerun the Right Job with auto or ratio policy to release Stage 2
+
+`examples/nbs/06_pair_progress.ipynb` writes the one-click Left script, uploads `src/dtrack_right`
+plus the progress collector, creates both Jobs (Right on demand, collector every 15 minutes), the
+progress tables/views, and the pair-progress AI/BI dashboard; EXECUTE=False is a full dry run.
 
 Monitor a submitted Job (this command monitors; it does not submit the notebook):
 
@@ -361,17 +373,18 @@ Selected pairs (`--pair` is repeatable):
     --pair orders --pair customers --workers 4
 
 Outputs include:
-  row_check/<pair>.left.json   Left counts + credential-free pair config
-  row_check/_LEFT_CLOSED      Left Stage-1 barrier
-  row_check/<pair>.json        Right verdicts
-  reports/<pair>_compare_row.csv
-  manifest/<pair>.json         Stage-2 plan only when the gate passes
-  row_check/_CLOSED            Right Stage-1 barrier
-  audit.txt                    representative best-effort SQL audit entries for this run
+  pairs/<pair>/row_check/left.json    Left counts + credential-free pair config
+  _status/left_row_check.closed.json  Left Stage-1 barrier
+  pairs/<pair>/row_check/result.json  Right verdicts
+  report/pairs/<pair>/row_check.csv
+  pairs/<pair>/plan.json              Stage-2 plan only when the gate passes
+  _status/row_check.closed.json       Right Stage-1 barrier
+  _status/audit.sql                   representative best-effort SQL for this run
 
 E. Run Left Stage 2
 
-Start this without waiting manually for Right Stage 1; it waits for `row_check/_CLOSED`.
+Start this without waiting manually for Right Stage 1; it waits for
+`_status/row_check.closed.json`.
 The Right Job can drain units while Left continues producing them.
 
   dtrack col-check --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
@@ -384,7 +397,7 @@ Selected pairs:
     --pair orders --pair customers
 
 If Stage 1 released more pairs than selected here, this is intentionally a partial Stage 2 run;
-`manifest/_CLOSED` is written only after units for all released manifests have been indexed.
+`_status/col_check.closed.json` is written only after Units for every released Pair plan exist.
 
 Parameter choice:
   pull-workers  source query/file pulls; start 1-2 for Oracle or large extracts
@@ -401,7 +414,7 @@ work-dir (single-threaded load: the parallel CSV reader buffers every column), t
 DTRACK_STATS_BATCH columns per query, so memory is bounded by the budget in section 1 rather
 than by column count. Size DTRACK_DUCKDB_SHARE = pull-workers + stat-workers.
 
-Resume: rerun the same `--run-id`. Windows whose units are all already in `_INDEX/` are skipped
+Resume: rerun the same `--run-id`. Windows whose Unit objects already exist are skipped
 before any pull; a partially published window is pulled again and only its missing units are
 written.
 
@@ -413,61 +426,64 @@ F. Reports
 
 Reports remain under `$RUN_S3/$RUN_ID/report/`; local runs expose the same directory directly.
 For S3 use the organization's standard object-store browser/sync tooling. Expected artifacts:
-summary.json, per-pair row/col CSVs, index.html, and report.xlsx.
+summary.json, `pairs/<pair>/row_check.csv`, `pairs/<pair>/col_check.csv`, index.html, and
+report.xlsx.
 
 
 4. PAYLOAD LAYOUT AND MONITORING
 --------------------------------
 
 <run>/
-  audit.txt                     representative SQL only, without metadata comment lines
-  audit/<event_id>.txt          immutable first-per-shape records used for concurrent merging
-  audit_errors/<event_id>.json  audit-write failures; the data query still executes
-  _STATUS.json                  coarse state/role/run/result count
-  _HEARTBEAT                    Left producer liveness
-  row_check/                    Stage-1 inputs, verdicts, barriers
-  manifest/                     immutable Stage-2 plans + optional fixed keys + _CLOSED
-  units/<unit_id>.json          Left statistics payload for one pair/window/column
-  _INDEX/<seq>-<unit_id>.json   small readiness pointer to the unit payload
-  results/<unit_id>.json        final Left/Right comparison
-  dead/<unit_id>.json           terminal failure + traceback
-  reports/                      intermediate comparison CSVs
-  report/                       final report set; always bound to this run
+  _status/run.json                       current state/role/run/timezone
+  _status/heartbeat.json                 Left producer liveness
+  _status/units.csv                      human-readable Unit state snapshot
+  _status/*.closed.json                  Stage barriers
+  _status/audit.sql                      representative SQL without comment headers
+  pairs/<pair>/plan.json                 immutable Stage-2 Pair plan
+  pairs/<pair>/fixed_keys.json           fixed-N only
+  pairs/<pair>/row_check/{left,result}.json
+  pairs/<pair>/units/<seq>-<unit_id>.json  Left stats plus readiness metadata
+  pairs/<pair>/col_check/right_ready/     durable Right Window readiness
+  pairs/<pair>/col_check/results/         final comparisons
+  pairs/<pair>/col_check/failures/        terminal failures + traceback
+  pairs/<pair>/audit/<event>.sql          immutable representative SQL evidence
+  report/pairs/<pair>/{row_check,col_check}.csv
+  report/{summary.json,index.html,report.xlsx}
 
-Why both `units/` and `_INDEX/` exist:
-  units = data payload; _INDEX = ordered commit/readiness event.
-  Producer always writes payload first, pointer second. Therefore every visible pointer should
-  reference a complete payload. Right incrementally lists `_INDEX/` with StartAfter and reads the
-  pointer's payload_key. Do not merge or delete one side independently.
+Why `_INDEX/` no longer exists on new runs:
+  An S3 PUT is atomic for one key. Protocol v2 stores readiness metadata and Left statistics in one
+  sequence-prefixed Unit JSON, so its creation is the commit. Readers still understand v1
+  payload-plus-pointer runs, but v2 writers never create `units/` plus `_INDEX/` peers.
 
 Unit identity:
   deterministic SHA-256-derived id from pair + vintage window + column. Existing ids are skipped,
   and a window whose ids all exist is not pulled again, so reruns are idempotent.
-  Sequence-prefixed index names give an ordered polling cursor.
+  Sequence-prefixed Unit names preserve deterministic polling order.
 
 Core monitoring invariants:
-  expected = manifest/_CLOSED.expected_units
-  indexed  = count(_INDEX/)
-  done     = count(results/) + count(dead/)
-  backlog  = indexed - done
+  expected = _status/col_check.closed.json.expected_units
+  ready    = count(pairs/*/units/*.json)
+  done     = count(pairs/*/col_check/results/*.json)
+             + count(pairs/*/col_check/failures/*.json)
+  backlog  = ready - done
 
 Healthy completion:
-  row_check/_CLOSED exists
-  manifest/_CLOSED exists
-  indexed >= expected
+  _status/row_check.closed.json exists
+  _status/col_check.closed.json exists
+  ready >= expected
   done >= expected
-  dead == 0 (or every dead unit is explicitly accepted)
-  _STATUS.json.state == complete
+  failed == 0 (or every failed Unit is explicitly accepted)
+  _status/run.json.state == complete
 
 Current implementation already provides:
-  paginated S3 listing; incremental _INDEX cursor; payload-before-pointer commit;
+  paginated S3 listing; atomic single-object Unit commit;
   heartbeat timeout; WIP backpressure; deterministic unit ids; per-unit retries/dead letters;
   exact rollback target resolution; S3 deletion batches of at most 1000 objects.
 
 SQL audit contract:
   Before a source/warehouse/Spark/DuckDB statement is submitted, dtrack fingerprints its SQL.
   The first query for each run + stage operation + pair + side + backend + SQL shape wins a lock
-  and best-effort writes one immutable `audit/<event_id>.txt`; repetitive vintage windows,
+  and best-effort writes one immutable `pairs/<pair>/audit/<event>.sql`; repetitive vintage windows,
   multithread siblings, and retries with the same shape are not written again. A changed relation,
   projection, predicate structure, or sampling strategy creates a new shape and is retained.
 
@@ -477,14 +493,15 @@ SQL audit contract:
   CREATE/DELETE/INSERT/count, `SHOW TABLES`) is omitted by default.
 
   Row/col/key-check checkpoints and final completion merge SQL only into
-  `audit.txt`, avoiding an O(n^2) rewrite for every S3 query. Audit I/O failure never blocks the
-  statement; when the run store is still writable the failure goes under `audit_errors/`. Detailed
-  `audit/` events are retained for the latest five runs; older runs keep `audit.txt`. Local backup
+  `_status/audit.sql`, avoiding an O(n^2) rewrite for every S3 query. Individual SQL headers contain
+  only timestamp, side, backend, and operation; Pair identity comes from the path. Audit I/O failure
+  never blocks the statement; writable failures stay beside the Pair audit. Detailed events are
+  retained for the latest five runs; older runs keep `_status/audit.sql`. Local backup
   includes the current run's events and merged file, but never uploads `_local/`.
 
 Industrial operating pattern for very large object counts:
   1. Keep S3 payloads immutable and authoritative; never hand-edit unit JSON in place.
-  2. Emit CloudWatch metrics for expected/indexed/done/dead/backlog/heartbeat age and alarm on
+  2. Emit CloudWatch metrics for expected/left-ready/complete/failed/backlog/heartbeat age and alarm on
      stale heartbeat, growing backlog, dead > 0, or closure/count mismatch.
   3. Enable S3 Inventory and query it with Athena for fleet-wide audits/search by prefix, size,
      age, and orphan status. Interactive full-prefix JSON scans are acceptable only at modest size.
@@ -533,12 +550,12 @@ Batch mode resolves all pairs first, freezes and deduplicates exact targets, the
 
 Stages:
   dead  delete selected dead records so Right retries them
-  col   delete selected Stage-2 pointers/payloads/results/dead + global closure/status/final report
-  row   col reset plus selected row verdict/count/manifest/intermediate report + Stage-1 barriers
+  col   delete selected Stage-2 Units/results/failures + global closure/status/final report
+  row   col reset plus selected row verdict/count/Pair plan/row report + Stage-1 barriers
 
 Any `col` or `row` rollback invalidates and deletes the run-level `report/` set, even for
 one pair, because summary.json/index.html/report.xlsx describe the whole run. Restart Right to
-publish a fresh set and only consume it after `_STATUS.json.state` becomes `complete`.
+publish a fresh set and only consume it after `_status/run.json.state` becomes `complete`.
 
 Inspect the dry-run JSON:
   pairs, by_pair, planned, keys, targets, next
@@ -613,7 +630,7 @@ section 1; counts and DESCRIBE stay inline. The local runner opens up to five Du
 (Left pulls, Left statistics, Right statistics, landing), so set DTRACK_DUCKDB_SHARE accordingly
 and run one local run per machine. It is the fallback for small pairs; see section 3E for
 wide tables.
-Representative submitted SQL shapes are retained in `<run>/audit.txt`; key-check uses
+Representative submitted SQL shapes are retained in `<run>/_status/audit.sql`; key-check uses
 `.dtrack-local/keycheck/<pair>/audit.txt`.
 
 Confluence tracking pages use one grouped lifecycle:
@@ -673,14 +690,16 @@ Left/right sample mismatch:
   run `dtrack local key-check`; inspect key order, col_map, key_families, nulls, dates, and zeros.
 
 col-check waits forever:
-  inspect _STATUS.json, row_check/_CLOSED, Right Job state, gate decision, and wait_timeout.
+  inspect _status/run.json, _status/row_check.closed.json, Right Job state, gate decision,
+  and wait_timeout.
 
 Large backlog:
-  compare indexed/done, inspect _HEARTBEAT, Right Job logs and dead/, then tune producer WIP or
+  inspect `_status/units.csv`, `_status/heartbeat.json`, Right Job logs and Pair failures, then tune
+  producer WIP or
   Right capacity from measurements. More pull/stat workers do not fix a stalled Right consumer.
 
 Dead units:
-  read dead/<unit_id>.json and the dedicated job/local error log; fix the cause; dry-run
+  read pairs/<pair>/col_check/failures/<unit_id>.json and the dedicated job/local error log; fix the cause; dry-run
   `rollback --stage dead`; apply; restart the Right Job with the same run_id.
 
 Out of Memory Error / statistics take tens of minutes per window:
@@ -705,9 +724,9 @@ Wrong config after Stage 2 started:
   [ ] doctor/preflight passed
   [ ] key-check passed when sampling is enabled
   [ ] run_id and exact run S3 prefix recorded
-  [ ] row_check/_CLOSED exists and findings reviewed
-  [ ] manifest/_CLOSED expected count recorded
-  [ ] indexed == expected; results + dead == expected
-  [ ] dead == 0 or approved
+  [ ] _status/row_check.closed.json exists and findings reviewed
+  [ ] _status/col_check.closed.json expected count recorded
+  [ ] ready == expected; results + failures == expected
+  [ ] failed == 0 or approved
   [ ] summary.json/index.html/report.xlsx archived
   [ ] config, run_id, report URL, and operator decision recorded

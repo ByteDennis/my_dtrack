@@ -34,8 +34,9 @@ def test_row_check_command_writes_left_counts_to_s3(s3_bucket, synthetic, tmp_pa
         "run_id": "r1",
     }
     store = S3Store(f"{root}/r1")
-    assert store.get_json("row_check/_LEFT_CLOSED") == {"pairs": ["orders"], "run_id": "r1"}
-    assert store.get_json("row_check/orders.left.json")["counts"]["2026-01-15"] == 30
+    closed = store.get_json("_status/left_row_check.closed.json")
+    assert closed["pairs"] == ["orders"] and closed["run_id"] == "r1"
+    assert store.get_json("pairs/orders/row_check/left.json")["counts"]["2026-01-15"] == 30
 
 
 def test_col_check_command_publishes_units_once_manifests_are_released(
@@ -56,7 +57,7 @@ def test_col_check_command_publishes_units_once_manifests_are_released(
     ) == 0
     capsys.readouterr()
     store = S3Store(f"{root}/r2")
-    left = store.get_json("row_check/orders.left.json")
+    left = store.get_json("pairs/orders/row_check/left.json")
     assert left["run_id"] == "r2"
     manifest = all_match_manifest(
         build_manifest, left["run_id"], "orders", left["pair_config"], left["counts"]
@@ -71,7 +72,7 @@ def test_col_check_command_publishes_units_once_manifests_are_released(
         "run": f"{root}/r2",
         "run_id": "r2",
     }
-    assert store.get_json("manifest/_CLOSED")["expected_units"] == 8
+    assert store.get_json("_status/col_check.closed.json")["expected_units"] == 8
 
 
 # >>> --run-s3 stays stable; row-check appends either the supplied or generated run id <<< #
@@ -83,7 +84,7 @@ def test_row_check_appends_a_generated_run_id_to_the_runs_root(
     assert main(["row-check", "--config", config, "--run-s3", root, "--pair", "orders"]) == 0
     outcome = json.loads(capsys.readouterr().out)
     assert outcome["run"] == f"{root}/{outcome['run_id']}"
-    assert S3Store(outcome["run"]).exists("row_check/orders.left.json")
+    assert S3Store(outcome["run"]).exists("pairs/orders/row_check/left.json")
 
 
 def test_row_check_rejects_a_nested_run_id(s3_bucket, synthetic, tmp_path, capsys):

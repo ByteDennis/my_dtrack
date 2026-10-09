@@ -82,9 +82,9 @@ $RIGHT_CMD --run-s3 "$RUNS" --run-id "$RUN_ID" --right-csv-dir "$RIGHT" --out "$
   >"$WORK/05_right_job.stdout" 2>"$LOGS/05_right_job.log" &
 RIGHT_PID=$!
 sleep 3
-log "right job pid=$RIGHT_PID is polling $S3/row_check/ for left counts"
+log "right job pid=$RIGHT_PID is polling $S3/pairs/*/row_check/left.json for left counts"
 
-section "5. LEFT row-check: left-side counts only -> row_check/<pair>.left.json"
+section "5. LEFT row-check: left-side counts only -> pairs/<pair>/row_check/left.json"
 run "06_row_check_left" uv run dtrack row-check --config examples/e2e/config.json --run-s3 "$RUNS" --run-id "$RUN_ID"
 show "$LOGS/06_row_check_left.log"
 
@@ -109,7 +109,8 @@ for policy in manual ratio:0.02; do
   run "11_row_check_left_$tag" uv run dtrack row-check --config examples/e2e/config.json --run-s3 "$RUNS" --run-id "$RUN_ID-$tag"
   run "12_right_$tag" $RIGHT_CMD --run-s3 "$RUNS" --run-id "$RUN_ID-$tag" --right-csv-dir "$RIGHT" --out "$WORK/report-$tag" --work-dir "$WORK/right-$tag" --gate "$policy" --poll-interval 1 --idle-timeout 8 --wait-timeout 10 || true
   uv run python examples/e2e/s3_mirror.py "$S3-$tag" "$WORK/mirror-$tag" >/dev/null 2>&1
-  log "gate=$policy: manifests written=$(ls "$WORK/mirror-$tag/manifest" 2>/dev/null | grep -vc _CLOSED); $(gate_of "$WORK/mirror-$tag/row_check/orders.json"); $(gate_of "$WORK/mirror-$tag/row_check/customers.json") (right job exits rc=1 by idle timeout: nobody runs col-check in this demo, expected)"
+  plans="$(find "$WORK/mirror-$tag/pairs" -type f -path '*/plan.json' 2>/dev/null | wc -l | tr -d ' ')"
+  log "gate=$policy: plans written=$plans; $(gate_of "$WORK/mirror-$tag/pairs/orders/row_check/result.json"); $(gate_of "$WORK/mirror-$tag/pairs/customers/row_check/result.json") (right job exits rc=1 by idle timeout: nobody runs col-check in this demo, expected)"
 done
 
 section "10. mirror the run folder (work store + report/) to disk"
@@ -117,13 +118,20 @@ run "13_s3_mirror_work" uv run python examples/e2e/s3_mirror.py "$S3" "$OUT/s3_m
 
 section "11. deliverables"
 show "$OUT/report/summary.json"
-show "$OUT/report/orders_compare_row.csv"
-show "$OUT/report/orders_compare_col.csv"
-show "$OUT/report/customers_compare_col.csv"
+show "$OUT/report/pairs/orders/row_check.csv"
+show "$OUT/report/pairs/orders/col_check.csv"
+show "$OUT/report/pairs/customers/col_check.csv"
 log "html: $OUT/report/index.html ($(wc -c <"$OUT/report/index.html") bytes)"
 log "xlsx: $OUT/report/report.xlsx sheets=$(uv run python -c "from openpyxl import load_workbook; print(load_workbook('$OUT/report/report.xlsx').sheetnames)")"
-log "published in the run folder: $(ls "$OUT/s3_mirror/report" | tr '\n' ' ')"
-log "work store objects: left=$(ls "$OUT/s3_mirror/row_check" | grep -c left.json) verdicts=$(ls "$OUT/s3_mirror/row_check" | grep -v left | grep -vc _) manifests=$(ls "$OUT/s3_mirror/manifest" | grep -v _CLOSED | grep -vc keys.json) fixed_keys=$(ls "$OUT/s3_mirror/manifest" | grep -c keys.json) units=$(ls "$OUT/s3_mirror/units" | wc -l) index=$(ls "$OUT/s3_mirror/_INDEX" | wc -l) results=$(ls "$OUT/s3_mirror/results" | wc -l) dead=$(ls "$OUT/s3_mirror/dead" 2>/dev/null | wc -l)"
+log "published in the run folder: $(find "$OUT/s3_mirror/report" -type f -printf '%P ' | sort)"
+left_count="$(find "$OUT/s3_mirror/pairs" -type f -path '*/row_check/left.json' | wc -l | tr -d ' ')"
+verdict_count="$(find "$OUT/s3_mirror/pairs" -type f -path '*/row_check/result.json' | wc -l | tr -d ' ')"
+plan_count="$(find "$OUT/s3_mirror/pairs" -type f -path '*/plan.json' | wc -l | tr -d ' ')"
+fixed_count="$(find "$OUT/s3_mirror/pairs" -type f -path '*/fixed_keys.json' | wc -l | tr -d ' ')"
+unit_count="$(find "$OUT/s3_mirror/pairs" -type f -path '*/units/*.json' | wc -l | tr -d ' ')"
+result_count="$(find "$OUT/s3_mirror/pairs" -type f -path '*/col_check/results/*.json' | wc -l | tr -d ' ')"
+failure_count="$(find "$OUT/s3_mirror/pairs" -type f -path '*/col_check/failures/*.json' | wc -l | tr -d ' ')"
+log "work store objects: left=$left_count verdicts=$verdict_count plans=$plan_count fixed_keys=$fixed_count units=$unit_count results=$result_count failures=$failure_count"
 log "scratch (git-ignored): $WORK"
 
 section "done"

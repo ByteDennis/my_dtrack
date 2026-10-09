@@ -72,8 +72,8 @@ def _store():
 def test_build_report_ignores_left_documents_and_key_files(tmp_path):
     files = build_report(_store(), tmp_path / "out", title="T")
     assert set(files) == {
-        "p_compare_row.csv",
-        "p_compare_col.csv",
+        "pairs/p/row_check.csv",
+        "pairs/p/col_check.csv",
         "index.html",
         "report.xlsx",
         "summary.json",
@@ -118,7 +118,7 @@ def test_compare_col_csv_orders_rows_and_unions_fields():
 
 def test_run_is_partial_with_dead_units_or_without_a_closed_manifest(tmp_path):
     store = _store()
-    store.put_dead("u3", {"unit_id": "u3", "error": "boom"})
+    store.put_dead("u3", {"unit_id": "u3", "pair": "p", "error": "boom"})
     summary = json.loads(build_report(store, tmp_path / "a")["summary.json"].read_text())
     assert summary["status"] == "PARTIAL" and summary["errors"] == [
         {"unit_id": "u3", "error": "boom"}
@@ -131,10 +131,15 @@ def test_run_is_partial_with_dead_units_or_without_a_closed_manifest(tmp_path):
 
 def test_a_run_without_col_results_still_reports_row_counts(tmp_path):
     store = _store()
-    for key in [key for key in store.objects if key.startswith("results/")]:
+    for key in [
+        key
+        for key in store.objects
+        if key.startswith("results/") or "/col_check/results/" in key
+    ]:
         store.objects.pop(key)
     files = build_report(store, tmp_path)
-    assert "p_compare_col.csv" not in files and "Stage 2" not in files["index.html"].read_text()
+    assert "pairs/p/col_check.csv" not in files
+    assert "Stage 2" not in files["index.html"].read_text()
 
 
 def test_build_report_needs_at_least_one_row_check_document(tmp_path):

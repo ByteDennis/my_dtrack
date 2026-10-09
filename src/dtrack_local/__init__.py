@@ -11,8 +11,9 @@
 #   run_all(run, gate=, run_s3=)
 #
 # Run folder <out>/<run_id>/ (same layout as S3, so `rollback --run-s3 <out> --run-id` works)
-#   row_check/  manifest/  _INDEX/  units/  results/  dead/  reports/  report/  audit.txt
-#   audit/ detailed events (latest five runs); audit_errors/ best-effort failures; _STATUS.json
+#   _status/ run, heartbeat, barriers, units.csv and merged audit.sql
+#   pairs/<pair>/ plan, row_check, units, col_check results/failures and detailed audit events
+#   report/summary.json, report/pairs/<pair>/{row_check,col_check}.csv, HTML and XLSX
 #   _local/left/  _local/right/   pulled window CSVs;  _local/data.duckdb   every pulled window
 #   _local/logs/errors.log         ERROR/CRITICAL records and unexpected tracebacks; not console
 #   (tables left__<pair>, right__<pair>, column dtrack_bucket)

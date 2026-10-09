@@ -1,3 +1,28 @@
+Commit: a086678db03562d21d9ef9668814cf3c61495c2c
+CONTEXT.md — Modified: distinguished immutable Pair plans and audit events from mutable run status and derived Unit state snapshots.
+README.md — Modified: documented the Pair-centric protocol-v2 flow, atomic statistics-bearing Units, and `_status/units.csv` progress view.
+changelog.txt — Modified: recorded the Pair-centric run layout changes that were prepared before this commit.
+examples/e2e/README.md — Modified: documented Pair-scoped row/column artifacts, atomic Unit publication, and the unified report tree.
+examples/e2e/run_e2e.sh — Modified: exercised and counted protocol-v2 Pair plans, Units, results, failures, and nested report outputs.
+examples/nbs/06_pair_progress.ipynb — Added: generated the Left launch script, Databricks Right and scheduled progress-collector Jobs, Delta progress tables/views, automatic blockers, and a pair-progress AI/BI dashboard with a dry-run mode.
+guideme.txt — Modified: documented CSV `nullstr`, the progress setup notebook, protocol-v2 monitoring, rollback, audit, and completion paths.
+src/dtrack_left/backends/sources.py — Modified: accepted CSV missing-value markers through `left.nullstr`, retained `options.nullstr` compatibility, and rejected conflicting or non-CSV use.
+src/dtrack_left/cli/config.py — Modified: validated optional run timezones and CSV-only string/list `nullstr` configuration.
+src/dtrack_left/common/date_platforms.py — Modified: used non-throwing DuckDB date casts so invalid source values become visible statistical differences instead of aborting a run.
+src/dtrack_left/common/protocol.py — Added: defined v2 paths, v1-compatible readers, run-timezone timestamps, and `_status/units.csv` generation.
+src/dtrack_right/common/protocol.py — Added: shipped the identical Databricks-side protocol contract.
+src/dtrack_left/backends/store.py — Modified: published one atomic Unit object and moved heartbeat, closures, results, and failures into the new layout.
+src/dtrack_right/backends/store.py — Modified: mirrored the v2 store contract for S3 and Volume stores while retaining v1 reads.
+src/dtrack_left/checks — Modified: wrote Pair-scoped row inputs, plans, keys, Units, status snapshots, and v2-safe rollback targets while preserving resumability.
+src/dtrack_right/checks — Modified: incrementally consumed Pair Units, wrote row/column outcomes and durable Right readiness, and refreshed Unit status snapshots.
+src/dtrack_left/common/audit.py — Modified: moved SQL evidence under Pair/status paths, reduced headers to timestamp/side/backend/operation, and used the run timezone.
+src/dtrack_right/common/audit.py — Modified: mirrored the concise timezone-aware audit contract.
+src/dtrack_right/job.py — Modified: resolved both protocol generations, published cumulative and newly added result counts, and finalized the v2 run status.
+src/dtrack_right/progress.py — Added: collected one progress snapshot per run and Pair, derived deterministic automatic blockers, and generated idempotent Delta DDL, views, snapshot inserts, blocker merges, and plan metadata merges.
+src/dtrack_right/report/build.py — Modified: read both protocol versions and emitted one `report/` tree with per-Pair row/column subfolders.
+src/dtrack_local/pipeline.py — Modified: initialized/resumed v2 status and preserved `_local/` as backup-excluded scratch data.
+tests — Modified: covered `nullstr`, safe date parsing, every Unit state, v1 compatibility, concise timezone-aware audit headers, atomic Unit publication, Pair progress/blockers/SQL, reports, rollback, packaging, and full local/Right job flows.
+
 Commit: 5ff56230a9efd598ae59fb38660fdc3fc8e12d3f
 examples/nbs/05_reuse_pulled.ipynb — Added: provided an executable recovery notebook that recomputes statistics and reports from previously pulled Left and Right window CSVs without contacting either source.
 guideme.txt — Modified: documented the reuse-pulled recovery workflow, including disabling landing writes and attaching no live warehouse.

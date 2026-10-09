@@ -30,6 +30,6 @@ def test_examples_e2e_runs_clean_and_reports_the_injected_findings(moto_endpoint
     assert summary["status"] == "DONE"
     assert summary["findings"] == {"row_count_diff": 1, "partition_missing": 2, "col_stat_diff": 2}
     assert (
-        "work store objects: left=2 verdicts=2 manifests=2 fixed_keys=1 units=11 index=11 results=11 dead=0"
+        "work store objects: left=2 verdicts=2 plans=2 fixed_keys=1 units=11 results=11 failures=0"
         in record
     )

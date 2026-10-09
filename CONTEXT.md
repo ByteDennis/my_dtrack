@@ -33,8 +33,16 @@ A collection of admitted Partitions scanned together for sampled column statisti
 _Avoid_: Partition, batch
 
 **Unit**:
-The smallest independently committed and completed Stage 2 result, identified by Pair, Window, and column.
+The smallest independently published and completed Stage 2 comparison, identified by Pair, Window, and column. Its publication includes the Left statistics and makes the Unit ready for the Right side.
 _Avoid_: File, task
+
+**Pair plan**:
+The immutable Stage 2 contract for one Pair: admitted Windows, mapped columns, sampling, normalization, and expected Unit count.
+_Avoid_: Manifest, status
+
+**Unit state snapshot**:
+A derived, human-readable view of every planned Unit's current lifecycle state. Protocol objects remain authoritative.
+_Avoid_: Queue, manifest
 
 **Finding**:
 A verified disagreement between the two sides.
@@ -48,9 +56,13 @@ _Avoid_: Finding, mismatch
 The per-Pair rule that admits only count-matching Partitions to Stage 2.
 _Avoid_: Global gate, pause
 
-**Ready pointer**:
-The commit record that makes a fully written Unit visible to the Consumer.
-_Avoid_: Unit, lock file
+**Run status**:
+The replaceable observation of current run ownership and progress, interpreted in the timezone frozen when the run starts.
+_Avoid_: Pair plan, audit
+
+**Audit event**:
+Immutable evidence of one representative submitted SQL operation. Pair identity belongs to its path rather than its visible SQL header.
+_Avoid_: Status, log line
 
 **Work store**:
 The short-lived S3 namespace used for protocol state and intermediate artifacts.

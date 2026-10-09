@@ -9,7 +9,7 @@ from dtrack_left.backends.store import S3Store
 pytestmark = [pytest.mark.moto, pytest.mark.docker]
 
 
-def test_moto_s3_data_before_pointer_and_start_after(moto_endpoint):
+def test_moto_s3_atomic_units_and_start_after(moto_endpoint):
     endpoint = moto_endpoint
     client = boto3.client(
         "s3",
@@ -24,7 +24,9 @@ def test_moto_s3_data_before_pointer_and_start_after(moto_endpoint):
     store = S3Store(f"s3://{bucket}/run", client=client)
     store.commit_unit(1, "a", {"value": 1}, {"pair": "p"})
     store.commit_unit(2, "b", {"value": 2}, {"pair": "p"})
-    assert store.exists("units/a.json")
-    assert store.list_keys("_INDEX/", start_after="_INDEX/00000001-a.json") == [
-        "_INDEX/00000002-b.json"
+    assert store.exists("pairs/p/units/00000001-a.json")
+    assert store.list_keys(
+        "pairs/p/units/", start_after="pairs/p/units/00000001-a.json"
+    ) == [
+        "pairs/p/units/00000002-b.json"
     ]

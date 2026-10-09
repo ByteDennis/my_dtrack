@@ -4,6 +4,7 @@ import csv
 import json
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -36,6 +37,11 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     pairs = config.get("pairs")
     if not isinstance(pairs, dict) or not pairs:
         raise ValueError("config requires a non-empty pairs object")
+    if config.get("timezone"):
+        try:
+            ZoneInfo(str(config["timezone"]))
+        except Exception as exc:
+            raise ValueError(f"unsupported timezone {config['timezone']!r}") from exc
     resolve_connections(config)
     for name, pair in pairs.items():
         if pair.get("skip"):
@@ -45,6 +51,17 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         right_source = str(right.get("source") or "").lower()
         if left_source not in LEFT_SOURCES:
             raise ValueError(f"{name}: unsupported Left source {left_source!r}")
+        if "nullstr" in left:
+            nullstr = left["nullstr"]
+            if left_source not in {"file", "csv"}:
+                raise ValueError(f"{name}: Left nullstr requires source file/csv")
+            if not isinstance(nullstr, str | list) or (
+                isinstance(nullstr, list) and not all(isinstance(value, str) for value in nullstr)
+            ):
+                raise TypeError(f"{name}: Left nullstr must be a string or a list of strings")
+            configured = (left.get("options") or {}).get("nullstr", nullstr)
+            if configured != nullstr:
+                raise ValueError(f"{name}: Left nullstr disagrees with options.nullstr")
         if right_source != "databricks":
             raise ValueError(f"{name}: Right side must be databricks")
         kind = {"volume_raw": "files"}.get(right.get("kind"), right.get("kind") or "table")

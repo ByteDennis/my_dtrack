@@ -8,6 +8,7 @@ from .backends.store import resolve_run
 from .checks.col_check import ColCheck
 from .checks.row_check import run_row_check
 from .common.audit import SqlAudit
+from .common.protocol import AUDIT_SUMMARY, list_left_documents, list_results, write_run_status
 from .report.build import CONTENT_TYPES, build_report
 
 log = logging.getLogger("dtrack.right")
@@ -37,19 +38,21 @@ def run(
     started = time.monotonic()
     while True:
         store, resolved = resolve_run(run_s3, run_id)
-        if store is not None and store.list_keys("row_check/"):
+        if store is not None and list_left_documents(store):
             break
         if time.monotonic() - started > wait_timeout:
-            raise TimeoutError("no run with row_check/*.left.json appeared before wait_timeout")
+            raise TimeoutError(
+                "no run with pairs/<pair>/row_check/left.json appeared before wait_timeout"
+            )
         time.sleep(poll_interval)
     log.info("run resolved: %s (%s)", resolved, store.root_uri)
-    store.put_json("_STATUS.json", {"state": "right_waiting", "role": "right", "run_id": resolved})
+    write_run_status(store, {"state": "right_waiting", "role": "right", "run_id": resolved})
 
     def reconcile_pending() -> bool:
         return run_row_check(store, target_factory, gate=gate) > 0
 
     reconcile_pending()
-    store.put_json("_STATUS.json", {"state": "right_col_check", "role": "right"})
+    write_run_status(store, {"state": "right_col_check", "role": "right"})
     col_check = ColCheck(
         store,
         target_factory,
@@ -74,14 +77,26 @@ def run(
         published.append(key)
         log.info("published %s", key)
     audit_written = SqlAudit(store, "right").refresh()
-    store.put_json(
-        "_STATUS.json",
-        {"state": "complete", "role": "right", "run_id": resolved, "results": len(results)},
+    total_results = len(list_results(store))
+    write_run_status(
+        store,
+        {
+            "state": "complete",
+            "role": "right",
+            "run_id": resolved,
+            "results": total_results,
+            "new_results": len(results),
+        },
     )
-    log.info("right job done: %d result(s), report -> %s/report/", len(results), store.root_uri)
+    log.info(
+        "right job done: %d new result(s), %d total, report -> %s/report/",
+        len(results),
+        total_results,
+        store.root_uri,
+    )
     return {
         "results": len(results),
         "summary": summary,
         "published": published,
-        "audit": "audit.txt" if audit_written else None,
+        "audit": AUDIT_SUMMARY if audit_written else None,
     }

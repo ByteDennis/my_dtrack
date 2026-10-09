@@ -9,6 +9,31 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from ..common.protocol import (
+    COL_CHECK_CLOSED,
+    HEARTBEAT,
+    LEGACY_HEARTBEAT,
+    ROW_CHECK_CLOSED,
+    failure_path,
+    get_run_status,
+    list_failures,
+    list_left_documents,
+    list_results,
+    list_units,
+    result_path,
+    timestamp,
+    unit_path,
+)
+
+
+def _unit_pair(store, unit_id: str, document: dict[str, Any]) -> str:
+    if document.get("pair"):
+        return str(document["pair"])
+    for _key, unit in list_units(store):
+        if unit.get("unit_id") == unit_id and unit.get("pair"):
+            return str(unit["pair"])
+    raise ValueError(f"{unit_id}: result or failure does not identify its pair")
+
 
 def validate_run_id(value: object) -> str:
     run_id = str(value or "")
@@ -155,43 +180,61 @@ class S3Store:
         payload: dict[str, Any],
         pointer: dict[str, Any],
     ) -> dict[str, Any]:
-        payload_key = f"units/{unit_id}.json"
-        self.put_json(payload_key, payload)
         document = {
             **pointer,
             "unit_id": unit_id,
-            "payload_key": payload_key,
             "sequence": int(sequence),
+            "left_ready_at": timestamp(self),
+            "left_statistics": payload,
         }
-        self.put_json(f"_INDEX/{sequence:08d}-{unit_id}.json", document)
+        self.put_json(unit_path(document["pair"], sequence, unit_id), document)
         return document
 
     def heartbeat(self, now: float | None = None) -> str:
-        return self.put_json("_HEARTBEAT", {"epoch_s": time.time() if now is None else now})
+        return self.put_json(
+            HEARTBEAT,
+            {"epoch_s": time.time() if now is None else now, "updated_at": timestamp(self)},
+        )
 
     def heartbeat_age(self, now: float | None = None) -> float | None:
-        if not self.exists("_HEARTBEAT"):
+        key = HEARTBEAT if self.exists(HEARTBEAT) else LEGACY_HEARTBEAT
+        if not self.exists(key):
             return None
         current = time.time() if now is None else now
-        return max(0.0, current - float(self.get_json("_HEARTBEAT")["epoch_s"]))
+        return max(0.0, current - float(self.get_json(key)["epoch_s"]))
 
     def close_manifests(self, pairs: list[str], expected_units: int) -> str:
         return self.put_json(
-            "manifest/_CLOSED", {"pairs": sorted(pairs), "expected_units": expected_units}
+            COL_CHECK_CLOSED,
+            {
+                "pairs": sorted(pairs),
+                "expected_units": expected_units,
+                "closed_at": timestamp(self),
+            },
         )
 
     def close_row_check(self, pairs: list[str]) -> str:
-        return self.put_json("row_check/_CLOSED", {"pairs": sorted(pairs)})
+        return self.put_json(
+            ROW_CHECK_CLOSED, {"pairs": sorted(pairs), "closed_at": timestamp(self)}
+        )
 
     def put_result(self, unit_id: str, result: dict[str, Any]) -> str:
-        return self.put_json(f"results/{unit_id}.json", result)
+        pair = _unit_pair(self, unit_id, result)
+        return self.put_json(
+            result_path(pair, unit_id),
+            {**result, "unit_id": unit_id, "pair": pair, "completed_at": timestamp(self)},
+        )
 
     def put_dead(self, unit_id: str, failure: dict[str, Any]) -> str:
-        return self.put_json(f"dead/{unit_id}.json", failure)
+        pair = _unit_pair(self, unit_id, failure)
+        return self.put_json(
+            failure_path(pair, unit_id),
+            {**failure, "unit_id": unit_id, "pair": pair, "failed_at": timestamp(self)},
+        )
 
     def ready_unclaimed(self) -> int:
-        ready = len(self.list_keys("_INDEX/"))
-        done = len(self.list_keys("results/")) + len(self.list_keys("dead/"))
+        ready = len(list_units(self))
+        done = len(list_results(self)) + len(list_failures(self))
         return max(0, ready - done)
 
 
@@ -276,43 +319,61 @@ class VolumeStore:
     def commit_unit(
         self, sequence: int, unit_id: str, payload: dict[str, Any], pointer: dict[str, Any]
     ):
-        payload_key = f"units/{unit_id}.json"
-        self.put_json(payload_key, payload)
         document = {
             **pointer,
             "unit_id": unit_id,
-            "payload_key": payload_key,
             "sequence": int(sequence),
+            "left_ready_at": timestamp(self),
+            "left_statistics": payload,
         }
-        self.put_json(f"_INDEX/{sequence:08d}-{unit_id}.json", document)
+        self.put_json(unit_path(document["pair"], sequence, unit_id), document)
         return document
 
     def heartbeat(self, now: float | None = None) -> str:
-        return self.put_json("_HEARTBEAT", {"epoch_s": time.time() if now is None else now})
+        return self.put_json(
+            HEARTBEAT,
+            {"epoch_s": time.time() if now is None else now, "updated_at": timestamp(self)},
+        )
 
     def heartbeat_age(self, now: float | None = None) -> float | None:
-        if not self.exists("_HEARTBEAT"):
+        key = HEARTBEAT if self.exists(HEARTBEAT) else LEGACY_HEARTBEAT
+        if not self.exists(key):
             return None
         current = time.time() if now is None else now
-        return max(0.0, current - float(self.get_json("_HEARTBEAT")["epoch_s"]))
+        return max(0.0, current - float(self.get_json(key)["epoch_s"]))
 
     def close_manifests(self, pairs: list[str], expected_units: int) -> str:
         return self.put_json(
-            "manifest/_CLOSED", {"pairs": sorted(pairs), "expected_units": expected_units}
+            COL_CHECK_CLOSED,
+            {
+                "pairs": sorted(pairs),
+                "expected_units": expected_units,
+                "closed_at": timestamp(self),
+            },
         )
 
     def close_row_check(self, pairs: list[str]) -> str:
-        return self.put_json("row_check/_CLOSED", {"pairs": sorted(pairs)})
+        return self.put_json(
+            ROW_CHECK_CLOSED, {"pairs": sorted(pairs), "closed_at": timestamp(self)}
+        )
 
     def put_result(self, unit_id: str, result: dict[str, Any]) -> str:
-        return self.put_json(f"results/{unit_id}.json", result)
+        pair = _unit_pair(self, unit_id, result)
+        return self.put_json(
+            result_path(pair, unit_id),
+            {**result, "unit_id": unit_id, "pair": pair, "completed_at": timestamp(self)},
+        )
 
     def put_dead(self, unit_id: str, failure: dict[str, Any]) -> str:
-        return self.put_json(f"dead/{unit_id}.json", failure)
+        pair = _unit_pair(self, unit_id, failure)
+        return self.put_json(
+            failure_path(pair, unit_id),
+            {**failure, "unit_id": unit_id, "pair": pair, "failed_at": timestamp(self)},
+        )
 
     def ready_unclaimed(self) -> int:
-        done = len(self.list_keys("results/")) + len(self.list_keys("dead/"))
-        return max(0, len(self.list_keys("_INDEX/")) - done)
+        done = len(list_results(self)) + len(list_failures(self))
+        return max(0, len(list_units(self)) - done)
 
 
 # >>> pick the store from a location string: s3://... or a Volume / local directory path <<< #
@@ -322,11 +383,9 @@ def open_store(location: str):
     return VolumeStore(location)
 
 
-# >>> a run is finished when its Right side wrote _STATUS.json{state: complete} <<< #
+# >>> a run is finished when its Right side wrote _status/run.json{state: complete} <<< #
 def run_is_complete(store) -> bool:
-    return (
-        store.exists("_STATUS.json") and store.get_json("_STATUS.json").get("state") == "complete"
-    )
+    return get_run_status(store).get("state") == "complete"
 
 
 # >>> resolve an explicit run_id or the newest unfinished run below the stable runs root <<< #
@@ -338,7 +397,7 @@ def resolve_run(location: str, run_id: str | None = None):
     candidates = []
     for name in root.list_prefixes():
         child = root.child(name)
-        if child.list_keys("row_check/") and not run_is_complete(child):
+        if list_left_documents(child) and not run_is_complete(child):
             candidates.append(name)
     if not candidates:
         return None, None

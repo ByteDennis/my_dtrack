@@ -81,6 +81,7 @@ def build_manifest(
         raise ValueError(
             f"{pair_name}: key_families names non-key columns: {', '.join(unknown_keys)}"
         )
+
     def family_spec(key: str):
         configured = key_family_config.get(key)
         if configured is None and key.lower() == date_col:
@@ -107,8 +108,7 @@ def build_manifest(
     unknown_column_types = sorted(set(configured_column_types) - set(columns))
     if unknown_column_types:
         raise ValueError(
-            f"{pair_name}: column_types needs mapped columns, got "
-            f"{', '.join(unknown_column_types)}"
+            f"{pair_name}: column_types needs mapped columns, got {', '.join(unknown_column_types)}"
         )
     try:
         column_types = {
@@ -160,7 +160,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     missing = sorted(required - manifest.keys())
     if missing:
         raise ValueError(f"manifest missing fields: {', '.join(missing)}")
-    if manifest["protocol_version"] != PROTOCOL_VERSION:
+    if manifest["protocol_version"] not in {1, PROTOCOL_VERSION}:
         raise ValueError("unsupported protocol version")
     if str(manifest["right"].get("source", "")).lower() != "databricks":
         raise ValueError("manifest Right side must be databricks")

@@ -159,3 +159,15 @@ def test_top_10_ties_keep_first_appearance_order(tmp_path):
     path.write_text("K\nz\ny\nx\ny\nz\nx\nw\n")
     result = stats.compute_csv_statistics(path, ["K"])
     assert [item["value"] for item in json.loads(result["K"]["top_10"])] == ["z", "y", "x", "w"]
+
+
+def test_unparsable_right_date_text_becomes_a_visible_difference_not_a_crash(tmp_path):
+    left = tmp_path / "l.csv"
+    right = tmp_path / "r.csv"
+    left.write_text("D\n01AUG2026:09:45:35\n02AUG2026:00:00:00\n")
+    right.write_text("D\n2026-08-01\n\" \"\n")
+    spec = "sas_datetime_date"
+    left_stats = stats.compute_csv_statistics(left, ["D"], column_types={"D": spec}, side="left")
+    right_stats = stats.compute_csv_statistics(right, ["D"], column_types={"D": spec}, side="right")
+    assert right_stats["D"]["n_missing"] == 0 and right_stats["D"]["n_unique"] == 2
+    assert left_stats["D"]["hash_sum"] != right_stats["D"]["hash_sum"]

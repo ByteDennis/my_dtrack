@@ -37,7 +37,7 @@ def manifest():
 STATS = {"col_type": "numeric", "n_total": 2, "n_missing": 0, "n_unique": 2, "hash_sum": "3"}
 
 
-def test_pipeline_commits_payload_before_pointer_and_closes_only_when_complete():
+def test_pipeline_commits_one_atomic_unit_and_closes_only_when_complete():
     store = MemoryStore()
     row = manifest()
     store.put_json("manifest/pair.json", row)
@@ -48,10 +48,9 @@ def test_pipeline_commits_payload_before_pointer_and_closes_only_when_complete()
     ).run([row])
     uid = unit_id("pair", "2026-01", "amount")
     assert published == 1
-    assert store.events.index(("put", f"units/{uid}.json")) < next(
-        i for i, event in enumerate(store.events) if event[1].startswith("_INDEX/")
-    )
-    assert store.exists("manifest/_CLOSED")
+    assert ("put", f"pairs/pair/units/00000001-{uid}.json") in store.events
+    assert not store.list_keys("_INDEX/")
+    assert store.exists("_status/col_check.closed.json")
 
 
 def test_pipeline_skips_units_already_indexed():
@@ -132,8 +131,9 @@ def test_pipeline_leaves_manifests_open_when_units_are_missing():
         pull_window=lambda _m, _w: "pulled",
         compute_stats=lambda _m, _w, _p: {"amount": STATS},
     ).run([row])
-    assert not store.exists("manifest/_CLOSED")
-    assert store.get_json("_STATUS.json") == {"state": "left_col_check_partial", "indexed_units": 1}
+    assert not store.exists("_status/col_check.closed.json")
+    assert store.get_json("_status/run.json")["state"] == "left_col_check_partial"
+    assert store.get_json("_status/run.json")["indexed_units"] == 1
 
 
 def _fixed_manifest(synthetic, count=3):
@@ -170,26 +170,27 @@ def test_row_check_then_col_check_on_real_files(synthetic, tmp_path):
     store = MemoryStore()
     config = pairs_config(synthetic.left)
     run_id, _ = run_row_check(config, store, run_id="real", pair_names=["orders"])
-    left = store.get_json("row_check/orders.left.json")
+    left = store.get_json("pairs/orders/row_check/left.json")
     right = FileSource(
         {"source": "csv", "path": str(synthetic.right / "orders.csv"), "date_col": "business_date"}
     ).partition_counts("2026-01-01", "2026-02-28")
     agreed = {day: n for day, n in left["counts"].items() if right.get(day) == n}
     manifest_row = all_match_manifest(build_manifest, run_id, "orders", left["pair_config"], agreed)
     assert [len(w["partitions"]) for w in manifest_row["windows"]] == [29, 27]
-    store.put_json("manifest/orders.json", manifest_row)
+    store.put_json("pairs/orders/plan.json", manifest_row)
     store.close_row_check(["orders"])
     manifests = wait_for_manifests(store, timeout=1, poll_interval=0)
     runtime = LeftRuntime(tmp_path / "work", store)
     published = ColCheckPipeline(
         store, pull_window=runtime.pull_window, compute_stats=runtime.compute_stats
     ).run(manifests)
-    assert published == 8 and store.get_json("manifest/_CLOSED")["expected_units"] == 8
-    pointers = [row for _, row in store.list_json("_INDEX/")]
-    unit = store.get_json(pointers[0]["payload_key"])
+    assert published == 8
+    assert store.get_json("_status/col_check.closed.json")["expected_units"] == 8
+    pointers = [row for _, row in store.list_json("pairs/orders/units/")]
+    unit = pointers[0]["left_statistics"]
     assert unit["n_total"] > 0 and {"n_unique", "hash_sum", "min_val"} <= set(unit)
     assert sorted({row["column"] for row in pointers}) == ["AMOUNT", "ORDER_ID", "REGION", "STATUS"]
-    assert store.get_json("_STATUS.json")["state"] == "left_col_check_closed"
+    assert store.get_json("_status/run.json")["state"] == "left_col_check_closed"
 
 
 def test_pipeline_skips_pulling_windows_whose_units_are_all_indexed():

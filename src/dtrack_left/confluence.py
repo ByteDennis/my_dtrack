@@ -6,6 +6,7 @@ from collections import Counter
 from html import escape
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 STATUS_COLOURS = {
     "PASS": "Green",
@@ -40,10 +41,23 @@ def _findings(counts: Counter[str]) -> str:
 
 def _pair_results(report: Path) -> list[dict[str, Any]]:
     rows = []
-    for row_path in sorted(report.glob("*_compare_row.csv")):
-        pair = row_path.name.removesuffix("_compare_row.csv")
+    pair_files = [
+        (unquote(folder.name), folder / "row_check.csv", folder / "col_check.csv")
+        for folder in sorted((report / "pairs").iterdir())
+        if folder.is_dir() and (folder / "row_check.csv").is_file()
+    ] if (report / "pairs").is_dir() else []
+    if not pair_files:
+        pair_files = [
+            (
+                row_path.name.removesuffix("_compare_row.csv"),
+                row_path,
+                report / row_path.name.replace("_compare_row.csv", "_compare_col.csv"),
+            )
+            for row_path in sorted(report.glob("*_compare_row.csv"))
+        ]
+    for pair, row_path, col_path in pair_files:
         row_counts = _verdicts(row_path)
-        col_counts = _verdicts(report / f"{pair}_compare_col.csv")
+        col_counts = _verdicts(col_path)
         row_total = sum(row_counts.values())
         col_total = sum(col_counts.values())
         row_issues = row_total - row_counts.get("match", 0)

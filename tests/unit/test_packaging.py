@@ -40,6 +40,7 @@ def test_right_package_contains_only_databricks_runtime_code():
         "dates.py",
         "hashing.py",
         "manifest.py",
+        "protocol.py",
         "sampling.py",
     }
     source = "\n".join(path.read_text() for path in right.rglob("*.py"))
@@ -125,6 +126,7 @@ def test_learning_notebooks_match_the_public_cli_layout():
         "03_tools.ipynb",
         "04_common.ipynb",
         "05_reuse_pulled.ipynb",
+        "06_pair_progress.ipynb",
     ]
     assert sorted(path.name for path in notebooks.glob("*.ipynb")) == expected
     assert not list((ROOT / "src").rglob("*.ipynb"))
@@ -133,10 +135,12 @@ def test_learning_notebooks_match_the_public_cli_layout():
     for name in expected:
         document = json.loads((notebooks / name).read_text())
         markdown = sum(cell["cell_type"] == "markdown" for cell in document["cells"])
-        assert markdown == (0 if name.startswith("05_") else 1)
+        assert markdown == (0 if name[:2] in {"05", "06"} else 1)
         assert all(not cell.get("outputs") for cell in document["cells"])
         code = "\n".join(
-            "".join(cell["source"]) for cell in document["cells"] if cell["cell_type"] == "code"
+            "".join(line for line in cell["source"] if not line.lstrip().startswith("%"))
+            for cell in document["cells"]
+            if cell["cell_type"] == "code" and not "".join(cell["source"]).lstrip().startswith("%%")
         )
         ast.parse(code)
         sources[name] = code
@@ -150,6 +154,7 @@ def test_learning_notebooks_match_the_public_cli_layout():
     assert "src/dtrack_right/notebook.py" in sources[expected[0]]
     assert "SQL Warehouse" in sources[expected[1]] + sources[expected[2]]
     assert "reuse_pulled=True" in sources[expected[5]]
+    assert "progress.collect" in sources[expected[6]] and "lvdash" in sources[expected[6]]
     assert all("assert " in sources[name] for name in expected)
     assert all("pytest.main" not in sources[name] for name in expected)
     assert all("subprocess.run(['pytest'" not in sources[name] for name in expected)
