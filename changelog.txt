@@ -13,8 +13,11 @@ src/dtrack_left/common/protocol.py — Added: defined v2 paths, v1-compatible re
 src/dtrack_right/common/protocol.py — Added: shipped the identical Databricks-side protocol contract.
 src/dtrack_left/backends/store.py — Modified: published one atomic Unit object and moved heartbeat, closures, results, and failures into the new layout.
 src/dtrack_right/backends/store.py — Modified: mirrored the v2 store contract for S3 and Volume stores while retaining v1 reads.
-src/dtrack_left/checks — Modified: wrote Pair-scoped row inputs, plans, keys, Units, status snapshots, and v2-safe rollback targets while preserving resumability.
-src/dtrack_right/checks — Modified: incrementally consumed Pair Units, wrote row/column outcomes and durable Right readiness, and refreshed Unit status snapshots.
+src/dtrack_left/checks/row_check.py — Modified: wrote Pair-scoped Left row inputs and protocol-v2 run/barrier status.
+src/dtrack_left/checks/col_check.py — Modified: consumed Pair plans and fixed keys, atomically published Units, refreshed status snapshots, and preserved resumability.
+src/dtrack_left/checks/rollback.py — Modified: resolved and safely removed protocol-v1 or Pair-scoped protocol-v2 rollback targets.
+src/dtrack_right/checks/row_check.py — Modified: wrote Pair-scoped row verdicts, plans, row reports, and protocol-v2 barriers.
+src/dtrack_right/checks/col_check.py — Modified: incrementally consumed Pair Units, persisted Right readiness and comparison outcomes, and refreshed Unit status snapshots.
 src/dtrack_left/common/audit.py — Modified: moved SQL evidence under Pair/status paths, reduced headers to timestamp/side/backend/operation, and used the run timezone.
 src/dtrack_right/common/audit.py — Modified: mirrored the concise timezone-aware audit contract.
 src/dtrack_right/job.py — Modified: resolved both protocol generations, published cumulative and newly added result counts, and finalized the v2 run status.

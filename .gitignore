@@ -26,3 +26,8 @@ docs/
 .ipynb_checkpoints/
 .DS_Store
 .dtrack-local/
+
+.agents/
+docker/
+plans/
+CONTEXT.md
