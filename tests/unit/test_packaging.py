@@ -113,6 +113,7 @@ def test_python_dash_m_dtrack_is_the_same_cli():
         text=True,
         check=True,
         cwd=ROOT,
+        timeout=15,
     )
     assert completed.stdout.startswith("dtrack, version")
 

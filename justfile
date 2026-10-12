@@ -26,8 +26,8 @@ dev action="sync":
 [positional-arguments]
 test kind="unit" *args:
     @shift; case "{{kind}}" in \
-      unit)   uv run pytest -q tests/unit "$@" ;; \
-      cov)    uv run pytest -q tests/unit --cov --cov-report=term --cov-report=html:.coverage-html "$@" ;; \
+      unit)   uv run pytest -q --timeout=60 tests/unit "$@" ;; \
+      cov)    uv run pytest -q --timeout=60 tests/unit --cov --cov-report=term --cov-report=html:.coverage-html "$@" ;; \
       moto)   just s3 up && {{moto_env}} uv run pytest -q --run-moto tests/local/s3 "$@" ;; \
       spark)  uv run --group spark pytest -q --run-spark tests/local/spark "$@" ;; \
       oracle) uv run pytest -q --run-oracle tests/local/oracle "$@" ;; \

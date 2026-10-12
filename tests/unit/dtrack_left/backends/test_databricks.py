@@ -144,7 +144,7 @@ def workspace_files(fail_on=None):
 
 
 def git_init(path):
-    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True, timeout=15)
 
 
 def test_upload_workspace_file_uses_the_personal_default_and_preserves_plain_python(tmp_path):

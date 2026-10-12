@@ -761,12 +761,14 @@ def locked_duckdb(duckdb_file):
     writer.wait(timeout=30)
 
 
+@pytest.mark.timeout(15)
 def test_duckdb_lock_held_by_a_writer_explains_the_snapshot_option(locked_duckdb):
     source = DuckDBSource({"path": str(locked_duckdb), "table": "fin.orders", "date_col": "d"})
     result = source.preflight()
     assert result["ok"] is False and '"snapshot": true' in result["error"]
 
 
+@pytest.mark.timeout(15)
 def test_duckdb_snapshot_reads_a_copy_with_the_writers_wal_once(locked_duckdb):
     source = DuckDBSource(
         {
