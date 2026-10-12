@@ -15,12 +15,15 @@ import pandas as pd
 from ..backends.sources import source_from_config
 from ..common.audit import SqlAudit, attach_sql_audit
 from ..common.duck import use_temp
-from ..common.manifest import unit_id, validate_manifest
+from ..common.manifest import planned_unit_ids, unit_id_for, validate_manifest, window_id
 from ..common.protocol import (
     fixed_keys_document,
     fixed_keys_path,
     get_run_status,
+    left_row_check_close_document,
+    list_failures,
     list_plans,
+    list_results,
     list_units,
     refresh_units_status,
     row_check_is_closed,
@@ -36,14 +39,21 @@ def wait_for_manifests(store, *, timeout: float = 1800, poll_interval: float = 3
     started = time.monotonic()
     last_state = None
     while True:
+        plans = [
+            value
+            for _key, value in list_plans(store)
+            if not pair_names or value["pair"] in pair_names
+        ]
         if row_check_is_closed(store):
-            manifests = [
-                value
-                for _key, value in list_plans(store)
-                if not pair_names or value["pair"] in pair_names
-            ]
-            log.info("row check closed: %d plan(s) released", len(manifests))
-            return manifests
+            log.info("row check closed: %d plan(s) released", len(plans))
+            return plans
+        left_closed = left_row_check_close_document(store)
+        if left_closed:
+            expected = set(pair_names or left_closed.get("pairs") or [])
+            planned = {plan["pair"] for plan in plans if int(plan.get("version") or 1) == 2}
+            if expected and expected <= planned:
+                log.info("version 2 Left plans ready: %d plan(s) released", len(plans))
+                return plans
         state = get_run_status(store)
         if state != last_state:
             log.info("waiting for the Right side: status=%s", state)
@@ -63,9 +73,7 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
     if manifest["sample"]["mode"] != "fixed":
         return None
     existing = fixed_keys_document(store, manifest["pair"])
-    if existing is not None:
-        if not store.exists(key_path):
-            store.put_json(key_path, existing)
+    if existing is not None and int(manifest.get("version") or 1) == 1:
         for window in manifest["windows"]:
             window["key_tuples"] = existing["windows"].get(window["bucket"], [])
         return None
@@ -73,8 +81,17 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
         source_from_config(manifest["left"]),
         SqlAudit(store, "left", pair=manifest["pair"]),
     )
-    windows = {}
+    windows = dict((existing or {}).get("windows") or {})
+    window_ids = dict((existing or {}).get("window_ids") or {})
+    changed = existing is None or existing.get("plan_id") != manifest.get("plan_id")
     for window in manifest["windows"]:
+        current_window_id = window_id(manifest, window)
+        if (
+            int(manifest.get("version") or 1) == 2
+            and window_ids.get(window["bucket"]) == current_window_id
+        ):
+            window["key_tuples"] = windows.get(window["bucket"], [])
+            continue
         output = Path(work_dir) / manifest["pair"] / window["bucket"] / "keys.csv"
         sampled = source.sample_keys(
             window["partitions"],
@@ -85,7 +102,19 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
         )
         rows = pd.read_csv(sampled, dtype=object)[manifest["key_cols"]]
         windows[window["bucket"]] = rows.drop_duplicates().values.tolist()
-    document = {"pair": manifest["pair"], "windows": windows}
+        window_ids[window["bucket"]] = current_window_id
+        window["key_tuples"] = windows[window["bucket"]]
+        changed = True
+    document = {
+        "pair": manifest["pair"],
+        "plan_id": manifest.get("plan_id"),
+        "windows": {window["bucket"]: windows[window["bucket"]] for window in manifest["windows"]},
+        "window_ids": {
+            window["bucket"]: window_ids[window["bucket"]] for window in manifest["windows"]
+        },
+    }
+    if not changed:
+        return None
     store.put_json(key_path, document)
     log.info(
         "fixed sample keys %s: %s -> %s",
@@ -93,8 +122,6 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
         {k: len(v) for k, v in windows.items()},
         key_path,
     )
-    for window in manifest["windows"]:
-        window["key_tuples"] = windows[window["bucket"]]
     return document
 
 
@@ -130,7 +157,9 @@ class ColCheckPipeline:
         manifests = list(manifests)
         for manifest in manifests:
             validate_manifest(manifest)
+        version2 = any(int(item.get("version") or 1) == 2 for item in manifests)
         pair_names = [manifest["pair"] for manifest in manifests]
+        active_ids = set().union(*(planned_unit_ids(manifest) for manifest in manifests))
         existing_rows = list_units(self.store, pair_names)
         existing = {row["unit_id"] for _key, row in existing_rows}
         sequence = max((row.get("sequence", 0) for _key, row in existing_rows), default=0) + 1
@@ -160,7 +189,7 @@ class ColCheckPipeline:
                         exhausted = True
                         break
                     if all(
-                        unit_id(manifest["pair"], window["bucket"], column) in existing
+                        unit_id_for(manifest, window, column) in existing
                         for column in manifest["columns"]
                     ):
                         log.info(
@@ -195,10 +224,14 @@ class ColCheckPipeline:
                     rows = job.result()
                     first = sequence
                     for column in manifest["columns"]:
-                        uid = unit_id(manifest["pair"], window["bucket"], column)
+                        uid = unit_id_for(manifest, window, column)
                         if uid in existing:
                             continue
-                        while self.store.ready_unclaimed() > self.wip:
+                        while (
+                            self._ready_unclaimed(active_ids)
+                            if version2
+                            else self.store.ready_unclaimed()
+                        ) > self.wip:
                             log.info("backpressure: ready_unclaimed > wip=%d, sleeping", self.wip)
                             time.sleep(self.backpressure_sleep)
                         self.store.commit_unit(
@@ -210,6 +243,8 @@ class ColCheckPipeline:
                                 "window": window["bucket"],
                                 "column": column,
                                 "right_column": manifest["col_map"][column],
+                                "plan_id": manifest.get("plan_id"),
+                                "window_id": window_id(manifest, window),
                             },
                         )
                         sequence += 1
@@ -224,10 +259,21 @@ class ColCheckPipeline:
                     refresh_units_status(self.store)
                     self.store.heartbeat()
         published = {row["pair"]: row for _key, row in list_plans(self.store)}
+        published_ids = set().union(*(planned_unit_ids(row) for row in published.values()))
         expected = sum(row["expected_units"] for row in published.values())
-        indexed = len(list_units(self.store, list(published)))
+        indexed = len(
+            {
+                row["unit_id"]
+                for _key, row in list_units(self.store, list(published))
+                if row["unit_id"] in published_ids
+            }
+        )
         if indexed >= expected:
-            self.store.close_manifests(list(published), expected)
+            self.store.close_manifests(
+                list(published),
+                expected,
+                plan_ids={pair: row.get("plan_id") for pair, row in published.items()},
+            )
             log.info("col check closed: pairs=%s expected_units=%d", sorted(published), expected)
         else:
             log.warning(
@@ -246,6 +292,20 @@ class ColCheckPipeline:
         refresh_units_status(self.store)
         SqlAudit(self.store, "left").refresh()
         return sequence - first_sequence
+
+    def _ready_unclaimed(self, active_ids: set[str]) -> int:
+        units = {
+            value["unit_id"]
+            for _key, value in list_units(self.store)
+            if value["unit_id"] in active_ids
+        }
+        finished = {
+            value["unit_id"]
+            for rows in (list_results(self.store), list_failures(self.store))
+            for _key, value in rows
+            if value["unit_id"] in active_ids
+        }
+        return len(units - finished)
 
 
 # >>> data rows in a CSV, header excluded <<< #

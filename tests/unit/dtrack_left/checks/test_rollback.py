@@ -137,10 +137,16 @@ def test_config_rejects_skipped_pair_before_deleting(finished, synthetic, stage)
 
 def test_dead_rollback_only_touches_dead_units_of_the_pair(finished):
     run = finished()
-    run.store.put_json("dead/x.json", {"pair": "orders", "unit_id": "x"})
-    run.store.put_json("dead/y.json", {"pair": "customers", "unit_id": "y"})
-    assert rollback.rollback(run.store, "orders", "dead", apply=True)["keys"] == ["dead/x.json"]
-    assert run.store.exists("dead/y.json")
+    run.store.put_json(
+        "pairs/orders/col_check/failures/x.json", {"pair": "orders", "unit_id": "x"}
+    )
+    run.store.put_json(
+        "pairs/customers/col_check/failures/y.json", {"pair": "customers", "unit_id": "y"}
+    )
+    assert rollback.rollback(run.store, "orders", "dead", apply=True)["keys"] == [
+        "pairs/orders/col_check/failures/x.json"
+    ]
+    assert run.store.exists("pairs/customers/col_check/failures/y.json")
     with pytest.raises(ValueError, match="stage must be"):
         rollback.plan(run.store, "orders", "all")
 
@@ -205,24 +211,20 @@ def test_pair_resolution_supports_all_and_refuses_typos_before_deleting(finished
 
 def test_rollback_deletes_from_s3_run_folders(s3_bucket):
     store = rollback.open_location(f"s3://{s3_bucket}/runs/r")
-    store.put_json("row_check/_CLOSED", {"pairs": ["p"]})
-    store.put_json("results/u.json", {"pair": "p", "unit_id": "u"})
-    store.put_json("results/v.json", {"pair": "q", "unit_id": "v"})
+    store.put_json("pairs/p/col_check/results/u.json", {"pair": "p", "unit_id": "u"})
+    store.put_json("pairs/q/col_check/results/v.json", {"pair": "q", "unit_id": "v"})
     outcome = rollback.rollback(store, "p", "col", apply=True)
-    assert outcome["keys"] == ["results/u.json"] and outcome["deleted"] == 1
+    assert outcome["keys"] == ["pairs/p/col_check/results/u.json"] and outcome["deleted"] == 1
     assert outcome["targets"] == [
         {
-            "key": "results/u.json",
-            "location": f"s3://{s3_bucket}/runs/r/results/u.json",
-            "object_key": "runs/r/results/u.json",
+            "key": "pairs/p/col_check/results/u.json",
+            "location": f"s3://{s3_bucket}/runs/r/pairs/p/col_check/results/u.json",
+            "object_key": "runs/r/pairs/p/col_check/results/u.json",
         }
     ]
     assert outcome["deletions"][0]["status"] == "deleted"
     left = boto3.client("s3").list_objects_v2(Bucket=s3_bucket)["Contents"]
-    assert sorted(row["Key"] for row in left) == [
-        "runs/r/results/v.json",
-        "runs/r/row_check/_CLOSED",
-    ]
+    assert sorted(row["Key"] for row in left) == ["runs/r/pairs/q/col_check/results/v.json"]
     assert any("dtrack col-check --run-s3 s3://" in step for step in outcome["next"])
 
 
@@ -304,10 +306,10 @@ def test_local_target_rejects_paths_outside_the_run(tmp_path):
 
 def test_delete_reports_a_target_that_disappeared_after_planning(tmp_path):
     store = rollback.LocalFolder(tmp_path / "run")
-    path = store.root / "results" / "u.json"
+    path = store.root / "pairs" / "p" / "col_check" / "results" / "u.json"
     path.parent.mkdir(parents=True)
     path.write_text("{}")
-    target = rollback.locate(store, "results/u.json")
+    target = rollback.locate(store, "pairs/p/col_check/results/u.json")
     path.unlink()
     outcome = rollback.delete(store, [target])
     assert outcome["deleted"] == outcome["failed"] == 0

@@ -6,11 +6,13 @@
 # 1. Check the config:        dtrack tools doctor --config c.json
 # 2. Pick the run:            export DTRACK_RUN_S3=s3://<bucket>/dtrack/work/runs
 #                             export DTRACK_RUN_ID=<new id>  # or let row-check generate one
-# 3. Start the Right job:     notebook dtrack_right/notebook with widgets run_s3=<runs root>,
+# 3a. Config version 2:       dtrack left-run --config c.json --pull-workers 1 --stat-workers 1
+#                             then start/restart the Right job after Left finishes
+# 3b. Config version 1:       start the Right job: notebook dtrack_right/notebook with widgets run_s3=<runs root>,
 #                             run_id=<run_id>, gate=auto; report goes to <run>/report/
 #                             [aws_secret_scope when run_s3 is s3://]; it may start before step 4
 # 4. Stage 1, Left counts:    dtrack row-check --config c.json
-# 5. Stage 2, Left units:     dtrack col-check           (waits for row_check/_CLOSED)
+# 5. Stage 2, Left units:     dtrack col-check           (waits for _status/row_check.closed.json)
 # 6. Follow the Right job:    dtrack tools dbx runs --active | dtrack tools dbx runs --run-id <job run>
 # 7. Report:                  read <run-s3>/<run-id>/report/ or publish it with tools blog
 #

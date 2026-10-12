@@ -17,7 +17,7 @@ from dtrack_left.common.manifest import build_manifest, unit_id
 
 def manifest():
     return {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "run_id": "run",
         "pair": "pair",
         "sample": {"mode": "all"},
@@ -40,7 +40,7 @@ STATS = {"col_type": "numeric", "n_total": 2, "n_missing": 0, "n_unique": 2, "ha
 def test_pipeline_commits_one_atomic_unit_and_closes_only_when_complete():
     store = MemoryStore()
     row = manifest()
-    store.put_json("manifest/pair.json", row)
+    store.put_json("pairs/pair/plan.json", row)
     published = ColCheckPipeline(
         store,
         pull_window=lambda _manifest, _window: "pulled",
@@ -49,14 +49,13 @@ def test_pipeline_commits_one_atomic_unit_and_closes_only_when_complete():
     uid = unit_id("pair", "2026-01", "amount")
     assert published == 1
     assert ("put", f"pairs/pair/units/00000001-{uid}.json") in store.events
-    assert not store.list_keys("_INDEX/")
     assert store.exists("_status/col_check.closed.json")
 
 
 def test_pipeline_skips_units_already_indexed():
     store = MemoryStore()
     row = manifest()
-    store.put_json("manifest/pair.json", row)
+    store.put_json("pairs/pair/plan.json", row)
     args = {
         "pull_window": lambda _m, _w: "pulled",
         "compute_stats": lambda _m, _w, _p: {"amount": STATS},
@@ -67,11 +66,11 @@ def test_pipeline_skips_units_already_indexed():
 
 def test_wait_for_manifests_returns_only_after_right_side_closes_row_check():
     store = MemoryStore()
-    store.put_json("manifest/pair.json", manifest())
-    store.put_json("manifest/pair.keys.json", {"pair": "pair", "windows": {}})
+    store.put_json("pairs/pair/plan.json", manifest())
+    store.put_json("pairs/pair/fixed_keys.json", {"pair": "pair", "windows": {}})
     with pytest.raises(TimeoutError):
         wait_for_manifests(store, timeout=0, poll_interval=0)
-    store.put_json("row_check/_CLOSED", {"pairs": ["pair"]})
+    store.close_row_check(["pair"])
     assert [m["pair"] for m in wait_for_manifests(store, timeout=0, poll_interval=0)] == ["pair"]
 
 
@@ -84,9 +83,9 @@ def test_wait_for_manifests_fails_fast_on_right_preflight_failure():
 
 def test_wait_for_manifests_polls_until_closed_and_filters_pairs(monkeypatch):
     store = MemoryStore()
-    store.put_json("_STATUS.json", {"state": "right_waiting"})
-    store.put_json("manifest/pair.json", manifest())
-    store.put_json("manifest/other.json", {**manifest(), "pair": "other"})
+    store.put_json("_status/run.json", {"state": "right_waiting"})
+    store.put_json("pairs/pair/plan.json", manifest())
+    store.put_json("pairs/other/plan.json", {**manifest(), "pair": "other"})
     sleeps = []
     monkeypatch.setattr(
         col_check.time,
@@ -107,7 +106,7 @@ def test_windows_are_interleaved_round_robin_across_pairs():
 def test_backpressure_waits_while_too_many_units_are_unclaimed(monkeypatch):
     store = MemoryStore()
     row = manifest()
-    store.put_json("manifest/pair.json", row)
+    store.put_json("pairs/pair/plan.json", row)
     levels = iter([5, 5, 0])
     monkeypatch.setattr(store, "ready_unclaimed", lambda: next(levels))
     naps = []
@@ -125,7 +124,7 @@ def test_backpressure_waits_while_too_many_units_are_unclaimed(monkeypatch):
 def test_pipeline_leaves_manifests_open_when_units_are_missing():
     store = MemoryStore()
     row = manifest()
-    store.put_json("manifest/pair.json", {**row, "expected_units": 3})
+    store.put_json("pairs/pair/plan.json", {**row, "expected_units": 3})
     ColCheckPipeline(
         store,
         pull_window=lambda _m, _w: "pulled",
@@ -166,6 +165,28 @@ def test_fixed_sample_keys_are_published_once_and_reused_by_the_runtime(syntheti
     assert forced["BALANCE"]["col_type"] == "categorical"
 
 
+def test_version_two_fixed_keys_refresh_the_plan_id_without_resampling_unchanged_windows(
+    synthetic, tmp_path
+):
+    store = MemoryStore()
+    pair = pairs_config(synthetic.left)["pairs"]["customers"]
+    counts = FileSource({**pair["left"]}).partition_counts("2026-01-01", "2026-01-31")
+    first = all_match_manifest(
+        build_manifest, "run", "customers", {**pair, "version": 2, "sample": 3}, counts
+    )
+    original = publish_fixed_keys(store, first, tmp_path / "keys")
+    second = all_match_manifest(
+        build_manifest,
+        "run",
+        "customers",
+        {**pair, "version": 2, "sample": 3, "excluded_columns": ["TIER"]},
+        counts,
+    )
+    refreshed = publish_fixed_keys(store, second, tmp_path / "keys")
+    assert refreshed["plan_id"] == second["plan_id"] != first["plan_id"]
+    assert refreshed["windows"] == original["windows"]
+
+
 def test_row_check_then_col_check_on_real_files(synthetic, tmp_path):
     store = MemoryStore()
     config = pairs_config(synthetic.left)
@@ -196,7 +217,7 @@ def test_row_check_then_col_check_on_real_files(synthetic, tmp_path):
 def test_pipeline_skips_pulling_windows_whose_units_are_all_indexed():
     store = MemoryStore()
     row = manifest()
-    store.put_json("manifest/pair.json", row)
+    store.put_json("pairs/pair/plan.json", row)
     pulled = []
     args = {
         "pull_window": lambda _m, window: pulled.append(window["bucket"]) or "pulled",
@@ -205,3 +226,37 @@ def test_pipeline_skips_pulling_windows_whose_units_are_all_indexed():
     assert ColCheckPipeline(store, **args).run([row]) == 1
     assert ColCheckPipeline(store, **args).run([row]) == 0
     assert pulled == ["2026-01"]
+
+
+def test_version_two_rerun_pulls_only_the_vintage_changed_by_an_exclusion():
+    pair = {
+        "version": 2,
+        "left": {"source": "csv", "date_col": "dt"},
+        "right": {"source": "databricks", "date_col": "dt"},
+        "col_map": {"amount": "amount"},
+        "vintage": "month",
+    }
+    row_check = {
+        "gate_decision": {"passed": True},
+        "partitions": {
+            "2026-01-01": {"left": 1, "right": 1, "verdict": "match"},
+            "2026-01-02": {"left": 1, "right": 2, "verdict": "count_diff"},
+            "2026-02-01": {"left": 1, "right": 1, "verdict": "match"},
+        },
+    }
+    store = MemoryStore()
+    pulled = []
+    args = {
+        "pull_window": lambda _m, window: pulled.append(window["bucket"]) or "pulled",
+        "compute_stats": lambda _m, _w, _p: {"amount": STATS},
+    }
+    first = build_manifest("run", "pair", pair, row_check)
+    store.put_json("pairs/pair/plan.json", first)
+    assert ColCheckPipeline(store, **args).run([first]) == 2
+
+    second = build_manifest(
+        "run", "pair", {**pair, "excluded_partitions": ["2026-01-02"]}, row_check
+    )
+    store.put_json("pairs/pair/plan.json", second)
+    assert ColCheckPipeline(store, **args).run([second]) == 1
+    assert pulled == ["2026-01-01", "2026-02-01", "2026-01-01"]

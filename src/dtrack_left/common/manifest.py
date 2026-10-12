@@ -11,6 +11,8 @@ from .column_types import portable_column_type, resolve_column_type
 from .dates import bucket_date, portable_date_type
 from .hashing import HASH_BUCKET_SPACE, key_family
 
+STATS_VERSION = 1
+
 
 def _slug(value: object) -> str:
     text = re.sub(r"[^a-z0-9]+", "-", str(value).strip().lower()).strip("-")
@@ -21,6 +23,56 @@ def unit_id(pair: str, window: str, column: str) -> str:
     raw = json.dumps([pair, window, column], ensure_ascii=False, separators=(",", ":"))
     digest = hashlib.sha256(raw.encode()).hexdigest()[:12]
     return f"{_slug(pair)}--{_slug(window)}--{_slug(column)}--{digest}"
+
+
+def _digest(value: Any, length: int = 16) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()[:length]
+
+
+def window_id(manifest: dict[str, Any], window: dict[str, Any]) -> str:
+    if int(manifest.get("version") or 1) == 1:
+        return str(window["bucket"])
+    return _digest(
+        {
+            "stats_version": STATS_VERSION,
+            "run_id": manifest["run_id"],
+            "pair": manifest["pair"],
+            "bucket": window["bucket"],
+            "partitions": window["partitions"],
+            "sample": manifest["sample"],
+            "key_cols": manifest.get("key_cols") or [],
+            "right_key_cols": manifest.get("right_key_cols") or [],
+            "key_families": manifest.get("key_families") or [],
+            "left": manifest.get("left") or {},
+        }
+    )
+
+
+def unit_id_for(manifest: dict[str, Any], window: dict[str, Any], column: str) -> str:
+    if int(manifest.get("version") or 1) == 1:
+        return unit_id(manifest["pair"], window["bucket"], column)
+    digest = _digest(
+        {
+            "window_id": window_id(manifest, window),
+            "column": column,
+            "right_column": manifest["col_map"][column],
+            "strict": bool(manifest.get("strict")),
+            "col_type_override": (manifest.get("col_type_overrides") or {}).get(column),
+            "column_type": (manifest.get("column_types") or {}).get(column),
+            "right": manifest.get("right") or {},
+        },
+        12,
+    )
+    return f"{_slug(manifest['pair'])}--{_slug(window['bucket'])}--{_slug(column)}--{digest}"
+
+
+def planned_unit_ids(manifest: dict[str, Any]) -> set[str]:
+    return {
+        unit_id_for(manifest, window, column)
+        for window in manifest.get("windows") or []
+        for column in manifest.get("columns") or []
+    }
 
 
 def sample_plan(raw: Any) -> dict[str, Any]:
@@ -50,20 +102,31 @@ def build_manifest(
     pair: dict[str, Any],
     row_check: dict[str, Any],
 ) -> dict[str, Any]:
+    version = int(pair.get("version") or 1)
+    if version not in {1, 2}:
+        raise ValueError(f"{pair_name}: version must be 1 or 2")
     if str((pair.get("right") or {}).get("source", "")).lower() != "databricks":
         raise ValueError(f"{pair_name}: Right side must be databricks")
-    if not row_check["gate_decision"].get("passed"):
+    if version == 1 and not row_check["gate_decision"].get("passed"):
         raise ValueError(f"{pair_name}: row check has not passed")
-    columns = list((pair.get("col_map") or {}).keys())
+    excluded_partitions = sorted(set(pair.get("excluded_partitions") or []))
+    excluded_columns = set(pair.get("excluded_columns") or [])
+    mapped_columns = list((pair.get("col_map") or {}).keys())
     date_col = str(pair["left"].get("date_col") or "").lower()
-    columns = [column for column in columns if column.lower() != date_col]
+    value_columns = [column for column in mapped_columns if column.lower() != date_col]
+    columns = [column for column in value_columns if column not in excluded_columns]
     if not columns:
         raise ValueError(f"{pair_name}: no mapped value columns")
     vintage = pair.get("vintage") or "day"
     grouped: dict[str, list[str]] = defaultdict(list)
     counts: dict[str, int] = {}
     for partition, row in sorted(row_check["partitions"].items()):
-        if row["verdict"] == "match":
+        admitted = (
+            row.get("left") is not None and partition not in excluded_partitions
+            if version == 2
+            else row["verdict"] == "match"
+        )
+        if admitted:
             grouped[bucket_date(partition, vintage)].append(partition)
             counts[partition] = int(row["left"])
     windows = [
@@ -96,16 +159,20 @@ def build_manifest(
         key_families = [family_spec(key) for key in keys]
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{pair_name}: unsupported key families: {exc}") from None
-    overrides = dict(pair.get("col_type_overrides") or {})
-    unknown = sorted(set(overrides) - set(columns))
-    invalid = sorted(set(overrides.values()) - {"numeric", "categorical"})
+    raw_overrides = pair.get("col_type_overrides") or {}
+    unknown = sorted(set(raw_overrides) - set(value_columns))
+    invalid = sorted(set(raw_overrides.values()) - {"numeric", "categorical"})
+    overrides = {column: kind for column, kind in raw_overrides.items() if column in columns}
     if unknown or invalid:
         raise ValueError(
             f"{pair_name}: col_type_overrides needs mapped columns and numeric|categorical, "
             f"got {', '.join(unknown + invalid)}"
         )
-    configured_column_types = dict(pair.get("column_types") or {})
-    unknown_column_types = sorted(set(configured_column_types) - set(columns))
+    raw_column_types = pair.get("column_types") or {}
+    unknown_column_types = sorted(set(raw_column_types) - set(value_columns))
+    configured_column_types = {
+        column: spec for column, spec in raw_column_types.items() if column in columns
+    }
     if unknown_column_types:
         raise ValueError(
             f"{pair_name}: column_types needs mapped columns, got {', '.join(unknown_column_types)}"
@@ -121,6 +188,7 @@ def build_manifest(
         raise ValueError(f"{pair_name}: sampling requires a key")
     manifest = {
         "protocol_version": PROTOCOL_VERSION,
+        "version": version,
         "run_id": run_id,
         "pair": pair_name,
         "sample": sampling,
@@ -137,8 +205,11 @@ def build_manifest(
         "strict": bool(pair.get("strict")),
         "col_type_overrides": overrides,
         "column_types": column_types,
+        "excluded_partitions": excluded_partitions,
+        "excluded_columns": sorted(excluded_columns),
         "expected_units": len(windows) * len(columns),
     }
+    manifest["plan_id"] = _digest(manifest)
     validate_manifest(manifest)
     return manifest
 
@@ -159,8 +230,13 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     missing = sorted(required - manifest.keys())
     if missing:
         raise ValueError(f"manifest missing fields: {', '.join(missing)}")
-    if manifest["protocol_version"] not in {1, PROTOCOL_VERSION}:
+    if manifest["protocol_version"] != PROTOCOL_VERSION:
         raise ValueError("unsupported protocol version")
+    version = int(manifest.get("version") or 1)
+    if version not in {1, 2}:
+        raise ValueError("manifest version must be 1 or 2")
+    if version == 2 and not manifest.get("plan_id"):
+        raise ValueError("version 2 manifest requires plan_id")
     if str(manifest["right"].get("source", "")).lower() != "databricks":
         raise ValueError("manifest Right side must be databricks")
     expected = len(manifest["windows"]) * len(manifest["columns"])

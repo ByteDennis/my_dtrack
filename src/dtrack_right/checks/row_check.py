@@ -13,6 +13,8 @@ from ..common.manifest import build_manifest
 from ..common.protocol import (
     left_row_check_close_document,
     list_left_documents,
+    list_plans,
+    list_row_results,
     pair_segment,
     plan_path,
     refresh_units_status,
@@ -111,9 +113,7 @@ def row_check_csv_bytes(document: dict[str, Any]) -> bytes:
 def pending_left_documents(store) -> list[dict[str, Any]]:
     pending = []
     for _key, document in list_left_documents(store):
-        if store.exists(row_result_path(document["pair"])) or store.exists(
-            f"row_check/{document['pair']}.json"
-        ):
+        if store.exists(row_result_path(document["pair"])):
             continue
         pending.append(document)
     return pending
@@ -121,13 +121,23 @@ def pending_left_documents(store) -> list[dict[str, Any]]:
 
 # >>> count the Right side, reconcile, gate; CSV and manifest first, the verdict last as the commit marker <<< #
 def reconcile_pair(
-    store, left_doc: dict[str, Any], target, *, gate: str = "auto"
+    store,
+    left_doc: dict[str, Any],
+    target,
+    *,
+    gate: str = "auto",
+    preflight_health: dict[str, Any] | None = None,
+    preflight_s: float | None = None,
 ) -> dict[str, Any]:
     pair = left_doc["pair"]
     attach_sql_audit(target, SqlAudit(store, "right", pair=pair))
-    started = time.monotonic()
-    health = target.preflight()
-    preflight_s = round(time.monotonic() - started, 6)
+    if preflight_health is None:
+        started = time.monotonic()
+        health = target.preflight()
+        preflight_s = round(time.monotonic() - started, 6)
+    else:
+        health = dict(preflight_health)
+        preflight_s = float(preflight_s or 0.0)
     if not health.get("ok"):
         log.error("preflight %s failed: %s", pair, health.get("error"))
         raise RuntimeError(f"Right-side preflight failed for {pair}: {health.get('error')}")
@@ -156,6 +166,7 @@ def reconcile_pair(
         "left": left_doc["left"],
         "right": left_doc["right"],
         "bounds": left_doc["bounds"],
+        "date_synonyms": dict(left_doc.get("date_synonyms") or {}),
         "partitions": partitions,
         "summary": summarize_partitions(partitions),
         "gate_decision": evaluate_gate(partitions, gate),
@@ -183,7 +194,10 @@ def reconcile_pair(
         row_check_csv_bytes(document),
         content_type="text/csv",
     )
-    if decision["passed"]:
+    version = int(left_doc["pair_config"].get("version") or 1)
+    if (version == 1 and decision["passed"]) or (
+        version == 2 and not store.exists(plan_path(pair))
+    ):
         manifest = build_manifest(left_doc["run_id"], pair, left_doc["pair_config"], document)
         store.put_json(plan_path(pair), manifest)
         refresh_units_status(store)
@@ -199,22 +213,79 @@ def reconcile_pair(
     return document
 
 
+def unresolved_version2_partitions(store) -> dict[str, list[str]]:
+    """Return row-check mismatches not acknowledged by the current version 2 plan."""
+    plans = {plan["pair"]: plan for _key, plan in list_plans(store)}
+    results = {result["pair"]: result for _key, result in list_row_results(store)}
+    unresolved = {}
+    for pair, plan in plans.items():
+        if int(plan.get("version") or 1) != 2 or pair not in results:
+            continue
+        synonyms = results[pair].get("date_synonyms") or {}
+        excluded = {synonyms.get(value, value) for value in plan.get("excluded_partitions") or []}
+        mismatches = sorted(
+            partition
+            for partition, row in results[pair]["partitions"].items()
+            if row.get("verdict") != "match" and partition not in excluded
+        )
+        if mismatches:
+            unresolved[pair] = mismatches
+    return unresolved
+
+
+def require_version2_exclusions(store) -> None:
+    unresolved = unresolved_version2_partitions(store)
+    if not unresolved:
+        return
+    details = "; ".join(f"{pair}: {', '.join(values)}" for pair, values in unresolved.items())
+    raise RuntimeError(
+        "version 2 row-check found unexcluded mismatched partitions; "
+        f"add them to excluded_partitions, rerun the Left job with the same run-id, "
+        f"then restart Right ({details})"
+    )
+
+
 # >>> process every pending left document; close the row check once the left side has closed and nothing is pending <<< #
-def run_row_check(store, target_factory, *, gate: str = "auto") -> int:
+def run_row_check(
+    store,
+    target_factory,
+    *,
+    gate: str = "auto",
+    targets: dict[str, Any] | None = None,
+    preflight_health: dict[str, dict[str, Any]] | None = None,
+    preflight_seconds: dict[str, float] | None = None,
+) -> int:
     processed = 0
-    for left_doc in pending_left_documents(store):
-        reconcile_pair(store, left_doc, target_factory(left_doc["right"]), gate=gate)
+    pending = pending_left_documents(store)
+    pending_pairs = {document["pair"] for document in pending}
+    if targets is not None:
+        missing_targets = sorted(pending_pairs - set(targets))
+        if missing_targets:
+            raise ValueError(f"preflight targets missing pair(s): {', '.join(missing_targets)}")
+    if preflight_health is not None:
+        missing_health = sorted(pending_pairs - set(preflight_health))
+        if missing_health:
+            raise ValueError(f"preflight health missing pair(s): {', '.join(missing_health)}")
+    for left_doc in pending:
+        pair = left_doc["pair"]
+        target = targets[pair] if targets is not None else target_factory(left_doc["right"])
+        reconcile_pair(
+            store,
+            left_doc,
+            target,
+            gate=gate,
+            preflight_health=preflight_health[pair] if preflight_health is not None else None,
+            preflight_s=(preflight_seconds or {}).get(pair),
+        )
         processed += 1
     closed = left_row_check_close_document(store)
     if closed and not store.exists("_status/row_check.closed.json"):
         pairs = closed["pairs"]
-        if all(
-            store.exists(row_result_path(pair)) or store.exists(f"row_check/{pair}.json")
-            for pair in pairs
-        ):
+        if all(store.exists(row_result_path(pair)) for pair in pairs):
             store.close_row_check(pairs)
             released = [pair for pair in pairs if store.exists(plan_path(pair))]
             log.info("row_check closed: %d/%d pairs released", len(released), len(pairs))
     if processed:
         SqlAudit(store, "right").refresh()
+    require_version2_exclusions(store)
     return processed

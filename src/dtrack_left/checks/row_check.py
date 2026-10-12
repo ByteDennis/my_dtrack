@@ -12,7 +12,14 @@ from typing import Any
 from ..backends.sources import source_from_config
 from ..common.audit import SqlAudit, attach_sql_audit
 from ..common.dates import portable_date_type
-from ..common.protocol import LEFT_ROW_CHECK_CLOSED, left_row_path, timestamp, write_run_status
+from ..common.manifest import build_manifest
+from ..common.protocol import (
+    LEFT_ROW_CHECK_CLOSED,
+    left_row_path,
+    plan_path,
+    timestamp,
+    write_run_status,
+)
 
 log = logging.getLogger("dtrack.left.row_check")
 SECRET_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
@@ -47,6 +54,8 @@ def run_row_check(
     pair_names: list[str] | None = None,
     source_factory: Callable[[dict[str, Any]], Any] = source_from_config,
     pair_workers: int = 4,
+    sources: dict[str, Any] | None = None,
+    preflight_health: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     run_id = run_id or make_run_id(config)
     pairs = {
@@ -63,11 +72,21 @@ def run_row_check(
         timezone_name=config.get("timezone"),
     )
     started = time.monotonic()
+    if sources is None:
+        sources = {name: source_factory(pair["left"]) for name, pair in pairs.items()}
+    missing_sources = sorted(set(pairs) - set(sources))
+    if missing_sources:
+        raise ValueError(f"preflight sources missing pair(s): {', '.join(missing_sources)}")
     sources = {
-        name: attach_sql_audit(source_factory(pair["left"]), SqlAudit(store, "left", pair=name))
-        for name, pair in pairs.items()
+        name: attach_sql_audit(sources[name], SqlAudit(store, "left", pair=name)) for name in pairs
     }
-    health = {name: source.preflight() for name, source in sources.items()}
+    if preflight_health is None:
+        health = {name: source.preflight() for name, source in sources.items()}
+    else:
+        missing_health = sorted(set(pairs) - set(preflight_health))
+        if missing_health:
+            raise ValueError(f"preflight health missing pair(s): {', '.join(missing_health)}")
+        health = {name: dict(preflight_health[name]) for name in pairs}
     for name, row in health.items():
         log.info(
             "left preflight %s: %s", name, "OK" if row.get("ok") else f"FAIL {row.get('error')}"
@@ -114,6 +133,23 @@ def run_row_check(
         }
         store.put_json(left_row_path(name), document)
         log.info("-> %s", left_row_path(name))
+        if int(public.get("version") or 1) == 2:
+            baseline = {
+                "gate_decision": {"passed": True},
+                "partitions": {
+                    partition: {"left": count, "right": None, "verdict": "left_only"}
+                    for partition, count in values.items()
+                },
+            }
+            plan = build_manifest(run_id, name, public, baseline)
+            store.put_json(plan_path(name), plan)
+            log.info(
+                "-> %s: version=2, %d windows x %d columns = %d units",
+                plan_path(name),
+                len(plan["windows"]),
+                len(plan["columns"]),
+                plan["expected_units"],
+            )
         documents.append(document)
     store.put_json(
         LEFT_ROW_CHECK_CLOSED,
@@ -121,10 +157,17 @@ def run_row_check(
     )
     store.heartbeat()
     write_run_status(store, {"state": "left_row_check_closed", "run_id": run_id, "role": "left"})
-    log.info(
-        "left side closed: %d pair(s) in %.3fs; waiting on the Right side for row-check verdicts",
-        len(pairs),
-        time.monotonic() - started,
-    )
+    if all(int(pair.get("version") or 1) == 2 for pair in pairs.values()):
+        log.info(
+            "left row check closed: %d pair(s) in %.3fs; version 2 plans are ready for col-check",
+            len(pairs),
+            time.monotonic() - started,
+        )
+    else:
+        log.info(
+            "left side closed: %d pair(s) in %.3fs; waiting on the Right side for row-check verdicts",
+            len(pairs),
+            time.monotonic() - started,
+        )
     SqlAudit(store, "left").refresh()
     return run_id, documents

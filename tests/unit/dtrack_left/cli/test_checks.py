@@ -44,17 +44,20 @@ def test_col_check_command_publishes_units_once_manifests_are_released(
 ):
     root = f"s3://{s3_bucket}/runs"
     monkeypatch.setenv("DTRACK_RUN_S3", root)
-    assert main(
-        [
-            "row-check",
-            "--config",
-            _config(synthetic, tmp_path),
-            "--run-id",
-            "r2",
-            "--pair",
-            "orders",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "row-check",
+                "--config",
+                _config(synthetic, tmp_path),
+                "--run-id",
+                "r2",
+                "--pair",
+                "orders",
+            ]
+        )
+        == 0
+    )
     capsys.readouterr()
     store = S3Store(f"{root}/r2")
     left = store.get_json("pairs/orders/row_check/left.json")
@@ -62,7 +65,7 @@ def test_col_check_command_publishes_units_once_manifests_are_released(
     manifest = all_match_manifest(
         build_manifest, left["run_id"], "orders", left["pair_config"], left["counts"]
     )
-    store.put_json("manifest/orders.json", manifest)
+    store.put_json("pairs/orders/plan.json", manifest)
     store.close_row_check(["orders"])
     argv = ["col-check", "--work-dir", str(tmp_path / "work"), "--wait-timeout", "1"]
     assert main([*argv, "--poll-interval", "0", "--pull-workers", "1", "--wip", "50"]) == 0
@@ -73,6 +76,46 @@ def test_col_check_command_publishes_units_once_manifests_are_released(
         "run_id": "r2",
     }
     assert store.get_json("_status/col_check.closed.json")["expected_units"] == 8
+
+
+def test_left_run_completes_version_two_without_a_right_signal(
+    s3_bucket, synthetic, tmp_path, capsys
+):
+    root = f"s3://{s3_bucket}/runs"
+    document = pairs_config(synthetic.left)
+    document["version"] = 2
+    path = tmp_path / "version2.json"
+    path.write_text(json.dumps(document))
+    assert (
+        main(
+            [
+                "left-run",
+                "--config",
+                str(path),
+                "--run-s3",
+                root,
+                "--run-id",
+                "left-first",
+                "--pair",
+                "orders",
+                "--workers",
+                "1",
+                "--pull-workers",
+                "1",
+                "--stat-workers",
+                "1",
+                "--work-dir",
+                str(tmp_path / "left-first-work"),
+            ]
+        )
+        == 0
+    )
+    outcome = json.loads(capsys.readouterr().out)
+    assert outcome["published_units"] == 8 and outcome["pairs"] == ["orders"]
+    store = S3Store(f"{root}/left-first")
+    assert store.get_json("pairs/orders/plan.json")["version"] == 2
+    assert store.exists("_status/col_check.closed.json")
+    assert not store.exists("_status/row_check.closed.json")
 
 
 # >>> --run-s3 stays stable; row-check appends either the supplied or generated run id <<< #
@@ -89,15 +132,18 @@ def test_row_check_appends_a_generated_run_id_to_the_runs_root(
 
 def test_row_check_rejects_a_nested_run_id(s3_bucket, synthetic, tmp_path, capsys):
     root = f"s3://{s3_bucket}/runs"
-    assert main(
-        [
-            "row-check",
-            "--config",
-            _config(synthetic, tmp_path),
-            "--run-s3",
-            root,
-            "--run-id",
-            "../other",
-        ]
-    ) == 2
+    assert (
+        main(
+            [
+                "row-check",
+                "--config",
+                _config(synthetic, tmp_path),
+                "--run-s3",
+                root,
+                "--run-id",
+                "../other",
+            ]
+        )
+        == 2
+    )
     assert "one non-empty folder" in capsys.readouterr().err

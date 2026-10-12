@@ -6,7 +6,7 @@ directory with the same run layout:
 
 | Package | Runs on | Commands / entry | Needs |
 | --- | --- | --- | --- |
-| `src/dtrack_left` | on-prem PC | `dtrack row-check`, `dtrack col-check`, `dtrack tools ...` | Left DB access; shared runs root |
+| `src/dtrack_left` | on-prem PC | `dtrack left-run`, `dtrack row-check`, `dtrack col-check`, `dtrack tools ...` | Left DB access; shared runs root |
 | `src/dtrack_right` | a Databricks job, started once | `src/dtrack_right/notebook.py` | table/Volume read; same runs root |
 | `src/dtrack_local` | one operator machine | `dtrack local ...` | both connections; runs root optional for backup |
 
@@ -16,6 +16,12 @@ directory with the same run layout:
 - **col check** (stage 2): deterministic sampling and per-column statistics on both sides,
   compared on the Right. Left atomically publishes one statistics-bearing Unit object; Right
   prefetches its own side, compares, writes Pair-scoped results, and builds the report.
+
+Top-level config `version: 1` keeps the Right-admitted flow above. With `version: 2`, `dtrack
+left-run` publishes Left counts and statistics first. Right later persists row-count evidence and
+fails before any statistics scan unless every mismatch is explicitly listed in
+`excluded_partitions`. Rerunning Left with the same run id reuses unchanged Unit identities and
+republishes only vintages or columns affected by exclusion changes.
 
 The on-prem side holds no Databricks credential and installs no Databricks package. The Right
 side never imports the Left package and contains no CSV/pandas fallback or source-platform sampling

@@ -10,6 +10,7 @@ from dtrack_right.checks.row_check import (
     run_row_check,
     summarize_partitions,
 )
+from dtrack_right.common.manifest import build_manifest
 
 
 def test_reconcile_partitions_classifies_every_day_on_either_side():
@@ -97,17 +98,17 @@ def test_row_check_csv_is_sorted_with_blank_delta_for_non_diffs():
 
 def test_pending_documents_skip_reconciled_pairs_and_non_left_files():
     store = MemoryStore()
-    store.put_json("row_check/a.left.json", left_document("a"))
-    store.put_json("row_check/b.left.json", left_document("b"))
-    store.put_json("row_check/b.json", {"pair": "b"})
-    store.put_json("row_check/_LEFT_CLOSED", {"pairs": ["a", "b"]})
+    store.put_json("pairs/a/row_check/left.json", left_document("a"))
+    store.put_json("pairs/b/row_check/left.json", left_document("b"))
+    store.put_json("pairs/b/row_check/result.json", {"pair": "b"})
+    store.put_json("_status/left_row_check.closed.json", {"pairs": ["a", "b"]})
     assert [doc["pair"] for doc in pending_left_documents(store)] == ["a"]
 
 
 def test_right_row_check_reconciles_pending_left_documents_and_writes_manifest_with_holes():
     store = MemoryStore()
-    store.put_json("row_check/p.left.json", left_document())
-    store.put_json("row_check/_LEFT_CLOSED", {"pairs": ["p"]})
+    store.put_json("pairs/p/row_check/left.json", left_document())
+    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 1
     doc = store.get_json("pairs/p/row_check/result.json")
     assert doc["summary"] == {"match": 1, "count_diff": 1, "left_only": 1, "right_only": 0}
@@ -123,8 +124,8 @@ def test_right_row_check_reconciles_pending_left_documents_and_writes_manifest_w
 # >>> the verdict is the commit marker: a crash before it leaves the pair pending, never half-released <<< #
 def test_a_crash_before_the_manifest_lands_is_redone_on_restart():
     store = MemoryStore()
-    store.put_json("row_check/p.left.json", left_document())
-    store.put_json("row_check/_LEFT_CLOSED", {"pairs": ["p"]})
+    store.put_json("pairs/p/row_check/left.json", left_document())
+    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
     real_put = store.put_json
 
     def crash_on_manifest(key, value):
@@ -144,15 +145,15 @@ def test_a_crash_before_the_manifest_lands_is_redone_on_restart():
 
 def test_row_check_stays_open_until_every_announced_pair_is_reconciled():
     store = MemoryStore()
-    store.put_json("row_check/a.left.json", left_document("a"))
-    store.put_json("row_check/_LEFT_CLOSED", {"pairs": ["a", "b"]})
+    store.put_json("pairs/a/row_check/left.json", left_document("a"))
+    store.put_json("_status/left_row_check.closed.json", {"pairs": ["a", "b"]})
     run_row_check(store, lambda _cfg: FakeTarget())
     assert not store.exists("_status/row_check.closed.json")
 
 
 def test_manual_gate_reports_without_releasing_a_manifest():
     store = MemoryStore()
-    store.put_json("row_check/p.left.json", left_document())
+    store.put_json("pairs/p/row_check/left.json", left_document())
     run_row_check(store, lambda _cfg: FakeTarget(), gate="manual")
     assert store.exists("pairs/p/row_check/result.json")
     assert not store.exists("pairs/p/plan.json")
@@ -163,3 +164,33 @@ def test_a_failed_right_preflight_stops_the_pair():
     with pytest.raises(RuntimeError, match="TABLE_OR_VIEW_NOT_FOUND"):
         reconcile_pair(store, left_document(), FakeTarget(healthy=False))
     assert not store.exists("pairs/p/row_check/result.json")
+
+
+def test_version_two_persists_row_result_then_fails_until_mismatches_are_excluded():
+    store = MemoryStore()
+    left = left_document()
+    left["pair_config"]["version"] = 2
+    baseline = {
+        "gate_decision": {"passed": True},
+        "partitions": {
+            day: {"left": count, "right": None, "verdict": "left_only"}
+            for day, count in left["counts"].items()
+        },
+    }
+    store.put_json("pairs/p/row_check/left.json", left)
+    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+
+    with pytest.raises(RuntimeError, match=r"p: 2026-01-02, 2026-01-03"):
+        run_row_check(store, lambda _cfg: FakeTarget())
+    assert store.exists("pairs/p/row_check/result.json")
+    assert store.exists("report/pairs/p/row_check.csv")
+    assert store.get_json("pairs/p/plan.json")["version"] == 2
+
+    updated = build_manifest(
+        "run",
+        "p",
+        {**left["pair_config"], "excluded_partitions": ["2026-01-02", "2026-01-03"]},
+        baseline,
+    )
+    store.put_json("pairs/p/plan.json", updated)
+    assert run_row_check(store, lambda _cfg: FakeTarget()) == 0

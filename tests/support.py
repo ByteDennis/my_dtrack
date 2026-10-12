@@ -176,12 +176,13 @@ class MemoryStore:
             {"pairs": sorted(pairs), "closed_at": timestamp(self)},
         )
 
-    def close_manifests(self, pairs, expected_units):
+    def close_manifests(self, pairs, expected_units, plan_ids=None):
         return self.put_json(
             COL_CHECK_CLOSED,
             {
                 "pairs": sorted(pairs),
                 "expected_units": expected_units,
+                "plan_ids": plan_ids or {},
                 "closed_at": timestamp(self),
             },
         )
@@ -218,6 +219,10 @@ class FakeCursor:
 
     def fetchall(self):
         return list(self.rows)
+
+    def fetchmany(self, size):
+        rows, self.rows = self.rows[:size], self.rows[size:]
+        return rows
 
     def close(self):
         self.connection.cursors_closed += 1
@@ -273,9 +278,7 @@ def assert_store_contract(store):
     assert store.list_keys("nothing/") == []
     first = store.commit_unit(1, "u1", {"v": 1}, {"pair": "p"})
     store.commit_unit(2, "u2", {"v": 2}, {"pair": "p"})
-    assert {
-        key: value for key, value in first.items() if key != "left_ready_at"
-    } == {
+    assert {key: value for key, value in first.items() if key != "left_ready_at"} == {
         "pair": "p",
         "unit_id": "u1",
         "sequence": 1,

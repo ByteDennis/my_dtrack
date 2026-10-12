@@ -94,6 +94,26 @@ def test_config_needs_pairs_and_a_profile_object():
         validate_config({"connections": ["pcds"], "pairs": {"p": pair()}})
 
 
+def test_config_version_two_normalizes_exclusions_and_version_one_rejects_them():
+    row = pair()
+    row.update(
+        excluded_partitions=["20260102", "2026-01-01", "2026-01-01"],
+        excluded_columns=["amount", "amount"],
+    )
+    loaded = validate_config({"version": 2, "pairs": {"p": row}})
+    assert loaded["pairs"]["p"]["version"] == 2
+    assert loaded["pairs"]["p"]["excluded_partitions"] == ["2026-01-01", "2026-01-02"]
+    assert loaded["pairs"]["p"]["excluded_columns"] == ["amount"]
+    with pytest.raises(ValueError, match="exclusions require config version 2"):
+        validate_config({"version": 1, "pairs": {"p": row}})
+
+
+@pytest.mark.parametrize("version", [0, 3, "2", True])
+def test_config_supports_exactly_two_integer_versions(version):
+    with pytest.raises(ValueError, match="version must be 1 or 2"):
+        validate_config({"version": version, "pairs": {"p": pair()}})
+
+
 def test_csv_sides_may_name_a_file_as_conn_macro_and_skipped_pairs_are_not_checked():
     config = {"pairs": {"p": pair(left="csv"), "off": {"skip": True}}}
     config["pairs"]["p"]["left"]["conn_macro"] = "data/a.csv"
@@ -216,9 +236,7 @@ def test_a_new_date_column_type_only_needs_a_registered_class(tmp_path):
 
     path = tmp_path / "c.json"
     document = {"pairs": {"p": pair()}}
-    document["pairs"]["p"]["col_map"] = {
-        "D": {"right": "d", "type": "test_compact_to_date"}
-    }
+    document["pairs"]["p"]["col_map"] = {"D": {"right": "d", "type": "test_compact_to_date"}}
     path.write_text(json.dumps(document))
     assert load_config(path)["pairs"]["p"]["column_types"]["D"] == {
         "type": "date",
@@ -241,9 +259,7 @@ def test_inline_col_map_is_untouched(tmp_path):
     assert load_config(path)["pairs"]["p"]["col_map"] == {"amount": "amount"}
 
 
-def test_query_sql_file_is_relative_to_config_and_normalizes_query_windows(
-    tmp_path, monkeypatch
-):
+def test_query_sql_file_is_relative_to_config_and_normalizes_query_windows(tmp_path, monkeypatch):
     (tmp_path / "queries").mkdir()
     (tmp_path / "queries" / "consolidated.sql").write_text(
         "SELECT d1.dt AS FINAL_DT, d1.amount\n"
@@ -255,9 +271,7 @@ def test_query_sql_file_is_relative_to_config_and_normalizes_query_windows(
         "query": "queries/consolidated.sql",
         "date_col": "FINAL_DT",
         "date_type": "date",
-        "query_windows": {
-            "driver_one": {"expression": "d1.dt", "date_type": "date"}
-        },
+        "query_windows": {"driver_one": {"expression": "d1.dt", "date_type": "date"}},
     }
     path = tmp_path / "config.json"
     path.write_text(json.dumps(document))
@@ -266,9 +280,7 @@ def test_query_sql_file_is_relative_to_config_and_normalizes_query_windows(
     left = load_config(path)["pairs"]["p"]["left"]
 
     assert left["query"].endswith("WHERE {{query_windows:driver_one}}")
-    assert left["query_windows"] == {
-        "driver_one": {"expression": "d1.dt", "date_type": "date"}
-    }
+    assert left["query_windows"] == {"driver_one": {"expression": "d1.dt", "date_type": "date"}}
 
 
 def test_query_sql_file_can_come_from_a_connection_profile(tmp_path):
@@ -291,9 +303,7 @@ def test_query_sql_file_can_come_from_a_connection_profile(tmp_path):
     path = tmp_path / "config.json"
     path.write_text(json.dumps(document))
 
-    assert load_config(path)["pairs"]["p"]["left"]["query"] == (
-        "SELECT dt, amount FROM driver"
-    )
+    assert load_config(path)["pairs"]["p"]["left"]["query"] == ("SELECT dt, amount FROM driver")
 
 
 def test_right_query_sql_file_is_also_relative_to_config(tmp_path):
@@ -309,9 +319,7 @@ def test_right_query_sql_file_is_also_relative_to_config(tmp_path):
     path = tmp_path / "config.json"
     path.write_text(json.dumps(document))
 
-    assert load_config(path)["pairs"]["p"]["right"]["query"] == (
-        "SELECT * FROM main.sales.orders"
-    )
+    assert load_config(path)["pairs"]["p"]["right"]["query"] == ("SELECT * FROM main.sales.orders")
 
 
 def test_missing_query_sql_file_fails_with_resolved_path(tmp_path):

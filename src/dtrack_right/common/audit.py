@@ -90,7 +90,6 @@ class SqlAudit:
             if "/audit/" in key and key.endswith(".sql")
         ]
         current.extend(self.store.list_keys("_status/audit/"))
-        current.extend(self.store.list_keys("audit/"))
         return sorted(set(current))
 
     def refresh(self) -> bool:
@@ -192,7 +191,6 @@ def prune_audit_history(runs_store, *, keep: int = 5) -> list[str]:
                 if "/audit/" in key and key.endswith(".sql")
             ]
             keys.extend(run_store.list_keys("_status/audit/"))
-            keys.extend(run_store.list_keys("audit/"))
             if keys:
                 runs.append((max(keys), run_id, run_store, keys))
         removed = []

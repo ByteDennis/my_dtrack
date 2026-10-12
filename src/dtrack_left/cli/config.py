@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from dotenv import find_dotenv, load_dotenv
 
 from ..common.column_types import portable_column_type
-from ..common.dates import resolve_date_type
+from ..common.dates import canonical_date, resolve_date_type
 from ..common.query_windows import normalize_query_windows
 
 LEFT_SOURCES = {"oracle", "athena", "aws", "hadoop", "csv", "file", "duckdb"}
@@ -34,6 +34,10 @@ def resolve_connections(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
+    version = config.get("version", 1)
+    if isinstance(version, bool) or not isinstance(version, int) or version not in {1, 2}:
+        raise ValueError("config version must be 1 or 2")
+    config["version"] = version
     pairs = config.get("pairs")
     if not isinstance(pairs, dict) or not pairs:
         raise ValueError("config requires a non-empty pairs object")
@@ -46,6 +50,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     for name, pair in pairs.items():
         if pair.get("skip"):
             continue
+        pair["version"] = version
         left, right = pair.get("left") or {}, pair.get("right") or {}
         left_source = str(left.get("source") or "").lower()
         right_source = str(right.get("source") or "").lower()
@@ -90,6 +95,34 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         _expand_inline_col_map(pair)
         if not isinstance(pair.get("col_map"), dict) or not pair["col_map"]:
             raise ValueError(f"{name}: col_map must be non-empty")
+        excluded_partitions = pair.get("excluded_partitions") or []
+        excluded_columns = pair.get("excluded_columns") or []
+        if version == 1 and (excluded_partitions or excluded_columns):
+            raise ValueError(f"{name}: exclusions require config version 2")
+        if not isinstance(excluded_partitions, list) or not all(
+            isinstance(value, str) for value in excluded_partitions
+        ):
+            raise TypeError(f"{name}: excluded_partitions must be a list of dates")
+        if not isinstance(excluded_columns, list) or not all(
+            isinstance(value, str) for value in excluded_columns
+        ):
+            raise TypeError(f"{name}: excluded_columns must be a list of Left column names")
+        try:
+            pair["excluded_partitions"] = sorted(
+                {canonical_date(value) for value in excluded_partitions}
+            )
+        except ValueError as exc:
+            raise ValueError(f"{name}: invalid excluded_partitions: {exc}") from None
+        unknown_excluded = sorted(set(excluded_columns) - set(pair["col_map"]))
+        if unknown_excluded:
+            raise ValueError(
+                f"{name}: excluded_columns names columns outside col_map: "
+                f"{', '.join(unknown_excluded)}"
+            )
+        date_col = str(left.get("date_col") or "").casefold()
+        if any(str(column).casefold() == date_col for column in excluded_columns):
+            raise ValueError(f"{name}: excluded_columns cannot include the Left date_col")
+        pair["excluded_columns"] = list(dict.fromkeys(excluded_columns))
         overrides = pair.get("col_type_overrides") or {}
         if set(overrides) - set(pair["col_map"]) or set(overrides.values()) - COL_TYPES:
             raise ValueError(f"{name}: col_type_overrides maps col_map keys to numeric|categorical")

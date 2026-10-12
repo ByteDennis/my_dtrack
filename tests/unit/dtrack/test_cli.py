@@ -6,7 +6,10 @@ from dtrack.cli import main
 def test_unified_cli_has_a_local_workflow_group(capsys):
     assert main(["-h"]) == 0
     root_help = capsys.readouterr().out
-    assert all(f"  {name}" in root_help for name in ("row-check", "col-check", "local", "tools"))
+    assert all(
+        f"  {name}" in root_help
+        for name in ("left-run", "row-check", "col-check", "local", "tools")
+    )
     assert "  fetch-report" not in root_help
 
     assert main(["tools", "-h"]) == 0

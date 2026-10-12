@@ -4,7 +4,7 @@ from support import STATS, FakeTarget, MemoryStore, left_document
 from dtrack_right.checks import col_check
 from dtrack_right.checks.col_check import ColCheck, DrainScheduler, compare_statistics
 from dtrack_right.checks.row_check import run_row_check
-from dtrack_right.common.manifest import unit_id
+from dtrack_right.common.manifest import build_manifest, unit_id, unit_id_for
 
 
 def test_compare_statistics_matches_identical_sides():
@@ -95,8 +95,8 @@ def test_scheduler_skips_windows_already_fetched():
 def _drained_store(sample_mode="all"):
     store = MemoryStore()
     doc = left_document(sample=None if sample_mode == "all" else 1)
-    store.put_json("row_check/p.left.json", doc)
-    store.put_json("row_check/_LEFT_CLOSED", {"pairs": ["p"]})
+    store.put_json("pairs/p/row_check/left.json", doc)
+    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
     run_row_check(store, lambda _cfg: FakeTarget())
     manifest = store.get_json("pairs/p/plan.json")
     uid = unit_id("p", "2026-01-01", "amount")
@@ -122,17 +122,7 @@ def test_col_check_waits_for_fixed_sample_keys_before_prefetching():
     with pytest.raises(TimeoutError):
         ColCheck(store, lambda _cfg: target, poll_interval=0, idle_timeout=0).run()
     assert target.calls == []
-    store.put_json(
-        "pairs/p/fixed_keys.json", {"pair": "p", "windows": {"2026-01-01": [["7"]]}}
-    )
-    results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
-    assert results and target.calls[-1] == ("p", "2026-01-01", [["7"]])
-
-
-def test_col_check_accepts_v1_fixed_sample_keys():
-    store, _uid = _drained_store(sample_mode="fixed")
-    store.put_json("manifest/p.keys.json", {"pair": "p", "windows": {"2026-01-01": [["7"]]}})
-    target = FakeTarget()
+    store.put_json("pairs/p/fixed_keys.json", {"pair": "p", "windows": {"2026-01-01": [["7"]]}})
     results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert results and target.calls[-1] == ("p", "2026-01-01", [["7"]])
 
@@ -143,6 +133,53 @@ def test_col_check_resumes_from_results_already_on_the_store():
     target = FakeTarget()
     assert ColCheck(store, lambda _cfg: target, poll_interval=0).run() == []
     assert target.calls == []
+
+
+def test_version_two_restart_scans_only_the_window_changed_by_the_current_plan():
+    pair = {
+        "version": 2,
+        "left": {"source": "oracle", "date_col": "dt"},
+        "right": {"source": "databricks", "date_col": "dt"},
+        "col_map": {"amount": "amount"},
+        "vintage": "month",
+    }
+    row_check = {
+        "gate_decision": {"passed": True},
+        "partitions": {
+            "2026-01-01": {"left": 1, "right": 1, "verdict": "match"},
+            "2026-01-02": {"left": 1, "right": 2, "verdict": "count_diff"},
+            "2026-02-01": {"left": 1, "right": 1, "verdict": "match"},
+        },
+    }
+    store = MemoryStore()
+    first = build_manifest("run", "p", pair, row_check)
+    store.put_json("pairs/p/plan.json", first)
+    for sequence, window in enumerate(first["windows"], 1):
+        uid = unit_id_for(first, window, "amount")
+        store.commit_unit(
+            sequence,
+            uid,
+            STATS,
+            {"pair": "p", "window": window["bucket"], "column": "amount"},
+        )
+    store.close_manifests(["p"], 2, plan_ids={"p": first["plan_id"]})
+    ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0).run()
+
+    second = build_manifest("run", "p", {**pair, "excluded_partitions": ["2026-01-02"]}, row_check)
+    store.put_json("pairs/p/plan.json", second)
+    january = second["windows"][0]
+    changed_uid = unit_id_for(second, january, "amount")
+    store.commit_unit(
+        3,
+        changed_uid,
+        STATS,
+        {"pair": "p", "window": january["bucket"], "column": "amount"},
+    )
+    store.close_manifests(["p"], 2, plan_ids={"p": second["plan_id"]})
+    target = FakeTarget()
+    results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
+    assert len(results) == 1
+    assert target.calls == [("p", "2026-01-01", None)]
 
 
 def test_a_failing_prefetch_dead_letters_every_unit_of_the_window():

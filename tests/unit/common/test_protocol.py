@@ -6,9 +6,6 @@ from support import MemoryStore
 from dtrack_right.common.manifest import unit_id
 from dtrack_right.common.protocol import (
     get_run_status,
-    list_plans,
-    list_results,
-    list_units,
     refresh_units_status,
     right_ready_path,
     timestamp,
@@ -73,24 +70,3 @@ def test_run_status_freezes_the_timezone_and_keeps_offset_timestamps():
     write_run_status(store, {"state": "complete", "role": "right"})
     assert get_run_status(store)["timezone"] == "Asia/Tokyo"
     assert get_run_status(store)["updated_at"].endswith("+09:00")
-
-
-def test_v2_readers_still_accept_v1_plan_unit_and_result_objects():
-    store = MemoryStore()
-    store.put_json("manifest/orders.json", _plan())
-    store.put_json("units/u.json", {"n_total": 1})
-    store.put_json(
-        "_INDEX/00000001-u.json",
-        {
-            "pair": "orders",
-            "window": "2026-01",
-            "column": "amount",
-            "unit_id": "u",
-            "sequence": 1,
-            "payload_key": "units/u.json",
-        },
-    )
-    store.put_json("results/u.json", {"pair": "orders", "unit_id": "u", "verdict": "match"})
-    assert [value["pair"] for _key, value in list_plans(store)] == ["orders"]
-    assert [value["unit_id"] for _key, value in list_units(store)] == ["u"]
-    assert [value["unit_id"] for _key, value in list_results(store)] == ["u"]

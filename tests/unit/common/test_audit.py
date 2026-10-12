@@ -126,15 +126,20 @@ def test_detailed_audit_events_are_retained_for_only_the_latest_five_runs(tmp_pa
     for index in range(7):
         run = runs.child(f"run-{index}")
         run.put_bytes(
-            f"audit/2026010{index + 1}T000000000000Z-event.txt",
+            f"_status/audit/2026010{index + 1}T000000000000Z-event.sql",
             f"-- audit_key={index}\nSELECT {index}\n\n".encode(),
+            content_type="text/plain",
         )
-        run.put_bytes("audit.txt", f"SELECT {index}\n".encode())
+        run.put_bytes(
+            "_status/audit.sql", f"SELECT {index}\n".encode(), content_type="text/plain"
+        )
 
     assert prune_audit_history(runs, keep=5) == ["run-1", "run-0"]
-    assert not runs.child("run-0").list_keys("audit/")
-    assert not runs.child("run-1").list_keys("audit/")
-    assert not (tmp_path / "runs/run-0/audit").exists()
-    assert not (tmp_path / "runs/run-1/audit").exists()
-    assert all(runs.child(f"run-{index}").list_keys("audit/") for index in range(2, 7))
-    assert all(runs.child(f"run-{index}").exists("audit.txt") for index in range(7))
+    assert not runs.child("run-0").list_keys("_status/audit/")
+    assert not runs.child("run-1").list_keys("_status/audit/")
+    assert not (tmp_path / "runs/run-0/_status/audit").exists()
+    assert not (tmp_path / "runs/run-1/_status/audit").exists()
+    assert all(
+        runs.child(f"run-{index}").list_keys("_status/audit/") for index in range(2, 7)
+    )
+    assert all(runs.child(f"run-{index}").exists("_status/audit.sql") for index in range(7))

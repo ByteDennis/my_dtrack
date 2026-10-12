@@ -155,6 +155,18 @@ class ConfigDefaultsGroup(click.Group):
 
 
 DISTRIBUTED_OPTIONS = {
+    "left-run": {
+        "store_uri",
+        "run_id",
+        "pairs",
+        "workers",
+        "work_dir",
+        "pull_workers",
+        "stat_workers",
+        "wip",
+        "log_level",
+        "debug",
+    },
     "row-check": {"store_uri", "run_id", "pairs", "workers", "log_level", "debug"},
     "col-check": {
         "store_uri",
@@ -173,7 +185,7 @@ DISTRIBUTED_OPTIONS = {
 
 
 class DistributedGroup(ConfigDefaultsGroup):
-    env_commands: ClassVar[set[str]] = {"row-check", "col-check"}
+    env_commands: ClassVar[set[str]] = {"left-run", "row-check", "col-check"}
 
     def config_defaults(self, document: dict) -> dict[str, dict]:
         return {

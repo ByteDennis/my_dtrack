@@ -122,6 +122,43 @@ def test_build_manifest_defaults_to_daily_windows_and_full_scan(common):
     assert manifest["sample"] == {"mode": "all"}
 
 
+def test_version_two_uses_left_partitions_and_explicit_exclusions(common):
+    pair = _variant(
+        version=2,
+        excluded_partitions=["2026-01-02", "2026-02-02"],
+        excluded_columns=["ID"],
+    )
+    manifest = common.manifest.build_manifest("run", "p", pair, ROW_CHECK)
+    assert manifest["version"] == 2 and manifest["plan_id"]
+    assert manifest["columns"] == ["AMOUNT"]
+    assert manifest["windows"] == [
+        {"bucket": "2026-01-01", "partitions": ["2026-01-01", "2026-01-03"], "n_left": 7},
+        {"bucket": "2026-02-01", "partitions": ["2026-02-01"], "n_left": 5},
+    ]
+
+
+def test_version_two_unit_ids_change_only_for_the_affected_window(common):
+    first = common.manifest.build_manifest("run", "p", _variant(version=2), ROW_CHECK)
+    second = common.manifest.build_manifest(
+        "run", "p", _variant(version=2, excluded_partitions=["2026-01-02"]), ROW_CHECK
+    )
+    first_ids = {
+        window["bucket"]: common.manifest.unit_id_for(first, window, "AMOUNT")
+        for window in first["windows"]
+    }
+    second_ids = {
+        window["bucket"]: common.manifest.unit_id_for(second, window, "AMOUNT")
+        for window in second["windows"]
+    }
+    assert first_ids["2026-01-01"] != second_ids["2026-01-01"]
+    assert first_ids["2026-02-01"] == second_ids["2026-02-01"]
+    right_only = common.manifest.build_manifest(
+        "run", "p", _variant(version=2, excluded_partitions=["2026-03-01"]), ROW_CHECK
+    )
+    assert common.manifest.planned_unit_ids(right_only) == common.manifest.planned_unit_ids(first)
+    assert right_only["plan_id"] != first["plan_id"]
+
+
 def test_date_partition_key_reuses_each_sides_date_type_for_hashing(common):
     pair = _variant(
         key="DT",
@@ -146,6 +183,7 @@ def test_date_partition_key_reuses_each_sides_date_type_for_hashing(common):
     ("change", "message"),
     [
         (lambda m: m.pop("windows"), "missing fields: windows"),
+        (lambda m: m.update(protocol_version=1), "protocol version"),
         (lambda m: m.update(protocol_version=99), "protocol version"),
         (lambda m: m.update(right={"source": "csv"}), "must be databricks"),
         (lambda m: m.update(expected_units=1), "expected_units"),

@@ -11,7 +11,6 @@ from urllib.parse import urlparse
 from ..common.protocol import (
     COL_CHECK_CLOSED,
     HEARTBEAT,
-    LEGACY_HEARTBEAT,
     ROW_CHECK_CLOSED,
     failure_path,
     list_failures,
@@ -196,18 +195,23 @@ class S3Store:
         )
 
     def heartbeat_age(self, now: float | None = None) -> float | None:
-        key = HEARTBEAT if self.exists(HEARTBEAT) else LEGACY_HEARTBEAT
-        if not self.exists(key):
+        if not self.exists(HEARTBEAT):
             return None
         current = time.time() if now is None else now
-        return max(0.0, current - float(self.get_json(key)["epoch_s"]))
+        return max(0.0, current - float(self.get_json(HEARTBEAT)["epoch_s"]))
 
-    def close_manifests(self, pairs: list[str], expected_units: int) -> str:
+    def close_manifests(
+        self,
+        pairs: list[str],
+        expected_units: int,
+        plan_ids: dict[str, str | None] | None = None,
+    ) -> str:
         return self.put_json(
             COL_CHECK_CLOSED,
             {
                 "pairs": sorted(pairs),
                 "expected_units": expected_units,
+                "plan_ids": plan_ids or {},
                 "closed_at": timestamp(self),
             },
         )

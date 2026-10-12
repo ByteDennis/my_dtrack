@@ -26,9 +26,9 @@ LEFT = {
 
 def _store():
     store = MemoryStore()
-    store.put_json("row_check/p.left.json", {"pair": "p", "counts": {}})
+    store.put_json("pairs/p/row_check/left.json", {"pair": "p", "counts": {}})
     store.put_json(
-        "row_check/p.json",
+        "pairs/p/row_check/result.json",
         {
             "run_id": "run",
             "pair": "p",
@@ -51,9 +51,11 @@ def _store():
             "timing": {"left_count_s": 1.5, "right_count_s": 0.5},
         },
     )
-    store.put_json("manifest/p.json", {"pair": "p", "vintage": "month", "expected_units": 2})
-    store.put_json("manifest/p.keys.json", {"pair": "p", "windows": {}})
-    store.put_json("manifest/_CLOSED", {"pairs": ["p"], "expected_units": 2})
+    store.put_json(
+        "pairs/p/plan.json", {"pair": "p", "vintage": "month", "expected_units": 2}
+    )
+    store.put_json("pairs/p/fixed_keys.json", {"pair": "p", "windows": {}})
+    store.put_json("_status/col_check.closed.json", {"pairs": ["p"], "expected_units": 2})
     same = compare_statistics(pair="p", window="2026-01-01", column="x", left=LEFT, right=LEFT)
     same["unit_id"], same["right_col"] = "u1", "x"
     changed = compare_statistics(
@@ -99,7 +101,7 @@ def test_report_files_can_be_published_to_a_run_store(tmp_path):
     run_store = runs_store.child("run")
     for name, path in files.items():
         run_store.put_bytes(f"report/{name}", path.read_bytes(), content_type="")
-    run_store.put_json("_STATUS.json", {"state": "complete"})
+    run_store.put_json("_status/run.json", {"state": "complete"})
     assert sorted(run_store.list_keys("report/")) == [f"report/{name}" for name in sorted(files)]
     assert run_store.get_bytes("report/report.xlsx") == files["report.xlsx"].read_bytes()
 
@@ -124,7 +126,7 @@ def test_run_is_partial_with_dead_units_or_without_a_closed_manifest(tmp_path):
         {"unit_id": "u3", "error": "boom"}
     ]
     store = _store()
-    store.objects.pop("manifest/_CLOSED")
+    store.objects.pop("_status/col_check.closed.json")
     summary = json.loads(build_report(store, tmp_path / "b")["summary.json"].read_text())
     assert summary["status"] == "PARTIAL" and summary["units_expected"] == 2
 
@@ -134,7 +136,7 @@ def test_a_run_without_col_results_still_reports_row_counts(tmp_path):
     for key in [
         key
         for key in store.objects
-        if key.startswith("results/") or "/col_check/results/" in key
+        if "/col_check/results/" in key
     ]:
         store.objects.pop(key)
     files = build_report(store, tmp_path)

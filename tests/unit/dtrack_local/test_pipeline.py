@@ -13,9 +13,32 @@ from dtrack_local.csv_target import CsvAnchorTarget
 
 
 # >>> the full local plan on the e2e synthetic files: CSV anchor as the Right side, report and backup to S3 <<< #
-def test_run_all_matches_the_distributed_protocol_and_backs_up(synthetic, tmp_path, s3_bucket):
+def test_run_all_matches_the_distributed_protocol_and_backs_up(
+    synthetic, tmp_path, s3_bucket, monkeypatch
+):
+    preflight_calls = {"left": 0, "right": 0}
+    source_factory = pipeline.source_from_config
+
+    def counted(resource, side):
+        original = resource.preflight
+
+        def preflight():
+            preflight_calls[side] += 1
+            return original()
+
+        resource.preflight = preflight
+        return resource
+
+    monkeypatch.setattr(
+        pipeline,
+        "source_from_config",
+        lambda config: counted(source_factory(config), "left"),
+    )
+
     def anchor(config):
-        return CsvAnchorTarget(config, synthetic.root / "right", tmp_path / "rw")
+        return counted(
+            CsvAnchorTarget(config, synthetic.root / "right", tmp_path / "rw"), "right"
+        )
 
     def open_local():
         return pipeline.open_run(
@@ -23,6 +46,7 @@ def test_run_all_matches_the_distributed_protocol_and_backs_up(synthetic, tmp_pa
         )
 
     outcome = pipeline.run_all(open_local(), run_s3=f"s3://{s3_bucket}/runs")
+    assert preflight_calls == {"left": 2, "right": 2}
     assert outcome["status"] == "DONE" and outcome["findings"] == {
         "row_count_diff": 1,
         "partition_missing": 2,
@@ -49,6 +73,7 @@ def test_run_all_matches_the_distributed_protocol_and_backs_up(synthetic, tmp_pa
     assert not any(key.startswith("runs/r1/_local/") for key in keys)
 
     again = pipeline.run_all(open_local())
+    assert preflight_calls == {"left": 4, "right": 4}
     assert again["findings"] == outcome["findings"] and again["landing"] == outcome["landing"]
     assert open_local().status()["state"] == "complete"
 

@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from support import RecordingClient, assert_store_contract
 
@@ -26,10 +28,19 @@ def test_resolve_run_rejects_nested_or_parent_run_ids(tmp_path):
 
 def test_volume_store_hides_partial_writes_and_normalises_prefixes(tmp_path):
     store = VolumeStore(tmp_path)
-    store.put_json("_INDEX/00000001-a.json", {})
-    (tmp_path / "_INDEX" / "00000002-b.json.part").write_text("{")
-    assert store.list_keys("/_INDEX/") == ["_INDEX/00000001-a.json"]
-    assert store.list_keys("_INDEX/0000000") == ["_INDEX/00000001-a.json"]
+    store.put_json("pairs/p/units/00000001-a.json", {})
+    (tmp_path / "pairs/p/units/00000002-b.json.part").write_text("{")
+    assert store.list_keys("/pairs/p/units/") == ["pairs/p/units/00000001-a.json"]
+    assert store.list_keys("pairs/p/units/0000000") == ["pairs/p/units/00000001-a.json"]
+
+
+def test_volume_store_atomically_replaces_one_file_from_concurrent_writers(tmp_path):
+    store = VolumeStore(tmp_path)
+    bodies = [f"snapshot-{index}".encode() for index in range(20)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda body: store.put_bytes("_status/units.csv", body), bodies))
+    assert store.get_bytes("_status/units.csv") in bodies
+    assert not list(tmp_path.rglob("*.part"))
 
 
 def test_s3_store_honours_the_store_contract_on_mocked_s3(s3_bucket):
@@ -55,11 +66,17 @@ def test_list_prefixes_and_child_address_run_folders(runs_root):
 
 def test_resolve_run_picks_newest_unfinished_run_under_a_root(runs_root):
     root = open_store(runs_root)
-    root.child("20260901T000000Z-aaa").put_json("_STATUS.json", {"state": "complete"})
-    root.child("20260902T000000Z-bbb").put_json("row_check/p.left.json", {"pair": "p"})
-    root.child("20260903T000000Z-ccc").put_json("row_check/p.left.json", {"pair": "p"})
+    root.child("20260901T000000Z-aaa").put_json("_status/run.json", {"state": "complete"})
+    root.child("20260902T000000Z-bbb").put_json(
+        "pairs/p/row_check/left.json", {"pair": "p"}
+    )
+    root.child("20260903T000000Z-ccc").put_json(
+        "pairs/p/row_check/left.json", {"pair": "p"}
+    )
     store, run_id = resolve_run(runs_root)
-    assert run_id == "20260903T000000Z-ccc" and store.exists("row_check/p.left.json")
+    assert run_id == "20260903T000000Z-ccc" and store.exists(
+        "pairs/p/row_check/left.json"
+    )
     assert resolve_run(runs_root, "20260902T000000Z-bbb")[1] == "20260902T000000Z-bbb"
     assert run_is_complete(root.child("20260901T000000Z-aaa"))
     assert not run_is_complete(root.child("20260902T000000Z-bbb"))
@@ -67,13 +84,13 @@ def test_resolve_run_picks_newest_unfinished_run_under_a_root(runs_root):
 
 def test_resolve_run_does_not_treat_a_run_folder_as_the_runs_root(runs_root):
     run = open_store(runs_root).child("r1")
-    run.put_json("row_check/p.left.json", {"pair": "p"})
+    run.put_json("pairs/p/row_check/left.json", {"pair": "p"})
     assert resolve_run(run.root_uri) == (None, None)
 
 
 def test_resolve_run_returns_nothing_when_every_run_is_complete(runs_root):
     root = open_store(runs_root)
-    root.child("r1").put_json("_STATUS.json", {"state": "complete"})
+    root.child("r1").put_json("_status/run.json", {"state": "complete"})
     assert resolve_run(runs_root) == (None, None)
 
 

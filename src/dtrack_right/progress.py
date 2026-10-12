@@ -12,12 +12,9 @@ from .common.protocol import (
     COL_CHECK_CLOSED,
     HEARTBEAT,
     LEFT_ROW_CHECK_CLOSED,
-    LEGACY_COL_CHECK_CLOSED,
-    LEGACY_HEARTBEAT,
-    LEGACY_LEFT_ROW_CHECK_CLOSED,
-    LEGACY_ROW_CHECK_CLOSED,
     ROW_CHECK_CLOSED,
     UNITS_STATUS,
+    active_unit_ids,
     get_run_status,
     list_failures,
     list_left_documents,
@@ -84,11 +81,8 @@ def _iso(value: float | str | None) -> str | None:
     return str(value)
 
 
-def _first(store, *keys: str) -> dict[str, Any]:
-    for key in keys:
-        if store.exists(key):
-            return store.get_json(key)
-    return {}
+def _document(store, key: str) -> dict[str, Any]:
+    return store.get_json(key) if store.exists(key) else {}
 
 
 # >>> one row per unit from _status/units.csv when the Right side refreshed it, else from the unit/result/failure documents <<< #
@@ -98,9 +92,15 @@ def unit_rows(store) -> list[dict[str, str]]:
         return list(csv.DictReader(io.StringIO(text)))
     results = {value["unit_id"]: value for _key, value in list_results(store)}
     failures = {value["unit_id"]: value for _key, value in list_failures(store)}
+    active = active_unit_ids(store)
+    version2_pairs = {
+        plan["pair"] for _key, plan in list_plans(store) if int(plan.get("version") or 1) == 2
+    }
     rows = []
     for _key, unit in list_units(store):
         uid = unit["unit_id"]
+        if unit.get("pair") in version2_pairs and uid not in active:
+            continue
         result, failure = results.get(uid, {}), failures.get(uid, {})
         rows.append(
             {
@@ -121,10 +121,10 @@ def snapshot(
 ) -> list[dict[str, Any]]:
     stamp = (now or datetime.now(UTC)).isoformat(timespec="seconds")
     status = get_run_status(store)
-    heartbeat = _first(store, HEARTBEAT, LEGACY_HEARTBEAT)
-    left_closed = _first(store, LEFT_ROW_CHECK_CLOSED, LEGACY_LEFT_ROW_CHECK_CLOSED)
-    row_closed = _first(store, ROW_CHECK_CLOSED, LEGACY_ROW_CHECK_CLOSED)
-    col_closed = _first(store, COL_CHECK_CLOSED, LEGACY_COL_CHECK_CLOSED)
+    heartbeat = _document(store, HEARTBEAT)
+    left_closed = _document(store, LEFT_ROW_CHECK_CLOSED)
+    row_closed = _document(store, ROW_CHECK_CLOSED)
+    col_closed = _document(store, COL_CHECK_CLOSED)
     base = {
         "snapshot_ts": stamp,
         "run_id": run_id,

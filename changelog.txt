@@ -1,3 +1,30 @@
+Unreleased: protocol-v2-only runtime
+src/dtrack_left/cli/checks.py — Added `left-run` for config Version 2 so Left counts and statistics finish without waiting for a Right signal.
+src/dtrack_left/cli/config.py — Added exact config versions 1/2 plus validated `excluded_partitions` and `excluded_columns` for Version 2.
+src/dtrack_left/common/manifest.py — Added current-plan fingerprints so same-run reruns reuse unchanged Units and replace only affected vintages or columns.
+src/dtrack_right/checks/row_check.py — Persisted row verdicts before failing closed on Version 2 mismatches that are not explicitly excluded.
+src/dtrack_right/checks/col_check.py — Limited scans, completion, and reuse to Units in the current Pair plan.
+src/dtrack_right/report/build.py — Excluded inactive Unit results and failures from current Version 2 reports.
+src/dtrack_left/backends/sources.py — Streamed database CSV exports in bounded batches instead of materializing each sampled vintage in Python memory.
+CONTEXT.md and docs/adr/0008-config-first-left-publication.md — Defined the two reconciliation versions, exclusion set, fail-closed barrier, and current-plan replacement semantics without adding runtime audit state.
+tests — Covered Version 2 config validation, Left-first execution, mismatch failure/recovery, selective vintage reruns, and streaming database exports.
+src/dtrack_left/common/protocol.py — Removed protocol-v1 path constants and fallback readers; Pair and `_status` artifacts are now the only accepted runtime layout.
+src/dtrack_right/common/protocol.py — Mirrored the protocol-v2-only reader and barrier contract on Databricks.
+src/dtrack_left/backends/store.py — Removed the old heartbeat fallback.
+src/dtrack_right/backends/store.py — Removed the old heartbeat fallback and made concurrent Volume status writes use collision-free atomic temporary files.
+src/dtrack_left/checks/rollback.py — Limited discovery, planning, and rebuilds to Pair-scoped protocol-v2 artifacts.
+src/dtrack_left/checks/row_check.py — Accepted already validated Left source instances and health so full local runs do not repeat preflight queries.
+src/dtrack_right/checks/row_check.py — Removed old Left-document, verdict, and closure fallbacks and reused already validated Right targets during full local runs.
+src/dtrack_local/pipeline.py — Retained run-level preflight resources and reused them during row-check while preserving standalone row-check validation.
+src/dtrack_right/checks/col_check.py — Removed old index polling and now consumes Pair Units only.
+src/dtrack_right/progress.py — Removed old run-status, heartbeat, and closure fallbacks.
+src/dtrack_left/common/audit.py — Removed reads and pruning for the old run-level audit event folder.
+src/dtrack_right/common/audit.py — Mirrored protocol-v2-only audit discovery and retention.
+src/dtrack_left/common/manifest.py — Rejected manifests whose protocol version is not the current version.
+src/dtrack_right/common/manifest.py — Mirrored strict current-version manifest validation.
+examples/nbs — Updated executable examples to use Pair and `_status` paths exclusively.
+tests — Replaced old-layout fixtures and compatibility assertions with protocol-v2 artifacts, covered concurrent status publication, and verified one preflight per side and Pair in `run_all`.
+
 Commit: a086678db03562d21d9ef9668814cf3c61495c2c
 CONTEXT.md — Modified: distinguished immutable Pair plans and audit events from mutable run status and derived Unit state snapshots.
 README.md — Modified: documented the Pair-centric protocol-v2 flow, atomic statistics-bearing Units, and `_status/units.csv` progress view.

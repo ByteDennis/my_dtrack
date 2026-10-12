@@ -13,7 +13,7 @@ Local fallback:
 
 Stage 1 / row:
   Left counts each date partition. Right counts the same partitions, reconciles them,
-  applies the gate, and publishes manifests only for admitted pairs.
+  and applies the configured Version 1 or Version 2 barrier.
 
 Stage 2 / col:
   Left and Right independently select the same records, compute per-column statistics,
@@ -21,13 +21,19 @@ Stage 2 / col:
 
 All auxiliary commands are under `dtrack tools`; old root commands are intentionally absent.
 
+Config versions:
+  version: 1  Right reconciles counts, then releases matching partitions to Left Stage 2.
+  version: 2  Left runs first from the config; Right later fails if any mismatch is not listed
+              in excluded_partitions, otherwise it computes and compares current-plan statistics.
+
 Debug the main workflows directly:
 
+  dtrack left-run --config config.json --debug ipdb
   dtrack row-check --config config.json --debug ipdb
   dtrack col-check --config config.json --debug attach            # debugpy port 5678
   dtrack local run --config config.json --debug ipdb
 
-Debug row-check, col-check, or local directly with `--debug ipdb|attach`.
+Debug left-run, row-check, col-check, or local directly with `--debug ipdb|attach`.
 
 Terminal mode uses ipdb and opens post-mortem on unhandled runtime errors.
 
@@ -66,10 +72,10 @@ Common environment variables (`.env` is loaded):
 
 DuckDB budget (every Left/local DuckDB connection: file sources, statistics, local landing):
 
-  DTRACK_DUCKDB_MEMORY=16GB                # process budget; default 60% of physical RAM
-  DTRACK_DUCKDB_SHARE=4                    # concurrent connections the budget is split across
+  DTRACK_DUCKDB_MEMORY=8GB                 # example for a 16GB machine; default 60% physical RAM
+  DTRACK_DUCKDB_SHARE=2                    # concurrent connections the budget is split across
                                            # (pull-workers + stat-workers; local adds Right + landing)
-  DTRACK_DUCKDB_THREADS=4                  # per connection; default cpu_count / SHARE
+  DTRACK_DUCKDB_THREADS=2                  # per connection; default cpu_count / SHARE
   DTRACK_DUCKDB_TEMP=D:\dtrack-spill       # spill + statistics scratch; default <work-dir>/duckdb
                                            # (col-check) or <run>/_local/duckdb (local), then
                                            # <system temp>/dtrack-duckdb when that is not writable
@@ -79,6 +85,11 @@ Set DTRACK_DUCKDB_MEMORY to what the machine can really give dtrack: each connec
 MEMORY / SHARE and spills to DTRACK_DUCKDB_TEMP above that instead of failing. A 1715-column
 window of 70k rows completes inside 4 GiB per connection; without a budget DuckDB assumes 80%
 of RAM (on Windows including the page file) for every connection at once.
+
+For a 16GB machine, start Version 2 Left work with `--pull-workers 1 --stat-workers 1`,
+`DTRACK_DUCKDB_MEMORY=8GB`, `DTRACK_DUCKDB_SHARE=2`, and `DTRACK_DUCKDB_THREADS=2`.
+Database CSV pulls stream 10,000 rows at a time; statistics still use one scratch DuckDB per
+concurrent vintage and aggregate mapped columns in `DTRACK_STATS_BATCH` batches.
 
 Local-only (Databricks SQL warehouse pulls through a corporate proxy):
 
@@ -94,17 +105,20 @@ The Left hand-off removes credentials, DSNs, hostnames, HTTP paths, and *_env fi
 Executed SQL is intentionally retained and can contain configured predicates or fixed sample-key
 literals; restrict access to each run prefix accordingly.
 
-Command option precedence for `dtrack row-check`, `dtrack col-check`, and `dtrack local` is:
+Command option precedence for `dtrack left-run`, `dtrack row-check`, `dtrack col-check`, and
+`dtrack local` is:
 
   CLI > config command section > environment > built-in
 
-Use top-level `row-check` and `col-check` objects for their optional arguments. For example:
+Use top-level `left-run`, `row-check`, and `col-check` objects for optional arguments. For example:
 
+  "left-run": {"run-s3": "s3://bucket/dtrack/runs", "pull-workers": 1},
   "row-check": {"run-s3": "s3://bucket/dtrack/runs", "workers": 4},
   "col-check": {"run-s3": "s3://bucket/dtrack/runs", "pull-workers": 2}
 
 Display effective defaults with:
 
+  dtrack left-run --config config.json --help
   dtrack row-check --config config.json --help
   dtrack col-check --config config.json --help
   dtrack local run --config config.json --help
@@ -116,6 +130,7 @@ Display effective defaults with:
 Minimal pattern:
 
 {
+  "version": 2,
   "connections": {
     "ora_main": {
       "source": "oracle",
@@ -150,6 +165,8 @@ Minimal pattern:
         "LINE_ID": "numeric"
       },
       "sample": 0.10,
+      "excluded_partitions": [],
+      "excluded_columns": [],
       "col_map": {
         "ORDER_ID": "order_id",
         "LINE_ID": "line_id",
@@ -351,6 +368,10 @@ Gate selection:
   manual      record findings but release no manifest; after review, use row rollback/new run
               and rerun the Right Job with auto or ratio policy to release Stage 2
 
+For `version: 2`, the gate option does not admit partitions. Right writes its row-check JSON/CSV,
+then stops immediately if any `count_diff`, `left_only`, or `right_only` partition is absent from
+`excluded_partitions`. No Right statistics run before this condition is satisfied.
+
 `examples/nbs/06_pair_progress.ipynb` writes the one-click Left script, uploads `src/dtrack_right`
 plus the progress collector, creates both Jobs (Right on demand, collector every 15 minutes), the
 progress tables/views, and the pair-progress AI/BI dashboard; EXECUTE=False is a full dry run.
@@ -380,6 +401,16 @@ Outputs include:
   pairs/<pair>/plan.json              Stage-2 plan only when the gate passes
   _status/row_check.closed.json       Right Stage-1 barrier
   _status/audit.sql                   representative best-effort SQL for this run
+
+Version 2 normally replaces sections D and E with one command:
+
+  dtrack left-run --config config.json --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
+    --workers 2 --pull-workers 1 --stat-workers 1 --wip 200
+
+This writes the current Pair plan and all Left Units without waiting for a Right signal. If Right
+later reports unexcluded mismatches, add those dates to `excluded_partitions`, optionally add
+columns to `excluded_columns`, and rerun this same command with the same run id. Unchanged Units
+are reused; only affected vintages/columns are pulled and published. Then restart the Right Job.
 
 E. Run Left Stage 2
 
@@ -452,8 +483,8 @@ report.xlsx.
 
 Why `_INDEX/` no longer exists on new runs:
   An S3 PUT is atomic for one key. Protocol v2 stores readiness metadata and Left statistics in one
-  sequence-prefixed Unit JSON, so its creation is the commit. Readers still understand v1
-  payload-plus-pointer runs, but v2 writers never create `units/` plus `_INDEX/` peers.
+  sequence-prefixed Unit JSON, so its creation is the commit. The runtime accepts protocol v2 only;
+  old payload-plus-pointer runs must be completed with an older release or migrated before reuse.
 
 Unit identity:
   deterministic SHA-256-derived id from pair + vintage window + column. Existing ids are skipped,

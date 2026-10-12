@@ -27,7 +27,7 @@ def test_right_common_contains_only_databricks_protocol_modules():
     assert {path.name for path in right.glob("*.py")} == RIGHT_COMMON
 
 
-def test_protocol_paths_and_compatibility_readers_are_identical_on_both_sides():
+def test_protocol_paths_and_readers_are_identical_on_both_sides():
     left = (SRC / "dtrack_left/common/protocol.py").read_text()
     right = (SRC / "dtrack_right/common/protocol.py").read_text()
     assert left.replace("from .. import PROTOCOL_VERSION", "") == right.replace(

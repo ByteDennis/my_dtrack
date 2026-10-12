@@ -150,3 +150,73 @@ def col_check_command(
         "published_units": published,
         "pairs": [m["pair"] for m in manifests],
     }
+
+
+# >>> dtrack left-run: version 2 count + plan + statistics in one on-prem invocation <<< #
+@click.command(
+    "left-run",
+    help="run version 2 Left counts and statistics without waiting for the Right side",
+    context_settings=CONTEXT_SETTINGS,
+)
+@debug_option
+@config_option
+@store_option()
+@runtime_option("--run-id", envvar="DTRACK_RUN_ID", help="folder below --run-s3")
+@pair_option
+@runtime_option(
+    "--workers", default=4, envvar="DTRACK_ROW_WORKERS", help="pairs counted in parallel"
+)
+@runtime_option(
+    "--work-dir",
+    default=".dtrack-work/col_check",
+    envvar="DTRACK_COL_WORK_DIR",
+    type=click.Path(file_okay=False),
+    help="scratch space for pulled windows",
+)
+@runtime_option(
+    "--pull-workers", default=1, envvar="DTRACK_COL_PULL_WORKERS", help="concurrent window pulls"
+)
+@runtime_option(
+    "--stat-workers",
+    default=1,
+    envvar="DTRACK_COL_STAT_WORKERS",
+    help="concurrent statistics jobs",
+)
+@runtime_option(
+    "--wip", default=200, envvar="DTRACK_COL_WIP", help="max published but unclaimed units"
+)
+@log_level_option
+@emit_json
+def left_run_command(
+    config, store, run_id, pairs, workers, work_dir, pull_workers, stat_workers, wip
+):
+    if int(config.get("version") or 1) != 2:
+        raise click.UsageError("left-run requires top-level config version: 2")
+    run_id = run_id or make_run_id(config)
+    try:
+        run_id = validate_run_id(run_id)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
+    run_store = store.child(run_id)
+    run_id, documents = run_row_check(
+        config, run_store, run_id=run_id, pair_names=pairs, pair_workers=workers
+    )
+    manifests = wait_for_manifests(run_store, timeout=0, poll_interval=0, pair_names=pairs)
+    for manifest in manifests:
+        publish_fixed_keys(run_store, manifest, work_dir)
+    runtime = LeftRuntime(work_dir, run_store)
+    published = ColCheckPipeline(
+        run_store,
+        pull_window=runtime.pull_window,
+        compute_stats=runtime.compute_stats,
+        pull_workers=pull_workers,
+        stat_workers=stat_workers,
+        wip=wip,
+    ).run(manifests)
+    prune_audit_history(store, keep=5)
+    return {
+        "run_id": run_id,
+        "run": run_store.root_uri,
+        "pairs": [document["pair"] for document in documents],
+        "published_units": published,
+    }

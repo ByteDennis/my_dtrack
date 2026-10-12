@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -219,6 +220,14 @@ class LocalRun:
         return get_run_status(self.store)
 
 
+@dataclass(frozen=True)
+class PreflightResult:
+    health: dict[str, dict[str, dict[str, Any]]]
+    sources: dict[str, Any]
+    targets: dict[str, Any]
+    right_seconds: dict[str, float]
+
+
 # >>> open (or resume) a run under `out`: config file or dict, warehouse from profile + id, landing DuckDB in _local/; reuse_pulled keeps every pulled window CSV <<< #
 def open_run(
     config: str | Path | dict[str, Any],
@@ -269,9 +278,12 @@ def open_run(
     return run
 
 
-# >>> both sides reachable before any counting: Left SELECT ... WHERE 1=0, Right DESCRIBE QUERY <<< #
-def preflight(run: LocalRun) -> dict[str, dict[str, Any]]:
+# >>> retain the checked resources so run_all can count through the same connections/config probes <<< #
+def _preflight(run: LocalRun) -> PreflightResult:
     result = {}
+    sources = {}
+    targets = {}
+    right_seconds = {}
     for name, pair in run.config["pairs"].items():
         if pair.get("skip") or (run.pairs and name not in run.pairs):
             continue
@@ -281,7 +293,12 @@ def preflight(run: LocalRun) -> dict[str, dict[str, Any]]:
         target = attach_sql_audit(
             run.target_factory(pair["right"]), SqlAudit(run.store, "right", pair=name)
         )
-        result[name] = {"left": source.preflight(), "right": target.preflight()}
+        sources[name] = source
+        targets[name] = target
+        result[name] = {"left": source.preflight()}
+        started = time.monotonic()
+        result[name]["right"] = target.preflight()
+        right_seconds[name] = round(time.monotonic() - started, 6)
         for side in ("left", "right"):
             health = result[name][side]
             if not health.get("ok"):
@@ -299,15 +316,47 @@ def preflight(run: LocalRun) -> dict[str, dict[str, Any]]:
             result[name]["right"].get("ok"),
         )
     SqlAudit(run.store, "local").refresh()
-    return result
+    return PreflightResult(result, sources, targets, right_seconds)
+
+
+# >>> both sides reachable before any counting: Left SELECT ... WHERE 1=0, Right DESCRIBE QUERY <<< #
+def preflight(run: LocalRun) -> dict[str, dict[str, Any]]:
+    return _preflight(run).health
 
 
 # >>> Stage 1: Left counts, Right counts, reconcile and gate; manifests for every pair that passed <<< #
-def row_check(run: LocalRun, *, gate: str = "auto", workers: int = 4) -> dict[str, Any]:
+def row_check(
+    run: LocalRun,
+    *,
+    gate: str = "auto",
+    workers: int = 4,
+    preflighted: PreflightResult | None = None,
+) -> dict[str, Any]:
+    left_kwargs = {}
+    right_kwargs = {}
+    if preflighted is not None:
+        left_kwargs = {
+            "sources": preflighted.sources,
+            "preflight_health": {
+                pair: health["left"] for pair, health in preflighted.health.items()
+            },
+        }
+        right_kwargs = {
+            "targets": preflighted.targets,
+            "preflight_health": {
+                pair: health["right"] for pair, health in preflighted.health.items()
+            },
+            "preflight_seconds": preflighted.right_seconds,
+        }
     left_row_check(
-        run.config, run.store, run_id=run.run_id, pair_names=run.pairs, pair_workers=workers
+        run.config,
+        run.store,
+        run_id=run.run_id,
+        pair_names=run.pairs,
+        pair_workers=workers,
+        **left_kwargs,
     )
-    right_row_check(run.store, run.target_factory, gate=gate)
+    right_row_check(run.store, run.target_factory, gate=gate, **right_kwargs)
     verdicts = {value["pair"]: value for _key, value in list_row_results(run.store)}
     return {
         pair: {
@@ -439,7 +488,8 @@ def run_all(
     gate: str = "auto",
     run_s3: str | None = None,
 ) -> dict[str, Any]:
-    health = preflight(run)
+    preflighted = _preflight(run)
+    health = preflighted.health
     failed = [
         f"{name}.{side}: {row[side].get('error')}"
         for name, row in health.items()
@@ -448,7 +498,7 @@ def run_all(
     ]
     if failed:
         raise RuntimeError("preflight failed: " + "; ".join(failed))
-    stage_one = row_check(run, gate=gate)
+    stage_one = row_check(run, gate=gate, preflighted=preflighted)
     stage_two = col_check(run) if row_check_is_closed(run.store) else None
     landing = run.landing.tables()
     built = report(run)

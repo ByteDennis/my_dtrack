@@ -18,12 +18,6 @@ ROW_CHECK_CLOSED = "_status/row_check.closed.json"
 COL_CHECK_CLOSED = "_status/col_check.closed.json"
 AUDIT_SUMMARY = "_status/audit.sql"
 
-LEGACY_RUN_STATUS = "_STATUS.json"
-LEGACY_HEARTBEAT = "_HEARTBEAT"
-LEGACY_LEFT_ROW_CHECK_CLOSED = "row_check/_LEFT_CLOSED"
-LEGACY_ROW_CHECK_CLOSED = "row_check/_CLOSED"
-LEGACY_COL_CHECK_CLOSED = "manifest/_CLOSED"
-
 UNIT_STATUS_FIELDS = (
     "pair",
     "stage",
@@ -65,10 +59,8 @@ def fixed_keys_path(pair: str) -> str:
 
 
 def fixed_keys_document(store, pair: str) -> dict[str, Any] | None:
-    for key in (fixed_keys_path(pair), f"manifest/{pair}.keys.json"):
-        if store.exists(key):
-            return store.get_json(key)
-    return None
+    key = fixed_keys_path(pair)
+    return store.get_json(key) if store.exists(key) else None
 
 
 def unit_prefix(pair: str) -> str:
@@ -107,114 +99,70 @@ def _list_pair_json(store, predicate) -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
-def _list_v2(store, suffix: str) -> list[tuple[str, dict[str, Any]]]:
+def _list_suffix(store, suffix: str) -> list[tuple[str, dict[str, Any]]]:
     return _list_pair_json(store, lambda key: key.endswith(suffix))
 
 
-def _dedupe(
-    legacy: list[tuple[str, dict[str, Any]]],
-    current: list[tuple[str, dict[str, Any]]],
-    identity: str,
-) -> list[tuple[str, dict[str, Any]]]:
-    rows: dict[str, tuple[str, dict[str, Any]]] = {}
-    for key, value in [*legacy, *current]:
-        name = value.get(identity)
-        if isinstance(name, str) and name:
-            rows[name] = (key, value)
-    return sorted(rows.values(), key=lambda row: row[0])
-
-
 def list_left_documents(store) -> list[tuple[str, dict[str, Any]]]:
-    legacy = [
-        (key, value) for key, value in store.list_json("row_check/") if key.endswith(".left.json")
-    ]
-    return _dedupe(legacy, _list_v2(store, "/row_check/left.json"), "pair")
+    return _list_suffix(store, "/row_check/left.json")
 
 
 def list_row_results(store) -> list[tuple[str, dict[str, Any]]]:
-    legacy = [
-        (key, value)
-        for key, value in store.list_json("row_check/")
-        if key.endswith(".json")
-        and not key.endswith(".left.json")
-        and not key.startswith("row_check/_")
-    ]
-    return _dedupe(legacy, _list_v2(store, "/row_check/result.json"), "pair")
+    return _list_suffix(store, "/row_check/result.json")
 
 
 def list_plans(store) -> list[tuple[str, dict[str, Any]]]:
-    legacy = [
-        (key, value)
-        for key, value in store.list_json("manifest/")
-        if key.endswith(".json")
-        and key != LEGACY_COL_CHECK_CLOSED
-        and not key.endswith(".keys.json")
-    ]
-    return _dedupe(legacy, _list_v2(store, "/plan.json"), "pair")
+    return _list_suffix(store, "/plan.json")
 
 
 def list_units(store, pairs: list[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
     wanted = None if pairs is None else set(pairs)
-    legacy = [
-        (key, value)
-        for key, value in store.list_json("_INDEX/")
-        if wanted is None or value.get("pair") in wanted
-    ]
     if wanted is None:
-        current = _list_pair_json(store, lambda key: "/units/" in key)
-    else:
-        current = [row for pair in sorted(wanted) for row in store.list_json(unit_prefix(pair))]
-    return _dedupe(legacy, current, "unit_id")
+        return _list_pair_json(store, lambda key: "/units/" in key)
+    return [row for pair in sorted(wanted) for row in store.list_json(unit_prefix(pair))]
 
 
 def list_results(store) -> list[tuple[str, dict[str, Any]]]:
-    legacy = [(key, value) for key, value in store.list_json("results/")]
-    current = _list_pair_json(store, lambda key: "/col_check/results/" in key)
-    return _dedupe(legacy, current, "unit_id")
+    return _list_pair_json(store, lambda key: "/col_check/results/" in key)
 
 
 def list_failures(store) -> list[tuple[str, dict[str, Any]]]:
-    legacy = [(key, value) for key, value in store.list_json("dead/")]
-    current = _list_pair_json(store, lambda key: "/col_check/failures/" in key)
-    return _dedupe(legacy, current, "unit_id")
+    return _list_pair_json(store, lambda key: "/col_check/failures/" in key)
 
 
 def list_right_ready(store) -> list[tuple[str, dict[str, Any]]]:
     return _list_pair_json(store, lambda key: "/col_check/right_ready/" in key)
 
 
+def active_unit_ids(store) -> set[str]:
+    from .manifest import planned_unit_ids
+
+    return set().union(*(planned_unit_ids(plan) for _key, plan in list_plans(store)))
+
+
+def current_plan_ids(store) -> dict[str, str | None]:
+    return {plan["pair"]: plan.get("plan_id") for _key, plan in list_plans(store)}
+
+
 def unit_statistics(store, unit: dict[str, Any]) -> dict[str, Any]:
-    if isinstance(unit.get("left_statistics"), dict):
-        return unit["left_statistics"]
-    return store.get_json(unit["payload_key"])
+    return unit["left_statistics"]
 
 
 def get_run_status(store) -> dict[str, Any]:
     exists = getattr(store, "exists", None)
-    if exists is None:
-        return {}
-    for key in (RUN_STATUS, LEGACY_RUN_STATUS):
-        if exists(key):
-            return store.get_json(key)
-    return {}
+    return store.get_json(RUN_STATUS) if exists is not None and exists(RUN_STATUS) else {}
 
 
 def row_check_is_closed(store) -> bool:
-    return store.exists(ROW_CHECK_CLOSED) or store.exists(LEGACY_ROW_CHECK_CLOSED)
+    return store.exists(ROW_CHECK_CLOSED)
 
 
 def left_row_check_close_document(store) -> dict[str, Any] | None:
-    for key in (LEFT_ROW_CHECK_CLOSED, LEGACY_LEFT_ROW_CHECK_CLOSED):
-        if store.exists(key):
-            return store.get_json(key)
-    return None
+    return store.get_json(LEFT_ROW_CHECK_CLOSED) if store.exists(LEFT_ROW_CHECK_CLOSED) else None
 
 
 def col_check_close_document(store) -> dict[str, Any] | None:
-    for key in (COL_CHECK_CLOSED, LEGACY_COL_CHECK_CLOSED):
-        if store.exists(key):
-            return store.get_json(key)
-    return None
+    return store.get_json(COL_CHECK_CLOSED) if store.exists(COL_CHECK_CLOSED) else None
 
 
 def _offset_name(value: datetime) -> str:
@@ -269,7 +217,7 @@ def write_run_status(
 
 
 def refresh_units_status(store) -> str:
-    from .manifest import unit_id
+    from .manifest import unit_id_for
 
     units = {value["unit_id"]: value for _key, value in list_units(store)}
     results = {value["unit_id"]: value for _key, value in list_results(store)}
@@ -283,8 +231,13 @@ def refresh_units_status(store) -> str:
         for window in plan.get("windows") or []:
             bucket = window["bucket"]
             ready = right_ready.get((pair, bucket), {})
+            if int(plan.get("version") or 1) == 2:
+                from .manifest import window_id
+
+                if ready.get("window_id") != window_id(plan, window):
+                    ready = {}
             for column in plan.get("columns") or []:
-                uid = unit_id(pair, bucket, column)
+                uid = unit_id_for(plan, window, column)
                 unit = units.get(uid, {})
                 result = results.get(uid, {})
                 failure = failures.get(uid, {})

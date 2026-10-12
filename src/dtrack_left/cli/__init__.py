@@ -1,6 +1,7 @@
 # dtrack: the Left-side CLI (python -m dtrack / python -m dtrack_left / dtrack)
 #
 # Commands
+#   left-run      --config c.json --run-s3 s3://.../runs [--run-id]  # version 2
 #   row-check     --config c.json --run-s3 s3://.../runs [--run-id] [--pair P ...] [--workers 4]
 #   col-check     --run-s3 s3://.../runs [--run-id] [--pair P] [--work-dir] [--pull-workers 2]
 #                 [--stat-workers 2] [--wip 200] [--wait-timeout 1800] [--poll-interval 3]
@@ -73,7 +74,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from .. import __version__
 from .blog import blog_group
-from .checks import col_check_command, row_check_command
+from .checks import col_check_command, left_run_command, row_check_command
 from .ops import dbx_group
 from .options import CONTEXT_SETTINGS, DistributedGroup
 from .tools import (
@@ -92,6 +93,7 @@ def cli():
 
 
 for command in (
+    left_run_command,
     row_check_command,
     col_check_command,
     tools_group,

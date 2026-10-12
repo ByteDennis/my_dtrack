@@ -10,7 +10,9 @@ from typing import Any
 
 from ..checks.row_check import row_check_csv_bytes
 from ..common.protocol import (
+    active_unit_ids,
     col_check_close_document,
+    current_plan_ids,
     list_failures,
     list_plans,
     list_results,
@@ -43,10 +45,28 @@ def compare_col_csv_bytes(rows: list[dict[str, Any]]) -> bytes:
 # >>> read Pair row/column results and the col-check closure from the work store <<< #
 def collect(store) -> dict[str, Any]:
     documents = [value for _key, value in list_row_results(store)]
-    results = [value for _key, value in list_results(store)]
-    dead = [value for _key, value in list_failures(store)]
     manifests = {value["pair"]: value for _key, value in list_plans(store)}
+    active = active_unit_ids(store)
+    version2_pairs = {
+        pair for pair, plan in manifests.items() if int(plan.get("version") or 1) == 2
+    }
+    results = [
+        value
+        for _key, value in list_results(store)
+        if value.get("pair") not in version2_pairs or value["unit_id"] in active
+    ]
+    dead = [
+        value
+        for _key, value in list_failures(store)
+        if value.get("pair") not in version2_pairs or value["unit_id"] in active
+    ]
     closed = col_check_close_document(store)
+    if (
+        closed
+        and any(int(plan.get("version") or 1) == 2 for plan in manifests.values())
+        and closed.get("plan_ids") != current_plan_ids(store)
+    ):
+        closed = None
     return {
         "documents": sorted(documents, key=lambda doc: doc["pair"]),
         "results": results,

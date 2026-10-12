@@ -43,17 +43,20 @@ def test_list_keys_follows_continuation_tokens_and_drops_start_after_on_later_pa
     client = RecordingClient(
         pages=[
             {
-                "Contents": [{"Key": "p/_INDEX/2"}],
+                "Contents": [{"Key": "p/pairs/a/units/2.json"}],
                 "IsTruncated": True,
                 "NextContinuationToken": "t",
             },
-            {"Contents": [{"Key": "p/_INDEX/3"}], "IsTruncated": False},
+            {"Contents": [{"Key": "p/pairs/a/units/3.json"}], "IsTruncated": False},
         ]
     )
     store = S3Store("s3://b/p", client=client)
-    assert store.list_keys("_INDEX/", start_after="_INDEX/1") == ["_INDEX/2", "_INDEX/3"]
+    assert store.list_keys("pairs/a/units/", start_after="pairs/a/units/1.json") == [
+        "pairs/a/units/2.json",
+        "pairs/a/units/3.json",
+    ]
     first, second = (kwargs for _, kwargs in client.calls)
-    assert first["StartAfter"] == "p/_INDEX/1" and "StartAfter" not in second
+    assert first["StartAfter"] == "p/pairs/a/units/1.json" and "StartAfter" not in second
     assert second["ContinuationToken"] == "t"
 
 
@@ -79,6 +82,8 @@ def test_endpoint_override_switches_to_path_style_addressing(monkeypatch):
 # >>> Databricks mkdir on an S3-backed Volume leaves 0-byte "folder/" markers <<< #
 def test_list_json_skips_folder_marker_objects(s3_bucket):
     store = S3Store(f"s3://{s3_bucket}/r")
-    boto3.client("s3").put_object(Bucket=s3_bucket, Key="r/manifest/", Body=b"")
-    store.put_json("manifest/a.json", {"x": 1})
-    assert store.list_json("manifest/") == [("manifest/a.json", {"x": 1})]
+    boto3.client("s3").put_object(Bucket=s3_bucket, Key="r/pairs/a/units/", Body=b"")
+    store.put_json("pairs/a/units/00000001-u.json", {"x": 1})
+    assert store.list_json("pairs/a/units/") == [
+        ("pairs/a/units/00000001-u.json", {"x": 1})
+    ]

@@ -5,7 +5,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from dtrack_left import __version__
 from dtrack_left.cli.blog import blog_group
-from dtrack_left.cli.checks import col_check_command, row_check_command
+from dtrack_left.cli.checks import col_check_command, left_run_command, row_check_command
 from dtrack_left.cli.ops import dbx_group
 from dtrack_left.cli.options import CONTEXT_SETTINGS, DistributedGroup
 from dtrack_left.cli.tools import (
@@ -39,7 +39,7 @@ def cli():
     load_dotenv(find_dotenv(usecwd=True))
 
 
-for command in (row_check_command, col_check_command, local_group, tools_group):
+for command in (left_run_command, row_check_command, col_check_command, local_group, tools_group):
     cli.add_command(command)
 
 

@@ -4,6 +4,7 @@ import json
 import os
 import posixpath
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,6 @@ from urllib.parse import urlparse
 from ..common.protocol import (
     COL_CHECK_CLOSED,
     HEARTBEAT,
-    LEGACY_HEARTBEAT,
     ROW_CHECK_CLOSED,
     failure_path,
     get_run_status,
@@ -197,18 +197,23 @@ class S3Store:
         )
 
     def heartbeat_age(self, now: float | None = None) -> float | None:
-        key = HEARTBEAT if self.exists(HEARTBEAT) else LEGACY_HEARTBEAT
-        if not self.exists(key):
+        if not self.exists(HEARTBEAT):
             return None
         current = time.time() if now is None else now
-        return max(0.0, current - float(self.get_json(key)["epoch_s"]))
+        return max(0.0, current - float(self.get_json(HEARTBEAT)["epoch_s"]))
 
-    def close_manifests(self, pairs: list[str], expected_units: int) -> str:
+    def close_manifests(
+        self,
+        pairs: list[str],
+        expected_units: int,
+        plan_ids: dict[str, str | None] | None = None,
+    ) -> str:
         return self.put_json(
             COL_CHECK_CLOSED,
             {
                 "pairs": sorted(pairs),
                 "expected_units": expected_units,
+                "plan_ids": plan_ids or {},
                 "closed_at": timestamp(self),
             },
         )
@@ -255,9 +260,12 @@ class VolumeStore:
     def put_bytes(self, relative: str, body: bytes, *, content_type: str = "") -> str:
         path = self._path(relative)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(path.name + ".part")
-        temporary.write_bytes(body)
-        temporary.replace(path)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.part")
+        try:
+            temporary.write_bytes(body)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
         return relative
 
     def put_json(self, relative: str, value: Any) -> str:
@@ -336,18 +344,23 @@ class VolumeStore:
         )
 
     def heartbeat_age(self, now: float | None = None) -> float | None:
-        key = HEARTBEAT if self.exists(HEARTBEAT) else LEGACY_HEARTBEAT
-        if not self.exists(key):
+        if not self.exists(HEARTBEAT):
             return None
         current = time.time() if now is None else now
-        return max(0.0, current - float(self.get_json(key)["epoch_s"]))
+        return max(0.0, current - float(self.get_json(HEARTBEAT)["epoch_s"]))
 
-    def close_manifests(self, pairs: list[str], expected_units: int) -> str:
+    def close_manifests(
+        self,
+        pairs: list[str],
+        expected_units: int,
+        plan_ids: dict[str, str | None] | None = None,
+    ) -> str:
         return self.put_json(
             COL_CHECK_CLOSED,
             {
                 "pairs": sorted(pairs),
                 "expected_units": expected_units,
+                "plan_ids": plan_ids or {},
                 "closed_at": timestamp(self),
             },
         )

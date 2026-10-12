@@ -40,6 +40,20 @@ def test_write_rows_creates_parents_and_writes_a_header(tmp_path):
     assert path.read_text().splitlines() == ["x,y", "1,a", "2,"]
 
 
+def test_database_csv_export_streams_bounded_batches(tmp_path, monkeypatch):
+    source, connection, _captured = _oracle(
+        monkeypatch, lambda _sql: (["A"], [(str(index),) for index in range(20_001)])
+    )
+    cursor = connection.cursor()
+    monkeypatch.setattr(connection, "cursor", lambda: cursor)
+    monkeypatch.setattr(
+        cursor, "fetchall", lambda: (_ for _ in ()).throw(AssertionError("fetchall"))
+    )
+    output = source.query_to_csv("SELECT A FROM ORDERS", tmp_path / "streamed.csv", ["A"])
+    assert len(output.read_text().splitlines()) == 20_002
+    assert connection.closed and connection.cursors_closed == 1
+
+
 def test_relation_quotes_parts_wraps_queries_and_needs_a_table():
     assert OracleSource({**ORACLE, "schema": "OWN"}).relation() == "OWN.ORDERS"
     assert OracleSource({**ORACLE, "table": "own.v_app"}).relation() == "own.v_app"
@@ -149,16 +163,11 @@ def test_oracle_query_windows_render_bounds_before_join_and_keep_outer_guard(mon
     assert source.partition_counts("2026-08-01", "2026-08-03") == {"2026-08-01": 1}
     sql = connection.statements[-1]
     assert "a.DT >= DATE '2026-08-01' AND a.DT < DATE '2026-08-04'" in sql
-    assert (
-        "b.ACTIVITY_DT >= DATE '2026-08-01' AND b.ACTIVITY_DT < DATE '2026-08-04'"
-        in sql
-    )
+    assert "b.ACTIVITY_DT >= DATE '2026-08-01' AND b.ACTIVITY_DT < DATE '2026-08-04'" in sql
     assert "FINAL_DT >= DATE '2026-08-01' AND FINAL_DT < DATE '2026-08-04'" in sql
 
 
-def test_oracle_query_windows_render_exact_admitted_days_before_sampling(
-    monkeypatch, tmp_path
-):
+def test_oracle_query_windows_render_exact_admitted_days_before_sampling(monkeypatch, tmp_path):
     query = (
         "SELECT a.DT AS FINAL_DT, a.ID, c.VALUE FROM DRIVER_ONE a "
         "LEFT JOIN DRIVER_TWO b ON a.ID = b.ID AND a.DT = b.ACTIVITY_DT "
@@ -200,10 +209,7 @@ def test_oracle_query_windows_are_neutral_for_metadata_probes(monkeypatch):
     source, connection, _ = _oracle(
         monkeypatch,
         lambda sql: (["FINAL_DT"], []),
-        query=(
-            "SELECT a.DT AS FINAL_DT FROM DRIVER_ONE a "
-            "WHERE {{query_windows:driver_one}}"
-        ),
+        query=("SELECT a.DT AS FINAL_DT FROM DRIVER_ONE a WHERE {{query_windows:driver_one}}"),
         date_col="FINAL_DT",
         query_windows={"driver_one": {"expression": "a.DT"}},
     )
@@ -288,7 +294,7 @@ def test_unsupported_custom_sampling_sql_fails_before_pulling_a_window(synthetic
 
     output = tmp_path / "must-not-exist.csv"
     with pytest.raises(SamplingSqlNotSupported, match="needs duckdb SQL"):
-            _orders(synthetic, date_type="string").pull_window(
+        _orders(synthetic, date_type="string").pull_window(
             ["2026-01-01"],
             ["AMOUNT"],
             output,
@@ -589,9 +595,7 @@ def test_file_source_filters_supported_text_and_sas_dates(tmp_path, date_type, r
 def test_file_source_rejects_mixed_date_formats(tmp_path):
     path = tmp_path / "mixed.csv"
     path.write_text("D,V\n01JAN2026,a\n24108,b\n")
-    source = FileSource(
-        {"source": "file", "path": str(path), "date_col": "D", "date_type": "sas"}
-    )
+    source = FileSource({"source": "file", "path": str(path), "date_col": "D", "date_type": "sas"})
     health = source.preflight()
     assert health["ok"] is False
     assert "mixed SAS date formats" in health["error"]

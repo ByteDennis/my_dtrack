@@ -8,7 +8,13 @@ from .backends.store import resolve_run
 from .checks.col_check import ColCheck
 from .checks.row_check import run_row_check
 from .common.audit import SqlAudit
-from .common.protocol import AUDIT_SUMMARY, list_left_documents, list_results, write_run_status
+from .common.protocol import (
+    AUDIT_SUMMARY,
+    active_unit_ids,
+    list_left_documents,
+    list_results,
+    write_run_status,
+)
 from .report.build import CONTENT_TYPES, build_report
 
 log = logging.getLogger("dtrack.right")
@@ -77,7 +83,8 @@ def run(
         published.append(key)
         log.info("published %s", key)
     audit_written = SqlAudit(store, "right").refresh()
-    total_results = len(list_results(store))
+    active = active_unit_ids(store)
+    total_results = sum(value["unit_id"] in active for _key, value in list_results(store))
     write_run_status(
         store,
         {

@@ -8,9 +8,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..common.audit import SqlAudit, attach_sql_audit
-from ..common.manifest import unit_id
+from ..common.manifest import planned_unit_ids, unit_id_for, window_id
 from ..common.protocol import (
+    active_unit_ids,
     col_check_close_document,
+    current_plan_ids,
     fixed_keys_document,
     list_failures,
     list_plans,
@@ -107,14 +109,19 @@ class DrainScheduler:
         self.ready = deque()
         self.unit_windows = set()
 
-    def add_manifest(self, manifest):
+    def add_manifest(self, manifest, completed_ids=()):
         if manifest["pair"] in self.manifests:
             return
         self.manifests[manifest["pair"]] = manifest
+        completed_ids = set(completed_ids)
         for window in manifest["windows"]:
             key = (manifest["pair"], window["bucket"])
             self.windows[key] = window
-            self.prefetch.append(key)
+            if not manifest.get("columns") or any(
+                unit_id_for(manifest, window, column) not in completed_ids
+                for column in manifest["columns"]
+            ):
+                self.prefetch.append(key)
 
     def add_unit(self, pointer):
         key = (pointer["pair"], pointer["window"])
@@ -180,13 +187,14 @@ class ColCheck:
         self.poll_interval = poll_interval
         self.on_idle = on_idle
         self.manifests = set()
-        self.seen = {value["unit_id"] for _key, value in list_results(store)}
-        self.seen |= {value["unit_id"] for _key, value in list_failures(store)}
+        self.completed_ids = {value["unit_id"] for _key, value in list_results(store)}
+        self.completed_ids |= {value["unit_id"] for _key, value in list_failures(store)}
+        self.seen = set(self.completed_ids)
+        self.active_ids = set()
         self.attempts = defaultdict(int)
         self.results = []
         self.targets = {}
         self.unit_cursors = {}
-        self.legacy_unit_cursor = None
 
     def _target(self, manifest):
         pair = manifest["pair"]
@@ -200,17 +208,28 @@ class ColCheck:
     def poll(self):
         changed = 0
         for key, manifest in list_plans(self.store):
-            if key in self.manifests:
+            identity = (key, manifest.get("plan_id"))
+            if identity in self.manifests:
                 continue
             if manifest["sample"]["mode"] == "fixed":
                 keys_document = fixed_keys_document(self.store, manifest["pair"])
                 if keys_document is None:
                     continue
+                if int(manifest.get("version") or 1) == 2 and (
+                    keys_document.get("plan_id") != manifest.get("plan_id")
+                    or any(
+                        (keys_document.get("window_ids") or {}).get(window["bucket"])
+                        != window_id(manifest, window)
+                        for window in manifest["windows"]
+                    )
+                ):
+                    continue
                 key_tuples = keys_document["windows"]
                 for window in manifest["windows"]:
                     window["key_tuples"] = key_tuples.get(window["bucket"], [])
-            self.scheduler.add_manifest(manifest)
-            self.manifests.add(key)
+            self.scheduler.add_manifest(manifest, self.completed_ids)
+            self.active_ids.update(planned_unit_ids(manifest))
+            self.manifests.add(identity)
             log.info(
                 "manifest %s loaded: %d windows x %d columns = %d units -> B-queue seeded",
                 manifest["pair"],
@@ -219,18 +238,14 @@ class ColCheck:
                 manifest["expected_units"],
             )
             changed += 1
-        batches = [("_INDEX/", self.legacy_unit_cursor)]
-        batches.extend(
+        batches = [
             (unit_prefix(pair), self.unit_cursors.get(pair))
             for pair in sorted(self.scheduler.manifests)
-        )
+        ]
         for prefix, cursor in batches:
             for key, pointer in self.store.list_json(prefix, start_after=cursor):
-                if prefix == "_INDEX/":
-                    self.legacy_unit_cursor = key
-                else:
-                    self.unit_cursors[pointer["pair"]] = key
-                if pointer["unit_id"] in self.seen:
+                self.unit_cursors[pointer["pair"]] = key
+                if pointer["unit_id"] not in self.active_ids or pointer["unit_id"] in self.seen:
                     continue
                 self.seen.add(pointer["unit_id"])
                 self.scheduler.add_unit(pointer)
@@ -246,10 +261,9 @@ class ColCheck:
         if self.attempts[uid] >= self.max_attempts:
             units = [uid]
             if task.kind == "prefetch":
-                units = [
-                    unit_id(task.pair, task.window, col)
-                    for col in self.scheduler.manifests[task.pair]["columns"]
-                ]
+                manifest = self.scheduler.manifests[task.pair]
+                window = self.scheduler.windows[(task.pair, task.window)]
+                units = [unit_id_for(manifest, window, col) for col in manifest["columns"]]
             for failed_uid in units:
                 log.error(
                     "dead %s after %d attempt(s): %s",
@@ -295,6 +309,8 @@ class ColCheck:
                     {
                         "pair": task.pair,
                         "window": task.window,
+                        "plan_id": manifest.get("plan_id"),
+                        "window_id": window_id(manifest, task.payload),
                         "right_ready_at": timestamp(self.store),
                     },
                 )
@@ -332,8 +348,15 @@ class ColCheck:
         closed = col_check_close_document(self.store)
         if closed is None:
             return False
-        expected = int(closed["expected_units"])
-        return len(list_results(self.store)) + len(list_failures(self.store)) >= expected
+        plans = [plan for _key, plan in list_plans(self.store)]
+        if any(int(plan.get("version") or 1) == 2 for plan in plans) and closed.get(
+            "plan_ids"
+        ) != current_plan_ids(self.store):
+            return False
+        active = active_unit_ids(self.store)
+        finished = {value["unit_id"] for _key, value in list_results(self.store)}
+        finished |= {value["unit_id"] for _key, value in list_failures(self.store)}
+        return active <= finished
 
     def run(self):
         last_progress = time.monotonic()
@@ -351,7 +374,10 @@ class ColCheck:
                 log.info(
                     "col_check complete: %d result(s), %d dead",
                     len(self.results),
-                    len(list_failures(self.store)),
+                    sum(
+                        value["unit_id"] in active_unit_ids(self.store)
+                        for _key, value in list_failures(self.store)
+                    ),
                 )
                 return self.results
             if self.on_idle and self.on_idle():

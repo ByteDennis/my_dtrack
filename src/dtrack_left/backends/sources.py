@@ -128,8 +128,27 @@ class SqlSource(ABC):
     def query_to_csv(
         self, sql: str, output: Path, columns: list[str], *, operation: str = "query"
     ) -> Path:
-        _columns, rows = self.query(sql, operation=operation)
-        return write_rows(output, columns, rows)
+        target = Path(output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        part = target.with_name(target.name + ".part")
+        connection = self.connect()
+        cursor = connection.cursor()
+        try:
+            self._audit(sql, operation)
+            cursor.execute(sql)
+            with part.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle, lineterminator="\n")
+                writer.writerow(columns)
+                while rows := cursor.fetchmany(10_000):
+                    writer.writerows(rows)
+            os.replace(part, target)
+            return target
+        except Exception:
+            part.unlink(missing_ok=True)
+            raise
+        finally:
+            cursor.close()
+            connection.close()
 
     def date_type(self):
         with self._date_type_lock:
@@ -460,6 +479,29 @@ class DuckDBSource(SqlSource):
             connection.execute(sql)
             columns = [str(item[0]) for item in connection.description or []]
             return columns, connection.fetchall() if connection.description else []
+        finally:
+            connection.close()
+
+    def query_to_csv(
+        self, sql: str, output: Path, columns: list[str], *, operation: str = "query"
+    ) -> Path:
+        target = Path(output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        part = target.with_name(target.name + ".part")
+        connection = self.connect()
+        try:
+            self._audit(sql, operation)
+            cursor = connection.execute(sql)
+            with part.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle, lineterminator="\n")
+                writer.writerow(columns)
+                while rows := cursor.fetchmany(10_000):
+                    writer.writerows(rows)
+            os.replace(part, target)
+            return target
+        except Exception:
+            part.unlink(missing_ok=True)
+            raise
         finally:
             connection.close()
 
