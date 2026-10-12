@@ -269,7 +269,8 @@ class FakeSpark:
 
 # >>> the store contract both S3Store and VolumeStore must honour <<< #
 def assert_store_contract(store):
-    store.put_json("a/b.json", {"x": 1})
+    assert store.json_bytes({"x": 1, "a": 2}) == b'{"a":2,"x":1}'
+    assert store.put_json("a/b.json", {"x": 1}).endswith("a/b.json")
     store.put_bytes("a/c.csv", b"h\n1\n", content_type="text/csv")
     assert store.get_json("a/b.json") == {"x": 1} and store.get_bytes("a/c.csv") == b"h\n1\n"
     assert store.exists("a/b.json") and not store.exists("a/missing.json")
@@ -278,10 +279,11 @@ def assert_store_contract(store):
     assert store.list_keys("nothing/") == []
     first = store.commit_unit(1, "u1", {"v": 1}, {"pair": "p"})
     store.commit_unit(2, "u2", {"v": 2}, {"pair": "p"})
-    assert {key: value for key, value in first.items() if key != "left_ready_at"} == {
+    assert first == {
         "pair": "p",
         "unit_id": "u1",
         "sequence": 1,
+        "left_ready_at": "2026-01-02T03:04:05+00:00",
         "left_statistics": {"v": 1},
     }
     assert [key for key, _ in store.list_json("pairs/p/units/")] == [
@@ -289,17 +291,47 @@ def assert_store_contract(store):
         "pairs/p/units/00000002-u2.json",
     ]
     assert store.ready_unclaimed() == 2
-    store.put_result("u1", {"verdict": "match"})
-    store.put_dead("u2", {"error": "x"})
+    assert store.put_result("u1", {"verdict": "match"}).endswith(
+        "pairs/p/col_check/results/u1.json"
+    )
+    assert store.get_json("pairs/p/col_check/results/u1.json") == {
+        "completed_at": "2026-01-02T03:04:05+00:00",
+        "pair": "p",
+        "unit_id": "u1",
+        "verdict": "match",
+    }
+    assert store.put_dead("u2", {"error": "x"}).endswith(
+        "pairs/p/col_check/failures/u2.json"
+    )
+    assert store.get_json("pairs/p/col_check/failures/u2.json") == {
+        "error": "x",
+        "failed_at": "2026-01-02T03:04:05+00:00",
+        "pair": "p",
+        "unit_id": "u2",
+    }
     assert store.ready_unclaimed() == 0
     assert store.heartbeat_age() is None
-    store.heartbeat(now=100.0)
+    assert store.heartbeat(now=100.0).endswith("_status/heartbeat.json")
+    assert store.get_json("_status/heartbeat.json") == {
+        "epoch_s": 100.0,
+        "updated_at": "2026-01-02T03:04:05+00:00",
+    }
     assert store.heartbeat_age(now=130.0) == 30.0 and store.heartbeat_age(now=50.0) == 0.0
     assert store.heartbeat_age() > 0
-    store.close_row_check(["b", "a"])
-    store.close_manifests(["b", "a"], 4)
-    assert store.get_json("_status/row_check.closed.json")["pairs"] == ["a", "b"]
-    assert store.get_json("_status/col_check.closed.json")["expected_units"] == 4
+    assert store.close_row_check(["b", "a"]).endswith("_status/row_check.closed.json")
+    assert store.close_manifests(["b", "a"], 4, {"p": "plan-1"}).endswith(
+        "_status/col_check.closed.json"
+    )
+    assert store.get_json("_status/row_check.closed.json") == {
+        "closed_at": "2026-01-02T03:04:05+00:00",
+        "pairs": ["a", "b"],
+    }
+    assert store.get_json("_status/col_check.closed.json") == {
+        "closed_at": "2026-01-02T03:04:05+00:00",
+        "expected_units": 4,
+        "pairs": ["a", "b"],
+        "plan_ids": {"p": "plan-1"},
+    }
 
 
 # >>> a manifest whose every partition matched, built from real left counts <<< #

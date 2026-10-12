@@ -51,6 +51,40 @@ def test_right_package_contains_only_databricks_runtime_code():
     assert not (right / "__main__.py").exists()
 
 
+def test_csv_sampling_is_not_reexported_from_common_hashing():
+    paths = [
+        path
+        for root in (ROOT / "src", ROOT / "tests", ROOT / "examples")
+        for path in root.rglob("*")
+        if path.suffix in {".py", ".ipynb"}
+    ]
+    for path in paths:
+        text = path.read_text()
+        if path.suffix == ".ipynb":
+            stale = [
+                line
+                for line in text.splitlines()
+                if "common.hashing import " in line and "sample_csv" in line
+            ]
+        else:
+            tree = ast.parse(text)
+            stale = [
+                node
+                for node in ast.walk(tree)
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module == "dtrack_left.common.hashing"
+                    and any(name.name == "sample_csv" for name in node.names)
+                )
+                or (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "sample_csv"
+                    and ast.unparse(node.value).endswith("hashing")
+                )
+            ]
+        assert not stale, path
+
+
 # >>> the pipeline never touches Databricks; only `dtrack tools dbx` may, lazily <<< #
 def test_left_pipeline_never_touches_databricks_and_dbx_imports_the_sdk_lazily():
     left = ROOT / "src/dtrack_left"
@@ -150,7 +184,7 @@ def test_learning_notebooks_match_the_public_cli_layout():
     assert "'col-check'" in sources[expected[1]]
     assert "'local', 'run'" in sources[expected[2]]
     assert "'tools', 'doctor'" in sources[expected[3]]
-    assert "detect_date_type" in sources[expected[4]]
+    assert "resolve_date_type('string').detect" in sources[expected[4]]
     assert "build_manifest" in sources[expected[4]]
     assert "src/dtrack_right/notebook.py" in sources[expected[0]]
     assert "SQL Warehouse" in sources[expected[1]] + sources[expected[2]]

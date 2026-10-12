@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
-from .dates import portable_date_type, resolve_date_type
+from .dates import resolve_date_type
 
 
 class ColumnType:
@@ -49,8 +49,8 @@ class DateColumnType(ColumnType):
     def spec(self) -> dict[str, Any]:
         return {
             "type": "date",
-            "left_date_type": portable_date_type(self.left),
-            "right_date_type": portable_date_type(self.right),
+            "left_date_type": self.left.spec(portable=True),
+            "right_date_type": self.right.spec(portable=True),
         }
 
 
@@ -91,7 +91,3 @@ def resolve_column_type(spec: Any) -> ColumnType:
             raise ValueError("portable column type must have type 'date'")
         return DateColumnType(spec.get("left_date_type"), spec.get("right_date_type"))
     raise TypeError(f"column type must be a registered name or an object, got {spec!r}")
-
-
-def portable_column_type(spec: Any) -> dict[str, Any]:
-    return resolve_column_type(spec).spec()

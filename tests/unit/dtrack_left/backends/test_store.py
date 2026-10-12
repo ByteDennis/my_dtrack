@@ -2,6 +2,7 @@ import boto3
 import pytest
 from support import RecordingClient, assert_store_contract
 
+from dtrack_left.backends import store as store_module
 from dtrack_left.backends.store import S3Location, S3Store, validate_run_id
 
 
@@ -19,7 +20,10 @@ def test_run_id_is_exactly_one_safe_folder_name(value):
     assert validate_run_id("20261007T150000Z-orders") == "20261007T150000Z-orders"
 
 
-def test_s3_store_honours_the_store_contract_on_mocked_s3(s3_bucket):
+def test_s3_store_honours_the_store_contract_on_mocked_s3(s3_bucket, monkeypatch):
+    monkeypatch.setattr(
+        store_module, "timestamp", lambda _store: "2026-01-02T03:04:05+00:00"
+    )
     assert_store_contract(S3Store(f"s3://{s3_bucket}/runs/r1"))
     keys = [row["Key"] for row in boto3.client("s3").list_objects_v2(Bucket=s3_bucket)["Contents"]]
     assert all(key.startswith("runs/r1/") for key in keys)

@@ -1,8 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from support import RecordingClient, assert_store_contract
 
+from dtrack_right.backends import store as store_module
 from dtrack_right.backends.store import (
     S3Store,
     VolumeStore,
@@ -13,7 +15,10 @@ from dtrack_right.backends.store import (
 )
 
 
-def test_volume_store_honours_the_store_contract(tmp_path):
+def test_volume_store_honours_the_store_contract(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        store_module, "timestamp", lambda _store: "2026-01-02T03:04:05+00:00"
+    )
     store = VolumeStore(tmp_path / "runs" / "r1")
     assert_store_contract(store)
     assert not list((tmp_path / "runs" / "r1").rglob("*.part"))
@@ -43,7 +48,84 @@ def test_volume_store_atomically_replaces_one_file_from_concurrent_writers(tmp_p
     assert not list(tmp_path.rglob("*.part"))
 
 
-def test_s3_store_honours_the_store_contract_on_mocked_s3(s3_bucket):
+@pytest.mark.parametrize("winerror", [5, 32])
+def test_volume_store_retries_transient_windows_replace_errors(tmp_path, monkeypatch, winerror):
+    store = VolumeStore(tmp_path)
+    store.put_bytes("_status/run.json", b"old")
+    actual_replace = Path.replace
+    attempts = 0
+    delays = []
+
+    def transient_failure(temporary, path):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            error = PermissionError("temporarily locked")
+            error.winerror = winerror
+            raise error
+        return actual_replace(temporary, path)
+
+    monkeypatch.setattr(Path, "replace", transient_failure)
+    monkeypatch.setattr(store_module.time, "sleep", delays.append)
+
+    store.put_bytes("_status/run.json", b"new")
+
+    assert store.get_bytes("_status/run.json") == b"new"
+    assert attempts == 3
+    assert delays == [0.01, 0.02]
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def test_volume_store_does_not_retry_other_permission_errors(tmp_path, monkeypatch):
+    store = VolumeStore(tmp_path)
+    attempts = 0
+
+    def permanent_failure(_temporary, _path):
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError("not a Windows sharing error")
+
+    monkeypatch.setattr(Path, "replace", permanent_failure)
+    monkeypatch.setattr(
+        store_module.time,
+        "sleep",
+        lambda _delay: pytest.fail("non-Windows permission errors must not be retried"),
+    )
+
+    with pytest.raises(PermissionError, match="not a Windows sharing error"):
+        store.put_bytes("_status/run.json", b"new")
+
+    assert attempts == 1
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def test_volume_store_stops_retrying_a_persistent_windows_access_denied(tmp_path, monkeypatch):
+    store = VolumeStore(tmp_path)
+    attempts = 0
+    delays = []
+
+    def persistent_failure(_temporary, _path):
+        nonlocal attempts
+        attempts += 1
+        error = PermissionError("access denied")
+        error.winerror = 5
+        raise error
+
+    monkeypatch.setattr(Path, "replace", persistent_failure)
+    monkeypatch.setattr(store_module.time, "sleep", delays.append)
+
+    with pytest.raises(PermissionError, match="access denied"):
+        store.put_bytes("_status/run.json", b"new")
+
+    assert attempts == 8
+    assert delays == [0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64]
+    assert not list(tmp_path.rglob("*.part"))
+
+
+def test_s3_store_honours_the_store_contract_on_mocked_s3(s3_bucket, monkeypatch):
+    monkeypatch.setattr(
+        store_module, "timestamp", lambda _store: "2026-01-02T03:04:05+00:00"
+    )
     assert_store_contract(S3Store(f"s3://{s3_bucket}/runs/r1"))
 
 

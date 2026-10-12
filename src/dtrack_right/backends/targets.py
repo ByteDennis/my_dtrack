@@ -9,13 +9,11 @@ from ..common.dates import (
     bounds_where,
     canonical_date,
     day_expr,
-    detect_date_type,
     partition_where,
     quote_ident,
     resolve_date_type,
 )
 from ..common.hashing import collapse_decimal_sql as _collapse_decimal_sql
-from ..common.hashing import key_family
 from ..common.sampling import sample_predicate_sql
 
 log = logging.getLogger("dtrack.right.target")
@@ -31,11 +29,6 @@ NUMERIC_TYPES = (
     "short",
 )
 INTEGRAL_TYPES = ("int", "bigint", "smallint", "tinyint", "long", "short")
-
-
-# >>> normalisation of a Right key column in Spark SQL: the family's right_transform_sql <<< #
-def _norm_sql(column: str, family: object) -> str:
-    return key_family(family).sql(quote_ident(column, "spark"), "right")
 
 
 # >>> Right side read through spark.sql: counts, sampling predicate and statistics all run in the warehouse <<< #
@@ -103,7 +96,7 @@ class SparkTarget:
                     f"WHERE {self._where(f'{column} IS NOT NULL')} LIMIT {self.date_probe_size}",
                     "date_type_probe",
                 )
-                resolved = detect_date_type(resolved, [row[0] for row in rows])
+                resolved = resolved.detect([row[0] for row in rows])
             self._date_type = resolved
             self.config["date_type"] = resolved.spec(portable=True)
             return resolved
@@ -187,13 +180,17 @@ class SparkTarget:
             ref = quote_ident(column, "spark")
             column_type = self.column_types.get(column, "")
             native = any(column_type.startswith(t) for t in NUMERIC_TYPES)
+            integral = native and any(column_type.startswith(t) for t in INTEGRAL_TYPES)
             comparison = column_types.get(left_column)
+            requested = overrides.get(left_column)
             numeric = (
                 not comparison
-                and overrides.get(left_column, "numeric" if native else "") == "numeric"
+                and (
+                    requested == "numeric"
+                    or (requested is None and native and not integral)
+                )
             )
             kinds[column] = numeric
-            integral = native and any(column_type.startswith(t) for t in INTEGRAL_TYPES)
             text = (
                 resolve_column_type(comparison).normalize_sql(ref, "spark", "right")
                 if comparison

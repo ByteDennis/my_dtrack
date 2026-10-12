@@ -5,6 +5,7 @@ import boto3
 import pytest
 from support import pairs_config
 
+from dtrack_left.backends import store as store_module
 from dtrack_left.checks import rollback
 from dtrack_left.cli import main
 from dtrack_left.common.protocol import list_results, list_units
@@ -273,7 +274,7 @@ def test_rollback_command_is_a_dry_run_until_yes(finished, capsys):
     outcome = json.loads(capsys.readouterr().out)
     assert outcome["deleted"] > 0 and "dry_run" not in outcome
     assert any("notebook 02" in step for step in outcome["next"])
-    assert rollback.next_steps("row", "p", "s3://b/r")[0].startswith(
+    assert rollback.next_steps_many("row", ["p"], "s3://b/r")[0].startswith(
         "distributed: dtrack row-check"
     )
 
@@ -313,6 +314,31 @@ def test_local_target_rejects_paths_outside_the_run(tmp_path):
     assert store.get_json("_status/heartbeat.json")["epoch_s"] == 123.0
     with pytest.raises(ValueError, match="outside the run folder"):
         rollback.locate(store, "../other.json")
+
+
+def test_local_folder_retries_a_transient_windows_access_denied(tmp_path, monkeypatch):
+    store = rollback.LocalFolder(tmp_path / "run")
+    store.put_bytes("_status/run.json", b"old")
+    actual_replace = Path.replace
+    attempts = 0
+
+    def transient_failure(temporary, path):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            error = PermissionError("temporarily locked")
+            error.winerror = 5
+            raise error
+        return actual_replace(temporary, path)
+
+    monkeypatch.setattr(Path, "replace", transient_failure)
+    monkeypatch.setattr(store_module.time, "sleep", lambda _delay: None)
+
+    store.put_bytes("_status/run.json", b"new")
+
+    assert store.get_bytes("_status/run.json") == b"new"
+    assert attempts == 2
+    assert not list(tmp_path.rglob("*.part"))
 
 
 def test_delete_reports_a_target_that_disappeared_after_planning(tmp_path):

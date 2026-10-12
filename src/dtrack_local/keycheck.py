@@ -11,8 +11,8 @@ import pandas as pd
 from dtrack_left.common.dates import (
     canonical_date,
     partition_where,
-    portable_date_type,
     quote_ident,
+    resolve_date_type,
 )
 from dtrack_left.common.hashing import FAMILIES, NULL, KeyFamily, collapse_decimal, key_family
 from dtrack_left.common.manifest import sample_plan as resolve_sample_plan
@@ -35,8 +35,12 @@ def key_spec(pair: dict[str, Any], families: dict[str, Any] | None = None):
         if family is None and key.lower() == date_col:
             family = {
                 "family": "date_type",
-                "left_date_type": portable_date_type(pair["left"].get("date_type")),
-                "right_date_type": portable_date_type(pair["right"].get("date_type")),
+                "left_date_type": resolve_date_type(pair["left"].get("date_type")).spec(
+                    portable=True
+                ),
+                "right_date_type": resolve_date_type(pair["right"].get("date_type")).spec(
+                    portable=True
+                ),
             }
         resolved.append(key_family(family))
     return keys, right, resolved

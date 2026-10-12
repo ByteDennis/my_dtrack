@@ -1,4 +1,27 @@
 Unreleased: protocol-v2-only runtime
+src/dtrack_left/common/stats.py — Added one column-type inference boundary, treated inferred integral values as categorical without computing top values, and retained explicit numeric overrides.
+src/dtrack_left/common/dates.py and column_types.py — Removed portable and detection wrapper aliases in favor of the underlying resolved type methods.
+src/dtrack_left/common/hashing.py and src/dtrack_left/csv_sampling.py — Removed normalization aliases, exposed the canonical composite-key operation, and moved pandas-backed CSV sampling out of the mirrored common module.
+src/dtrack_right/backends/store.py — Consolidated S3 and Volume protocol-document behavior while leaving backend byte and key primitives separate.
+src/dtrack_left/backends/store.py and src/dtrack_right/backends/store.py — Retried only transient Windows sharing-lock failures during atomic local file replacement and cleaned partial files safely.
+src/dtrack_left/checks/rollback.py and src/dtrack_right/backends/targets.py — Removed redundant single-item and SQL-normalization aliases and migrated callers to the original APIs.
+Test files changed in the latest commit (`Simplify reconciliation internals`):
+tests/local/spark/test_spark_target.py — Migrated Spark sampling coverage to the canonical key-family API and the dedicated CSV-sampling module.
+tests/support.py — Expanded the shared store contract to verify deterministic JSON, exact paths and timestamps, results, failures, heartbeats, and closure documents.
+tests/unit/common/test_dates.py — Replaced date wrapper coverage with direct `resolve_date_type`, `detect`, and portable `spec` method coverage.
+tests/unit/common/test_hashing.py — Replaced normalization aliases with direct key-family normalization and moved CSV sampling coverage to its dedicated module.
+tests/unit/common/test_parity.py — Enforced byte-identical audit, hashing, manifest, and protocol modules across Left and Right and checked canonical normalization parity.
+tests/unit/common/test_stats.py — Covered the centralized inference function, integral values as categorical, skipped top-value calculations, and explicit numeric overrides.
+tests/unit/dtrack_left/backends/test_sources.py — Updated source-sampling coverage to import `sample_csv` from its dedicated module.
+tests/unit/dtrack_left/backends/test_store.py — Made the shared S3-store contract deterministic by fixing protocol timestamps.
+tests/unit/dtrack_left/checks/test_rollback.py — Replaced the single-pair alias with `next_steps_many` and covered transient Windows replacement retries and partial-file cleanup.
+tests/unit/dtrack_right/backends/test_store.py — Covered consolidated S3/Volume behavior plus transient, permanent, and exhausted Windows replacement failures.
+tests/unit/dtrack_right/backends/test_targets.py — Removed alias-only SQL coverage and verified default integral-categorical statistics plus explicit numeric override behavior.
+tests/unit/test_packaging.py — Added AST-based stale-import checks, dedicated CSV-sampling packaging coverage, direct date detection, and Right-side dependency isolation.
+Test files changed in commit b1a348e (`Add unit test timeouts`):
+tests/unit/dtrack_left/backends/test_databricks.py — Added a 15-second timeout to the Git initialization subprocess used by workspace-upload tests.
+tests/unit/dtrack_left/backends/test_sources.py — Added 15-second pytest timeouts to the two DuckDB writer-lock tests.
+tests/unit/test_packaging.py — Added a 15-second timeout to the `python -m dtrack` packaging subprocess.
 src/dtrack_left/cli/checks.py — Added `left-run` for config Version 2 so Left counts and statistics finish without waiting for a Right signal.
 src/dtrack_left/cli/config.py — Added exact config versions 1/2 plus validated `excluded_partitions` and `excluded_columns` for Version 2.
 src/dtrack_left/common/manifest.py — Added current-plan fingerprints so same-run reruns reuse unchanged Units and replace only affected vintages or columns.

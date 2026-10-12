@@ -3,7 +3,8 @@ import hashlib
 import pandas as pd
 import pytest
 
-from dtrack_left.common import hashing as csv_hashing
+from dtrack_left import csv_sampling
+from dtrack_left.common import hashing as left_hashing
 
 
 @pytest.mark.parametrize(
@@ -36,7 +37,7 @@ def test_collapse_decimal_touches_only_pure_decimals(common, text, expected):
     ],
 )
 def test_normalize_value_per_key_family(common, value, family, expected):
-    assert common.hashing.normalize_value(value, family) == expected
+    assert common.hashing.key_family(family).normalize(value) == expected
 
 
 def test_hash32_is_the_first_eight_md5_hex_digits(common):
@@ -59,34 +60,34 @@ def _keys_csv(tmp_path, rows):
 
 def test_sample_csv_all_mode_returns_the_input_untouched(tmp_path):
     path = _keys_csv(tmp_path, [["1", "a"]])
-    assert csv_hashing.sample_csv(path, key_columns=[], mode="all") == path
+    assert csv_sampling.sample_csv(path, key_columns=[], mode="all") == path
 
 
 def test_sample_csv_rejects_missing_keys_and_unknown_modes(tmp_path):
     path = _keys_csv(tmp_path, [["1", "a"]])
     with pytest.raises(ValueError, match="requires key columns"):
-        csv_hashing.sample_csv(path, key_columns=[], mode="fraction", rate=0.5)
+        csv_sampling.sample_csv(path, key_columns=[], mode="fraction", rate=0.5)
     with pytest.raises(ValueError, match="unsupported sample mode"):
-        csv_hashing.sample_csv(path, key_columns=["id"], mode="stratified")
+        csv_sampling.sample_csv(path, key_columns=["id"], mode="stratified")
 
 
 def test_sample_csv_fraction_hashes_the_normalised_key_and_keeps_raw_rows(tmp_path):
     rows = [[f"{i:05d}", "x"] for i in range(400)]
     path = _keys_csv(tmp_path, rows)
     sampled = pd.read_csv(
-        csv_hashing.sample_csv(
+        csv_sampling.sample_csv(
             path, key_columns=["id"], mode="fraction", rate=0.25, families=["numeric"]
         ),
         dtype=object,
     )
     threshold = round(0.25 * 2**32)
-    expected = [key for key, _ in rows if csv_hashing.hash32(str(int(key))) < threshold]
+    expected = [key for key, _ in rows if left_hashing.hash32(str(int(key))) < threshold]
     assert list(sampled["id"]) == expected and 60 < len(expected) < 140
 
 
 def test_sample_csv_fixed_with_key_tuples_matches_normalised_keys(tmp_path):
     path = _keys_csv(tmp_path, [["1", "a"], ["2.0", "b"], ["3", "c"]])
-    sampled = csv_hashing.sample_csv(
+    sampled = csv_sampling.sample_csv(
         path, key_columns=["id"], mode="fixed", count=1, key_tuples=[["2"]], families=["numeric"]
     )
     assert sampled.read_text().splitlines() == ["id,value", "2.0,b"]
@@ -97,7 +98,7 @@ def test_sample_csv_fixed_without_tuples_picks_n_keys_by_hash_rank_with_all_thei
 ):
     path = _keys_csv(tmp_path, [["1", "a"], ["1", "b"], ["2", "c"], ["3", "d"], ["4", "e"]])
     sampled = pd.read_csv(
-        csv_hashing.sample_csv(path, key_columns=["id"], mode="fixed", count=2), dtype=object
+        csv_sampling.sample_csv(path, key_columns=["id"], mode="fixed", count=2), dtype=object
     )
     ranked = sorted("1234", key=lambda key: hashlib.md5(key.encode()).hexdigest())[:2]
     assert sorted(set(sampled["id"])) == sorted(ranked)
@@ -114,9 +115,9 @@ def test_fraction_sampling_picks_the_same_keys_on_left_and_right_real_files(synt
     )
     options = {"key_columns": ["ORDER_ID"], "mode": "fraction", "rate": 0.25}
     options["families"] = ["numeric"]
-    first = pd.read_csv(csv_hashing.sample_csv(tmp_path / "l.csv", **options), dtype=object)
-    again = pd.read_csv(csv_hashing.sample_csv(tmp_path / "l.csv", **options), dtype=object)
-    other = pd.read_csv(csv_hashing.sample_csv(tmp_path / "r.csv", **options), dtype=object)
+    first = pd.read_csv(csv_sampling.sample_csv(tmp_path / "l.csv", **options), dtype=object)
+    again = pd.read_csv(csv_sampling.sample_csv(tmp_path / "l.csv", **options), dtype=object)
+    other = pd.read_csv(csv_sampling.sample_csv(tmp_path / "r.csv", **options), dtype=object)
     assert first.equals(again)
     kept = ~first["BUSINESS_DATE"].isin({"2026-01-15"})
     kept_other = ~other["BUSINESS_DATE"].isin({"2026-01-15"})

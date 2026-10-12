@@ -16,8 +16,9 @@ from dtrack_left.backends.sources import (
     source_from_config,
     write_rows,
 )
-from dtrack_left.common.hashing import key_family, sample_csv
+from dtrack_left.common.hashing import key_family
 from dtrack_left.common.sampling import SamplingSqlNotSupported
+from dtrack_left.csv_sampling import sample_csv
 
 ORACLE = {"source": "oracle", "table": "ORDERS", "date_col": "BUSINESS_DATE", "date_type": "date"}
 

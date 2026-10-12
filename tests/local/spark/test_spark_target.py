@@ -3,8 +3,9 @@ import pytest
 from support import assert_stats_agree, synthetic_data
 
 from dtrack_left.backends.sources import FileSource
-from dtrack_left.common.hashing import normalize_value, sample_csv
+from dtrack_left.common.hashing import key_family
 from dtrack_left.common.stats import compute_csv_statistics
+from dtrack_left.csv_sampling import sample_csv
 from dtrack_local.pipeline import WarehouseTarget
 from dtrack_right.backends.targets import SparkTarget
 
@@ -229,11 +230,10 @@ def test_local_databricks_query_selects_the_same_fraction_keys_as_left(spark, tm
         },
         tmp_path,
     ).window_sql(manifest, {"bucket": "2026-01-01", "partitions": ["2026-01-01"]})
-    right_keys = {
-        normalize_value(row.right_id, "numeric", "right") for row in spark.sql(query).collect()
-    }
+    family = key_family("numeric")
+    right_keys = {family.normalize(row.right_id, "right") for row in spark.sql(query).collect()}
     left_keys = {
-        normalize_value(value, "numeric", "left")
+        family.normalize(value, "left")
         for value in pd.read_csv(left_path, dtype=object)["left_id"]
     }
     assert left_keys == right_keys

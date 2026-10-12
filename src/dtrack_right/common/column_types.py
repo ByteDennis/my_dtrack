@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .dates import portable_date_type, resolve_date_type
+from .dates import resolve_date_type
 
 
 class DateColumnType:
@@ -24,8 +24,8 @@ class DateColumnType:
     def spec(self) -> dict[str, Any]:
         return {
             "type": "date",
-            "left_date_type": portable_date_type(self.left),
-            "right_date_type": portable_date_type(self.right),
+            "left_date_type": self.left.spec(portable=True),
+            "right_date_type": self.right.spec(portable=True),
         }
 
 

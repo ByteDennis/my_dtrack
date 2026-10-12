@@ -14,6 +14,26 @@ from .column_types import resolve_column_type
 from .hashing import collapse_decimal
 
 
+def infer_column_type(
+    present: int,
+    parsed: int,
+    integers: int | None = None,
+    *,
+    requested: str | None = None,
+    comparison: bool = False,
+) -> tuple[str, bool]:
+    """Return the statistics type and whether every present value is integral text."""
+    is_integral = (
+        integers is not None and present > 0 and present == parsed == integers
+    )
+    is_numeric = (
+        requested == "numeric"
+        if requested
+        else not comparison and present > 0 and present == parsed and not is_integral
+    )
+    return ("numeric" if is_numeric else "categorical"), is_integral
+
+
 def _hash16(value: object) -> int:
     text = "<<NULL>>" if value is None or pd.isna(value) else str(value)
     return int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16], 16)
@@ -32,6 +52,8 @@ def column_statistics(
     series: pd.Series, *, strict: bool = False, col_type: str | None = None
 ) -> dict[str, Any]:
     values = series.copy()
+    original = values.dropna().astype(str)
+    integers = int(original.str.fullmatch(r"[+-]?[0-9]+").sum())
     if strict:
         values = values.map(
             lambda value: (
@@ -42,9 +64,14 @@ def column_statistics(
         )
     non_null = values.dropna()
     numeric = pd.to_numeric(non_null, errors="coerce")
-    is_numeric = len(non_null) > 0 and numeric.notna().all()
+    inferred_type, is_integral = infer_column_type(
+        len(non_null),
+        int(numeric.notna().sum()),
+        integers,
+        requested=col_type,
+    )
+    is_numeric = inferred_type == "numeric"
     if col_type:
-        is_numeric = col_type == "numeric"
         numeric = numeric.dropna()
     if is_numeric:
         values = values.map(
@@ -82,7 +109,7 @@ def column_statistics(
             max_val=None if strings.empty else strings.max(),
             length_avg=None if strings.empty else float(strings.str.len().mean()),
             length_max=None if strings.empty else int(strings.str.len().max()),
-            top_10=_top10(values),
+            top_10="" if is_integral else _top10(values),
         )
     return common
 
@@ -154,12 +181,14 @@ def compute_csv_statistics(
 def _statistics(connection, columns, strict, requested_types, comparisons, side):
     batch = stats_batch()
     base = {}
+    integral_values = {}
     for column in columns:
         ref = _quote(column)
         value = ref
         if column in comparisons:
             normalized = resolve_column_type(comparisons[column]).normalize_sql(ref, "duckdb", side)
             value = f"CASE WHEN {ref} IS NULL THEN NULL ELSE {normalized} END"
+        integral_values[column] = value
         if strict:
             value = f"lower({_collapse(value)})"
         base[column] = value
@@ -170,10 +199,14 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side)
         infer_selects = []
         for index, column in group:
             value = base[column]
+            integral_value = integral_values[column]
             infer_selects += [
                 f"count({value}) AS present_{index}",
                 f"count(try_cast({value} AS double)) AS numeric_{index}",
-                f"count_if(regexp_matches({value}, '^[+-]?[0-9]+$')) AS integral_{index}",
+                (
+                    f"count_if(regexp_matches({integral_value}, '^[+-]?[0-9]+$')) "
+                    f"AS integral_{index}"
+                ),
             ]
         inferred_row = connection.execute(
             f"SELECT {', '.join(infer_selects)} FROM scanned"
@@ -184,12 +217,14 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side)
     for index, column in indexed:
         forced = requested_types.get(column)
         present, parsed, integers = inferred[index]
-        numeric[column] = (
-            forced == "numeric"
-            if forced
-            else column not in comparisons and present > 0 and present == parsed
+        inferred_type, integral[column] = infer_column_type(
+            present,
+            parsed,
+            integers,
+            requested=forced,
+            comparison=column in comparisons,
         )
-        integral[column] = numeric[column] and present == parsed == integers
+        numeric[column] = inferred_type == "numeric"
 
     row: dict[str, Any] = {}
     values = {}
@@ -238,7 +273,7 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side)
         is_numeric = numeric[column]
         minimum, maximum = row[f"min_{index}"], row[f"max_{index}"]
         top = ""
-        if not is_numeric:
+        if not is_numeric and not integral[column]:
             top_rows = connection.execute(
                 "WITH counts AS (SELECT value, count(*) AS n, min(position) AS position "
                 f"FROM (SELECT {values[column]} AS value, rowid AS position FROM scanned) "

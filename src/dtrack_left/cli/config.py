@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import find_dotenv, load_dotenv
 
-from ..common.column_types import portable_column_type
+from ..common.column_types import resolve_column_type
 from ..common.dates import canonical_date, resolve_date_type
 from ..common.query_windows import normalize_query_windows
 
@@ -137,7 +137,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             )
         try:
             pair["column_types"] = {
-                column: portable_column_type(spec) for column, spec in column_types.items()
+                column: resolve_column_type(spec).spec() for column, spec in column_types.items()
             }
         except (TypeError, ValueError) as exc:
             raise ValueError(

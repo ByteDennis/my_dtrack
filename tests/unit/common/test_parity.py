@@ -20,6 +20,7 @@ RIGHT_COMMON = {
     "protocol.py",
     "sampling.py",
 }
+EXACT_MIRRORS = ("audit.py", "hashing.py", "manifest.py", "protocol.py")
 
 
 def test_right_common_contains_only_databricks_protocol_modules():
@@ -27,12 +28,11 @@ def test_right_common_contains_only_databricks_protocol_modules():
     assert {path.name for path in right.glob("*.py")} == RIGHT_COMMON
 
 
-def test_protocol_paths_and_readers_are_identical_on_both_sides():
-    left = (SRC / "dtrack_left/common/protocol.py").read_text()
-    right = (SRC / "dtrack_right/common/protocol.py").read_text()
-    assert left.replace("from .. import PROTOCOL_VERSION", "") == right.replace(
-        "from .. import PROTOCOL_VERSION", ""
-    )
+@pytest.mark.parametrize("name", EXACT_MIRRORS)
+def test_runtime_neutral_common_modules_are_identical_on_both_sides(name):
+    left = (SRC / "dtrack_left/common" / name).read_bytes()
+    right = (SRC / "dtrack_right/common" / name).read_bytes()
+    assert left == right
 
 
 def test_right_date_sql_runtime_contains_only_databricks_platforms():
@@ -117,8 +117,8 @@ def test_key_normalisation_strips_numeric_zeros_but_string_keeps_them():
         ("01JAN2026", "date"): "2026-01-01",
     }
     for (value, family), expected in cases.items():
-        assert cloud_hashing.normalize_value(value, family) == expected, (value, family)
-        assert hashing.normalize_value(value, family) == expected, (value, family)
+        assert cloud_hashing.key_family(family).normalize(value) == expected, (value, family)
+        assert hashing.key_family(family).normalize(value) == expected, (value, family)
 
 
 @pytest.mark.parametrize(

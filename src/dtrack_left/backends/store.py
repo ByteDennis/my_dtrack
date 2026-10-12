@@ -5,6 +5,7 @@ import os
 import posixpath
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -20,6 +21,21 @@ from ..common.protocol import (
     timestamp,
     unit_path,
 )
+
+_WINDOWS_REPLACE_ERRORS = frozenset({5, 32})
+_WINDOWS_REPLACE_RETRY_DELAYS = (0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64)
+
+
+def replace_local_file(temporary: Path, path: Path) -> None:
+    """Atomically replace a local file, tolerating brief Windows sharing locks."""
+    for delay in (*_WINDOWS_REPLACE_RETRY_DELAYS, None):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError as exc:
+            if delay is None or getattr(exc, "winerror", None) not in _WINDOWS_REPLACE_ERRORS:
+                raise
+            time.sleep(delay)
 
 
 def _unit_pair(store, unit_id: str, document: dict[str, Any]) -> str:

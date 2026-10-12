@@ -8,7 +8,7 @@ from typing import Any
 
 from .. import PROTOCOL_VERSION
 from .column_types import resolve_column_type
-from .dates import bucket_date, portable_date_type
+from .dates import bucket_date, resolve_date_type
 from .hashing import HASH_BUCKET_SPACE, key_family
 
 STATS_VERSION = 1
@@ -150,8 +150,12 @@ def build_manifest(
         if configured is None and key.lower() == date_col:
             configured = {
                 "family": "date_type",
-                "left_date_type": portable_date_type(pair["left"].get("date_type")),
-                "right_date_type": portable_date_type(pair["right"].get("date_type")),
+                "left_date_type": resolve_date_type(pair["left"].get("date_type")).spec(
+                    portable=True
+                ),
+                "right_date_type": resolve_date_type(pair["right"].get("date_type")).spec(
+                    portable=True
+                ),
             }
         return key_family(configured).spec()
 

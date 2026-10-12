@@ -154,7 +154,7 @@ class SqlAudit:
                     content_type="text/plain; charset=utf-8",
                 )
             return key
-        except Exception as exc:  # noqa: BLE001 - audit failure must never block the SQL
+        except Exception as exc:  # noqa: BLE001, RUF100 - audit failure must never block the SQL
             if not mutating:
                 with _CAPTURED_GUARD:
                     _CAPTURED.discard(capture)

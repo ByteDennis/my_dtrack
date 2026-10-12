@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from dtrack_left.common.dates import canonical_date, detect_date_type, resolve_date_type
-from dtrack_left.common.hashing import sample_csv
+from dtrack_left.common.dates import canonical_date, resolve_date_type
 from dtrack_left.common.stats import compute_csv_statistics
+from dtrack_left.csv_sampling import sample_csv
 
 
 class CsvAnchorTarget:
@@ -31,7 +31,7 @@ class CsvAnchorTarget:
         if resolved.requires_probe:
             frame = self._frame() if frame is None else frame
             values = frame[self.config["date_col"]].dropna().head(16).tolist()
-            resolved = detect_date_type(resolved, values)
+            resolved = resolved.detect(values)
         self._date_type = resolved
         self.config["date_type"] = resolved.spec(portable=True)
         return resolved

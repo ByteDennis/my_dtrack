@@ -509,18 +509,6 @@ def resolve_date_type(spec: Any = None) -> DateType:
     raise TypeError(f"date type must be a name or an object, got {spec!r}")
 
 
-def detect_date_type(spec: Any, values: list[object]) -> DateType:
-    return resolve_date_type(spec).detect(values)
-
-
-def date_type(spec: Any = None) -> DateType:
-    return resolve_date_type(spec)
-
-
-def portable_date_type(spec: Any = None) -> str | dict[str, Any]:
-    return resolve_date_type(spec).spec(portable=True)
-
-
 def _predicate_expr(date_col: str, dialect: str, date_type: Any) -> str:
     column = quote_ident(date_col, dialect)
     return resolve_date_type(date_type).predicate(column, dialect)

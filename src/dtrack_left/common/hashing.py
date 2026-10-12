@@ -5,12 +5,9 @@ import math
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, ClassVar
 
-import pandas as pd
-
-from .dates import DateType, canonical_date, portable_date_type, resolve_date_type
+from .dates import DateType, canonical_date, resolve_date_type
 
 NULL = "<<NULL>>"
 PURE_DECIMAL = re.compile(r"^-?[0-9]+\.[0-9]+$")
@@ -272,8 +269,8 @@ class DateKeyFamily(KeyFamily):
     def spec(self) -> dict[str, Any]:
         return {
             "family": self.name,
-            "left_date_type": portable_date_type(self.left_date_type),
-            "right_date_type": portable_date_type(self.right_date_type),
+            "left_date_type": self.left_date_type.spec(portable=True),
+            "right_date_type": self.right_date_type.spec(portable=True),
         }
 
     def __eq__(self, other: object) -> bool:
@@ -351,62 +348,17 @@ def key_families(specs: Iterable[Any] | None, count: int) -> list[KeyFamily]:
 HASH_BUCKET_SPACE = 2**32
 
 
-# >>> one key value as hashed text; side picks the family's left_transform or right_transform <<< #
-def normalize_value(value: object, family: object = "string", side: str = "left") -> str:
-    return key_families([family], 1)[0].normalize(value, side)
-
-
 def hash32(value: str) -> int:
     return int(hashlib.md5(value.encode("utf-8")).hexdigest()[:8], 16)
 
 
-def _composite(values, families, side: str) -> str:
+def composite_key(values, families, side: str) -> str:
     return "|".join(family.normalize(value, side) for value, family in zip(values, families))
 
 
 def selected_fraction(
     values: list[object], families: list[object], threshold: int, side: str = "left"
 ) -> bool:
-    return hash32(_composite(values, key_families(families, len(values)), side)) < int(threshold)
-
-
-def sample_csv(
-    path: str | Path,
-    *,
-    key_columns: list[str],
-    mode: str,
-    rate: float | None = None,
-    count: int | None = None,
-    families: list[object] | None = None,
-    key_tuples: list[list[object]] | None = None,
-    side: str = "left",
-) -> Path:
-    if mode == "all":
-        return Path(path)
-    if not key_columns:
-        raise ValueError("sampling requires key columns")
-    frame = pd.read_csv(path, dtype=object)
-    resolved = key_families(families, len(key_columns))
-    composite = pd.Series(
-        [_composite(list(row), resolved, side) for row in frame[key_columns].itertuples(False)],
-        index=frame.index,
-        dtype=object,
+    return hash32(composite_key(values, key_families(families, len(values)), side)) < int(
+        threshold
     )
-    if mode == "fraction":
-        threshold = max(1, round(float(rate) * HASH_BUCKET_SPACE))
-        sampled = frame[composite.map(hash32) < threshold]
-    elif mode == "fixed":
-        if key_tuples is not None:
-            wanted = {_composite(list(row), resolved, "left") for row in key_tuples}
-            sampled = frame[composite.isin(wanted)]
-        else:
-            ranked = frame.assign(
-                __rank=composite.map(lambda text: hashlib.md5(text.encode()).hexdigest())
-            )
-            keys = ranked.sort_values("__rank")[key_columns].drop_duplicates().head(int(count))
-            sampled = frame.merge(keys, on=key_columns, how="inner")
-    else:
-        raise ValueError(f"unsupported sample mode: {mode}")
-    output = Path(path).with_name(Path(path).stem + ".sampled.csv")
-    sampled.to_csv(output, index=False)
-    return output

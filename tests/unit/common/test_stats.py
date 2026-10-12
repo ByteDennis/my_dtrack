@@ -10,6 +10,28 @@ def _series(*values):
     return pd.Series(list(values), dtype=object)
 
 
+@pytest.mark.parametrize(
+    ("counts", "requested", "comparison", "expected"),
+    [
+        ((3, 3), None, False, ("numeric", False)),
+        ((3, 3, 3), None, False, ("categorical", True)),
+        ((3, 3, 2), None, False, ("numeric", False)),
+        ((3, 2, 2), None, False, ("categorical", False)),
+        ((0, 0, 0), None, False, ("categorical", False)),
+        ((3, 3, 3), "categorical", False, ("categorical", True)),
+        ((3, 3, 3), "numeric", False, ("numeric", True)),
+        ((3, 0, 0), "numeric", False, ("numeric", False)),
+        ((3, 3, 3), None, True, ("categorical", True)),
+    ],
+)
+def test_infer_column_type_wraps_count_based_classification(
+    counts, requested, comparison, expected
+):
+    assert stats.infer_column_type(
+        *counts, requested=requested, comparison=comparison
+    ) == expected
+
+
 def test_numeric_columns_hash_canonical_decimal_text():
     compute = stats.column_statistics
     a = compute(_series("7.50", "2", None))
@@ -21,9 +43,11 @@ def test_numeric_columns_hash_canonical_decimal_text():
     assert a["length_avg"] is None and a["top_10"] == ""
 
 
-def test_integral_columns_format_extremes_as_integers():
+def test_integral_columns_are_categorical_without_top_10():
     result = stats.column_statistics(_series("100003", "7", "42"))
-    assert (result["min_val"], result["max_val"]) == ("7", "100003")
+    assert result["col_type"] == "categorical"
+    assert (result["min_val"], result["max_val"]) == ("100003", "7")
+    assert result["mean"] is None and result["top_10"] == ""
 
 
 def test_single_numeric_value_has_no_sample_std():
@@ -57,7 +81,9 @@ def test_compute_csv_statistics_reads_as_text_and_checks_columns(tmp_path):
     path = tmp_path / "w.csv"
     path.write_text("ID,AMOUNT\n007,1.10\n008,2\n")
     result = stats.compute_csv_statistics(path, ["ID", "AMOUNT"])
-    assert result["ID"]["min_val"] == "7" and result["AMOUNT"]["n_unique"] == 2
+    assert result["ID"]["col_type"] == "categorical"
+    assert (result["ID"]["min_val"], result["ID"]["max_val"]) == ("007", "008")
+    assert result["ID"]["top_10"] == "" and result["AMOUNT"]["n_unique"] == 2
     with pytest.raises(ValueError, match="missing columns: NOPE"):
         stats.compute_csv_statistics(path, ["NOPE"])
 
@@ -93,6 +119,7 @@ def test_col_type_override_forces_numeric_or_categorical():
     text = compute(_series("007", "7"), col_type="categorical")
     assert text["col_type"] == "categorical" and text["n_unique"] == 2
     assert (text["min_val"], text["max_val"]) == ("007", "7")
+    assert text["top_10"] == ""
 
 
 def test_compute_csv_statistics_applies_overrides_by_column(tmp_path):
@@ -152,7 +179,8 @@ def test_batched_aggregates_match_the_single_query_payload(tmp_path, monkeypatch
     monkeypatch.setenv("DTRACK_STATS_BATCH", "7")
     batched = stats.compute_csv_statistics(path, columns, strict=True)
     assert batched == single
-    assert single["c0"]["col_type"] == "numeric" and single["c2"]["col_type"] == "categorical"
+    assert single["c0"]["col_type"] == "categorical" and single["c0"]["top_10"] == ""
+    assert single["c2"]["col_type"] == "categorical"
 
 
 def test_top_10_ties_keep_first_appearance_order(tmp_path):

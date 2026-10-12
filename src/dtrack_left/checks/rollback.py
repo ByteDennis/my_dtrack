@@ -6,7 +6,7 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ..backends.store import S3Store
+from ..backends.store import S3Store, replace_local_file
 from ..common.dates import resolve_date_type
 from ..common.manifest import build_manifest
 from ..common.protocol import (
@@ -60,8 +60,11 @@ class LocalFolder:
         path = self.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + ".part")
-        temporary.write_bytes(body)
-        temporary.replace(path)
+        try:
+            temporary.write_bytes(body)
+            replace_local_file(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
         return relative
 
     def put_json(self, relative: str, value: Any) -> str:
@@ -325,16 +328,7 @@ def publish_manifest(store, pair: str, prepared: dict[str, Any]) -> dict[str, An
     return manifest
 
 
-# >>> single-manifest API kept for callers; batch rollback prepares every pair before deleting <<< #
-def rebuild_manifest(store, config: dict[str, Any], pair: str) -> dict[str, Any]:
-    return publish_manifest(store, pair, prepare_manifest(store, config, pair))
-
-
 # >>> what to run after a rollback, per stage, for the distributed flow and for dtrack_local <<< #
-def next_steps(stage: str, pair: str, location: str) -> list[str]:
-    return next_steps_many(stage, [pair], location)
-
-
 def next_steps_many(
     stage: str, pairs: list[str], location: str, *, row_check_restarted: bool = False
 ) -> list[str]:

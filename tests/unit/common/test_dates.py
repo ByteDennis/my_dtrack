@@ -104,10 +104,10 @@ def test_registry_exposes_only_four_configurable_date_type_names(common):
 
 def test_builtin_date_types_are_registered_classes(common):
     dates = common.dates
-    assert isinstance(dates.date_type("date"), dates.NativeDateType)
-    assert isinstance(dates.date_type("string"), dates.StringDateType)
-    assert isinstance(dates.date_type("number"), dates.NumericDateType)
-    assert isinstance(dates.date_type("sas"), dates.SasDateType)
+    assert isinstance(dates.resolve_date_type("date"), dates.NativeDateType)
+    assert isinstance(dates.resolve_date_type("string"), dates.StringDateType)
+    assert isinstance(dates.resolve_date_type("number"), dates.NumericDateType)
+    assert isinstance(dates.resolve_date_type("sas"), dates.SasDateType)
 
 
 def test_parameterized_string_and_sas_formats_share_one_class_each(common):
@@ -142,17 +142,17 @@ def test_parameterized_string_and_sas_formats_share_one_class_each(common):
 def test_probe_values_resolve_a_family_to_one_concrete_format(
     common, configured, values, expected
 ):
-    detected = common.dates.detect_date_type(configured, values)
+    detected = common.dates.resolve_date_type(configured).detect(values)
     assert detected.spec(portable=True) == expected
 
 
 def test_probe_rejects_empty_or_mixed_physical_formats(common):
     with pytest.raises(ValueError, match="no non-null values"):
-        common.dates.detect_date_type("string", [None, ""])
+        common.dates.resolve_date_type("string").detect([None, ""])
     with pytest.raises(ValueError, match="mixed string date formats"):
-        common.dates.detect_date_type("string", ["2025-04-02", "20250403"])
+        common.dates.resolve_date_type("string").detect(["2025-04-02", "20250403"])
     with pytest.raises(ValueError, match="mixed SAS date formats"):
-        common.dates.detect_date_type("sas", ["01AUG2026", "24108"])
+        common.dates.resolve_date_type("sas").detect(["01AUG2026", "24108"])
 
 
 def test_sas_datetime_normalizes_to_its_calendar_day(common):
@@ -180,8 +180,8 @@ def test_register_date_type_accepts_a_named_class_instance(common):
     )
     dates.register_date_type(kind)
     try:
-        assert dates.date_type("test_slash") is kind
-        assert dates.date_type("test_slash").normalize("2026/01/02") == "2026-01-02"
+        assert dates.resolve_date_type("test_slash") is kind
+        assert dates.resolve_date_type("test_slash").normalize("2026/01/02") == "2026-01-02"
     finally:
         dates.DATE_TYPES.pop("test_slash")
 
@@ -378,9 +378,9 @@ def test_registered_date_type_uses_a_name_locally_and_a_portable_remote_spec(com
         range="day",
     )
     try:
-        registered = dates.date_type("test_slash")
+        registered = dates.resolve_date_type("test_slash")
         assert registered.spec() == "test_slash"
-        assert dates.portable_date_type("test_slash") == {
+        assert registered.spec(portable=True) == {
             "predicate_sql": {"oracle": "TO_DATE({column}, 'YYYY/MM/DD')"},
             "literal_sql": "DATE '{iso}'",
             "range": "day",
@@ -401,7 +401,7 @@ def test_registered_date_type_uses_a_name_locally_and_a_portable_remote_spec(com
 
 def test_sas_date_type_family_resolves_to_one_format_before_sql(common):
     dates = common.dates
-    sas = dates.date_type("sas")
+    sas = dates.resolve_date_type("sas")
     assert isinstance(sas, dates.SasDateType)
     assert sas.requires_probe
     date9 = sas.detect(["02JAN2026", "03-Jan-2026"])
@@ -436,10 +436,10 @@ def test_sas_registered_and_inline_specs_preserve_sas_behavior(common):
     assert inline.normalize("24108.75") == "2026-01-02"
     dates.register_date_type("test_sas", inline)
     try:
-        registered = dates.date_type("test_sas")
+        registered = dates.resolve_date_type("test_sas")
         assert isinstance(registered, dates.SasDateType)
         assert registered.spec() == "test_sas"
-        portable = dates.portable_date_type("test_sas")
+        portable = registered.spec(portable=True)
         assert portable == {"type": "sas", "format": "days"}
         restored = dates.resolve_date_type(portable)
         assert isinstance(restored, dates.SasDateType)
@@ -461,12 +461,12 @@ def test_registered_date_type_can_reuse_python_and_sql_normalizers(common):
         },
     )
     try:
-        kind = dates.date_type("test_slash")
+        kind = dates.resolve_date_type("test_slash")
         assert kind.normalize("2026/01/02") == "2026-01-02"
         assert kind.normalize_sql("`DT`", "spark") == (
             "coalesce(date_format(to_date(`DT`, 'yyyy/MM/dd'), 'yyyy-MM-dd'), '')"
         )
-        assert dates.portable_date_type(kind)["python_formats"] == ["%Y/%m/%d"]
+        assert kind.spec(portable=True)["python_formats"] == ["%Y/%m/%d"]
     finally:
         dates.DATE_TYPES.pop("test_slash")
 

@@ -11,7 +11,7 @@ from typing import Any
 
 from ..backends.sources import source_from_config
 from ..common.audit import SqlAudit, attach_sql_audit
-from ..common.dates import portable_date_type
+from ..common.dates import resolve_date_type
 from ..common.manifest import build_manifest
 from ..common.protocol import (
     LEFT_ROW_CHECK_CLOSED,
@@ -41,7 +41,9 @@ def public_pair_config(pair: dict[str, Any]) -> dict[str, Any]:
             k: v for k, v in pair[side].items() if k not in SECRET_FIELDS and not k.endswith("_env")
         }
         if "date_type" in result[side]:
-            result[side]["date_type"] = portable_date_type(result[side]["date_type"])
+            result[side]["date_type"] = resolve_date_type(result[side]["date_type"]).spec(
+                portable=True
+            )
     return result
 
 

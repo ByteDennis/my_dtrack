@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from .dates import DateType, canonical_date, portable_date_type, resolve_date_type
+from .dates import DateType, canonical_date, resolve_date_type
 
 NULL = "<<NULL>>"
 PURE_DECIMAL = re.compile(r"^-?[0-9]+\.[0-9]+$")
@@ -269,8 +269,8 @@ class DateKeyFamily(KeyFamily):
     def spec(self) -> dict[str, Any]:
         return {
             "family": self.name,
-            "left_date_type": portable_date_type(self.left_date_type),
-            "right_date_type": portable_date_type(self.right_date_type),
+            "left_date_type": self.left_date_type.spec(portable=True),
+            "right_date_type": self.right_date_type.spec(portable=True),
         }
 
     def __eq__(self, other: object) -> bool:
@@ -348,20 +348,17 @@ def key_families(specs: Iterable[Any] | None, count: int) -> list[KeyFamily]:
 HASH_BUCKET_SPACE = 2**32
 
 
-# >>> one key value as hashed text; side picks the family's left_transform or right_transform <<< #
-def normalize_value(value: object, family: object = "string", side: str = "left") -> str:
-    return key_families([family], 1)[0].normalize(value, side)
-
-
 def hash32(value: str) -> int:
     return int(hashlib.md5(value.encode("utf-8")).hexdigest()[:8], 16)
 
 
-def _composite(values, families, side: str) -> str:
+def composite_key(values, families, side: str) -> str:
     return "|".join(family.normalize(value, side) for value, family in zip(values, families))
 
 
 def selected_fraction(
     values: list[object], families: list[object], threshold: int, side: str = "left"
 ) -> bool:
-    return hash32(_composite(values, key_families(families, len(values)), side)) < int(threshold)
+    return hash32(composite_key(values, key_families(families, len(values)), side)) < int(
+        threshold
+    )

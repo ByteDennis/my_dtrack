@@ -6,7 +6,7 @@ from support import FakeRow, FakeSpark
 
 from dtrack_right.backends import targets
 from dtrack_right.backends.targets import SparkTarget
-from dtrack_right.common.hashing import collapse_decimal, key_family
+from dtrack_right.common.hashing import collapse_decimal
 
 ORDERS = {"source": "databricks", "catalog": "main", "schema": "sales", "table": "orders"}
 ORDERS |= {"date_col": "business_date", "date_type": "date"}
@@ -39,13 +39,6 @@ def test_spark_collapse_decimal_sql_applies_the_same_rule_as_python(text):
     sql = targets._collapse_decimal_sql("x")
     assert sql.startswith("CASE WHEN x rlike ")
     assert _spark_rule(sql)(text) == collapse_decimal(text)
-
-
-@pytest.mark.parametrize("family", ["string", "numeric", "date", "exact", "digits"])
-def test_norm_sql_is_the_family_right_transform_sql(family):
-    sql = targets._norm_sql("k", family)
-    assert sql == key_family(family).sql("`k`", "right")
-    assert sql.startswith("coalesce(nullif(") and sql.endswith(", ''), '<<NULL>>')")
 
 
 def test_relation_supports_tables_queries_and_raw_volume_files():
@@ -204,9 +197,10 @@ def test_window_statistics_is_one_query_mapped_back_per_column():
     query = spark.statements[1]
     assert "`business_date` >= DATE '2026-01-01' AND `business_date` < DATE '2026-01-03'" in query
     assert "< 99" in query and "APPROX" not in query.upper()
-    assert "cast(min(`order_id`) as string)" in query
+    assert "min(trim(cast(`order_id` as string)))" in query
     assert "cast(min(cast(`amount` as double)) as string)" in query
-    assert stats["order_id"]["col_type"] == "numeric" and stats["order_id"]["mean"] is None
+    assert stats["order_id"]["col_type"] == "categorical"
+    assert stats["order_id"]["mean"] is None and stats["order_id"]["top_10"] == ""
     assert stats["amount"] == {
         "col_type": "numeric",
         "n_total": 4,
@@ -235,6 +229,17 @@ def test_overrides_force_a_string_column_numeric_and_a_decimal_categorical():
     assert "avg(try_cast(CASE WHEN trim(cast(`status` as string))" in query
     assert "NULL AS mean_1" in query and "avg(length(trim(cast(`amount` as string))))" in query
     assert stats["status"]["col_type"] == "numeric" and stats["amount"]["col_type"] == "categorical"
+    assert stats["order_id"]["col_type"] == "categorical"
+
+
+def test_override_can_force_an_integral_column_back_to_numeric():
+    spark = FakeSpark(
+        lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]
+    )
+    manifest = _manifest({"mode": "all"})
+    manifest["col_type_overrides"] = {"ORDER_ID": "numeric"}
+    stats = SparkTarget(spark, ORDERS).window_statistics(manifest, {"partitions": ["2026-01-01"]})
+    assert "avg(cast(`order_id` as double)) AS mean_0" in spark.statements[1]
     assert stats["order_id"]["col_type"] == "numeric"
 
 

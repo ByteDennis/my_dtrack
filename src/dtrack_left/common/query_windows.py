@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .dates import bounds_expression_where, partition_expression_where, portable_date_type
+from .dates import bounds_expression_where, partition_expression_where, resolve_date_type
 
 QUERY_WINDOW_MARKER = re.compile(
     r"\{\{\s*query_windows:([A-Za-z][A-Za-z0-9_-]*)\s*\}\}"
@@ -56,7 +56,7 @@ def normalize_query_windows(
             raise ValueError(f"query_windows.{name}.expression must be a non-empty string")
         normalized[name] = {
             "expression": expression.strip(),
-            "date_type": portable_date_type(spec.get("date_type") or "date"),
+            "date_type": resolve_date_type(spec.get("date_type") or "date").spec(portable=True),
         }
     return normalized
 

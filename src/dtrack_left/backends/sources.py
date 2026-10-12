@@ -17,7 +17,6 @@ from ..common.dates import (
     bounds_where,
     canonical_date,
     day_expr,
-    detect_date_type,
     partition_where,
     quote_ident,
     resolve_date_type,
@@ -167,7 +166,7 @@ class SqlSource(ABC):
                     f"WHERE {self._where(f'{column} IS NOT NULL')} {limit}"
                 )
                 _columns, rows = self.query(sql, operation="date_type_probe")
-                resolved = detect_date_type(resolved, [row[0] for row in rows])
+                resolved = resolved.detect([row[0] for row in rows])
             self._date_type = resolved
             self.config["date_type"] = resolved.spec(portable=True)
             return resolved
