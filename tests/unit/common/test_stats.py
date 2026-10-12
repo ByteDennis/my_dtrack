@@ -124,6 +124,7 @@ def test_registered_date_column_type_normalizes_each_side_before_hashing(tmp_pat
     assert left_stats["D"]["min_val"] == "2026-08-01"
 
 
+@pytest.mark.slow
 def test_batched_aggregates_match_the_single_query_payload(tmp_path, monkeypatch):
     import random
 

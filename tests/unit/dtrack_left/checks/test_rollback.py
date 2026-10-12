@@ -29,6 +29,7 @@ def finished(synthetic, tmp_path):
     return reopen
 
 
+@pytest.mark.slow
 def test_col_rollback_rebuilds_the_manifest_from_stage_two_settings_only(finished, synthetic):
     run = finished()
     report_keys = run.store.list_keys("report/")
@@ -64,6 +65,7 @@ def test_col_rollback_rebuilds_the_manifest_from_stage_two_settings_only(finishe
         rollback.rollback(run.store, "orders", "dead", config=config)
 
 
+@pytest.mark.slow
 def test_row_rollback_recounts_one_pair_and_ends_where_it_started(finished):
     run = finished()
     done = rollback.rollback(run.store, "orders", "row", apply=True)
@@ -79,6 +81,7 @@ def test_row_rollback_recounts_one_pair_and_ends_where_it_started(finished):
     assert summary["units_completed"] == 11 and summary["status"] == "DONE"
 
 
+@pytest.mark.slow
 def test_row_rollback_with_config_restarts_selected_left_pairs_in_same_run(finished, synthetic):
     run = finished()
     config = pairs_config(synthetic.left)
@@ -109,6 +112,7 @@ def test_row_rollback_with_config_restarts_selected_left_pairs_in_same_run(finis
     assert all("dtrack row-check" not in step for step in done["next"])
 
 
+@pytest.mark.slow
 def test_row_config_dry_run_never_queries_sources(finished, synthetic, monkeypatch):
     run = finished()
     config = pairs_config(synthetic.left)
@@ -122,6 +126,7 @@ def test_row_config_dry_run_never_queries_sources(finished, synthetic, monkeypat
 
 
 @pytest.mark.parametrize("stage", ["row", "col"])
+@pytest.mark.slow
 def test_config_rejects_skipped_pair_before_deleting(finished, synthetic, stage):
     run = finished()
     config = pairs_config(synthetic.left)
@@ -135,6 +140,7 @@ def test_config_rejects_skipped_pair_before_deleting(finished, synthetic, stage)
     assert run.store.exists("_status/row_check.closed.json")
 
 
+@pytest.mark.slow
 def test_dead_rollback_only_touches_dead_units_of_the_pair(finished):
     run = finished()
     run.store.put_json(
@@ -151,6 +157,7 @@ def test_dead_rollback_only_touches_dead_units_of_the_pair(finished):
         rollback.plan(run.store, "orders", "all")
 
 
+@pytest.mark.slow
 def test_batch_rollback_deduplicates_shared_markers_and_deletes_every_selected_pair(
     finished, monkeypatch
 ):
@@ -167,6 +174,7 @@ def test_batch_rollback_deduplicates_shared_markers_and_deletes_every_selected_p
     assert not list_units(run.store)
 
 
+@pytest.mark.slow
 def test_batch_config_builds_every_manifest_before_deleting(finished, synthetic):
     run = finished()
     config = pairs_config(synthetic.left)
@@ -193,6 +201,7 @@ def test_batch_config_builds_every_manifest_before_deleting(finished, synthetic)
         assert run.store.get_json(f"pairs/{pair}/row_check/left.json") == left_doc
 
 
+@pytest.mark.slow
 def test_pair_resolution_supports_all_and_refuses_typos_before_deleting(finished):
     run = finished()
     available = rollback.discover_pairs(run.store)
@@ -228,6 +237,7 @@ def test_rollback_deletes_from_s3_run_folders(s3_bucket):
     assert any("dtrack col-check --run-s3 s3://" in step for step in outcome["next"])
 
 
+@pytest.mark.slow
 def test_rollback_command_is_a_dry_run_until_yes(finished, capsys):
     run = finished()
     assert main(
@@ -268,6 +278,7 @@ def test_rollback_command_is_a_dry_run_until_yes(finished, capsys):
     )
 
 
+@pytest.mark.slow
 def test_rollback_command_accepts_repeated_pairs_and_all(finished, capsys):
     run = finished()
     base = [

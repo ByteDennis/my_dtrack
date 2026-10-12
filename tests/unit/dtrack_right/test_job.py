@@ -33,6 +33,7 @@ def _published_run(synthetic, runs, work, run_id="r1"):
     return store, factory
 
 
+@pytest.mark.slow
 def test_run_resolves_the_root_publishes_the_report_and_reruns_without_rework(synthetic, tmp_path):
     runs = tmp_path / "runs"
     store, factory = _published_run(synthetic, runs, tmp_path / "work")
@@ -62,6 +63,7 @@ def test_run_gives_up_when_no_left_counts_arrive(tmp_path):
         run(str(tmp_path / "runs"), None, poll_interval=0, wait_timeout=0)
 
 
+@pytest.mark.slow
 def test_local_right_launcher_runs_the_job_with_the_csv_anchor(synthetic, tmp_path, capsys):
     runs = tmp_path / "runs"
     _published_run(synthetic, runs, tmp_path / "work", run_id="r7")
@@ -76,6 +78,7 @@ def test_local_right_launcher_runs_the_job_with_the_csv_anchor(synthetic, tmp_pa
     }
 
 
+@pytest.mark.slow
 def test_local_right_launcher_honours_run_id_when_multiple_runs_are_ready(
     synthetic, tmp_path, capsys
 ):

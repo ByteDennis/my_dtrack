@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from support import pairs_config
 
 from dtrack_left.checks.col_check import (
@@ -23,6 +24,7 @@ def _target_factory(root: Path, work: Path):
 
 
 # >>> the whole protocol in one process on real CSV files and a real directory store, no mocks <<< #
+@pytest.mark.slow
 def test_full_pipeline_on_real_files(synthetic, tmp_path):
     root = synthetic.root
     store = VolumeStore(tmp_path / "runs" / "real")

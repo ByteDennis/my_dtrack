@@ -13,6 +13,7 @@ from dtrack_local.csv_target import CsvAnchorTarget
 
 
 # >>> the full local plan on the e2e synthetic files: CSV anchor as the Right side, report and backup to S3 <<< #
+@pytest.mark.slow
 def test_run_all_matches_the_distributed_protocol_and_backs_up(
     synthetic, tmp_path, s3_bucket, monkeypatch
 ):
@@ -233,6 +234,7 @@ def test_landing_keeps_raw_text_per_bucket(tmp_path):
     assert json.loads(json.dumps(landing.tables())) == {"left__p": 2}
 
 
+@pytest.mark.slow
 def test_cli_runs_the_plan_and_preflight_reports_failures(synthetic, tmp_path, monkeypatch, capsys):
     from dtrack_local.cli import main
 

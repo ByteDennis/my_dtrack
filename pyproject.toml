@@ -58,6 +58,7 @@ testpaths = ["tests"]
 pythonpath = ["src", "tests"]
 addopts = "--import-mode=importlib"
 markers = [
+    "slow: unit tests that exercise a full pipeline or another intentionally expensive path",
     "moto: tests/local/s3, needs the Moto S3 container (run with --run-moto)",
     "spark: tests/local/spark, local pyspark session (run with --run-spark)",
     "oracle: tests/local/oracle, Oracle via testcontainers (run with --run-oracle)",
