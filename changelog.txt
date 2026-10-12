@@ -6,7 +6,7 @@ src/dtrack_right/checks/row_check.py — Persisted row verdicts before failing c
 src/dtrack_right/checks/col_check.py — Limited scans, completion, and reuse to Units in the current Pair plan.
 src/dtrack_right/report/build.py — Excluded inactive Unit results and failures from current Version 2 reports.
 src/dtrack_left/backends/sources.py — Streamed database CSV exports in bounded batches instead of materializing each sampled vintage in Python memory.
-CONTEXT.md and docs/adr/0008-config-first-left-publication.md — Defined the two reconciliation versions, exclusion set, fail-closed barrier, and current-plan replacement semantics without adding runtime audit state.
+README.md and guideme.txt — Documented the two reconciliation versions, exclusion controls, fail-closed recovery flow, and conservative 16GB-memory settings.
 tests — Covered Version 2 config validation, Left-first execution, mismatch failure/recovery, selective vintage reruns, and streaming database exports.
 src/dtrack_left/common/protocol.py — Removed protocol-v1 path constants and fallback readers; Pair and `_status` artifacts are now the only accepted runtime layout.
 src/dtrack_right/common/protocol.py — Mirrored the protocol-v2-only reader and barrier contract on Databricks.
