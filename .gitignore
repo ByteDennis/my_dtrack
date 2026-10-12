@@ -13,11 +13,13 @@ work/
 reports/
 .dtrack-work/
 .venv-live/
-tests/live/live.env
-tests/local/confluence/confluence.env
+tests/live/
+tests/local/confluence/
+tests/local/e2e/
+tests/local/oracle/
+tests/local/s3/
 .coverage-html/
 .coverage
-tests/live/.provision.json
 examples/nbs/.work/
 examples/e2e/output/
 examples/e2e/logs/
