@@ -67,6 +67,7 @@ def test_row_and_col_help_show_config_defaults_over_environment(tmp_path, monkey
     assert "DTRACK_ROW_WORKERS" in row_help
     assert "DTRACK_PAIRS" in row_help
     assert "DTRACK_DEBUG" in row_help
+    assert "--force" in row_help and "DTRACK_FORCE" in row_help
 
     assert main(["col-check", "--config", str(config), "--help"]) == 0
     col_help = " ".join(capsys.readouterr().out.split())
@@ -76,4 +77,5 @@ def test_row_and_col_help_show_config_defaults_over_environment(tmp_path, monkey
     assert "DTRACK_COL_PULL_WORKERS" in col_help
     assert "DTRACK_COL_WAIT_TIMEOUT" in col_help
     assert "DTRACK_DEBUG" in col_help
+    assert "--force" in col_help and "DTRACK_FORCE" in col_help
     assert "default: s3://env/runs" not in row_help + col_help

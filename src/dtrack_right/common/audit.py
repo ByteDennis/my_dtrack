@@ -41,6 +41,10 @@ MUTATING_SQL = re.compile(
 SQL_STRING = re.compile(r"'(?:''|[^'])*'")
 SQL_NUMBER = re.compile(r"(?<![\w.])[-+]?\d+(?:\.\d+)?(?![\w.])")
 SQL_IN_LIST = re.compile(r"\bIN\s*\(\s*\?(?:\s*,\s*\?)+\s*\)", re.IGNORECASE)
+AUDIT_SQL_MAX_CHARS = 8192
+AUDIT_SQL_EDGE_CHARS = 3500
+AUDIT_SELECT_ITEM_LIMIT = 20
+AUDIT_SELECT_EDGE_ITEMS = 2
 
 
 def _lock_for(store) -> threading.RLock:
@@ -55,6 +59,142 @@ def sql_shape(sql: str) -> str:
     normalized = SQL_IN_LIST.sub("IN (?)", normalized)
     normalized = " ".join(normalized.split()).lower()
     return hashlib.sha256(normalized.encode()).hexdigest()[:16]
+
+
+def _select_ranges(sql: str) -> list[tuple[int, int]]:
+    ranges = []
+    starts: dict[int, int] = {}
+    depth = 0
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            while index < len(sql):
+                if sql[index] == quote:
+                    if index + 1 < len(sql) and sql[index + 1] == quote:
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+        if sql.startswith("--", index):
+            newline = sql.find("\n", index + 2)
+            index = len(sql) if newline < 0 else newline + 1
+            continue
+        if sql.startswith("/*", index):
+            closing = sql.find("*/", index + 2)
+            index = len(sql) if closing < 0 else closing + 2
+            continue
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if char.isalpha() or char == "_":
+            end = index + 1
+            while end < len(sql) and (sql[end].isalnum() or sql[end] in {"_", "$", "#"}):
+                end += 1
+            word = sql[index:end].upper()
+            if word == "SELECT":
+                starts[depth] = end
+            elif word == "FROM" and depth in starts:
+                ranges.append((starts.pop(depth), index))
+            index = end
+            continue
+        index += 1
+    return ranges
+
+
+def _projection_items(projection: str) -> list[str]:
+    items = []
+    start = 0
+    depth = 0
+    index = 0
+    while index < len(projection):
+        char = projection[index]
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            while index < len(projection):
+                if projection[index] == quote:
+                    if index + 1 < len(projection) and projection[index + 1] == quote:
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+        if projection.startswith("--", index):
+            newline = projection.find("\n", index + 2)
+            index = len(projection) if newline < 0 else newline + 1
+            continue
+        if projection.startswith("/*", index):
+            closing = projection.find("*/", index + 2)
+            index = len(projection) if closing < 0 else closing + 2
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            items.append(projection[start:index].strip())
+            start = index + 1
+        index += 1
+    items.append(projection[start:].strip())
+    return items
+
+
+def _compact_select_lists(sql: str) -> str:
+    edits = []
+    for start, end in _select_ranges(sql):
+        items = _projection_items(sql[start:end])
+        if len(items) <= AUDIT_SELECT_ITEM_LIMIT:
+            continue
+        omitted = len(items) - (AUDIT_SELECT_EDGE_ITEMS * 2)
+        noun = "attribute" if omitted == 1 else "attributes"
+        shown = [
+            *items[:AUDIT_SELECT_EDGE_ITEMS],
+            f"/* ... {omitted} {noun} omitted from audit ... */",
+            *items[-AUDIT_SELECT_EDGE_ITEMS:],
+        ]
+        edits.append((start, end, ", ".join(shown)))
+    selected = []
+    for edit in sorted(edits, key=lambda item: item[1] - item[0], reverse=True):
+        start, end, _replacement = edit
+        if any(
+            start < chosen_end and end > chosen_start for chosen_start, chosen_end, _ in selected
+        ):
+            continue
+        selected.append(edit)
+    compact = sql
+    for start, end, replacement in sorted(selected, reverse=True):
+        compact = compact[:start] + replacement + compact[end:]
+    return compact
+
+
+def compact_sql(sql: str) -> tuple[str, dict[str, str | int]]:
+    statement = str(sql).rstrip()
+    compact = _compact_select_lists(statement)
+    fields: dict[str, str | int] = {}
+    if compact != statement:
+        fields["audit_sql_truncated"] = "true"
+    if len(compact) > AUDIT_SQL_MAX_CHARS:
+        omitted = len(compact) - (AUDIT_SQL_EDGE_CHARS * 2)
+        marker = f"\n/* ... {omitted} characters omitted from audit ... */\n"
+        compact = compact[:AUDIT_SQL_EDGE_CHARS] + marker + compact[-AUDIT_SQL_EDGE_CHARS:]
+        fields.update(
+            {
+                "executed_sql_chars": len(statement),
+                "audit_sql_truncated": "true",
+            }
+        )
+    return compact, fields
 
 
 class SqlAudit:
@@ -74,13 +214,14 @@ class SqlAudit:
         backend: str,
         operation: str,
     ) -> bytes:
+        statement, compact_fields = compact_sql(sql)
         fields = [
             f"timestamp={timestamp}",
             f"side={self.side}",
             f"backend={backend}",
             f"operation={operation}",
         ]
-        statement = str(sql).rstrip()
+        fields.extend(f"{key}={value}" for key, value in compact_fields.items())
         return ("-- " + " ".join(fields) + "\n" + statement + "\n\n").encode("utf-8")
 
     def _event_keys(self) -> list[str]:
@@ -98,6 +239,7 @@ class SqlAudit:
                 keys = self._event_keys()
                 blocks = []
                 seen = set()
+                entries = []
                 for key in keys:
                     block = self.store.get_bytes(key)
                     name = key.rsplit("/", 1)[-1]
@@ -107,6 +249,11 @@ class SqlAudit:
                         name.rsplit("--", 1)[1].removesuffix(".sql") if "--" in name else None
                     )
                     audit_key = audit_key or (match.group(1) if match else key)
+                    timestamp = re.search(r"\btimestamp=([^\s]+)", header)
+                    entries.append(
+                        (timestamp.group(1) if timestamp else key, key, audit_key, block)
+                    )
+                for _order, _key, audit_key, block in sorted(entries):
                     if audit_key in seen:
                         continue
                     seen.add(audit_key)
@@ -139,7 +286,9 @@ class SqlAudit:
         audit_key = hashlib.sha256("|".join(capture).encode()).hexdigest()[:20]
         if mutating:
             audit_key = f"{audit_key}-{event_id}"
-        key = f"{audit_prefix(self.pair)}{event_id}--{audit_key}.sql"
+            key = f"{audit_prefix(self.pair)}{event_id}--{audit_key}.sql"
+        else:
+            key = f"{audit_prefix(self.pair)}{audit_key}.sql"
         block = self._block(
             sql,
             timestamp=timestamp,
@@ -148,6 +297,9 @@ class SqlAudit:
         )
         try:
             with self.lock:
+                exists = getattr(self.store, "exists", None)
+                if not mutating and exists is not None and exists(key):
+                    return None
                 self.store.put_bytes(
                     key,
                     block,

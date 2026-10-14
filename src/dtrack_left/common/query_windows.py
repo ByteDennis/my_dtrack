@@ -3,13 +3,72 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .dates import bounds_expression_where, partition_expression_where, resolve_date_type
-
-QUERY_WINDOW_MARKER = re.compile(
-    r"\{\{\s*query_windows:([A-Za-z][A-Za-z0-9_-]*)\s*\}\}"
+from .dates import (
+    bounds_expression_where,
+    partition_expression_where,
+    quote_ident,
+    resolve_date_type,
 )
+
+QUERY_WINDOW_MARKER = re.compile(r"\{\{\s*query_windows:([A-Za-z][A-Za-z0-9_-]*)\s*\}\}")
 QUERY_WINDOW_PREFIX = re.compile(r"\{\{\s*query_windows\s*:")
 QUERY_WINDOW_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+QUERY_PROJECTION_MARKER = re.compile(r"\{\{\s*dtrack_projection\s*\}\}")
+QUERY_PROJECTION_PREFIX = re.compile(r"\{\{\s*dtrack_projection")
+
+
+def normalize_query_projection(
+    query: str | None,
+    expressions: Any,
+    *,
+    source: str,
+) -> dict[str, str]:
+    text = str(query or "")
+    markers = QUERY_PROJECTION_MARKER.findall(text)
+    if QUERY_PROJECTION_PREFIX.search(QUERY_PROJECTION_MARKER.sub("", text)):
+        raise ValueError("malformed dtrack_projection marker")
+    if not markers and not expressions:
+        return {}
+    if source.lower() != "oracle":
+        raise ValueError("dtrack_projection is currently supported only for Oracle queries")
+    if not text:
+        raise ValueError("dtrack_projection requires query")
+    if not markers:
+        raise ValueError("query_projection requires {{dtrack_projection}} in query")
+    if len(markers) != 1:
+        raise ValueError("query must contain exactly one {{dtrack_projection}} marker")
+    if not isinstance(expressions, dict) or not expressions:
+        raise ValueError("{{dtrack_projection}} requires query_projection")
+    normalized: dict[str, str] = {}
+    for column, expression in expressions.items():
+        if not isinstance(column, str) or not column.strip():
+            raise TypeError("query_projection column names must be non-empty strings")
+        if not isinstance(expression, str) or not expression.strip():
+            raise TypeError(f"query_projection.{column} must be a non-empty SQL expression")
+        normalized[column.strip()] = expression.strip()
+    return normalized
+
+
+def render_query_projection(
+    query: str,
+    expressions: dict[str, str],
+    columns: list[str] | None,
+    *,
+    dialect: str,
+) -> str:
+    if not expressions:
+        return query
+    selected = list(dict.fromkeys(columns or expressions))
+    missing = [column for column in selected if column not in expressions]
+    if missing:
+        raise ValueError(f"query_projection lacks columns: {', '.join(missing)}")
+    projection = ", ".join(
+        f"{expressions[column]} AS {quote_ident(column, dialect)}" for column in selected
+    )
+    rendered = QUERY_PROJECTION_MARKER.sub(projection, query)
+    if QUERY_PROJECTION_PREFIX.search(rendered):
+        raise ValueError("malformed or unresolved dtrack_projection marker")
+    return rendered
 
 
 def normalize_query_windows(
@@ -48,9 +107,7 @@ def normalize_query_windows(
             raise TypeError(f"query_windows.{name} must be an object")
         unknown = sorted(set(spec) - {"expression", "date_type"})
         if unknown:
-            raise ValueError(
-                f"query_windows.{name} has unsupported fields: {', '.join(unknown)}"
-            )
+            raise ValueError(f"query_windows.{name} has unsupported fields: {', '.join(unknown)}")
         expression = spec.get("expression")
         if not isinstance(expression, str) or not expression.strip():
             raise ValueError(f"query_windows.{name}.expression must be a non-empty string")

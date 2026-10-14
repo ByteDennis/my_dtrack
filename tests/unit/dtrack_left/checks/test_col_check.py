@@ -2,11 +2,12 @@ import pandas as pd
 import pytest
 from support import MemoryStore, all_match_manifest, pairs_config
 
-from dtrack_left.backends.sources import FileSource
+from dtrack_left.backends.sources import FileSource, write_rows
 from dtrack_left.checks import col_check
 from dtrack_left.checks.col_check import (
     ColCheckPipeline,
     LeftRuntime,
+    iter_column_batches,
     iter_windows_round_robin,
     publish_fixed_keys,
     wait_for_manifests,
@@ -50,6 +51,106 @@ def test_pipeline_commits_one_atomic_unit_and_closes_only_when_complete():
     assert published == 1
     assert ("put", f"pairs/pair/units/00000001-{uid}.json") in store.events
     assert store.exists("_status/col_check.closed.json")
+
+
+def test_projection_query_computes_and_commits_one_column_batch_at_a_time(caplog):
+    store = MemoryStore()
+    columns = [f"c{i}" for i in range(5)]
+    row = {
+        **manifest(),
+        "columns": columns,
+        "col_map": {column: column for column in columns},
+        "expected_units": len(columns),
+        "left": {
+            "source": "oracle",
+            "date_col": "dt",
+            "query": "SELECT {{dtrack_projection}} FROM wide_source",
+            "query_projection": {
+                "dt": "s.dt",
+                **{column: f"s.{column}" for column in columns},
+            },
+            "column_batch_size": 2,
+        },
+    }
+    store.put_json("pairs/pair/plan.json", row)
+    pulled = []
+    computed = []
+
+    def pull(batch_manifest, _window):
+        pulled.append(list(batch_manifest["columns"]))
+        return "pulled"
+
+    def compute(batch_manifest, _window, _pulled):
+        if computed:
+            assert store.list_keys("pairs/pair/units/")
+        computed.append(list(batch_manifest["columns"]))
+        return {column: STATS for column in batch_manifest["columns"]}
+
+    with caplog.at_level("INFO", logger="dtrack.left.col_check"):
+        published = ColCheckPipeline(
+            store,
+            pull_window=pull,
+            compute_stats=compute,
+            pull_workers=1,
+            stat_workers=1,
+        ).run([row])
+
+    assert published == 5
+    assert pulled == [["c0", "c1"], ["c2", "c3"], ["c4"]]
+    assert computed == pulled
+    assert "batch 1/3" in caplog.text
+    assert "ready 5/5" in caplog.text
+
+
+def test_projection_batches_reserve_oracle_columns_for_date_and_keys():
+    columns = [f"c{i}" for i in range(1002)]
+    row = {
+        **manifest(),
+        "columns": columns,
+        "col_map": {column: column for column in columns},
+        "key_cols": ["account_id"],
+        "left": {
+            "source": "oracle",
+            "date_col": "dt",
+            "query_projection": {"dt": "s.dt"},
+            "column_batch_size": 5000,
+        },
+    }
+
+    batches = list(iter_column_batches([row]))
+
+    assert [len(batch[0]["columns"]) for batch in batches] == [998, 4]
+    assert [batch[0]["_column_batch"] for batch in batches] == [
+        {"index": 1, "total": 2},
+        {"index": 2, "total": 2},
+    ]
+
+
+def test_left_runtime_reuses_only_a_provenance_matching_pull(tmp_path):
+    row = {**manifest(), "version": 2, "plan_id": "plan-one", "key_families": []}
+    calls = []
+
+    class Source:
+        def pull_window(self, partitions, columns, output, **options):
+            calls.append((partitions, columns, options))
+            selected = [row["left"]["date_col"], *row["key_cols"], *columns]
+            return write_rows(output, selected, [["2026-01-01", "1"]])
+
+    runtime = LeftRuntime(tmp_path, reuse_pulled=True)
+    runtime.sources["pair"] = Source()
+    window = row["windows"][0]
+
+    first = runtime.pull_window(row, window)
+    assert runtime.pull_window(row, window) == first
+    assert len(calls) == 1
+
+    changed = {**row, "plan_id": "plan-two"}
+    runtime.pull_window(changed, window)
+    assert len(calls) == 2
+
+    runtime.force = True
+    runtime.pull_window(changed, window)
+    assert len(calls) == 3
 
 
 def test_pipeline_skips_units_already_indexed():
@@ -103,7 +204,7 @@ def test_windows_are_interleaved_round_robin_across_pairs():
     assert order == [("a", 1), ("b", 1), ("a", 2), ("a", 3)]
 
 
-def test_backpressure_waits_while_too_many_units_are_unclaimed(monkeypatch):
+def test_backpressure_reports_the_backlog_without_spamming_each_poll(monkeypatch, caplog):
     store = MemoryStore()
     row = manifest()
     store.put_json("pairs/pair/plan.json", row)
@@ -111,14 +212,22 @@ def test_backpressure_waits_while_too_many_units_are_unclaimed(monkeypatch):
     monkeypatch.setattr(store, "ready_unclaimed", lambda: next(levels))
     naps = []
     monkeypatch.setattr(col_check.time, "sleep", naps.append)
-    ColCheckPipeline(
-        store,
-        pull_window=lambda _m, _w: "pulled",
-        compute_stats=lambda _m, _w, _p: {"amount": STATS},
-        wip=1,
-        backpressure_sleep=0.5,
-    ).run([row])
+    with caplog.at_level("INFO", logger="dtrack.left.col_check"):
+        ColCheckPipeline(
+            store,
+            pull_window=lambda _m, _w: "pulled",
+            compute_stats=lambda _m, _w, _p: {"amount": STATS},
+            wip=1,
+            backpressure_sleep=0.5,
+        ).run([row])
     assert naps == [0.5, 0.5]
+    waiting = [
+        record.message for record in caplog.records if record.message.startswith("backpressure:")
+    ]
+    assert waiting == [
+        "backpressure: ready_unclaimed=5, wip=1, over_limit=4; waiting for Right (0.0s)"
+    ]
+    assert "backpressure cleared: ready_unclaimed=0, wip=1" in caplog.text
 
 
 def test_pipeline_leaves_manifests_open_when_units_are_missing():

@@ -10,7 +10,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from ..common.column_types import resolve_column_type
 from ..common.dates import canonical_date, resolve_date_type
-from ..common.query_windows import normalize_query_windows
+from ..common.query_windows import normalize_query_projection, normalize_query_windows
 
 LEFT_SOURCES = {"oracle", "athena", "aws", "hadoop", "csv", "file", "duckdb"}
 COL_TYPES = {"numeric", "categorical"}
@@ -87,6 +87,14 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{name}: invalid Left query_windows: {exc}") from None
         if not left["query_windows"]:
             left.pop("query_windows", None)
+        try:
+            left["query_projection"] = normalize_query_projection(
+                left.get("query"), left.get("query_projection"), source=left_source
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name}: invalid Left query_projection: {exc}") from None
+        if not left["query_projection"]:
+            left.pop("query_projection", None)
         for side_name, side in (("Left", left), ("Right", right)):
             try:
                 resolve_date_type(side.get("date_type"))
@@ -123,6 +131,26 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if any(str(column).casefold() == date_col for column in excluded_columns):
             raise ValueError(f"{name}: excluded_columns cannot include the Left date_col")
         pair["excluded_columns"] = list(dict.fromkeys(excluded_columns))
+        projection = left.get("query_projection") or {}
+        batch_size = left.get("column_batch_size")
+        if batch_size is not None:
+            if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+                raise TypeError(f"{name}: Left column_batch_size must be a positive integer")
+            if not projection:
+                raise ValueError(f"{name}: Left column_batch_size requires query_projection")
+        if projection:
+            keys = [part.strip() for part in str(pair.get("key") or "").split(",") if part.strip()]
+            required = {
+                left["date_col"],
+                *keys,
+                *(set(pair["col_map"]) - set(pair["excluded_columns"])),
+            }
+            missing_projection = sorted(required - set(projection))
+            if missing_projection:
+                raise ValueError(
+                    f"{name}: query_projection lacks configured columns: "
+                    f"{', '.join(missing_projection)}"
+                )
         overrides = pair.get("col_type_overrides") or {}
         if set(overrides) - set(pair["col_map"]) or set(overrides.values()) - COL_TYPES:
             raise ValueError(f"{name}: col_type_overrides maps col_map keys to numeric|categorical")

@@ -28,7 +28,7 @@ def _literal(value: object, dialect: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-def _cast_text(expr: str, dialect: str, data_type: str | None = None) -> str:
+def cast_text_sql(expr: str, dialect: str, data_type: str | None = None) -> str:
     dialect = _dialect(dialect)
     if dialect == "oracle":
         kind = str(data_type or "").upper()
@@ -195,7 +195,7 @@ def normalize_sql(
         )
     steps = family.left_steps if side == "left" else family.right_steps
     parsed = family._parsed if steps is None else family._left if side == "left" else family._right
-    text = _cast_text(expr, dialect, data_type)
+    text = cast_text_sql(expr, dialect, data_type)
     for step, arg in parsed:
         text = _step_sql(text, step.name, arg, dialect)
     return f"CASE WHEN ({text}) IS NULL OR ({text}) = '' THEN '{NULL}' ELSE ({text}) END"

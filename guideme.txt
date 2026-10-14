@@ -112,9 +112,9 @@ Command option precedence for `dtrack left-run`, `dtrack row-check`, `dtrack col
 
 Use top-level `left-run`, `row-check`, and `col-check` objects for optional arguments. For example:
 
-  "left-run": {"run-s3": "s3://bucket/dtrack/runs", "pull-workers": 1},
-  "row-check": {"run-s3": "s3://bucket/dtrack/runs", "workers": 4},
-  "col-check": {"run-s3": "s3://bucket/dtrack/runs", "pull-workers": 2}
+  "left-run": {"run-s3": "s3://bucket/dtrack/runs", "pull-workers": 1, "force": false},
+  "row-check": {"run-s3": "s3://bucket/dtrack/runs", "workers": 4, "force": false},
+  "col-check": {"run-s3": "s3://bucket/dtrack/runs", "pull-workers": 2, "force": false}
 
 Display effective defaults with:
 
@@ -205,7 +205,7 @@ Parameter choice:
       ), driver_two AS (
         SELECT * FROM DRIVER_TWO d2 WHERE {{query_windows:driver_two}}
       )
-      SELECT d1.BUSINESS_DT AS FINAL_DT, d1.SSN, a.STATUS
+      SELECT {{dtrack_projection}}
       FROM driver_one d1
       LEFT JOIN driver_two d2
         ON d1.BUSINESS_DT = d2.ACTIVITY_DT AND d1.SSN = d2.SSN
@@ -219,7 +219,13 @@ Parameter choice:
         "query_windows": {
           "driver_one": {"expression": "d1.BUSINESS_DT", "date_type": "date"},
           "driver_two": {"expression": "d2.ACTIVITY_DT", "date_type": "date"}
-        }
+        },
+        "query_projection": {
+          "FINAL_DT": "d1.BUSINESS_DT",
+          "SSN": "d1.SSN",
+          "STATUS": "a.STATUS"
+        },
+        "column_batch_size": 500
       }
 
     The undated account view needs no marker. Row check renders the configured inclusive
@@ -228,6 +234,17 @@ Parameter choice:
     guardrail, and deterministic hash sampling remains outside the final joined relation.
     Marker declarations and uses must match exactly; DTrack rejects unknown, unused, or malformed
     markers before querying Oracle. This is controlled substitution, not Python string formatting.
+
+    `dtrack_projection` is optional and Oracle-only. Use it for a consolidated query whose full
+    select list would exceed Oracle's portable 1000-column limit. Every Left date, key, and
+    non-excluded mapped column needs one `query_projection` expression. Row-count and metadata
+    operations render only the columns they need. Col check defaults to batches of 500 mapped
+    columns, reserves additional projection slots for the date and keys, and logs pull,
+    statistics, commit, and ready-unit progress for every batch. A completed batch is uploaded
+    immediately; DTrack does not wait for all columns in the vintage. Queries without the marker
+    retain the prior one-pull-per-vintage behavior. Keep filters needed by every batch inside the
+    source query; `left.where` on a projected query should reference only aliases that are always
+    present, such as the configured date or keys.
 
   right.kind
     table (default): catalog/schema/table
@@ -402,6 +419,11 @@ Outputs include:
   _status/row_check.closed.json       Right Stage-1 barrier
   _status/audit.sql                   representative best-effort SQL for this run
 
+Read-only SQL shapes use deterministic detailed audit filenames, so restarting the command does
+not create another file for the same shape. For a very wide SELECT, the audit shows the first two
+and last two attributes with an `attributes omitted from audit` ellipsis and no SQL hash. The full
+unshortened SQL is still what Oracle executes.
+
 Version 2 normally replaces sections D and E with one command:
 
   dtrack left-run --config config.json --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
@@ -411,6 +433,60 @@ This writes the current Pair plan and all Left Units without waiting for a Right
 later reports unexcluded mismatches, add those dates to `excluded_partitions`, optionally add
 columns to `excluded_columns`, and rerun this same command with the same run id. Unchanged Units
 are reused; only affected vintages/columns are pulled and published. Then restart the Right Job.
+
+An identical rerun with the same run id also reuses the saved Left row counts. If a pull completed
+but its statistics did not, the local CSV is reusable across command processes when the same
+`--work-dir` contains both `left.csv` (or `left-0001.csv`, etc.) and its `.dtrack.json` sidecar.
+The sidecar must match the run, Pair plan, vintage, projected columns, and sampled keys; a bare or
+stale CSV is pulled again.
+
+To deliberately repeat all Left work for the selected Pairs, add `--force`:
+
+  dtrack left-run --config config.json --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
+    --force --workers 2 --pull-workers 1 --stat-workers 1
+
+Force removes the selected run's existing row/column checkpoints, Units, results, failures,
+closures, fixed keys, and derived reports before rebuilding them. It does not append a second set
+of active Units. `row-check --force` resets both Left stages; `col-check --force` resets only
+Stage 2. With `--import-sas`, force recomputes and republishes from the already validated SAS CSVs;
+it does not rerun SAS. `--force` cannot be combined with `--export-sas`.
+
+If Oracle is reachable only from a SAS server, use the same command in two phases; there is no
+additional subcommand:
+
+  dtrack left-run --config config.json --run-id "$RUN_ID" --export-sas ./sas-run
+
+Copy the whole `sas-run` directory to the SAS server. In `left-run.sas`, change the top-level
+`dtrack_bundle` path to that copied directory and replace each `dtrack_connect_*` placeholder with
+the site's normal SAS/ACCESS Oracle connection options. Run the script. Its output is:
+
+  sas-run/request.json
+  sas-run/left-run.sas
+  sas-run/output/_SUCCESS.json
+  sas-run/output/<pair-id>/counts.csv
+  sas-run/output/<pair-id>/windows/<vintage>.csv
+  sas-run/output/<pair-id>/keys/<vintage>.csv     fixed-N sampling only
+
+After applying the configured source query/`where`, the script counts all returned partitions by
+default and loops over all returned dates. `fromDate`, `toDate`, and `excluded_partitions` are the
+explicit DTrack partition filters; `vintage` groups the remaining dates into output files. It
+honors Pair selection, `where`, table/query and `query_windows`, mapped and excluded columns,
+keys/key families, sample mode, strict mode, column types, and type overrides. Mapping changes the
+Right-side names in the plan; SAS CSV headers deliberately keep the Left names. For this first
+version, fixed-N sampling is limited to 1000 keys and string/SAS date types must use a concrete
+format rather than auto-detection.
+
+Copy the completed directory back without changing `request.json`, then import and upload the Left
+protocol artifacts:
+
+  dtrack left-run --config config.json --run-s3 "$RUN_S3" \
+    --import-sas ./sas-run --pull-workers 1 --stat-workers 1 --wip 200
+
+`--import-sas` reads the run id from `request.json` when `--run-id` is omitted. It verifies the
+config hash, completion marker, expected vintage/key files, and ordered Left CSV headers
+(case-insensitive); computes the normal statistics locally; and uploads counts, plans, fixed keys,
+and Units. It does not upload the raw SAS CSVs. Start or restart the existing Right Job afterward:
+Right still determines row mismatches, compares column statistics, and writes the final report.
 
 E. Run Left Stage 2
 
@@ -439,15 +515,20 @@ Parameter choice:
   work-dir      pulled window CSVs and the DuckDB scratch/spill directory (default
                 .dtrack-work/col_check); put it on the disk with the most free space
 
+When WIP backpressure is active, the log reports `ready_unclaimed`, `wip`, and `over_limit` once,
+then at most once every 30 seconds until Right catches up. A final `backpressure cleared` line
+reports the remaining backlog and total wait time; the old once-per-second message is not emitted.
+
 Each window is pulled, summarized, and published before the next one; nothing accumulates in
 memory across windows. Statistics load the window CSV once into a scratch DuckDB file under
 work-dir (single-threaded load: the parallel CSV reader buffers every column), then aggregate
 DTRACK_STATS_BATCH columns per query, so memory is bounded by the budget in section 1 rather
 than by column count. Size DTRACK_DUCKDB_SHARE = pull-workers + stat-workers.
 
-Resume: rerun the same `--run-id`. Windows whose Unit objects already exist are skipped
-before any pull; a partially published window is pulled again and only its missing units are
-written.
+Resume: rerun the same `--run-id`. Windows whose Unit objects already exist are skipped before any
+pull. A partially published window reuses its local pull only when the provenance sidecar matches,
+then calculates and writes only missing Units. Use `--force` to clear Stage 2 and pull, calculate,
+and publish it again.
 
 Wide tables (hundreds to thousands of columns, 100k+ rows per window) belong in this
 distributed workflow, not in `dtrack local`: the Right statistics then run on the cluster

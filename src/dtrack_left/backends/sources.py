@@ -22,7 +22,12 @@ from ..common.dates import (
     resolve_date_type,
 )
 from ..common.hashing import HASH_BUCKET_SPACE, key_family
-from ..common.query_windows import normalize_query_windows, render_query_windows
+from ..common.query_windows import (
+    normalize_query_projection,
+    normalize_query_windows,
+    render_query_projection,
+    render_query_windows,
+)
 from ..common.sampling import fixed_keys_sql, sample_predicate_sql
 
 
@@ -67,6 +72,15 @@ class SqlSource(ABC):
             self.config["query_windows"] = windows
         else:
             self.config.pop("query_windows", None)
+        projection = normalize_query_projection(
+            self.config.get("query"),
+            self.config.get("query_projection"),
+            source=str(self.config.get("source") or self.dialect),
+        )
+        if projection:
+            self.config["query_projection"] = projection
+        else:
+            self.config.pop("query_projection", None)
         self.sql_audit = None
         self._date_type = None
         self._date_type_lock = threading.Lock()
@@ -88,6 +102,7 @@ class SqlSource(ABC):
         partitions: list[str] | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
+        columns: list[str] | None = None,
     ) -> str:
         if self.config.get("query"):
             query = render_query_windows(
@@ -97,6 +112,13 @@ class SqlSource(ABC):
                 partitions=partitions,
                 from_date=from_date,
                 to_date=to_date,
+            )
+            query = render_query_projection(
+                query,
+                self.config.get("query_projection") or {},
+                columns
+                or ([self.config["date_col"]] if self.config.get("query_projection") else None),
+                dialect=self.dialect,
             )
             return f"({query}) dtrack_source"
         parts = [self.config.get(name) for name in ("catalog", "schema", "table")]
@@ -162,7 +184,7 @@ class SqlSource(ABC):
                     else f"LIMIT {self.date_probe_size}"
                 )
                 sql = (
-                    f"SELECT {column} FROM {self.relation()} "
+                    f"SELECT {column} FROM {self.relation(columns=[self.config['date_col']])} "
                     f"WHERE {self._where(f'{column} IS NOT NULL')} {limit}"
                 )
                 _columns, rows = self.query(sql, operation="date_type_probe")
@@ -173,7 +195,8 @@ class SqlSource(ABC):
 
     def preflight(self) -> dict[str, Any]:
         try:
-            self.query(f"SELECT * FROM {self.relation()} WHERE 1=0", operation="preflight")
+            relation = self.relation(columns=[self.config["date_col"]])
+            self.query(f"SELECT * FROM {relation} WHERE 1=0", operation="preflight")
             self.date_type()
             return {"ok": True, "source": self.config.get("source")}
         except Exception as exc:
@@ -197,7 +220,7 @@ class SqlSource(ABC):
         )
         sql = (
             f"SELECT {date_ref} AS dtrack_partition, COUNT(*) AS dtrack_count "
-            f"FROM {self.relation(from_date=from_date, to_date=to_date)} "
+            f"FROM {self.relation(from_date=from_date, to_date=to_date, columns=[date_col])} "
             f"WHERE {self._where(bounds)} GROUP BY {date_ref}"
         )
         _columns, rows = self.query(sql, operation="partition_counts")
@@ -259,7 +282,8 @@ class SqlSource(ABC):
         predicate = " AND ".join(f"({item})" for item in (predicate, sample) if item)
         sql = (
             f"SELECT {', '.join(quote_ident(column, self.dialect) for column in selected)} "
-            f"FROM {self.relation(partitions=partitions)} WHERE {self._where(predicate)}"
+            f"FROM {self.relation(partitions=partitions, columns=selected)} "
+            f"WHERE {self._where(predicate)}"
         )
         return self.query_to_csv(sql, output, selected, operation="pull_window")
 
@@ -280,7 +304,10 @@ class SqlSource(ABC):
             date_type=self.config.get("date_type"),
         )
         sql = fixed_keys_sql(
-            self.relation(partitions=partitions),
+            self.relation(
+                partitions=partitions,
+                columns=list(dict.fromkeys([self.config["date_col"], *key_columns])),
+            ),
             self._where(predicate),
             [quote_ident(column, self.dialect) for column in key_columns],
             key_families or [],
@@ -351,6 +378,7 @@ class FileSource(SqlSource):
         partitions: list[str] | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
+        columns: list[str] | None = None,
     ) -> str:
         source = self.reader()
         if self.config.get("query"):
@@ -436,9 +464,15 @@ class DuckDBSource(SqlSource):
         partitions: list[str] | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
+        columns: list[str] | None = None,
     ) -> str:
         if self.config.get("query"):
-            return super().relation(partitions=partitions, from_date=from_date, to_date=to_date)
+            return super().relation(
+                partitions=partitions,
+                from_date=from_date,
+                to_date=to_date,
+                columns=columns,
+            )
         parts = [self.config.get(name) for name in ("catalog", "schema", "table")]
         names = [name for part in parts if part for name in str(part).split(".")]
         if not names:
@@ -574,7 +608,8 @@ class OracleSource(SqlSource):
                     selected = ", ".join(
                         quote_ident(column, self.dialect) for column in key_columns
                     )
-                    sql = f"SELECT {selected} FROM {self.relation()} WHERE {self._where('1=0')}"
+                    relation = self.relation(columns=key_columns)
+                    sql = f"SELECT {selected} FROM {relation} WHERE {self._where('1=0')}"
                     self._audit(sql, "describe_keys")
                     cursor.execute(sql)
                     found = {}

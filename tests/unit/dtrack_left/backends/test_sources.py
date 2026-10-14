@@ -100,6 +100,45 @@ def test_preflight_runs_an_empty_select_and_reports_failures(monkeypatch):
     }
 
 
+def test_oracle_projection_query_keeps_preflight_and_windows_below_the_column_limit(
+    monkeypatch, tmp_path
+):
+    query = (
+        "SELECT {{dtrack_projection}} FROM DRIVER d "
+        "LEFT JOIN FACT f ON d.ID = f.ID WHERE {{query_windows:driver}}"
+    )
+    projection = {
+        "FINAL_DT": "d.DT",
+        "ACCOUNT_ID": "d.ID",
+        "AMOUNT": "f.AMOUNT",
+        "STATUS": "f.STATUS",
+    }
+    source, connection, _ = _oracle(
+        monkeypatch,
+        lambda sql: (["FINAL_DT", "ACCOUNT_ID", "AMOUNT"], []),
+        query=query,
+        query_windows={"driver": {"expression": "d.DT", "date_type": "date"}},
+        query_projection=projection,
+        date_col="FINAL_DT",
+    )
+
+    assert source.preflight()["ok"]
+    assert "d.DT AS FINAL_DT" in connection.statements[0]
+    assert "f.AMOUNT" not in connection.statements[0]
+    assert "f.STATUS" not in connection.statements[0]
+
+    source.pull_window(
+        ["2026-08-01"],
+        ["AMOUNT"],
+        tmp_path / "batch.csv",
+        key_columns=["ACCOUNT_ID"],
+    )
+    sql = connection.statements[-1]
+    assert "d.DT AS FINAL_DT, d.ID AS ACCOUNT_ID, f.AMOUNT AS AMOUNT" in sql
+    assert "f.STATUS" not in sql
+    assert "{{dtrack_projection}}" not in sql
+
+
 def test_oracle_preflight_probes_and_caches_the_string_date_format(monkeypatch):
     def respond(sql):
         if "FETCH FIRST 16 ROWS ONLY" in sql:

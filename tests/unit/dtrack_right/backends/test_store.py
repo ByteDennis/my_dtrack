@@ -20,7 +20,7 @@ def test_volume_store_honours_the_store_contract(tmp_path, monkeypatch):
         store_module, "timestamp", lambda _store: "2026-01-02T03:04:05+00:00"
     )
     store = VolumeStore(tmp_path / "runs" / "r1")
-    assert_store_contract(store)
+    assert_store_contract(store, expected_timestamp="2026-01-02T03:04:05+00:00")
     assert not list((tmp_path / "runs" / "r1").rglob("*.part"))
 
 
@@ -126,7 +126,10 @@ def test_s3_store_honours_the_store_contract_on_mocked_s3(s3_bucket, monkeypatch
     monkeypatch.setattr(
         store_module, "timestamp", lambda _store: "2026-01-02T03:04:05+00:00"
     )
-    assert_store_contract(S3Store(f"s3://{s3_bucket}/runs/r1"))
+    assert_store_contract(
+        S3Store(f"s3://{s3_bucket}/runs/r1"),
+        expected_timestamp="2026-01-02T03:04:05+00:00",
+    )
 
 
 @pytest.fixture(params=["volume", "s3"])

@@ -176,18 +176,13 @@ class LandingLeftRuntime(LeftRuntime):
     def __init__(
         self, work_dir: str | Path, store, landing: Landing | None = None, *, reuse: bool = False
     ):
-        super().__init__(work_dir, store)
+        super().__init__(work_dir, store, reuse_pulled=reuse)
         self.landing = landing
-        self.reuse = reuse
 
     def pull_window(self, manifest, window):
-        raw = self.work_dir / manifest["pair"] / window["bucket"] / "left.csv"
-        if self.reuse and raw.is_file():
-            log.info("reuse left %s %s: %s", manifest["pair"], window["bucket"], raw)
-            return raw
         sampled = super().pull_window(manifest, window)
         if self.landing:
-            self.landing.land("left", manifest["pair"], window["bucket"], raw)
+            self.landing.land("left", manifest["pair"], window["bucket"], sampled)
         return sampled
 
 

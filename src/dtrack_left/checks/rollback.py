@@ -27,11 +27,10 @@ from ..common.protocol import (
     row_result_path,
     timestamp,
 )
-from .row_check import public_pair_config, run_row_check
+from .row_check import STAGE_ONE_FIELDS, public_pair_config, run_row_check
 
 log = logging.getLogger("dtrack.left.rollback")
 STAGES = ("dead", "col", "row")
-STAGE_ONE_FIELDS = ("left", "right", "fromDate", "toDate", "date_synonyms")
 COMMIT_MARKERS = (
     ROW_CHECK_CLOSED,
     COL_CHECK_CLOSED,
@@ -102,9 +101,7 @@ def open_location(location: str):
 def _documents(store, prefixes=PAIR_PREFIXES) -> dict[str, list[tuple[str, Any]]]:
     return {
         prefix: [
-            (key, store.get_json(key))
-            for key in store.list_keys(prefix)
-            if key.endswith(".json")
+            (key, store.get_json(key)) for key in store.list_keys(prefix) if key.endswith(".json")
         ]
         for prefix in prefixes
     }
@@ -194,6 +191,19 @@ def plan_many(store, pairs: list[str], stage: str, documents=None) -> dict[str, 
 # >>> the objects to delete so `stage` of `pair` is produced again; commit markers first <<< #
 def plan(store, pair: str, stage: str) -> list[str]:
     return plan_many(store, [pair], stage)[pair]
+
+
+def reset_for_rerun(store, pairs: list[str], stage: str) -> list[str]:
+    planned = plan_many(store, pairs, stage)
+    keys = sorted({key for rows in planned.values() for key in rows})
+    if not keys:
+        return []
+    store.delete_keys(keys)
+    remaining = [key for key in keys if store.exists(key)]
+    if remaining:
+        raise RuntimeError(f"force reset left {len(remaining)} object(s): {remaining[:3]}")
+    log.info("force reset %s stage for %s: %d object(s)", stage, pairs, len(keys))
+    return keys
 
 
 # >>> resolve a logical store key to the exact local path or S3 object that rollback will delete <<< #

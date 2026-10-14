@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
+from dtrack_left.common import audit as audit_module
 from dtrack_left.common.audit import SqlAudit as LeftSqlAudit
 from dtrack_left.common.audit import prune_audit_history
 from dtrack_right.backends.store import VolumeStore
@@ -112,6 +113,44 @@ def test_multithreaded_same_shape_has_one_first_winner(tmp_path):
     assert len(store.list_keys("pairs/orders/audit/")) == 1
 
 
+def test_non_mutating_audit_shape_is_reused_after_a_process_restart(tmp_path):
+    store = VolumeStore(tmp_path / "run")
+    first = LeftSqlAudit(store, "left", pair="orders").record(
+        "SELECT A FROM T WHERE DT = '2026-01-01'",
+        backend="oracle",
+        operation="pull_window",
+    )
+    audit_module._CAPTURED.clear()
+    repeated = LeftSqlAudit(store, "left", pair="orders").record(
+        "SELECT A FROM T WHERE DT = '2026-02-01'",
+        backend="oracle",
+        operation="pull_window",
+    )
+
+    assert first and repeated is None
+    assert first.rsplit("/", 1)[-1].count("-") == 0
+    assert store.list_keys("pairs/orders/audit/") == [first]
+
+
+def test_long_sql_audit_keeps_the_first_and_last_two_attributes_without_a_hash(tmp_path):
+    store = VolumeStore(tmp_path / "run")
+    sql = "SELECT " + ", ".join(f"source_column_{index} AS C{index}" for index in range(1001))
+    sql += " FROM VERY_WIDE_RUNTIME_QUERY"
+
+    key = LeftSqlAudit(store, "left", pair="wide").record(
+        sql, backend="oracle", operation="pull_window"
+    )
+    recorded = store.get_bytes(key).decode()
+
+    assert len(recorded) < 8000
+    assert "997 attributes omitted from audit" in recorded
+    assert "sha256" not in recorded
+    assert "source_column_0 AS C0" in recorded and "source_column_1 AS C1" in recorded
+    assert "source_column_999 AS C999" in recorded
+    assert "source_column_1000 AS C1000" in recorded
+    assert "source_column_500 AS C500" not in recorded
+
+
 def test_mutating_sql_is_never_sampled_and_internal_maintenance_is_omitted(tmp_path):
     store = VolumeStore(tmp_path / "run")
     audit = LeftSqlAudit(store, "local")
@@ -130,16 +169,12 @@ def test_detailed_audit_events_are_retained_for_only_the_latest_five_runs(tmp_pa
             f"-- audit_key={index}\nSELECT {index}\n\n".encode(),
             content_type="text/plain",
         )
-        run.put_bytes(
-            "_status/audit.sql", f"SELECT {index}\n".encode(), content_type="text/plain"
-        )
+        run.put_bytes("_status/audit.sql", f"SELECT {index}\n".encode(), content_type="text/plain")
 
     assert prune_audit_history(runs, keep=5) == ["run-1", "run-0"]
     assert not runs.child("run-0").list_keys("_status/audit/")
     assert not runs.child("run-1").list_keys("_status/audit/")
     assert not (tmp_path / "runs/run-0/_status/audit").exists()
     assert not (tmp_path / "runs/run-1/_status/audit").exists()
-    assert all(
-        runs.child(f"run-{index}").list_keys("_status/audit/") for index in range(2, 7)
-    )
+    assert all(runs.child(f"run-{index}").list_keys("_status/audit/") for index in range(2, 7))
     assert all(runs.child(f"run-{index}").exists("_status/audit.sql") for index in range(7))

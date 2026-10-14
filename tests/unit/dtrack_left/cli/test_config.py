@@ -379,6 +379,55 @@ def test_query_windows_are_oracle_only():
         validate_config({"pairs": {"p": row}})
 
 
+def test_oracle_query_projection_requires_explicit_expressions_for_used_columns():
+    row = pair()
+    row["left"].update(
+        query=("SELECT {{dtrack_projection}} FROM driver d WHERE {{query_windows:driver}}"),
+        date_col="FINAL_DT",
+        date_type="date",
+        query_windows={"driver": {"expression": "d.dt"}},
+        query_projection={
+            "FINAL_DT": "d.dt",
+            "ACCOUNT_ID": "d.account_id",
+            "amount": "d.amount",
+        },
+        column_batch_size=400,
+    )
+    row["key"] = "ACCOUNT_ID"
+
+    left = validate_config({"pairs": {"p": row}})["pairs"]["p"]["left"]
+
+    assert left["query_projection"]["FINAL_DT"] == "d.dt"
+    assert left["column_batch_size"] == 400
+
+    row["left"]["query_projection"].pop("amount")
+    with pytest.raises(ValueError, match="query_projection lacks configured columns: amount"):
+        validate_config({"pairs": {"p": row}})
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda left: left.pop("query_projection"), "requires query_projection"),
+        (
+            lambda left: left.update(query="SELECT d.dt FROM driver d"),
+            "requires {{dtrack_projection}}",
+        ),
+        (lambda left: left.update(column_batch_size=0), "positive integer"),
+    ],
+)
+def test_oracle_query_projection_fails_closed(change, message):
+    row = pair()
+    row["left"].update(
+        query="SELECT {{dtrack_projection}} FROM driver d",
+        query_projection={"dt": "d.dt", "amount": "d.amount"},
+    )
+    change(row["left"])
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        validate_config({"pairs": {"p": row}})
+
+
 @pytest.mark.parametrize(
     ("name", "body", "error"),
     [

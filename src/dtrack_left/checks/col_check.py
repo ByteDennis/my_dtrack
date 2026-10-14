@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
+import hashlib
 import itertools
+import json
 import logging
 import threading
 import time
@@ -13,6 +16,7 @@ from typing import Any
 import pandas as pd
 
 from ..backends.sources import source_from_config
+from ..backends.store import replace_local_file
 from ..common.audit import SqlAudit, attach_sql_audit
 from ..common.duck import use_temp
 from ..common.manifest import planned_unit_ids, unit_id_for, validate_manifest, window_id
@@ -32,6 +36,10 @@ from ..common.protocol import (
 from ..common.stats import compute_csv_statistics
 
 log = logging.getLogger("dtrack.left.col_check")
+
+ORACLE_MAX_PROJECTION_COLUMNS = 1000
+DEFAULT_COLUMN_BATCH_SIZE = 500
+BACKPRESSURE_LOG_INTERVAL = 30.0
 
 
 # >>> block until the Right side has closed Stage 1; surface its status while waiting <<< #
@@ -133,6 +141,34 @@ def iter_windows_round_robin(manifests: Iterable[dict[str, Any]]):
                 yield manifest, window
 
 
+def iter_column_batches(manifests: Iterable[dict[str, Any]]):
+    for manifest, window in iter_windows_round_robin(manifests):
+        left = manifest["left"]
+        if not left.get("query_projection"):
+            yield manifest, window
+            continue
+        prefix = list(dict.fromkeys([left["date_col"], *manifest["key_cols"]]))
+        available = ORACLE_MAX_PROJECTION_COLUMNS - len(prefix)
+        if available < 1:
+            raise ValueError(
+                f"{manifest['pair']}: date and key columns exhaust the Oracle projection limit"
+            )
+        configured = int(left.get("column_batch_size") or DEFAULT_COLUMN_BATCH_SIZE)
+        batch_size = min(configured, available)
+        columns = manifest["columns"]
+        total = max(1, (len(columns) + batch_size - 1) // batch_size)
+        for offset in range(0, len(columns), batch_size):
+            index = offset // batch_size + 1
+            yield (
+                {
+                    **manifest,
+                    "columns": columns[offset : offset + batch_size],
+                    "_column_batch": {"index": index, "total": total},
+                },
+                window,
+            )
+
+
 class ColCheckPipeline:
     def __init__(
         self,
@@ -162,17 +198,18 @@ class ColCheckPipeline:
         active_ids = set().union(*(planned_unit_ids(manifest) for manifest in manifests))
         existing_rows = list_units(self.store, pair_names)
         existing = {row["unit_id"] for _key, row in existing_rows}
+        ready_ids = existing & active_ids
         sequence = max((row.get("sequence", 0) for _key, row in existing_rows), default=0) + 1
         first_sequence = sequence
         ready = deque()
-        plans = iter(iter_windows_round_robin(manifests))
+        plans = iter(iter_column_batches(manifests))
         exhausted = False
         write_run_status(self.store, {"state": "left_col_check", "role": "left"})
         self.store.heartbeat()
         log.info(
             "col_check start: %d plan(s), %d unit(s) already ready, next sequence=%d, wip=%d",
             len(manifests),
-            len(existing),
+            len(ready_ids),
             sequence,
             self.wip,
         )
@@ -198,16 +235,29 @@ class ColCheckPipeline:
                             window["bucket"],
                         )
                         continue
+                    batch = manifest.get("_column_batch")
+                    batch_text = f" batch {batch['index']}/{batch['total']}" if batch else ""
                     log.info(
-                        "pull %s %s: %d partition(s)",
+                        "pull %s %s%s: %d partition(s), %d column(s)",
                         manifest["pair"],
                         window["bucket"],
+                        batch_text,
                         len(window["partitions"]),
+                        len(manifest["columns"]),
                     )
                     job = pulls.submit(self.pull_window, manifest, window)
                     pull_jobs[job] = (manifest, window)
                 while ready and len(stat_jobs) < self.stat_workers:
                     manifest, window, value = ready.popleft()
+                    batch = manifest.get("_column_batch")
+                    batch_text = f" batch {batch['index']}/{batch['total']}" if batch else ""
+                    log.info(
+                        "statistics %s %s%s: calculating %d column(s)",
+                        manifest["pair"],
+                        window["bucket"],
+                        batch_text,
+                        len(manifest["columns"]),
+                    )
                     job = stats.submit(self.compute_stats, manifest, window, value)
                     stat_jobs[job] = (manifest, window)
                 active = set(pull_jobs) | set(stat_jobs)
@@ -217,7 +267,14 @@ class ColCheckPipeline:
                 for job in complete:
                     if job in pull_jobs:
                         manifest, window = pull_jobs.pop(job)
-                        log.info("pulled %s %s -> stat queue", manifest["pair"], window["bucket"])
+                        batch = manifest.get("_column_batch")
+                        batch_text = f" batch {batch['index']}/{batch['total']}" if batch else ""
+                        log.info(
+                            "pulled %s %s%s -> stat queue",
+                            manifest["pair"],
+                            window["bucket"],
+                            batch_text,
+                        )
                         ready.append((manifest, window, job.result()))
                         continue
                     manifest, window = stat_jobs.pop(job)
@@ -227,12 +284,40 @@ class ColCheckPipeline:
                         uid = unit_id_for(manifest, window, column)
                         if uid in existing:
                             continue
-                        while (
-                            self._ready_unclaimed(active_ids)
-                            if version2
-                            else self.store.ready_unclaimed()
-                        ) > self.wip:
-                            log.info("backpressure: ready_unclaimed > wip=%d, sleeping", self.wip)
+                        waiting_started = None
+                        last_wait_log = None
+                        while True:
+                            ready_unclaimed = (
+                                self._ready_unclaimed(active_ids)
+                                if version2
+                                else self.store.ready_unclaimed()
+                            )
+                            if ready_unclaimed <= self.wip:
+                                if waiting_started is not None:
+                                    log.info(
+                                        "backpressure cleared: ready_unclaimed=%d, wip=%d, "
+                                        "waited=%.1fs",
+                                        ready_unclaimed,
+                                        self.wip,
+                                        time.monotonic() - waiting_started,
+                                    )
+                                break
+                            now = time.monotonic()
+                            if (
+                                waiting_started is None
+                                or now - last_wait_log >= BACKPRESSURE_LOG_INTERVAL
+                            ):
+                                if waiting_started is None:
+                                    waiting_started = now
+                                last_wait_log = now
+                                log.info(
+                                    "backpressure: ready_unclaimed=%d, wip=%d, over_limit=%d; "
+                                    "waiting for Right (%.1fs)",
+                                    ready_unclaimed,
+                                    self.wip,
+                                    ready_unclaimed - self.wip,
+                                    now - waiting_started,
+                                )
                             time.sleep(self.backpressure_sleep)
                         self.store.commit_unit(
                             sequence,
@@ -247,14 +332,20 @@ class ColCheckPipeline:
                                 "window_id": window_id(manifest, window),
                             },
                         )
+                        ready_ids.add(uid)
                         sequence += 1
+                    batch = manifest.get("_column_batch")
+                    batch_text = f" batch {batch['index']}/{batch['total']}" if batch else ""
                     log.info(
-                        "committed %s %s: %d unit(s), sequence %08d..%08d",
+                        "committed %s %s%s: %d unit(s), sequence %08d..%08d, ready %d/%d",
                         manifest["pair"],
                         window["bucket"],
+                        batch_text,
                         sequence - first,
                         first,
                         max(first, sequence - 1),
+                        len(ready_ids),
+                        len(active_ids),
                     )
                     refresh_units_status(self.store)
                     self.store.heartbeat()
@@ -315,10 +406,19 @@ def _row_count(path: str | Path) -> int:
 
 
 class LeftRuntime:
-    def __init__(self, work_dir: str | Path, store=None):
+    def __init__(
+        self,
+        work_dir: str | Path,
+        store=None,
+        *,
+        reuse_pulled: bool = True,
+        force: bool = False,
+    ):
         self.work_dir = Path(work_dir)
         use_temp(self.work_dir / "duckdb")
         self.store = store
+        self.reuse_pulled = reuse_pulled
+        self.force = force
         self.sources = {}
         self.sources_lock = threading.Lock()
 
@@ -336,7 +436,47 @@ class LeftRuntime:
         if manifest["sample"]["mode"] == "fixed" and "key_tuples" not in window:
             keys = fixed_keys_document(self.store, manifest["pair"])["windows"]
             window["key_tuples"] = keys.get(window["bucket"], [])
-        output = self.work_dir / manifest["pair"] / window["bucket"] / "left.csv"
+        batch = manifest.get("_column_batch")
+        filename = f"left-{batch['index']:04d}.csv" if batch and batch["total"] > 1 else "left.csv"
+        output = self.work_dir / manifest["pair"] / window["bucket"] / filename
+        metadata = output.with_name(output.name + ".dtrack.json")
+        selected = list(
+            dict.fromkeys(
+                [manifest["left"]["date_col"], *manifest["key_cols"], *manifest["columns"]]
+            )
+        )
+        cache = {
+            "format": "dtrack-left-pull-v1",
+            "run_id": manifest["run_id"],
+            "pair": manifest["pair"],
+            "plan_id": manifest.get("plan_id"),
+            "window_id": window_id(manifest, window),
+            "columns": selected,
+            "key_tuples_sha256": hashlib.sha256(
+                json.dumps(
+                    window.get("key_tuples"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+        }
+        if self.reuse_pulled and not self.force and output.is_file() and metadata.is_file():
+            try:
+                saved = json.loads(metadata.read_text(encoding="utf-8"))
+                with output.open(encoding="utf-8-sig", newline="") as handle:
+                    header = next(csv.reader(handle), [])
+                if saved == cache and header == selected:
+                    log.info(
+                        "reuse left %s %s%s: %s",
+                        manifest["pair"],
+                        window["bucket"],
+                        f" batch {batch['index']}/{batch['total']}" if batch else "",
+                        output,
+                    )
+                    return output
+            except (OSError, ValueError, json.JSONDecodeError):
+                log.warning("ignoring invalid Left pull cache metadata: %s", metadata)
         path = self.source(manifest).pull_window(
             window["partitions"],
             manifest["columns"],
@@ -347,6 +487,16 @@ class LeftRuntime:
             side="left",
             key_tuples=window.get("key_tuples"),
         )
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        temporary = metadata.with_name(metadata.name + ".part")
+        try:
+            temporary.write_text(
+                json.dumps(cache, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            replace_local_file(temporary, metadata)
+        finally:
+            temporary.unlink(missing_ok=True)
         log.info(
             "left %s %s: %d sampled row(s) pulled (%s)",
             manifest["pair"],

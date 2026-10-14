@@ -7,6 +7,7 @@ from dtrack_left.checks.row_check import (
     SECRET_FIELDS,
     make_run_id,
     public_pair_config,
+    reuse_row_check,
     run_row_check,
 )
 
@@ -108,6 +109,24 @@ def test_row_check_refuses_an_empty_selection_and_failed_preflights():
     with pytest.raises(RuntimeError, match="left preflight failed: a"):
         run_row_check(_config(a={}), store, source_factory=lambda _r: Down())
     assert not store.exists("pairs/a/row_check/left.json")
+
+
+def test_row_check_reuses_same_run_counts_including_an_empty_result():
+    class Empty(Fake):
+        def partition_counts(self, *_args):
+            return {}
+
+    config = _config(a={})
+    store = MemoryStore()
+    run_row_check(config, store, run_id="same-run", source_factory=lambda _row: Empty())
+
+    reused = reuse_row_check(config, store, run_id="same-run")
+    assert reused is not None
+    run_id, documents = reused
+    assert run_id == "same-run" and documents[0]["counts"] == {}
+
+    config["pairs"]["a"]["fromDate"] = "2026-01-02"
+    assert reuse_row_check(config, store, run_id="same-run") is None
 
 
 def test_public_pair_config_strips_every_credential_field():

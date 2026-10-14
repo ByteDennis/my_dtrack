@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import datetime
 from pathlib import Path
 
 from dtrack_right.common.protocol import (
@@ -144,6 +145,15 @@ class MemoryStore:
             }
         )
 
+    def delete_keys(self, keys):
+        deleted = 0
+        for key in keys:
+            if key in self.objects:
+                self.objects.pop(key)
+                self.events.append(("delete", key))
+                deleted += 1
+        return deleted
+
     def heartbeat(self, now=None):
         return self.put_json(
             HEARTBEAT,
@@ -268,7 +278,15 @@ class FakeSpark:
 
 
 # >>> the store contract both S3Store and VolumeStore must honour <<< #
-def assert_store_contract(store):
+def assert_store_contract(store, *, expected_timestamp=None):
+    def without_timestamp(document, field):
+        value = document.pop(field)
+        if expected_timestamp is None:
+            assert datetime.fromisoformat(value).tzinfo is not None
+        else:
+            assert value == expected_timestamp
+        return document
+
     assert store.json_bytes({"x": 1, "a": 2}) == b'{"a":2,"x":1}'
     assert store.put_json("a/b.json", {"x": 1}).endswith("a/b.json")
     store.put_bytes("a/c.csv", b"h\n1\n", content_type="text/csv")
@@ -279,11 +297,10 @@ def assert_store_contract(store):
     assert store.list_keys("nothing/") == []
     first = store.commit_unit(1, "u1", {"v": 1}, {"pair": "p"})
     store.commit_unit(2, "u2", {"v": 2}, {"pair": "p"})
-    assert first == {
+    assert without_timestamp(first, "left_ready_at") == {
         "pair": "p",
         "unit_id": "u1",
         "sequence": 1,
-        "left_ready_at": "2026-01-02T03:04:05+00:00",
         "left_statistics": {"v": 1},
     }
     assert [key for key, _ in store.list_json("pairs/p/units/")] == [
@@ -294,27 +311,24 @@ def assert_store_contract(store):
     assert store.put_result("u1", {"verdict": "match"}).endswith(
         "pairs/p/col_check/results/u1.json"
     )
-    assert store.get_json("pairs/p/col_check/results/u1.json") == {
-        "completed_at": "2026-01-02T03:04:05+00:00",
+    assert without_timestamp(
+        store.get_json("pairs/p/col_check/results/u1.json"), "completed_at"
+    ) == {
         "pair": "p",
         "unit_id": "u1",
         "verdict": "match",
     }
-    assert store.put_dead("u2", {"error": "x"}).endswith(
-        "pairs/p/col_check/failures/u2.json"
-    )
-    assert store.get_json("pairs/p/col_check/failures/u2.json") == {
+    assert store.put_dead("u2", {"error": "x"}).endswith("pairs/p/col_check/failures/u2.json")
+    assert without_timestamp(store.get_json("pairs/p/col_check/failures/u2.json"), "failed_at") == {
         "error": "x",
-        "failed_at": "2026-01-02T03:04:05+00:00",
         "pair": "p",
         "unit_id": "u2",
     }
     assert store.ready_unclaimed() == 0
     assert store.heartbeat_age() is None
     assert store.heartbeat(now=100.0).endswith("_status/heartbeat.json")
-    assert store.get_json("_status/heartbeat.json") == {
+    assert without_timestamp(store.get_json("_status/heartbeat.json"), "updated_at") == {
         "epoch_s": 100.0,
-        "updated_at": "2026-01-02T03:04:05+00:00",
     }
     assert store.heartbeat_age(now=130.0) == 30.0 and store.heartbeat_age(now=50.0) == 0.0
     assert store.heartbeat_age() > 0
@@ -322,12 +336,10 @@ def assert_store_contract(store):
     assert store.close_manifests(["b", "a"], 4, {"p": "plan-1"}).endswith(
         "_status/col_check.closed.json"
     )
-    assert store.get_json("_status/row_check.closed.json") == {
-        "closed_at": "2026-01-02T03:04:05+00:00",
+    assert without_timestamp(store.get_json("_status/row_check.closed.json"), "closed_at") == {
         "pairs": ["a", "b"],
     }
-    assert store.get_json("_status/col_check.closed.json") == {
-        "closed_at": "2026-01-02T03:04:05+00:00",
+    assert without_timestamp(store.get_json("_status/col_check.closed.json"), "closed_at") == {
         "expected_units": 4,
         "pairs": ["a", "b"],
         "plan_ids": {"p": "plan-1"},

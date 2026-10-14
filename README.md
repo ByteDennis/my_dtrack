@@ -23,6 +23,23 @@ fails before any statistics scan unless every mismatch is explicitly listed in
 `excluded_partitions`. Rerunning Left with the same run id reuses unchanged Unit identities and
 republishes only vintages or columns affected by exclusion changes.
 
+When Oracle is reachable only from SAS, keep the same `left-run` workflow and split it into export
+and import phases:
+
+```bash
+dtrack left-run --config config.json --run-id "$RUN_ID" --export-sas ./sas-run
+# Copy the whole directory to the SAS host, edit dtrack_bundle / dtrack_connect_* in left-run.sas,
+# and run left-run.sas there.
+dtrack left-run --config config.json --run-s3 "$RUN_S3" --import-sas ./sas-run
+```
+
+After applying the configured source query/`where`, the generated script counts every returned
+partition by default, then loops over every configured vintage and exports sampled data.
+`fromDate`, `toDate`, and `excluded_partitions` are the explicit DTrack partition filters. The
+import validates the bundle, computes the normal Left statistics, and uploads protocol documents
+and Units—not the raw SAS CSV files. The existing Right job must still run afterward to compare row
+counts and column statistics and to publish the final report.
+
 The on-prem side holds no Databricks credential and installs no Databricks package. The Right
 side never imports the Left package and contains no CSV/pandas fallback or source-platform sampling
 SQL. Oracle is installed by default; Athena and Hadoop are extras.
@@ -42,7 +59,23 @@ An Oracle `query` may be inline or a `.sql` path relative to the config file. La
 queries can push the selected DTrack window into each dated driver before the join with controlled
 markers such as `{{query_windows:driver_one}}`; declare each marker under the Left
 `query_windows` map. DTrack still applies the final-result date predicate and samples only after
-the consolidated relation is built.
+the consolidated relation is built. If that query returns more than Oracle's portable 1000-column
+limit, replace its final select list with `{{dtrack_projection}}` and map each configured Left
+column to its original Oracle expression under `left.query_projection`. Preflight and row counts
+then select only the date, while col-check pulls, calculates, and publishes at most 500 mapped
+columns per batch by default (`left.column_batch_size` may lower or raise the requested batch size;
+DTrack still reserves room for the date and keys). Queries without this marker keep their existing
+behavior. Oracle always receives the complete rendered SQL. Human audit files compact SELECT lists
+larger than 20 attributes to the first two and last two attributes with an ellipsis and no visible
+SQL hash; repeated read-query shapes reuse the same detailed audit file across command restarts.
+
+Rerunning `row-check`, `col-check`, or `left-run` with the same `--run-id` resumes by default:
+compatible row counts and existing Units are reused, and incomplete local pulls are reused only
+when their provenance sidecar matches the run, plan, window, columns, and sampled keys. Keep the
+same `--work-dir` to reuse those local CSVs. Add `--force` to clear the selected run stage and
+recompute it; prior Units/results are removed first, so the rerun does not create duplicate active
+Units. `left-run --force --import-sas` recomputes from the validated SAS output, while
+`--force --export-sas` is rejected because export has no uploaded run state.
 
 ```bash
 uv sync

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import boto3
 import pytest
-from support import pairs_config
+from support import MemoryStore, pairs_config
 
 from dtrack_left.backends import store as store_module
 from dtrack_left.checks import rollback
@@ -144,9 +144,7 @@ def test_config_rejects_skipped_pair_before_deleting(finished, synthetic, stage)
 @pytest.mark.slow
 def test_dead_rollback_only_touches_dead_units_of_the_pair(finished):
     run = finished()
-    run.store.put_json(
-        "pairs/orders/col_check/failures/x.json", {"pair": "orders", "unit_id": "x"}
-    )
+    run.store.put_json("pairs/orders/col_check/failures/x.json", {"pair": "orders", "unit_id": "x"})
     run.store.put_json(
         "pairs/customers/col_check/failures/y.json", {"pair": "customers", "unit_id": "y"}
     )
@@ -156,6 +154,28 @@ def test_dead_rollback_only_touches_dead_units_of_the_pair(finished):
     assert run.store.exists("pairs/customers/col_check/failures/y.json")
     with pytest.raises(ValueError, match="stage must be"):
         rollback.plan(run.store, "orders", "all")
+
+
+def test_force_reset_removes_only_the_requested_stage_artifacts():
+    store = MemoryStore()
+    store.put_json("pairs/p/row_check/left.json", {"pair": "p", "run_id": "r"})
+    store.put_json("pairs/p/plan.json", {"pair": "p"})
+    store.put_json("pairs/p/fixed_keys.json", {"pair": "p"})
+    store.put_json("pairs/p/units/00000001-u.json", {"pair": "p", "unit_id": "u"})
+    store.put_json("pairs/p/col_check/results/u.json", {"pair": "p", "unit_id": "u"})
+    store.put_json("_status/col_check.closed.json", {"pairs": ["p"]})
+    store.put_json("_status/run.json", {"run_id": "r"})
+
+    removed = rollback.reset_for_rerun(store, ["p"], "col")
+
+    assert "pairs/p/units/00000001-u.json" in removed
+    assert store.exists("pairs/p/row_check/left.json") and store.exists("pairs/p/plan.json")
+    assert not store.exists("pairs/p/fixed_keys.json")
+    assert not list_units(store) and not list_results(store)
+
+    rollback.reset_for_rerun(store, ["p"], "row")
+    assert not store.exists("pairs/p/row_check/left.json")
+    assert not store.exists("pairs/p/plan.json")
 
 
 @pytest.mark.slow
@@ -241,20 +261,23 @@ def test_rollback_deletes_from_s3_run_folders(s3_bucket):
 @pytest.mark.slow
 def test_rollback_command_is_a_dry_run_until_yes(finished, capsys):
     run = finished()
-    assert main(
-        [
-            "tools",
-            "rollback",
-            "--run-s3",
-            str(run.folder.parent),
-            "--run-id",
-            run.run_id,
-            "--pair",
-            "orders",
-            "--stage",
-            "dead",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "tools",
+                "rollback",
+                "--run-s3",
+                str(run.folder.parent),
+                "--run-id",
+                run.run_id,
+                "--pair",
+                "orders",
+                "--stage",
+                "dead",
+            ]
+        )
+        == 0
+    )
     dry = json.loads(capsys.readouterr().out)
     assert dry["planned"] == 0 and dry["targets"] == [] and "add --yes" in dry["dry_run"]
     argv = [

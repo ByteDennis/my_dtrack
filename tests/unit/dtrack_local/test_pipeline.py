@@ -37,9 +37,7 @@ def test_run_all_matches_the_distributed_protocol_and_backs_up(
     )
 
     def anchor(config):
-        return counted(
-            CsvAnchorTarget(config, synthetic.root / "right", tmp_path / "rw"), "right"
-        )
+        return counted(CsvAnchorTarget(config, synthetic.root / "right", tmp_path / "rw"), "right")
 
     def open_local():
         return pipeline.open_run(
@@ -611,7 +609,21 @@ def test_reuse_pulled_windows_skips_source_and_warehouse(tmp_path):
         [("2026-01-01", "1", "10.5", "OPEN"), ("2026-01-01", "2", "3.0", None)],
     )
     assert not list(tmp_path.rglob("*.part"))
-    manifest = {**MANIFEST, "left": {"source": "nope"}, "key_cols": ["ORDER_ID"]}
+    manifest = {
+        **MANIFEST,
+        "run_id": "r",
+        "plan_id": "p",
+        "left": {"source": "nope", "date_col": "dt"},
+        "key_cols": ["ORDER_ID"],
+    }
+    runtime = pipeline.LandingLeftRuntime(tmp_path / "left", MemoryStore(), None, reuse=True)
+
+    class ExistingPull:
+        def pull_window(self, *_args, **_kwargs):
+            return left
+
+    runtime.sources["orders"] = ExistingPull()
+    assert runtime.pull_window(manifest, window) == left
     runtime = pipeline.LandingLeftRuntime(tmp_path / "left", MemoryStore(), None, reuse=True)
     assert runtime.pull_window(manifest, window) == left
     target = pipeline.WarehouseTarget(
