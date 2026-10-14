@@ -12,8 +12,8 @@ def test_size_text_parses_binary_units():
 
 def test_budget_is_split_across_the_expected_connections(monkeypatch):
     monkeypatch.setenv("DTRACK_DUCKDB_MEMORY", "16GB")
-    monkeypatch.setenv("DTRACK_DUCKDB_SHARE", "4")
-    monkeypatch.setenv("DTRACK_DUCKDB_THREADS", "3")
+    monkeypatch.setenv("DTRACK_DUCKDB_WORKERS", "4")
+    monkeypatch.setattr(duck.os, "cpu_count", lambda: 12)
     applied = duck.settings()
     assert applied["memory_limit"] == f"{4 * 1024}MiB"
     assert applied["threads"] == "3"
@@ -22,15 +22,15 @@ def test_budget_is_split_across_the_expected_connections(monkeypatch):
 
 def test_default_budget_is_a_fraction_of_physical_memory(monkeypatch):
     monkeypatch.delenv("DTRACK_DUCKDB_MEMORY", raising=False)
-    monkeypatch.delenv("DTRACK_DUCKDB_SHARE", raising=False)
+    monkeypatch.delenv("DTRACK_DUCKDB_WORKERS", raising=False)
     monkeypatch.setattr(duck, "physical_memory", lambda: 32 * 2**30)
-    assert duck.settings()["memory_limit"] == f"{int(32 * 1024 * 0.6 / 4)}MiB"
+    assert duck.settings()["memory_limit"] == f"{int(32 * 1024 * 0.6 / 2)}MiB"
 
 
 def test_connect_applies_the_budget_and_spills_to_the_temp_directory(monkeypatch, tmp_path):
     pytest.importorskip("duckdb")
     monkeypatch.setenv("DTRACK_DUCKDB_MEMORY", "2GB")
-    monkeypatch.setenv("DTRACK_DUCKDB_SHARE", "2")
+    monkeypatch.setenv("DTRACK_DUCKDB_WORKERS", "2")
     monkeypatch.setenv("DTRACK_DUCKDB_TEMP", str(tmp_path / "spill"))
     with duck.connect(ordered=False) as connection:
         setting = lambda name: connection.execute(f"SELECT current_setting('{name}')").fetchone()[0]
@@ -56,7 +56,7 @@ def test_unwritable_temp_falls_back_to_the_system_temp(monkeypatch, tmp_path, ca
     blocker = tmp_path / "file"
     blocker.write_text("x")
     monkeypatch.setenv("DTRACK_DUCKDB_TEMP", str(blocker / "nested"))
-    with caplog.at_level("WARNING", logger="dtrack.duck"), duck.connect() as connection:
+    with caplog.at_level("WARNING", logger="dtrack.left.duck"), duck.connect() as connection:
         setting = connection.execute("SELECT current_setting('temp_directory')").fetchone()[0]
     assert setting.endswith("dtrack-duckdb")
     assert "unusable" in caplog.text

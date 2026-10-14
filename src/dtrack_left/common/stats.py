@@ -3,8 +3,12 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import logging
 import os
+import threading
 import uuid
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +16,8 @@ import pandas as pd
 
 from .column_types import resolve_column_type
 from .hashing import collapse_decimal
+
+log = logging.getLogger("dtrack.left.stats")
 
 
 def infer_column_type(
@@ -152,8 +158,11 @@ def compute_csv_statistics(
     col_types: dict[str, str] | None = None,
     column_types: dict[str, Any] | None = None,
     side: str = "left",
+    progress: Callable[[str, int, int], None] | None = None,
+    on_batch: Callable[[dict[str, dict[str, Any]]], None] | None = None,
+    shard_status: Callable[[int, int, int], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    from .duck import connect, settings, temp_directory
+    from .duck import connect, temp_directory
 
     with Path(path).open(encoding="utf-8", newline="") as handle:
         available = next(csv.reader(handle), [])
@@ -165,20 +174,124 @@ def compute_csv_statistics(
     workspace = Path(temp_directory()) / f"stats-{uuid.uuid4().hex}.duckdb"
     try:
         workspace.parent.mkdir(parents=True, exist_ok=True)
-        with connect(str(workspace)) as connection:
+        with connect(str(workspace), resource_workers=1) as connection:
             projection = ", ".join(_quote(column) for column in dict.fromkeys(columns))
             connection.execute("SET threads = 1")
             connection.execute(f"CREATE TABLE scanned AS SELECT {projection} FROM {scan}")
-            connection.execute(f"SET threads = {settings()['threads']}")
-            return _statistics(
-                connection, columns, strict, col_types or {}, column_types or {}, side
-            )
+            if progress:
+                progress("load", 1, 1)
+        return _parallel_statistics(
+            workspace,
+            columns,
+            strict,
+            col_types or {},
+            column_types or {},
+            side,
+            progress,
+            on_batch,
+            shard_status,
+        )
     finally:
         for suffix in ("", ".wal"):
             Path(str(workspace) + suffix).unlink(missing_ok=True)
 
 
-def _statistics(connection, columns, strict, requested_types, comparisons, side):
+def _parallel_statistics(
+    workspace,
+    columns,
+    strict,
+    requested_types,
+    comparisons,
+    side,
+    progress,
+    on_batch,
+    shard_status,
+):
+    from .duck import connect, worker_count
+
+    groups = list(_batches(columns, stats_batch()))
+    if not groups:
+        return {}
+    workers = min(worker_count(), len(groups))
+    log.info(
+        "statistics shards start: attributes=%d, shard_size=%d, shards=%d, parallel=%d",
+        len(columns),
+        stats_batch(),
+        len(groups),
+        workers,
+    )
+    if shard_status:
+        shard_status(workers, 0, len(groups))
+    phase_done = {
+        phase: [0] * len(groups) for phase in ("infer", "aggregate", "finalize")
+    }
+    progress_lock = threading.Lock()
+
+    def group_progress(group_index):
+        def update(phase, completed, total):
+            if phase not in phase_done:
+                return
+            with progress_lock:
+                phase_done[phase][group_index] = min(total, completed)
+                overall = sum(phase_done[phase])
+            if progress:
+                progress(phase, overall, len(columns))
+
+        return update
+
+    def calculate(group_index, group):
+        with connect(
+            str(workspace),
+            read_only=True,
+            resource_workers=workers,
+        ) as connection:
+            return _statistics(
+                connection,
+                group,
+                strict,
+                requested_types,
+                comparisons,
+                side,
+                group_progress(group_index),
+            )
+
+    completed = {}
+    completed_groups = 0
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dtrack-stats") as executor:
+        jobs = {
+            executor.submit(calculate, index, group): index
+            for index, group in enumerate(groups)
+        }
+        try:
+            for job in as_completed(jobs):
+                rows = job.result()
+                completed.update(rows)
+                completed_groups += 1
+                if shard_status:
+                    shard_status(
+                        min(workers, len(groups) - completed_groups),
+                        completed_groups,
+                        len(groups),
+                    )
+                log.info(
+                    "statistics shard calculated: shard=%d/%d, attributes=%d, "
+                    "attributes_calculated=%d/%d",
+                    completed_groups,
+                    len(groups),
+                    len(rows),
+                    len(completed),
+                    len(columns),
+                )
+                if on_batch:
+                    on_batch(rows)
+        except Exception:
+            for job in jobs:
+                job.cancel()
+            raise
+    return {column: completed[column] for column in columns}
+
+
+def _statistics(connection, columns, strict, requested_types, comparisons, side, progress=None):
     batch = stats_batch()
     base = {}
     integral_values = {}
@@ -195,6 +308,7 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side)
 
     indexed = list(enumerate(columns))
     inferred: dict[int, tuple] = {}
+    completed = 0
     for group in _batches(indexed, batch):
         infer_selects = []
         for index, column in group:
@@ -213,6 +327,9 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side)
         ).fetchone()
         for offset, (index, _column) in enumerate(group):
             inferred[index] = inferred_row[offset * 3 : offset * 3 + 3]
+        completed += len(group)
+        if progress:
+            progress("infer", completed, len(columns))
     numeric, integral = {}, {}
     for index, column in indexed:
         forced = requested_types.get(column)
@@ -228,6 +345,7 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side)
 
     row: dict[str, Any] = {}
     values = {}
+    completed = 0
     for group in _batches(indexed, batch):
         selects = ["count(*) AS n_total"]
         for index, column in group:
@@ -267,6 +385,9 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side)
             ]
         cursor = connection.execute(f"SELECT {', '.join(selects)} FROM scanned")
         row.update(zip([item[0] for item in cursor.description], cursor.fetchone()))
+        completed += len(group)
+        if progress:
+            progress("aggregate", completed, len(columns))
 
     result = {}
     for index, column in indexed:
@@ -303,4 +424,6 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side)
             ),
             "top_10": top,
         }
+        if progress:
+            progress("finalize", index + 1, len(columns))
     return result

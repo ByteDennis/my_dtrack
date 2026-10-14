@@ -97,6 +97,36 @@ def dbx_workspace_upload(w, source, target, overwrite, dry_run):
     return databricks.upload_workspace(w, source, target, overwrite=overwrite, dry_run=dry_run)
 
 
+def _absolute_workspace_path(_ctx, _param, value):
+    if not value.startswith("/") or ".." in Path(value).parts or value == "/":
+        raise click.BadParameter("must be an absolute non-root Workspace path")
+    return value
+
+
+# >>> dtrack tools dbx workspace download: mirror a Workspace file/notebook/tree locally <<< #
+@workspace_group.command(
+    "download",
+    help="download a Workspace file, notebook, or folder to a local path",
+    context_settings=CONTEXT_SETTINGS,
+)
+@click.argument("source", callback=_absolute_workspace_path)
+@click.argument("target", required=False, type=click.Path(path_type=Path))
+@profile_option
+@click.option("--overwrite", is_flag=True, help="replace existing local files")
+@click.option("--dry-run", is_flag=True, help="show planned local paths without writing")
+@log_level_option
+@emit_json
+@with_workspace
+def dbx_workspace_download(w, source, target, overwrite, dry_run):
+    return databricks.download_workspace(
+        w,
+        source,
+        target,
+        overwrite=overwrite,
+        dry_run=dry_run,
+    )
+
+
 # >>> dtrack tools dbx compute status|start|stop: one all-purpose cluster <<< #
 @dbx_group.command(
     "compute", help="status | start | stop a cluster", context_settings=CONTEXT_SETTINGS

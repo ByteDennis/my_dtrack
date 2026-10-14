@@ -100,9 +100,7 @@ def test_preflight_runs_an_empty_select_and_reports_failures(monkeypatch):
     }
 
 
-def test_oracle_projection_query_keeps_preflight_and_windows_below_the_column_limit(
-    monkeypatch, tmp_path
-):
+def test_oracle_projection_query_preflights_every_mapped_column(monkeypatch, tmp_path):
     query = (
         "SELECT {{dtrack_projection}} FROM DRIVER d "
         "LEFT JOIN FACT f ON d.ID = f.ID WHERE {{query_windows:driver}}"
@@ -124,8 +122,8 @@ def test_oracle_projection_query_keeps_preflight_and_windows_below_the_column_li
 
     assert source.preflight()["ok"]
     assert "d.DT AS FINAL_DT" in connection.statements[0]
-    assert "f.AMOUNT" not in connection.statements[0]
-    assert "f.STATUS" not in connection.statements[0]
+    assert "f.AMOUNT AS AMOUNT" in connection.statements[0]
+    assert "f.STATUS AS STATUS" in connection.statements[0]
 
     source.pull_window(
         ["2026-08-01"],
@@ -768,6 +766,12 @@ def test_duckdb_source_pulls_a_window_and_never_writes(duckdb_file, tmp_path):
         source.query("CREATE TABLE fin.x (i INT)")
 
 
+def test_duckdb_source_query_reads_after_the_writer_closes(duckdb_file):
+    source = DuckDBSource({"path": str(duckdb_file), "table": "fin.orders"})
+    columns, rows = source.query('SELECT COUNT(*) AS n FROM "fin"."orders"')
+    assert columns == ["n"] and rows == [(9,)]
+
+
 def test_duckdb_source_needs_a_path_and_reports_a_missing_database(tmp_path):
     with pytest.raises(ValueError, match="requires path"):
         DuckDBSource({"table": "t"})
@@ -779,7 +783,7 @@ def test_duckdb_source_needs_a_path_and_reports_a_missing_database(tmp_path):
         DuckDBSource({"path": "a.duckdb"}).relation()
 
 
-# >>> another process holds the database read-write and has three uncheckpointed rows in its .wal <<< #
+# >>> another process holds the database read-write with uncheckpointed rows in its WAL <<< #
 @pytest.fixture
 def locked_duckdb(duckdb_file):
     import subprocess
@@ -802,30 +806,19 @@ def locked_duckdb(duckdb_file):
 
 
 @pytest.mark.timeout(15)
-def test_duckdb_lock_held_by_a_writer_explains_the_snapshot_option(locked_duckdb):
+def test_duckdb_lock_held_by_a_writer_requires_checkpoint_close_or_read_only(locked_duckdb):
     source = DuckDBSource({"path": str(locked_duckdb), "table": "fin.orders", "date_col": "d"})
     result = source.preflight()
-    assert result["ok"] is False and '"snapshot": true' in result["error"]
+    assert result["ok"] is False
+    assert "CHECKPOINT and close" in result["error"] and "read-only" in result["error"]
 
 
-@pytest.mark.timeout(15)
-def test_duckdb_snapshot_reads_a_copy_with_the_writers_wal_once(locked_duckdb):
-    source = DuckDBSource(
-        {
-            "path": str(locked_duckdb),
-            "table": "fin.orders",
-            "date_col": "business_date",
-            "date_type": "date",
-            "snapshot": True,
-        }
-    )
-    assert source.partition_counts()["2026-01-04"] == 3
-    first = source.database()
-    assert source.partition_counts()["2026-01-01"] == 3 and source.database() == first
-    assert first != str(locked_duckdb) and first.endswith("sales-2026.duckdb")
-    assert source.relation() == '"fin"."orders"'
-
-
-def test_duckdb_snapshot_is_off_for_urls():
-    assert DuckDBSource({"path": "s3://b/x.duckdb", "snapshot": True}).snapshot is False
-    assert DuckDBSource({"path": "x.duckdb", "snapshot": True}).snapshot is True
+def test_duckdb_source_rejects_the_removed_live_snapshot_option(duckdb_file):
+    with pytest.raises(ValueError, match="no longer supports snapshot"):
+        DuckDBSource(
+            {
+                "path": str(duckdb_file),
+                "table": "fin.orders",
+                "snapshot": True,
+            }
+        )

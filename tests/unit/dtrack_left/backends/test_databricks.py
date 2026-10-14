@@ -1,3 +1,4 @@
+import base64
 import subprocess
 import sys
 from enum import Enum
@@ -140,6 +141,43 @@ def workspace_files(fail_on=None):
     return NS(
         workspace=files,
         current_user=NS(me=lambda: NS(user_name="me@corp.com")),
+    )
+
+
+class WorkspaceDownloads:
+    def __init__(self, objects, content):
+        self.objects = {row.path: row for row in objects}
+        self.content = content
+        self.calls = []
+
+    def get_status(self, path):
+        self.calls.append(("get_status", path))
+        return self.objects[path]
+
+    def list(self, path):
+        self.calls.append(("list", path))
+        parent = path.rstrip("/") + "/"
+        return iter(
+            row
+            for item, row in sorted(self.objects.items())
+            if item.startswith(parent) and "/" not in item[len(parent) :]
+        )
+
+    def export(self, path, *, format):
+        self.calls.append(("export", path, format.value))
+        body, file_type = self.content[path]
+        return NS(content=base64.b64encode(body).decode(), file_type=file_type)
+
+
+def workspace_downloads(objects, content):
+    return NS(workspace=WorkspaceDownloads(objects, content))
+
+
+def workspace_object(path, type_, language=None):
+    return NS(
+        path=path,
+        object_type=NS(value=type_),
+        language=None if language is None else NS(value=language),
     )
 
 
@@ -289,6 +327,78 @@ def test_upload_workspace_reports_individual_failures_and_exit_one(tmp_path):
     assert result["uploaded"] == 1 and result["exit_code"] == 1
     assert result["paths"] == ["/Shared/folder/b.txt"]
     assert result["failed"] == [{"path": "/Shared/folder/a.txt", "error": "OSError: upload failed"}]
+
+
+def test_download_workspace_mirrors_files_and_source_notebooks(tmp_path):
+    objects = [
+        workspace_object("/Shared/right", "DIRECTORY"),
+        workspace_object("/Shared/right/module.py", "FILE"),
+        workspace_object("/Shared/right/notebook", "NOTEBOOK", "PYTHON"),
+        workspace_object("/Shared/right/empty", "DIRECTORY"),
+        workspace_object("/Shared/right/pkg", "DIRECTORY"),
+        workspace_object("/Shared/right/pkg/config.json", "FILE"),
+    ]
+    content = {
+        "/Shared/right/module.py": (b"VALUE = 1\n", "py"),
+        "/Shared/right/notebook": (b"# Databricks notebook source\nprint('ok')\n", "py"),
+        "/Shared/right/pkg/config.json": (b'{"ok":true}\n', "json"),
+    }
+    w = workspace_downloads(objects, content)
+    target = tmp_path / "right"
+
+    result = databricks.download_workspace(w, "/Shared/right", target)
+
+    assert result["planned"] == result["downloaded"] == 3
+    assert result["directories"] == 3 and result["failed"] == []
+    assert (target / "empty").is_dir()
+    assert (target / "module.py").read_bytes() == b"VALUE = 1\n"
+    assert (target / "notebook.py").read_text() == "# Databricks notebook source\nprint('ok')\n"
+    assert (target / "pkg/config.json").read_text() == '{"ok":true}\n'
+
+
+def test_download_workspace_dry_run_is_read_only_and_reports_local_paths(tmp_path):
+    objects = [
+        workspace_object("/Shared/right", "DIRECTORY"),
+        workspace_object("/Shared/right/n", "NOTEBOOK", "SQL"),
+    ]
+    w = workspace_downloads(objects, {"/Shared/right/n": (b"SELECT 1\n", "sql")})
+    target = tmp_path / "right"
+
+    result = databricks.download_workspace(w, "/Shared/right", target, dry_run=True)
+
+    assert result["paths"] == [str(target / "n.sql")]
+    assert result["downloaded"] == 0 and not target.exists()
+    assert [call[0] for call in w.workspace.calls] == ["get_status", "list"]
+
+
+def test_download_workspace_requires_overwrite_and_continues_other_files(tmp_path):
+    objects = [
+        workspace_object("/Shared/right", "DIRECTORY"),
+        workspace_object("/Shared/right/a.txt", "FILE"),
+        workspace_object("/Shared/right/b.txt", "FILE"),
+    ]
+    content = {
+        "/Shared/right/a.txt": (b"new-a", "txt"),
+        "/Shared/right/b.txt": (b"new-b", "txt"),
+    }
+    target = tmp_path / "right"
+    target.mkdir()
+    (target / "a.txt").write_text("old-a")
+
+    result = databricks.download_workspace(
+        workspace_downloads(objects, content), "/Shared/right", target
+    )
+
+    assert (target / "a.txt").read_text() == "old-a"
+    assert (target / "b.txt").read_text() == "new-b"
+    assert result["downloaded"] == 1 and result["exit_code"] == 1
+    assert result["failed"][0]["path"] == str(target / "a.txt")
+
+    replaced = databricks.download_workspace(
+        workspace_downloads(objects, content), "/Shared/right", target, overwrite=True
+    )
+    assert replaced["downloaded"] == 2
+    assert (target / "a.txt").read_text() == "new-a"
 
 
 def test_compute_status_reports_ec2_nodes_and_uptime_since_the_last_restart():

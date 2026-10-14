@@ -5,11 +5,12 @@ import os
 import tempfile
 from pathlib import Path
 
-log = logging.getLogger("dtrack.duck")
-DEFAULT_SHARE = 4
+log = logging.getLogger("dtrack.left.duck")
+DEFAULT_WORKERS = 2
 DEFAULT_FRACTION = 0.6
 _TEMP: str | None = None
 _WARNED: set[str] = set()
+_LOGGED_SETTINGS: set[tuple[str, ...]] = set()
 
 
 # >>> spill and scratch databases under the run's own work directory (same disk and permissions as the pulled CSVs) <<< #
@@ -77,18 +78,22 @@ def parse_size(text: str) -> int:
     return int(float(raw))
 
 
-# >>> the process-wide DuckDB budget: DTRACK_DUCKDB_MEMORY, else 60% of physical RAM, split across DTRACK_DUCKDB_SHARE connections <<< #
-def settings() -> dict[str, str]:
-    share = max(1, int(os.getenv("DTRACK_DUCKDB_SHARE") or DEFAULT_SHARE))
+# >>> one concurrency knob divides both memory and CPU across simultaneous DuckDB work <<< #
+def worker_count() -> int:
+    return max(1, int(os.getenv("DTRACK_DUCKDB_WORKERS") or DEFAULT_WORKERS))
+
+
+# >>> the process-wide DuckDB budget: explicit memory or 60% physical RAM, divided across workers <<< #
+def settings(workers: int | None = None) -> dict[str, str]:
+    workers = max(1, workers or worker_count())
     budget = os.getenv("DTRACK_DUCKDB_MEMORY")
     total = parse_size(budget) if budget else physical_memory()
     result: dict[str, str] = {}
     if total:
-        per = max(256 * 2**20, int((total if budget else total * DEFAULT_FRACTION) / share))
+        per = max(256 * 2**20, int((total if budget else total * DEFAULT_FRACTION) / workers))
         result["memory_limit"] = f"{per // 2**20}MiB"
-    threads = os.getenv("DTRACK_DUCKDB_THREADS")
     cpus = os.cpu_count() or 1
-    result["threads"] = str(max(1, int(threads) if threads else cpus // share))
+    result["threads"] = str(max(1, cpus // workers))
     result["temp_directory"] = temp_directory()
     return result
 
@@ -108,12 +113,29 @@ def _ensure_temp(path: str) -> str:
 
 
 # >>> every DuckDB connection in the Left pipeline: budgeted memory and threads, spilling to a temp directory <<< #
-def connect(path: str | None = None, *, read_only: bool = False, ordered: bool = True):
+def connect(
+    path: str | None = None,
+    *,
+    read_only: bool = False,
+    ordered: bool = True,
+    resource_workers: int | None = None,
+):
     import duckdb
 
     connection = duckdb.connect(path, read_only=read_only) if path else duckdb.connect()
-    applied = settings()
+    workers = max(1, resource_workers or worker_count())
+    applied = settings(workers)
     applied["temp_directory"] = _ensure_temp(applied["temp_directory"])
+    signature = tuple(f"{key}={value}" for key, value in sorted(applied.items()))
+    if signature not in _LOGGED_SETTINGS:
+        _LOGGED_SETTINGS.add(signature)
+        log.info(
+            "duckdb resources: workers=%d, threads=%s and memory_limit=%s per connection, temp=%s",
+            workers,
+            applied["threads"],
+            applied.get("memory_limit", "duckdb-default"),
+            applied["temp_directory"],
+        )
     for key, value in applied.items():
         connection.execute(f"SET {key} = '{value}'")
     if not ordered:

@@ -2,6 +2,7 @@ import io
 import logging
 
 import dtrack_local.cli as local_cli
+from dtrack_left.common.run_logging import current_left_log
 from dtrack_local.run_logging import configure_run_logging, current_error_log
 
 
@@ -15,7 +16,9 @@ def test_run_errors_go_to_a_dedicated_file_and_not_the_console(tmp_path):
     try:
         path = configure_run_logging(tmp_path / "run")
         logger = logging.getLogger("dtrack.local.test")
+        left_logger = logging.getLogger("dtrack.left.col_check")
         logger.info("visible progress")
+        left_logger.info("persistent left progress")
         logger.error("private failure", extra={"dtrack_traceback": "traceback details\n"})
         for handler in root.handlers:
             handler.flush()
@@ -26,6 +29,8 @@ def test_run_errors_go_to_a_dedicated_file_and_not_the_console(tmp_path):
         assert "traceback details" in path.read_text()
         assert "visible progress" not in path.read_text()
         assert current_error_log() == path
+        assert current_left_log() == tmp_path / "run" / "_local" / "logs" / "left.log"
+        assert "persistent left progress" in current_left_log().read_text()
     finally:
         for handler in root.handlers:
             if getattr(handler, "dtrack_error_handler", False):

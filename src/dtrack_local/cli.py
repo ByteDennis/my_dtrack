@@ -462,6 +462,7 @@ def run_command(run, gate, run_s3):
             "findings",
             "backup",
             "landing",
+            "left_log",
             "error_log",
         )
     }

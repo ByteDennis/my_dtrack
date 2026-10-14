@@ -59,6 +59,7 @@ def test_run_all_matches_the_distributed_protocol_and_backs_up(
     }
     assert outcome["col_check"]["compared"] == 11 and outcome["col_check"]["dead"] == 0
     assert set(outcome["landing"]) == {"left__orders", "left__customers"}
+    assert outcome["left_log"].endswith("r1/_local/logs/left.log")
     assert outcome["error_log"].endswith("r1/_local/logs/errors.log")
     audit = (tmp_path / "runs/r1/_status/audit.sql").read_text()
     assert "SELECT" in audit and "-- timestamp=" not in audit
@@ -350,6 +351,7 @@ def test_local_config_supplies_every_optional_run_value(tmp_path, monkeypatch, c
                 "findings": {},
                 "backup": {},
                 "landing": {},
+                "left_log": "left.log",
                 "error_log": "errors.log",
             }
         ),
@@ -395,6 +397,7 @@ def test_cli_then_config_then_environment_precedence(tmp_path, monkeypatch, caps
                 "findings": {},
                 "backup": {},
                 "landing": {},
+                "left_log": "left.log",
                 "error_log": "errors.log",
             }
         ),

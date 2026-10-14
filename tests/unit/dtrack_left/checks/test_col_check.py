@@ -7,13 +7,13 @@ from dtrack_left.checks import col_check
 from dtrack_left.checks.col_check import (
     ColCheckPipeline,
     LeftRuntime,
-    iter_column_batches,
     iter_windows_round_robin,
     publish_fixed_keys,
     wait_for_manifests,
 )
 from dtrack_left.checks.row_check import run_row_check
 from dtrack_left.common.manifest import build_manifest, unit_id
+from dtrack_left.common.protocol import list_units
 
 
 def manifest():
@@ -53,7 +53,7 @@ def test_pipeline_commits_one_atomic_unit_and_closes_only_when_complete():
     assert store.exists("_status/col_check.closed.json")
 
 
-def test_projection_query_computes_and_commits_one_column_batch_at_a_time(caplog):
+def test_projection_query_computes_and_commits_one_window_at_a_time(caplog):
     store = MemoryStore()
     columns = [f"c{i}" for i in range(5)]
     row = {
@@ -69,22 +69,19 @@ def test_projection_query_computes_and_commits_one_column_batch_at_a_time(caplog
                 "dt": "s.dt",
                 **{column: f"s.{column}" for column in columns},
             },
-            "column_batch_size": 2,
         },
     }
     store.put_json("pairs/pair/plan.json", row)
     pulled = []
     computed = []
 
-    def pull(batch_manifest, _window):
-        pulled.append(list(batch_manifest["columns"]))
+    def pull(window_manifest, _window):
+        pulled.append(list(window_manifest["columns"]))
         return "pulled"
 
-    def compute(batch_manifest, _window, _pulled):
-        if computed:
-            assert store.list_keys("pairs/pair/units/")
-        computed.append(list(batch_manifest["columns"]))
-        return {column: STATS for column in batch_manifest["columns"]}
+    def compute(window_manifest, _window, _pulled):
+        computed.append(list(window_manifest["columns"]))
+        return {column: STATS for column in window_manifest["columns"]}
 
     with caplog.at_level("INFO", logger="dtrack.left.col_check"):
         published = ColCheckPipeline(
@@ -96,34 +93,9 @@ def test_projection_query_computes_and_commits_one_column_batch_at_a_time(caplog
         ).run([row])
 
     assert published == 5
-    assert pulled == [["c0", "c1"], ["c2", "c3"], ["c4"]]
+    assert pulled == [columns]
     assert computed == pulled
-    assert "batch 1/3" in caplog.text
-    assert "ready 5/5" in caplog.text
-
-
-def test_projection_batches_reserve_oracle_columns_for_date_and_keys():
-    columns = [f"c{i}" for i in range(1002)]
-    row = {
-        **manifest(),
-        "columns": columns,
-        "col_map": {column: column for column in columns},
-        "key_cols": ["account_id"],
-        "left": {
-            "source": "oracle",
-            "date_col": "dt",
-            "query_projection": {"dt": "s.dt"},
-            "column_batch_size": 5000,
-        },
-    }
-
-    batches = list(iter_column_batches([row]))
-
-    assert [len(batch[0]["columns"]) for batch in batches] == [998, 4]
-    assert [batch[0]["_column_batch"] for batch in batches] == [
-        {"index": 1, "total": 2},
-        {"index": 2, "total": 2},
-    ]
+    assert "run_ready=5/5" in caplog.text
 
 
 def test_left_runtime_reuses_only_a_provenance_matching_pull(tmp_path):
@@ -225,9 +197,92 @@ def test_backpressure_reports_the_backlog_without_spamming_each_poll(monkeypatch
         record.message for record in caplog.records if record.message.startswith("backpressure:")
     ]
     assert waiting == [
-        "backpressure: ready_unclaimed=5, wip=1, over_limit=4; waiting for Right (0.0s)"
+        (
+            "backpressure: ready_unclaimed=5, wip=1, over_limit=4; "
+            "left_ready=0/1, right_finished=0/1; waiting for Right (0.0s)"
+        )
     ]
     assert "backpressure cleared: ready_unclaimed=0, wip=1" in caplog.text
+
+
+def test_statistics_progress_is_polled_while_a_worker_is_running(caplog):
+    import time
+
+    store = MemoryStore()
+    row = manifest()
+    store.put_json("pairs/pair/plan.json", row)
+
+    def compute(_manifest, _window, _pulled, *, progress):
+        progress("load", 1, 1)
+        time.sleep(0.03)
+        progress("infer", 1, 1)
+        progress("aggregate", 1, 1)
+        progress("finalize", 1, 1)
+        return {"amount": STATS}
+
+    with caplog.at_level("INFO", logger="dtrack.left.progress"):
+        ColCheckPipeline(
+            store,
+            pull_window=lambda _m, _w: "pulled",
+            compute_stats=compute,
+            progress_interval=0.01,
+        ).run([row])
+
+    assert "statistics progress:" in caplog.text
+    assert "phase_steps=" in caplog.text
+    assert "shards_running=" in caplog.text
+    assert "attributes_calculated=" in caplog.text
+    assert "attributes_uploaded=" in caplog.text
+
+
+def test_pipeline_publishes_shards_early_but_runs_only_one_vintage_at_a_time():
+    store = MemoryStore()
+    columns = ["a", "b"]
+    row = {
+        **manifest(),
+        "columns": columns,
+        "col_map": {column: column for column in columns},
+        "windows": [
+            {"bucket": "2026-01", "partitions": ["2026-01-01"], "n_left": 2},
+            {"bucket": "2026-02", "partitions": ["2026-02-01"], "n_left": 2},
+        ],
+        "expected_units": 4,
+    }
+    store.put_json("pairs/pair/plan.json", row)
+    active = 0
+    max_active = 0
+    observed = []
+
+    def compute(_manifest, window, _pulled, *, progress, on_batch):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        progress("load", 1, 1)
+        for index, column in enumerate(columns, start=1):
+            on_batch({column: STATS})
+            observed.append((window["bucket"], column, len(list_units(store))))
+            progress("infer", index, len(columns))
+            progress("aggregate", index, len(columns))
+            progress("finalize", index, len(columns))
+        active -= 1
+        return {}
+
+    published = ColCheckPipeline(
+        store,
+        pull_window=lambda _manifest, window: window["bucket"],
+        compute_stats=compute,
+        pull_workers=2,
+        stat_workers=4,
+    ).run([row])
+
+    assert published == 4
+    assert max_active == 1
+    assert observed == [
+        ("2026-01", "a", 1),
+        ("2026-01", "b", 2),
+        ("2026-02", "a", 3),
+        ("2026-02", "b", 4),
+    ]
 
 
 def test_pipeline_leaves_manifests_open_when_units_are_missing():

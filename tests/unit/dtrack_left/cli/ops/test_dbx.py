@@ -27,6 +27,7 @@ def dbx_calls(monkeypatch):
         "list_runs",
         "run_detail",
         "upload_workspace",
+        "download_workspace",
     ):
         monkeypatch.setattr(
             dbx.databricks,
@@ -134,6 +135,43 @@ def test_dbx_workspace_upload_keeps_backend_exit_code(dbx_calls, monkeypatch, tm
 def test_dbx_workspace_upload_requires_an_existing_source(dbx_calls, tmp_path):
     assert run_tool(["dbx", "workspace", "upload"]) == 2
     assert run_tool(["dbx", "workspace", "upload", str(tmp_path / "missing")]) == 2
+
+
+def test_dbx_workspace_download_calls_backend_with_paths_and_flags(
+    dbx_calls, tmp_path, capsys
+):
+    target = tmp_path / "right"
+
+    assert (
+        run_tool(
+            [
+                "dbx",
+                "workspace",
+                "download",
+                "/Users/me/right",
+                str(target),
+                "--profile",
+                "work",
+                "--overwrite",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+
+    assert dbx_calls == [
+        (
+            "download_workspace",
+            ("w:work", "/Users/me/right", target),
+            {"overwrite": True, "dry_run": True},
+        )
+    ]
+    assert json.loads(capsys.readouterr().out) == {"called": "download_workspace"}
+
+
+def test_dbx_workspace_download_requires_an_absolute_source(dbx_calls, tmp_path):
+    assert run_tool(["dbx", "workspace", "download"]) == 2
+    assert run_tool(["dbx", "workspace", "download", "Shared/right", str(tmp_path)]) == 2
 
 
 def test_dbx_usage_errors_exit_two_and_sdk_errors_exit_one(dbx_calls, monkeypatch, capsys):

@@ -90,7 +90,7 @@ show "$LOGS/06_row_check_left.log"
 
 section "6. LEFT col-check: waits for the Right side's manifests, then pushes Units"
 run "07_col_check_left" uv run dtrack col-check --run-s3 "$RUNS" --run-id "$RUN_ID" --work-dir "$WORK/col_check" \
-  --pull-workers 2 --stat-workers 2 --wip 200 --poll-interval 1 --wait-timeout 120
+  --pull-workers 2 --stat-workers 1 --wip 200 --poll-interval 1 --wait-timeout 120
 show "$LOGS/07_col_check_left.log"
 
 section "7. RIGHT job drains, builds the report, publishes it, exits"

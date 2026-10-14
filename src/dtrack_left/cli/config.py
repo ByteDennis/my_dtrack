@@ -56,6 +56,11 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         right_source = str(right.get("source") or "").lower()
         if left_source not in LEFT_SOURCES:
             raise ValueError(f"{name}: unsupported Left source {left_source!r}")
+        if left_source == "duckdb" and left.get("snapshot"):
+            raise ValueError(
+                f"{name}: Left duckdb snapshot is no longer supported; "
+                "have the writer CHECKPOINT and close before DTrack reads the stable file"
+            )
         if "nullstr" in left:
             nullstr = left["nullstr"]
             if left_source not in {"file", "csv"}:
@@ -132,12 +137,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{name}: excluded_columns cannot include the Left date_col")
         pair["excluded_columns"] = list(dict.fromkeys(excluded_columns))
         projection = left.get("query_projection") or {}
-        batch_size = left.get("column_batch_size")
-        if batch_size is not None:
-            if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
-                raise TypeError(f"{name}: Left column_batch_size must be a positive integer")
-            if not projection:
-                raise ValueError(f"{name}: Left column_batch_size requires query_projection")
+        left.pop("column_batch_size", None)
         if projection:
             keys = [part.strip() for part in str(pair.get("key") or "").split(",") if part.strip()]
             required = {

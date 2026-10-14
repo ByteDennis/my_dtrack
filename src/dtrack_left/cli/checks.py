@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import click
@@ -12,6 +13,7 @@ from ..checks.row_check import active_pairs, make_run_id, reuse_row_check, run_r
 from ..checks.sas import export_sas_bundle, import_sas_bundle
 from ..common.audit import prune_audit_history
 from ..common.protocol import get_run_status, list_left_documents
+from ..common.run_logging import configure_left_logging
 from .options import (
     CONTEXT_SETTINGS,
     config_option,
@@ -22,6 +24,11 @@ from .options import (
     runtime_option,
     store_option,
 )
+
+
+def _configure_left_run_log(run_id: str) -> Path:
+    configured = os.getenv("DTRACK_LEFT_LOG")
+    return configure_left_logging(configured or Path(".dtrack-work/logs") / f"{run_id}.log")
 
 
 def _active_run(root, run_id: str | None):
@@ -76,6 +83,7 @@ def row_check_command(config, store, run_id, pairs, workers, force):
         run_id = validate_run_id(run_id)
     except ValueError as exc:
         raise click.UsageError(str(exc)) from None
+    left_log = _configure_left_run_log(run_id)
     run_store = store.child(run_id)
     selected = list(active_pairs(config, pairs))
     if force:
@@ -94,7 +102,12 @@ def row_check_command(config, store, run_id, pairs, workers, force):
     else:
         run_id, documents = reused
     prune_audit_history(store, keep=5)
-    return {"run_id": run_id, "run": run_store.root_uri, "pairs": len(documents)}
+    return {
+        "run_id": run_id,
+        "run": run_store.root_uri,
+        "pairs": len(documents),
+        "left_log": str(left_log),
+    }
 
 
 # >>> dtrack col-check: wait for the Right side's manifests, then publish left-side units <<< #
@@ -129,9 +142,9 @@ def row_check_command(config, store, run_id, pairs, workers, force):
 )
 @runtime_option(
     "--stat-workers",
-    default=2,
+    default=1,
     envvar="DTRACK_COL_STAT_WORKERS",
-    help="concurrent statistics jobs",
+    help="compatibility option; vintages run serially (use DTRACK_DUCKDB_WORKERS for shards)",
 )
 @runtime_option(
     "--wip", default=200, envvar="DTRACK_COL_WIP", help="max published but unclaimed units"
@@ -169,6 +182,7 @@ def col_check_command(
     force,
 ):
     store, run_id = _active_run(store, run_id)
+    left_log = _configure_left_run_log(run_id)
     manifests = wait_for_manifests(
         store, timeout=wait_timeout, poll_interval=poll_interval, pair_names=pairs
     )
@@ -190,6 +204,7 @@ def col_check_command(
         "run": store.root_uri,
         "published_units": published,
         "pairs": [m["pair"] for m in manifests],
+        "left_log": str(left_log),
     }
 
 
@@ -236,7 +251,7 @@ def col_check_command(
     "--stat-workers",
     default=1,
     envvar="DTRACK_COL_STAT_WORKERS",
-    help="concurrent statistics jobs",
+    help="compatibility option; vintages run serially (use DTRACK_DUCKDB_WORKERS for shards)",
 )
 @runtime_option(
     "--wip", default=200, envvar="DTRACK_COL_WIP", help="max published but unclaimed units"
@@ -281,9 +296,11 @@ def left_run_command(
         run_id = validate_run_id(run_id)
     except ValueError as exc:
         raise click.UsageError(str(exc)) from None
+    left_log = _configure_left_run_log(run_id)
     if export_sas:
         return {
             "mode": "export-sas",
+            "left_log": str(left_log),
             **export_sas_bundle(config, export_sas, run_id=run_id, pair_names=pairs),
         }
     if not store_uri:
@@ -306,7 +323,12 @@ def left_run_command(
             work_dir=work_dir,
         )
         prune_audit_history(store, keep=5)
-        return {"mode": "import-sas", "run": run_store.root_uri, **outcome}
+        return {
+            "mode": "import-sas",
+            "run": run_store.root_uri,
+            "left_log": str(left_log),
+            **outcome,
+        }
     reused = (
         None if force else reuse_row_check(config, run_store, run_id=run_id, pair_names=selected)
     )
@@ -338,4 +360,5 @@ def left_run_command(
         "run": run_store.root_uri,
         "pairs": [document["pair"] for document in documents],
         "published_units": published,
+        "left_log": str(left_log),
     }

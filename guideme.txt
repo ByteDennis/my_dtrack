@@ -72,24 +72,27 @@ Common environment variables (`.env` is loaded):
 
 DuckDB budget (every Left/local DuckDB connection: file sources, statistics, local landing):
 
-  DTRACK_DUCKDB_MEMORY=8GB                 # example for a 16GB machine; default 60% physical RAM
-  DTRACK_DUCKDB_SHARE=2                    # concurrent connections the budget is split across
-                                           # (pull-workers + stat-workers; local adds Right + landing)
-  DTRACK_DUCKDB_THREADS=2                  # per connection; default cpu_count / SHARE
+  DTRACK_DUCKDB_MEMORY=20GB                # example for a 32GB machine; default 60% physical RAM
+  DTRACK_DUCKDB_WORKERS=2                  # parallel column shards; splits RAM and CPU evenly
   DTRACK_DUCKDB_TEMP=D:\dtrack-spill       # spill + statistics scratch; default <work-dir>/duckdb
                                            # (col-check) or <run>/_local/duckdb (local), then
                                            # <system temp>/dtrack-duckdb when that is not writable
-  DTRACK_STATS_BATCH=64                    # columns per statistics aggregate query
+  DTRACK_STATS_BATCH=64                    # attributes per calculation + S3 publication wave
+  DTRACK_PROGRESS_INTERVAL=10              # persistent progress-log interval in seconds
+  DTRACK_LEFT_LOG=/path/to/left.log        # distributed CLI override; default .dtrack-work/logs/<run>.log
 
 Set DTRACK_DUCKDB_MEMORY to what the machine can really give dtrack: each connection gets
-MEMORY / SHARE and spills to DTRACK_DUCKDB_TEMP above that instead of failing. A 1715-column
+MEMORY / WORKERS and `cpu_count / WORKERS` threads, and spills to DTRACK_DUCKDB_TEMP above that
+instead of failing. A 1715-column
 window of 70k rows completes inside 4 GiB per connection; without a budget DuckDB assumes 80%
 of RAM (on Windows including the page file) for every connection at once.
 
-For a 16GB machine, start Version 2 Left work with `--pull-workers 1 --stat-workers 1`,
-`DTRACK_DUCKDB_MEMORY=8GB`, `DTRACK_DUCKDB_SHARE=2`, and `DTRACK_DUCKDB_THREADS=2`.
+For a 32GB, 10-core machine, start Version 2 Left work with `--pull-workers 1`,
+`DTRACK_DUCKDB_MEMORY=20GB`, and `DTRACK_DUCKDB_WORKERS=2`. DTrack runs one vintage at a time;
+its two column shards each receive about 10GB and five DuckDB threads. `--stat-workers` remains
+accepted for command compatibility but is fixed to one vintage.
 Database CSV pulls stream 10,000 rows at a time; statistics still use one scratch DuckDB per
-concurrent vintage and aggregate mapped columns in `DTRACK_STATS_BATCH` batches.
+vintage and calculate/publish mapped columns in `DTRACK_STATS_BATCH` waves.
 
 Local-only (Databricks SQL warehouse pulls through a corporate proxy):
 
@@ -224,8 +227,7 @@ Parameter choice:
           "FINAL_DT": "d1.BUSINESS_DT",
           "SSN": "d1.SSN",
           "STATUS": "a.STATUS"
-        },
-        "column_batch_size": 500
+        }
       }
 
     The undated account view needs no marker. Row check renders the configured inclusive
@@ -235,16 +237,12 @@ Parameter choice:
     Marker declarations and uses must match exactly; DTrack rejects unknown, unused, or malformed
     markers before querying Oracle. This is controlled substitution, not Python string formatting.
 
-    `dtrack_projection` is optional and Oracle-only. Use it for a consolidated query whose full
-    select list would exceed Oracle's portable 1000-column limit. Every Left date, key, and
-    non-excluded mapped column needs one `query_projection` expression. Row-count and metadata
-    operations render only the columns they need. Col check defaults to batches of 500 mapped
-    columns, reserves additional projection slots for the date and keys, and logs pull,
-    statistics, commit, and ready-unit progress for every batch. A completed batch is uploaded
-    immediately; DTrack does not wait for all columns in the vintage. Queries without the marker
-    retain the prior one-pull-per-vintage behavior. Keep filters needed by every batch inside the
-    source query; `left.where` on a projected query should reference only aliases that are always
-    present, such as the configured date or keys.
+    `dtrack_projection` is optional and Oracle-only. Every Left date, key, and non-excluded mapped
+    column needs one `query_projection` expression. Preflight deliberately renders the complete
+    configured projection, so Oracle rejects an unsupported select list before Stage 1 starts.
+    Col check pulls the full projection once per vintage; DTrack does not split the Oracle query
+    into hidden column batches. Keep filters inside the source query; `left.where` should reference
+    projected aliases such as the configured date or keys.
 
   right.kind
     table (default): catalog/schema/table
@@ -373,6 +371,15 @@ C. Start the Databricks Right notebook/Job
 
 It may start before or after row-check; it waits for `pairs/<pair>/row_check/left.json`.
 
+Upload the Right package, or download a Workspace tree for inspection/backup:
+
+  dtrack tools dbx workspace upload src/dtrack_right /Users/<you>/dtrack/dtrack_right --overwrite
+  dtrack tools dbx workspace download /Users/<you>/dtrack/dtrack_right ./downloaded-right
+
+`workspace download` recursively mirrors Workspace files and notebooks, restores a source
+notebook's language suffix, refuses to replace local files without `--overwrite`, and supports
+`--dry-run` plus `--profile` like upload.
+
   run_s3      = s3://my-bucket/dtrack/runs       # stable root; no run_id
   run_id      = $RUN_ID                          # recommended: explicit
   gate        = auto | manual | ratio:<0..1>
@@ -495,7 +502,7 @@ Start this without waiting manually for Right Stage 1; it waits for
 The Right Job can drain units while Left continues producing them.
 
   dtrack col-check --run-s3 "$RUN_S3" --run-id "$RUN_ID" \
-    --pull-workers 2 --stat-workers 2 --wip 200 \
+    --pull-workers 2 --stat-workers 1 --wip 200 \
     --wait-timeout 1800 --poll-interval 3
 
 Selected pairs:
@@ -508,7 +515,7 @@ If Stage 1 released more pairs than selected here, this is intentionally a parti
 
 Parameter choice:
   pull-workers  source query/file pulls; start 1-2 for Oracle or large extracts
-  stat-workers  local CPU/stat work; start 2, increase only after measuring
+  stat-workers  compatibility option fixed to one active vintage
   wip           maximum indexed-but-not-finished backlog; backpressure, not object count
   wait-timeout  maximum wait for Right Stage-1 closure
   poll-interval S3 polling interval; 2-5 seconds is usually sufficient
@@ -521,9 +528,11 @@ reports the remaining backlog and total wait time; the old once-per-second messa
 
 Each window is pulled, summarized, and published before the next one; nothing accumulates in
 memory across windows. Statistics load the window CSV once into a scratch DuckDB file under
-work-dir (single-threaded load: the parallel CSV reader buffers every column), then aggregate
-DTRACK_STATS_BATCH columns per query, so memory is bounded by the budget in section 1 rather
-than by column count. Size DTRACK_DUCKDB_SHARE = pull-workers + stat-workers.
+work-dir (single-threaded load: the parallel CSV reader buffers every column), then run up to
+DTRACK_DUCKDB_WORKERS column shards in parallel. Each shard calculates DTRACK_STATS_BATCH
+attributes and immediately publishes that wave to S3, so the Right job can begin before the
+vintage finishes. One tqdm bar and `left.log` show running/completed shards plus calculated and
+uploaded attribute totals.
 
 Resume: rerun the same `--run-id`. Windows whose Unit objects already exist are skipped before any
 pull. A partially published window reuses its local pull only when the provenance sidecar matches,
@@ -738,10 +747,9 @@ every CSV that exists is complete.
 
 Right windows are pulled from the SQL warehouse with `disposition=EXTERNAL_LINKS` (the INLINE
 default caps a statement result at 25 MiB) and downloaded with `requests` through the proxy in
-section 1; counts and DESCRIBE stay inline. The local runner opens up to five DuckDB connections
-(Left pulls, Left statistics, Right statistics, landing), so set DTRACK_DUCKDB_SHARE accordingly
-and run one local run per machine. It is the fallback for small pairs; see section 3E for
-wide tables.
+section 1; counts and DESCRIBE stay inline. The local runner may use DuckDB for Left pulls,
+statistics, Right statistics, and landing. DTRACK_DUCKDB_WORKERS is the intra-vintage shard count;
+run one local run per machine. It is the fallback for small pairs; see section 3E for wide tables.
 Representative submitted SQL shapes are retained in `<run>/_status/audit.sql`; key-check uses
 `.dtrack-local/keycheck/<pair>/audit.txt`.
 
@@ -815,8 +823,8 @@ Dead units:
   `rollback --stage dead`; apply; restart the Right Job with the same run_id.
 
 Out of Memory Error / statistics take tens of minutes per window:
-  set DTRACK_DUCKDB_MEMORY to the RAM the machine can spare and DTRACK_DUCKDB_SHARE to the
-  number of concurrent connections; point DTRACK_DUCKDB_TEMP at a disk with room to spill; run one
+  set DTRACK_DUCKDB_MEMORY to the RAM the machine can spare and DTRACK_DUCKDB_WORKERS to the
+  number of parallel column shards; point DTRACK_DUCKDB_TEMP at a disk with room to spill; run one
   dtrack process per machine. Lower DTRACK_STATS_BATCH only if a single batch still exceeds the
   per-connection limit. Wide tables go through the distributed workflow (section 3E).
 

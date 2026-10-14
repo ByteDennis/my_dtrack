@@ -31,6 +31,7 @@ def test_row_check_command_writes_left_counts_to_s3(s3_bucket, synthetic, tmp_pa
     ]
     assert main([*argv, "--workers", "1", "--log-level", "debug"]) == 0
     assert json.loads(capsys.readouterr().out) == {
+        "left_log": ".dtrack-work/logs/r1.log",
         "pairs": 1,
         "run": f"{root}/r1",
         "run_id": "r1",
@@ -108,6 +109,7 @@ def test_col_check_command_publishes_units_once_manifests_are_released(
     argv = ["col-check", "--work-dir", str(tmp_path / "work"), "--wait-timeout", "1"]
     assert main([*argv, "--poll-interval", "0", "--pull-workers", "1", "--wip", "50"]) == 0
     assert json.loads(capsys.readouterr().out) == {
+        "left_log": ".dtrack-work/logs/r2.log",
         "pairs": ["orders"],
         "published_units": 8,
         "run": f"{root}/r2",
@@ -279,6 +281,7 @@ def test_left_run_exports_and_imports_one_sas_bundle(s3_bucket, tmp_path, capsys
     )
     imported = json.loads(capsys.readouterr().out)
     assert imported == {
+        "left_log": ".dtrack-work/logs/sas-run.log",
         "mode": "import-sas",
         "pairs": ["ledger"],
         "published_units": 2,

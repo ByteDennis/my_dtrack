@@ -61,11 +61,12 @@ markers such as `{{query_windows:driver_one}}`; declare each marker under the Le
 `query_windows` map. DTrack still applies the final-result date predicate and samples only after
 the consolidated relation is built. If that query returns more than Oracle's portable 1000-column
 limit, replace its final select list with `{{dtrack_projection}}` and map each configured Left
-column to its original Oracle expression under `left.query_projection`. Preflight and row counts
-then select only the date, while col-check pulls, calculates, and publishes at most 500 mapped
-columns per batch by default (`left.column_batch_size` may lower or raise the requested batch size;
-DTrack still reserves room for the date and keys). Queries without this marker keep their existing
-behavior. Oracle always receives the complete rendered SQL. Human audit files compact SELECT lists
+column to its original Oracle expression under `left.query_projection`. Preflight renders the
+complete configured projection and lets Oracle reject an unsupported select list immediately;
+col-check then pulls the full projection once per vintage. Statistics run parallel column shards
+inside that vintage and publish each completed `DTRACK_STATS_BATCH` wave immediately. Queries
+without this marker keep their existing behavior. Oracle always receives the complete rendered
+SQL. Human audit files compact SELECT lists
 larger than 20 attributes to the first two and last two attributes with an ellipsis and no visible
 SQL hash; repeated read-query shapes reuse the same detailed audit file across command restarts.
 
@@ -84,6 +85,16 @@ uv run dtrack --help          # or: python -m dtrack --help (no console-script l
 uv run dtrack tools --help    # reports, diagnostics, sampling, rollback, Databricks, Confluence
 just e2e            # both sides against a local Moto S3
 ```
+
+With the `dbx` extra installed, Workspace package transfer is symmetric and profile-aware:
+
+```bash
+dtrack tools dbx workspace upload src/dtrack_right /Users/me/dtrack/dtrack_right --overwrite
+dtrack tools dbx workspace download /Users/me/dtrack/dtrack_right ./downloaded-right
+```
+
+Download recursively mirrors Workspace files and notebooks, restores source-notebook suffixes,
+and supports `--dry-run` and overwrite protection.
 
 `dtrack local key-check` can override `--key`, `--family KEY=...`, and `--sample` to compare
 the exact sampled key set selected by the Left source and Databricks. `dtrack tools blog preview`

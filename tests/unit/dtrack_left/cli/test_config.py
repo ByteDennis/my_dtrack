@@ -26,6 +26,13 @@ def test_supported_left_sources(source):
     assert validate_config({"pairs": {"p": pair(left=source)}})
 
 
+def test_duckdb_live_snapshot_option_is_rejected_during_config_validation():
+    row = pair(left="duckdb")
+    row["left"]["snapshot"] = True
+    with pytest.raises(ValueError, match="snapshot is no longer supported"):
+        validate_config({"pairs": {"p": row}})
+
+
 def test_sas_is_out_of_scope():
     with pytest.raises(ValueError, match="unsupported Left source"):
         validate_config({"pairs": {"p": pair(left="sas")}})
@@ -391,14 +398,12 @@ def test_oracle_query_projection_requires_explicit_expressions_for_used_columns(
             "ACCOUNT_ID": "d.account_id",
             "amount": "d.amount",
         },
-        column_batch_size=400,
     )
     row["key"] = "ACCOUNT_ID"
 
     left = validate_config({"pairs": {"p": row}})["pairs"]["p"]["left"]
 
     assert left["query_projection"]["FINAL_DT"] == "d.dt"
-    assert left["column_batch_size"] == 400
 
     row["left"]["query_projection"].pop("amount")
     with pytest.raises(ValueError, match="query_projection lacks configured columns: amount"):
@@ -413,7 +418,6 @@ def test_oracle_query_projection_requires_explicit_expressions_for_used_columns(
             lambda left: left.update(query="SELECT d.dt FROM driver d"),
             "requires {{dtrack_projection}}",
         ),
-        (lambda left: left.update(column_batch_size=0), "positive integer"),
     ],
 )
 def test_oracle_query_projection_fails_closed(change, message):

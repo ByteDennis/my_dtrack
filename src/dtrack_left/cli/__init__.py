@@ -4,7 +4,7 @@
 #   left-run      --config c.json --run-s3 s3://.../runs [--run-id]  # version 2
 #   row-check     --config c.json --run-s3 s3://.../runs [--run-id] [--pair P ...] [--workers 4]
 #   col-check     --run-s3 s3://.../runs [--run-id] [--pair P] [--work-dir] [--pull-workers 2]
-#                 [--stat-workers 2] [--wip 200] [--wait-timeout 1800] [--poll-interval 3]
+#                 [--stat-workers 1] [--wip 200] [--wait-timeout 1800] [--poll-interval 3]
 #   tools         materialize, doctor, rollback, blog, and dbx helpers
 #                 (the installed dtrack CLI also adds the local key-check helper)
 #   Every command: --log-level debug|info|warning|error (stderr); stdout is one JSON line.
@@ -22,7 +22,7 @@
 #   file     path (glob ok) + format csv|txt|tsv|json|ndjson|jsonl|parquet (default from suffix);
 #   (csv)    options {read_csv/read_json args}; query with {src}; date_format (strptime) -> date
 #   duckdb   path to a .duckdb file or s3:// / https:// URL; table | schema.table | db.schema.table
-#            | query; snapshot: true reads a copy when another process holds the write lock
+#            | query; the database must not be held open read-write by another process
 #   athena   database|schema, s3_staging_dir, region (dtrack[athena])
 #   hadoop   disabled until identifier quoting and Kerberos/ODBC auth are fixed
 #

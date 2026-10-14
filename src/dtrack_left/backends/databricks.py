@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import os
 import subprocess
 import time
 import webbrowser
@@ -138,6 +140,145 @@ def upload_workspace(
         "failed": failures,
         "exit_code": 1 if failures else 0,
     }
+
+
+# >>> Workspace files/notebooks -> a local file or mirrored tree; notebooks regain the exported language suffix <<< #
+def download_workspace(
+    w,
+    source: str,
+    target: str | Path | None = None,
+    *,
+    overwrite: bool = False,
+    dry_run: bool = False,
+) -> dict:
+    from databricks.sdk.service.workspace import ExportFormat
+
+    remote_root = _workspace_path(source)
+    root = w.workspace.get_status(str(remote_root))
+    root_type = _value(root.object_type)
+    is_directory = root_type in {"DIRECTORY", "REPO"}
+    local_root = Path(target) if target is not None else Path(remote_root.name)
+    if local_root.is_symlink():
+        raise ValueError(f"target must not be a symbolic link: {local_root}")
+    if is_directory and local_root.exists() and not local_root.is_dir():
+        raise ValueError(f"directory download target is not a directory: {local_root}")
+    if not is_directory and local_root.is_dir():
+        local_root = local_root / remote_root.name
+
+    directories, objects = _workspace_download_objects(w, root)
+    planned_paths = []
+    downloaded_paths = []
+    failures = []
+    downloaded_bytes = 0
+    if is_directory and not dry_run:
+        for item in directories:
+            remote = PurePosixPath(item.path)
+            relative = remote.relative_to(remote_root)
+            destination = local_root.joinpath(*relative.parts)
+            try:
+                _validate_workspace_relative(relative)
+                _validate_download_target(local_root, destination, is_directory=True)
+                if destination.exists() and not destination.is_dir():
+                    raise NotADirectoryError("directory path is an existing file")
+                destination.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                failures.append(
+                    {"path": str(destination), "error": f"{type(exc).__name__}: {exc}"}
+                )
+    for item in objects:
+        remote = PurePosixPath(item.path)
+        relative = remote.relative_to(remote_root) if is_directory else PurePosixPath(remote.name)
+        _validate_workspace_relative(relative)
+        destination = local_root.joinpath(*relative.parts) if is_directory else local_root
+        try:
+            if dry_run:
+                destination = _workspace_download_path(destination, item, None)
+                planned_paths.append(str(destination))
+                continue
+            response = w.workspace.export(str(remote), format=ExportFormat.AUTO)
+            content = response.content
+            if content is None:
+                raise ValueError("Workspace export returned no content")
+            destination = _workspace_download_path(destination, item, response.file_type)
+            body = base64.b64decode(content, validate=True)
+            planned_paths.append(str(destination))
+            _validate_download_target(local_root, destination, is_directory=is_directory)
+            if destination.exists() and not overwrite:
+                raise FileExistsError("target exists; pass --overwrite to replace it")
+            if destination.exists() and destination.is_dir():
+                raise IsADirectoryError("target path is a directory")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(destination.name + ".dtrack.part")
+            try:
+                temporary.write_bytes(body)
+                os.replace(temporary, destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+            downloaded_paths.append(str(destination))
+            downloaded_bytes += len(body)
+        except Exception as exc:
+            failures.append(
+                {"path": str(destination), "error": f"{type(exc).__name__}: {exc}"}
+            )
+
+    return {
+        "source": str(remote_root),
+        "target": str(local_root),
+        "dry_run": dry_run,
+        "planned": len(objects),
+        "downloaded": len(downloaded_paths),
+        "directories": len(directories),
+        "bytes": downloaded_bytes,
+        "paths": planned_paths if dry_run else downloaded_paths,
+        "failed": failures,
+        "exit_code": 1 if failures else 0,
+    }
+
+
+def _workspace_download_objects(w, root) -> tuple[list[Any], list[Any]]:
+    directories = []
+    objects = []
+
+    def visit(item):
+        type_ = _value(item.object_type)
+        if type_ not in {"DIRECTORY", "REPO"}:
+            objects.append(item)
+            return
+        directories.append(item)
+        for child in sorted(w.workspace.list(item.path), key=lambda row: row.path or ""):
+            visit(child)
+
+    visit(root)
+    return directories, objects
+
+
+def _workspace_download_path(destination: Path, item, file_type: str | None) -> Path:
+    if _value(item.object_type) != "NOTEBOOK" or destination.suffix:
+        return destination
+    fallback = {
+        "PYTHON": "py",
+        "R": "r",
+        "SQL": "sql",
+        "SCALA": "scala",
+    }.get(_value(item.language))
+    suffix = (file_type or fallback or "").strip().lstrip(".")
+    if not suffix or Path(suffix).name != suffix or any(char in suffix for char in "/\\"):
+        raise ValueError(f"invalid Workspace export file type: {file_type!r}")
+    return destination.with_name(f"{destination.name}.{suffix}")
+
+
+def _validate_workspace_relative(path: PurePosixPath) -> None:
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"invalid Workspace child path: {path}")
+
+
+def _validate_download_target(root: Path, destination: Path, *, is_directory: bool) -> None:
+    boundary = root.parent if is_directory else destination.parent
+    current = destination
+    while current != boundary:
+        if current.is_symlink():
+            raise ValueError(f"download target contains a symbolic link: {current}")
+        current = current.parent
 
 
 def _workspace_path(path: str) -> PurePosixPath:

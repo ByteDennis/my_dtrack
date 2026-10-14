@@ -7,6 +7,7 @@
 #                         one statement; several: wrap them in BEGIN ... END
 #   dtrack tools dbx runs       [--limit 10] [--job-id N] [--active] | --run-id N
 #   dtrack tools dbx workspace upload SOURCE [TARGET] [--overwrite] [--dry-run] [--profile corp]
+#   dtrack tools dbx workspace download SOURCE [TARGET] [--overwrite] [--dry-run] [--profile corp]
 #   dtrack tools dbx s3 creds   [--profile corp] [--target corp-winscp] [--watch] [--every 1200]
 #   dtrack tools dbx s3 winscp  [--site corp-s3] [--profile] [--target] [--every]
 #   dtrack tools dbx s3 whoami  [--profile corp]

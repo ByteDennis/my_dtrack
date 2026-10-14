@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import atexit
 import csv
 import os
-import shutil
-import tempfile
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
@@ -195,7 +192,8 @@ class SqlSource(ABC):
 
     def preflight(self) -> dict[str, Any]:
         try:
-            relation = self.relation(columns=[self.config["date_col"]])
+            projection = self.config.get("query_projection") or {}
+            relation = self.relation(columns=list(projection) or [self.config["date_col"]])
             self.query(f"SELECT * FROM {relation} WHERE 1=0", operation="preflight")
             self.date_type()
             return {"ok": True, "source": self.config.get("source")}
@@ -438,25 +436,12 @@ class DuckDBSource(SqlSource):
         self.path = str(config.get("path") or config.get("conn_macro") or "")
         if not self.path:
             raise ValueError("duckdb source requires path to a .duckdb database file or URL")
+        if config.get("snapshot"):
+            raise ValueError(
+                "duckdb source no longer supports snapshot: copying an active database and WAL "
+                "is not portable; have the writer CHECKPOINT and close, then read its stable file"
+            )
         self.alias = PurePosixPath(urlparse(self.path).path or self.path).stem or "dtrack_db"
-        self.snapshot = bool(config.get("snapshot")) and not urlparse(self.path).netloc
-        self._copy: str | None = None
-        self._copy_lock = threading.Lock()
-
-    # >>> one copy of the database and its .wal per source, so a writer holding the lock does not block us <<< #
-    def database(self) -> str:
-        if not self.snapshot:
-            return self.path
-        with self._copy_lock:
-            if self._copy is None:
-                folder = tempfile.mkdtemp(prefix="dtrack-duckdb-")
-                atexit.register(shutil.rmtree, folder, True)
-                target = Path(folder) / Path(self.path).name
-                shutil.copyfile(self.path, target)
-                if Path(self.path + ".wal").is_file():
-                    shutil.copyfile(self.path + ".wal", str(target) + ".wal")
-                self._copy = str(target)
-        return self._copy
 
     def relation(
         self,
@@ -486,7 +471,7 @@ class DuckDBSource(SqlSource):
 
         connection = connect(ordered=False)
         alias = quote_ident(self.alias, self.dialect)
-        attach = f"ATTACH {_duckdb_value(self.database())} AS {alias} (READ_ONLY)"
+        attach = f"ATTACH {_duckdb_value(self.path)} AS {alias} (READ_ONLY)"
         try:
             self._audit(attach, "attach")
             connection.execute(attach)
@@ -496,7 +481,8 @@ class DuckDBSource(SqlSource):
                 raise
             raise RuntimeError(
                 f"{self.path} is open read-write in another process; "
-                'set "snapshot": true to read a copy, or open it read-only there'
+                "have that writer CHECKPOINT and close before DTrack reads the database, "
+                "or open the database read-only in every process"
             ) from exc
         use = f"USE {alias}"
         self._audit(use, "session")

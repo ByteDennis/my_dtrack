@@ -190,6 +190,50 @@ def test_top_10_ties_keep_first_appearance_order(tmp_path):
     assert [item["value"] for item in json.loads(result["K"]["top_10"])] == ["z", "y", "x", "w"]
 
 
+def test_csv_statistics_reports_load_infer_aggregate_and_finalize_progress(tmp_path):
+    path = tmp_path / "progress.csv"
+    path.write_text("N,K\n1,a\n2,b\n", encoding="utf-8")
+    events = []
+
+    result = stats.compute_csv_statistics(
+        path,
+        ["N", "K"],
+        progress=lambda phase, completed, total: events.append((phase, completed, total)),
+    )
+
+    assert set(result) == {"N", "K"}
+    assert ("load", 1, 1) in events
+    assert ("infer", 2, 2) in events
+    assert ("aggregate", 2, 2) in events
+    assert ("finalize", 2, 2) in events
+
+
+def test_csv_statistics_publishes_parallel_column_shards_as_they_finish(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "shards.csv"
+    path.write_text("A,B,C,D\n1,x,10,p\n2,y,20,q\n", encoding="utf-8")
+    monkeypatch.setenv("DTRACK_STATS_BATCH", "2")
+    monkeypatch.setenv("DTRACK_DUCKDB_WORKERS", "2")
+    batches = []
+    statuses = []
+
+    result = stats.compute_csv_statistics(
+        path,
+        ["A", "B", "C", "D"],
+        on_batch=lambda rows: batches.append(rows),
+        shard_status=lambda active, done, total: statuses.append((active, done, total)),
+    )
+
+    assert set(result) == {"A", "B", "C", "D"}
+    assert len(batches) == 2
+    assert {frozenset(batch) for batch in batches} == {
+        frozenset({"A", "B"}),
+        frozenset({"C", "D"}),
+    }
+    assert statuses[0] == (2, 0, 2) and statuses[-1] == (0, 2, 2)
+
+
 def test_unparsable_right_date_text_becomes_a_visible_difference_not_a_crash(tmp_path):
     left = tmp_path / "l.csv"
     right = tmp_path / "r.csv"

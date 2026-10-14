@@ -15,6 +15,7 @@ dependencies = [
     "oracledb>=3.0",
     "pandas>=2.0",
     "python-dotenv>=1.0",
+    "tqdm>=4.67",
     "ipdb>=0.13",
     "debugpy>=1.8",
 ]

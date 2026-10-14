@@ -211,6 +211,10 @@ class LocalRun:
     def error_log(self) -> Path:
         return self.local / "logs" / "errors.log"
 
+    @property
+    def left_log(self) -> Path:
+        return self.local / "logs" / "left.log"
+
     def status(self) -> dict[str, Any]:
         return get_run_status(self.store)
 
@@ -269,7 +273,13 @@ def open_run(
             {"state": "created", "role": "local", "run_id": run_id},
             timezone_name=document.get("timezone"),
         )
-    log.info("local run %s at %s; errors -> %s", run_id, folder, run.error_log)
+    log.info(
+        "local run %s at %s; Left progress -> %s; errors -> %s",
+        run_id,
+        folder,
+        run.left_log,
+        run.error_log,
+    )
     return run
 
 
@@ -364,7 +374,7 @@ def row_check(
 
 # >>> Stage 2: publish Left units while the Right side prefetches and compares them concurrently <<< #
 def col_check(
-    run: LocalRun, *, pull_workers: int = 2, stat_workers: int = 2, max_attempts: int = 3
+    run: LocalRun, *, pull_workers: int = 2, stat_workers: int = 1, max_attempts: int = 3
 ) -> dict[str, Any]:
     try:
         return _col_check(
@@ -507,5 +517,6 @@ def run_all(
         "findings": built["summary"]["findings"],
         "backup": saved,
         "landing": landing,
+        "left_log": str(run.left_log),
         "error_log": str(run.error_log),
     }
