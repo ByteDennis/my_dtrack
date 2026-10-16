@@ -18,7 +18,7 @@ DOCUMENT = {
 }
 
 
-def test_cell_helpers_strip_control_characters_and_keep_hash_sums_as_text():
+def test_cell_values():
     assert excel._clean("a\x00b\x1fc") == "abc" and excel._clean(3) == 3
     assert excel._number("", "mean") is None
     assert excel._number("12345678901234567890", "hash_sum") == "12345678901234567890"
@@ -28,12 +28,12 @@ def test_cell_helpers_strip_control_characters_and_keep_hash_sums_as_text():
     assert not excel._differs(row, "std") and not excel._differs(row, "col_type")
 
 
-def test_relation_names_a_table_or_falls_back_to_the_path():
+def test_relation_name():
     assert excel._relation(DOCUMENT["left"]) == "OWN.A"
     assert excel._relation(DOCUMENT["right"]) == "/Volumes/c/s/v/a"
 
 
-def test_row_sheet_lists_findings_first_and_truncates_the_sheet_name():
+def test_row_sheet():
     workbook = excel.build_workbook([DOCUMENT], {})
     sheet = workbook["a_rather_long_pair_name_over_31"[:31]]
     assert workbook.sheetnames == ["a_rather_long_pair_name_over_31"[:31]]
@@ -43,7 +43,7 @@ def test_row_sheet_lists_findings_first_and_truncates_the_sheet_name():
     assert sheet.cell(row=12, column=1).fill.start_color.rgb.endswith("FFC7CE")
 
 
-def test_col_sheet_marks_failing_vintages_and_differing_cells():
+def test_col_sheet():
     diff = compare_statistics(
         pair="p", window="2026-02-01", column="X", left=STATS, right={**STATS, "mean": 9.0}
     )

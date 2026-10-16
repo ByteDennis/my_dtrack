@@ -6,7 +6,7 @@ from dtrack_left.common.run_logging import current_left_log, get_left_logger, ge
 from dtrack_local.run_logging import configure_run_logging, current_error_log
 
 
-def test_run_errors_go_to_a_dedicated_file_and_not_the_console(tmp_path):
+def test_error_log(tmp_path):
     parent = get_logger()
     original_handlers, original_level, original_propagate = (
         parent.handlers[:],
@@ -45,7 +45,7 @@ def test_run_errors_go_to_a_dedicated_file_and_not_the_console(tmp_path):
         parent.propagate = original_propagate
 
 
-def test_cli_keeps_an_unexpected_traceback_out_of_console(tmp_path, monkeypatch, capsys):
+def test_cli_traceback(tmp_path, monkeypatch, capsys):
     parent = get_logger()
     path = configure_run_logging(tmp_path / "run")
     monkeypatch.setattr(
@@ -64,7 +64,7 @@ def test_cli_keeps_an_unexpected_traceback_out_of_console(tmp_path, monkeypatch,
                 handler.close()
 
 
-def test_named_loggers_keep_one_stable_namespace():
+def test_names():
     assert get_logger().name == "dtrack"
     assert get_logger("local").name == "dtrack.local"
     assert get_left_logger().name == "dtrack.left"

@@ -54,7 +54,7 @@ def _run(store, *, state="right_col_check", heartbeat=None, dead=0, gate=True):
     return store
 
 
-def test_snapshot_reads_counts_gate_units_and_heartbeat_from_the_run_documents():
+def test_snapshot():
     rows = {
         row["pair_name"]: row
         for row in progress.snapshot(_run(MemoryStore(), dead=1), "r1", now=NOW)
@@ -84,7 +84,7 @@ def test_snapshot_reads_counts_gate_units_and_heartbeat_from_the_run_documents()
     )
 
 
-def test_snapshot_prefers_the_units_status_csv_when_present():
+def test_status_csv():
     store = _run(MemoryStore())
     store.put_bytes(
         "_status/units.csv",
@@ -95,7 +95,7 @@ def test_snapshot_prefers_the_units_status_csv_when_present():
     assert (row["units_published"], row["units_compared"], row["units_diff"]) == (1, 1, 0)
 
 
-def test_auto_blockers_open_and_resolve_deterministically():
+def test_blockers():
     rows = progress.snapshot(_run(MemoryStore(), dead=1, heartbeat=45, gate=False), "r1", now=NOW)
     orders = [r for r in rows if r["pair_name"] == "orders"]
     stuck = {("r1", "orders"): (NOW - timedelta(hours=3)).isoformat()}
@@ -119,7 +119,7 @@ def test_auto_blockers_open_and_resolve_deterministically():
     )
 
 
-def test_collect_skips_runs_complete_for_longer_than_a_day_and_survives_a_broken_run(tmp_path):
+def test_old_runs(tmp_path):
     root = VolumeStore(tmp_path)
     _run(root.child("active"))
     old = _run(root.child("old"), state="complete")
@@ -138,7 +138,7 @@ def test_collect_skips_runs_complete_for_longer_than_a_day_and_survives_a_broken
     assert by_run["active"][0]["run_root"] == f"{tmp_path}/active"
 
 
-def test_sql_renders_literals_casts_and_the_manual_row_guard():
+def test_sql_render():
     rows = progress.snapshot(_run(MemoryStore()), "r1", now=NOW)
     insert = progress.insert_snapshot_sql("c.s", rows)
     assert insert.startswith("INSERT INTO c.s.dtrack_progress_snapshot (snapshot_ts, run_id")

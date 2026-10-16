@@ -101,20 +101,24 @@ def client(details, *, statements=(), runs=()):
     )
 
 
-def test_workspace_explains_the_extra_when_the_sdk_is_missing(monkeypatch):
-    monkeypatch.setitem(sys.modules, "databricks.sdk", None)
-    with pytest.raises(ImportError, match=r"dtrack\[dbx\]"):
-        databricks.workspace("corp")
+@pytest.mark.parametrize(
+    ("sdk", "error"),
+    [
+        (None, r"dtrack\[dbx\]"),
+        (NS(WorkspaceClient=lambda profile: ("client", profile)), None),
+    ],
+    ids=["missing", "installed"],
+)
+def test_workspace(monkeypatch, sdk, error):
+    monkeypatch.setitem(sys.modules, "databricks.sdk", sdk)
+    if error:
+        with pytest.raises(ImportError, match=error):
+            databricks.workspace("corp")
+    else:
+        assert databricks.workspace("corp") == ("client", "corp")
 
 
-def test_workspace_builds_a_client_for_the_profile(monkeypatch):
-    monkeypatch.setitem(
-        sys.modules, "databricks.sdk", NS(WorkspaceClient=lambda profile: ("client", profile))
-    )
-    assert databricks.workspace("corp") == ("client", "corp")
-
-
-def test_login_opens_the_host_and_reports_the_identity():
+def test_login_opens():
     opened = []
     result = databricks.login(client(cluster()), opener=lambda url: opened.append(url) or True)
     assert opened == ["https://x.cloud.databricks.com"] and result["browser_opened"] is True
@@ -185,7 +189,7 @@ def git_init(path):
     subprocess.run(["git", "init", "-q", str(path)], check=True, timeout=15)
 
 
-def test_upload_workspace_file_uses_the_personal_default_and_preserves_plain_python(tmp_path):
+def test_upload_workspace(tmp_path):
     source = tmp_path / "helpers.py"
     source.write_text("def answer():\n    return 42\n")
     w = workspace_files()
@@ -199,7 +203,7 @@ def test_upload_workspace_file_uses_the_personal_default_and_preserves_plain_pyt
     assert upload[3]["format"].value == "AUTO" and "language" not in upload[3]
 
 
-def test_upload_workspace_folder_ignores_junk_and_imports_source_notebook(tmp_path):
+def test_upload_folder(tmp_path):
     git_init(tmp_path)
     (tmp_path / ".gitignore").write_text("generated-data/\n*.scratch\n")
     source = tmp_path / "right"
@@ -226,7 +230,7 @@ def test_upload_workspace_folder_ignores_junk_and_imports_source_notebook(tmp_pa
     assert notebook_options["overwrite"] is True
 
 
-def test_upload_workspace_honors_nested_gitignore_negation(tmp_path):
+def test_upload_honors(tmp_path):
     git_init(tmp_path)
     (tmp_path / ".gitignore").write_text("*.secret\n")
     source = tmp_path / "project"
@@ -242,7 +246,7 @@ def test_upload_workspace_honors_nested_gitignore_negation(tmp_path):
     assert result["paths"] == ["/Shared/project/.gitignore", "/Shared/project/keep.secret"]
 
 
-def test_upload_workspace_without_gitignore_does_not_filter_names_or_suffixes(tmp_path):
+def test_upload_gitignore(tmp_path):
     git_init(tmp_path)
     source = tmp_path / "project"
     (source / "__pycache__").mkdir(parents=True)
@@ -259,7 +263,7 @@ def test_upload_workspace_without_gitignore_does_not_filter_names_or_suffixes(tm
     ]
 
 
-def test_upload_workspace_accepts_a_relative_folder_inside_a_git_worktree(tmp_path, monkeypatch):
+def test_upload_accepts(tmp_path, monkeypatch):
     git_init(tmp_path)
     (tmp_path / ".gitignore").write_text("*.tmp\n")
     source = tmp_path / "project"
@@ -276,7 +280,7 @@ def test_upload_workspace_accepts_a_relative_folder_inside_a_git_worktree(tmp_pa
     assert result["skipped"] == 1
 
 
-def test_upload_workspace_imports_ipynb_as_a_jupyter_notebook(tmp_path):
+def test_upload_imports(tmp_path):
     source = tmp_path / "analysis.ipynb"
     source.write_text('{"cells": [], "nbformat": 4, "nbformat_minor": 5}')
     w = workspace_files()
@@ -290,7 +294,7 @@ def test_upload_workspace_imports_ipynb_as_a_jupyter_notebook(tmp_path):
     assert "language" not in upload[3]
 
 
-def test_upload_workspace_dry_run_has_no_writes_and_lists_remote_paths(tmp_path):
+def test_upload_dry(tmp_path):
     source = tmp_path / "folder"
     source.mkdir()
     (source / "a.txt").write_text("a")
@@ -303,7 +307,7 @@ def test_upload_workspace_dry_run_has_no_writes_and_lists_remote_paths(tmp_path)
     assert result["paths"] == ["/Shared/folder/a.txt"]
 
 
-def test_upload_workspace_rejects_relative_targets_and_symbolic_links(tmp_path):
+def test_upload_rejects(tmp_path):
     source = tmp_path / "a.txt"
     source.write_text("a")
     with pytest.raises(ValueError, match="must be absolute"):
@@ -315,7 +319,7 @@ def test_upload_workspace_rejects_relative_targets_and_symbolic_links(tmp_path):
         databricks.upload_workspace(workspace_files(), link, "/Shared/link.txt")
 
 
-def test_upload_workspace_reports_individual_failures_and_exit_one(tmp_path):
+def test_upload_reports(tmp_path):
     source = tmp_path / "folder"
     source.mkdir()
     (source / "a.txt").write_text("a")
@@ -329,7 +333,7 @@ def test_upload_workspace_reports_individual_failures_and_exit_one(tmp_path):
     assert result["failed"] == [{"path": "/Shared/folder/a.txt", "error": "OSError: upload failed"}]
 
 
-def test_download_workspace_mirrors_files_and_source_notebooks(tmp_path):
+def test_download_workspace(tmp_path):
     objects = [
         workspace_object("/Shared/right", "DIRECTORY"),
         workspace_object("/Shared/right/module.py", "FILE"),
@@ -356,7 +360,7 @@ def test_download_workspace_mirrors_files_and_source_notebooks(tmp_path):
     assert (target / "pkg/config.json").read_text() == '{"ok":true}\n'
 
 
-def test_download_workspace_dry_run_is_read_only_and_reports_local_paths(tmp_path):
+def test_download_dry(tmp_path):
     objects = [
         workspace_object("/Shared/right", "DIRECTORY"),
         workspace_object("/Shared/right/n", "NOTEBOOK", "SQL"),
@@ -371,7 +375,7 @@ def test_download_workspace_dry_run_is_read_only_and_reports_local_paths(tmp_pat
     assert [call[0] for call in w.workspace.calls] == ["get_status", "list"]
 
 
-def test_download_workspace_requires_overwrite_and_continues_other_files(tmp_path):
+def test_download_requires(tmp_path):
     objects = [
         workspace_object("/Shared/right", "DIRECTORY"),
         workspace_object("/Shared/right/a.txt", "FILE"),
@@ -401,7 +405,7 @@ def test_download_workspace_requires_overwrite_and_continues_other_files(tmp_pat
     assert (target / "a.txt").read_text() == "new-a"
 
 
-def test_compute_status_reports_ec2_nodes_and_uptime_since_the_last_restart():
+def test_compute_status():
     status = databricks.compute_status(
         client(cluster()), "c1", now=START / 1000 + 3 * 3600 + 5 * 60
     )
@@ -429,7 +433,7 @@ def test_compute_status_reports_ec2_nodes_and_uptime_since_the_last_restart():
     assert databricks.compute_status(client(fresh), "c1")["uptime"] is None
 
 
-def test_compute_start_is_a_no_op_when_running_and_waits_when_asked():
+def test_compute_start():
     running = client(cluster())
     assert (
         databricks.compute_start(running, "c1")["action"] == "already running" and running.log == []
@@ -446,7 +450,7 @@ def test_compute_start_is_a_no_op_when_running_and_waits_when_asked():
     databricks.compute_stop(client(cluster()), "c1")
 
 
-def test_warehouse_status_start_and_stop():
+def test_warehouse_status():
     w = client(cluster())
     status = databricks.warehouse_status(w, "wh1")
     assert (
@@ -470,7 +474,7 @@ def _statement(state, rows=None, error=None):
     )
 
 
-def test_run_sql_polls_until_done_and_limits_rows():
+def test_run_sql():
     w = client(
         cluster(),
         statements=[_statement("PENDING"), _statement("SUCCEEDED", [["1"], ["2"], ["3"]])],
@@ -486,7 +490,7 @@ def test_run_sql_polls_until_done_and_limits_rows():
     assert databricks.run_sql(empty, "SELECT 1", "wh1")["rows"] == []
 
 
-def test_run_sql_raises_with_the_warehouse_error():
+def test_run_raises():
     w = client(cluster(), statements=[_statement("FAILED", error="TABLE_OR_VIEW_NOT_FOUND")])
     with pytest.raises(RuntimeError, match="FAILED: TABLE_OR_VIEW_NOT_FOUND"):
         databricks.run_sql(w, "SELECT * FROM nope", "wh1")
@@ -514,7 +518,7 @@ def _run(run_id, tasks=None):
     )
 
 
-def test_runs_list_the_newest_and_show_one_with_its_tasks():
+def test_runs_list():
     task = NS(
         task_key="t",
         run_id=11,

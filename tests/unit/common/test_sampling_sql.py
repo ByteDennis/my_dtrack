@@ -35,7 +35,7 @@ VALUES = [
     [*sorted(FAMILIES), ["trim", "upper", "strip_prefix:ID-"], ["lpad:6"]],
     ids=str,
 )
-def test_duckdb_normalisation_matches_python_for_every_family(spec):
+def test_duckdb_normalisation(spec):
     family = key_family(spec)
     expression = normalize_sql("value", family, "duckdb", "left")
     rows = duckdb.sql("SELECT unnest(?) AS value", params=[VALUES])
@@ -43,7 +43,7 @@ def test_duckdb_normalisation_matches_python_for_every_family(spec):
     assert got == [family.normalize(value, "left") for value in VALUES]
 
 
-def test_duckdb_hash_bucket_matches_python_reference():
+def test_hash_bucket():
     family = key_family("numeric")
     composite = composite_sql(["value"], [family], "duckdb", "left")
     expression = hash32_sql(composite, "duckdb")
@@ -62,12 +62,12 @@ def test_duckdb_hash_bucket_matches_python_reference():
         ("duckdb", "md5(", "'0x' || SUBSTR"),
     ],
 )
-def test_each_backend_compiles_its_own_md5_expression(dialect, hash_fragment, bucket_fragment):
+def test_backend_md5(dialect, hash_fragment, bucket_fragment):
     assert hash_fragment in hash_hex_sql("normalized_key", dialect)
     assert bucket_fragment in hash32_sql("normalized_key", dialect)
 
 
-def test_fraction_and_fixed_predicates_share_one_normalisation_contract():
+def test_predicate_contract():
     fraction = sample_predicate_sql(
         {"mode": "fraction", "threshold": 99}, ["id"], ["numeric"], "duckdb", "left"
     )
@@ -83,7 +83,7 @@ def test_fraction_and_fixed_predicates_share_one_normalisation_contract():
     assert "IN ('7', '2')" in fixed
 
 
-def test_non_spark_custom_family_fails_closed_instead_of_silently_drifting():
+def test_custom_family():
     class CustomFamily(type(key_family("string"))):
         name = "custom-test"
 
@@ -95,7 +95,7 @@ def test_non_spark_custom_family_fails_closed_instead_of_silently_drifting():
         normalize_sql("value", family, "duckdb", "left")
 
 
-def test_oracle_fixed_predicate_chunks_more_than_1000_keys():
+def test_oracle_chunks():
     predicate = sample_predicate_sql(
         {"mode": "fixed"},
         ["id"],
@@ -107,7 +107,7 @@ def test_oracle_fixed_predicate_chunks_more_than_1000_keys():
     assert predicate.count(" IN (") == 2 and " OR " in predicate
 
 
-def test_oracle_native_types_use_explicit_nls_independent_formats():
+def test_oracle_formats():
     numeric = normalize_sql("n", key_family("numeric"), "oracle", "left", "DB_TYPE_NUMBER")
     date = normalize_sql("d", key_family("date"), "oracle", "left", "DB_TYPE_DATE")
     timestamp = normalize_sql("ts", key_family("date"), "oracle", "left", "DB_TYPE_TIMESTAMP")
@@ -118,12 +118,12 @@ def test_oracle_native_types_use_explicit_nls_independent_formats():
     assert "'YYYY-MM-DD HH24:MI:SS.FF'" in timestamp
 
 
-def test_oracle_timezone_keys_require_an_explicit_canonical_expression():
+def test_timezone_keys():
     with pytest.raises(SamplingSqlNotSupported, match="timezone-bearing Oracle keys"):
         normalize_sql("ts", key_family("date"), "oracle", "left", "DB_TYPE_TIMESTAMP_TZ")
 
 
-def test_date_type_family_generates_dialect_sql_for_the_hash_key():
+def test_date_family():
     family = key_family(
         {
             "family": "date_type",

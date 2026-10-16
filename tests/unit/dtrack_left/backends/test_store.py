@@ -6,7 +6,7 @@ from dtrack_left.backends import store as store_module
 from dtrack_left.backends.store import S3Location, S3Store, validate_run_id
 
 
-def test_s3_location_parses_bucket_and_prefix():
+def test_s3_location():
     assert S3Location.parse("s3://b/runs/r1/") == S3Location("b", "runs/r1")
     assert S3Location.parse("s3://b") == S3Location("b", "")
     with pytest.raises(ValueError, match="expected s3://"):
@@ -14,16 +14,14 @@ def test_s3_location_parses_bucket_and_prefix():
 
 
 @pytest.mark.parametrize("value", ["", ".", "..", "a/b", r"a\b", "a\0b"])
-def test_run_id_is_exactly_one_safe_folder_name(value):
+def test_run_id(value):
     with pytest.raises(ValueError, match="one non-empty folder"):
         validate_run_id(value)
     assert validate_run_id("20261007T150000Z-orders") == "20261007T150000Z-orders"
 
 
-def test_s3_store_honours_the_store_contract_on_mocked_s3(s3_bucket, monkeypatch):
-    monkeypatch.setattr(
-        store_module, "timestamp", lambda _store: "2026-01-02T03:04:05+00:00"
-    )
+def test_s3_store(s3_bucket, monkeypatch):
+    monkeypatch.setattr(store_module, "timestamp", lambda _store: "2026-01-02T03:04:05+00:00")
     assert_store_contract(
         S3Store(f"s3://{s3_bucket}/runs/r1"),
         expected_timestamp="2026-01-02T03:04:05+00:00",
@@ -32,13 +30,13 @@ def test_s3_store_honours_the_store_contract_on_mocked_s3(s3_bucket, monkeypatch
     assert all(key.startswith("runs/r1/") for key in keys)
 
 
-def test_s3_store_at_bucket_root_uses_bare_keys(s3_bucket):
+def test_s3_bucket(s3_bucket):
     store = S3Store(f"s3://{s3_bucket}")
     store.put_json("/a.json", {"x": 1})
     assert store.list_keys("") == ["a.json"] and store._key("a.json") == "a.json"
 
 
-def test_writes_carry_the_key_and_content_type():
+def test_writes_carry():
     client = RecordingClient()
     S3Store("s3://b/p", client=client).put_json("x.json", {})
     _, kwargs = client.calls[0]
@@ -46,7 +44,7 @@ def test_writes_carry_the_key_and_content_type():
     assert "ServerSideEncryption" not in kwargs
 
 
-def test_list_keys_follows_continuation_tokens_and_drops_start_after_on_later_pages():
+def test_list_keys():
     client = RecordingClient(
         pages=[
             {
@@ -67,7 +65,7 @@ def test_list_keys_follows_continuation_tokens_and_drops_start_after_on_later_pa
     assert second["ContinuationToken"] == "t"
 
 
-def test_exists_is_false_only_for_not_found_errors():
+def test_exists_false():
     class Error(Exception):
         def __init__(self, code):
             super().__init__(code)
@@ -78,7 +76,7 @@ def test_exists_is_false_only_for_not_found_errors():
         S3Store("s3://b/p", client=RecordingClient(head_error=Error("403"))).exists("x")
 
 
-def test_endpoint_override_switches_to_path_style_addressing(monkeypatch):
+def test_endpoint_override(monkeypatch):
     monkeypatch.setenv("DTRACK_S3_ENDPOINT_URL", "http://127.0.0.1:4566")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     client = S3Store("s3://b/p").client
@@ -87,10 +85,8 @@ def test_endpoint_override_switches_to_path_style_addressing(monkeypatch):
 
 
 # >>> Databricks mkdir on an S3-backed Volume leaves 0-byte "folder/" markers <<< #
-def test_list_json_skips_folder_marker_objects(s3_bucket):
+def test_list_json(s3_bucket):
     store = S3Store(f"s3://{s3_bucket}/r")
     boto3.client("s3").put_object(Bucket=s3_bucket, Key="r/pairs/a/units/", Body=b"")
     store.put_json("pairs/a/units/00000001-u.json", {"x": 1})
-    assert store.list_json("pairs/a/units/") == [
-        ("pairs/a/units/00000001-u.json", {"x": 1})
-    ]
+    assert store.list_json("pairs/a/units/") == [("pairs/a/units/00000001-u.json", {"x": 1})]

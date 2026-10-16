@@ -105,7 +105,7 @@ class FakeConfluence:
 
 
 @pytest.mark.parametrize("renumber", [False, True], ids=["9.x-gaps", "7.x-renumber"])
-def test_keep_versions_relists_after_each_delete_on_both_numbering_schemes(renumber):
+def test_keep_versions(renumber):
     client = FakeConfluence(renumber=renumber)
     outcome = confluence.keep_versions(client, "1", 2)
     assert outcome["deleted"] == 4 and len(outcome["remaining"]) == 2
@@ -114,7 +114,7 @@ def test_keep_versions_relists_after_each_delete_on_both_numbering_schemes(renum
 
 
 @pytest.mark.parametrize("renumber", [False, True], ids=["9.x-gaps", "7.x-renumber"])
-def test_delete_versions_goes_highest_first_so_renumbering_cannot_shift_targets(renumber):
+def test_delete_versions(renumber):
     client = FakeConfluence(renumber=renumber)
     assert confluence.delete_versions(client, "1", [2, 4]) == [2, 4]
     deletes = [path for method, path, *_ in client.calls if method == "DELETE"]
@@ -122,7 +122,7 @@ def test_delete_versions_goes_highest_first_so_renumbering_cannot_shift_targets(
     assert len(client.versions["1"]) == 4
 
 
-def test_delete_versions_refuses_the_current_and_unknown_versions():
+def test_delete_refuses():
     client = FakeConfluence()
     with pytest.raises(ValueError, match="current version"):
         confluence.delete_versions(client, "1", [6])
@@ -130,7 +130,7 @@ def test_delete_versions_refuses_the_current_and_unknown_versions():
         confluence.delete_versions(client, "1", [9])
 
 
-def test_keep_versions_stops_when_a_delete_has_no_effect():
+def test_keep_stops():
     client = FakeConfluence()
     client.request = lambda method, path, **kw: (
         FakeConfluence._reply(client, 204)
@@ -142,7 +142,7 @@ def test_keep_versions_stops_when_a_delete_has_no_effect():
 
 
 @pytest.mark.parametrize("cloud", [False, True])
-def test_restrictions_always_keep_the_caller_and_accept_groups(cloud):
+def test_restrictions_keep(cloud):
     client = FakeConfluence(cloud=cloud)
     me = "acc-me" if cloud else "me"
     key = "accountId" if cloud else "username"
@@ -160,7 +160,7 @@ def test_restrictions_always_keep_the_caller_and_accept_groups(cloud):
         confluence.set_restrictions(client, "1", read=["team:x"], me=me)
 
 
-def test_upload_attachment_adds_a_new_version_for_an_existing_name(tmp_path):
+def test_upload_attachment(tmp_path):
     client = FakeConfluence()
     path = tmp_path / "report.xlsx"
     path.write_bytes(b"one")
@@ -177,13 +177,13 @@ def test_upload_attachment_adds_a_new_version_for_an_existing_name(tmp_path):
         confluence.delete_attachment(client, "1", "report.xlsx")
 
 
-def test_errors_carry_the_route_and_status():
+def test_errors_carry():
     client = FakeConfluence()
     with pytest.raises(confluence.ConfluenceError, match="DELETE content/1/version/9: HTTP 400"):
         confluence.confluence_call(client, "DELETE", "content/1/version/9")
 
 
-def test_publish_applies_attach_detach_versions_then_restrictions(tmp_path):
+def test_publish_applies(tmp_path):
     client = FakeConfluence()
     attachment = tmp_path / "note.txt"
     attachment.write_text("x")
@@ -204,7 +204,7 @@ def test_publish_applies_attach_detach_versions_then_restrictions(tmp_path):
     assert methods.index("POST") < methods.index("DELETE") < methods.index("PUT")
 
 
-def test_template_state_is_versioned_and_exact_page_update_preserves_identity():
+def test_template_state():
     client = FakeConfluence()
     state = {
         "version": 1,
@@ -222,19 +222,17 @@ def test_template_state_is_versioned_and_exact_page_update_preserves_identity():
         "template_state_version": 2,
         "attachments": [],
     }
-    assert client.properties["1"][confluence.TEMPLATE_STATE_PROPERTY]["version"] == {
-        "number": 2
-    }
+    assert client.properties["1"][confluence.TEMPLATE_STATE_PROPERTY]["version"] == {"number": 2}
 
 
-def test_delete_page_trashes_and_optionally_purges():
+def test_delete_page():
     client = FakeConfluence()
     assert confluence.delete_page(client, "1") == {"page_id": "1", "state": "trashed"}
     assert confluence.delete_page(client, "1", purge=True)["state"] == "purged"
     assert client.calls[-1][2] == {"status": "trashed"}
 
 
-def test_inspect_page_combines_versions_restrictions_and_attachments():
+def test_inspect_page():
     client = FakeConfluence()
     client.restrictions["read"] = {
         "user": [{"type": "known", "username": "me"}],

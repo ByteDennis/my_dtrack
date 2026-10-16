@@ -8,7 +8,7 @@ from dtrack_right.backends.store import VolumeStore
 from dtrack_right.common.audit import SqlAudit as RightSqlAudit
 
 
-def test_left_and_right_sql_events_merge_into_one_run_audit(tmp_path):
+def test_event_merge(tmp_path):
     store = VolumeStore(tmp_path / "run")
     left = LeftSqlAudit(store, "left", pair="orders")
     right = RightSqlAudit(store, "right", pair="orders")
@@ -25,7 +25,7 @@ def test_left_and_right_sql_events_merge_into_one_run_audit(tmp_path):
     assert "-- timestamp=" not in text
 
 
-def test_sql_audit_failure_is_recorded_but_never_raises():
+def test_failure_recording():
     failures = {}
 
     class BrokenStore:
@@ -46,7 +46,7 @@ def test_sql_audit_failure_is_recorded_but_never_raises():
     assert failure["error"] == "audit unavailable" and failure["pair"] == "orders"
 
 
-def test_sql_audit_metadata_is_plain_and_serializable(tmp_path):
+def test_metadata_serializable(tmp_path):
     store = VolumeStore(tmp_path / "run")
     audit = LeftSqlAudit(store, "local")
     assert audit.record("SHOW TABLES", backend="duckdb", operation="inspect")
@@ -56,7 +56,7 @@ def test_sql_audit_metadata_is_plain_and_serializable(tmp_path):
     )
 
 
-def test_detailed_audit_header_is_minimal_and_uses_the_run_timezone(tmp_path):
+def test_audit_header(tmp_path):
     store = VolumeStore(tmp_path / "run")
     store.put_json("_status/run.json", {"timezone": "Asia/Tokyo"})
     key = LeftSqlAudit(store, "left", pair="orders").record(
@@ -70,7 +70,7 @@ def test_detailed_audit_header_is_minimal_and_uses_the_run_timezone(tmp_path):
     )
 
 
-def test_repeated_window_literals_keep_only_the_first_query_shape(tmp_path):
+def test_shape_sampling(tmp_path):
     store = VolumeStore(tmp_path / "run")
     audit = LeftSqlAudit(store, "left", pair="orders")
     first = audit.record(
@@ -95,7 +95,7 @@ def test_repeated_window_literals_keep_only_the_first_query_shape(tmp_path):
     assert "2026-01-01" in text and "2026-02-01" in text
 
 
-def test_multithreaded_same_shape_has_one_first_winner(tmp_path):
+def test_shape_concurrency(tmp_path):
     store = VolumeStore(tmp_path / "run")
     audit = LeftSqlAudit(store, "left", pair="orders")
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -113,7 +113,7 @@ def test_multithreaded_same_shape_has_one_first_winner(tmp_path):
     assert len(store.list_keys("pairs/orders/audit/")) == 1
 
 
-def test_non_mutating_audit_shape_is_reused_after_a_process_restart(tmp_path):
+def test_shape_restart(tmp_path):
     store = VolumeStore(tmp_path / "run")
     first = LeftSqlAudit(store, "left", pair="orders").record(
         "SELECT A FROM T WHERE DT = '2026-01-01'",
@@ -132,7 +132,7 @@ def test_non_mutating_audit_shape_is_reused_after_a_process_restart(tmp_path):
     assert store.list_keys("pairs/orders/audit/") == [first]
 
 
-def test_long_sql_audit_keeps_the_first_and_last_two_attributes_without_a_hash(tmp_path):
+def test_long_sql(tmp_path):
     store = VolumeStore(tmp_path / "run")
     sql = "SELECT " + ", ".join(f"source_column_{index} AS C{index}" for index in range(1001))
     sql += " FROM VERY_WIDE_RUNTIME_QUERY"
@@ -151,7 +151,7 @@ def test_long_sql_audit_keeps_the_first_and_last_two_attributes_without_a_hash(t
     assert "source_column_500 AS C500" not in recorded
 
 
-def test_mutating_sql_is_never_sampled_and_internal_maintenance_is_omitted(tmp_path):
+def test_sql_filtering(tmp_path):
     store = VolumeStore(tmp_path / "run")
     audit = LeftSqlAudit(store, "local")
     assert audit.record("DELETE FROM T WHERE ID = 1", backend="duckdb")
@@ -160,7 +160,7 @@ def test_mutating_sql_is_never_sampled_and_internal_maintenance_is_omitted(tmp_p
     assert len(store.list_keys("_status/audit/")) == 2
 
 
-def test_detailed_audit_events_are_retained_for_only_the_latest_five_runs(tmp_path):
+def test_audit_retention(tmp_path):
     runs = VolumeStore(tmp_path / "runs")
     for index in range(7):
         run = runs.child(f"run-{index}")

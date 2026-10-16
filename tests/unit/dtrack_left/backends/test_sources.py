@@ -36,12 +36,12 @@ def _oracle(monkeypatch, responder, **config):
     return source, connection, captured
 
 
-def test_write_rows_creates_parents_and_writes_a_header(tmp_path):
+def test_write_rows(tmp_path):
     path = write_rows(tmp_path / "a" / "b.csv", ["x", "y"], [(1, "a"), (2, None)])
     assert path.read_text().splitlines() == ["x,y", "1,a", "2,"]
 
 
-def test_database_csv_export_streams_bounded_batches(tmp_path, monkeypatch):
+def test_database_csv(tmp_path, monkeypatch):
     source, connection, _captured = _oracle(
         monkeypatch, lambda _sql: (["A"], [(str(index),) for index in range(20_001)])
     )
@@ -55,7 +55,7 @@ def test_database_csv_export_streams_bounded_batches(tmp_path, monkeypatch):
     assert connection.closed and connection.cursors_closed == 1
 
 
-def test_relation_quotes_parts_wraps_queries_and_needs_a_table():
+def test_relation_quotes():
     assert OracleSource({**ORACLE, "schema": "OWN"}).relation() == "OWN.ORDERS"
     assert OracleSource({**ORACLE, "table": "own.v_app"}).relation() == "own.v_app"
     assert OracleSource({**ORACLE, "table": 'OWN."my view"'}).relation() == 'OWN."my view"'
@@ -66,7 +66,7 @@ def test_relation_quotes_parts_wraps_queries_and_needs_a_table():
         OracleSource({"source": "oracle"}).relation()
 
 
-def test_oracle_credentials_come_from_config_or_named_environment(monkeypatch):
+def test_oracle_credentials(monkeypatch):
     monkeypatch.setenv("PCDS_USER", "env-user")
     monkeypatch.setenv("ORACLE_PASSWORD", "env-pass")
     monkeypatch.setenv("ORACLE_DSN", "env:1521/X")
@@ -74,7 +74,7 @@ def test_oracle_credentials_come_from_config_or_named_environment(monkeypatch):
     assert (source.user, source.password, source.dsn) == ("env-user", "env-pass", "env:1521/X")
 
 
-def test_oracle_connect_requires_all_three_credentials(monkeypatch):
+def test_oracle_connect(monkeypatch):
     monkeypatch.setitem(sys.modules, "oracledb", SimpleNamespace(connect=None))
     for name in ("ORACLE_USER", "ORACLE_PASSWORD", "ORACLE_DSN", "PCDS_USR"):
         monkeypatch.delenv(name, raising=False)
@@ -82,7 +82,7 @@ def test_oracle_connect_requires_all_three_credentials(monkeypatch):
         OracleSource(ORACLE).connect()
 
 
-def test_preflight_runs_an_empty_select_and_reports_failures(monkeypatch):
+def test_preflight_runs(monkeypatch):
     source, connection, captured = _oracle(monkeypatch, lambda sql: (["A"], []))
     assert source.preflight() == {"ok": True, "source": "oracle"}
     assert connection.statements == ["SELECT * FROM ORDERS WHERE 1=0"]
@@ -100,7 +100,7 @@ def test_preflight_runs_an_empty_select_and_reports_failures(monkeypatch):
     }
 
 
-def test_oracle_preflight_probes_and_caches_the_string_date_format(monkeypatch):
+def test_oracle_preflight(monkeypatch):
     def respond(sql):
         if "FETCH FIRST 16 ROWS ONLY" in sql:
             return ["BUSINESS_DATE"], [("20260101",), ("20260102",)]
@@ -121,7 +121,7 @@ def test_oracle_preflight_probes_and_caches_the_string_date_format(monkeypatch):
     ]
 
 
-def test_partition_counts_groups_by_day_within_bounds_and_extra_where(monkeypatch):
+def test_partition_counts(monkeypatch):
     rows = [
         (pd.Timestamp("2026-01-01"), 1),
         (pd.Timestamp("2026-01-01 17:30"), 2),
@@ -143,7 +143,7 @@ def test_partition_counts_groups_by_day_within_bounds_and_extra_where(monkeypatc
     ]
 
 
-def test_oracle_query_windows_render_bounds_before_join_and_keep_outer_guard(monkeypatch):
+def test_oracle_query(monkeypatch):
     query = (
         "WITH d1 AS (SELECT * FROM DRIVER_ONE a WHERE {{query_windows:driver_one}}), "
         "d2 AS (SELECT * FROM DRIVER_TWO b WHERE {{query_windows:driver_two}}) "
@@ -168,7 +168,7 @@ def test_oracle_query_windows_render_bounds_before_join_and_keep_outer_guard(mon
     assert "FINAL_DT >= DATE '2026-08-01' AND FINAL_DT < DATE '2026-08-04'" in sql
 
 
-def test_oracle_query_windows_render_exact_admitted_days_before_sampling(monkeypatch, tmp_path):
+def test_oracle_windows(monkeypatch, tmp_path):
     query = (
         "SELECT a.DT AS FINAL_DT, a.ID, c.VALUE FROM DRIVER_ONE a "
         "LEFT JOIN DRIVER_TWO b ON a.ID = b.ID AND a.DT = b.ACTIVITY_DT "
@@ -206,7 +206,7 @@ def test_oracle_query_windows_render_exact_admitted_days_before_sampling(monkeyp
     assert "{{query_windows:" not in sql
 
 
-def test_oracle_query_windows_are_neutral_for_metadata_probes(monkeypatch):
+def test_oracle_neutral(monkeypatch):
     source, connection, _ = _oracle(
         monkeypatch,
         lambda sql: (["FINAL_DT"], []),
@@ -219,12 +219,12 @@ def test_oracle_query_windows_are_neutral_for_metadata_probes(monkeypatch):
     assert "WHERE 1=1) dtrack_source WHERE 1=0" in connection.statements[0]
 
 
-def test_query_without_a_result_set_returns_no_rows(monkeypatch):
+def test_query_result(monkeypatch):
     source, _, _ = _oracle(monkeypatch, lambda sql: ([], [("ignored",)]))
     assert source.query("BEGIN NULL; END;") == ([], [])
 
 
-def test_oracle_query_is_audited_before_cursor_execute(monkeypatch):
+def test_oracle_audited(monkeypatch):
     events = []
     source, _, _ = _oracle(monkeypatch, lambda sql: events.append(("execute", sql)) or ([], []))
     source.set_sql_audit(
@@ -237,9 +237,7 @@ def test_oracle_query_is_audited_before_cursor_execute(monkeypatch):
     ]
 
 
-def test_pull_window_selects_date_keys_and_columns_once_over_the_admitted_days(
-    monkeypatch, tmp_path
-):
+def test_pull_window(monkeypatch, tmp_path):
     source, connection, _ = _oracle(
         monkeypatch, lambda sql: (["D", "K", "A"], [("2026-01-01", 1, 2.5)])
     )
@@ -259,7 +257,7 @@ def test_pull_window_selects_date_keys_and_columns_once_over_the_admitted_days(
     )
 
 
-def test_oracle_pull_window_pushes_the_fraction_hash_into_the_query(monkeypatch, tmp_path):
+def test_oracle_pull(monkeypatch, tmp_path):
     source, connection, _ = _oracle(
         monkeypatch, lambda sql: (["D", "K", "A"], [("2026-01-01", "007", "x")])
     )
@@ -286,7 +284,7 @@ def test_oracle_pull_window_pushes_the_fraction_hash_into_the_query(monkeypatch,
     assert connection.statements.count("SELECT ORDER_ID FROM ORDERS WHERE (1=0)") == 1
 
 
-def test_unsupported_custom_sampling_sql_fails_before_pulling_a_window(synthetic, tmp_path):
+def test_unsupported_custom(synthetic, tmp_path):
     class CustomFamily(type(key_family("string"))):
         name = "source-custom-test"
 
@@ -306,7 +304,7 @@ def test_unsupported_custom_sampling_sql_fails_before_pulling_a_window(synthetic
     assert not output.exists()
 
 
-def test_athena_and_hadoop_connect_through_their_optional_drivers(monkeypatch):
+def test_athena_hadoop(monkeypatch):
     athena_calls = []
     pyathena = SimpleNamespace(connect=lambda **kwargs: athena_calls.append(kwargs) or "athena")
     hadoop_calls = []
@@ -330,7 +328,7 @@ def test_athena_and_hadoop_connect_through_their_optional_drivers(monkeypatch):
     assert hadoop_calls == [("DSN=Hive_Prod", {"autocommit": True})]
 
 
-def test_optional_drivers_explain_the_extra_to_install(monkeypatch):
+def test_optional_drivers(monkeypatch):
     monkeypatch.setitem(sys.modules, "pyathena", None)
     monkeypatch.setitem(sys.modules, "pyodbc", None)
     with pytest.raises(ImportError, match=r"dtrack\[athena\]"):
@@ -348,15 +346,16 @@ def test_optional_drivers_explain_the_extra_to_install(monkeypatch):
         ("hadoop", HadoopSource),
         ("csv", FileSource),
         ("file", FileSource),
+        ("sas", None),
     ],
+    ids=["oracle", "athena", "aws", "hadoop", "csv", "file", "unknown"],
 )
-def test_source_from_config_dispatches_on_source(name, cls):
-    assert isinstance(source_from_config({"source": name}), cls)
-
-
-def test_source_from_config_rejects_unknown_sources():
-    with pytest.raises(ValueError, match="unsupported Left source: sas"):
-        source_from_config({"source": "sas"})
+def test_dispatch(name, cls):
+    if cls is None:
+        with pytest.raises(ValueError, match="unsupported Left source: sas"):
+            source_from_config({"source": name})
+    else:
+        assert isinstance(source_from_config({"source": name}), cls)
 
 
 def _orders(synthetic, **config):
@@ -364,7 +363,7 @@ def _orders(synthetic, **config):
     return FileSource({"source": "csv", "path": path, "date_col": "BUSINESS_DATE", **config})
 
 
-def test_file_source_counts_every_real_partition_exactly(synthetic):
+def test_file_source(synthetic):
     source = _orders(synthetic, date_type="string")
     assert source.preflight()["ok"]
     counts = source.partition_counts("2026-01-01", "2026-02-28")
@@ -376,7 +375,7 @@ def test_file_source_counts_every_real_partition_exactly(synthetic):
 
 
 # >>> parity with the pandas reader it replaced: same rows, same raw text, byte for byte <<< #
-def test_file_source_pull_window_matches_the_old_pandas_reader_byte_for_byte(synthetic, tmp_path):
+def test_file_pull(synthetic, tmp_path):
     days = [f"2026-01-{d:02d}" for d in range(1, 31) if d not in (15, 31)]
     columns = ["BUSINESS_DATE", "ORDER_ID", "AMOUNT", "STATUS"]
     out = _orders(synthetic, date_type="string").pull_window(
@@ -389,7 +388,7 @@ def test_file_source_pull_window_matches_the_old_pandas_reader_byte_for_byte(syn
     assert len(pd.read_csv(out)) == 29 * 30
 
 
-def test_file_source_csv_export_fetches_bounded_batches(tmp_path, monkeypatch):
+def test_file_csv(tmp_path, monkeypatch):
     class StreamingConnection:
         description = (("A",), ("B",))
 
@@ -418,7 +417,7 @@ def test_file_source_csv_export_fetches_bounded_batches(tmp_path, monkeypatch):
     assert connection.closed
 
 
-def test_file_source_fraction_pushdown_matches_the_python_reference(synthetic, tmp_path):
+def test_file_fraction(synthetic, tmp_path):
     source = _orders(synthetic, date_type="string")
     days = ["2026-01-01", "2026-01-02", "2026-01-03"]
     full = source.pull_window(days, ["AMOUNT"], tmp_path / "full.csv", key_columns=["ORDER_ID"])
@@ -436,7 +435,7 @@ def test_file_source_fraction_pushdown_matches_the_python_reference(synthetic, t
     assert pd.read_csv(pushed, dtype=object).equals(pd.read_csv(expected, dtype=object))
 
 
-def test_file_source_selects_fixed_keys_in_duckdb_before_writing_csv(synthetic, tmp_path):
+def test_file_selects(synthetic, tmp_path):
     source = _orders(synthetic, date_type="string")
     days = ["2026-01-01", "2026-01-02", "2026-01-03"]
     full = source.pull_window(days, [], tmp_path / "all.csv", key_columns=["ORDER_ID"])
@@ -455,7 +454,7 @@ def test_file_source_selects_fixed_keys_in_duckdb_before_writing_csv(synthetic, 
     assert got == want and len(got) == 5
 
 
-def test_file_source_preflight_reports_missing_file_and_missing_date_column(tmp_path):
+def test_file_preflight(tmp_path):
     missing = FileSource({"source": "csv", "path": str(tmp_path / "nope.csv"), "date_col": "D"})
     assert missing.preflight()["ok"] is False
     path = tmp_path / "a.csv"
@@ -465,7 +464,7 @@ def test_file_source_preflight_reports_missing_file_and_missing_date_column(tmp_
     assert FileSource({"source": "csv", "conn_macro": str(path)}).path == str(path)
 
 
-def test_file_source_preflight_resolves_date_column_case_insensitively(tmp_path):
+def test_file_resolves(tmp_path):
     path = tmp_path / "case.csv"
     path.write_text("TRIGGER_DT,VALUE\n2026-01-01,1\n")
     source = FileSource(
@@ -505,7 +504,7 @@ def test_file_source_preflight_resolves_date_column_case_insensitively(tmp_path)
         ),
     ],
 )
-def test_file_source_reads_text_json_ndjson_and_parquet(tmp_path, name, write, config):
+def test_file_reads(tmp_path, name, write, config):
     write(tmp_path / name)
     source = FileSource({"source": "file", "path": str(tmp_path / name), "date_col": "D", **config})
     assert source.preflight()["ok"], source.preflight()
@@ -514,7 +513,7 @@ def test_file_source_reads_text_json_ndjson_and_parquet(tmp_path, name, write, c
     assert out.read_text().splitlines()[0] == "D,V" and len(out.read_text().splitlines()) == 2
 
 
-def test_raw_text_survives_csv_reads(tmp_path):
+def test_raw_text(tmp_path):
     (tmp_path / "a.txt").write_text("D|V\n2026-01-01|1.50\n2026-01-01|007\n")
     source = FileSource(
         {"path": str(tmp_path / "a.txt"), "date_col": "D", "options": {"delim": "|"}}
@@ -523,7 +522,7 @@ def test_raw_text_survives_csv_reads(tmp_path):
     assert out.read_text().splitlines()[1:] == ["2026-01-01,1.50", "2026-01-01,007"]
 
 
-def test_file_source_nullstr_converts_export_markers_before_queries(tmp_path):
+def test_file_nullstr(tmp_path):
     path = tmp_path / "sas.csv"
     path.write_text("D,K,V\n2026-01-01,NULL,NULL\n2026-01-01,7,x\n")
     source = FileSource(
@@ -542,7 +541,7 @@ def test_file_source_nullstr_converts_export_markers_before_queries(tmp_path):
     assert rows == [(1, 1)]
 
 
-def test_file_source_nullstr_rejects_non_csv_and_conflicting_options():
+def test_file_rejects():
     with pytest.raises(ValueError, match="only supported for CSV"):
         FileSource({"source": "file", "path": "a.parquet", "nullstr": "NULL"})
     with pytest.raises(ValueError, match="disagrees"):
@@ -557,7 +556,7 @@ def test_file_source_nullstr_rejects_non_csv_and_conflicting_options():
 
 
 # >>> the patch hook: a DuckDB query over {src}, here deriving the partition from each file name <<< #
-def test_query_patch_and_date_format_over_a_glob_of_files(tmp_path):
+def test_query_patch(tmp_path):
     for day in ("20260101", "20260102"):
         (tmp_path / f"orders_{day}.csv").write_text("ID,V\n1,a\n2,b\n")
     source = FileSource(
@@ -585,7 +584,7 @@ def test_query_patch_and_date_format_over_a_glob_of_files(tmp_path):
         ("sas", ["01JAN2026:09:45:35", "02JAN2026:00:00:00"]),
     ],
 )
-def test_file_source_filters_supported_text_and_sas_dates(tmp_path, date_type, raw_days):
+def test_file_filters(tmp_path, date_type, raw_days):
     path = tmp_path / f"{date_type}.csv"
     path.write_text(f"D,V\n{raw_days[0]},a\n{raw_days[1]},b\n")
     source = FileSource(
@@ -599,7 +598,7 @@ def test_file_source_filters_supported_text_and_sas_dates(tmp_path, date_type, r
     assert pulled.read_text().splitlines() == ["D,V", f"{raw_days[1]},b"]
 
 
-def test_file_source_rejects_mixed_date_formats(tmp_path):
+def test_file_mixed(tmp_path):
     path = tmp_path / "mixed.csv"
     path.write_text("D,V\n01JAN2026,a\n24108,b\n")
     source = FileSource({"source": "file", "path": str(path), "date_col": "D", "date_type": "sas"})
@@ -608,7 +607,7 @@ def test_file_source_rejects_mixed_date_formats(tmp_path):
     assert "mixed SAS date formats" in health["error"]
 
 
-def test_file_formats_come_from_the_suffix_or_config_and_unknown_ones_fail():
+def test_file_formats():
     assert FileSource({"path": "a.TSV"}).format == "csv"
     assert FileSource({"path": "a.jsonl"}).format == "ndjson"
     assert FileSource({"path": "a.dat", "format": "parquet"}).format == "parquet"
@@ -624,7 +623,7 @@ def test_file_formats_come_from_the_suffix_or_config_and_unknown_ones_fail():
 
 
 # >>> several Oracle servers: each pair names its macro, credentials resolve by that name <<< #
-def test_oracle_credentials_resolve_by_conn_macro_like_the_legacy_package(monkeypatch):
+def test_oracle_resolve(monkeypatch):
     for name in ("ORACLE_USER", "ORACLE_PASSWORD", "ORACLE_DSN", "LDAP_DSN"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("pb23_USR", "u23")
@@ -644,7 +643,7 @@ def test_oracle_credentials_resolve_by_conn_macro_like_the_legacy_package(monkey
     assert OracleSource({**ORACLE, "conn_macro": "other"}).user == "shared"
 
 
-def test_oracle_service_goes_through_ldap_when_a_template_is_set(monkeypatch):
+def test_oracle_service(monkeypatch):
     seen = {}
 
     class Connection:
@@ -703,7 +702,7 @@ def duckdb_file(tmp_path):
         {"query": "SELECT * FROM fin.orders"},
     ],
 )
-def test_duckdb_source_reads_tables_by_any_name_spelling(duckdb_file, spec):
+def test_duckdb_source(duckdb_file, spec):
     source = source_from_config(
         {
             "source": "duckdb",
@@ -717,7 +716,7 @@ def test_duckdb_source_reads_tables_by_any_name_spelling(duckdb_file, spec):
     assert source.partition_counts() == {"2026-01-01": 3, "2026-01-02": 3, "2026-01-03": 3}
 
 
-def test_duckdb_source_pulls_a_window_and_never_writes(duckdb_file, tmp_path):
+def test_duckdb_pulls(duckdb_file, tmp_path):
     source = DuckDBSource(
         {
             "path": str(duckdb_file),
@@ -735,13 +734,13 @@ def test_duckdb_source_pulls_a_window_and_never_writes(duckdb_file, tmp_path):
         source.query("CREATE TABLE fin.x (i INT)")
 
 
-def test_duckdb_source_query_reads_after_the_writer_closes(duckdb_file):
+def test_duckdb_query(duckdb_file):
     source = DuckDBSource({"path": str(duckdb_file), "table": "fin.orders"})
     columns, rows = source.query('SELECT COUNT(*) AS n FROM "fin"."orders"')
     assert columns == ["n"] and rows == [(9,)]
 
 
-def test_duckdb_source_needs_a_path_and_reports_a_missing_database(tmp_path):
+def test_duckdb_needs(tmp_path):
     with pytest.raises(ValueError, match="requires path"):
         DuckDBSource({"table": "t"})
     missing = DuckDBSource({"path": str(tmp_path / "nope.duckdb"), "table": "t", "date_col": "d"})
@@ -775,14 +774,14 @@ def locked_duckdb(duckdb_file):
 
 
 @pytest.mark.timeout(15)
-def test_duckdb_lock_held_by_a_writer_requires_checkpoint_close_or_read_only(locked_duckdb):
+def test_duckdb_lock(locked_duckdb):
     source = DuckDBSource({"path": str(locked_duckdb), "table": "fin.orders", "date_col": "d"})
     result = source.preflight()
     assert result["ok"] is False
     assert "CHECKPOINT and close" in result["error"] and "read-only" in result["error"]
 
 
-def test_duckdb_source_rejects_the_removed_live_snapshot_option(duckdb_file):
+def test_duckdb_rejects(duckdb_file):
     with pytest.raises(ValueError, match="no longer supports snapshot"):
         DuckDBSource(
             {

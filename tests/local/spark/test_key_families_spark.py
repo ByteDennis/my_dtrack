@@ -63,7 +63,7 @@ def spark():
 
 @pytest.mark.parametrize("ansi", ["false", "true"])
 @pytest.mark.parametrize("spec", SPECS, ids=str)
-def test_spark_right_transform_matches_python_for_every_family_and_step(spark, ansi, spec):
+def test_family_steps(spark, ansi, spec):
     spark.conf.set("spark.sql.ansi.enabled", ansi)
     family = key_family(spec)
     rows = spark.sql(f"SELECT i, {family.sql('k', 'right')} FROM keys ORDER BY i").collect()

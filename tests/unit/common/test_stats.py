@@ -24,15 +24,11 @@ def _series(*values):
         ((3, 3, 3), None, True, ("categorical", True)),
     ],
 )
-def test_infer_column_type_wraps_count_based_classification(
-    counts, requested, comparison, expected
-):
-    assert stats.infer_column_type(
-        *counts, requested=requested, comparison=comparison
-    ) == expected
+def test_infer_type(counts, requested, comparison, expected):
+    assert stats.infer_column_type(*counts, requested=requested, comparison=comparison) == expected
 
 
-def test_numeric_columns_hash_canonical_decimal_text():
+def test_numeric_hash():
     compute = stats.column_statistics
     a = compute(_series("7.50", "2", None))
     b = compute(_series("7.5", "2.0", None))
@@ -43,18 +39,18 @@ def test_numeric_columns_hash_canonical_decimal_text():
     assert a["length_avg"] is None and a["top_10"] == ""
 
 
-def test_integral_columns_are_categorical_without_top_10():
+def test_integral_category():
     result = stats.column_statistics(_series("100003", "7", "42"))
     assert result["col_type"] == "categorical"
     assert (result["min_val"], result["max_val"]) == ("100003", "7")
     assert result["mean"] is None and result["top_10"] == ""
 
 
-def test_single_numeric_value_has_no_sample_std():
+def test_single_numeric():
     assert stats.column_statistics(_series("5"))["std"] is None
 
 
-def test_categorical_columns_report_lengths_extremes_and_top_10():
+def test_category_summary():
     result = stats.column_statistics(_series("b", "aa", "b", None))
     assert result["col_type"] == "categorical"
     assert (result["min_val"], result["max_val"]) == ("aa", "b")
@@ -62,13 +58,13 @@ def test_categorical_columns_report_lengths_extremes_and_top_10():
     assert json.loads(result["top_10"]) == [{"value": "b", "count": 2}, {"value": "aa", "count": 1}]
 
 
-def test_an_all_null_column_is_categorical_with_empty_extremes():
+def test_null_category():
     result = stats.column_statistics(_series(None, None))
     assert result["col_type"] == "categorical" and result["n_missing"] == 2
     assert result["min_val"] is None and result["length_max"] is None
 
 
-def test_strict_mode_folds_case_and_decimal_text():
+def test_strict_mode():
     compute = stats.column_statistics
     loose_a, loose_b = compute(_series("Gold", "SILVER")), compute(_series("gold", "silver"))
     strict_a = compute(_series("Gold", "SILVER"), strict=True)
@@ -77,7 +73,7 @@ def test_strict_mode_folds_case_and_decimal_text():
     assert strict_a["hash_sum"] == strict_b["hash_sum"]
 
 
-def test_compute_csv_statistics_reads_as_text_and_checks_columns(tmp_path):
+def test_csv_columns(tmp_path):
     path = tmp_path / "w.csv"
     path.write_text("ID,AMOUNT\n007,1.10\n008,2\n")
     result = stats.compute_csv_statistics(path, ["ID", "AMOUNT"])
@@ -88,7 +84,7 @@ def test_compute_csv_statistics_reads_as_text_and_checks_columns(tmp_path):
         stats.compute_csv_statistics(path, ["NOPE"])
 
 
-def test_statistics_see_the_injected_drift_in_the_real_files(synthetic, tmp_path):
+def test_statistics_drift(synthetic, tmp_path):
     left = pd.read_csv(synthetic.left / "ORDERS.csv", dtype=object)
     right = pd.read_csv(synthetic.right / "orders.csv", dtype=object).rename(columns=str.upper)
     january = ["2026-01-15", "2026-01-31"]
@@ -111,7 +107,7 @@ def test_statistics_see_the_injected_drift_in_the_real_files(synthetic, tmp_path
 
 
 # >>> col_type_overrides: the pair decides, not the values or the warehouse type <<< #
-def test_col_type_override_forces_numeric_or_categorical():
+def test_type_override():
     compute = stats.column_statistics
     forced = compute(_series("7.50", "n/a", "2", None), col_type="numeric")
     assert forced["col_type"] == "numeric" and forced["mean"] == pytest.approx(4.75)
@@ -122,16 +118,14 @@ def test_col_type_override_forces_numeric_or_categorical():
     assert text["top_10"] == ""
 
 
-def test_compute_csv_statistics_applies_overrides_by_column(tmp_path):
+def test_csv_overrides(tmp_path):
     path = tmp_path / "w.csv"
     path.write_text("ID,AMOUNT\n007,1.10\n008,2\n")
-    result = stats.compute_csv_statistics(
-        path, ["ID", "AMOUNT"], col_types={"ID": "categorical"}
-    )
+    result = stats.compute_csv_statistics(path, ["ID", "AMOUNT"], col_types={"ID": "categorical"})
     assert result["ID"]["col_type"] == "categorical" and result["AMOUNT"]["col_type"] == "numeric"
 
 
-def test_registered_date_column_type_normalizes_each_side_before_hashing(tmp_path):
+def test_date_normalization(tmp_path):
     left = tmp_path / "left.csv"
     right = tmp_path / "right.csv"
     left.write_text("D\n01AUG2026:09:45:35\n02AUG2026:00:00:00\n")
@@ -141,18 +135,14 @@ def test_registered_date_column_type_normalizes_each_side_before_hashing(tmp_pat
         "left_date_type": {"type": "sas", "format": "datetime"},
         "right_date_type": "date",
     }
-    left_stats = stats.compute_csv_statistics(
-        left, ["D"], column_types={"D": spec}, side="left"
-    )
-    right_stats = stats.compute_csv_statistics(
-        right, ["D"], column_types={"D": spec}, side="right"
-    )
+    left_stats = stats.compute_csv_statistics(left, ["D"], column_types={"D": spec}, side="left")
+    right_stats = stats.compute_csv_statistics(right, ["D"], column_types={"D": spec}, side="right")
     assert left_stats == right_stats
     assert left_stats["D"]["min_val"] == "2026-08-01"
 
 
 @pytest.mark.slow
-def test_batched_aggregates_match_the_single_query_payload(tmp_path, monkeypatch):
+def test_batched_aggregates(tmp_path, monkeypatch):
     import random
 
     random.seed(7)
@@ -183,14 +173,14 @@ def test_batched_aggregates_match_the_single_query_payload(tmp_path, monkeypatch
     assert single["c2"]["col_type"] == "categorical"
 
 
-def test_top_10_ties_keep_first_appearance_order(tmp_path):
+def test_top_ties(tmp_path):
     path = tmp_path / "ties.csv"
     path.write_text("K\nz\ny\nx\ny\nz\nx\nw\n")
     result = stats.compute_csv_statistics(path, ["K"])
     assert [item["value"] for item in json.loads(result["K"]["top_10"])] == ["z", "y", "x", "w"]
 
 
-def test_csv_statistics_reports_load_infer_aggregate_and_finalize_progress(tmp_path):
+def test_statistics_progress(tmp_path):
     path = tmp_path / "progress.csv"
     path.write_text("N,K\n1,a\n2,b\n", encoding="utf-8")
     events = []
@@ -208,9 +198,7 @@ def test_csv_statistics_reports_load_infer_aggregate_and_finalize_progress(tmp_p
     assert ("finalize", 2, 2) in events
 
 
-def test_csv_statistics_publishes_parallel_column_shards_as_they_finish(
-    tmp_path, monkeypatch
-):
+def test_parallel_shards(tmp_path, monkeypatch):
     path = tmp_path / "shards.csv"
     path.write_text("A,B,C,D\n1,x,10,p\n2,y,20,q\n", encoding="utf-8")
     monkeypatch.setenv("DTRACK_STATS_BATCH", "2")
@@ -234,11 +222,11 @@ def test_csv_statistics_publishes_parallel_column_shards_as_they_finish(
     assert statuses[0] == (2, 0, 2) and statuses[-1] == (0, 2, 2)
 
 
-def test_unparsable_right_date_text_becomes_a_visible_difference_not_a_crash(tmp_path):
+def test_invalid_dates(tmp_path):
     left = tmp_path / "l.csv"
     right = tmp_path / "r.csv"
     left.write_text("D\n01AUG2026:09:45:35\n02AUG2026:00:00:00\n")
-    right.write_text("D\n2026-08-01\n\" \"\n")
+    right.write_text('D\n2026-08-01\n" "\n')
     spec = "sas_datetime_date"
     left_stats = stats.compute_csv_statistics(left, ["D"], column_types={"D": spec}, side="left")
     right_stats = stats.compute_csv_statistics(right, ["D"], column_types={"D": spec}, side="right")

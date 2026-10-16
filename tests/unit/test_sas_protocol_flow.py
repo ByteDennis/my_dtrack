@@ -41,7 +41,7 @@ def _all_partition_config():
     )
 
 
-def test_sas_export_defaults_to_every_counted_partition(tmp_path):
+def test_export_defaults(tmp_path):
     bundle = tmp_path / "sas"
     result = export_sas_bundle(_all_partition_config(), bundle, run_id="all-partitions")
     script = (bundle / "left-run.sas").read_text()
@@ -56,7 +56,7 @@ def test_sas_export_defaults_to_every_counted_partition(tmp_path):
     assert "intnx('week.2', dtrack_date, 0, 'b')" in script
 
 
-def test_sas_export_pushes_each_vintage_into_query_windows(tmp_path):
+def test_export_windows(tmp_path):
     config = _all_partition_config()
     config["pairs"]["ledger"]["left"].update(
         query=(
@@ -75,7 +75,7 @@ def test_sas_export_pushes_each_vintage_into_query_windows(tmp_path):
     assert "IN (&dtrack_partitions)" in script
 
 
-def test_sas_export_canonicalizes_only_the_final_sample_projection(tmp_path):
+def test_export_projection(tmp_path):
     config = _all_partition_config()
     pair = config["pairs"]["ledger"]
     pair["key"] = "ACCOUNT_ID"
@@ -166,7 +166,7 @@ def _simulate_sas_output(config, bundle, left_root):
 
 # >>> real files and protocol objects exercise SAS import through the complete Right job <<< #
 @pytest.mark.slow
-def test_simulated_sas_bundle_runs_through_right_comparison_and_report(synthetic, tmp_path):
+def test_bundle_flow(synthetic, tmp_path):
     config = oracle_config({})
     config["version"] = 2
     config["pairs"]["orders"]["excluded_partitions"] = [

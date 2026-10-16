@@ -20,7 +20,7 @@ from dtrack_left.common import hashing as left_hashing
         ("1.2.3", "1.2.3"),
     ],
 )
-def test_collapse_decimal_touches_only_pure_decimals(common, text, expected):
+def test_collapse_decimal(common, text, expected):
     assert common.hashing.collapse_decimal(text) == expected
 
 
@@ -36,16 +36,16 @@ def test_collapse_decimal_touches_only_pure_decimals(common, text, expected):
         (7, "numeric", "7"),
     ],
 )
-def test_normalize_value_per_key_family(common, value, family, expected):
+def test_normalize_value(common, value, family, expected):
     assert common.hashing.key_family(family).normalize(value) == expected
 
 
-def test_hash32_is_the_first_eight_md5_hex_digits(common):
+def test_hash32(common):
     assert common.hashing.hash32("abc") == int(hashlib.md5(b"abc").hexdigest()[:8], 16)
     assert 0 <= common.hashing.hash32("anything") < common.hashing.HASH_BUCKET_SPACE
 
 
-def test_selected_fraction_is_a_threshold_on_the_normalised_composite(common):
+def test_selected_fraction(common):
     hashing = common.hashing
     value = hashing.hash32("abc|7.5")
     assert hashing.selected_fraction([" ABC", "7.50"], ["string", "numeric"], value + 1)
@@ -58,12 +58,12 @@ def _keys_csv(tmp_path, rows):
     return path
 
 
-def test_sample_csv_all_mode_returns_the_input_untouched(tmp_path):
+def test_sample_all(tmp_path):
     path = _keys_csv(tmp_path, [["1", "a"]])
     assert csv_sampling.sample_csv(path, key_columns=[], mode="all") == path
 
 
-def test_sample_csv_rejects_missing_keys_and_unknown_modes(tmp_path):
+def test_sample_invalid(tmp_path):
     path = _keys_csv(tmp_path, [["1", "a"]])
     with pytest.raises(ValueError, match="requires key columns"):
         csv_sampling.sample_csv(path, key_columns=[], mode="fraction", rate=0.5)
@@ -71,7 +71,7 @@ def test_sample_csv_rejects_missing_keys_and_unknown_modes(tmp_path):
         csv_sampling.sample_csv(path, key_columns=["id"], mode="stratified")
 
 
-def test_sample_csv_fraction_hashes_the_normalised_key_and_keeps_raw_rows(tmp_path):
+def test_sample_fraction(tmp_path):
     rows = [[f"{i:05d}", "x"] for i in range(400)]
     path = _keys_csv(tmp_path, rows)
     sampled = pd.read_csv(
@@ -85,7 +85,7 @@ def test_sample_csv_fraction_hashes_the_normalised_key_and_keeps_raw_rows(tmp_pa
     assert list(sampled["id"]) == expected and 60 < len(expected) < 140
 
 
-def test_sample_csv_fixed_with_key_tuples_matches_normalised_keys(tmp_path):
+def test_fixed_tuples(tmp_path):
     path = _keys_csv(tmp_path, [["1", "a"], ["2.0", "b"], ["3", "c"]])
     sampled = csv_sampling.sample_csv(
         path, key_columns=["id"], mode="fixed", count=1, key_tuples=[["2"]], families=["numeric"]
@@ -93,7 +93,7 @@ def test_sample_csv_fixed_with_key_tuples_matches_normalised_keys(tmp_path):
     assert sampled.read_text().splitlines() == ["id,value", "2.0,b"]
 
 
-def test_sample_csv_fixed_without_tuples_picks_n_keys_by_hash_rank_with_all_their_rows(
+def test_fixed_rank(
     tmp_path,
 ):
     path = _keys_csv(tmp_path, [["1", "a"], ["1", "b"], ["2", "c"], ["3", "d"], ["4", "e"]])
@@ -105,7 +105,7 @@ def test_sample_csv_fixed_without_tuples_picks_n_keys_by_hash_rank_with_all_thei
     assert len(sampled) == sum(2 if key == "1" else 1 for key in ranked)
 
 
-def test_fraction_sampling_picks_the_same_keys_on_left_and_right_real_files(synthetic, tmp_path):
+def test_fraction_parity(synthetic, tmp_path):
     left = pd.read_csv(synthetic.left / "ORDERS.csv", dtype=object)
     right = pd.read_csv(synthetic.right / "orders.csv", dtype=object)
     common_days = sorted(set(left["BUSINESS_DATE"]) & set(right["business_date"]))

@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_left_package_has_no_databricks_dependency_and_optional_left_adapters():
+def test_left_dependencies():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     dependencies = project["project"]["dependencies"]
     extras = project["project"]["optional-dependencies"]
@@ -24,12 +24,12 @@ def test_left_package_has_no_databricks_dependency_and_optional_left_adapters():
     assert project["project"]["scripts"] == {"dtrack": "dtrack.cli:main"}
 
 
-def test_right_package_never_imports_the_left_package():
+def test_right_imports():
     for path in (ROOT / "src/dtrack_right").rglob("*.py"):
         assert "dtrack_left" not in path.read_text(), path
 
 
-def test_right_package_contains_only_databricks_runtime_code():
+def test_right_contents():
     right = ROOT / "src/dtrack_right"
     common = {path.name for path in (right / "common").glob("*.py")}
     assert common == {
@@ -51,7 +51,7 @@ def test_right_package_contains_only_databricks_runtime_code():
     assert not (right / "__main__.py").exists()
 
 
-def test_csv_sampling_is_not_reexported_from_common_hashing():
+def test_sampling_exports():
     paths = [
         path
         for root in (ROOT / "src", ROOT / "tests", ROOT / "examples")
@@ -86,7 +86,7 @@ def test_csv_sampling_is_not_reexported_from_common_hashing():
 
 
 # >>> the pipeline never touches Databricks; only `dtrack tools dbx` may, lazily <<< #
-def test_left_pipeline_never_touches_databricks_and_dbx_imports_the_sdk_lazily():
+def test_databricks_boundary():
     left = ROOT / "src/dtrack_left"
     helper = left / "backends/databricks.py"
     for path in left.rglob("*.py"):
@@ -112,7 +112,7 @@ def test_left_pipeline_never_touches_databricks_and_dbx_imports_the_sdk_lazily()
 
 
 # >>> the S3 credential helper is an operator tool: no pipeline module imports it <<< #
-def test_left_pipeline_never_imports_the_aws_helper():
+def test_aws_boundary():
     left = ROOT / "src/dtrack_left"
     pipeline = [*(left / "checks").glob("*.py"), *(left / "common").glob("*.py")]
     pipeline += [left / "cli/checks.py", left / "backends/sources.py", left / "backends/store.py"]
@@ -122,7 +122,7 @@ def test_left_pipeline_never_imports_the_aws_helper():
 
 
 # >>> the local backup plan builds on both sides; neither side nor the Right job may depend on it <<< #
-def test_only_dtrack_local_combines_the_two_sides():
+def test_local_boundary():
     for side in ("dtrack_left", "dtrack_right"):
         for path in (ROOT / "src" / side).rglob("*.py"):
             text = path.read_text()
@@ -131,12 +131,12 @@ def test_only_dtrack_local_combines_the_two_sides():
     assert "from dtrack_left" in local and "from dtrack_right" in local
 
 
-def test_right_job_installs_only_what_a_databricks_runtime_lacks():
+def test_right_requirements():
     requirements = (ROOT / "src/dtrack_right/requirements.txt").read_text().split()
     assert sorted(name.split(">=")[0] for name in requirements) == ["boto3", "openpyxl"]
 
 
-def test_python_dash_m_dtrack_is_the_same_cli():
+def test_module_cli():
     import dtrack
     import dtrack.cli
 
@@ -152,7 +152,7 @@ def test_python_dash_m_dtrack_is_the_same_cli():
     assert completed.stdout.startswith("dtrack, version")
 
 
-def test_learning_notebooks_match_the_public_cli_layout():
+def test_notebook_layout():
     notebooks = ROOT / "examples/nbs"
     expected = [
         "00_row_check.ipynb",
@@ -193,3 +193,45 @@ def test_learning_notebooks_match_the_public_cli_layout():
     assert all("assert " in sources[name] for name in expected)
     assert all("pytest.main" not in sources[name] for name in expected)
     assert all("subprocess.run(['pytest'" not in sources[name] for name in expected)
+
+
+def test_name_policy():
+    paths = {
+        ROOT / path
+        for path in subprocess.run(
+            ["git", "ls-files", "tests"],
+            capture_output=True,
+            check=True,
+            cwd=ROOT,
+            text=True,
+        ).stdout.splitlines()
+        if path.endswith(".py")
+    }
+    paths.add(ROOT / "tests/live/test_source_queries.py")
+
+    violations = []
+    for path in sorted(paths):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        scopes = [("module", tree)]
+        while scopes:
+            scope_name, scope = scopes.pop()
+            names = [
+                node.name
+                for node in scope.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("test_")
+            ]
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            if duplicates:
+                violations.append(f"{path.relative_to(ROOT)}:{scope_name}: duplicates {duplicates}")
+            for name in names:
+                words = name.removeprefix("test_").split("_")
+                if len(words) > 2 or not all(
+                    any(char.isalpha() for char in word) for word in words
+                ):
+                    violations.append(f"{path.relative_to(ROOT)}:{name}: use 1-2 semantic words")
+            for node in scope.body:
+                if isinstance(node, ast.ClassDef):
+                    scopes.append((f"{scope_name}.{node.name}", node))
+
+    assert not violations, "\n" + "\n".join(violations)

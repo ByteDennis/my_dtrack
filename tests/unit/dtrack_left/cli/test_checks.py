@@ -15,7 +15,7 @@ def _config(synthetic, tmp_path):
     return str(path)
 
 
-def test_row_check_command_writes_left_counts_to_s3(s3_bucket, synthetic, tmp_path, capsys):
+def test_row_check(s3_bucket, synthetic, tmp_path, capsys):
     root = f"s3://{s3_bucket}/runs"
     config = _config(synthetic, tmp_path)
     argv = [
@@ -42,9 +42,7 @@ def test_row_check_command_writes_left_counts_to_s3(s3_bucket, synthetic, tmp_pa
     assert store.get_json("pairs/orders/row_check/left.json")["counts"]["2026-01-15"] == 30
 
 
-def test_row_check_reuses_the_same_run_unless_force_is_set(
-    s3_bucket, synthetic, tmp_path, capsys, monkeypatch
-):
+def test_row_reuses(s3_bucket, synthetic, tmp_path, capsys, monkeypatch):
     root = f"s3://{s3_bucket}/runs"
     argv = [
         "row-check",
@@ -78,9 +76,7 @@ def test_row_check_reuses_the_same_run_unless_force_is_set(
     assert calls == ["reusable", "reusable"]
 
 
-def test_col_check_command_publishes_units_once_manifests_are_released(
-    s3_bucket, synthetic, tmp_path, capsys, monkeypatch
-):
+def test_col_check(s3_bucket, synthetic, tmp_path, capsys, monkeypatch):
     root = f"s3://{s3_bucket}/runs"
     monkeypatch.setenv("DTRACK_RUN_S3", root)
     assert (
@@ -118,9 +114,7 @@ def test_col_check_command_publishes_units_once_manifests_are_released(
     assert store.get_json("_status/col_check.closed.json")["expected_units"] == 8
 
 
-def test_left_run_completes_version_two_without_a_right_signal(
-    s3_bucket, synthetic, tmp_path, capsys
-):
+def test_left_run(s3_bucket, synthetic, tmp_path, capsys):
     root = f"s3://{s3_bucket}/runs"
     document = pairs_config(synthetic.left)
     document["version"] = 2
@@ -203,7 +197,7 @@ def _sas_config(tmp_path):
     return path
 
 
-def test_left_run_exports_and_imports_one_sas_bundle(s3_bucket, tmp_path, capsys, monkeypatch):
+def test_left_exports(s3_bucket, tmp_path, capsys, monkeypatch):
     config = _sas_config(tmp_path)
     bundle = tmp_path / "sas-bundle"
     assert (
@@ -302,9 +296,7 @@ def test_left_run_exports_and_imports_one_sas_bundle(s3_bucket, tmp_path, capsys
 
 
 # >>> --run-s3 stays stable; row-check appends either the supplied or generated run id <<< #
-def test_row_check_appends_a_generated_run_id_to_the_runs_root(
-    s3_bucket, synthetic, tmp_path, capsys
-):
+def test_row_appends(s3_bucket, synthetic, tmp_path, capsys):
     root = f"s3://{s3_bucket}/runs"
     config = _config(synthetic, tmp_path)
     assert main(["row-check", "--config", config, "--run-s3", root, "--pair", "orders"]) == 0
@@ -313,7 +305,7 @@ def test_row_check_appends_a_generated_run_id_to_the_runs_root(
     assert S3Store(outcome["run"]).exists("pairs/orders/row_check/left.json")
 
 
-def test_row_check_rejects_a_nested_run_id(s3_bucket, synthetic, tmp_path, capsys):
+def test_row_rejects(s3_bucket, synthetic, tmp_path, capsys):
     root = f"s3://{s3_bucket}/runs"
     assert (
         main(

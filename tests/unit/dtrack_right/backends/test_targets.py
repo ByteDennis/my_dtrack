@@ -35,13 +35,13 @@ def _spark_rule(sql_text):
 
 
 @pytest.mark.parametrize("text", ["2.50", "2.0", "-0.10", "10", "007", "1e3", "abc", "0.000"])
-def test_spark_collapse_decimal_sql_applies_the_same_rule_as_python(text):
+def test_decimal_rule(text):
     sql = targets._collapse_decimal_sql("x")
     assert sql.startswith("CASE WHEN x rlike ")
     assert _spark_rule(sql)(text) == collapse_decimal(text)
 
 
-def test_relation_supports_tables_queries_and_raw_volume_files():
+def test_relations():
     assert SparkTarget(None, ORDERS).relation() == "`main`.`sales`.`orders`"
     assert SparkTarget(None, {"query": "SELECT 1"}).relation() == "(SELECT 1) dtrack_source"
     volume = SparkTarget(None, {"kind": "volume_raw", "path": "/Volumes/c/s/v/o'k/"})
@@ -56,7 +56,7 @@ def test_relation_supports_tables_queries_and_raw_volume_files():
 
 
 # >>> files that are not a table: read_files with options and schema hints, patched through {src} <<< #
-def test_files_kind_reads_a_volume_folder_and_applies_the_src_patch():
+def test_file_relation():
     config = {
         "kind": "files",
         "path": "/Volumes/c/s/work/inputs/orders/",
@@ -74,7 +74,7 @@ def test_files_kind_reads_a_volume_folder_and_applies_the_src_patch():
     assert patched == f"(SELECT *, to_date(d, 'dd/MM/yyyy') AS dt FROM {reader}) dtrack_source"
 
 
-def test_preflight_describes_the_relation_and_needs_the_date_column():
+def test_preflight():
     spark = FakeSpark(lambda sql: DESCRIBE)
     target = SparkTarget(spark, ORDERS)
     health = target.preflight()
@@ -85,7 +85,7 @@ def test_preflight_describes_the_relation_and_needs_the_date_column():
     assert missing["ok"] is False and "'dt'" in missing["error"]
 
 
-def test_spark_preflight_probes_and_caches_sas_datetime_text():
+def test_sas_probe():
     def respond(sql):
         if sql.startswith("DESCRIBE"):
             return DESCRIBE
@@ -101,7 +101,7 @@ def test_spark_preflight_probes_and_caches_sas_datetime_text():
     assert len([sql for sql in spark.statements if "LIMIT 16" in sql]) == 1
 
 
-def test_partition_counts_run_one_grouped_query_with_bounds_and_where():
+def test_partition_counts():
     spark = FakeSpark(lambda sql: [("2026-01-01", 3), ("2026-01-02", 4)])
     target = SparkTarget(spark, {**ORDERS, "where": "region = 'EU'"})
     assert target.partition_counts("2026-01-01", "2026-01-31") == {
@@ -118,7 +118,7 @@ def test_partition_counts_run_one_grouped_query_with_bounds_and_where():
     ]
 
 
-def test_spark_query_is_audited_before_submission():
+def test_sql_audit():
     events = []
 
     class Spark:
@@ -155,7 +155,7 @@ def _manifest(sample, strict=False, keys=("order_id",), families=("numeric",)):
         ({"mode": "fixed"}, {"key_tuples": []}, "1=0"),
     ],
 )
-def test_sample_predicate_per_mode(sample, window, expected):
+def test_sample_modes(sample, window, expected):
     predicate = SparkTarget(None, ORDERS)._sample_predicate(_manifest(sample), window)
     if expected is None:
         assert predicate is None
@@ -186,7 +186,7 @@ def _stats_row():
     return row
 
 
-def test_window_statistics_is_one_query_mapped_back_per_column():
+def test_statistics():
     spark = FakeSpark(
         lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]
     )
@@ -218,32 +218,40 @@ def test_window_statistics_is_one_query_mapped_back_per_column():
     assert stats["status"]["col_type"] == "categorical" and stats["status"]["length_max"] == 2
 
 
-def test_overrides_force_a_string_column_numeric_and_a_decimal_categorical():
+@pytest.mark.parametrize(
+    ("overrides", "fragments", "types"),
+    [
+        pytest.param(
+            {"STATUS": "numeric", "AMOUNT": "categorical"},
+            (
+                "avg(try_cast(CASE WHEN trim(cast(`status` as string))",
+                "NULL AS mean_1",
+                "avg(length(trim(cast(`amount` as string))))",
+            ),
+            {"status": "numeric", "amount": "categorical", "order_id": "categorical"},
+            id="mixed",
+        ),
+        pytest.param(
+            {"ORDER_ID": "numeric"},
+            ("avg(cast(`order_id` as double)) AS mean_0",),
+            {"order_id": "numeric"},
+            id="integral",
+        ),
+    ],
+)
+def test_overrides(overrides, fragments, types):
     spark = FakeSpark(
         lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]
     )
     manifest = _manifest({"mode": "all"})
-    manifest["col_type_overrides"] = {"STATUS": "numeric", "AMOUNT": "categorical"}
+    manifest["col_type_overrides"] = overrides
     stats = SparkTarget(spark, ORDERS).window_statistics(manifest, {"partitions": ["2026-01-01"]})
     query = spark.statements[1]
-    assert "avg(try_cast(CASE WHEN trim(cast(`status` as string))" in query
-    assert "NULL AS mean_1" in query and "avg(length(trim(cast(`amount` as string))))" in query
-    assert stats["status"]["col_type"] == "numeric" and stats["amount"]["col_type"] == "categorical"
-    assert stats["order_id"]["col_type"] == "categorical"
+    assert all(fragment in query for fragment in fragments)
+    assert all(stats[column]["col_type"] == kind for column, kind in types.items())
 
 
-def test_override_can_force_an_integral_column_back_to_numeric():
-    spark = FakeSpark(
-        lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]
-    )
-    manifest = _manifest({"mode": "all"})
-    manifest["col_type_overrides"] = {"ORDER_ID": "numeric"}
-    stats = SparkTarget(spark, ORDERS).window_statistics(manifest, {"partitions": ["2026-01-01"]})
-    assert "avg(cast(`order_id` as double)) AS mean_0" in spark.statements[1]
-    assert stats["order_id"]["col_type"] == "numeric"
-
-
-def test_registered_date_column_type_normalizes_the_right_expression():
+def test_date_column():
     spark = FakeSpark(
         lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]
     )
@@ -261,7 +269,7 @@ def test_registered_date_column_type_normalizes_the_right_expression():
     assert "NULL AS mean_2" in query
 
 
-def test_strict_mode_lowercases_and_collapses_text_columns():
+def test_strict_text():
     spark = FakeSpark(
         lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]
     )
@@ -272,7 +280,7 @@ def test_strict_mode_lowercases_and_collapses_text_columns():
     assert "count(DISTINCT lower(CASE WHEN trim(cast(`status` as string))" in spark.statements[1]
 
 
-def test_fixed_sample_normalizes_left_key_tuples_per_family():
+def test_fixed_normalization():
     keys, families = ("card", "amt", "eff_dt"), ("string", "numeric", "date")
     manifest = _manifest({"mode": "fixed"}, keys=keys, families=families)
     window = {"key_tuples": [[" ABC ", "1.50", "2026-01-31 00:00:00"], ["O'K", "007", "20260131"]]}

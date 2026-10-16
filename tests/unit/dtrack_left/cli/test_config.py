@@ -16,29 +16,42 @@ def pair(right="databricks", left="oracle"):
     }
 
 
-def test_right_side_is_always_databricks():
+def test_right_side():
     with pytest.raises(ValueError, match="Right side must be databricks"):
         validate_config({"pairs": {"p": pair(right="csv")}})
 
 
-@pytest.mark.parametrize("source", ["oracle", "athena", "aws", "hadoop", "csv", "file", "duckdb"])
-def test_supported_left_sources(source):
-    assert validate_config({"pairs": {"p": pair(left=source)}})
+@pytest.mark.parametrize(
+    ("source", "error"),
+    [
+        ("oracle", None),
+        ("athena", None),
+        ("aws", None),
+        ("hadoop", None),
+        ("csv", None),
+        ("file", None),
+        ("duckdb", None),
+        ("sas", "unsupported Left source"),
+    ],
+    ids=["oracle", "athena", "aws", "hadoop", "csv", "file", "duckdb", "sas"],
+)
+def test_sources(source, error):
+    config = {"pairs": {"p": pair(left=source)}}
+    if error:
+        with pytest.raises(ValueError, match=error):
+            validate_config(config)
+    else:
+        assert validate_config(config)
 
 
-def test_duckdb_live_snapshot_option_is_rejected_during_config_validation():
+def test_duckdb_live():
     row = pair(left="duckdb")
     row["left"]["snapshot"] = True
     with pytest.raises(ValueError, match="snapshot is no longer supported"):
         validate_config({"pairs": {"p": row}})
 
 
-def test_sas_is_out_of_scope():
-    with pytest.raises(ValueError, match="unsupported Left source"):
-        validate_config({"pairs": {"p": pair(left="sas")}})
-
-
-def test_conn_macro_expands_named_profiles_and_pair_fields_win():
+def test_conn_macro():
     config = {
         "connections": {
             "pcds": {"source": "oracle", "dsn": "pcds:1521/PCDS", "user_env": "PCDS_USER"},
@@ -85,14 +98,14 @@ def test_conn_macro_expands_named_profiles_and_pair_fields_win():
     }
 
 
-def test_config_needs_pairs_and_a_profile_object():
+def test_config_needs():
     with pytest.raises(ValueError, match="non-empty pairs"):
         validate_config({"pairs": {}})
     with pytest.raises(TypeError, match="connections must be an object"):
         validate_config({"connections": ["pcds"], "pairs": {"p": pair()}})
 
 
-def test_config_version_two_normalizes_exclusions_and_version_one_rejects_them():
+def test_config_version():
     row = pair()
     row.update(
         excluded_partitions=["20260102", "2026-01-01", "2026-01-01"],
@@ -107,39 +120,36 @@ def test_config_version_two_normalizes_exclusions_and_version_one_rejects_them()
 
 
 @pytest.mark.parametrize("version", [0, 3, "2", True])
-def test_config_supports_exactly_two_integer_versions(version):
+def test_config_supports(version):
     with pytest.raises(ValueError, match="version must be 1 or 2"):
         validate_config({"version": version, "pairs": {"p": pair()}})
 
 
-def test_csv_sides_may_name_a_file_as_conn_macro_and_skipped_pairs_are_not_checked():
+def test_csv_sides():
     config = {"pairs": {"p": pair(left="csv"), "off": {"skip": True}}}
     config["pairs"]["p"]["left"]["conn_macro"] = "data/a.csv"
     assert validate_config(config)["pairs"]["p"]["left"]["conn_macro"] == "data/a.csv"
 
 
-def test_file_source_accepts_a_top_level_nullstr():
-    row = pair(left="file")
-    row["left"]["nullstr"] = ["", "NULL"]
-    assert validate_config({"pairs": {"p": row}})["pairs"]["p"]["left"]["nullstr"] == [
-        "",
-        "NULL",
-    ]
-
-
-@pytest.mark.parametrize("nullstr", [1, ["", 1]])
-def test_file_source_nullstr_must_be_text_or_a_text_list(nullstr):
-    row = pair(left="file")
+@pytest.mark.parametrize(
+    ("source", "nullstr", "error"),
+    [
+        ("file", ["", "NULL"], None),
+        ("file", 1, "nullstr must be a string or a list of strings"),
+        ("file", ["", 1], "nullstr must be a string or a list of strings"),
+        ("oracle", "NULL", "nullstr requires source file/csv"),
+    ],
+    ids=["valid", "scalar-type", "list-type", "database"],
+)
+def test_nullstr(source, nullstr, error):
+    row = pair(left=source)
     row["left"]["nullstr"] = nullstr
-    with pytest.raises(TypeError, match="nullstr must be a string or a list of strings"):
-        validate_config({"pairs": {"p": row}})
-
-
-def test_nullstr_is_not_accepted_for_database_sources():
-    row = pair()
-    row["left"]["nullstr"] = "NULL"
-    with pytest.raises(ValueError, match="nullstr requires source file/csv"):
-        validate_config({"pairs": {"p": row}})
+    config = {"pairs": {"p": row}}
+    if error:
+        with pytest.raises((TypeError, ValueError), match=error):
+            validate_config(config)
+    else:
+        assert validate_config(config)["pairs"]["p"]["left"]["nullstr"] == nullstr
 
 
 @pytest.mark.parametrize(
@@ -155,14 +165,14 @@ def test_nullstr_is_not_accepted_for_database_sources():
         (lambda p: p.update(col_type_overrides={"amount": "date"}), "col_type_overrides"),
     ],
 )
-def test_pairs_need_date_columns_and_a_column_map(change, message):
+def test_pairs_need(change, message):
     row = pair()
     change(row)
     with pytest.raises(ValueError, match=message):
         validate_config({"pairs": {"p": row}})
 
 
-def test_load_config_reads_json_and_loads_dotenv(tmp_path, monkeypatch):
+def test_load_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DTRACK_UNIT_MARKER", raising=False)
     (tmp_path / ".env").write_text("DTRACK_UNIT_MARKER=from-dotenv\n")
@@ -172,7 +182,7 @@ def test_load_config_reads_json_and_loads_dotenv(tmp_path, monkeypatch):
     assert os.environ["DTRACK_UNIT_MARKER"] == "from-dotenv"
 
 
-def test_right_files_kind_with_a_src_patch_is_accepted():
+def test_right_files():
     row = pair(left="file")
     row["right"] = {"source": "databricks", "kind": "files", "path": "/Volumes/c/s/work/in/"}
     row["right"] |= {"format": "csv", "query": "SELECT * FROM {src}", "date_col": "dt"}
@@ -187,7 +197,7 @@ def config_with_map(tmp_path, col_map, **extra):
     return path
 
 
-def test_col_map_csv_is_relative_to_the_config_file_and_fills_types(tmp_path, monkeypatch):
+def test_col_map(tmp_path, monkeypatch):
     path = config_with_map(tmp_path, "maps/p.csv")
     (tmp_path / "maps/p.csv").write_text(
         "﻿# left side, right side\nleft, right ,type\nORDER_ID,order_id,\n\nAMT,amount,Numeric\n"
@@ -198,7 +208,7 @@ def test_col_map_csv_is_relative_to_the_config_file_and_fills_types(tmp_path, mo
     assert loaded["col_type_overrides"] == {"AMT": "numeric"}
 
 
-def test_col_map_type_can_name_a_registered_asymmetric_date_type(tmp_path):
+def test_col_type(tmp_path):
     path = config_with_map(tmp_path, "maps/p.csv")
     (tmp_path / "maps/p.csv").write_text(
         "left,right,type\nSAS_ATTRIBUTE,date_attribute,sas_datetime_date\n"
@@ -214,7 +224,7 @@ def test_col_map_type_can_name_a_registered_asymmetric_date_type(tmp_path):
     }
 
 
-def test_inline_json_col_map_accepts_right_and_registered_type(tmp_path):
+def test_inline_json(tmp_path):
     path = tmp_path / "c.json"
     document = {"pairs": {"p": pair()}}
     document["pairs"]["p"]["col_map"] = {
@@ -226,7 +236,7 @@ def test_inline_json_col_map_accepts_right_and_registered_type(tmp_path):
     assert loaded["column_types"]["SAS_ATTRIBUTE"]["right_date_type"] == "date"
 
 
-def test_a_new_date_column_type_only_needs_a_registered_class(tmp_path):
+def test_new_date(tmp_path):
     @register_column_type("test_compact_to_date")
     class CompactToDate(DateColumnType):
         left_date_type: ClassVar[object] = {"type": "string", "format": "compact"}
@@ -243,7 +253,7 @@ def test_a_new_date_column_type_only_needs_a_registered_class(tmp_path):
     }
 
 
-def test_col_map_json_file_and_inline_overrides_merge(tmp_path):
+def test_col_json(tmp_path):
     path = config_with_map(tmp_path, "maps/p.json", col_type_overrides={"ID": "categorical"})
     (tmp_path / "maps/p.json").write_text(json.dumps({"ID": "id", "AMT": "amount"}))
     loaded = load_config(path)["pairs"]["p"]
@@ -251,13 +261,13 @@ def test_col_map_json_file_and_inline_overrides_merge(tmp_path):
     assert loaded["col_type_overrides"] == {"ID": "categorical"}
 
 
-def test_inline_col_map_is_untouched(tmp_path):
+def test_inline_col(tmp_path):
     path = tmp_path / "c.json"
     path.write_text(json.dumps({"pairs": {"p": pair()}}))
     assert load_config(path)["pairs"]["p"]["col_map"] == {"amount": "amount"}
 
 
-def test_query_sql_file_is_relative_to_config_and_normalizes_query_windows(tmp_path, monkeypatch):
+def test_query_sql(tmp_path, monkeypatch):
     (tmp_path / "queries").mkdir()
     (tmp_path / "queries" / "consolidated.sql").write_text(
         "SELECT d1.dt AS FINAL_DT, d1.amount\n"
@@ -281,7 +291,7 @@ def test_query_sql_file_is_relative_to_config_and_normalizes_query_windows(tmp_p
     assert left["query_windows"] == {"driver_one": {"expression": "d1.dt", "date_type": "date"}}
 
 
-def test_query_sql_file_can_come_from_a_connection_profile(tmp_path):
+def test_query_file(tmp_path):
     (tmp_path / "driver.sql").write_text("SELECT dt, amount FROM driver")
     document = {
         "connections": {
@@ -304,7 +314,7 @@ def test_query_sql_file_can_come_from_a_connection_profile(tmp_path):
     assert load_config(path)["pairs"]["p"]["left"]["query"] == ("SELECT dt, amount FROM driver")
 
 
-def test_right_query_sql_file_is_also_relative_to_config(tmp_path):
+def test_right_query(tmp_path):
     (tmp_path / "queries").mkdir()
     (tmp_path / "queries" / "right.sql").write_text("SELECT * FROM main.sales.orders;\n")
     document = {"pairs": {"p": pair()}}
@@ -320,7 +330,7 @@ def test_right_query_sql_file_is_also_relative_to_config(tmp_path):
     assert load_config(path)["pairs"]["p"]["right"]["query"] == ("SELECT * FROM main.sales.orders")
 
 
-def test_missing_query_sql_file_fails_with_resolved_path(tmp_path):
+def test_missing_query(tmp_path):
     document = {"pairs": {"p": pair()}}
     document["pairs"]["p"]["left"]["query"] = "queries/missing.sql"
     path = tmp_path / "config.json"
@@ -360,14 +370,14 @@ def test_missing_query_sql_file_fails_with_resolved_path(tmp_path):
         ),
     ],
 )
-def test_query_windows_fail_closed(query, windows, error):
+def test_query_windows(query, windows, error):
     row = pair()
     row["left"].update(query=query, query_windows=windows)
     with pytest.raises(ValueError, match=error):
         validate_config({"pairs": {"p": row}})
 
 
-def test_query_windows_are_oracle_only():
+def test_query_oracle():
     row = pair(left="file")
     row["left"].update(
         query="SELECT * FROM {src} WHERE {{query_windows:driver}}",
@@ -391,7 +401,7 @@ def test_query_windows_are_oracle_only():
         ("p.csv", "left,right,type\na,x,text\n", "numeric|categorical"),
     ],
 )
-def test_bad_col_map_files_fail_with_the_path(tmp_path, name, body, error):
+def test_bad_col(tmp_path, name, body, error):
     path = config_with_map(tmp_path, f"maps/{name}")
     if body is not None:
         (tmp_path / "maps" / name).write_text(body)
@@ -399,7 +409,7 @@ def test_bad_col_map_files_fail_with_the_path(tmp_path, name, body, error):
         load_config(path)
 
 
-def test_col_map_type_must_agree_with_inline_overrides(tmp_path):
+def test_col_agree(tmp_path):
     path = config_with_map(tmp_path, "maps/p.csv", col_type_overrides={"a": "categorical"})
     (tmp_path / "maps/p.csv").write_text("left,right,type\na,x,numeric\n")
     with pytest.raises(ValueError, match=r"disagree on \['a'\]"):

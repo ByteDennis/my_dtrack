@@ -1,3 +1,69 @@
+Unreleased: compact pytest names and consolidate parameterized cases
+
+Changed files (all files in this change set):
+- M `changelog.txt` — Record every test file changed by the naming and parameterization cleanup.
+- M `tests/live/test_source_queries.py` — Shorten the live query, timing, and UTF-8 test names; live connections remain operator-run only.
+- M `tests/local/spark/test_key_families_spark.py` — Shorten the Spark key-family test name.
+- M `tests/local/spark/test_spark_target.py` — Shorten Spark target test names while preserving the existing parameter tables.
+- M `tests/unit/common/test_audit.py` — Shorten audit test names.
+- M `tests/unit/common/test_dates.py` — Shorten date test names and combine valid/error canonical-date and bucket-date cases with `pytest.mark.parametrize`.
+- M `tests/unit/common/test_duck.py` — Shorten DuckDB resource test names.
+- M `tests/unit/common/test_hashing.py` — Shorten hashing test names.
+- M `tests/unit/common/test_key_families.py` — Shorten key-family test names.
+- M `tests/unit/common/test_manifest.py` — Shorten manifest test names and combine valid/error sample-plan cases with `pytest.mark.parametrize`.
+- M `tests/unit/common/test_parity.py` — Shorten shared-module parity test names.
+- M `tests/unit/common/test_protocol.py` — Shorten protocol contract test names.
+- M `tests/unit/common/test_sampling_sql.py` — Shorten sampling SQL test names.
+- M `tests/unit/common/test_stats.py` — Shorten statistics test names.
+- M `tests/unit/dtrack/test_cli.py` — Shorten top-level CLI test names.
+- M `tests/unit/dtrack_left/backends/test_aws.py` — Shorten AWS helper test names.
+- M `tests/unit/dtrack_left/backends/test_databricks.py` — Shorten Databricks backend test names and parameterize the workspace availability cases.
+- M `tests/unit/dtrack_left/backends/test_materialize.py` — Shorten materialization test names.
+- M `tests/unit/dtrack_left/backends/test_sources.py` — Shorten source test names and parameterize valid/invalid source dispatch.
+- M `tests/unit/dtrack_left/backends/test_store.py` — Shorten Left store test names.
+- M `tests/unit/dtrack_left/checks/test_col_check.py` — Shorten Left column-check test names.
+- M `tests/unit/dtrack_left/checks/test_rollback.py` — Shorten rollback test names.
+- M `tests/unit/dtrack_left/checks/test_row_check.py` — Shorten Left row-check test names.
+- M `tests/unit/dtrack_left/cli/ops/test_dbx.py` — Shorten Databricks CLI operation test names.
+- M `tests/unit/dtrack_left/cli/ops/test_s3.py` — Shorten S3 CLI operation test names.
+- M `tests/unit/dtrack_left/cli/test_blog.py` — Shorten Confluence blog CLI test names.
+- M `tests/unit/dtrack_left/cli/test_checks.py` — Shorten reconciliation CLI test names.
+- M `tests/unit/dtrack_left/cli/test_config.py` — Shorten config test names and parameterize supported-source, SAS-source, and `nullstr` cases.
+- M `tests/unit/dtrack_left/cli/test_options.py` — Shorten shared CLI option test names.
+- M `tests/unit/dtrack_left/cli/test_tools.py` — Shorten tools CLI test names.
+- M `tests/unit/dtrack_left/test_confluence_admin.py` — Shorten Confluence administration test names.
+- M `tests/unit/dtrack_left/test_confluence_templates.py` — Shorten Confluence template test names.
+- M `tests/unit/dtrack_local/test_csv_target.py` — Shorten local CSV target test names.
+- M `tests/unit/dtrack_local/test_keycheck.py` — Shorten local key-check test names.
+- M `tests/unit/dtrack_local/test_pipeline.py` — Shorten local pipeline test names.
+- M `tests/unit/dtrack_local/test_run_logging.py` — Shorten logging test names while retaining the parameterized logger-name cases.
+- M `tests/unit/dtrack_local/test_warehouse.py` — Shorten local warehouse test names.
+- M `tests/unit/dtrack_right/backends/test_store.py` — Shorten Right store test names and parameterize the two unresolved-run cases.
+- M `tests/unit/dtrack_right/backends/test_targets.py` — Shorten Spark target test names and parameterize column-type override cases.
+- M `tests/unit/dtrack_right/checks/test_col_check.py` — Shorten Right column-check test names.
+- M `tests/unit/dtrack_right/checks/test_row_check.py` — Shorten Right row-check test names.
+- M `tests/unit/dtrack_right/report/test_build.py` — Shorten report-builder test names and parameterize partial-run scenarios.
+- M `tests/unit/dtrack_right/report/test_excel.py` — Shorten Excel report test names.
+- M `tests/unit/dtrack_right/report/test_html.py` — Shorten HTML report test names.
+- M `tests/unit/dtrack_right/test_job.py` — Shorten Right job test names.
+- M `tests/unit/dtrack_right/test_progress.py` — Shorten progress test names.
+- M `tests/unit/test_packaging.py` — Shorten packaging test names and enforce one-to-two-word semantic test names with an AST policy test.
+- M `tests/unit/test_protocol_flow.py` — Shorten the protocol-flow test name.
+- M `tests/unit/test_sas_protocol_flow.py` — Shorten SAS protocol-flow test names.
+
+Added files:
+- None.
+
+Deleted files:
+- None.
+
+Verification:
+- Tracked pytest functions: 480 before, 471 after; names over two words: 0; duplicate names per scope: 0.
+- `uv run pytest --collect-only -q tests/unit`: 854 tests collected, up from 852 because the naming-policy check and parameterized coverage add cases without removing scenarios.
+- `uv run pytest -q --timeout=60 tests/unit`: 842 passed, 12 skipped.
+- Ruff, changed-file format checks, the naming-policy test, and `git diff --check` passed.
+- External live tests were intentionally not run.
+
 Unreleased: remove query projection, enable pyodbc Hadoop, stabilize Left logging, add live profiling
 
 Changed files (all files in this change set):

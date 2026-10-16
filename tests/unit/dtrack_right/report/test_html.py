@@ -6,7 +6,7 @@ from dtrack_right.checks.col_check import compare_statistics
 from dtrack_right.report import html
 
 
-def test_scalar_formatting_helpers():
+def test_scalars():
     assert html.format_count(1_234_567) == "1,234,567 (1.23 M)"
     assert html.format_count(2_500_000_000) == "2,500,000,000 (2.50 B)"
     assert html._e(None) == "—" and html._e("<b>") == "&lt;b&gt;"
@@ -25,14 +25,14 @@ def _document(partitions, **extra):
     }
 
 
-def test_row_count_section_praises_a_perfect_pair():
+def test_perfect_rows():
     section = html.row_count_section(
         _document({"2026-01-01": {"left": 2, "right": 2, "verdict": "match"}})
     )
     assert "All dates match perfectly" in section and "—" in section
 
 
-def test_row_count_section_lists_at_most_ten_days_per_finding():
+def test_row_limit():
     partitions = {
         f"2026-01-{day:02d}": {"left": 1, "right": 2, "verdict": "count_diff"}
         for day in range(1, 13)
@@ -52,7 +52,7 @@ def _diff(column, vintage, **right):
     return row
 
 
-def test_column_stats_section_summarises_every_diff_column_and_vintage():
+def test_column_diffs():
     rows = [_diff(f"C{i}", "2026-01-01", mean=9.0) for i in range(5)]
     rows += [_diff("C0", f"2026-0{m}-01", hash_sum="5") for m in range(2, 6)]
     section = html.column_stats_section("p", rows, "oracle", "databricks", ("DT", "dt"))
@@ -61,13 +61,13 @@ def test_column_stats_section_summarises_every_diff_column_and_vintage():
     assert "hash_sum (3→5)" in section and "mean (1.5000→9)" in section
 
 
-def test_column_stats_section_praises_a_clean_pair():
+def test_clean_columns():
     row = compare_statistics(pair="p", window="2026-01-01", column="C", left=STATS, right=STATS)
     section = html.column_stats_section("p", [row], "oracle", "databricks", ("DT", "dt"))
     assert "All columns match across all vintages" in section
 
 
-def test_summary_section_lists_dead_units_and_status_color():
+def test_summary_status():
     ok = html.summary_section(
         {
             "status": "DONE",
@@ -91,7 +91,7 @@ def test_summary_section_lists_dead_units_and_status_color():
     assert "DEAD=1 units" in bad and "&lt;x&gt;" in bad and "background:#c62828" in bad
 
 
-def test_wrap_document_escapes_title_and_subtitle():
+def test_document_escape():
     page = html.wrap_document("A<B", ["<p>body</p>"], subtitle="run <1>")
     assert "<title>A&lt;B</title>" in page and "run &lt;1&gt;" in page
     assert page.rstrip().endswith("</html>") and "<p>body</p>" in page

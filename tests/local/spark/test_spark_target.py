@@ -73,7 +73,7 @@ def _pandas_reference(path, partitions, sample, strict, tmp_path, key_tuples=Non
 
 
 # >>> exact per-day counts through spark.sql equal the CSV truth <<< #
-def test_partition_counts_match_the_file(spark, orders):
+def test_partition_counts(spark, orders):
     target = SparkTarget(
         spark,
         {
@@ -100,7 +100,7 @@ def test_partition_counts_match_the_file(spark, orders):
         ("sas", ["01JAN2026:09:45:35", "02JAN2026:00:00:00"]),
     ],
 )
-def test_partition_counts_support_compact_and_sas_dates(spark, date_type, raw_days):
+def test_date_formats(spark, date_type, raw_days):
     spark.createDataFrame(
         [(raw_days[0],), (raw_days[1],)], "raw_day STRING"
     ).createOrReplaceTempView("date_formats")
@@ -119,10 +119,10 @@ def test_partition_counts_support_compact_and_sas_dates(spark, date_type, raw_da
     }
 
 
-def test_sas_fractional_days_truncate_toward_zero_in_spark(spark):
-    spark.createDataFrame(
-        [("-1.75",), ("24108.75",)], "raw_day STRING"
-    ).createOrReplaceTempView("sas_fractional_days")
+def test_sas_fraction(spark):
+    spark.createDataFrame([("-1.75",), ("24108.75",)], "raw_day STRING").createOrReplaceTempView(
+        "sas_fractional_days"
+    )
     target = SparkTarget(
         spark,
         {
@@ -140,7 +140,7 @@ def test_sas_fractional_days_truncate_toward_zero_in_spark(spark):
 
 # >>> the hash-bucket predicate in SQL selects exactly the rows pandas selects, and every statistic agrees <<< #
 @pytest.mark.parametrize("strict", [False, True])
-def test_window_statistics_agree_with_pandas_on_a_fraction_sample(spark, orders, tmp_path, strict):
+def test_fraction_stats(spark, orders, tmp_path, strict):
     partitions = [f"2026-01-{d:02d}" for d in range(1, 31) if d not in (15,)]
     sample = {"mode": "fraction", "rate": 0.25, "threshold": round(0.25 * 2**32)}
     target = SparkTarget(
@@ -160,7 +160,7 @@ def test_window_statistics_agree_with_pandas_on_a_fraction_sample(spark, orders,
 
 
 # >>> fixed-N: the key list from keys.json selects the same rows in SQL as in pandas <<< #
-def test_window_statistics_agree_with_pandas_on_fixed_keys(spark, orders, tmp_path):
+def test_fixed_stats(spark, orders, tmp_path):
     partitions = [f"2026-02-{d:02d}" for d in range(1, 29) if d != 10]
     keys = [[str(order_id)] for order_id in (100961, 100962, 101000, 101500, 101777)]
     sample = {"mode": "fixed", "count": 5}
@@ -182,7 +182,7 @@ def test_window_statistics_agree_with_pandas_on_fixed_keys(spark, orders, tmp_pa
 
 
 # >>> the local Databricks query and Left source select the exact same normalised record keys <<< #
-def test_local_databricks_query_selects_the_same_fraction_keys_as_left(spark, tmp_path):
+def test_fraction_keys(spark, tmp_path):
     left = tmp_path / "left.csv"
     pd.DataFrame(
         {
@@ -223,18 +223,17 @@ def test_local_databricks_query_selects_the_same_fraction_keys_as_left(spark, tm
     query, _columns = WarehouseTarget(
         None,
         {
-                "source": "databricks",
-                "table": "local_sample_parity",
-                "date_col": "day",
-                "date_type": {"type": "string", "format": "dash"},
+            "source": "databricks",
+            "table": "local_sample_parity",
+            "date_col": "day",
+            "date_type": {"type": "string", "format": "dash"},
         },
         tmp_path,
     ).window_sql(manifest, {"bucket": "2026-01-01", "partitions": ["2026-01-01"]})
     family = key_family("numeric")
     right_keys = {family.normalize(row.right_id, "right") for row in spark.sql(query).collect()}
     left_keys = {
-        family.normalize(value, "left")
-        for value in pd.read_csv(left_path, dtype=object)["left_id"]
+        family.normalize(value, "left") for value in pd.read_csv(left_path, dtype=object)["left_id"]
     }
     assert left_keys == right_keys
     assert 0 < len(left_keys) < 12

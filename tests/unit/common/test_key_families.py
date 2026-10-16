@@ -18,17 +18,17 @@ import pytest
         (["strip_suffix:.0"], "42.0", "42"),
     ],
 )
-def test_builtin_families_and_step_lists(common, family, value, expected):
+def test_builtin_families(common, family, value, expected):
     assert common.hashing.key_family(family).normalize(value) == expected
 
 
-def test_left_and_right_transform_default_to_transform(common):
+def test_transform_defaults(common):
     family = common.hashing.key_family("numeric")
     assert family.left_transform("007") == family.right_transform("007") == family.transform("007")
     assert family.left_transform_sql("x") == family.right_transform_sql("x")
 
 
-def test_config_object_sets_each_side_and_inherits_the_rest(common):
+def test_side_config(common):
     family = common.hashing.key_family(
         {"family": "numeric", "left_transform": ["trim", "strip_prefix:A"]}
     )
@@ -41,7 +41,7 @@ def test_config_object_sets_each_side_and_inherits_the_rest(common):
     assert common.hashing.key_family(family.spec()) == family
 
 
-def test_registered_subclass_overrides_one_side_and_travels_by_name(common):
+def test_registered_subclass(common):
     keys = common.hashing
 
     @keys.register_family("test_branch")
@@ -74,16 +74,16 @@ def test_registered_subclass_overrides_one_side_and_travels_by_name(common):
         (7, "must be a name"),
     ],
 )
-def test_bad_family_specs_are_refused(common, spec, message):
+def test_invalid_specs(common, spec, message):
     with pytest.raises((TypeError, ValueError), match=message):
         common.hashing.key_family(spec)
 
 
-def test_spark_literal_escapes_quotes_and_backslashes(common):
+def test_spark_literal(common):
     assert common.hashing.spark_literal("o'k\\") == "'o\\'k\\\\'"
 
 
-def test_date_type_family_reuses_different_left_and_right_physical_dates(common):
+def test_date_family(common):
     family = common.hashing.key_family(
         {
             "family": "date_type",

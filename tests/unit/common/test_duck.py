@@ -3,14 +3,14 @@ import pytest
 from dtrack_left.common import duck
 
 
-def test_size_text_parses_binary_units():
+def test_size_text():
     assert duck.parse_size("16GB") == 16 * 2**30
     assert duck.parse_size("512 MiB") == 512 * 2**20
     assert duck.parse_size("2.5G") == int(2.5 * 2**30)
     assert duck.parse_size("1024") == 1024
 
 
-def test_budget_is_split_across_the_expected_connections(monkeypatch):
+def test_budget_split(monkeypatch):
     monkeypatch.setenv("DTRACK_DUCKDB_MEMORY", "16GB")
     monkeypatch.setenv("DTRACK_DUCKDB_WORKERS", "4")
     monkeypatch.setattr(duck.os, "cpu_count", lambda: 12)
@@ -20,14 +20,14 @@ def test_budget_is_split_across_the_expected_connections(monkeypatch):
     assert applied["temp_directory"].endswith("dtrack-duckdb")
 
 
-def test_default_budget_is_a_fraction_of_physical_memory(monkeypatch):
+def test_default_budget(monkeypatch):
     monkeypatch.delenv("DTRACK_DUCKDB_MEMORY", raising=False)
     monkeypatch.delenv("DTRACK_DUCKDB_WORKERS", raising=False)
     monkeypatch.setattr(duck, "physical_memory", lambda: 32 * 2**30)
     assert duck.settings()["memory_limit"] == f"{int(32 * 1024 * 0.6 / 2)}MiB"
 
 
-def test_connect_applies_the_budget_and_spills_to_the_temp_directory(monkeypatch, tmp_path):
+def test_connect_budget(monkeypatch, tmp_path):
     pytest.importorskip("duckdb")
     monkeypatch.setenv("DTRACK_DUCKDB_MEMORY", "2GB")
     monkeypatch.setenv("DTRACK_DUCKDB_WORKERS", "2")
@@ -40,7 +40,7 @@ def test_connect_applies_the_budget_and_spills_to_the_temp_directory(monkeypatch
     assert (tmp_path / "spill").is_dir()
 
 
-def test_temp_prefers_env_then_the_registered_work_dir_then_system_temp(monkeypatch, tmp_path):
+def test_temp_precedence(monkeypatch, tmp_path):
     monkeypatch.delenv("DTRACK_DUCKDB_TEMP", raising=False)
     duck.use_temp(None)
     assert duck.temp_directory().endswith("dtrack-duckdb")
@@ -51,7 +51,7 @@ def test_temp_prefers_env_then_the_registered_work_dir_then_system_temp(monkeypa
     duck.use_temp(None)
 
 
-def test_unwritable_temp_falls_back_to_the_system_temp(monkeypatch, tmp_path, caplog):
+def test_temp_fallback(monkeypatch, tmp_path, caplog):
     pytest.importorskip("duckdb")
     blocker = tmp_path / "file"
     blocker.write_text("x")

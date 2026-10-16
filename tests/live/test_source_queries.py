@@ -211,7 +211,7 @@ def _profile_once(source_name: str, config: dict, sql: str, output: Path, run_in
 
 @pytest.mark.live
 @pytest.mark.parametrize("source_name", SOURCE_NAMES)
-def test_source_query_and_csv_return_the_same_frame(source_name, tmp_path):
+def test_query(source_name, tmp_path):
     """Run read-only probe SQL from an ignored local JSON file against each configured source."""
     config, sql = _case(source_name)
     source = source_from_config(config)
@@ -229,7 +229,7 @@ def test_source_query_and_csv_return_the_same_frame(source_name, tmp_path):
 @pytest.mark.live
 @pytest.mark.live_performance
 @pytest.mark.parametrize("source_name", SOURCE_NAMES)
-def test_source_query_step_timings(source_name, tmp_path, request):
+def test_timing(source_name, tmp_path, request):
     """Measure every client-side query/export step without enforcing unstable time limits."""
     config, sql = _case(source_name)
     for run_index in range(1, _positive_int("DTRACK_LIVE_PROFILE_RUNS", 1) + 1):
@@ -245,7 +245,7 @@ def test_source_query_step_timings(source_name, tmp_path, request):
 
 @pytest.mark.live
 @pytest.mark.live_performance
-def test_timing_report_is_utf8_lf_and_windows_safe(tmp_path, monkeypatch):
+def test_encoding(tmp_path, monkeypatch):
     monkeypatch.setenv("DTRACK_LIVE_TIMINGS_DIR", str(tmp_path))
     path = _timing_path("hadoop")
     _write_timing_report(

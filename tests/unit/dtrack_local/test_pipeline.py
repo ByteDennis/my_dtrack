@@ -13,9 +13,7 @@ from dtrack_local.csv_target import CsvAnchorTarget
 
 # >>> the full local plan on the e2e synthetic files: CSV anchor as the Right side, report and backup to S3 <<< #
 @pytest.mark.slow
-def test_run_all_matches_the_distributed_protocol_and_backs_up(
-    synthetic, tmp_path, s3_bucket, monkeypatch
-):
+def test_run_all(synthetic, tmp_path, s3_bucket, monkeypatch):
     preflight_calls = {"left": 0, "right": 0}
     source_factory = pipeline.source_from_config
 
@@ -106,7 +104,7 @@ MANIFEST = {
 }
 
 
-def test_warehouse_target_pulls_native_columns_and_computes_statistics_locally(tmp_path):
+def test_warehouse_stats(tmp_path):
     rows = [("2026-01-01", "1", "10.50", "OPEN"), ("2026-01-02", "2", "3", None)]
     warehouse = FakeWarehouse(rows)
     landing = pipeline.Landing(tmp_path / "data.duckdb")
@@ -125,7 +123,7 @@ def test_warehouse_target_pulls_native_columns_and_computes_statistics_locally(t
     assert landing.tables() == {"right__orders": 2}
 
 
-def test_sample_filters_in_the_warehouse_before_transfer(tmp_path):
+def test_sample_pushdown(tmp_path):
     warehouse = FakeWarehouse([("2026-01-01", "1", "10.50", "OPEN")])
     config = {"table": "orders", "date_col": "dt"}
     target = pipeline.WarehouseTarget(warehouse, config, tmp_path)
@@ -139,7 +137,7 @@ def test_sample_filters_in_the_warehouse_before_transfer(tmp_path):
     assert not (tmp_path / "orders" / "b" / "right.sampled.csv").exists()
 
 
-def test_local_col_check_consumes_while_left_is_still_publishing(tmp_path, monkeypatch):
+def test_streaming(tmp_path, monkeypatch):
     events = []
     consumer_started = threading.Event()
     manifest = {"pair": "orders", "sample": {"mode": "all"}}
@@ -183,7 +181,7 @@ def test_local_col_check_consumes_while_left_is_still_publishing(tmp_path, monke
     assert result == {"published_units": 1, "compared": 1, "verdicts": {"match": 1}, "dead": 0}
 
 
-def test_local_col_check_surfaces_a_concurrent_left_failure(tmp_path, monkeypatch, caplog):
+def test_left_failure(tmp_path, monkeypatch, caplog):
     producer_failed = threading.Event()
     manifest = {"pair": "orders", "sample": {"mode": "all"}}
 
@@ -220,7 +218,7 @@ def test_local_col_check_surfaces_a_concurrent_left_failure(tmp_path, monkeypatc
     assert "local col-check failed" in caplog.text
 
 
-def test_landing_keeps_raw_text_per_bucket(tmp_path):
+def test_raw_landing(tmp_path):
     csv = tmp_path / "w.csv"
     csv.write_text("ID,AMOUNT\n007,1.50\n")
     landing = pipeline.Landing(tmp_path / "d.duckdb")
@@ -233,7 +231,7 @@ def test_landing_keeps_raw_text_per_bucket(tmp_path):
 
 
 @pytest.mark.slow
-def test_cli_runs_the_plan_and_preflight_reports_failures(synthetic, tmp_path, monkeypatch, capsys):
+def test_cli_preflight(synthetic, tmp_path, monkeypatch, capsys):
     from dtrack_local.cli import main
 
     config = tmp_path / "c.json"
@@ -265,9 +263,7 @@ def test_cli_runs_the_plan_and_preflight_reports_failures(synthetic, tmp_path, m
     assert json.loads(capsys.readouterr().out)["orders"]["right"]["ok"] is False
 
 
-def test_preflight_logs_returned_failures_to_the_private_error_log(
-    synthetic, tmp_path, monkeypatch
-):
+def test_preflight_log(synthetic, tmp_path, monkeypatch):
     from dtrack_left.common.run_logging import get_logger
     from dtrack_local.run_logging import configure_run_logging
 
@@ -297,7 +293,7 @@ def test_preflight_logs_returned_failures_to_the_private_error_log(
                 handler.close()
 
 
-def test_preflight_cli_compacts_long_column_lists():
+def test_compact_columns():
     from dtrack_local.cli import _compact_preflight_health
 
     columns = [f"COL_{number}" for number in range(1_000)]
@@ -314,7 +310,7 @@ def test_preflight_cli_compacts_long_column_lists():
     ]
 
 
-def test_local_config_supplies_every_optional_run_value(tmp_path, monkeypatch, capsys):
+def test_config_options(tmp_path, monkeypatch, capsys):
     import dtrack_local.cli as local_cli
 
     config = tmp_path / "config.json"
@@ -372,7 +368,7 @@ def test_local_config_supplies_every_optional_run_value(tmp_path, monkeypatch, c
     }
 
 
-def test_cli_then_config_then_environment_precedence(tmp_path, monkeypatch, capsys):
+def test_config_precedence(tmp_path, monkeypatch, capsys):
     import dtrack_local.cli as local_cli
 
     config = tmp_path / "config.json"
@@ -417,7 +413,7 @@ def test_cli_then_config_then_environment_precedence(tmp_path, monkeypatch, caps
     assert executed[-1]["run_s3"] == "s3://cli/runs"
 
 
-def test_local_help_reads_config_before_showing_effective_defaults(tmp_path, monkeypatch, capsys):
+def test_config_help(tmp_path, monkeypatch, capsys):
     from dtrack_local.cli import main
 
     config = tmp_path / "config.json"
@@ -438,7 +434,7 @@ def test_local_help_reads_config_before_showing_effective_defaults(tmp_path, mon
     assert "default: s3://env/runs" not in output
 
 
-def test_local_help_shows_effective_environment_defaults(monkeypatch, capsys):
+def test_environment_help(monkeypatch, capsys):
     from dtrack_local.cli import main
 
     monkeypatch.setenv("DTRACK_RUN_ID", "env-run")
@@ -454,9 +450,7 @@ def test_local_help_shows_effective_environment_defaults(monkeypatch, capsys):
     assert "default: s3://env/runs" in compact
 
 
-def test_key_check_cli_runs_the_production_sample_for_one_window(
-    synthetic, tmp_path, monkeypatch, capsys
-):
+def test_cli_sample(synthetic, tmp_path, monkeypatch, capsys):
     import dtrack_local.cli as local_cli
 
     config = tmp_path / "c.json"
@@ -511,9 +505,7 @@ def test_key_check_cli_runs_the_production_sample_for_one_window(
     assert checked_pair["key_families"]["ACCT_ID"] == "numeric"
 
 
-def test_key_check_inherits_pair_window_before_environment_defaults(
-    synthetic, tmp_path, monkeypatch, capsys
-):
+def test_pair_window(synthetic, tmp_path, monkeypatch, capsys):
     import dtrack_local.cli as local_cli
 
     document = pairs_config(synthetic.left)
@@ -554,9 +546,7 @@ def test_key_check_inherits_pair_window_before_environment_defaults(
     assert seen["window"] == ("2026-08-01", "2026-08-03")
 
 
-def test_key_check_does_not_mix_a_partial_pair_window_with_environment(
-    synthetic, tmp_path, monkeypatch, capsys
-):
+def test_partial_window(synthetic, tmp_path, monkeypatch, capsys):
     import dtrack_local.cli as local_cli
 
     document = pairs_config(synthetic.left)
@@ -597,7 +587,7 @@ def test_key_check_does_not_mix_a_partial_pair_window_with_environment(
     assert seen["window"][1] != "2019-08-03"
 
 
-def test_reuse_pulled_windows_skips_source_and_warehouse(tmp_path):
+def test_reuse_windows(tmp_path):
     from dtrack_left.backends.sources import write_rows
 
     window = {"bucket": "2026-01-01", "partitions": ["2026-01-01"]}
@@ -642,7 +632,7 @@ def test_reuse_pulled_windows_skips_source_and_warehouse(tmp_path):
         target.window_statistics(manifest, {"bucket": "2026-02-01", "partitions": ["2026-02-01"]})
 
 
-def test_open_run_threads_reuse_and_landing_flags(tmp_path):
+def test_open_flags(tmp_path):
     config = {
         "pairs": {
             "orders": {

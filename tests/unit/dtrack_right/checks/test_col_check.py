@@ -7,13 +7,13 @@ from dtrack_right.checks.row_check import run_row_check
 from dtrack_right.common.manifest import build_manifest, unit_id, unit_id_for
 
 
-def test_compare_statistics_matches_identical_sides():
+def test_identical():
     result = compare_statistics(pair="p", window="w", column="c", left=STATS, right=STATS)
     assert result["verdict"] == "match" and result["n_total_diff"] == 0
     assert result["mean_diff"] == 0.0 and result["length_avg_match"] is None
 
 
-def test_compare_statistics_flags_count_float_extreme_and_hash_drift():
+def test_stat_drift():
     changed = {
         **STATS,
         "n_unique": 3,
@@ -29,7 +29,7 @@ def test_compare_statistics_flags_count_float_extreme_and_hash_drift():
 
 
 # >>> numeric extremes compare by value (100 == 100.0); categorical ones stay verbatim (007 != 7) <<< #
-def test_numeric_extremes_compare_by_value_and_text_extremes_verbatim():
+def test_extremes():
     left = {**STATS, "col_type": "numeric", "min_val": "100", "max_val": "7.5"}
     right = {**left, "min_val": "100.0", "max_val": "7.50"}
     result = compare_statistics(pair="p", window="w", column="c", left=left, right=right)
@@ -46,7 +46,7 @@ def test_numeric_extremes_compare_by_value_and_text_extremes_verbatim():
     )
 
 
-def test_compare_statistics_tolerates_float_noise_and_compares_text_verbatim():
+def test_float_noise():
     right = {**STATS, "mean": 1.5 + 1e-9, "std": "n/a"}
     result = compare_statistics(
         pair="p", window="w", column="c", left={**STATS, "std": "n/a"}, right=right
@@ -61,7 +61,7 @@ def _manifest(pair="p", windows=("2026-01-01", "2026-02-01")):
     return {"pair": pair, "windows": [{"bucket": w, "partitions": [w]} for w in windows]}
 
 
-def test_scheduler_prioritizes_ready_compare_over_prefetch():
+def test_ready_priority():
     scheduler = DrainScheduler()
     scheduler.add_manifest(_manifest())
     scheduler.add_manifest(_manifest())
@@ -74,7 +74,7 @@ def test_scheduler_prioritizes_ready_compare_over_prefetch():
     assert scheduler.next_task().payload["unit_id"] == "v"
 
 
-def test_scheduler_limits_speculative_prefetch_and_retries_failed_ones_first():
+def test_retry_priority():
     scheduler = DrainScheduler(prefetch_depth=1)
     scheduler.add_manifest(_manifest())
     assert scheduler.next_task().window == "2026-01-01"
@@ -85,7 +85,7 @@ def test_scheduler_limits_speculative_prefetch_and_retries_failed_ones_first():
     assert scheduler.next_task().kind == "compare"
 
 
-def test_scheduler_skips_windows_already_fetched():
+def test_fetched_skip():
     scheduler = DrainScheduler(prefetch_depth=5)
     scheduler.add_manifest(_manifest(windows=("a",)))
     scheduler.mark_right_ready("p", "a", {})
@@ -107,7 +107,7 @@ def _drained_store(sample_mode="all"):
     return store, uid
 
 
-def test_col_check_compares_a_unit_and_records_the_result():
+def test_unit_result():
     store, uid = _drained_store()
     target = FakeTarget()
     results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
@@ -116,7 +116,7 @@ def test_col_check_compares_a_unit_and_records_the_result():
     assert target.calls == [("p", "2026-01-01", None)]
 
 
-def test_col_check_waits_for_fixed_sample_keys_before_prefetching():
+def test_fixed_wait():
     store, _uid = _drained_store(sample_mode="fixed")
     target = FakeTarget()
     with pytest.raises(TimeoutError):
@@ -127,7 +127,7 @@ def test_col_check_waits_for_fixed_sample_keys_before_prefetching():
     assert results and target.calls[-1] == ("p", "2026-01-01", [["7"]])
 
 
-def test_col_check_resumes_from_results_already_on_the_store():
+def test_resume_results():
     store, _uid = _drained_store()
     ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0).run()
     target = FakeTarget()
@@ -135,7 +135,7 @@ def test_col_check_resumes_from_results_already_on_the_store():
     assert target.calls == []
 
 
-def test_version_two_restart_scans_only_the_window_changed_by_the_current_plan():
+def test_v2_restart():
     pair = {
         "version": 2,
         "left": {"source": "oracle", "date_col": "dt"},
@@ -182,7 +182,7 @@ def test_version_two_restart_scans_only_the_window_changed_by_the_current_plan()
     assert target.calls == [("p", "2026-01-01", None)]
 
 
-def test_a_failing_prefetch_dead_letters_every_unit_of_the_window():
+def test_prefetch_failure():
     store, uid = _drained_store()
 
     class Broken(FakeTarget):
@@ -194,7 +194,7 @@ def test_a_failing_prefetch_dead_letters_every_unit_of_the_window():
     assert results == [] and failure["error"] == "boom"
 
 
-def test_a_failing_compare_is_retried_then_dead_lettered():
+def test_compare_failure():
     store, uid = _drained_store()
     target = FakeTarget(stats={"amount": STATS})
     unit_key = next(key for key in store.objects if "/units/" in key)
@@ -203,7 +203,7 @@ def test_a_failing_compare_is_retried_then_dead_lettered():
     assert results == [] and store.exists(f"pairs/p/col_check/failures/{uid}.json")
 
 
-def test_col_check_calls_on_idle_before_giving_up():
+def test_idle_callback():
     store, _uid = _drained_store()
     store.objects.pop("_status/col_check.closed.json")
     calls = []
@@ -218,7 +218,7 @@ def test_col_check_calls_on_idle_before_giving_up():
     assert len(results) == 1 and len(calls) >= 2
 
 
-def test_col_check_stops_when_the_left_heartbeat_is_stale(monkeypatch):
+def test_stale_heartbeat(monkeypatch):
     store, _uid = _drained_store()
     store.objects.pop("_status/col_check.closed.json")
     monkeypatch.setattr(store, "heartbeat_age", lambda now=None: 999.0)

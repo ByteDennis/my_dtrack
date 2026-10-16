@@ -29,7 +29,7 @@ def _invoke(args, **env):
     return CliRunner().invoke(probe, args, env=env, standalone_mode=False)
 
 
-def test_decorators_build_the_store_and_pair_list_and_print_one_json_line():
+def test_decorators_build():
     result = _invoke(
         ["--where", "s3://b/p", "--pair", "a", "--pair", "b"],
         AWS_DEFAULT_REGION="us-east-1",
@@ -42,7 +42,7 @@ def test_decorators_build_the_store_and_pair_list_and_print_one_json_line():
     }
 
 
-def test_options_fall_back_to_environment_variables_and_exit_code_is_returned():
+def test_options_fall():
     result = _invoke(
         ["--code", "3"], DTRACK_UNIT_WHERE="s3://env/p", AWS_DEFAULT_REGION="us-east-1"
     )
@@ -51,14 +51,14 @@ def test_options_fall_back_to_environment_variables_and_exit_code_is_returned():
     assert json.loads(result.output)["pairs"] is None
 
 
-def test_log_level_is_applied_before_the_command_body(monkeypatch):
+def test_log_level(monkeypatch):
     seen = []
     monkeypatch.setattr(options, "setup_logging", seen.append)
     _invoke(["--where", "s3://b/p", "--log-level", "warning"], AWS_DEFAULT_REGION="us-east-1")
     assert seen == ["WARNING"]
 
 
-def test_setup_logging_writes_utc_timestamps_to_stderr(monkeypatch):
+def test_setup_logging(monkeypatch):
     logger = get_logger()
     monkeypatch.setattr(logger, "handlers", [])
     monkeypatch.setattr(logger, "level", logger.level)

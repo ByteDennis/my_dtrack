@@ -25,7 +25,7 @@ def _target_factory(root: Path, work: Path):
 
 # >>> the whole protocol in one process on real CSV files and a real directory store, no mocks <<< #
 @pytest.mark.slow
-def test_full_pipeline_on_real_files(synthetic, tmp_path):
+def test_pipeline_files(synthetic, tmp_path):
     root = synthetic.root
     store = VolumeStore(tmp_path / "runs" / "real")
     _run_id, _ = run_row_check(pairs_config(root / "left"), store, run_id="real")

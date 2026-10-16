@@ -13,7 +13,7 @@ from dtrack_right.checks.row_check import (
 from dtrack_right.common.manifest import build_manifest
 
 
-def test_reconcile_partitions_classifies_every_day_on_either_side():
+def test_partition_verdicts():
     rows = reconcile_partitions(
         {"2026-01-01": 10, "2026-01-02": 5, "20260104": 3},
         {"2026-01-01": 10, "2026-01-03": 5, "2026-01-04": 4},
@@ -33,7 +33,7 @@ def test_reconcile_partitions_classifies_every_day_on_either_side():
     }
 
 
-def test_reconcile_partitions_folds_date_synonyms_on_both_sides():
+def test_date_synonyms():
     rows = reconcile_partitions(
         {"3000-01-01": 2}, {"2026-07-01": 2}, date_synonyms={"3000-01-01": "2026-07-01"}
     )
@@ -63,7 +63,7 @@ def test_gate_policies(policy, passed):
     assert decision["passed"] is passed and decision["excluded_ratio"] == 0.5
 
 
-def test_gate_auto_fails_when_nothing_matched_and_handles_empty_input():
+def test_gate_empty():
     assert evaluate_gate({"a": {"verdict": "count_diff"}})["passed"] is False
     assert evaluate_gate({}, None) == {
         "policy": "auto",
@@ -76,12 +76,12 @@ def test_gate_auto_fails_when_nothing_matched_and_handles_empty_input():
 
 
 @pytest.mark.parametrize("policy", ["ratio:1.5", "strict"])
-def test_gate_rejects_unknown_or_out_of_range_policies(policy):
+def test_gate_invalid(policy):
     with pytest.raises(ValueError):
         evaluate_gate(ROWS, policy)
 
 
-def test_row_check_csv_is_sorted_with_blank_delta_for_non_diffs():
+def test_csv_order():
     document = {
         "pair": "p",
         "partitions": {
@@ -96,7 +96,7 @@ def test_row_check_csv_is_sorted_with_blank_delta_for_non_diffs():
     ]
 
 
-def test_pending_documents_skip_reconciled_pairs_and_non_left_files():
+def test_pending_docs():
     store = MemoryStore()
     store.put_json("pairs/a/row_check/left.json", left_document("a"))
     store.put_json("pairs/b/row_check/left.json", left_document("b"))
@@ -105,7 +105,7 @@ def test_pending_documents_skip_reconciled_pairs_and_non_left_files():
     assert [doc["pair"] for doc in pending_left_documents(store)] == ["a"]
 
 
-def test_right_row_check_reconciles_pending_left_documents_and_writes_manifest_with_holes():
+def test_reconcile_pending():
     store = MemoryStore()
     store.put_json("pairs/p/row_check/left.json", left_document())
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
@@ -122,7 +122,7 @@ def test_right_row_check_reconciles_pending_left_documents_and_writes_manifest_w
 
 
 # >>> the verdict is the commit marker: a crash before it leaves the pair pending, never half-released <<< #
-def test_a_crash_before_the_manifest_lands_is_redone_on_restart():
+def test_restart_manifest():
     store = MemoryStore()
     store.put_json("pairs/p/row_check/left.json", left_document())
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
@@ -143,7 +143,7 @@ def test_a_crash_before_the_manifest_lands_is_redone_on_restart():
     assert store.exists("_status/row_check.closed.json")
 
 
-def test_row_check_stays_open_until_every_announced_pair_is_reconciled():
+def test_open_pairs():
     store = MemoryStore()
     store.put_json("pairs/a/row_check/left.json", left_document("a"))
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["a", "b"]})
@@ -151,7 +151,7 @@ def test_row_check_stays_open_until_every_announced_pair_is_reconciled():
     assert not store.exists("_status/row_check.closed.json")
 
 
-def test_manual_gate_reports_without_releasing_a_manifest():
+def test_manual_gate():
     store = MemoryStore()
     store.put_json("pairs/p/row_check/left.json", left_document())
     run_row_check(store, lambda _cfg: FakeTarget(), gate="manual")
@@ -159,14 +159,14 @@ def test_manual_gate_reports_without_releasing_a_manifest():
     assert not store.exists("pairs/p/plan.json")
 
 
-def test_a_failed_right_preflight_stops_the_pair():
+def test_preflight_failure():
     store = MemoryStore()
     with pytest.raises(RuntimeError, match="TABLE_OR_VIEW_NOT_FOUND"):
         reconcile_pair(store, left_document(), FakeTarget(healthy=False))
     assert not store.exists("pairs/p/row_check/result.json")
 
 
-def test_version_two_persists_row_result_then_fails_until_mismatches_are_excluded():
+def test_v2_exclusions():
     store = MemoryStore()
     left = left_document()
     left["pair_config"]["version"] = 2

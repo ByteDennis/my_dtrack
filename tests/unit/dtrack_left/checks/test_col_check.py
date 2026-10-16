@@ -38,7 +38,7 @@ def manifest():
 STATS = {"col_type": "numeric", "n_total": 2, "n_missing": 0, "n_unique": 2, "hash_sum": "3"}
 
 
-def test_pipeline_commits_one_atomic_unit_and_closes_only_when_complete():
+def test_pipeline_commits():
     store = MemoryStore()
     row = manifest()
     store.put_json("pairs/pair/plan.json", row)
@@ -53,7 +53,7 @@ def test_pipeline_commits_one_atomic_unit_and_closes_only_when_complete():
     assert store.exists("_status/col_check.closed.json")
 
 
-def test_query_computes_and_commits_one_window_at_a_time(caplog):
+def test_query_computes(caplog):
     store = MemoryStore()
     columns = [f"c{i}" for i in range(5)]
     row = {
@@ -94,7 +94,7 @@ def test_query_computes_and_commits_one_window_at_a_time(caplog):
     assert "run_ready=5/5" in caplog.text
 
 
-def test_left_runtime_reuses_only_a_provenance_matching_pull(tmp_path):
+def test_left_runtime(tmp_path):
     row = {**manifest(), "version": 2, "plan_id": "plan-one", "key_families": []}
     calls = []
 
@@ -121,7 +121,7 @@ def test_left_runtime_reuses_only_a_provenance_matching_pull(tmp_path):
     assert len(calls) == 3
 
 
-def test_pipeline_skips_units_already_indexed():
+def test_pipeline_skips():
     store = MemoryStore()
     row = manifest()
     store.put_json("pairs/pair/plan.json", row)
@@ -133,7 +133,7 @@ def test_pipeline_skips_units_already_indexed():
     assert ColCheckPipeline(store, **args).run([row]) == 0
 
 
-def test_wait_for_manifests_returns_only_after_right_side_closes_row_check():
+def test_wait_manifests():
     store = MemoryStore()
     store.put_json("pairs/pair/plan.json", manifest())
     store.put_json("pairs/pair/fixed_keys.json", {"pair": "pair", "windows": {}})
@@ -143,14 +143,14 @@ def test_wait_for_manifests_returns_only_after_right_side_closes_row_check():
     assert [m["pair"] for m in wait_for_manifests(store, timeout=0, poll_interval=0)] == ["pair"]
 
 
-def test_wait_for_manifests_fails_fast_on_right_preflight_failure():
+def test_wait_fails():
     store = MemoryStore()
     store.put_json("_PREFLIGHT.json", {"ok": False, "pairs": {"pair": {"error": "no table"}}})
     with pytest.raises(RuntimeError, match="preflight failed"):
         wait_for_manifests(store, timeout=0, poll_interval=0)
 
 
-def test_wait_for_manifests_polls_until_closed_and_filters_pairs(monkeypatch):
+def test_wait_polls(monkeypatch):
     store = MemoryStore()
     store.put_json("_status/run.json", {"state": "right_waiting"})
     store.put_json("pairs/pair/plan.json", manifest())
@@ -165,14 +165,14 @@ def test_wait_for_manifests_polls_until_closed_and_filters_pairs(monkeypatch):
     assert [m["pair"] for m in found] == ["other"] and sleeps == [7]
 
 
-def test_windows_are_interleaved_round_robin_across_pairs():
+def test_windows_interleaved():
     a = {"pair": "a", "windows": [{"bucket": 1}, {"bucket": 2}, {"bucket": 3}]}
     b = {"pair": "b", "windows": [{"bucket": 1}]}
     order = [(m["pair"], w["bucket"]) for m, w in iter_windows_round_robin([a, b, {"pair": "c"}])]
     assert order == [("a", 1), ("b", 1), ("a", 2), ("a", 3)]
 
 
-def test_backpressure_reports_the_backlog_without_spamming_each_poll(monkeypatch, caplog):
+def test_backpressure_reports(monkeypatch, caplog):
     store = MemoryStore()
     row = manifest()
     store.put_json("pairs/pair/plan.json", row)
@@ -201,7 +201,7 @@ def test_backpressure_reports_the_backlog_without_spamming_each_poll(monkeypatch
     assert "backpressure cleared: ready_unclaimed=0, wip=1" in caplog.text
 
 
-def test_statistics_progress_is_polled_while_a_worker_is_running(caplog):
+def test_statistics_progress(caplog):
     import time
 
     store = MemoryStore()
@@ -231,7 +231,7 @@ def test_statistics_progress_is_polled_while_a_worker_is_running(caplog):
     assert "attributes_uploaded=" in caplog.text
 
 
-def test_pipeline_publishes_shards_early_but_runs_only_one_vintage_at_a_time():
+def test_pipeline_publishes():
     store = MemoryStore()
     columns = ["a", "b"]
     row = {
@@ -281,7 +281,7 @@ def test_pipeline_publishes_shards_early_but_runs_only_one_vintage_at_a_time():
     ]
 
 
-def test_pipeline_leaves_manifests_open_when_units_are_missing():
+def test_pipeline_leaves():
     store = MemoryStore()
     row = manifest()
     store.put_json("pairs/pair/plan.json", {**row, "expected_units": 3})
@@ -302,7 +302,7 @@ def _fixed_manifest(synthetic, count=3):
     return all_match_manifest(build_manifest, "run", "customers", pair, counts)
 
 
-def test_fixed_sample_keys_are_published_once_and_reused_by_the_runtime(synthetic, tmp_path):
+def test_fixed_sample(synthetic, tmp_path):
     store = MemoryStore()
     manifest_row = _fixed_manifest(synthetic)
     document = publish_fixed_keys(store, manifest_row, tmp_path / "keys")
@@ -325,9 +325,7 @@ def test_fixed_sample_keys_are_published_once_and_reused_by_the_runtime(syntheti
     assert forced["BALANCE"]["col_type"] == "categorical"
 
 
-def test_version_two_fixed_keys_refresh_the_plan_id_without_resampling_unchanged_windows(
-    synthetic, tmp_path
-):
+def test_version_two(synthetic, tmp_path):
     store = MemoryStore()
     pair = pairs_config(synthetic.left)["pairs"]["customers"]
     counts = FileSource({**pair["left"]}).partition_counts("2026-01-01", "2026-01-31")
@@ -347,7 +345,7 @@ def test_version_two_fixed_keys_refresh_the_plan_id_without_resampling_unchanged
     assert refreshed["windows"] == original["windows"]
 
 
-def test_row_check_then_col_check_on_real_files(synthetic, tmp_path):
+def test_row_check(synthetic, tmp_path):
     store = MemoryStore()
     config = pairs_config(synthetic.left)
     run_id, _ = run_row_check(config, store, run_id="real", pair_names=["orders"])
@@ -374,7 +372,7 @@ def test_row_check_then_col_check_on_real_files(synthetic, tmp_path):
     assert store.get_json("_status/run.json")["state"] == "left_col_check_closed"
 
 
-def test_pipeline_skips_pulling_windows_whose_units_are_all_indexed():
+def test_pipeline_pulling():
     store = MemoryStore()
     row = manifest()
     store.put_json("pairs/pair/plan.json", row)
@@ -388,7 +386,7 @@ def test_pipeline_skips_pulling_windows_whose_units_are_all_indexed():
     assert pulled == ["2026-01"]
 
 
-def test_version_two_rerun_pulls_only_the_vintage_changed_by_an_exclusion():
+def test_version_rerun():
     pair = {
         "version": 2,
         "left": {"source": "csv", "date_col": "dt"},

@@ -42,7 +42,7 @@ def _csvs(tmp_path, right_norm_sql=None):
     return tmp_path / "left.csv", tmp_path / "right.csv"
 
 
-def test_configured_families_match_differently_written_keys(tmp_path):
+def test_family_match(tmp_path):
     left, right = _csvs(tmp_path)
     check = keycheck.compare_keys("p", PAIR, left, right, window=("2026-01-31", "2026-01-31"))
     summary = check.summary()
@@ -50,7 +50,7 @@ def test_configured_families_match_differently_written_keys(tmp_path):
     assert set(check.left_only["ACCT_ID"]) == {"ABC", "009"}
 
 
-def test_report_explains_each_mismatch_and_points_at_a_family(tmp_path):
+def test_mismatch_report(tmp_path):
     left, right = _csvs(tmp_path)
     check = keycheck.compare_keys(
         "p",
@@ -74,7 +74,7 @@ def test_report_explains_each_mismatch_and_points_at_a_family(tmp_path):
     assert best == {"ACCT_ID": "numeric", "OPEN_DT": "date"}
 
 
-def test_only_keys_narrows_both_sides_and_sql_parity_is_reported(tmp_path):
+def test_key_filter(tmp_path):
     left, right = _csvs(tmp_path, right_norm_sql=["7|2020-01-01", "X", "abc|2020-01-03", "10|x"])
     check = keycheck.compare_keys(
         "p", PAIR, left, right, window=("a", "b"), only_keys=[["007", "2020-01-01"]]
@@ -95,11 +95,11 @@ def test_only_keys_narrows_both_sides_and_sql_parity_is_reported(tmp_path):
         ("x", "y", "different value"),
     ],
 )
-def test_explain_names_the_difference(left, right, reason):
+def test_explanations(left, right, reason):
     assert keycheck.explain(left, right)[0] == reason
 
 
-def test_pull_right_keys_selects_raw_keys_and_the_spark_composite(tmp_path):
+def test_right_keys(tmp_path):
     seen = {}
     warehouse = SimpleNamespace(
         to_csv=lambda sql, output, columns, **kwargs: seen.update(
@@ -119,7 +119,7 @@ def test_pull_right_keys_selects_raw_keys_and_the_spark_composite(tmp_path):
     assert "CAST(`dw_dt` AS STRING)" not in seen["sql"]
 
 
-def test_fraction_sample_is_pushed_into_both_key_queries(tmp_path):
+def test_fraction_pushdown(tmp_path):
     seen = {}
 
     class Source:
@@ -159,7 +159,7 @@ def test_fraction_sample_is_pushed_into_both_key_queries(tmp_path):
     assert result.summary()["ok"] is True
 
 
-def test_fixed_sample_uses_left_selected_keys_on_both_sides(tmp_path):
+def test_fixed_keys(tmp_path):
     seen = {}
 
     class Source:
@@ -206,7 +206,7 @@ def test_fixed_sample_uses_left_selected_keys_on_both_sides(tmp_path):
     assert result.summary()["selected fixed keys"] == 1
 
 
-def test_real_left_source_accepts_the_resolved_families_for_fixed_sampling(tmp_path):
+def test_real_source(tmp_path):
     left_path = tmp_path / "left.csv"
     pd.DataFrame({"EFF_DT": ["2026-01-31"], "ACCT_ID": ["007"], "OPEN_DT": ["2020-01-01"]}).to_csv(
         left_path, index=False
@@ -239,12 +239,12 @@ def test_real_left_source_accepts_the_resolved_families_for_fixed_sampling(tmp_p
     assert result.summary()["ok"] is True
 
 
-def test_key_spec_needs_a_key():
+def test_key_required():
     with pytest.raises(ValueError, match="no key"):
         keycheck.key_spec({**PAIR, "key": ""})
 
 
-def test_partition_date_key_automatically_reuses_side_date_types():
+def test_date_family():
     pair = {
         **PAIR,
         "key": "EFF_DT",

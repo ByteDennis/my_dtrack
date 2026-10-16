@@ -12,7 +12,7 @@ from dtrack_left.confluence_templates import (
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_business_validation_template_computes_metrics_and_artifact_links():
+def test_business_validation():
     page = build_template_page(
         ROOT / "templates/confluence/business-validation-overall.xhtml",
         ROOT / "templates/confluence/business-validation-overall.example.json",
@@ -27,7 +27,7 @@ def test_business_validation_template_computes_metrics_and_artifact_links():
     assert "main.finance.payments" in body and "NOT PASS" in body
 
 
-def test_template_escapes_json_values_and_rejects_raw_user_fields(tmp_path):
+def test_template_escapes(tmp_path):
     data = tmp_path / "data.json"
     data.write_text(json.dumps({"title": "<script>x</script>", "tables": []}))
     safe = tmp_path / "safe.xhtml"
@@ -40,7 +40,7 @@ def test_template_escapes_json_values_and_rejects_raw_user_fields(tmp_path):
         build_template_page(raw, data)
 
 
-def test_template_state_can_append_tables_evidence_and_statuses(tmp_path):
+def test_template_state(tmp_path):
     template = tmp_path / "page.xhtml"
     template.write_text(
         "{{#tables}}<p>{{name}} {{{tech_pvt.artifacts_xhtml}}} "
@@ -83,7 +83,7 @@ def test_template_state_can_append_tables_evidence_and_statuses(tmp_path):
     assert page["template_state"]["data"]["tables"][1]["status"] == "NOT PASS"
 
 
-def test_template_state_rejects_duplicate_or_unknown_table_changes(tmp_path):
+def test_template_rejects(tmp_path):
     document = {"tables": [{"name": "Orders", "table": "main.orders"}]}
     with pytest.raises(ValueError, match="already exists"):
         merge_template_data(document, append_tables=[{"name": "Orders"}])

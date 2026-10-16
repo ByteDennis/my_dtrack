@@ -18,7 +18,7 @@ def config_path(synthetic, tmp_path):
     return path
 
 
-def test_help_lists_every_command(capsys):
+def test_help_lists(capsys):
     assert main(["-h"]) == 0
     out = capsys.readouterr().out
     for command in ("row-check", "col-check", "tools"):
@@ -36,12 +36,12 @@ def test_help_lists_every_command(capsys):
 @pytest.mark.parametrize(
     "command", ["fetch-report", "materialize", "doctor", "rollback", "debug", "dbx", "blog"]
 )
-def test_auxiliary_commands_require_the_tools_group(command, capsys):
+def test_auxiliary_commands(command, capsys):
     assert main([command, "-h"]) == 2
     assert f"No such command '{command}'" in capsys.readouterr().err
 
 
-def test_doctor_preflights_real_csv_sources_and_prints_one_json_line(config_path, capsys):
+def test_doctor_preflights(config_path, capsys):
     assert main(["tools", "doctor", "--config", str(config_path)]) == 0
     result = json.loads(capsys.readouterr().out)
     assert set(result) == {"orders", "customers"} and all(row["ok"] for row in result.values())
@@ -69,12 +69,12 @@ def test_doctor_preflights_real_csv_sources_and_prints_one_json_line(config_path
         ),
     ],
 )
-def test_describe_right_names_what_the_job_reads(spec, expected):
+def test_describe_right(spec, expected):
     row = tools.describe_right(spec)
     assert (row["kind"], row["target"], row["patched"]) == expected
 
 
-def test_doctor_fails_with_exit_code_one_when_a_source_is_missing(config_path, tmp_path, capsys):
+def test_doctor_fails(config_path, tmp_path, capsys):
     config = json.loads(config_path.read_text())
     config["pairs"]["orders"]["left"]["path"] = str(tmp_path / "missing.csv")
     broken = tmp_path / "broken.json"
@@ -83,11 +83,11 @@ def test_doctor_fails_with_exit_code_one_when_a_source_is_missing(config_path, t
     assert json.loads(capsys.readouterr().out)["orders"]["ok"] is False
 
 
-def test_usage_errors_exit_two(capsys):
+def test_usage_errors(capsys):
     assert main(["row-check", "--config", "nope.json", "--run-s3", "s3://b/runs"]) == 2
 
 
-def test_version_and_abort_map_to_exit_codes(monkeypatch, capsys):
+def test_version_abort(monkeypatch, capsys):
     assert main(["--version"]) == 0 and "dtrack, version" in capsys.readouterr().out
     monkeypatch.setattr(cli_package.cli, "main", lambda **_: (_ for _ in ()).throw(click.Abort()))
     assert main(["tools", "doctor"]) == 1 and "Aborted!" in capsys.readouterr().err
@@ -109,7 +109,7 @@ class FakeDebugger:
         self.calls.append(("post_mortem", tb is not None))
 
 
-def test_run_under_debugger_uses_ipdb_and_opens_post_mortem_on_errors(monkeypatch):
+def test_run_debugger(monkeypatch):
     good, bad = FakeDebugger(), FakeDebugger(fail=True)
     monkeypatch.setitem(sys.modules, "ipdb", good)
     assert debugging.run_under_debugger(lambda argv: 7, ["doctor"]) == 7
@@ -118,13 +118,13 @@ def test_run_under_debugger_uses_ipdb_and_opens_post_mortem_on_errors(monkeypatc
     assert bad.calls == [("runcall", ["doctor"]), ("post_mortem", True)]
 
 
-def test_run_under_debugger_requires_ipdb_instead_of_falling_back_to_pdb(monkeypatch):
+def test_run_requires(monkeypatch):
     monkeypatch.setitem(sys.modules, "ipdb", None)
     with pytest.raises(RuntimeError, match="ipdb is required"):
         debugging.run_under_debugger(lambda argv: 3, [])
 
 
-def test_attach_waits_for_vs_code_before_running(monkeypatch):
+def test_attach_waits(monkeypatch):
     events = []
     fake = SimpleNamespace(
         listen=lambda address: events.append(("listen", address)),
@@ -132,14 +132,14 @@ def test_attach_waits_for_vs_code_before_running(monkeypatch):
         breakpoint=lambda: events.append("breakpoint"),
     )
     monkeypatch.setitem(sys.modules, "debugpy", fake)
-    assert debugging.run_under_debugger(
-        lambda argv: events.append(argv) or 0, ["x"], attach=5678
-    ) == 0
+    assert (
+        debugging.run_under_debugger(lambda argv: events.append(argv) or 0, ["x"], attach=5678) == 0
+    )
     assert events == [("listen", ("0.0.0.0", 5678)), "wait", "breakpoint", ["x"]]
 
 
 @pytest.mark.parametrize(("mode", "port"), [("ipdb", None), ("attach", 5678)])
-def test_debug_option_reuses_the_shared_debugger_runner(monkeypatch, mode, port):
+def test_debug_option(monkeypatch, mode, port):
     seen = []
 
     @click.command()

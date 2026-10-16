@@ -31,7 +31,7 @@ def finished(synthetic, tmp_path):
 
 
 @pytest.mark.slow
-def test_col_rollback_rebuilds_the_manifest_from_stage_two_settings_only(finished, synthetic):
+def test_col_rollback(finished, synthetic):
     run = finished()
     report_keys = run.store.list_keys("report/")
     assert report_keys
@@ -67,7 +67,7 @@ def test_col_rollback_rebuilds_the_manifest_from_stage_two_settings_only(finishe
 
 
 @pytest.mark.slow
-def test_row_rollback_recounts_one_pair_and_ends_where_it_started(finished):
+def test_row_rollback(finished):
     run = finished()
     done = rollback.rollback(run.store, "orders", "row", apply=True)
     assert "pairs/orders/row_check/result.json" in done["keys"]
@@ -83,7 +83,7 @@ def test_row_rollback_recounts_one_pair_and_ends_where_it_started(finished):
 
 
 @pytest.mark.slow
-def test_row_rollback_with_config_restarts_selected_left_pairs_in_same_run(finished, synthetic):
+def test_row_config(finished, synthetic):
     run = finished()
     config = pairs_config(synthetic.left)
     config["pairs"]["orders"]["fromDate"] = "2026-01-02"
@@ -114,7 +114,7 @@ def test_row_rollback_with_config_restarts_selected_left_pairs_in_same_run(finis
 
 
 @pytest.mark.slow
-def test_row_config_dry_run_never_queries_sources(finished, synthetic, monkeypatch):
+def test_row_dry(finished, synthetic, monkeypatch):
     run = finished()
     config = pairs_config(synthetic.left)
 
@@ -128,7 +128,7 @@ def test_row_config_dry_run_never_queries_sources(finished, synthetic, monkeypat
 
 @pytest.mark.parametrize("stage", ["row", "col"])
 @pytest.mark.slow
-def test_config_rejects_skipped_pair_before_deleting(finished, synthetic, stage):
+def test_config_rejects(finished, synthetic, stage):
     run = finished()
     config = pairs_config(synthetic.left)
     config["pairs"]["orders"]["skip"] = True
@@ -142,7 +142,7 @@ def test_config_rejects_skipped_pair_before_deleting(finished, synthetic, stage)
 
 
 @pytest.mark.slow
-def test_dead_rollback_only_touches_dead_units_of_the_pair(finished):
+def test_dead_rollback(finished):
     run = finished()
     run.store.put_json("pairs/orders/col_check/failures/x.json", {"pair": "orders", "unit_id": "x"})
     run.store.put_json(
@@ -156,7 +156,7 @@ def test_dead_rollback_only_touches_dead_units_of_the_pair(finished):
         rollback.plan(run.store, "orders", "all")
 
 
-def test_force_reset_removes_only_the_requested_stage_artifacts():
+def test_force_reset():
     store = MemoryStore()
     store.put_json("pairs/p/row_check/left.json", {"pair": "p", "run_id": "r"})
     store.put_json("pairs/p/plan.json", {"pair": "p"})
@@ -179,9 +179,7 @@ def test_force_reset_removes_only_the_requested_stage_artifacts():
 
 
 @pytest.mark.slow
-def test_batch_rollback_deduplicates_shared_markers_and_deletes_every_selected_pair(
-    finished, monkeypatch
-):
+def test_batch_rollback(finished, monkeypatch):
     run = finished()
     pairs = ["orders", "customers"]
     dry = rollback.rollback_many(run.store, pairs, "col")
@@ -196,7 +194,7 @@ def test_batch_rollback_deduplicates_shared_markers_and_deletes_every_selected_p
 
 
 @pytest.mark.slow
-def test_batch_config_builds_every_manifest_before_deleting(finished, synthetic):
+def test_batch_config(finished, synthetic):
     run = finished()
     config = pairs_config(synthetic.left)
     config["pairs"]["orders"]["col_map"].pop("STATUS")
@@ -223,7 +221,7 @@ def test_batch_config_builds_every_manifest_before_deleting(finished, synthetic)
 
 
 @pytest.mark.slow
-def test_pair_resolution_supports_all_and_refuses_typos_before_deleting(finished):
+def test_pair_resolution(finished):
     run = finished()
     available = rollback.discover_pairs(run.store)
     assert available == ["customers", "orders"]
@@ -239,7 +237,7 @@ def test_pair_resolution_supports_all_and_refuses_typos_before_deleting(finished
     assert run.store.exists("_status/col_check.closed.json")
 
 
-def test_rollback_deletes_from_s3_run_folders(s3_bucket):
+def test_rollback_deletes(s3_bucket):
     store = rollback.open_location(f"s3://{s3_bucket}/runs/r")
     store.put_json("pairs/p/col_check/results/u.json", {"pair": "p", "unit_id": "u"})
     store.put_json("pairs/q/col_check/results/v.json", {"pair": "q", "unit_id": "v"})
@@ -259,7 +257,7 @@ def test_rollback_deletes_from_s3_run_folders(s3_bucket):
 
 
 @pytest.mark.slow
-def test_rollback_command_is_a_dry_run_until_yes(finished, capsys):
+def test_rollback_command(finished, capsys):
     run = finished()
     assert (
         main(
@@ -303,7 +301,7 @@ def test_rollback_command_is_a_dry_run_until_yes(finished, capsys):
 
 
 @pytest.mark.slow
-def test_rollback_command_accepts_repeated_pairs_and_all(finished, capsys):
+def test_rollback_accepts(finished, capsys):
     run = finished()
     base = [
         "tools",
@@ -331,7 +329,7 @@ def test_rollback_command_accepts_repeated_pairs_and_all(finished, capsys):
     assert run.store.exists("_status/col_check.closed.json")
 
 
-def test_local_target_rejects_paths_outside_the_run(tmp_path):
+def test_local_target(tmp_path):
     store = rollback.LocalFolder(tmp_path / "run")
     store.heartbeat(now=123.0)
     assert store.get_json("_status/heartbeat.json")["epoch_s"] == 123.0
@@ -339,7 +337,7 @@ def test_local_target_rejects_paths_outside_the_run(tmp_path):
         rollback.locate(store, "../other.json")
 
 
-def test_local_folder_retries_a_transient_windows_access_denied(tmp_path, monkeypatch):
+def test_local_folder(tmp_path, monkeypatch):
     store = rollback.LocalFolder(tmp_path / "run")
     store.put_bytes("_status/run.json", b"old")
     actual_replace = Path.replace
@@ -364,7 +362,7 @@ def test_local_folder_retries_a_transient_windows_access_denied(tmp_path, monkey
     assert not list(tmp_path.rglob("*.part"))
 
 
-def test_delete_reports_a_target_that_disappeared_after_planning(tmp_path):
+def test_delete_reports(tmp_path):
     store = rollback.LocalFolder(tmp_path / "run")
     path = store.root / "pairs" / "p" / "col_check" / "results" / "u.json"
     path.parent.mkdir(parents=True)

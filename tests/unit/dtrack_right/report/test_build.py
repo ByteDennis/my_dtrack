@@ -51,9 +51,7 @@ def _store():
             "timing": {"left_count_s": 1.5, "right_count_s": 0.5},
         },
     )
-    store.put_json(
-        "pairs/p/plan.json", {"pair": "p", "vintage": "month", "expected_units": 2}
-    )
+    store.put_json("pairs/p/plan.json", {"pair": "p", "vintage": "month", "expected_units": 2})
     store.put_json("pairs/p/fixed_keys.json", {"pair": "p", "windows": {}})
     store.put_json("_status/col_check.closed.json", {"pairs": ["p"], "expected_units": 2})
     same = compare_statistics(pair="p", window="2026-01-01", column="x", left=LEFT, right=LEFT)
@@ -71,7 +69,7 @@ def _store():
     return store
 
 
-def test_build_report_ignores_left_documents_and_key_files(tmp_path):
+def test_report_inputs(tmp_path):
     files = build_report(_store(), tmp_path / "out", title="T")
     assert set(files) == {
         "pairs/p/row_check.csv",
@@ -95,7 +93,7 @@ def test_build_report_ignores_left_documents_and_key_files(tmp_path):
     )
 
 
-def test_report_files_can_be_published_to_a_run_store(tmp_path):
+def test_report_publish(tmp_path):
     files = build_report(_store(), tmp_path / "out")
     runs_store = VolumeStore(tmp_path / "runs")
     run_store = runs_store.child("run")
@@ -106,7 +104,7 @@ def test_report_files_can_be_published_to_a_run_store(tmp_path):
     assert run_store.get_bytes("report/report.xlsx") == files["report.xlsx"].read_bytes()
 
 
-def test_compare_col_csv_orders_rows_and_unions_fields():
+def test_compare_csv():
     rows = [
         {"vintage": "2026-02-01", "column": "a", "verdict": "match"},
         {"vintage": "2026-01-01", "column": "b", "extra": 1},
@@ -118,32 +116,38 @@ def test_compare_col_csv_orders_rows_and_unions_fields():
     ]
 
 
-def test_run_is_partial_with_dead_units_or_without_a_closed_manifest(tmp_path):
+@pytest.mark.parametrize(
+    ("has_dead", "has_manifest", "expected"),
+    [
+        pytest.param(
+            True,
+            True,
+            {"errors": [{"unit_id": "u3", "error": "boom"}]},
+            id="dead-unit",
+        ),
+        pytest.param(False, False, {"units_expected": 2}, id="open-manifest"),
+    ],
+)
+def test_partial(tmp_path, has_dead, has_manifest, expected):
     store = _store()
-    store.put_dead("u3", {"unit_id": "u3", "pair": "p", "error": "boom"})
-    summary = json.loads(build_report(store, tmp_path / "a")["summary.json"].read_text())
-    assert summary["status"] == "PARTIAL" and summary["errors"] == [
-        {"unit_id": "u3", "error": "boom"}
-    ]
-    store = _store()
-    store.objects.pop("_status/col_check.closed.json")
-    summary = json.loads(build_report(store, tmp_path / "b")["summary.json"].read_text())
-    assert summary["status"] == "PARTIAL" and summary["units_expected"] == 2
+    if has_dead:
+        store.put_dead("u3", {"unit_id": "u3", "pair": "p", "error": "boom"})
+    if not has_manifest:
+        store.objects.pop("_status/col_check.closed.json")
+    summary = json.loads(build_report(store, tmp_path)["summary.json"].read_text())
+    assert summary["status"] == "PARTIAL"
+    assert all(summary[field] == value for field, value in expected.items())
 
 
-def test_a_run_without_col_results_still_reports_row_counts(tmp_path):
+def test_rows_only(tmp_path):
     store = _store()
-    for key in [
-        key
-        for key in store.objects
-        if "/col_check/results/" in key
-    ]:
+    for key in [key for key in store.objects if "/col_check/results/" in key]:
         store.objects.pop(key)
     files = build_report(store, tmp_path)
     assert "pairs/p/col_check.csv" not in files
     assert "Stage 2" not in files["index.html"].read_text()
 
 
-def test_build_report_needs_at_least_one_row_check_document(tmp_path):
+def test_rows_required(tmp_path):
     with pytest.raises(ValueError, match="no row_check documents"):
         build_report(MemoryStore(), tmp_path)

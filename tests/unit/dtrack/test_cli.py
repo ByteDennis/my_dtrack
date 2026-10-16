@@ -3,7 +3,7 @@ import json
 from dtrack.cli import main
 
 
-def test_unified_cli_has_a_local_workflow_group(capsys):
+def test_local_group(capsys):
     assert main(["-h"]) == 0
     root_help = capsys.readouterr().out
     assert all(
@@ -23,7 +23,7 @@ def test_unified_cli_has_a_local_workflow_group(capsys):
     assert all(command in local_help for command in ("preflight", "run", "key-check"))
 
 
-def test_auxiliary_commands_are_not_available_at_the_root(capsys):
+def test_root_commands(capsys):
     for command in (
         "fetch-report",
         "materialize",
@@ -38,7 +38,7 @@ def test_auxiliary_commands_are_not_available_at_the_root(capsys):
         assert f"No such command '{command}'" in capsys.readouterr().err
 
 
-def test_row_and_col_help_show_config_defaults_over_environment(tmp_path, monkeypatch, capsys):
+def test_help_defaults(tmp_path, monkeypatch, capsys):
     config = tmp_path / "config.json"
     config.write_text(
         json.dumps(

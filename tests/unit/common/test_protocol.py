@@ -27,7 +27,7 @@ def _status_rows(store):
     return {row["column"]: row for row in csv.DictReader(io.StringIO(text))}
 
 
-def test_units_csv_tracks_waiting_left_ready_right_ready_complete_and_failed():
+def test_unit_states():
     store = MemoryStore()
     store.put_json("pairs/orders/plan.json", _plan())
     assert {row["state"] for row in _status_rows(store).values()} == {"waiting_left"}
@@ -58,7 +58,7 @@ def test_units_csv_tracks_waiting_left_ready_right_ready_complete_and_failed():
     assert rows["amount"]["completed_at"] and rows["status"]["completed_at"]
 
 
-def test_run_status_freezes_the_timezone_and_keeps_offset_timestamps():
+def test_status_timezone():
     store = MemoryStore()
     write_run_status(
         store,

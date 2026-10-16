@@ -20,7 +20,7 @@ class Fake:
         return {"2026-01-01": 1, "20260102": 2}
 
 
-def test_row_check_publishes_counts_and_public_config_without_secrets():
+def test_row_check():
     config = {
         "pairs": {
             "p": {
@@ -77,7 +77,7 @@ def _config(**pairs):
     return {"pairs": {name: {**base, **extra} for name, extra in pairs.items()}}
 
 
-def test_make_run_id_is_a_utc_stamp_plus_a_config_digest():
+def test_make_run():
     now = datetime(2026, 9, 27, 1, 2, 3, tzinfo=UTC)
     run_id = make_run_id({"pairs": {}}, now=now)
     assert run_id.startswith("20260927T010203Z-") and len(run_id.split("-")[1]) == 6
@@ -86,7 +86,7 @@ def test_make_run_id_is_a_utc_stamp_plus_a_config_digest():
     assert make_run_id({}).endswith(make_run_id({}, now=now)[-7:])
 
 
-def test_row_check_filters_pairs_and_skips_disabled_ones():
+def test_row_filters():
     store = MemoryStore()
     config = _config(a={}, b={}, c={"skip": True})
     run_id, documents = run_row_check(
@@ -97,7 +97,7 @@ def test_row_check_filters_pairs_and_skips_disabled_ones():
     assert store.exists("_status/heartbeat.json")
 
 
-def test_row_check_refuses_an_empty_selection_and_failed_preflights():
+def test_row_refuses():
     with pytest.raises(ValueError, match="no active pairs"):
         run_row_check(_config(a={"skip": True}), MemoryStore(), source_factory=lambda _r: Fake())
 
@@ -111,7 +111,7 @@ def test_row_check_refuses_an_empty_selection_and_failed_preflights():
     assert not store.exists("pairs/a/row_check/left.json")
 
 
-def test_row_check_reuses_same_run_counts_including_an_empty_result():
+def test_row_reuses():
     class Empty(Fake):
         def partition_counts(self, *_args):
             return {}
@@ -129,13 +129,13 @@ def test_row_check_reuses_same_run_counts_including_an_empty_result():
     assert reuse_row_check(config, store, run_id="same-run") is None
 
 
-def test_public_pair_config_strips_every_credential_field():
+def test_public_pair():
     side = {name: "x" for name in SECRET_FIELDS} | {"token_env": "T", "table": "t"}
     public = public_pair_config({"left": side, "right": side, "sample": 5})
     assert public == {"sample": 5, "left": {"table": "t"}, "right": {"table": "t"}}
 
 
-def test_public_pair_config_keeps_different_side_date_types_and_expands_custom_names():
+def test_public_config():
     from dtrack_left.common import dates
 
     dates.register_date_type(

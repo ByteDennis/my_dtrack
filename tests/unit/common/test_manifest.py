@@ -23,7 +23,7 @@ ROW_CHECK = {
 }
 
 
-def test_unit_id_is_stable_slugged_and_collision_resistant(common):
+def test_unit_id(common):
     unit_id = common.manifest.unit_id
     assert unit_id("p", "2026-01-01", "AMOUNT") == unit_id("p", "2026-01-01", "AMOUNT")
     assert unit_id("p", "2026-01-01", "AMOUNT").startswith("p--2026-01-01--amount--")
@@ -33,31 +33,31 @@ def test_unit_id_is_stable_slugged_and_collision_resistant(common):
 
 
 @pytest.mark.parametrize(
-    ("raw", "expected"),
+    ("raw", "expected", "error"),
     [
-        (None, {"mode": "all"}),
-        ("", {"mode": "all"}),
-        (False, {"mode": "all"}),
-        (20, {"mode": "fixed", "count": 20}),
-        ("20", {"mode": "fixed", "count": 20}),
-        (1.0, {"mode": "fraction", "rate": 1.0, "threshold": 2**32}),
-        ("0.5", {"mode": "fraction", "rate": 0.5, "threshold": 2**31}),
-        ("1e-9", {"mode": "fraction", "rate": 1e-9, "threshold": 4}),
+        (None, {"mode": "all"}, None),
+        ("", {"mode": "all"}, None),
+        (False, {"mode": "all"}, None),
+        (20, {"mode": "fixed", "count": 20}, None),
+        ("20", {"mode": "fixed", "count": 20}, None),
+        (1.0, {"mode": "fraction", "rate": 1.0, "threshold": 2**32}, None),
+        ("0.5", {"mode": "fraction", "rate": 0.5, "threshold": 2**31}, None),
+        ("1e-9", {"mode": "fraction", "rate": 1e-9, "threshold": 4}, None),
+        (True, None, TypeError),
+        (1.5, None, ValueError),
+        (0.0, None, ValueError),
+        (0, None, ValueError),
     ],
 )
-def test_sample_plan_parses_fractions_and_counts(common, raw, expected):
-    assert common.manifest.sample_plan(raw) == expected
+def test_sample(common, raw, expected, error):
+    if error is None:
+        assert common.manifest.sample_plan(raw) == expected
+    else:
+        with pytest.raises(error):
+            common.manifest.sample_plan(raw)
 
 
-@pytest.mark.parametrize(
-    ("raw", "error"), [(True, TypeError), (1.5, ValueError), (0.0, ValueError), (0, ValueError)]
-)
-def test_sample_plan_rejects_invalid_values(common, raw, error):
-    with pytest.raises(error):
-        common.manifest.sample_plan(raw)
-
-
-def test_build_manifest_windows_keep_holes_and_count_units(common):
+def test_manifest_windows(common):
     manifest = common.manifest.build_manifest("run", "p", PAIR, ROW_CHECK)
     assert manifest["columns"] == ["ID", "AMOUNT"]
     assert manifest["windows"] == [
@@ -109,12 +109,12 @@ def _variant(**changes):
         (_variant(col_type_overrides={"ID": "date"}), ROW_CHECK, "got date"),
     ],
 )
-def test_build_manifest_refuses_invalid_pairs(common, pair, row_check, message):
+def test_manifest_invalid(common, pair, row_check, message):
     with pytest.raises(ValueError, match=message):
         common.manifest.build_manifest("run", "p", pair, row_check)
 
 
-def test_build_manifest_defaults_to_daily_windows_and_full_scan(common):
+def test_manifest_defaults(common):
     manifest = common.manifest.build_manifest(
         "run", "p", _variant(vintage=None, sample=None, key=""), ROW_CHECK
     )
@@ -122,7 +122,7 @@ def test_build_manifest_defaults_to_daily_windows_and_full_scan(common):
     assert manifest["sample"] == {"mode": "all"}
 
 
-def test_version_two_uses_left_partitions_and_explicit_exclusions(common):
+def test_version_two(common):
     pair = _variant(
         version=2,
         excluded_partitions=["2026-01-02", "2026-02-02"],
@@ -137,7 +137,7 @@ def test_version_two_uses_left_partitions_and_explicit_exclusions(common):
     ]
 
 
-def test_version_two_unit_ids_change_only_for_the_affected_window(common):
+def test_version_ids(common):
     first = common.manifest.build_manifest("run", "p", _variant(version=2), ROW_CHECK)
     second = common.manifest.build_manifest(
         "run", "p", _variant(version=2, excluded_partitions=["2026-01-02"]), ROW_CHECK
@@ -159,7 +159,7 @@ def test_version_two_unit_ids_change_only_for_the_affected_window(common):
     assert right_only["plan_id"] != first["plan_id"]
 
 
-def test_date_partition_key_reuses_each_sides_date_type_for_hashing(common):
+def test_date_key(common):
     pair = _variant(
         key="DT",
         key_families={},
@@ -190,7 +190,7 @@ def test_date_partition_key_reuses_each_sides_date_type_for_hashing(common):
         (lambda m: m["windows"][0].update(partitions=["b", "a"]), "sorted and unique"),
     ],
 )
-def test_validate_manifest_rejects_broken_documents(common, change, message):
+def test_manifest_validation(common, change, message):
     manifest = common.manifest.build_manifest("run", "p", PAIR, ROW_CHECK)
     change(manifest)
     with pytest.raises(ValueError, match=message):

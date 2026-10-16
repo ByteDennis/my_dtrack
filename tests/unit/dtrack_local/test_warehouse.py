@@ -26,7 +26,7 @@ def _client(states, chunks=None):
     return NS(statement_execution=api), calls
 
 
-def test_rows_follow_every_chunk_after_polling_without_forcing_a_disposition():
+def test_chunk_rows():
     client, calls = _client(
         [_response("PENDING"), _response("SUCCEEDED", rows=[["1", "x"]], following=1)],
         chunks={1: NS(data_array=[["2", None]], external_links=None, next_chunk_index=None)},
@@ -37,12 +37,13 @@ def test_rows_follow_every_chunk_after_polling_without_forcing_a_disposition():
     assert calls[0]["format"].value == "JSON_ARRAY"
 
 
-def test_statement_is_audited_before_submission():
+def test_sql_audit():
     events = []
     response = _response("SUCCEEDED", rows=[])
     api = NS(
-        execute_statement=lambda **kwargs: events.append(("execute", kwargs["statement"]))
-        or response,
+        execute_statement=lambda **kwargs: (
+            events.append(("execute", kwargs["statement"])) or response
+        ),
     )
     audit = NS(record=lambda sql, **meta: events.append(("audit", sql, meta)))
     Warehouse(NS(statement_execution=api), "wh", sql_audit=audit).rows("SELECT * FROM huge_table")
@@ -56,7 +57,7 @@ def test_statement_is_audited_before_submission():
     ]
 
 
-def test_external_links_are_downloaded_in_order_and_written_like_a_left_pull(tmp_path):
+def test_external_links(tmp_path):
     links = [NS(external_link="u0", next_chunk_index=1)]
     client, calls = _client(
         [_response("SUCCEEDED", links=links)],
@@ -71,7 +72,7 @@ def test_external_links_are_downloaded_in_order_and_written_like_a_left_pull(tmp
     assert (tmp_path / "w" / "r.csv").read_text() == "a,b\n1,x\n2,\n3,z\n"
 
 
-def test_failures_carry_the_warehouse_error_and_bad_settings_fail_early():
+def test_failures():
     client, _ = _client([_response("FAILED", error="TABLE_OR_VIEW_NOT_FOUND")])
     with pytest.raises(RuntimeError, match="FAILED: TABLE_OR_VIEW_NOT_FOUND"):
         Warehouse(client, "wh").rows("SELECT * FROM nope")
@@ -79,7 +80,7 @@ def test_failures_carry_the_warehouse_error_and_bad_settings_fail_early():
         Warehouse(client, "")
 
 
-def test_chunk_proxy_comes_from_aws_proxy_credentials(monkeypatch):
+def test_chunk_proxy(monkeypatch):
     for name in ("USERNAME", "PASSWORD", "AWS_HOST"):
         monkeypatch.delenv(name, raising=False)
     assert chunk_proxies() is None

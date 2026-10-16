@@ -34,7 +34,7 @@ def _published_run(synthetic, runs, work, run_id="r1"):
 
 
 @pytest.mark.slow
-def test_run_resolves_the_root_publishes_the_report_and_reruns_without_rework(synthetic, tmp_path):
+def test_rerun(synthetic, tmp_path):
     runs = tmp_path / "runs"
     store, factory = _published_run(synthetic, runs, tmp_path / "work")
     options = {"poll_interval": 0, "idle_timeout": 5, "wait_timeout": 5}
@@ -58,13 +58,13 @@ def test_run_resolves_the_root_publishes_the_report_and_reruns_without_rework(sy
     assert status["results"] == 11 and status["new_results"] == 0
 
 
-def test_run_gives_up_when_no_left_counts_arrive(tmp_path):
+def test_missing_counts(tmp_path):
     with pytest.raises(TimeoutError, match="wait_timeout"):
         run(str(tmp_path / "runs"), None, poll_interval=0, wait_timeout=0)
 
 
 @pytest.mark.slow
-def test_local_right_launcher_runs_the_job_with_the_csv_anchor(synthetic, tmp_path, capsys):
+def test_csv_launcher(synthetic, tmp_path, capsys):
     runs = tmp_path / "runs"
     _published_run(synthetic, runs, tmp_path / "work", run_id="r7")
     argv = ["--run-s3", str(runs), "--right-csv-dir", str(synthetic.right)]
@@ -79,9 +79,7 @@ def test_local_right_launcher_runs_the_job_with_the_csv_anchor(synthetic, tmp_pa
 
 
 @pytest.mark.slow
-def test_local_right_launcher_honours_run_id_when_multiple_runs_are_ready(
-    synthetic, tmp_path, capsys
-):
+def test_run_selection(synthetic, tmp_path, capsys):
     runs = tmp_path / "runs"
     selected, _ = _published_run(synthetic, runs, tmp_path / "work-r7", run_id="r7")
     other, _ = _published_run(synthetic, runs, tmp_path / "work-r8", run_id="r8")

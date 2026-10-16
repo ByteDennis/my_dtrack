@@ -11,11 +11,7 @@ from dtrack_left.cli.config import load_config
 def _config(tmp_path, *, where=None):
     csv = tmp_path / "huge.csv"
     csv.write_text(
-        "D,K,V\n"
-        "2026-01-01,001,a\n"
-        "2026-01-01,002,b\n"
-        "2026-02-01,003,c\n"
-        "2026-02-01,004,d\n"
+        "D,K,V\n2026-01-01,001,a\n2026-01-01,002,b\n2026-02-01,003,c\n2026-02-01,004,d\n"
     )
     left = {
         "source": "file",
@@ -47,14 +43,12 @@ def _config(tmp_path, *, where=None):
     return config, csv
 
 
-def test_materialize_validates_updates_config_and_only_then_deletes_csv(tmp_path, caplog):
+def test_materialize_validates(tmp_path, caplog):
     config, csv = _config(tmp_path)
     output = tmp_path / "parquet"
 
     with caplog.at_level(logging.INFO, logger="dtrack.left.materialize"):
-        result = materialize_pair(
-            config, "p", output=output, partition="day", delete_source=True
-        )
+        result = materialize_pair(config, "p", output=output, partition="day", delete_source=True)
 
     assert result["rows"] == 4 and result["source_deleted"] is True
     assert not csv.exists()
@@ -99,7 +93,7 @@ def test_materialize_validates_updates_config_and_only_then_deletes_csv(tmp_path
     assert any("committed dataset and config" in message for message in messages)
 
 
-def test_delete_source_refuses_derived_views_before_writing_anything(tmp_path):
+def test_delete_source(tmp_path):
     config, csv = _config(tmp_path, where="K <> '002'")
     output = tmp_path / "parquet"
     with pytest.raises(ValueError, match="where/query"):
@@ -107,7 +101,7 @@ def test_delete_source_refuses_derived_views_before_writing_anything(tmp_path):
     assert csv.exists() and not output.exists()
 
 
-def test_duckdb_progress_is_enabled_only_for_a_terminal(monkeypatch):
+def test_duckdb_progress(monkeypatch):
     class Connection:
         def __init__(self):
             self.sql = []

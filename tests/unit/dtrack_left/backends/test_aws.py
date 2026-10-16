@@ -6,7 +6,7 @@ import pytest
 from dtrack_left.backends import aws
 
 
-def test_refresh_copies_the_credential_process_profile_into_a_static_one(aws_home):
+def test_refresh_copies(aws_home):
     first = aws.refresh_profile("corp", "corp-winscp")
     assert first["target"] == "corp-winscp" and first["access_key"] == "ASIA...0001"
     assert 1700 < first["expires_in"] <= 1800 and first["file"] == str(aws_home / "credentials")
@@ -16,7 +16,7 @@ def test_refresh_copies_the_credential_process_profile_into_a_static_one(aws_hom
     assert source.method == "custom-process"
 
 
-def test_a_second_refresh_replaces_only_its_own_section(aws_home):
+def test_second_refresh(aws_home):
     path = aws_home / "credentials"
     path.write_bytes(
         b"[other]\r\naws_access_key_id = A\r\n# keep me\r\n\r\n"
@@ -30,13 +30,13 @@ def test_a_second_refresh_replaces_only_its_own_section(aws_home):
     assert not (aws_home / "credentials.tmp").exists() and path.stat().st_mode & 0o777 == 0o600
 
 
-def test_refresh_refuses_to_shadow_the_source_profile(aws_home):
+def test_refresh_refuses(aws_home):
     with pytest.raises(ValueError, match="shadow"):
         aws.refresh_profile("corp", "corp")
     assert not (aws_home / "credentials").exists()
 
 
-def test_static_keys_have_no_expiry_and_a_profile_without_keys_fails(aws_home):
+def test_static_keys(aws_home):
     (aws_home / "credentials").write_text(
         "[plain]\naws_access_key_id = A\naws_secret_access_key = B\n"
     )
@@ -52,11 +52,11 @@ def test_static_keys_have_no_expiry_and_a_profile_without_keys_fails(aws_home):
 @pytest.mark.parametrize(
     ("expires_in", "delay"), [(None, 1200), (1800, 1200), (900, 600), (200, 60), (-5, 60)]
 )
-def test_next_delay_refreshes_before_the_credentials_expire(expires_in, delay):
+def test_next_delay(expires_in, delay):
     assert aws.next_delay(expires_in, 1200) == delay
 
 
-def test_watch_refreshes_on_schedule_and_retries_failures():
+def test_watch_refreshes():
     ticks = iter(range(40))
     outcomes = iter([OSError("proxy"), {"expires_in": 1800}, {"expires_in": None}])
 
@@ -72,7 +72,7 @@ def test_watch_refreshes_on_schedule_and_retries_failures():
     assert count == 2
 
 
-def test_winscp_path_prefers_the_env_var_then_fails_clearly(tmp_path, monkeypatch):
+def test_winscp_path(tmp_path, monkeypatch):
     exe = tmp_path / "WinSCP.exe"
     exe.write_text("")
     monkeypatch.setenv("DTRACK_WINSCP", str(exe))
@@ -86,7 +86,7 @@ def test_winscp_path_prefers_the_env_var_then_fails_clearly(tmp_path, monkeypatc
     assert launched.argv == ["W.exe", "corp-s3"]
 
 
-def test_whoami_reports_the_identity_and_expiry(aws_home):
+def test_whoami_reports(aws_home):
     moto = pytest.importorskip("moto")
     with moto.mock_aws():
         outcome = aws.whoami("corp")

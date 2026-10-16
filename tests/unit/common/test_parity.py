@@ -23,19 +23,19 @@ RIGHT_COMMON = {
 EXACT_MIRRORS = ("audit.py", "hashing.py", "manifest.py", "protocol.py")
 
 
-def test_right_common_contains_only_databricks_protocol_modules():
+def test_right_modules():
     right = SRC / "dtrack_right/common"
     assert {path.name for path in right.glob("*.py")} == RIGHT_COMMON
 
 
 @pytest.mark.parametrize("name", EXACT_MIRRORS)
-def test_runtime_neutral_common_modules_are_identical_on_both_sides(name):
+def test_module_parity(name):
     left = (SRC / "dtrack_left/common" / name).read_bytes()
     right = (SRC / "dtrack_right/common" / name).read_bytes()
     assert left == right
 
 
-def test_right_date_sql_runtime_contains_only_databricks_platforms():
+def test_right_platforms():
     from dtrack_left.common.date_platforms import DATE_SQL_PLATFORMS as left_platforms
     from dtrack_right.common.date_platforms import DATE_SQL_PLATFORMS as right_platforms
 
@@ -43,7 +43,7 @@ def test_right_date_sql_runtime_contains_only_databricks_platforms():
     assert set(left_platforms) == {"oracle", "spark", "databricks", "hadoop", "athena", "duckdb"}
 
 
-def test_cloud_comparison_matches_expected_verdicts():
+def test_cloud_comparison():
     left = {
         "col_type": "numeric",
         "n_total": 3,
@@ -64,7 +64,7 @@ def test_cloud_comparison_matches_expected_verdicts():
     assert same["verdict"] == "match" and changed["verdict"] == "diff"
 
 
-def test_key_normalisation_strips_numeric_zeros_but_string_keeps_them():
+def test_key_normalisation():
     cases = {
         ("007", "numeric"): "7",
         ("007", "string"): "007",
@@ -91,7 +91,7 @@ def test_key_normalisation_strips_numeric_zeros_but_string_keeps_them():
     ],
 )
 @pytest.mark.parametrize("side", ["left", "right"])
-def test_left_and_right_compile_identical_spark_sample_predicates(plan, key_tuples, side):
+def test_sample_parity(plan, key_tuples, side):
     arguments = (
         plan,
         ["`id`", "`label`"],
