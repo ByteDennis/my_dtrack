@@ -131,6 +131,7 @@ src/dtrack_right/    notebook, Spark-only target/sampling, row/col comparison, s
                      S3/Volume store, and report
 tests/               backend, protocol, behavioral parity, local Spark, and live integration tests
 examples/e2e/        two-process end-to-end run with synthetic data
+examples/remote_job/ one-time Databricks setup plus a cross-platform Left/Right launcher and dashboard refresh
 docker/              Moto S3 simulator
 docs/                workflow, ADRs, plans, notes, slides
 ```

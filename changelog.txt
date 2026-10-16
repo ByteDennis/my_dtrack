@@ -1,3 +1,34 @@
+Unreleased: add one-click remote Left/Right example with dashboard and Alert delivery
+
+Changed files (all tracked files in this change set):
+- M `README.md` — Add the new remote-job example to the repository map.
+- M `changelog.txt` — Record the complete file-level manifest and verification evidence.
+- M `pyproject.toml` — Raise the `dbx` and `live` Databricks SDK floor to the first pinned version used to validate Alerts v2 and Alert Job task models.
+- M `uv.lock` — Lock the matching `databricks-sdk>=0.143.0` optional/development requirements.
+- A `examples/remote_job/.gitignore` — Keep generated non-secret setup state out of Git.
+- A `examples/remote_job/README.md` — Document one-time setup, run-level inputs, cross-platform entrypoints, Databricks Alert delivery, run isolation, resume safety, and the collector-to-View/Dashboard/Alert data paths.
+- A `examples/remote_job/run.cmd` — Add the UTF-8 Windows launcher with interactive input fallback.
+- A `examples/remote_job/run.sh` — Add the Linux/macOS launcher.
+- A `examples/remote_job/setup/install.py` — Upload Right sources, create tables/Views, seed Pair plans, publish the Lakeview dashboard, create/update an Alerts v2 definition and template, upsert queued Right/collector/Alert Jobs, return `NO_DATA` for pre-snapshot failures, and persist all identifiers.
+- A `examples/remote_job/setup/setup.cmd` — Add the UTF-8 Windows one-time setup entrypoint.
+- A `examples/remote_job/setup/setup.sh` — Add the Linux/macOS one-time setup entrypoint.
+- A `examples/remote_job/src/dashboard.py` — Build the Executive and Detailed Lakeview dashboard over the progress Views.
+- A `examples/remote_job/src/alert_context_notebook.py` — Persist the launcher's validated `run_id` immediately before Alert evaluation so serialized notification runs cannot select another run's snapshot.
+- A `examples/remote_job/src/launch.py` — Start Right before local Left work, wait for both sides, refresh the collector, run the Databricks Alert Job, and report the dashboard/notification identifiers.
+- A `examples/remote_job/src/progress_notebook.py` — Append progress snapshots, recreate stable Views idempotently, and merge automatic blockers on Databricks.
+- A `tests/unit/examples/test_remote_job.py` — Parameterize config-version command selection, job compute, widget parameters, and success/failure launch paths; cover the Alert definition/template, queued run-scoped Job graph, empty-snapshot fallback, dashboard structure, atomic state output, and Right/Left/collector/Alert ordering with short test names.
+
+Deleted files:
+- None in Git. The uncommitted `examples/remote_job/src/email_report.py` SMTP prototype was removed before publication and is not part of this change set.
+
+Verification:
+- `uv run pytest -q --timeout=60 tests/unit/examples/test_remote_job.py`: 12 passed.
+- `uv run pytest -q --timeout=60 tests/unit`: 878 passed, 12 skipped.
+- `uv run ruff check src tests examples/remote_job`: passed.
+- Changed-path Ruff format check: 7 files already formatted.
+- Bash syntax checks, Python bytecode compilation, `git diff --check`, and `uv build` passed.
+- External live tests were intentionally not run, per operator instruction; real Databricks setup and job execution remain operator-run validation.
+
 Unreleased: select column statistics per Pair
 
 Changed files (all tracked files in this change set):
