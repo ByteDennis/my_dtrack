@@ -79,6 +79,7 @@ def row_count_section(document: dict[str, Any]) -> str:
     right_label = str(right.get("source") or "databricks")
     partitions = document["partitions"]
     timing = document.get("timing") or {}
+    all_rows = document.get("partition_mode") == "all"
     by_verdict: dict[str, list] = {"match": [], "count_diff": [], "left_only": [], "right_only": []}
     for dt in sorted(partitions):
         row = partitions[dt]
@@ -94,38 +95,43 @@ def row_count_section(document: dict[str, Any]) -> str:
         (left_label, left, left_dates, total_left, timing.get("left_count_s")),
         (right_label, right, right_dates, total_right, timing.get("right_count_s")),
     ):
+        partition_basis = "all rows" if all_rows else side.get("date_col")
         out += (
-            f"            <tr><td {CELL}>{_e(label)}</td><td {CELL}>{_e(side.get('date_col'))}</td>"
-            f"<td {CELL}>{_e(dates[0] if dates else None)}</td>"
-            f"<td {CELL}>{_e(dates[-1] if dates else None)}</td>"
+            f"            <tr><td {CELL}>{_e(label)}</td><td {CELL}>{_e(partition_basis)}</td>"
+            f"<td {CELL}>{_e(None if all_rows else dates[0] if dates else None)}</td>"
+            f"<td {CELL}>{_e(None if all_rows else dates[-1] if dates else None)}</td>"
             f"<td {CELL}>{format_count(total)}</td><td {CELL}>{_seconds(took)}</td></tr>\n"
         )
     n_match, n_mismatch = len(by_verdict["match"]), len(by_verdict["count_diff"])
     n_left, n_right = len(by_verdict["left_only"]), len(by_verdict["right_only"])
     mismatch_style = "color:#c62828; font-weight:600;" if n_mismatch else "color:green;"
+    unit = "partitions" if all_rows else "days"
     summary = (
         f"{_e(left_label)} only: {n_left}, {_e(right_label)} only: {n_right}, "
-        f'<span style="color:green;">days match: {n_match}</span>, '
-        f'<span style="{mismatch_style}">days mismatch: {n_mismatch}</span>'
+        f'<span style="color:green;">{unit} match: {n_match}</span>, '
+        f'<span style="{mismatch_style}">{unit} mismatch: {n_mismatch}</span>'
     )
     out += _details_open(6, summary)
     if not (n_mismatch or n_left or n_right):
-        out += '<p style="margin:8px 0; color:green;">✓ All dates match perfectly!</p>\n'
+        message = "Whole-dataset row counts match!" if all_rows else "All dates match perfectly!"
+        out += f'<p style="margin:8px 0; color:green;">✓ {message}</p>\n'
     else:
         upper_left, upper_right = left_label.upper(), right_label.upper()
+        noun = "Partitions" if all_rows else "Dates"
+        noun_lower = noun.lower()
         out += '<table style="width:100%; border:none; border-spacing:0;"><tr style="vertical-align:top;">\n'
         blocks = (
-            (f"Mismatched Dates ({n_mismatch})", by_verdict["count_diff"], "No mismatches", ""),
+            (f"Mismatched {noun} ({n_mismatch})", by_verdict["count_diff"], "No mismatches", ""),
             (
-                f"{upper_left}-Only Dates ({n_left})",
+                f"{upper_left}-Only {noun} ({n_left})",
                 by_verdict["left_only"],
-                f"No {upper_left}-Only dates",
+                f"No {upper_left}-Only {noun_lower}",
                 "border-left:1px solid #ddd;",
             ),
             (
-                f"{upper_right}-Only Dates ({n_right})",
+                f"{upper_right}-Only {noun} ({n_right})",
                 by_verdict["right_only"],
-                f"No {upper_right}-Only dates",
+                f"No {upper_right}-Only {noun_lower}",
                 "border-left:1px solid #ddd;",
             ),
         )
@@ -178,6 +184,7 @@ def column_stats_section(
     left_label: str,
     right_label: str,
     date_cols: tuple[str, str],
+    partition_mode: str = "date",
 ) -> str:
     vintages = sorted({row["vintage"] for row in rows}, reverse=True)
     columns = sorted({row["column"] for row in rows})
@@ -186,11 +193,13 @@ def column_stats_section(
     n_cols, n_diff = len(columns), len(cols_with_diffs)
     shown = ", ".join(cols_with_diffs[:4]) + (", ..." if n_diff > 4 else "") if n_diff else "None"
     out = _pair_header(pair, 7)
+    all_rows = partition_mode == "all"
     for label, date_col in ((left_label, date_cols[0]), (right_label, date_cols[1])):
+        partition_basis = "all rows" if all_rows else date_col
         out += (
-            f"            <tr><td {CELL}>{_e(label)}</td><td {CELL}>{_e(date_col)}</td>"
-            f"<td {CELL}>{_e(vintages[-1] if vintages else None)}</td>"
-            f"<td {CELL}>{_e(vintages[0] if vintages else None)}</td>"
+            f"            <tr><td {CELL}>{_e(label)}</td><td {CELL}>{_e(partition_basis)}</td>"
+            f"<td {CELL}>{_e(None if all_rows else vintages[-1] if vintages else None)}</td>"
+            f"<td {CELL}>{_e(None if all_rows else vintages[0] if vintages else None)}</td>"
             f"<td {CELL}>{n_cols}</td><td {CELL}>{len(vintages)}</td><td {CELL}>—</td></tr>\n"
         )
     diff_style = "color:#c62828; font-weight:600;" if n_diff else "color:green;"
@@ -200,9 +209,12 @@ def column_stats_section(
     )
     out += _details_open(7, summary)
     if not n_diff:
-        out += (
-            '<p style="margin:8px 0; color:green;">✓ All columns match across all vintages!</p>\n'
+        message = (
+            "All columns match across the whole dataset!"
+            if all_rows
+            else "All columns match across all vintages!"
         )
+        out += f'<p style="margin:8px 0; color:green;">✓ {message}</p>\n'
         return out + DETAILS_CLOSE
     blocks = []
     for column in cols_with_diffs:
@@ -267,6 +279,7 @@ def column_stats_table(sections: list[str], vintage: str = "month") -> str:
         "month": "# months",
         "quarter": "# quarters",
         "year": "# years",
+        "all": "# windows",
     }
     return _table(
         [

@@ -68,6 +68,37 @@ def test_row_check():
     assert not any(key.endswith("/plan.json") for key in store.objects)
 
 
+def test_all_partition():
+    seen = []
+
+    class All(Fake):
+        def partition_counts(self, *_args):
+            return {"all": 7}
+
+    config = {
+        "pairs": {
+            "p": {
+                "partition_mode": "all",
+                "left": {"source": "oracle", "table": "A"},
+                "right": {"source": "databricks", "table": "a"},
+                "col_map": {"amount": "amount"},
+            }
+        }
+    }
+
+    def factory(spec):
+        seen.append(spec)
+        return All()
+
+    store = MemoryStore()
+    run_row_check(config, store, run_id="run", source_factory=factory)
+    document = store.get_json("pairs/p/row_check/left.json")
+    assert seen == [{"source": "oracle", "table": "A", "partition_mode": "all"}]
+    assert document["partition_mode"] == "all"
+    assert document["counts"] == {"all": 7}
+    assert document["bounds"] == {"from": None, "to": None}
+
+
 def _config(**pairs):
     base = {
         "left": {"source": "csv", "path": "x.csv", "date_col": "dt"},

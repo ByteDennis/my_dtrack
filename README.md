@@ -55,6 +55,14 @@ non-null sample for `string`/`sas`, then carries the detected internal format th
 manifest payloads. The standalone Right package contains only the Spark/Databricks SQL adapter;
 source-platform adapters stay on the Left.
 
+Pairs without a business date can set `"partition_mode": "all"` at Pair level and omit
+`date_col` on both sides. DTrack then counts the complete Left and Right relations as one `all`
+partition and runs fraction or fixed-key sampling once across the whole dataset. A real stable
+`key` is still required for sampling; the mode deliberately rejects `fromDate`, `toDate`,
+`vintage`, `date_synonyms`, `excluded_partitions`, and Left query-window markers because those
+settings would otherwise imply date filtering that cannot occur. Date-partitioned CSV
+materialization and SAS bundle export remain `partition_mode: date` workflows.
+
 An Oracle `query` may be inline or a `.sql` path relative to the config file. Large consolidation
 queries can push the selected DTrack window into each dated driver before the join with controlled
 markers such as `{{query_windows:driver_one}}`; declare each marker under the Left

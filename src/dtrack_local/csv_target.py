@@ -40,9 +40,13 @@ class CsvAnchorTarget:
         try:
             frame = self._frame()
             columns = list(frame.columns)
-            if self.config["date_col"] not in columns:
+            if (
+                self.config.get("partition_mode") != "all"
+                and self.config["date_col"] not in columns
+            ):
                 raise ValueError(f"missing column {self.config['date_col']}")
-            self.date_type(frame)
+            if self.config.get("partition_mode") != "all":
+                self.date_type(frame)
             return {"ok": True, "source": "csv-anchor", "columns": columns}
         except (OSError, KeyError, TypeError, ValueError) as exc:
             return {"ok": False, "source": "csv-anchor", "error": str(exc)}
@@ -50,8 +54,11 @@ class CsvAnchorTarget:
     def partition_counts(
         self, from_date: str | None = None, to_date: str | None = None
     ) -> dict[str, int]:
-        normalize = self.date_type().normalize
-        values = self._frame()[self.config["date_col"]].map(normalize)
+        frame = self._frame()
+        if self.config.get("partition_mode") == "all":
+            return {"all": len(frame)}
+        normalize = self.date_type(frame).normalize
+        values = frame[self.config["date_col"]].map(normalize)
         if from_date:
             values = values[values >= canonical_date(from_date)]
         if to_date:
@@ -62,15 +69,22 @@ class CsvAnchorTarget:
         self, manifest: dict[str, Any], window: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
         frame = self._frame()
-        normalize = self.date_type(frame).normalize
-        dates = frame[self.config["date_col"]].map(normalize)
         right_columns = [manifest["col_map"][column] for column in manifest["columns"]]
-        selected = list(
-            dict.fromkeys([self.config["date_col"], *manifest["right_key_cols"], *right_columns])
-        )
+        if self.config.get("partition_mode") == "all":
+            selected = list(dict.fromkeys([*manifest["right_key_cols"], *right_columns]))
+            rows = frame.loc[:, selected]
+        else:
+            normalize = self.date_type(frame).normalize
+            dates = frame[self.config["date_col"]].map(normalize)
+            selected = list(
+                dict.fromkeys(
+                    [self.config["date_col"], *manifest["right_key_cols"], *right_columns]
+                )
+            )
+            rows = frame.loc[dates.isin(set(window["partitions"])), selected]
         output = self.work_dir / manifest["pair"] / window["bucket"] / "right.csv"
         output.parent.mkdir(parents=True, exist_ok=True)
-        frame.loc[dates.isin(set(window["partitions"])), selected].to_csv(output, index=False)
+        rows.to_csv(output, index=False)
         plan = manifest["sample"]
         sampled = sample_csv(
             output,

@@ -118,6 +118,36 @@ def test_partition_counts():
     ]
 
 
+def test_all_partition():
+    describe = [row for row in DESCRIBE if row[0] != "business_date"]
+
+    def respond(sql):
+        if sql.startswith("DESCRIBE"):
+            return describe
+        if "COUNT(*)" in sql:
+            return [(7,)]
+        return [FakeRow(_stats_row())]
+
+    spark = FakeSpark(respond)
+    config = {
+        "source": "databricks",
+        "catalog": "main",
+        "schema": "sales",
+        "table": "orders",
+        "partition_mode": "all",
+    }
+    target = SparkTarget(spark, config)
+    assert target.preflight()["ok"]
+    assert target.partition_counts() == {"all": 7}
+    manifest = _manifest({"mode": "fraction", "threshold": 1000})
+    manifest["partition_mode"] = "all"
+    target.window_statistics(manifest, {"bucket": "all", "partitions": ["all"]})
+    count_sql, stats_sql = spark.statements[-2:]
+    assert count_sql == "SELECT COUNT(*) FROM `main`.`sales`.`orders` WHERE 1=1"
+    assert "business_date" not in stats_sql
+    assert "< 1000" in stats_sql
+
+
 def test_sql_audit():
     events = []
 

@@ -141,6 +141,8 @@ def materialize_pair(
         pair = config["pairs"][pair_name]
     except KeyError:
         raise ValueError(f"unknown pair {pair_name!r}") from None
+    if pair.get("partition_mode") == "all":
+        raise ValueError("materialize requires partition_mode date")
     source_spec = dict(pair.get("left") or {})
     if str(source_spec.get("source") or "").lower() not in {"file", "csv"}:
         raise ValueError("materialize requires a Left source=file or source=csv")

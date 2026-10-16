@@ -38,6 +38,8 @@ def _request(config: dict[str, Any], run_id: str, pair_names: list[str] | None) 
         raise ValueError(f"selected pair(s) are missing or skipped: {', '.join(missing)}")
     public = {}
     for name, pair in pairs.items():
+        if pair.get("partition_mode") == "all":
+            raise ValueError(f"{name}: SAS export requires partition_mode date")
         if str(pair["left"].get("source") or "").lower() != "oracle":
             raise ValueError(f"{name}: SAS export supports only a Left Oracle source")
         date_type = resolve_date_type(pair["left"].get("date_type"))

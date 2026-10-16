@@ -40,6 +40,11 @@ def test_date_synonyms():
     assert rows == {"2026-07-01": {"left": 2, "right": 2, "verdict": "match"}}
 
 
+def test_all_partition():
+    rows = reconcile_partitions({"all": 9}, {"all": 9}, partition_mode="all")
+    assert rows == {"all": {"left": 9, "right": 9, "verdict": "match"}}
+
+
 ROWS = {
     "a": {"verdict": "match"},
     "b": {"verdict": "match"},
@@ -194,3 +199,23 @@ def test_v2_exclusions():
     )
     store.put_json("pairs/p/plan.json", updated)
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 0
+
+
+def test_all_mismatch():
+    store = MemoryStore()
+    left = left_document(counts={"all": 5})
+    left["partition_mode"] = "all"
+    left["bounds"] = {"from": None, "to": None}
+    left["left"] = {"source": "oracle", "table": "A"}
+    left["right"] = {"source": "databricks", "table": "a"}
+    left["pair_config"] = {
+        "version": 2,
+        "partition_mode": "all",
+        "left": left["left"],
+        "right": left["right"],
+        "col_map": {"amount": "amount"},
+    }
+    store.put_json("pairs/p/row_check/left.json", left)
+    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    with pytest.raises(RuntimeError, match="partition_mode all row counts differ"):
+        run_row_check(store, lambda _cfg: FakeTarget(counts={"all": 6}))

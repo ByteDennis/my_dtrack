@@ -257,8 +257,30 @@ Parameter choice:
     query:            query
     files:            path + format; query may reference {src}
 
+  partition_mode
+    date (default): both sides require date_col and use normal date partitions/windows.
+    all: date_col is optional and ignored for partitioning. DTrack creates one `all` partition,
+    compares whole-relation row counts, and applies fraction/fixed sampling once across the full
+    dataset. A real stable key is still required when sample is not all rows.
+
+    `all` rejects fromDate, toDate, vintage, date_synonyms, excluded_partitions, and Left
+    query_windows instead of silently ignoring them. `dtrack tools materialize` and SAS bundle
+    export currently require the default date mode.
+
+    Minimal undated Pair:
+
+      {
+        "partition_mode": "all",
+        "left": {"source": "oracle", "table": "APP.ACCOUNTS"},
+        "right": {"source": "databricks", "table": "main.curated.accounts"},
+        "key": "ACCOUNT_ID",
+        "sample": 0.1,
+        "col_map": {"ACCOUNT_ID": "account_id", "BALANCE": "balance"}
+      }
+
   date_col
-    Required on both sides. It defines Stage-1 partitions and Stage-2 windows.
+    Required on both sides in partition_mode=date. It defines Stage-1 partitions and Stage-2
+    windows. It may be omitted in partition_mode=all.
 
   date_type
     date     native DATE/TIMESTAMP values
@@ -313,7 +335,7 @@ Parameter choice:
 
   vintage
     day | week | month | quarter | year. This groups admitted matching dates; it does
-    not fill missing dates and is not the job schedule.
+    not fill missing dates and is not the job schedule. It is invalid in partition_mode=all.
 
   strict
     Normalizes compared text more aggressively. It does not replace key_families.
@@ -708,8 +730,8 @@ Stage-1 config update and immediate Left recount in the same run:
 
 `col + --config` keeps the Stage-1 left counts and pair verdict, validates every new
 manifest before deleting anything, then rebuilds Stage 2. It refuses changes to
-left/right source settings (including date_col and date_type), fromDate, toDate, or
-date_synonyms so old counts cannot be paired with a new Stage-1 definition.
+left/right source settings (including date_col and date_type), partition_mode, fromDate,
+toDate, or date_synonyms so old counts cannot be paired with a new Stage-1 definition.
 
 `row + --config` permits those Stage-1 changes. Its dry-run validates pair selection,
 config serialization, and the preserved run_id without querying a source. With `--yes`

@@ -143,6 +143,64 @@ def test_partition_counts(monkeypatch):
     ]
 
 
+def test_all_partition(monkeypatch, tmp_path):
+    def respond(sql):
+        if "COUNT(*)" in sql:
+            return ["dtrack_count"], [(7,)]
+        if "ORDER BY dtrack_rank" in sql:
+            return ["ORDER_ID"], [(1,), (2,)]
+        return ["ORDER_ID", "AMOUNT"], [(1, 10)]
+
+    source, connection, _ = _oracle(
+        monkeypatch,
+        respond,
+        partition_mode="all",
+        date_col=None,
+        where="ACTIVE = 1",
+    )
+    assert source.preflight()["ok"]
+    assert source.partition_counts() == {"all": 7}
+    output = source.pull_window(
+        ["all"],
+        ["AMOUNT"],
+        tmp_path / "all.csv",
+        key_columns=["ORDER_ID"],
+        sample_plan={"mode": "fraction", "threshold": 1000},
+        key_families=["numeric"],
+    )
+    assert output.read_text(encoding="utf-8").splitlines() == ["ORDER_ID,AMOUNT", "1,10"]
+    count_sql = next(sql for sql in connection.statements if "COUNT(*)" in sql)
+    pull_sql = connection.statements[-1]
+    assert count_sql == "SELECT COUNT(*) AS dtrack_count FROM ORDERS WHERE (ACTIVE = 1)"
+    assert "BUSINESS_DATE" not in pull_sql
+    assert "STANDARD_HASH" in pull_sql and "< 1000" in pull_sql
+    assert "FROM ORDERS WHERE" in pull_sql
+    keys = source.sample_keys(
+        ["all"],
+        ["ORDER_ID"],
+        tmp_path / "keys.csv",
+        count=2,
+        key_families=["numeric"],
+    )
+    assert keys.read_text(encoding="utf-8").splitlines() == ["ORDER_ID", "1", "2"]
+    fixed_sql = connection.statements[-1]
+    assert "BUSINESS_DATE" not in fixed_sql and "FETCH FIRST 2 ROWS ONLY" in fixed_sql
+
+    path = tmp_path / "undated.csv"
+    path.write_text("ID,AMOUNT\n1,10\n2,20\n", encoding="utf-8")
+    file_source = FileSource({"source": "file", "path": str(path), "partition_mode": "all"})
+    assert file_source.preflight()["ok"]
+    assert file_source.partition_counts() == {"all": 2}
+    pulled = file_source.pull_window(
+        ["all"], ["AMOUNT"], tmp_path / "file-all.csv", key_columns=["ID"]
+    )
+    assert pulled.read_text(encoding="utf-8").splitlines() == [
+        "ID,AMOUNT",
+        "1,10",
+        "2,20",
+    ]
+
+
 def test_oracle_query(monkeypatch):
     query = (
         "WITH d1 AS (SELECT * FROM DRIVER_ONE a WHERE {{query_windows:driver_one}}), "

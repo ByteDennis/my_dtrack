@@ -88,7 +88,12 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
             window["key_tuples"] = existing["windows"].get(window["bucket"], [])
         return None
     source = attach_sql_audit(
-        source_from_config(manifest["left"]),
+        source_from_config(
+            {
+                **manifest["left"],
+                "partition_mode": manifest.get("partition_mode", "date"),
+            }
+        ),
         SqlAudit(store, "left", pair=manifest["pair"]),
     )
     windows = dict((existing or {}).get("windows") or {})
@@ -515,7 +520,12 @@ class LeftRuntime:
         with self.sources_lock:
             if pair not in self.sources:
                 self.sources[pair] = attach_sql_audit(
-                    source_from_config(manifest["left"]),
+                    source_from_config(
+                        {
+                            **manifest["left"],
+                            "partition_mode": manifest.get("partition_mode", "date"),
+                        }
+                    ),
                     SqlAudit(self.store, "left", pair=pair),
                 )
             return self.sources[pair]
@@ -528,7 +538,15 @@ class LeftRuntime:
         metadata = output.with_name(output.name + ".dtrack.json")
         selected = list(
             dict.fromkeys(
-                [manifest["left"]["date_col"], *manifest["key_cols"], *manifest["columns"]]
+                [
+                    *(
+                        [manifest["left"]["date_col"]]
+                        if manifest.get("partition_mode", "date") == "date"
+                        else []
+                    ),
+                    *manifest["key_cols"],
+                    *manifest["columns"],
+                ]
             )
         )
         cache = {

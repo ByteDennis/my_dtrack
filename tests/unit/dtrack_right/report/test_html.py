@@ -32,6 +32,18 @@ def test_perfect_rows():
     assert "All dates match perfectly" in section and "—" in section
 
 
+def test_all_mode():
+    document = _document(
+        {"all": {"left": 2, "right": 2, "verdict": "match"}},
+        partition_mode="all",
+    )
+    section = html.row_count_section(document)
+    assert "all rows" in section and "Whole-dataset row counts match" in section
+    row = compare_statistics(pair="p", window="all", column="C", left=STATS, right=STATS)
+    columns = html.column_stats_section("p", [row], "oracle", "databricks", (None, None), "all")
+    assert "all rows" in columns and "whole dataset" in columns
+
+
 def test_row_limit():
     partitions = {
         f"2026-01-{day:02d}": {"left": 1, "right": 2, "verdict": "count_diff"}

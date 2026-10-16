@@ -1,3 +1,55 @@
+Unreleased: add whole-dataset partition mode
+
+Changed files (all tracked files in this change set):
+- M `README.md` — Document Pair-level `partition_mode: "all"`, whole-dataset sampling, incompatible date controls, and supported workflow boundaries.
+- M `changelog.txt` — Record the complete file-level manifest and verification evidence for whole-dataset partitioning.
+- M `guideme.txt` — Add the all-mode contract, an undated Pair example, rollback semantics, and operator constraints.
+- M `src/dtrack_left/backends/materialize.py` — Fail clearly because date-partitioned materialization requires `partition_mode: "date"`.
+- M `src/dtrack_left/backends/sources.py` — Count one `all` partition and pull/fixed-sample the complete relation without a date column or predicate.
+- M `src/dtrack_left/checks/col_check.py` — Carry partition mode into Left sources and omit the date column from all-mode pull/cache schemas.
+- M `src/dtrack_left/checks/row_check.py` — Treat partition mode as Stage-1 identity, pass it to sources, and publish it in row-count documents.
+- M `src/dtrack_left/checks/sas.py` — Reject all mode explicitly because SAS bundle generation remains date-window based.
+- M `src/dtrack_left/cli/__init__.py` — Describe date and all partition modes in built-in CLI configuration guidance.
+- M `src/dtrack_left/cli/config.py` — Validate `date|all`, make `date_col` optional in all mode, and reject incompatible date-only settings.
+- M `src/dtrack_left/cli/tools.py` — Pass each Pair's partition mode through doctor preflight.
+- M `src/dtrack_left/common/manifest.py` — Build and validate one `all` window while preserving unchanged date-mode plan identities.
+- M `src/dtrack_local/cli.py` — Run key-check over the all window and reject explicit date bounds in all mode.
+- M `src/dtrack_local/csv_target.py` — Preflight, count, and sample undated CSV anchor datasets as one complete partition.
+- M `src/dtrack_local/keycheck.py` — Compare whole-dataset keys without requiring or projecting date columns.
+- M `src/dtrack_local/pipeline.py` — Carry partition mode through local preflight and warehouse sampling without date predicates.
+- M `src/dtrack_right/backends/targets.py` — Count and calculate sampled Spark statistics over the complete relation in all mode.
+- M `src/dtrack_right/checks/col_check.py` — Carry manifest partition mode into cached Right targets.
+- M `src/dtrack_right/checks/row_check.py` — Reconcile the literal all partition, propagate the mode, and fail closed with an actionable whole-dataset mismatch error.
+- M `src/dtrack_right/common/manifest.py` — Mirror the Left all-window manifest contract for the standalone Right package.
+- M `src/dtrack_right/report/build.py` — Pass partition mode into rendered column-statistics sections.
+- M `src/dtrack_right/report/excel.py` — Label all-mode reports as `all rows` with non-applicable date bounds.
+- M `src/dtrack_right/report/html.py` — Render whole-dataset row/column outcomes without fake date language.
+- M `tests/unit/common/test_manifest.py` — Cover the single all-window manifest on both package sides.
+- M `tests/unit/dtrack_left/backends/test_sources.py` — Cover undated Oracle/file counts plus global fraction and fixed-key sampling.
+- M `tests/unit/dtrack_left/checks/test_row_check.py` — Cover all-mode source construction and published Left row documents.
+- M `tests/unit/dtrack_left/cli/test_config.py` — Parameterize valid and invalid partition-mode configurations and date-only conflicts.
+- M `tests/unit/dtrack_local/test_csv_target.py` — Cover whole-dataset local CSV counts and statistics without a date column.
+- M `tests/unit/dtrack_local/test_pipeline.py` — Cover global warehouse sampling SQL without a date projection or predicate.
+- M `tests/unit/dtrack_right/backends/test_targets.py` — Cover all-mode Databricks preflight, counts, and sampled statistics SQL.
+- M `tests/unit/dtrack_right/checks/test_row_check.py` — Cover all-partition reconciliation and fail-closed Version 2 count mismatches.
+- M `tests/unit/dtrack_right/report/test_excel.py` — Cover all-mode spreadsheet labels and non-applicable bounds.
+- M `tests/unit/dtrack_right/report/test_html.py` — Cover whole-dataset HTML row and column messaging.
+
+Added files:
+- None.
+
+Deleted files:
+- None.
+
+Local ignored artifact:
+- M `CONTEXT.md` — Define Partition mode and update Partition/Barrier language; this repository intentionally ignores the local domain glossary, so it is not part of the commit.
+
+Verification:
+- `uv run pytest --collect-only -q tests/unit`: 872 tests collected.
+- `uv run pytest -q --timeout=60 tests/unit`: 860 passed, 12 skipped.
+- Ruff, changed-file format checks, Left/Right manifest parity, `git diff --check`, and the pytest naming policy passed.
+- External live tests were intentionally not run.
+
 Unreleased: compact pytest names and consolidate parameterized cases
 
 Changed files (all files in this change set):

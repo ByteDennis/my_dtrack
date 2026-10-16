@@ -200,7 +200,14 @@ def _keycheck_target(pair, work, *, profile, warehouse_id, sql_audit=None):
         warehouse_id or os.getenv("DTRACK_DBX_WAREHOUSE_ID", ""),
         sql_audit=sql_audit,
     )
-    return pipeline.WarehouseTarget(warehouse, pair["right"], work)
+    return pipeline.WarehouseTarget(
+        warehouse,
+        {
+            **pair["right"],
+            "partition_mode": pair.get("partition_mode", "date"),
+        },
+        work,
+    )
 
 
 def _keycheck_window(from_date: str | None, to_date: str | None, days: int) -> tuple[str, str]:
@@ -379,12 +386,26 @@ def key_check_command(
         pair["key_families"] = {**(pair.get("key_families") or {}), **family_overrides}
     if sample is not None:
         pair["sample"] = sample
-    from_date, to_date = _keycheck_bounds(from_date, to_date, pair)
-    start, end = _keycheck_window(from_date, to_date, days)
+    if pair.get("partition_mode") == "all":
+        if from_date or to_date:
+            raise click.BadParameter(
+                "date bounds are unavailable when partition_mode is all",
+                param_hint="--from-date/--to-date",
+            )
+        start = end = "all"
+    else:
+        from_date, to_date = _keycheck_bounds(from_date, to_date, pair)
+        start, end = _keycheck_window(from_date, to_date, days)
     work = Path(out) / pair_name
     audit_store = VolumeStore(work)
     source = attach_sql_audit(
-        source_from_config(pair["left"]), SqlAudit(audit_store, "left", pair=pair_name)
+        source_from_config(
+            {
+                **pair["left"],
+                "partition_mode": pair.get("partition_mode", "date"),
+            }
+        ),
+        SqlAudit(audit_store, "left", pair=pair_name),
     )
     counts = source.partition_counts(start, end)
     partitions = sorted(counts)

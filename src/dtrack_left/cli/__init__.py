@@ -33,7 +33,8 @@
 #   plus where; names are case-insensitive in Databricks, but col_map right names must match
 #   the DESCRIBE spelling (column types are looked up by exact name)
 #
-# Both sides: date_col (required) and date_type
+# Pair partition_mode: date (default) | all (one whole-dataset partition)
+# Both sides in date mode: date_col (required) and date_type
 #   date     native DATE/TIMESTAMP values, compared by calendar day
 #   string   probes YYYY-MM-DD or YYYYMMDD text
 #   number   numeric YYYYMMDD values
@@ -42,7 +43,9 @@
 #   rejects empty or mixed formats, then publishes the concrete internal spec for later stages.
 #
 # Stage 1 settings (changing them needs rollback --stage row, or a new run):
-#   left, right, fromDate, toDate ("YYYY-MM-DD", inclusive), date_synonyms {"3000-01-01": "2026-07-01"}
+#   left, right, partition_mode, fromDate, toDate ("YYYY-MM-DD", inclusive),
+#   date_synonyms {"3000-01-01": "2026-07-01"}
+#   partition_mode all omits date_col and rejects date bounds/synonyms, vintage, and exclusions
 #   gate (Right job / dtrack_local --gate): auto (>= 1 matching partition) | manual | ratio:<0..1>
 # Stage 2 settings (rollback --stage col --config c.json rebuilds the manifest, no recount):
 #   col_map              {"LEFT": "right"} | "maps/p.csv" (left,right[,type]) | "maps/p.json",

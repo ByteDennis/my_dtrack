@@ -48,7 +48,12 @@ def describe_right(spec: dict) -> dict:
 def doctor_command(config):
     results = {
         name: {
-            **source_from_config(pair["left"]).preflight(),
+            **source_from_config(
+                {
+                    **pair["left"],
+                    "partition_mode": pair.get("partition_mode", "date"),
+                }
+            ).preflight(),
             "right": describe_right(pair["right"]),
             "col_type_overrides": dict(pair.get("col_type_overrides") or {}),
         }

@@ -71,6 +71,10 @@ class SqlSource(ABC):
         self.sql_audit = audit
         return self
 
+    @property
+    def partition_mode(self) -> str:
+        return str(self.config.get("partition_mode") or "date")
+
     def _audit(self, sql: str, operation: str = "query") -> None:
         if self.sql_audit is not None:
             self.sql_audit.record(sql, backend=self.dialect, operation=operation)
@@ -170,7 +174,8 @@ class SqlSource(ABC):
     def preflight(self) -> dict[str, Any]:
         try:
             self.query(f"SELECT * FROM {self.relation()} WHERE 1=0", operation="preflight")
-            self.date_type()
+            if self.partition_mode == "date":
+                self.date_type()
             return {"ok": True, "source": self.config.get("source")}
         except Exception as exc:
             return {"ok": False, "source": self.config.get("source"), "error": str(exc)}
@@ -181,6 +186,10 @@ class SqlSource(ABC):
     def partition_counts(
         self, from_date: str | None = None, to_date: str | None = None
     ) -> dict[str, int]:
+        if self.partition_mode == "all":
+            sql = f"SELECT COUNT(*) AS dtrack_count FROM {self.relation()} WHERE {self._where()}"
+            _columns, rows = self.query(sql, operation="partition_counts")
+            return {"all": int(rows[0][0]) if rows else 0}
         self.date_type()
         date_col = self.config["date_col"]
         date_ref = day_expr(date_col, self.dialect, self.config.get("date_type"))
@@ -215,14 +224,20 @@ class SqlSource(ABC):
         side: str = "left",
         key_tuples: list[list[object]] | None = None,
     ) -> Path:
-        self.date_type()
-        selected = list(dict.fromkeys([self.config["date_col"], *(key_columns or []), *columns]))
-        predicate = partition_where(
-            self.config["date_col"],
-            partitions,
-            dialect=self.dialect,
-            date_type=self.config.get("date_type"),
-        )
+        if self.partition_mode == "date":
+            self.date_type()
+            selected = list(
+                dict.fromkeys([self.config["date_col"], *(key_columns or []), *columns])
+            )
+            predicate = partition_where(
+                self.config["date_col"],
+                partitions,
+                dialect=self.dialect,
+                date_type=self.config.get("date_type"),
+            )
+        else:
+            selected = list(dict.fromkeys([*(key_columns or []), *columns]))
+            predicate = None
         needs_sample = sample_plan and sample_plan.get("mode") != "all"
         key_types = self.key_types(key_columns or []) if needs_sample else []
         stored_hash = self.config.get("sample_hash") or {}
@@ -255,7 +270,7 @@ class SqlSource(ABC):
         predicate = " AND ".join(f"({item})" for item in (predicate, sample) if item)
         sql = (
             f"SELECT {', '.join(quote_ident(column, self.dialect) for column in selected)} "
-            f"FROM {self.relation(partitions=partitions)} "
+            f"FROM {self.relation(partitions=partitions if self.partition_mode == 'date' else None)} "
             f"WHERE {self._where(predicate)}"
         )
         return self.query_to_csv(sql, output, selected, operation="pull_window")
@@ -269,15 +284,18 @@ class SqlSource(ABC):
         count: int,
         key_families: list[Any] | None = None,
     ) -> Path:
-        self.date_type()
-        predicate = partition_where(
-            self.config["date_col"],
-            partitions,
-            dialect=self.dialect,
-            date_type=self.config.get("date_type"),
-        )
+        if self.partition_mode == "date":
+            self.date_type()
+            predicate = partition_where(
+                self.config["date_col"],
+                partitions,
+                dialect=self.dialect,
+                date_type=self.config.get("date_type"),
+            )
+        else:
+            predicate = None
         sql = fixed_keys_sql(
-            self.relation(partitions=partitions),
+            self.relation(partitions=partitions if self.partition_mode == "date" else None),
             self._where(predicate),
             [quote_ident(column, self.dialect) for column in key_columns],
             key_families or [],
@@ -352,7 +370,7 @@ class FileSource(SqlSource):
         source = self.reader()
         if self.config.get("query"):
             source = f"({self.config['query'].replace('{src}', source)})"
-        date_format = self.config.get("date_format")
+        date_format = self.config.get("date_format") if self.partition_mode == "date" else None
         if not date_format:
             return f"{source} dtrack_source"
         column = quote_ident(self.config["date_col"], self.dialect)
@@ -389,10 +407,11 @@ class FileSource(SqlSource):
             columns, _rows = self.query(
                 f"SELECT * FROM {self.relation()} WHERE 1=0", operation="preflight"
             )
-            requested = self.config.get("date_col")
-            if requested:
-                self.config["date_col"] = _resolve_column_name(columns, str(requested))
-            self.date_type()
+            if self.partition_mode == "date":
+                requested = self.config.get("date_col")
+                if requested:
+                    self.config["date_col"] = _resolve_column_name(columns, str(requested))
+                self.date_type()
             return {"ok": True, "source": "file", "columns": columns}
         except Exception as exc:
             return {"ok": False, "source": "file", "error": str(exc)}

@@ -109,15 +109,22 @@ def build_manifest(
         raise ValueError(f"{pair_name}: Right side must be databricks")
     if version == 1 and not row_check["gate_decision"].get("passed"):
         raise ValueError(f"{pair_name}: row check has not passed")
+    partition_mode = str(pair.get("partition_mode") or "date")
+    if partition_mode not in {"date", "all"}:
+        raise ValueError(f"{pair_name}: partition_mode must be date or all")
     excluded_partitions = sorted(set(pair.get("excluded_partitions") or []))
     excluded_columns = set(pair.get("excluded_columns") or [])
     mapped_columns = list((pair.get("col_map") or {}).keys())
     date_col = str(pair["left"].get("date_col") or "").lower()
-    value_columns = [column for column in mapped_columns if column.lower() != date_col]
+    value_columns = (
+        mapped_columns
+        if partition_mode == "all"
+        else [column for column in mapped_columns if column.lower() != date_col]
+    )
     columns = [column for column in value_columns if column not in excluded_columns]
     if not columns:
         raise ValueError(f"{pair_name}: no mapped value columns")
-    vintage = pair.get("vintage") or "day"
+    vintage = "all" if partition_mode == "all" else pair.get("vintage") or "day"
     grouped: dict[str, list[str]] = defaultdict(list)
     counts: dict[str, int] = {}
     for partition, row in sorted(row_check["partitions"].items()):
@@ -127,7 +134,8 @@ def build_manifest(
             else row["verdict"] == "match"
         )
         if admitted:
-            grouped[bucket_date(partition, vintage)].append(partition)
+            bucket = "all" if partition_mode == "all" else bucket_date(partition, vintage)
+            grouped[bucket].append(partition)
             counts[partition] = int(row["left"])
     windows = [
         {
@@ -147,7 +155,7 @@ def build_manifest(
 
     def family_spec(key: str):
         configured = key_family_config.get(key)
-        if configured is None and key.lower() == date_col:
+        if partition_mode == "date" and configured is None and key.lower() == date_col:
             configured = {
                 "family": "date_type",
                 "left_date_type": resolve_date_type(pair["left"].get("date_type")).spec(
@@ -214,6 +222,8 @@ def build_manifest(
         "excluded_columns": sorted(excluded_columns),
         "expected_units": len(windows) * len(columns),
     }
+    if partition_mode == "all":
+        manifest["partition_mode"] = "all"
     manifest["plan_id"] = _digest(manifest)
     validate_manifest(manifest)
     return manifest
@@ -244,6 +254,11 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("version 2 manifest requires plan_id")
     if str(manifest["right"].get("source", "")).lower() != "databricks":
         raise ValueError("manifest Right side must be databricks")
+    partition_mode = str(manifest.get("partition_mode") or "date")
+    if partition_mode not in {"date", "all"}:
+        raise ValueError("manifest partition_mode must be date or all")
+    if partition_mode == "all" and manifest["vintage"] != "all":
+        raise ValueError("all-partition manifest vintage must be all")
     expected = len(manifest["windows"]) * len(manifest["columns"])
     if manifest["expected_units"] != expected:
         raise ValueError("expected_units does not equal Windows x columns")
@@ -256,5 +271,9 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     for spec in column_types.values():
         resolve_column_type(spec)
     for window in manifest["windows"]:
+        if partition_mode == "all" and (
+            window.get("bucket") != "all" or window.get("partitions") != ["all"]
+        ):
+            raise ValueError("all-partition manifest must contain only the all window")
         if window["partitions"] != sorted(set(window["partitions"])):
             raise ValueError("Window Partitions must be sorted and unique")

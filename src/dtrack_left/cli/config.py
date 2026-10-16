@@ -82,21 +82,47 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{name}: Right kind {kind!r} requires {', '.join(needed)}")
         if "{src}" in str(right.get("query") or "") and kind != "files":
             raise ValueError(f"{name}: {{src}} in a Right query needs kind 'files'")
-        if not left.get("date_col") or not right.get("date_col"):
+        raw_partition_mode = pair.get("partition_mode", "date")
+        if not isinstance(raw_partition_mode, str):
+            raise TypeError(f"{name}: partition_mode must be date or all")
+        partition_mode = raw_partition_mode.strip().lower()
+        if partition_mode not in {"date", "all"}:
+            raise ValueError(f"{name}: partition_mode must be date or all")
+        if partition_mode == "date" and (not left.get("date_col") or not right.get("date_col")):
             raise ValueError(f"{name}: both sides require date_col")
+        if partition_mode == "all":
+            pair["partition_mode"] = "all"
+            date_only = [
+                field
+                for field in (
+                    "fromDate",
+                    "toDate",
+                    "vintage",
+                    "date_synonyms",
+                    "excluded_partitions",
+                )
+                if pair.get(field)
+            ]
+            if date_only:
+                raise ValueError(f"{name}: partition_mode all cannot use {', '.join(date_only)}")
+        else:
+            pair.pop("partition_mode", None)
         try:
             left["query_windows"] = normalize_query_windows(
                 left.get("query"), left.get("query_windows"), source=left_source
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{name}: invalid Left query_windows: {exc}") from None
+        if partition_mode == "all" and left["query_windows"]:
+            raise ValueError(f"{name}: partition_mode all cannot use Left query_windows")
         if not left["query_windows"]:
             left.pop("query_windows", None)
         for side_name, side in (("Left", left), ("Right", right)):
-            try:
-                resolve_date_type(side.get("date_type"))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"{name}: invalid {side_name} date_type: {exc}") from None
+            if partition_mode == "date" or "date_type" in side:
+                try:
+                    resolve_date_type(side.get("date_type"))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{name}: invalid {side_name} date_type: {exc}") from None
         _expand_inline_col_map(pair)
         if not isinstance(pair.get("col_map"), dict) or not pair["col_map"]:
             raise ValueError(f"{name}: col_map must be non-empty")
@@ -112,12 +138,15 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             isinstance(value, str) for value in excluded_columns
         ):
             raise TypeError(f"{name}: excluded_columns must be a list of Left column names")
-        try:
-            pair["excluded_partitions"] = sorted(
-                {canonical_date(value) for value in excluded_partitions}
-            )
-        except ValueError as exc:
-            raise ValueError(f"{name}: invalid excluded_partitions: {exc}") from None
+        if partition_mode == "date":
+            try:
+                pair["excluded_partitions"] = sorted(
+                    {canonical_date(value) for value in excluded_partitions}
+                )
+            except ValueError as exc:
+                raise ValueError(f"{name}: invalid excluded_partitions: {exc}") from None
+        else:
+            pair["excluded_partitions"] = []
         unknown_excluded = sorted(set(excluded_columns) - set(pair["col_map"]))
         if unknown_excluded:
             raise ValueError(
@@ -125,7 +154,9 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 f"{', '.join(unknown_excluded)}"
             )
         date_col = str(left.get("date_col") or "").casefold()
-        if any(str(column).casefold() == date_col for column in excluded_columns):
+        if partition_mode == "date" and any(
+            str(column).casefold() == date_col for column in excluded_columns
+        ):
             raise ValueError(f"{name}: excluded_columns cannot include the Left date_col")
         pair["excluded_columns"] = list(dict.fromkeys(excluded_columns))
         overrides = pair.get("col_type_overrides") or {}

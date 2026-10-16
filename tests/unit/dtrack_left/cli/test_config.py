@@ -172,6 +172,49 @@ def test_pairs_need(change, message):
         validate_config({"pairs": {"p": row}})
 
 
+@pytest.mark.parametrize(
+    ("change", "error", "exception"),
+    [
+        (lambda p: p.update(partition_mode="all"), None, None),
+        (
+            lambda p: p.update(partition_mode="weekly"),
+            "partition_mode must be date or all",
+            ValueError,
+        ),
+        (lambda p: p.update(partition_mode=1), "partition_mode must be date or all", TypeError),
+        (
+            lambda p: p.update(partition_mode="all", fromDate="2026-01-01"),
+            "partition_mode all cannot use fromDate",
+            ValueError,
+        ),
+        (
+            lambda p: p.update(partition_mode="all", vintage="month"),
+            "partition_mode all cannot use vintage",
+            ValueError,
+        ),
+        (
+            lambda p: p.update(partition_mode="all", excluded_partitions=["2026-01-01"]),
+            "partition_mode all cannot use excluded_partitions",
+            ValueError,
+        ),
+    ],
+    ids=["all", "invalid", "type", "bounds", "vintage", "exclusions"],
+)
+def test_partition_mode(change, error, exception):
+    row = pair()
+    row["left"].pop("date_col")
+    row["right"].pop("date_col")
+    change(row)
+    config = {"version": 2, "pairs": {"p": row}}
+    if error:
+        with pytest.raises(exception, match=error):
+            validate_config(config)
+    else:
+        loaded = validate_config(config)["pairs"]["p"]
+        assert loaded["partition_mode"] == "all"
+        assert "date_col" not in loaded["left"] and "date_col" not in loaded["right"]
+
+
 def test_load_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DTRACK_UNIT_MARKER", raising=False)

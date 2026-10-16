@@ -75,6 +75,51 @@ def test_run_all(synthetic, tmp_path, s3_bucket, monkeypatch):
     assert open_local().status()["state"] == "complete"
 
 
+def test_all_run(tmp_path):
+    left = tmp_path / "left.csv"
+    right_root = tmp_path / "right"
+    right_root.mkdir()
+    body = "id,amount,status\n1,10,open\n2,20,closed\n3,30,open\n"
+    left.write_text(body, encoding="utf-8")
+    (right_root / "accounts.csv").write_text(body, encoding="utf-8")
+    config = {
+        "version": 1,
+        "pairs": {
+            "accounts": {
+                "partition_mode": "all",
+                "left": {"source": "file", "path": str(left)},
+                "right": {"source": "databricks", "table": "accounts"},
+                "key": "id",
+                "key_families": {"id": "numeric"},
+                "sample": 1.0,
+                "col_map": {"id": "id", "amount": "amount", "status": "status"},
+            }
+        },
+    }
+
+    def anchor(spec):
+        return CsvAnchorTarget(spec, right_root, tmp_path / "right-work")
+
+    run = pipeline.open_run(
+        config,
+        run_id="all-run",
+        out=tmp_path / "runs",
+        target_factory=anchor,
+        land=False,
+    )
+    outcome = pipeline.run_all(run)
+    assert outcome["status"] == "DONE" and outcome["findings"] == {
+        "row_count_diff": 0,
+        "partition_missing": 0,
+        "col_stat_diff": 0,
+    }
+    result = run.store.get_json("pairs/accounts/row_check/result.json")
+    plan = run.store.get_json("pairs/accounts/plan.json")
+    assert result["partitions"] == {"all": {"left": 3, "right": 3, "verdict": "match"}}
+    assert plan["partition_mode"] == "all"
+    assert plan["windows"] == [{"bucket": "all", "partitions": ["all"], "n_left": 3}]
+
+
 class FakeWarehouse:
     def __init__(self, rows):
         self.sql = []
@@ -135,6 +180,21 @@ def test_sample_pushdown(tmp_path):
     pulled = next(item for item in warehouse.sql if item.startswith("SELECT `dt`,"))
     assert "md5(" in pulled and stats["amount"]["n_total"] == 1
     assert not (tmp_path / "orders" / "b" / "right.sampled.csv").exists()
+
+
+def test_all_sampling(tmp_path):
+    warehouse = FakeWarehouse([("1", "10.50", "OPEN"), ("2", "3", None)])
+    config = {"table": "orders", "partition_mode": "all"}
+    target = pipeline.WarehouseTarget(warehouse, config, tmp_path)
+    manifest = {
+        **MANIFEST,
+        "partition_mode": "all",
+        "sample": {"mode": "fraction", "threshold": 2**32, "rate": 1.0},
+    }
+    stats = target.window_statistics(manifest, {"bucket": "all", "partitions": ["all"]})
+    pulled = next(item for item in warehouse.sql if item.startswith("SELECT `order_id`,"))
+    assert "business_date" not in pulled and "`dt`" not in pulled
+    assert "md5(" in pulled and stats["amount"]["n_total"] == 2
 
 
 def test_streaming(tmp_path, monkeypatch):

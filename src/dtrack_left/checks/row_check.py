@@ -23,7 +23,14 @@ from ..common.run_logging import get_left_logger
 
 log = get_left_logger("row_check")
 SECRET_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
-STAGE_ONE_FIELDS = ("left", "right", "fromDate", "toDate", "date_synonyms")
+STAGE_ONE_FIELDS = (
+    "left",
+    "right",
+    "partition_mode",
+    "fromDate",
+    "toDate",
+    "date_synonyms",
+)
 
 
 def make_run_id(config: dict[str, Any], *, now: datetime | None = None) -> str:
@@ -122,6 +129,7 @@ def publish_row_check_results(
             "right": public["right"],
             "bounds": {"from": pair.get("fromDate"), "to": pair.get("toDate")},
             "date_synonyms": dict(pair.get("date_synonyms") or {}),
+            "partition_mode": public.get("partition_mode", "date"),
             "counts": values,
             "pair_config": public,
             "preflight": result["preflight"],
@@ -178,7 +186,15 @@ def run_row_check(
     )
     started = time.monotonic()
     if sources is None:
-        sources = {name: source_factory(pair["left"]) for name, pair in pairs.items()}
+        sources = {
+            name: source_factory(
+                {
+                    **pair["left"],
+                    "partition_mode": pair.get("partition_mode", "date"),
+                }
+            )
+            for name, pair in pairs.items()
+        }
     missing_sources = sorted(set(pairs) - set(sources))
     if missing_sources:
         raise ValueError(f"preflight sources missing pair(s): {', '.join(missing_sources)}")

@@ -49,6 +49,10 @@ class SparkTarget:
         self.sql_audit = audit
         return self
 
+    @property
+    def partition_mode(self) -> str:
+        return str(self.config.get("partition_mode") or "date")
+
     def _audit(self, sql: str, operation: str = "query") -> None:
         if self.sql_audit is not None:
             self.sql_audit.record(sql, backend="spark", operation=operation)
@@ -110,10 +114,11 @@ class SparkTarget:
                 )
                 if row[0] and not str(row[0]).startswith("#")
             }
-            if self.config["date_col"] not in columns:
+            if self.partition_mode == "date" and self.config["date_col"] not in columns:
                 raise ValueError(f"date_col {self.config['date_col']!r} not in {sorted(columns)}")
             self.column_types = columns
-            self.date_type()
+            if self.partition_mode == "date":
+                self.date_type()
             return {
                 "ok": True,
                 "source": "databricks",
@@ -125,6 +130,12 @@ class SparkTarget:
     def partition_counts(
         self, from_date: str | None = None, to_date: str | None = None
     ) -> dict[str, int]:
+        if self.partition_mode == "all":
+            rows = self._rows(
+                f"SELECT COUNT(*) FROM {self.relation()} WHERE {self._where(None)}",
+                "partition_counts",
+            )
+            return {"all": int(rows[0][0]) if rows else 0}
         self.date_type()
         date_col = self.config["date_col"]
         ref = day_expr(date_col, "spark", self.config.get("date_type"))
@@ -161,16 +172,22 @@ class SparkTarget:
     ) -> dict[str, dict[str, Any]]:
         if not hasattr(self, "column_types"):
             self.preflight()
-        self.date_type()
+        if self.partition_mode == "date":
+            self.date_type()
         strict = bool(manifest.get("strict"))
-        predicate = partition_where(
-            self.config["date_col"],
-            window["partitions"],
-            dialect="spark",
-            date_type=self.config.get("date_type"),
+        predicate = (
+            partition_where(
+                self.config["date_col"],
+                window["partitions"],
+                dialect="spark",
+                date_type=self.config.get("date_type"),
+            )
+            if self.partition_mode == "date"
+            else None
         )
         sample = self._sample_predicate(manifest, window)
-        where = self._where(predicate if sample is None else f"{predicate} AND ({sample})")
+        filters = " AND ".join(f"({item})" for item in (predicate, sample) if item)
+        where = self._where(filters or None)
         right_columns = [manifest["col_map"][column] for column in manifest["columns"]]
         overrides = manifest.get("col_type_overrides") or {}
         column_types = manifest.get("column_types") or {}
@@ -183,12 +200,8 @@ class SparkTarget:
             integral = native and any(column_type.startswith(t) for t in INTEGRAL_TYPES)
             comparison = column_types.get(left_column)
             requested = overrides.get(left_column)
-            numeric = (
-                not comparison
-                and (
-                    requested == "numeric"
-                    or (requested is None and native and not integral)
-                )
+            numeric = not comparison and (
+                requested == "numeric" or (requested is None and native and not integral)
             )
             kinds[column] = numeric
             text = (

@@ -40,6 +40,33 @@ def test_preflight(tmp_path):
     assert "missing column d" in missing.preflight()["error"]
 
 
+def test_all_partition(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "t.csv").write_text("id,amount\n1,10\n2,20\n", encoding="utf-8")
+    work = tmp_path / "work"
+    target = CsvAnchorTarget({"table": "t", "partition_mode": "all"}, source, work)
+    assert target.preflight()["ok"]
+    assert target.partition_counts() == {"all": 2}
+    manifest = {
+        "pair": "t",
+        "partition_mode": "all",
+        "columns": ["AMOUNT"],
+        "col_map": {"AMOUNT": "amount"},
+        "right_key_cols": ["id"],
+        "key_families": ["numeric"],
+        "sample": {"mode": "all"},
+        "strict": False,
+    }
+    stats = target.window_statistics(manifest, {"bucket": "all", "partitions": ["all"]})
+    assert stats["amount"]["n_total"] == 2
+    assert (work / "t" / "all" / "right.csv").read_text(encoding="utf-8").splitlines() == [
+        "id,amount",
+        "1,10",
+        "2,20",
+    ]
+
+
 def test_date_type(tmp_path):
     source = tmp_path / "source"
     source.mkdir()

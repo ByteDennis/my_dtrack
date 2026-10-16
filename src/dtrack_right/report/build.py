@@ -153,6 +153,7 @@ def build_report(
                     left_label,
                     right_label,
                     (document["left"].get("date_col"), document["right"].get("date_col")),
+                    document.get("partition_mode", "date"),
                 )
             )
     vintage = next(iter(state["manifests"].values()), {}).get("vintage", "month")

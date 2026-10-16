@@ -122,6 +122,28 @@ def test_manifest_defaults(common):
     assert manifest["sample"] == {"mode": "all"}
 
 
+def test_all_window(common):
+    pair = {
+        "partition_mode": "all",
+        "left": {"source": "oracle", "table": "A"},
+        "right": {"source": "databricks", "table": "a"},
+        "col_map": {"ID": "id", "AMOUNT": "amount"},
+        "key": "ID",
+        "key_families": {"ID": "numeric"},
+        "sample": 0.5,
+    }
+    row_check = {
+        "gate_decision": {"passed": True},
+        "partitions": {"all": {"left": 9, "right": 9, "verdict": "match"}},
+    }
+    manifest = common.manifest.build_manifest("run", "p", pair, row_check)
+    assert manifest["partition_mode"] == "all"
+    assert manifest["vintage"] == "all"
+    assert manifest["columns"] == ["ID", "AMOUNT"]
+    assert manifest["windows"] == [{"bucket": "all", "partitions": ["all"], "n_left": 9}]
+    assert manifest["expected_units"] == 2
+
+
 def test_version_two(common):
     pair = _variant(
         version=2,

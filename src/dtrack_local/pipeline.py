@@ -143,15 +143,28 @@ class WarehouseTarget(SparkTarget):
         return self.warehouse.rows(sql, operation=operation)
 
     def window_sql(self, manifest: dict[str, Any], window: dict[str, Any]) -> tuple[str, list[str]]:
-        self.date_type()
-        date_col = self.config["date_col"]
-        predicate = partition_where(
-            date_col, window["partitions"], dialect="spark", date_type=self.config.get("date_type")
-        )
+        partition_mode = self.config.get("partition_mode", "date")
+        if partition_mode == "date":
+            self.date_type()
+            date_col = self.config["date_col"]
+            predicate = partition_where(
+                date_col,
+                window["partitions"],
+                dialect="spark",
+                date_type=self.config.get("date_type"),
+            )
+        else:
+            date_col = None
+            predicate = None
         sample = self._sample_predicate(manifest, window)
-        where = self._where(predicate if sample is None else f"{predicate} AND ({sample})")
+        filters = " AND ".join(f"({item})" for item in (predicate, sample) if item)
+        where = self._where(filters or None)
         right_columns = [manifest["col_map"][column] for column in manifest["columns"]]
-        selected = list(dict.fromkeys([date_col, *manifest["right_key_cols"], *right_columns]))
+        selected = list(
+            dict.fromkeys(
+                [*([date_col] if date_col else []), *manifest["right_key_cols"], *right_columns]
+            )
+        )
         projection = ", ".join(quote_ident(column, "spark") for column in selected)
         return f"SELECT {projection} FROM {self.relation()} WHERE {where}", selected
 
@@ -293,10 +306,22 @@ def _preflight(run: LocalRun) -> PreflightResult:
         if pair.get("skip") or (run.pairs and name not in run.pairs):
             continue
         source = attach_sql_audit(
-            source_from_config(pair["left"]), SqlAudit(run.store, "left", pair=name)
+            source_from_config(
+                {
+                    **pair["left"],
+                    "partition_mode": pair.get("partition_mode", "date"),
+                }
+            ),
+            SqlAudit(run.store, "left", pair=name),
         )
         target = attach_sql_audit(
-            run.target_factory(pair["right"]), SqlAudit(run.store, "right", pair=name)
+            run.target_factory(
+                {
+                    **pair["right"],
+                    "partition_mode": pair.get("partition_mode", "date"),
+                }
+            ),
+            SqlAudit(run.store, "right", pair=name),
         )
         sources[name] = source
         targets[name] = target

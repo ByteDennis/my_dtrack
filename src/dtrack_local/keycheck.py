@@ -32,7 +32,11 @@ def key_spec(pair: dict[str, Any], families: dict[str, Any] | None = None):
     date_col = str(pair["left"].get("date_col") or "").lower()
     for key in keys:
         family = configured.get(key)
-        if family is None and key.lower() == date_col:
+        if (
+            pair.get("partition_mode", "date") == "date"
+            and family is None
+            and key.lower() == date_col
+        ):
             family = {
                 "family": "date_type",
                 "left_date_type": resolve_date_type(pair["left"].get("date_type")).spec(
@@ -84,10 +88,14 @@ def pull_right_keys(
     sample: dict[str, Any] | None = None,
     key_tuples: list[list[object]] | None = None,
 ):
-    date_col = target.config["date_col"]
-    predicate = partition_where(
-        date_col, partitions, dialect="spark", date_type=target.config.get("date_type")
-    )
+    if target.config.get("partition_mode", "date") == "date":
+        date_col = target.config["date_col"]
+        predicate = partition_where(
+            date_col, partitions, dialect="spark", date_type=target.config.get("date_type")
+        )
+    else:
+        date_col = None
+        predicate = None
     sampled = sample_predicate_sql(
         sample,
         [quote_ident(key, "spark") for key in right_keys],
@@ -97,7 +105,7 @@ def pull_right_keys(
         key_tuples,
     )
     predicate = " AND ".join(f"({item})" for item in (predicate, sampled) if item)
-    selected = list(dict.fromkeys([date_col, *right_keys]))
+    selected = list(dict.fromkeys([*([date_col] if date_col else []), *right_keys]))
     projection = [quote_ident(column, "spark") for column in selected]
     composite = ", ".join(
         family.sql(quote_ident(key, "spark"), "right") for key, family in zip(right_keys, families)
@@ -106,9 +114,7 @@ def pull_right_keys(
     sql = (
         f"SELECT {', '.join(projection)} FROM {target.relation()} WHERE {target._where(predicate)}"
     )
-    target.warehouse.to_csv(
-        sql, output, [*selected, NORM_SQL], operation="key_check"
-    )
+    target.warehouse.to_csv(sql, output, [*selected, NORM_SQL], operation="key_check")
     return Path(output)
 
 
@@ -188,13 +194,16 @@ class KeyCheck:
         }
 
 
-def _normalise(frame, columns, families, side, date_col):
+def _normalise(frame, columns, families, side, date_col=None):
     frame = frame.copy()
     parts = [frame[c].map(lambda v, f=f: f.normalize(v, side)) for c, f in zip(columns, families)]
     frame["norm"] = pd.concat(parts, axis=1).agg("|".join, axis=1) if len(frame) else []
     loose = [frame[c].map(_loose) for c in columns]
     frame["loose"] = pd.concat(loose, axis=1).agg("|".join, axis=1) if len(frame) else []
-    frame["day"] = frame[date_col].map(_day) if len(frame) else []
+    if date_col:
+        frame["day"] = frame[date_col].map(_day) if len(frame) else []
+    else:
+        frame["day"] = "all"
     return frame
 
 
@@ -245,8 +254,8 @@ def compare_keys(
     left_keys, right_keys, resolved = key_spec(pair, families)
     left = pd.read_csv(left_csv, dtype=object, keep_default_na=False, na_values=[""])
     right = pd.read_csv(right_csv, dtype=object, keep_default_na=False, na_values=[""])
-    left = _normalise(left, left_keys, resolved, "left", pair["left"]["date_col"])
-    right = _normalise(right, right_keys, resolved, "right", pair["right"]["date_col"])
+    left = _normalise(left, left_keys, resolved, "left", pair["left"].get("date_col"))
+    right = _normalise(right, right_keys, resolved, "right", pair["right"].get("date_col"))
     if only_keys is not None:
         wanted = {"|".join(_loose(v) for v in row) for row in only_keys}
         left, right = left[left["loose"].isin(wanted)], right[right["loose"].isin(wanted)]

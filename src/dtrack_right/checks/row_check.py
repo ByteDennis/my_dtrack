@@ -26,9 +26,13 @@ def reconcile_partitions(
     left_counts: dict[str, int],
     right_counts: dict[str, int],
     date_synonyms: dict[str, str] | None = None,
+    partition_mode: str = "date",
 ) -> dict[str, dict[str, Any]]:
-    left = apply_synonyms(left_counts, date_synonyms)
-    right = apply_synonyms(right_counts, date_synonyms)
+    if partition_mode == "all":
+        left, right = dict(left_counts), dict(right_counts)
+    else:
+        left = apply_synonyms(left_counts, date_synonyms)
+        right = apply_synonyms(right_counts, date_synonyms)
     result: dict[str, dict[str, Any]] = {}
     for partition in sorted(set(left) | set(right)):
         left_value = left.get(partition)
@@ -158,7 +162,10 @@ def reconcile_pair(
         right_s,
     )
     partitions = reconcile_partitions(
-        left_doc["counts"], right_counts, left_doc.get("date_synonyms")
+        left_doc["counts"],
+        right_counts,
+        left_doc.get("date_synonyms"),
+        left_doc.get("partition_mode", "date"),
     )
     document = {
         "run_id": left_doc["run_id"],
@@ -167,6 +174,7 @@ def reconcile_pair(
         "right": left_doc["right"],
         "bounds": left_doc["bounds"],
         "date_synonyms": dict(left_doc.get("date_synonyms") or {}),
+        "partition_mode": left_doc.get("partition_mode", "date"),
         "partitions": partitions,
         "summary": summarize_partitions(partitions),
         "gate_decision": evaluate_gate(partitions, gate),
@@ -237,6 +245,15 @@ def require_version2_exclusions(store) -> None:
     unresolved = unresolved_version2_partitions(store)
     if not unresolved:
         return
+    plans = {plan["pair"]: plan for _key, plan in list_plans(store)}
+    all_mode = sorted(
+        pair for pair in unresolved if (plans.get(pair) or {}).get("partition_mode") == "all"
+    )
+    if all_mode:
+        raise RuntimeError(
+            "partition_mode all row counts differ; align the complete Left and Right relations "
+            f"before continuing ({', '.join(all_mode)})"
+        )
     details = "; ".join(f"{pair}: {', '.join(values)}" for pair, values in unresolved.items())
     raise RuntimeError(
         "version 2 row-check found unexcluded mismatched partitions; "
@@ -268,7 +285,16 @@ def run_row_check(
             raise ValueError(f"preflight health missing pair(s): {', '.join(missing_health)}")
     for left_doc in pending:
         pair = left_doc["pair"]
-        target = targets[pair] if targets is not None else target_factory(left_doc["right"])
+        target = (
+            targets[pair]
+            if targets is not None
+            else target_factory(
+                {
+                    **left_doc["right"],
+                    "partition_mode": left_doc.get("partition_mode", "date"),
+                }
+            )
+        )
         reconcile_pair(
             store,
             left_doc,

@@ -200,7 +200,12 @@ class ColCheck:
         pair = manifest["pair"]
         if pair not in self.targets:
             self.targets[pair] = attach_sql_audit(
-                self.target_factory(manifest["right"]),
+                self.target_factory(
+                    {
+                        **manifest["right"],
+                        "partition_mode": manifest.get("partition_mode", "date"),
+                    }
+                ),
                 SqlAudit(self.store, "right", pair=pair),
             )
         return self.targets[pair]

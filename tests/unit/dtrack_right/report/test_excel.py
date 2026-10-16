@@ -43,6 +43,20 @@ def test_row_sheet():
     assert sheet.cell(row=12, column=1).fill.start_color.rgb.endswith("FFC7CE")
 
 
+def test_all_mode():
+    document = {
+        **DOCUMENT,
+        "partition_mode": "all",
+        "left": {"source": "oracle", "table": "A"},
+        "right": {"source": "databricks", "table": "a"},
+        "bounds": {"from": None, "to": None},
+        "partitions": {"all": {"left": 2, "right": 2, "verdict": "match"}},
+    }
+    sheet = excel.build_workbook([document], {})[DOCUMENT["pair"][:31]]
+    assert sheet["A3"].value == "Partition Basis:" and sheet["B3"].value == "all rows"
+    assert sheet["B4"].value == "not applicable"
+
+
 def test_col_sheet():
     diff = compare_statistics(
         pair="p", window="2026-02-01", column="X", left=STATS, right={**STATS, "mean": 9.0}

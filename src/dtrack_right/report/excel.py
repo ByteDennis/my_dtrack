@@ -55,14 +55,23 @@ def write_row_sheet(workbook, document: dict[str, Any]) -> None:
     left_label = str(left.get("source") or "left").upper()
     right_label = str(right.get("source") or "databricks").upper()
     summary = document.get("summary") or {}
+    all_rows = document.get("partition_mode") == "all"
     sheet = workbook.create_sheet(title=f"{document['pair']}_row"[:31])
     header = [
         (f"{left_label}:", _relation(left)),
         (f"{right_label}:", _relation(right)),
-        ("Date Variable:", f"{left.get('date_col')} / {right.get('date_col')}"),
+        (
+            "Partition Basis:",
+            "all rows" if all_rows else f"{left.get('date_col')} / {right.get('date_col')}",
+        ),
         (
             "Bounds:",
-            f"{(document.get('bounds') or {}).get('from')} -> {(document.get('bounds') or {}).get('to')}",
+            "not applicable"
+            if all_rows
+            else (
+                f"{(document.get('bounds') or {}).get('from')} -> "
+                f"{(document.get('bounds') or {}).get('to')}"
+            ),
         ),
         ("Matching:", summary.get("match", 0)),
         ("Mismatch:", summary.get("count_diff", 0)),
