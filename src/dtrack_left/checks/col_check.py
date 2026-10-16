@@ -626,6 +626,7 @@ class LeftRuntime:
             col_types=manifest.get("col_type_overrides"),
             column_types=manifest.get("column_types"),
             side="left",
+            statistics=manifest.get("statistics"),
             progress=progress,
             on_batch=on_batch,
             shard_status=shard_status,

@@ -246,6 +246,20 @@ def test_statistics():
         "top_10": "",
     }
     assert stats["status"]["col_type"] == "categorical" and stats["status"]["length_max"] == 2
+    selected_manifest = _manifest({"mode": "all"})
+    selected_manifest["statistics"] = ["n_unique", "hash_sum"]
+    selected = target.window_statistics(selected_manifest, window)
+    selected_query = spark.statements[-1]
+    assert "count(DISTINCT" in selected_query and "sha2(" in selected_query
+    assert all(
+        fragment not in selected_query
+        for fragment in ("count_if(", "avg(", "stddev_samp(", "min(", "max(")
+    )
+    assert selected["amount"] == {
+        "col_type": "numeric",
+        "n_unique": 2,
+        "hash_sum": "2000",
+    }
 
 
 @pytest.mark.parametrize(

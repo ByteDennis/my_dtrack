@@ -80,6 +80,19 @@ def test_csv_columns(tmp_path):
     assert result["ID"]["col_type"] == "categorical"
     assert (result["ID"]["min_val"], result["ID"]["max_val"]) == ("007", "008")
     assert result["ID"]["top_10"] == "" and result["AMOUNT"]["n_unique"] == 2
+    selected = stats.compute_csv_statistics(
+        path, ["ID", "AMOUNT"], statistics=["hash_sum", "n_unique"]
+    )
+    assert selected["ID"] == {
+        "col_type": "categorical",
+        "n_unique": 2,
+        "hash_sum": result["ID"]["hash_sum"],
+    }
+    assert selected["AMOUNT"] == {
+        "col_type": "numeric",
+        "n_unique": 2,
+        "hash_sum": result["AMOUNT"]["hash_sum"],
+    }
     with pytest.raises(ValueError, match="missing columns: NOPE"):
         stats.compute_csv_statistics(path, ["NOPE"])
 

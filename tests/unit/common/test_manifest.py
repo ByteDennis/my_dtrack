@@ -71,6 +71,10 @@ def test_manifest_windows(common):
         "run", "p", _variant(col_type_overrides={"AMOUNT": "numeric"}), ROW_CHECK
     )
     assert forced["col_type_overrides"] == {"AMOUNT": "numeric"}
+    selected = common.manifest.build_manifest(
+        "run", "p", _variant(statistics=["hash_sum", "n_unique"]), ROW_CHECK
+    )
+    assert selected["statistics"] == ["n_unique", "hash_sum"]
     dated = common.manifest.build_manifest(
         "run",
         "p",
@@ -168,11 +172,18 @@ def test_version_ids(common):
         window["bucket"]: common.manifest.unit_id_for(first, window, "AMOUNT")
         for window in first["windows"]
     }
+    assert first_ids["2026-01-01"] == "p--2026-01-01--amount--35348aa128b7"
     second_ids = {
         window["bucket"]: common.manifest.unit_id_for(second, window, "AMOUNT")
         for window in second["windows"]
     }
     assert first_ids["2026-01-01"] != second_ids["2026-01-01"]
+    selected = common.manifest.build_manifest(
+        "run", "p", _variant(version=2, statistics=["hash_sum", "n_unique"]), ROW_CHECK
+    )
+    assert common.manifest.unit_id_for(
+        first, first["windows"][0], "AMOUNT"
+    ) != common.manifest.unit_id_for(selected, selected["windows"][0], "AMOUNT")
     assert first_ids["2026-02-01"] == second_ids["2026-02-01"]
     right_only = common.manifest.build_manifest(
         "run", "p", _variant(version=2, excluded_partitions=["2026-03-01"]), ROW_CHECK

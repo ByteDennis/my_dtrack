@@ -64,6 +64,7 @@
 #                        (sides default to transform; steps and families: common/hashing.py)
 #   sample               missing / "" / false = all rows | 0 < x <= 1 fraction by key hash |
 #                        N > 0 fixed N keys per window chosen by the Left side (both need key)
+#   statistics           optional metric list; e.g. ["hash_sum", "n_unique"] (Pair-level)
 #   strict               true: text compared lower-cased and decimal-collapsed
 #   skip                 true: the pair is ignored
 #

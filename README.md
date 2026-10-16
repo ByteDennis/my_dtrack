@@ -63,6 +63,11 @@ partition and runs fraction or fixed-key sampling once across the whole dataset.
 settings would otherwise imply date filtering that cannot occur. Date-partitioned CSV
 materialization and SAS bundle export remain `partition_mode: date` workflows.
 
+Column comparison work is also configurable per Pair. Set, for example,
+`"statistics": ["hash_sum", "n_unique"]` to calculate and compare only the normalized hash sum
+and distinct-value count for that Pair. Omitting `statistics` preserves the full standard set;
+`col_type` remains metadata used to keep Left and Right normalization aligned.
+
 An Oracle `query` may be inline or a `.sql` path relative to the config file. Large consolidation
 queries can push the selected DTrack window into each dated driver before the join with controlled
 markers such as `{{query_windows:driver_one}}`; declare each marker under the Left

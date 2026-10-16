@@ -10,6 +10,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from ..common.column_types import resolve_column_type
 from ..common.dates import canonical_date, resolve_date_type
+from ..common.manifest import statistics_plan
 from ..common.query_windows import normalize_query_windows
 
 LEFT_SOURCES = {"oracle", "athena", "aws", "hadoop", "csv", "file", "duckdb"}
@@ -126,6 +127,14 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         _expand_inline_col_map(pair)
         if not isinstance(pair.get("col_map"), dict) or not pair["col_map"]:
             raise ValueError(f"{name}: col_map must be non-empty")
+        try:
+            statistics = statistics_plan(pair.get("statistics"))
+        except (TypeError, ValueError) as exc:
+            raise type(exc)(f"{name}: {exc}") from None
+        if statistics is None:
+            pair.pop("statistics", None)
+        else:
+            pair["statistics"] = statistics
         excluded_partitions = pair.get("excluded_partitions") or []
         excluded_columns = pair.get("excluded_columns") or []
         if version == 1 and (excluded_partitions or excluded_columns):

@@ -56,6 +56,7 @@ def doctor_command(config):
             ).preflight(),
             "right": describe_right(pair["right"]),
             "col_type_overrides": dict(pair.get("col_type_overrides") or {}),
+            "statistics": pair.get("statistics"),
         }
         for name, pair in config["pairs"].items()
         if not pair.get("skip")

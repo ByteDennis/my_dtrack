@@ -119,6 +119,7 @@ def right_csv_statistics(manifest: dict[str, Any], path: str | Path) -> dict[str
         col_types={manifest["col_map"][k]: v for k, v in overrides.items()},
         column_types={manifest["col_map"][k]: v for k, v in column_types.items()},
         side="right",
+        statistics=manifest.get("statistics"),
     )
 
 

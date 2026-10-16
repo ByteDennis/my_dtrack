@@ -26,6 +26,17 @@ def test_stat_drift():
     assert result["verdict"] == "diff" and result["n_unique_diff"] == 1
     assert result["mean_match"] is False and result["min_match"] is False
     assert result["hash_sum_match"] is False and result["top_10_right"] == "[]"
+    selected = compare_statistics(
+        pair="p",
+        window="w",
+        column="c",
+        left=STATS,
+        right=changed,
+        statistics=["n_unique", "hash_sum"],
+    )
+    assert selected["verdict"] == "diff"
+    assert "n_total_diff" not in selected and "mean_match" not in selected
+    assert selected["n_unique_diff"] == 1 and selected["hash_sum_match"] is False
 
 
 # >>> numeric extremes compare by value (100 == 100.0); categorical ones stay verbatim (007 != 7) <<< #

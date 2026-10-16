@@ -15,6 +15,7 @@ import pandas as pd
 
 from .column_types import resolve_column_type
 from .hashing import collapse_decimal
+from .manifest import DEFAULT_STATISTICS, statistics_plan
 from .run_logging import get_left_logger
 
 log = get_left_logger("stats")
@@ -53,7 +54,11 @@ def _top10(series: pd.Series) -> str:
 
 
 def column_statistics(
-    series: pd.Series, *, strict: bool = False, col_type: str | None = None
+    series: pd.Series,
+    *,
+    strict: bool = False,
+    col_type: str | None = None,
+    statistics: list[str] | None = None,
 ) -> dict[str, Any]:
     values = series.copy()
     original = values.dropna().astype(str)
@@ -115,7 +120,14 @@ def column_statistics(
             length_max=None if strings.empty else int(strings.str.len().max()),
             top_10="" if is_integral else _top10(values),
         )
-    return common
+    if statistics is None:
+        return common
+    selected = statistics_plan(statistics)
+    keys = {"min": "min_val", "max": "max_val"}
+    return {
+        "col_type": common["col_type"],
+        **{keys.get(name, name): common[keys.get(name, name)] for name in selected or []},
+    }
 
 
 DEFAULT_BATCH = 64
@@ -156,6 +168,7 @@ def compute_csv_statistics(
     col_types: dict[str, str] | None = None,
     column_types: dict[str, Any] | None = None,
     side: str = "left",
+    statistics: list[str] | None = None,
     progress: Callable[[str, int, int], None] | None = None,
     on_batch: Callable[[dict[str, dict[str, Any]]], None] | None = None,
     shard_status: Callable[[int, int, int], None] | None = None,
@@ -185,6 +198,7 @@ def compute_csv_statistics(
             col_types or {},
             column_types or {},
             side,
+            statistics,
             progress,
             on_batch,
             shard_status,
@@ -201,6 +215,7 @@ def _parallel_statistics(
     requested_types,
     comparisons,
     side,
+    statistics,
     progress,
     on_batch,
     shard_status,
@@ -248,6 +263,7 @@ def _parallel_statistics(
                 requested_types,
                 comparisons,
                 side,
+                statistics,
                 group_progress(group_index),
             )
 
@@ -286,8 +302,19 @@ def _parallel_statistics(
     return {column: completed[column] for column in columns}
 
 
-def _statistics(connection, columns, strict, requested_types, comparisons, side, progress=None):
+def _statistics(
+    connection,
+    columns,
+    strict,
+    requested_types,
+    comparisons,
+    side,
+    statistics,
+    progress=None,
+):
     batch = stats_batch()
+    selected = statistics_plan(statistics) or list(DEFAULT_STATISTICS)
+    include_top = statistics is None
     base = {}
     integral_values = {}
     for column in columns:
@@ -342,7 +369,7 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side,
     values = {}
     completed = 0
     for group in _batches(indexed, batch):
-        selects = ["count(*) AS n_total"]
+        selects = ["count(*) AS n_total"] if "n_total" in selected else []
         for index, column in group:
             raw, value = _quote(column), base[column]
             if numeric[column] and not strict:
@@ -353,31 +380,46 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side,
             hash_value = (
                 f"cast('0x' || substr(sha256(coalesce({value}, '<<NULL>>')), 1, 16) as ubigint)"
             )
-            selects += [
-                f"count_if({raw} IS NULL) AS n_missing_{index}",
-                f"count(DISTINCT {value}) AS n_unique_{index}",
-                f"sum(cast({hash_value} AS hugeint)) AS hash_sum_{index}",
-                f"avg({number}) AS mean_{index}" if numeric[column] else f"NULL AS mean_{index}",
-                f"stddev_samp({number}) AS std_{index}"
-                if numeric[column]
-                else f"NULL AS std_{index}",
-                f"min({extreme}) AS min_{index}"
-                if numeric[column]
-                else f"min({value}) AS min_{index}",
-                f"max({extreme}) AS max_{index}"
-                if numeric[column]
-                else f"max({value}) AS max_{index}",
-                (
+            if "n_missing" in selected:
+                selects.append(f"count_if({raw} IS NULL) AS n_missing_{index}")
+            if "n_unique" in selected:
+                selects.append(f"count(DISTINCT {value}) AS n_unique_{index}")
+            if "hash_sum" in selected:
+                selects.append(f"sum(cast({hash_value} AS hugeint)) AS hash_sum_{index}")
+            if "mean" in selected:
+                selects.append(
+                    f"avg({number}) AS mean_{index}" if numeric[column] else f"NULL AS mean_{index}"
+                )
+            if "std" in selected:
+                selects.append(
+                    f"stddev_samp({number}) AS std_{index}"
+                    if numeric[column]
+                    else f"NULL AS std_{index}"
+                )
+            if "min" in selected:
+                selects.append(
+                    f"min({extreme}) AS min_{index}"
+                    if numeric[column]
+                    else f"min({value}) AS min_{index}"
+                )
+            if "max" in selected:
+                selects.append(
+                    f"max({extreme}) AS max_{index}"
+                    if numeric[column]
+                    else f"max({value}) AS max_{index}"
+                )
+            if "length_avg" in selected:
+                selects.append(
                     f"NULL AS length_avg_{index}"
                     if numeric[column]
                     else f"avg(length({value})) AS length_avg_{index}"
-                ),
-                (
+                )
+            if "length_max" in selected:
+                selects.append(
                     f"NULL AS length_max_{index}"
                     if numeric[column]
                     else f"max(length({value})) AS length_max_{index}"
-                ),
-            ]
+                )
         cursor = connection.execute(f"SELECT {', '.join(selects)} FROM scanned")
         row.update(zip([item[0] for item in cursor.description], cursor.fetchone()))
         completed += len(group)
@@ -387,9 +429,8 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side,
     result = {}
     for index, column in indexed:
         is_numeric = numeric[column]
-        minimum, maximum = row[f"min_{index}"], row[f"max_{index}"]
         top = ""
-        if not is_numeric and not integral[column]:
+        if include_top and not is_numeric and not integral[column]:
             top_rows = connection.execute(
                 "WITH counts AS (SELECT value, count(*) AS n, min(position) AS position "
                 f"FROM (SELECT {values[column]} AS value, rowid AS position FROM scanned) "
@@ -401,24 +442,29 @@ def _statistics(connection, columns, strict, requested_types, comparisons, side,
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-        result[column] = {
-            "col_type": "numeric" if is_numeric else "categorical",
-            "n_total": int(row["n_total"]),
-            "n_missing": int(row[f"n_missing_{index}"] or 0),
-            "n_unique": int(row[f"n_unique_{index}"] or 0),
-            "hash_sum": str(int(row[f"hash_sum_{index}"] or 0)),
-            "mean": None if row[f"mean_{index}"] is None else float(row[f"mean_{index}"]),
-            "std": None if row[f"std_{index}"] is None else float(row[f"std_{index}"]),
-            "min_val": None if minimum is None else str(minimum),
-            "max_val": None if maximum is None else str(maximum),
-            "length_avg": (
-                None if row[f"length_avg_{index}"] is None else float(row[f"length_avg_{index}"])
-            ),
-            "length_max": (
-                None if row[f"length_max_{index}"] is None else int(row[f"length_max_{index}"])
-            ),
-            "top_10": top,
-        }
+        payload: dict[str, Any] = {"col_type": "numeric" if is_numeric else "categorical"}
+        if "n_total" in selected:
+            payload["n_total"] = int(row["n_total"])
+        if "n_missing" in selected:
+            payload["n_missing"] = int(row[f"n_missing_{index}"] or 0)
+        if "n_unique" in selected:
+            payload["n_unique"] = int(row[f"n_unique_{index}"] or 0)
+        if "hash_sum" in selected:
+            payload["hash_sum"] = str(int(row[f"hash_sum_{index}"] or 0))
+        for name in ("mean", "std", "length_avg"):
+            if name in selected:
+                value = row[f"{name}_{index}"]
+                payload[name] = None if value is None else float(value)
+        if "length_max" in selected:
+            value = row[f"length_max_{index}"]
+            payload["length_max"] = None if value is None else int(value)
+        for name in ("min", "max"):
+            if name in selected:
+                value = row[f"{name}_{index}"]
+                payload[f"{name}_val"] = None if value is None else str(value)
+        if include_top:
+            payload["top_10"] = top
+        result[column] = payload
         if progress:
             progress("finalize", index + 1, len(columns))
     return result

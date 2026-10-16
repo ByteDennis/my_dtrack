@@ -105,4 +105,5 @@ class CsvAnchorTarget:
             col_types={manifest["col_map"][key]: value for key, value in overrides.items()},
             column_types={manifest["col_map"][key]: value for key, value in column_types.items()},
             side="right",
+            statistics=manifest.get("statistics"),
         )

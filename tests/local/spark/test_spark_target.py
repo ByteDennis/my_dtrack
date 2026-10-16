@@ -55,7 +55,7 @@ def _manifest(sample, strict=False, key_tuples=None):
     }
 
 
-def _pandas_reference(path, partitions, sample, strict, tmp_path, key_tuples=None):
+def _pandas_reference(path, partitions, sample, strict, tmp_path, key_tuples=None, statistics=None):
     frame = pd.read_csv(path, dtype=object)
     window = frame[frame["business_date"].isin(partitions)]
     csv_path = tmp_path / "window.csv"
@@ -69,7 +69,7 @@ def _pandas_reference(path, partitions, sample, strict, tmp_path, key_tuples=Non
         families=["numeric"],
         key_tuples=key_tuples,
     )
-    return compute_csv_statistics(sampled, COLUMNS, strict=strict)
+    return compute_csv_statistics(sampled, COLUMNS, strict=strict, statistics=statistics)
 
 
 # >>> exact per-day counts through spark.sql equal the CSV truth <<< #
@@ -139,8 +139,12 @@ def test_sas_fraction(spark):
 
 
 # >>> the hash-bucket predicate in SQL selects exactly the rows pandas selects, and every statistic agrees <<< #
-@pytest.mark.parametrize("strict", [False, True])
-def test_fraction_stats(spark, orders, tmp_path, strict):
+@pytest.mark.parametrize(
+    ("strict", "statistics"),
+    [(False, None), (True, None), (False, ["n_unique", "hash_sum"])],
+    ids=["loose", "strict", "selected"],
+)
+def test_fraction_stats(spark, orders, tmp_path, strict, statistics):
     partitions = [f"2026-01-{d:02d}" for d in range(1, 31) if d not in (15,)]
     sample = {"mode": "fraction", "rate": 0.25, "threshold": round(0.25 * 2**32)}
     target = SparkTarget(
@@ -152,11 +156,19 @@ def test_fraction_stats(spark, orders, tmp_path, strict):
             "date_type": "string",
         },
     )
+    manifest = _manifest(sample, strict)
+    if statistics:
+        manifest["statistics"] = statistics
     spark_stats = target.window_statistics(
-        _manifest(sample, strict), {"bucket": "2026-01-01", "partitions": partitions}
+        manifest, {"bucket": "2026-01-01", "partitions": partitions}
     )
-    pandas_stats = _pandas_reference(orders, partitions, sample, strict, tmp_path)
-    assert_stats_agree(COLUMNS, spark_stats, pandas_stats)
+    pandas_stats = _pandas_reference(
+        orders, partitions, sample, strict, tmp_path, statistics=statistics
+    )
+    if statistics:
+        assert spark_stats == pandas_stats
+    else:
+        assert_stats_agree(COLUMNS, spark_stats, pandas_stats)
 
 
 # >>> fixed-N: the key list from keys.json selects the same rows in SQL as in pandas <<< #

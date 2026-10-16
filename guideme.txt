@@ -184,6 +184,7 @@ Minimal pattern:
         "LINE_ID": "numeric"
       },
       "sample": 0.10,
+      "statistics": ["hash_sum", "n_unique"],
       "excluded_partitions": [],
       "excluded_columns": [],
       "col_map": {
@@ -332,6 +333,17 @@ Parameter choice:
     0 < float <= 1   = deterministic fraction by normalized composite-key MD5 bucket
     positive integer = fixed N distinct keys per vintage window; Left publishes the
                        selected key tuples in pairs/<pair>/fixed_keys.json for Right reuse
+
+  statistics
+    Optional Pair-level list of Stage-2 column metrics. Missing means the complete standard set.
+    To calculate and compare only normalized hash sums and distinct-value counts, use:
+
+      "statistics": ["hash_sum", "n_unique"]
+
+    Supported names are n_total, n_missing, n_unique, mean, std, min, max, length_avg,
+    length_max, and hash_sum. DTrack stores them in canonical order, rejects duplicates and
+    unknown names, and always retains col_type as normalization/report metadata. A custom list
+    also skips categorical Top-10 work; only selected metrics determine the column verdict.
 
   vintage
     day | week | month | quarter | year. This groups admitted matching dates; it does
@@ -666,7 +678,8 @@ Industrial operating pattern for very large object counts:
      queue/catalog. Do not use one shared DuckDB file as the distributed multi-writer queue.
 
 Modification rule:
-  Stage-2-only change (col_map, key, key_families, sample, vintage, strict, type override):
+  Stage-2-only change (col_map, key, key_families, sample, statistics, vintage, strict,
+  type override):
     reviewed col rollback, optionally rebuild manifest with --config, then rerun col.
   Stage-1 change (left/right relation, date types, date bounds, date synonyms):
     row rollback or, preferably after unit production, a new immutable run_id.

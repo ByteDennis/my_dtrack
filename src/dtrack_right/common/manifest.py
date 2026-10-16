@@ -12,6 +12,31 @@ from .dates import bucket_date, resolve_date_type
 from .hashing import HASH_BUCKET_SPACE, key_family
 
 STATS_VERSION = 1
+DEFAULT_STATISTICS = (
+    "n_total",
+    "n_missing",
+    "n_unique",
+    "mean",
+    "std",
+    "min",
+    "max",
+    "length_avg",
+    "length_max",
+    "hash_sum",
+)
+
+
+def statistics_plan(raw: Any) -> list[str] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw or not all(isinstance(item, str) for item in raw):
+        raise TypeError("statistics must be a non-empty list")
+    if len(raw) != len(set(raw)):
+        raise ValueError("statistics must not contain duplicates")
+    unknown = sorted(set(raw) - set(DEFAULT_STATISTICS))
+    if unknown:
+        raise ValueError(f"unsupported statistics: {', '.join(unknown)}")
+    return [name for name in DEFAULT_STATISTICS if name in raw]
 
 
 def _slug(value: object) -> str:
@@ -52,18 +77,18 @@ def window_id(manifest: dict[str, Any], window: dict[str, Any]) -> str:
 def unit_id_for(manifest: dict[str, Any], window: dict[str, Any], column: str) -> str:
     if int(manifest.get("version") or 1) == 1:
         return unit_id(manifest["pair"], window["bucket"], column)
-    digest = _digest(
-        {
-            "window_id": window_id(manifest, window),
-            "column": column,
-            "right_column": manifest["col_map"][column],
-            "strict": bool(manifest.get("strict")),
-            "col_type_override": (manifest.get("col_type_overrides") or {}).get(column),
-            "column_type": (manifest.get("column_types") or {}).get(column),
-            "right": manifest.get("right") or {},
-        },
-        12,
-    )
+    identity = {
+        "window_id": window_id(manifest, window),
+        "column": column,
+        "right_column": manifest["col_map"][column],
+        "strict": bool(manifest.get("strict")),
+        "col_type_override": (manifest.get("col_type_overrides") or {}).get(column),
+        "column_type": (manifest.get("column_types") or {}).get(column),
+        "right": manifest.get("right") or {},
+    }
+    if "statistics" in manifest:
+        identity["statistics"] = manifest["statistics"]
+    digest = _digest(identity, 12)
     return f"{_slug(manifest['pair'])}--{_slug(window['bucket'])}--{_slug(column)}--{digest}"
 
 
@@ -222,6 +247,9 @@ def build_manifest(
         "excluded_columns": sorted(excluded_columns),
         "expected_units": len(windows) * len(columns),
     }
+    statistics = statistics_plan(pair.get("statistics"))
+    if statistics is not None:
+        manifest["statistics"] = statistics
     if partition_mode == "all":
         manifest["partition_mode"] = "all"
     manifest["plan_id"] = _digest(manifest)
@@ -259,6 +287,9 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("manifest partition_mode must be date or all")
     if partition_mode == "all" and manifest["vintage"] != "all":
         raise ValueError("all-partition manifest vintage must be all")
+    statistics = statistics_plan(manifest.get("statistics"))
+    if statistics is not None and manifest["statistics"] != statistics:
+        raise ValueError("manifest statistics must use canonical order")
     expected = len(manifest["windows"]) * len(manifest["columns"])
     if manifest["expected_units"] != expected:
         raise ValueError("expected_units does not equal Windows x columns")

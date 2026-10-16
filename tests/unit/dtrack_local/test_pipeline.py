@@ -92,6 +92,7 @@ def test_all_run(tmp_path):
                 "key": "id",
                 "key_families": {"id": "numeric"},
                 "sample": 1.0,
+                "statistics": ["hash_sum", "n_unique"],
                 "col_map": {"id": "id", "amount": "amount", "status": "status"},
             }
         },
@@ -117,7 +118,15 @@ def test_all_run(tmp_path):
     plan = run.store.get_json("pairs/accounts/plan.json")
     assert result["partitions"] == {"all": {"left": 3, "right": 3, "verdict": "match"}}
     assert plan["partition_mode"] == "all"
+    assert plan["statistics"] == ["n_unique", "hash_sum"]
     assert plan["windows"] == [{"bucket": "all", "partitions": ["all"], "n_left": 3}]
+    column = next(
+        value
+        for _key, value in run.store.list_json("pairs/accounts/col_check/results/")
+        if value["column"] == "amount"
+    )
+    assert column["n_unique_diff"] == 0 and column["hash_sum_match"] is True
+    assert "n_total_diff" not in column and "mean_match" not in column
 
 
 class FakeWarehouse:

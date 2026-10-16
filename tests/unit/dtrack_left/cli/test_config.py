@@ -215,6 +215,31 @@ def test_partition_mode(change, error, exception):
         assert "date_col" not in loaded["left"] and "date_col" not in loaded["right"]
 
 
+@pytest.mark.parametrize(
+    ("value", "expected", "error"),
+    [
+        (None, None, None),
+        (["hash_sum", "n_unique"], ["n_unique", "hash_sum"], None),
+        (["hash_sum", "hash_sum"], None, "must not contain duplicates"),
+        (["unique_value"], None, "unsupported statistics"),
+        ("hash_sum", None, "must be a non-empty list"),
+        ([], None, "must be a non-empty list"),
+    ],
+    ids=["default", "selected", "duplicate", "unknown", "type", "empty"],
+)
+def test_statistics(value, expected, error):
+    row = pair()
+    if value is not None:
+        row["statistics"] = value
+    config = {"pairs": {"p": row}}
+    if error:
+        with pytest.raises((TypeError, ValueError), match=error):
+            validate_config(config)
+    else:
+        loaded = validate_config(config)["pairs"]["p"]
+        assert loaded.get("statistics") == expected
+
+
 def test_load_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DTRACK_UNIT_MARKER", raising=False)

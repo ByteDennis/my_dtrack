@@ -14,6 +14,7 @@ from ..common.dates import (
     resolve_date_type,
 )
 from ..common.hashing import collapse_decimal_sql as _collapse_decimal_sql
+from ..common.manifest import DEFAULT_STATISTICS
 from ..common.sampling import sample_predicate_sql
 
 log = logging.getLogger("dtrack.right.target")
@@ -191,8 +192,10 @@ class SparkTarget:
         right_columns = [manifest["col_map"][column] for column in manifest["columns"]]
         overrides = manifest.get("col_type_overrides") or {}
         column_types = manifest.get("column_types") or {}
+        selected = manifest.get("statistics") or list(DEFAULT_STATISTICS)
+        include_top = "statistics" not in manifest
         kinds = {}
-        selects = ["count(1) AS n_total"]
+        selects = ["count(1) AS n_total"] if "n_total" in selected else []
         for i, (left_column, column) in enumerate(zip(manifest["columns"], right_columns)):
             ref = quote_ident(column, "spark")
             column_type = self.column_types.get(column, "")
@@ -219,47 +222,64 @@ class SparkTarget:
                 else text
             )
             extreme = ref if integral and numeric else value
-            selects += [
-                f"count_if({ref} IS NULL) AS n_missing_{i}",
-                f"count(DISTINCT {text}) AS n_unique_{i}",
-                f"sum(cast(conv(substr(sha2(coalesce({text}, '<<NULL>>'), 256), 1, 16), 16, 10) as decimal(38,0))) AS hash_sum_{i}",
-                (f"avg({value}) AS mean_{i}" if numeric else f"NULL AS mean_{i}"),
-                (f"stddev_samp({value}) AS std_{i}" if numeric else f"NULL AS std_{i}"),
-                f"cast(min({extreme}) as string) AS min_{i}",
-                f"cast(max({extreme}) as string) AS max_{i}",
-                (
+            if "n_missing" in selected:
+                selects.append(f"count_if({ref} IS NULL) AS n_missing_{i}")
+            if "n_unique" in selected:
+                selects.append(f"count(DISTINCT {text}) AS n_unique_{i}")
+            if "hash_sum" in selected:
+                selects.append(
+                    "sum(cast(conv(substr(sha2(coalesce("
+                    f"{text}, '<<NULL>>'), 256), 1, 16), 16, 10) as decimal(38,0))) "
+                    f"AS hash_sum_{i}"
+                )
+            if "mean" in selected:
+                selects.append(f"avg({value}) AS mean_{i}" if numeric else f"NULL AS mean_{i}")
+            if "std" in selected:
+                selects.append(
+                    f"stddev_samp({value}) AS std_{i}" if numeric else f"NULL AS std_{i}"
+                )
+            if "min" in selected:
+                selects.append(f"cast(min({extreme}) as string) AS min_{i}")
+            if "max" in selected:
+                selects.append(f"cast(max({extreme}) as string) AS max_{i}")
+            if "length_avg" in selected:
+                selects.append(
                     f"NULL AS length_avg_{i}"
                     if numeric
                     else f"avg(length({text})) AS length_avg_{i}"
-                ),
-                (
+                )
+            if "length_max" in selected:
+                selects.append(
                     f"NULL AS length_max_{i}"
                     if numeric
                     else f"max(length({text})) AS length_max_{i}"
-                ),
-            ]
+                )
         sql = f"SELECT {', '.join(selects)} FROM {self.relation()} WHERE {where}"
         self._audit(sql, "window_statistics")
         row = self.spark.sql(sql).collect()[0].asDict()
         stats = {}
         for i, column in enumerate(right_columns):
             numeric = kinds[column]
-            stats[column] = {
-                "col_type": "numeric" if numeric else "categorical",
-                "n_total": int(row["n_total"]),
-                "n_missing": int(row[f"n_missing_{i}"] or 0),
-                "n_unique": int(row[f"n_unique_{i}"] or 0),
-                "hash_sum": str(int(row[f"hash_sum_{i}"] or 0)),
-                "mean": None if row[f"mean_{i}"] is None else float(row[f"mean_{i}"]),
-                "std": None if row[f"std_{i}"] is None else float(row[f"std_{i}"]),
-                "min_val": row[f"min_{i}"],
-                "max_val": row[f"max_{i}"],
-                "length_avg": None
-                if row[f"length_avg_{i}"] is None
-                else float(row[f"length_avg_{i}"]),
-                "length_max": None
-                if row[f"length_max_{i}"] is None
-                else int(row[f"length_max_{i}"]),
-                "top_10": "",
-            }
+            payload: dict[str, Any] = {"col_type": "numeric" if numeric else "categorical"}
+            if "n_total" in selected:
+                payload["n_total"] = int(row["n_total"])
+            if "n_missing" in selected:
+                payload["n_missing"] = int(row[f"n_missing_{i}"] or 0)
+            if "n_unique" in selected:
+                payload["n_unique"] = int(row[f"n_unique_{i}"] or 0)
+            if "hash_sum" in selected:
+                payload["hash_sum"] = str(int(row[f"hash_sum_{i}"] or 0))
+            for name in ("mean", "std", "length_avg"):
+                if name in selected:
+                    value = row[f"{name}_{i}"]
+                    payload[name] = None if value is None else float(value)
+            if "length_max" in selected:
+                value = row[f"length_max_{i}"]
+                payload["length_max"] = None if value is None else int(value)
+            for name in ("min", "max"):
+                if name in selected:
+                    payload[f"{name}_val"] = row[f"{name}_{i}"]
+            if include_top:
+                payload["top_10"] = ""
+            stats[column] = payload
         return stats

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..common.audit import SqlAudit, attach_sql_audit
-from ..common.manifest import planned_unit_ids, unit_id_for, window_id
+from ..common.manifest import DEFAULT_STATISTICS, planned_unit_ids, unit_id_for, window_id
 from ..common.protocol import (
     active_unit_ids,
     col_check_close_document,
@@ -57,15 +57,22 @@ def compare_statistics(
     column: str,
     left: dict[str, Any],
     right: dict[str, Any],
+    statistics: list[str] | None = None,
 ) -> dict[str, Any]:
+    selected = statistics or list(DEFAULT_STATISTICS)
     result: dict[str, Any] = {"pair": pair, "vintage": window, "column": column}
+    checks = []
     for name in ("n_total", "n_missing", "n_unique"):
+        if name not in selected:
+            continue
         left_value, right_value = _number(left, name), _number(right, name)
         result[f"{name}_left"] = left_value
         result[f"{name}_right"] = right_value
         result[f"{name}_diff"] = right_value - left_value
-    checks = []
+        checks.append(result[f"{name}_diff"] == 0)
     for name in ("mean", "std", "length_avg", "length_max", "hash_sum"):
+        if name not in selected:
+            continue
         match = _float_match(left.get(name), right.get(name))
         result[f"{name}_left"] = left.get(name)
         result[f"{name}_right"] = right.get(name)
@@ -73,11 +80,15 @@ def compare_statistics(
         if match is not None:
             checks.append(match)
     for name in ("mean", "std"):
+        if name not in selected:
+            continue
         try:
             result[f"{name}_diff"] = float(right[name]) - float(left[name])
         except (KeyError, TypeError, ValueError):
             result[f"{name}_diff"] = None
     for name in ("min_val", "max_val"):
+        if name.removesuffix("_val") not in selected:
+            continue
         left_value = "" if left.get(name) is None else str(left.get(name)).strip()
         right_value = "" if right.get(name) is None else str(right.get(name)).strip()
         label = "min" if name == "min_val" else "max"
@@ -88,11 +99,11 @@ def compare_statistics(
             same = bool(left_value and right_value and _float_match(left_value, right_value, 0))
         result[f"{label}_match"] = same
         checks.append(same)
-    result["top_10_left"] = left.get("top_10") or ""
-    result["top_10_right"] = right.get("top_10") or ""
-    count_match = all(result[f"{name}_diff"] == 0 for name in ("n_total", "n_missing", "n_unique"))
+    if statistics is None:
+        result["top_10_left"] = left.get("top_10") or ""
+        result["top_10_right"] = right.get("top_10") or ""
     result["col_type"] = left.get("col_type") or right.get("col_type") or ""
-    result["verdict"] = "match" if count_match and all(checks) else "diff"
+    result["verdict"] = "match" if all(checks) else "diff"
     return result
 
 
@@ -297,8 +308,8 @@ class ColCheck:
 
     def run_task(self, task):
         try:
+            manifest = self.scheduler.manifests[task.pair]
             if task.kind == "prefetch":
-                manifest = self.scheduler.manifests[task.pair]
                 started = time.monotonic()
                 log.info(
                     "B fetch_right %s %s: %d partition(s)",
@@ -332,7 +343,12 @@ class ColCheck:
             left = unit_statistics(self.store, pointer)
             right = self.scheduler.right_stats[(task.pair, task.window)][pointer["column"]]
             result = compare_statistics(
-                pair=task.pair, window=task.window, column=pointer["column"], left=left, right=right
+                pair=task.pair,
+                window=task.window,
+                column=pointer["column"],
+                left=left,
+                right=right,
+                statistics=manifest.get("statistics"),
             )
             result["unit_id"] = pointer["unit_id"]
             result["right_col"] = pointer.get("right_column") or pointer["column"]

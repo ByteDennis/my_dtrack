@@ -1,3 +1,46 @@
+Unreleased: select column statistics per Pair
+
+Changed files (all tracked files in this change set):
+- M `README.md` — Document Pair-level statistic selection and the hash-sum/distinct-count example.
+- M `changelog.txt` — Record the complete file-level manifest and verification evidence for selectable statistics.
+- M `guideme.txt` — Add the `statistics` contract, supported names, example, and rollback classification.
+- M `src/dtrack_left/checks/col_check.py` — Pass the manifest statistic selection into Left CSV aggregation.
+- M `src/dtrack_left/cli/__init__.py` — Describe the Pair-level `statistics` setting in built-in CLI guidance.
+- M `src/dtrack_left/cli/config.py` — Validate, deduplicate, and canonically order each Pair's statistic selection.
+- M `src/dtrack_left/cli/tools.py` — Show the selected statistic list in doctor output.
+- M `src/dtrack_left/common/manifest.py` — Carry selected statistics in Pair plans and Version 2 Unit identity while preserving default identities.
+- M `src/dtrack_left/common/stats.py` — Generate only selected DuckDB aggregates and skip unselected Top-10 work.
+- M `src/dtrack_local/csv_target.py` — Apply Pair-level statistic selection to local CSV Right calculations.
+- M `src/dtrack_local/pipeline.py` — Apply Pair-level statistic selection to local warehouse CSV calculations.
+- M `src/dtrack_right/backends/targets.py` — Generate only selected Spark aggregate expressions and payload fields.
+- M `src/dtrack_right/checks/col_check.py` — Compare only selected statistics when deciding each column verdict.
+- M `src/dtrack_right/common/manifest.py` — Mirror the selectable-statistics Pair-plan contract in the standalone Right package.
+- M `tests/local/spark/test_spark_target.py` — Verify selected Spark statistics match DuckDB/Pandas reference results.
+- M `tests/unit/common/test_manifest.py` — Cover canonical selection and Version 2 Unit identity on both package sides.
+- M `tests/unit/common/test_stats.py` — Cover selected DuckDB statistic payloads.
+- M `tests/unit/dtrack_left/cli/test_config.py` — Parameterize valid, duplicate, unknown, non-list, and empty selections.
+- M `tests/unit/dtrack_local/test_pipeline.py` — Cover the full local all-partition flow using only hash sum and distinct count.
+- M `tests/unit/dtrack_right/backends/test_targets.py` — Verify Spark SQL omits every unselected aggregate.
+- M `tests/unit/dtrack_right/checks/test_col_check.py` — Verify unselected metrics do not affect or appear in comparison results.
+
+Added files:
+- None.
+
+Deleted files:
+- None.
+
+Local ignored artifact:
+- M `CONTEXT.md` — Define the Pair-level Statistic set term; this repository intentionally ignores the local domain glossary, so it is not part of the commit.
+
+Verification:
+- `uv run pytest --collect-only -q tests/unit`: 878 tests collected.
+- `uv run pytest -q --timeout=60 tests/unit`: 866 passed, 12 skipped.
+- `uv run pytest -q --run-spark tests/local/spark/test_spark_target.py::test_fraction_stats`:
+  3 passed, including selected-statistic Spark/DuckDB parity.
+- Ruff, changed-file format checks, Left/Right manifest parity, `git diff --check`, Vulture,
+  package build, and the pytest naming policy passed.
+- External live tests will not be run, per operator instruction.
+
 Unreleased: add whole-dataset partition mode
 
 Changed files (all tracked files in this change set):
