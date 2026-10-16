@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import functools
-import logging
 from pathlib import Path
 
 import click
 from dotenv import find_dotenv, load_dotenv
 
 from ...backends import databricks
+from ...common.run_logging import get_left_logger
 from ..options import CONTEXT_SETTINGS, emit_json, log_level_option
 
-dbx_log = logging.getLogger("dtrack.left.dbx")
+dbx_log = get_left_logger("dbx")
 
 
 # >>> --profile for every dbx command: the constant default, overridden by DTRACK_DBX_PROFILE <<< #

@@ -81,6 +81,22 @@ DuckDB budget (every Left/local DuckDB connection: file sources, statistics, loc
   DTRACK_PROGRESS_INTERVAL=10              # persistent progress-log interval in seconds
   DTRACK_LEFT_LOG=/path/to/left.log        # distributed CLI override; default .dtrack-work/logs/<run>.log
 
+Live source query profiling (Oracle, Athena, Hadoop):
+
+  Create the ignored `tests/live/source_queries.json` described in
+  `tests/live/test_source_queries.py`, then run:
+
+    just live profile
+
+  The performance group separates connection, execute, first/remaining fetch, DataFrame,
+  CSV export/read, comparison, and cleanup time. It writes ranked JSON reports to
+  `.dtrack-work/live-timings/` and prints the five slowest steps; override that directory with
+  `DTRACK_LIVE_TIMINGS_DIR`. Set
+  `DTRACK_LIVE_PROFILE_RUNS=3` for repeated measurements or
+  `DTRACK_LIVE_PROFILE_FETCH_SIZE=10000` to compare fetch sizes. Inputs accept UTF-8 with or
+  without a BOM; reports are UTF-8/LF. Paths use `pathlib` and report filenames avoid Windows
+  reserved characters, so the same tests can run from Windows or Linux/Databricks.
+
 Set DTRACK_DUCKDB_MEMORY to what the machine can really give dtrack: each connection gets
 MEMORY / WORKERS and `cpu_count / WORKERS` threads, and spills to DTRACK_DUCKDB_TEMP above that
 instead of failing. A 1715-column
@@ -185,8 +201,8 @@ Minimal pattern:
 Parameter choice:
 
   left.source
-    oracle | file/csv | duckdb | athena
-    Hadoop is currently disabled; do not select it for production.
+    oracle | file/csv | duckdb | athena | hadoop
+    Hadoop connects through a pyodbc DSN from `left.dsn`, `left.conn_macro`, or `HADOOP_DSN`.
 
   left relation
     table, schema+table, or query. `query` may be inline SQL or a config-relative `.sql` file.
@@ -208,7 +224,7 @@ Parameter choice:
       ), driver_two AS (
         SELECT * FROM DRIVER_TWO d2 WHERE {{query_windows:driver_two}}
       )
-      SELECT {{dtrack_projection}}
+      SELECT d1.BUSINESS_DT AS FINAL_DT, d1.SSN, a.STATUS
       FROM driver_one d1
       LEFT JOIN driver_two d2
         ON d1.BUSINESS_DT = d2.ACTIVITY_DT AND d1.SSN = d2.SSN
@@ -222,11 +238,6 @@ Parameter choice:
         "query_windows": {
           "driver_one": {"expression": "d1.BUSINESS_DT", "date_type": "date"},
           "driver_two": {"expression": "d2.ACTIVITY_DT", "date_type": "date"}
-        },
-        "query_projection": {
-          "FINAL_DT": "d1.BUSINESS_DT",
-          "SSN": "d1.SSN",
-          "STATUS": "a.STATUS"
         }
       }
 
@@ -237,12 +248,9 @@ Parameter choice:
     Marker declarations and uses must match exactly; DTrack rejects unknown, unused, or malformed
     markers before querying Oracle. This is controlled substitution, not Python string formatting.
 
-    `dtrack_projection` is optional and Oracle-only. Every Left date, key, and non-excluded mapped
-    column needs one `query_projection` expression. Preflight deliberately renders the complete
-    configured projection, so Oracle rejects an unsupported select list before Stage 1 starts.
-    Col check pulls the full projection once per vintage; DTrack does not split the Oracle query
-    into hidden column batches. Keep filters inside the source query; `left.where` should reference
-    projected aliases such as the configured date or keys.
+    The query must return every configured Left date, key, and non-excluded mapped column. Keep
+    filters inside the source query; `left.where` should reference returned aliases such as the
+    configured date or keys.
 
   right.kind
     table (default): catalog/schema/table

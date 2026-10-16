@@ -1,10 +1,66 @@
+Unreleased: remove query projection, enable pyodbc Hadoop, stabilize Left logging, add live profiling
+
+Changed files (all files in this change set):
+- M `.gitignore` — Keep existing `tests/live` content ignored while exposing only the new source-query test.
+- M `README.md` — Remove the Oracle query-projection contract and require explicit query result columns.
+- M `changelog.txt` — Remove unreleased projection claims and record this complete file-level change manifest.
+- M `guideme.txt` — Remove projection guidance; document Hadoop DSNs, UTF-8, cross-platform live profiling, and tuning controls.
+- M `justfile` — Install Athena/Hadoop live extras and add `just live profile`.
+- M `pyproject.toml` — Replace Impyla Hadoop dependencies with `pyodbc` and register the live-performance marker.
+- M `src/dtrack_left/backends/aws.py` — Use the stable named Left logger.
+- M `src/dtrack_left/backends/materialize.py` — Use the stable named Left logger.
+- M `src/dtrack_left/backends/sources.py` — Remove query-projection execution and dead relation arguments; enable Hadoop through a pyodbc DSN.
+- M `src/dtrack_left/checks/col_check.py` — Use the stable named Left logger.
+- M `src/dtrack_left/checks/rollback.py` — Use the stable named Left logger.
+- M `src/dtrack_left/checks/row_check.py` — Use the stable named Left logger.
+- M `src/dtrack_left/checks/sas.py` — Remove SAS query-projection rendering and its dead column argument.
+- M `src/dtrack_left/cli/__init__.py` — Document Hadoop as an enabled pyodbc source.
+- M `src/dtrack_left/cli/config.py` — Remove query-projection validation and the stale `column_batch_size` compatibility path.
+- M `src/dtrack_left/cli/debugging.py` — Use the stable named Left logger.
+- M `src/dtrack_left/cli/ops/dbx.py` — Use the stable named Left logger.
+- M `src/dtrack_left/cli/ops/s3.py` — Use the stable named Left logger.
+- M `src/dtrack_left/cli/options.py` — Replace root `logging.basicConfig()` with idempotent named-console configuration.
+- M `src/dtrack_left/common/__init__.py` — Delete the now-unused `disabled()` decorator.
+- M `src/dtrack_left/common/dates.py` — Quote Hadoop identifiers with backticks for Hive-compatible SQL.
+- M `src/dtrack_left/common/duck.py` — Use the stable named Left logger.
+- M `src/dtrack_left/common/progress.py` — Use the stable named Left logger.
+- M `src/dtrack_left/common/query_windows.py` — Delete query-projection markers, normalization, and rendering.
+- M `src/dtrack_left/common/run_logging.py` — Add stable `dtrack`/`dtrack.left.*` logger factories and idempotent handlers.
+- M `src/dtrack_left/common/stats.py` — Use the stable named Left logger.
+- M `src/dtrack_local/run_logging.py` — Attach console/error/Left handlers to the named `dtrack` tree instead of the root logger.
+- M `src/dtrack_right/common/dates.py` — Mirror Hadoop backtick quoting in the shared Right-side date module.
+- M `src/dtrack_right/progress.py` — Delete the unreferenced `to_json()` helper and its import.
+- M `tests/conftest.py` — Gate tests by actual pytest markers so a parameter named `oracle` does not trigger the Oracle-container gate.
+- M `tests/unit/common/test_dates.py` — Cover Hadoop backtick identifier quoting.
+- M `tests/unit/common/test_parity.py` — Remove tests for the deleted `disabled()` helper while retaining Left/Right parity checks.
+- M `tests/unit/dtrack_left/backends/test_sources.py` — Remove projection contracts and cover pyodbc Hadoop connection, errors, and dispatch.
+- M `tests/unit/dtrack_left/checks/test_col_check.py` — Preserve one-window scheduling coverage without query projection.
+- M `tests/unit/dtrack_left/cli/test_config.py` — Remove query-projection and disabled-Hadoop validation tests.
+- M `tests/unit/dtrack_left/cli/test_options.py` — Verify stable named, UTC, idempotent console logging.
+- M `tests/unit/dtrack_local/test_pipeline.py` — Flush and clean the named error logger in pipeline tests.
+- M `tests/unit/dtrack_local/test_run_logging.py` — Verify console, Left, and private-error files share one stable logger namespace.
+- M `tests/unit/test_packaging.py` — Assert the Hadoop extra contains `pyodbc` instead of Impyla.
+- M `tests/unit/test_sas_protocol_flow.py` — Remove the deleted SAS query-projection contract.
+- M `uv.lock` — Lock `pyodbc` and remove the obsolete Impyla/Thrift dependency chain.
+
+Added files:
+- A `tests/live/test_source_queries.py` — Add UTF-8 Oracle/Athena/Hadoop query/CSV correctness tests plus cross-platform per-step performance reports using `pandas.DataFrame.from_records`.
+
+Deleted files:
+- None. Dead code was deleted inside the modified files above; no complete file was removed.
+
+Verification:
+- `uv run pytest -q --timeout=60 tests/unit`: 840 passed, 12 skipped.
+- Ruff, format check, lockfile check, package build, `git diff --check`, and Vulture 80% dead-code scan passed.
+- External live connections were intentionally not run; local credentials/configuration and timing reports remain ignored.
+
 Unreleased: intra-vintage Left statistics and Workspace download
 src/dtrack_left/common/stats.py, duck.py, and progress.py — Run one vintage at a time while calculating DTRACK_STATS_BATCH column shards in parallel under one DTRACK_DUCKDB_WORKERS CPU/RAM budget; publish every completed shard immediately and expose running shards plus calculated/uploaded attribute counts through tqdm and periodic logs.
 src/dtrack_left/common/run_logging.py, dtrack_local/run_logging.py, pipeline.py, and Left CLI commands — Append all dtrack.left records to one run-scoped left.log and return that path in command results while retaining the dedicated error log.
-src/dtrack_left/checks/col_check.py, backends/sources.py, and cli/config.py — Make WIP a hard ceiling with Left-ready/Right-finished status, remove automatic Oracle projection batching, and submit the complete configured projection during preflight so Oracle remains authoritative for projection-limit failures.
+src/dtrack_left/checks/col_check.py, backends/sources.py, and cli/config.py — Make WIP a hard ceiling with Left-ready/Right-finished status and pull one complete configured vintage at a time.
 src/dtrack_left/backends/databricks.py and cli/ops/dbx.py — Add `dtrack tools dbx workspace download SOURCE [TARGET]` with recursive file/notebook export, restored notebook suffixes, atomic local writes, overwrite protection, dry-run output, per-object failures, and profile support.
-tests/unit/common, dtrack_left, and dtrack_local — Cover intra-vintage shard publication, one-vintage scheduling, progress counters, unified DuckDB resources, persistent logging, full Oracle preflight projection, hard WIP, and Workspace download backend/CLI behavior.
-README.md, guideme.txt, examples, pyproject.toml, and uv.lock — Document the 32GB/10-core starting profile, DTRACK_STATS_BATCH publication waves, the single DuckDB worker knob, progress/log locations, full-projection behavior, and Workspace download; add tqdm as the console progress dependency.
+tests/unit/common, dtrack_left, and dtrack_local — Cover intra-vintage shard publication, one-vintage scheduling, progress counters, unified DuckDB resources, persistent logging, hard WIP, and Workspace download backend/CLI behavior.
+README.md, guideme.txt, examples, pyproject.toml, and uv.lock — Document the 32GB/10-core starting profile, DTRACK_STATS_BATCH publication waves, the single DuckDB worker knob, progress/log locations, and Workspace download; add tqdm as the console progress dependency.
 
 Unreleased: protocol-v2-only runtime
 src/dtrack_left/backends/sources.py and cli/config.py — Removed DuckDBSource's non-portable live database/WAL copy option; DuckDB files are attached directly read-only, obsolete snapshot config is rejected early, and an active writer gets actionable CHECKPOINT/close guidance on every platform.
@@ -14,10 +70,6 @@ src/dtrack_left/common/audit.py and src/dtrack_right/common/audit.py — Reused 
 src/dtrack_left/checks/row_check.py, col_check.py, rollback.py, and cli/checks.py — Reused same-run row counts, completed Units, and provenance-matched local pulls by default; added `--force` to row-check, col-check, and left-run to clear the selected run stage before recomputing without duplicate active Units.
 tests/unit/common/test_audit.py, dtrack_left/checks tests, dtrack_left/cli/test_checks.py, and dtrack_local/test_pipeline.py — Covered cross-process audit deduplication, first/last projection evidence, empty-count reuse, provenance-safe pull reuse, stage reset, same-run resume, and forced full Left recomputation.
 README.md and guideme.txt — Documented compact SQL audit evidence, cross-command same-run checkpoints, provenance sidecars, and `--force` behavior.
-src/dtrack_left/common/query_windows.py, cli/config.py, and backends/sources.py — Added fail-closed Oracle `dtrack_projection` declarations so wide consolidation queries render only operation-required columns and avoid ORA-01792 during preflight, counts, key work, and sampled pulls.
-src/dtrack_left/checks/col_check.py — Split projection-backed Oracle vintages into bounded column batches (500 by default, capped below the portable 1000-column limit after date/key columns), logged pull/statistics/commit progress, and published each completed batch immediately.
-tests/unit/dtrack_left/cli/test_config.py, backends/test_sources.py, and checks/test_col_check.py — Covered projection validation, narrow Oracle SQL, 1000-column protection, batch-level computation, incremental Unit publication, and ready-unit progress.
-README.md and guideme.txt — Documented the wide-query projection map, batching defaults, incremental upload behavior, and filter boundary.
 src/dtrack_left/checks/sas.py — Added fail-closed SAS bundle export/import for Oracle-only Left execution, including all-partition vintage loops, deterministic sampling SQL, config locking, and local statistics publication.
 src/dtrack_left/cli/checks.py and options.py — Extended `left-run` with mutually exclusive `--export-sas` and `--import-sas` phases without adding another subcommand; export needs no S3 and import publishes the existing v2 protocol.
 src/dtrack_left/checks/row_check.py — Reused one active-Pair selector and one row-result publisher so direct Oracle and SAS-import paths produce the same protocol documents.

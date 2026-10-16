@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import shutil
 import sys
@@ -15,6 +14,7 @@ from typing import Any
 from ..cli.config import load_config
 from ..common.dates import canonical_date, day_expr, quote_ident
 from ..common.hashing import HASH_BUCKET_SPACE, DateKeyFamily, key_family
+from ..common.run_logging import get_left_logger
 from ..common.sampling import composite_sql, hash32_sql
 from .sources import FileSource, _duckdb_value
 
@@ -22,7 +22,7 @@ HASH_VERSION = 1
 SAMPLE_RATES = (0.01, 0.02)
 DAY_PARTITION_MIN_BYTES = 128 * 1024 * 1024
 PROGRESS_INTERVAL_SECONDS = 30
-log = logging.getLogger("dtrack.left.materialize")
+log = get_left_logger("materialize")
 
 
 def _enable_duckdb_progress(connection) -> None:
@@ -50,7 +50,12 @@ def _stage(name: str, output: Path | None = None):
         while not stopped.wait(PROGRESS_INTERVAL_SECONDS):
             written = _size(output)
             suffix = f", written={written / (1024**3):.2f} GiB" if written else ""
-            log.info("materialize %s still running: elapsed=%.0fs%s", name, time.monotonic() - started, suffix)
+            log.info(
+                "materialize %s still running: elapsed=%.0fs%s",
+                name,
+                time.monotonic() - started,
+                suffix,
+            )
 
     log.info("materialize %s started", name)
     worker = None
@@ -243,8 +248,7 @@ def materialize_pair(
             _enable_duckdb_progress(connection)
             after = _summary(connection.execute(validate_sql).fetchall())
             output_columns = [
-                row[0]
-                for row in connection.execute(f"DESCRIBE SELECT * FROM {reader}").fetchall()
+                row[0] for row in connection.execute(f"DESCRIBE SELECT * FROM {reader}").fetchall()
             ]
         expected_columns = {*columns, "dtrack_hash", "dtrack_partition"}
         if set(output_columns) != expected_columns:

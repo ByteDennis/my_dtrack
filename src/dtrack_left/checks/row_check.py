@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -20,8 +19,9 @@ from ..common.protocol import (
     timestamp,
     write_run_status,
 )
+from ..common.run_logging import get_left_logger
 
-log = logging.getLogger("dtrack.left.row_check")
+log = get_left_logger("row_check")
 SECRET_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
 STAGE_ONE_FIELDS = ("left", "right", "fromDate", "toDate", "date_synonyms")
 

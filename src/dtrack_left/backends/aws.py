@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 import shutil
 import subprocess
@@ -10,6 +9,8 @@ from pathlib import Path
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+
+from ..common.run_logging import get_left_logger
 
 DEFAULT_PROFILE = "corp"
 DEFAULT_TARGET = "corp-winscp"
@@ -23,7 +24,7 @@ WINSCP_PATHS = (
 )
 AWS_ERRORS = (BotoCoreError, ClientError, OSError, RuntimeError, ValueError)
 
-log = logging.getLogger("dtrack.left.aws")
+log = get_left_logger("aws")
 
 
 # >>> a boto3 session for an ~/.aws/config profile; credential_process and sso run inside botocore <<< #

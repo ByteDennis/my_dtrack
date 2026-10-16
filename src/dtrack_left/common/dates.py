@@ -70,11 +70,11 @@ def contiguous_runs(partitions: list[str]) -> list[tuple[str, str]]:
 
 
 def quote_ident(name: str, dialect: str) -> str:
-    if dialect == "spark":
+    if dialect in {"spark", "hadoop"}:
         return ".".join("`" + part.replace("`", "``") + "`" for part in name.split("."))
     if dialect == "oracle":
         return name
-    if dialect in {"athena", "hadoop", "databricks"}:
+    if dialect in {"athena", "databricks"}:
         return ".".join(f'"{part.replace(chr(34), chr(34) * 2)}"' for part in name.split("."))
     return f'"{name.replace(chr(34), chr(34) * 2)}"'
 
@@ -108,6 +108,7 @@ def _render(template: str, **values: object) -> str:
         return template.format_map(values)
     except KeyError as exc:
         raise ValueError(f"unknown date type SQL placeholder {exc.args[0]!r}") from None
+
 
 def _probe_values(values: list[object]) -> list[object]:
     found = [
@@ -188,7 +189,11 @@ class DateType:
 
     def day(self, column: str, dialect: str) -> str:
         template = _pick_template(self.day_sql, dialect, "day_sql")
-        return self.predicate(column, dialect) if template is None else _render(template, column=column)
+        return (
+            self.predicate(column, dialect)
+            if template is None
+            else _render(template, column=column)
+        )
 
     def literal(self, value: str, dialect: str) -> str:
         day = canonical_date(value)
@@ -298,9 +303,7 @@ class StringDateType(DateType):
         return platform.format_day(platform.parse_text(column, self._concrete()))
 
     def spec(self, *, portable: bool = False) -> str | dict[str, Any]:
-        if DATE_TYPES.get(self.name) is self and (
-            not portable or self.name in BUILTIN_DATE_TYPES
-        ):
+        if DATE_TYPES.get(self.name) is self and (not portable or self.name in BUILTIN_DATE_TYPES):
             return self.name
         return {"type": "string", "format": self._concrete()}
 
@@ -392,9 +395,7 @@ class SasDateType(DateType):
         return platform.format_day(self.day(column, dialect))
 
     def spec(self, *, portable: bool = False) -> str | dict[str, Any]:
-        if DATE_TYPES.get(self.name) is self and (
-            not portable or self.name in BUILTIN_DATE_TYPES
-        ):
+        if DATE_TYPES.get(self.name) is self and (not portable or self.name in BUILTIN_DATE_TYPES):
             return self.name
         return {"type": "sas", "format": self._concrete()}
 
@@ -425,8 +426,7 @@ def register_date_type(
         DATE_TYPES[resolved.name] = resolved
         return resolved
     if spec is not None and any(
-        value is not None
-        for value in (predicate_sql, day_sql, normalizer_sql)
+        value is not None for value in (predicate_sql, day_sql, normalizer_sql)
     ):
         raise TypeError("register_date_type accepts either spec or SQL keyword arguments")
     if spec is not None and (literal_sql != "'{iso}'" or range != "value" or python_formats):

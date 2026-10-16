@@ -13,7 +13,7 @@ from ..common.duck import use_temp
 from ..common.hashing import key_family
 from ..common.manifest import build_manifest, window_id
 from ..common.protocol import fixed_keys_path, write_run_status
-from ..common.query_windows import QUERY_WINDOW_MARKER, render_query_projection
+from ..common.query_windows import QUERY_WINDOW_MARKER
 from ..common.sampling import cast_text_sql, hash32_sql, hash_hex_sql, normalize_sql
 from .col_check import ColCheckPipeline, LeftRuntime
 from .row_check import active_pairs, public_pair_config, publish_row_check_results
@@ -70,7 +70,7 @@ def _request(config: dict[str, Any], run_id: str, pair_names: list[str] | None) 
     }
 
 
-def _partition_relation(left: dict[str, Any], partitions_macro: str, columns: list[str]) -> str:
+def _partition_relation(left: dict[str, Any], partitions_macro: str) -> str:
     source = OracleSource(left)
     if not left.get("query"):
         return source.relation()
@@ -83,12 +83,6 @@ def _partition_relation(left: dict[str, Any], partitions_macro: str, columns: li
         return f"({expression} IN ({partitions_macro}))"
 
     query = QUERY_WINDOW_MARKER.sub(predicate, left["query"])
-    query = render_query_projection(
-        query,
-        left.get("query_projection") or {},
-        columns,
-        dialect="oracle",
-    )
     return f"({query}) dtrack_source"
 
 
@@ -117,7 +111,7 @@ def _render_pair(name: str, row: dict[str, Any], run_id: str) -> str:
     )
     counts_sql = (
         f"SELECT {canonical_day} AS dtrack_partition, COUNT(*) AS dtrack_count "
-        f"FROM {source.relation(from_date=pair.get('fromDate'), to_date=pair.get('toDate'), columns=[left['date_col']])} "
+        f"FROM {source.relation(from_date=pair.get('fromDate'), to_date=pair.get('toDate'))} "
         f"WHERE {source._where(bounds)} GROUP BY {canonical_day}"
     )
     manifest = build_manifest(
@@ -128,7 +122,7 @@ def _render_pair(name: str, row: dict[str, Any], run_id: str) -> str:
     )
     selected = list(dict.fromkeys([left["date_col"], *manifest["key_cols"], *manifest["columns"]]))
     partitions = "&dtrack_partitions"
-    relation = _partition_relation(left, partitions, selected)
+    relation = _partition_relation(left, partitions)
     date_predicate = f"{canonical_day} IN ({partitions})"
     window_where = source._where(date_predicate)
     sample = manifest["sample"]
@@ -136,7 +130,7 @@ def _render_pair(name: str, row: dict[str, Any], run_id: str) -> str:
     key_aliases = _projection(manifest["key_cols"])
     selected_columns = [quote_ident(column, "oracle") for column in selected]
     type_index_by_name = {column: index for index, column in enumerate(selected, 1)}
-    metadata_relation = source.relation(columns=selected)
+    metadata_relation = source.relation()
     probes = []
     sample_setup = []
     for index, (column_name, column) in enumerate(zip(selected, selected_columns, strict=True), 1):

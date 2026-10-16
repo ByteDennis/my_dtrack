@@ -4,7 +4,7 @@ import logging
 import time
 from pathlib import Path
 
-from dtrack_left.common.run_logging import configure_left_logging
+from dtrack_left.common.run_logging import configure_left_logging, get_logger
 
 ERROR_FORMAT = "%(asctime)s.%(msecs)03dZ %(levelname)s %(threadName)s %(name)s: %(message)s"
 _current_error_log: Path | None = None
@@ -37,12 +37,15 @@ def configure_run_logging(run_folder: str | Path) -> Path:
     path = Path(run_folder) / "_local" / "logs" / "errors.log"
     path.parent.mkdir(parents=True, exist_ok=True)
     configure_left_logging(path.with_name("left.log"))
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        if getattr(handler, "dtrack_error_handler", False):
-            root.removeHandler(handler)
+    logger = get_logger()
+    for handler in list(logger.handlers):
+        stale_console = _is_console(handler) and getattr(
+            getattr(handler, "stream", None), "closed", False
+        )
+        if getattr(handler, "dtrack_error_handler", False) or stale_console:
+            logger.removeHandler(handler)
             handler.close()
-    for handler in root.handlers:
+    for handler in logger.handlers:
         if _is_console(handler) and not any(
             isinstance(item, _BelowError) for item in handler.filters
         ):
@@ -53,7 +56,7 @@ def configure_run_logging(run_folder: str | Path) -> Path:
     errors.setLevel(logging.ERROR)
     errors.setFormatter(_ErrorFormatter(ERROR_FORMAT, datefmt="%Y-%m-%dT%H:%M:%S"))
     errors.dtrack_error_handler = True
-    root.addHandler(errors)
+    logger.addHandler(errors)
     _current_error_log = path
     return path
 

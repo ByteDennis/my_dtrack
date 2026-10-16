@@ -43,45 +43,6 @@ def test_right_date_sql_runtime_contains_only_databricks_platforms():
     assert set(left_platforms) == {"oracle", "spark", "databricks", "hadoop", "athena", "duckdb"}
 
 
-def test_left_disabled_classes_refuse_to_instantiate_but_keep_their_attributes():
-    from dtrack_left.common import disabled
-
-    @disabled("not fixed")
-    class Broken:
-        kind = "x"
-
-        def __init__(self, value):
-            self.value = value
-
-    class Child(Broken):
-        pass
-
-    assert Broken.kind == "x"
-    with pytest.raises(NotImplementedError, match="Broken is disabled: not fixed"):
-        Broken(1)
-    with pytest.raises(NotImplementedError, match="Child is disabled"):
-        Child(1)
-
-
-def test_left_disabled_functions_and_methods_refuse_to_run_but_keep_their_names():
-    from dtrack_left.common import disabled
-
-    @disabled("not fixed")
-    def pull(table):
-        return table
-
-    class Source:
-        @disabled("no auth")
-        def connect(self):
-            return "conn"
-
-    assert pull.__name__ == "pull" and pull.__wrapped__("t") == "t"
-    with pytest.raises(NotImplementedError, match="pull is disabled: not fixed"):
-        pull("t")
-    with pytest.raises(NotImplementedError, match="Source.connect is disabled: no auth"):
-        Source().connect()
-
-
 def test_cloud_comparison_matches_expected_verdicts():
     left = {
         "col_type": "numeric",

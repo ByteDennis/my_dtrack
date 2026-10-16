@@ -6,6 +6,7 @@ from click.testing import CliRunner
 
 from dtrack_left.backends.store import S3Store
 from dtrack_left.cli import options
+from dtrack_left.common.run_logging import get_logger
 
 
 # >>> a throwaway command wired with every shared decorator, echoing what it received <<< #
@@ -58,9 +59,14 @@ def test_log_level_is_applied_before_the_command_body(monkeypatch):
 
 
 def test_setup_logging_writes_utc_timestamps_to_stderr(monkeypatch):
-    root = logging.getLogger()
-    monkeypatch.setattr(root, "handlers", [])
-    monkeypatch.setattr(root, "level", root.level)
+    logger = get_logger()
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "level", logger.level)
+    monkeypatch.setattr(logger, "propagate", logger.propagate)
     options.setup_logging("debug")
-    assert root.level == logging.DEBUG
-    assert root.handlers[0].formatter._fmt.startswith("%(asctime)s.%(msecs)03dZ")
+    options.setup_logging("debug")
+    assert logger.name == "dtrack"
+    assert logger.level == logging.DEBUG
+    assert logger.propagate is False
+    assert len(logger.handlers) == 1
+    assert logger.handlers[0].formatter._fmt.startswith("%(asctime)s.%(msecs)03dZ")

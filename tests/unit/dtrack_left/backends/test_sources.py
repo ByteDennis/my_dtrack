@@ -100,43 +100,6 @@ def test_preflight_runs_an_empty_select_and_reports_failures(monkeypatch):
     }
 
 
-def test_oracle_projection_query_preflights_every_mapped_column(monkeypatch, tmp_path):
-    query = (
-        "SELECT {{dtrack_projection}} FROM DRIVER d "
-        "LEFT JOIN FACT f ON d.ID = f.ID WHERE {{query_windows:driver}}"
-    )
-    projection = {
-        "FINAL_DT": "d.DT",
-        "ACCOUNT_ID": "d.ID",
-        "AMOUNT": "f.AMOUNT",
-        "STATUS": "f.STATUS",
-    }
-    source, connection, _ = _oracle(
-        monkeypatch,
-        lambda sql: (["FINAL_DT", "ACCOUNT_ID", "AMOUNT"], []),
-        query=query,
-        query_windows={"driver": {"expression": "d.DT", "date_type": "date"}},
-        query_projection=projection,
-        date_col="FINAL_DT",
-    )
-
-    assert source.preflight()["ok"]
-    assert "d.DT AS FINAL_DT" in connection.statements[0]
-    assert "f.AMOUNT AS AMOUNT" in connection.statements[0]
-    assert "f.STATUS AS STATUS" in connection.statements[0]
-
-    source.pull_window(
-        ["2026-08-01"],
-        ["AMOUNT"],
-        tmp_path / "batch.csv",
-        key_columns=["ACCOUNT_ID"],
-    )
-    sql = connection.statements[-1]
-    assert "d.DT AS FINAL_DT, d.ID AS ACCOUNT_ID, f.AMOUNT AS AMOUNT" in sql
-    assert "f.STATUS" not in sql
-    assert "{{dtrack_projection}}" not in sql
-
-
 def test_oracle_preflight_probes_and_caches_the_string_date_format(monkeypatch):
     def respond(sql):
         if "FETCH FIRST 16 ROWS ONLY" in sql:
@@ -344,26 +307,36 @@ def test_unsupported_custom_sampling_sql_fails_before_pulling_a_window(synthetic
 
 
 def test_athena_and_hadoop_connect_through_their_optional_drivers(monkeypatch):
-    calls = []
-    fake = SimpleNamespace(connect=lambda **kwargs: calls.append(kwargs) or "conn")
-    monkeypatch.setitem(sys.modules, "pyathena", fake)
-    monkeypatch.setitem(sys.modules, "impala", SimpleNamespace(dbapi=fake))
-    monkeypatch.setitem(sys.modules, "impala.dbapi", fake)
+    athena_calls = []
+    pyathena = SimpleNamespace(connect=lambda **kwargs: athena_calls.append(kwargs) or "athena")
+    hadoop_calls = []
+    pyodbc = SimpleNamespace(
+        connect=lambda connection_string, **kwargs: (
+            hadoop_calls.append((connection_string, kwargs)) or "hadoop"
+        )
+    )
+    monkeypatch.setitem(sys.modules, "pyathena", pyathena)
+    monkeypatch.setitem(sys.modules, "pyodbc", pyodbc)
     athena = AthenaSource(
         {"source": "athena", "schema": "db", "s3_staging_dir": "s3://q/", "region": "us-east-1"}
     )
-    assert athena.connect() == "conn"
-    assert calls == [{"s3_staging_dir": "s3://q/", "region_name": "us-east-1", "schema_name": "db"}]
-    with pytest.raises(NotImplementedError, match="HadoopSource is disabled"):
-        HadoopSource({"source": "hadoop", "host": "hive", "port": "10001"})
+    hadoop = HadoopSource({"source": "hadoop", "dsn": "Hive_Prod"})
+
+    assert athena.connect() == "athena"
+    assert athena_calls == [
+        {"s3_staging_dir": "s3://q/", "region_name": "us-east-1", "schema_name": "db"}
+    ]
+    assert hadoop.connect() == "hadoop"
+    assert hadoop_calls == [("DSN=Hive_Prod", {"autocommit": True})]
 
 
 def test_optional_drivers_explain_the_extra_to_install(monkeypatch):
     monkeypatch.setitem(sys.modules, "pyathena", None)
-    monkeypatch.setitem(sys.modules, "impala", None)
-    monkeypatch.setitem(sys.modules, "impala.dbapi", None)
+    monkeypatch.setitem(sys.modules, "pyodbc", None)
     with pytest.raises(ImportError, match=r"dtrack\[athena\]"):
         AthenaSource({"source": "athena"}).connect()
+    with pytest.raises(ImportError, match=r"dtrack\[hadoop\]"):
+        HadoopSource({"source": "hadoop", "dsn": "Hive_Prod"}).connect()
 
 
 @pytest.mark.parametrize(
@@ -372,17 +345,13 @@ def test_optional_drivers_explain_the_extra_to_install(monkeypatch):
         ("oracle", OracleSource),
         ("ATHENA", AthenaSource),
         ("aws", AthenaSource),
+        ("hadoop", HadoopSource),
         ("csv", FileSource),
         ("file", FileSource),
     ],
 )
 def test_source_from_config_dispatches_on_source(name, cls):
     assert isinstance(source_from_config({"source": name}), cls)
-
-
-def test_source_from_config_reaches_the_disabled_hadoop_source():
-    with pytest.raises(NotImplementedError, match="HadoopSource is disabled"):
-        source_from_config({"source": "hadoop"})
 
 
 def test_source_from_config_rejects_unknown_sources():

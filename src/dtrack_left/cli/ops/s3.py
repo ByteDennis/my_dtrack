@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import functools
-import logging
 import time
 
 import click
 
 from ...backends import aws
+from ...common.run_logging import get_left_logger
 from ..options import CONTEXT_SETTINGS, emit_json, log_level_option
 
-s3_log = logging.getLogger("dtrack.left.aws")
+s3_log = get_left_logger("aws")
 QUICK_EXIT = 15
 
 profile_option = click.option(

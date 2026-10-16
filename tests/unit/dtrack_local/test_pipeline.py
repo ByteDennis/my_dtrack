@@ -1,5 +1,4 @@
 import json
-import logging
 import threading
 from types import SimpleNamespace
 
@@ -269,6 +268,7 @@ def test_cli_runs_the_plan_and_preflight_reports_failures(synthetic, tmp_path, m
 def test_preflight_logs_returned_failures_to_the_private_error_log(
     synthetic, tmp_path, monkeypatch
 ):
+    from dtrack_left.common.run_logging import get_logger
     from dtrack_local.run_logging import configure_run_logging
 
     config = pairs_config(synthetic.left)
@@ -280,10 +280,10 @@ def test_preflight_logs_returned_failures_to_the_private_error_log(
         pipeline.Landing(tmp_path / "d.duckdb"),
     )
     path = configure_run_logging(run.folder)
-    root = logging.getLogger()
+    logger = get_logger()
     try:
         health = pipeline.preflight(run)
-        for handler in root.handlers:
+        for handler in logger.handlers:
             handler.flush()
 
         assert health["orders"]["right"]["ok"] is False
@@ -291,9 +291,9 @@ def test_preflight_logs_returned_failures_to_the_private_error_log(
         assert "preflight orders right failed" in logged
         assert "orders.csv" in logged
     finally:
-        for handler in list(root.handlers):
+        for handler in list(logger.handlers):
             if getattr(handler, "dtrack_error_handler", False):
-                root.removeHandler(handler)
+                logger.removeHandler(handler)
                 handler.close()
 
 

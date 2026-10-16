@@ -24,7 +24,7 @@
 #   duckdb   path to a .duckdb file or s3:// / https:// URL; table | schema.table | db.schema.table
 #            | query; the database must not be held open read-write by another process
 #   athena   database|schema, s3_staging_dir, region (dtrack[athena])
-#   hadoop   disabled until identifier quoting and Kerberos/ODBC auth are fixed
+#   hadoop   DSN or conn_macro/HADOOP_DSN through pyodbc (dtrack[hadoop])
 #
 # Right side (pair.right): "source": "databricks", "kind" one of:
 #   table    catalog+schema+table | table "c.s.t" | conn_macro "c.s" + table   (default kind)

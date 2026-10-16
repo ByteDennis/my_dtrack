@@ -5,7 +5,6 @@ import hashlib
 import inspect
 import itertools
 import json
-import logging
 import os
 import threading
 import time
@@ -36,9 +35,10 @@ from ..common.protocol import (
     row_check_is_closed,
     write_run_status,
 )
+from ..common.run_logging import get_left_logger
 from ..common.stats import compute_csv_statistics
 
-log = logging.getLogger("dtrack.left.col_check")
+log = get_left_logger("col_check")
 
 BACKPRESSURE_LOG_INTERVAL = 30.0
 DEFAULT_PROGRESS_INTERVAL = 10.0
@@ -206,8 +206,7 @@ class ColCheckPipeline:
         plan_rows = []
         for manifest, window in iter_windows_round_robin(manifests):
             if all(
-                unit_id_for(manifest, window, column) in existing
-                for column in manifest["columns"]
+                unit_id_for(manifest, window, column) in existing for column in manifest["columns"]
             ):
                 log.info(
                     "skip %s %s: every unit already indexed",
@@ -453,9 +452,7 @@ class ColCheckPipeline:
         last_wait_log = None
         while True:
             left_ready, right_finished, active_ready_unclaimed = self._unit_progress(active_ids)
-            ready_unclaimed = (
-                active_ready_unclaimed if version2 else self.store.ready_unclaimed()
-            )
+            ready_unclaimed = active_ready_unclaimed if version2 else self.store.ready_unclaimed()
             if ready_unclaimed < self.wip:
                 if waiting_started is not None:
                     log.info(

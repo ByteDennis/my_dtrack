@@ -17,7 +17,7 @@ def test_left_package_has_no_databricks_dependency_and_optional_left_adapters():
     assert not any("databricks" in item for item in dependencies)
     assert not any("pyathena" in item or "impyla" in item for item in dependencies)
     assert extras["athena"] == ["pyathena>=2.0"]
-    assert any(item.startswith("impyla") for item in extras["hadoop"])
+    assert extras["hadoop"] == ["pyodbc>=5.0"]
     assert sorted(extras) == ["athena", "confluence", "dbx", "hadoop", "ldap"]
     assert extras["confluence"] == ["atlassian-python-api==5.0.5"]
     assert [item.split(">")[0] for item in extras["dbx"]] == ["databricks-sdk"]

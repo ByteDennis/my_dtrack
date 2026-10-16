@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import time
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -27,9 +26,10 @@ from ..common.protocol import (
     row_result_path,
     timestamp,
 )
+from ..common.run_logging import get_left_logger
 from .row_check import STAGE_ONE_FIELDS, public_pair_config, run_row_check
 
-log = logging.getLogger("dtrack.left.rollback")
+log = get_left_logger("rollback")
 STAGES = ("dead", "col", "row")
 COMMIT_MARKERS = (
     ROW_CHECK_CLOSED,

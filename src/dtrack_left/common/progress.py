@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from collections.abc import Hashable
 
 from tqdm.auto import tqdm
 
-log = logging.getLogger("dtrack.left.progress")
+from .run_logging import get_left_logger
+
+log = get_left_logger("progress")
 PHASES = ("load", "infer", "aggregate", "finalize", "publish")
 
 
@@ -108,9 +109,7 @@ class StatisticsProgress:
             job = self.jobs.get(key)
             if job is None:
                 return
-            remaining = {
-                phase: job["totals"][phase] - job["done"][phase] for phase in PHASES
-            }
+            remaining = {phase: job["totals"][phase] - job["done"][phase] for phase in PHASES}
             delta = sum(remaining.values())
             self.completed_steps += delta
             for phase, amount in remaining.items():

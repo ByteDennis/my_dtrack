@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import logging
 import os
 import tempfile
 from pathlib import Path
 
-log = logging.getLogger("dtrack.left.duck")
+from .run_logging import get_left_logger
+
+log = get_left_logger("duck")
 DEFAULT_WORKERS = 2
 DEFAULT_FRACTION = 0.6
 _TEMP: str | None = None

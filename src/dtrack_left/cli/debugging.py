@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import logging
 import sys
 
-log = logging.getLogger("dtrack.left.debug")
+from ..common.run_logging import get_left_logger
+
+log = get_left_logger("debug")
 
 
 def run_under_debugger(main, argv: list[str], *, attach: int | None = None) -> int:

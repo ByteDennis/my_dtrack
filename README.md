@@ -59,14 +59,10 @@ An Oracle `query` may be inline or a `.sql` path relative to the config file. La
 queries can push the selected DTrack window into each dated driver before the join with controlled
 markers such as `{{query_windows:driver_one}}`; declare each marker under the Left
 `query_windows` map. DTrack still applies the final-result date predicate and samples only after
-the consolidated relation is built. If that query returns more than Oracle's portable 1000-column
-limit, replace its final select list with `{{dtrack_projection}}` and map each configured Left
-column to its original Oracle expression under `left.query_projection`. Preflight renders the
-complete configured projection and lets Oracle reject an unsupported select list immediately;
-col-check then pulls the full projection once per vintage. Statistics run parallel column shards
-inside that vintage and publish each completed `DTRACK_STATS_BATCH` wave immediately. Queries
-without this marker keep their existing behavior. Oracle always receives the complete rendered
-SQL. Human audit files compact SELECT lists
+the consolidated relation is built. The query must select the configured date, key, and mapped
+columns explicitly. Col-check pulls one complete vintage at a time; statistics run parallel column
+shards inside that vintage and publish each completed `DTRACK_STATS_BATCH` wave immediately.
+Oracle always receives the complete rendered SQL. Human audit files compact SELECT lists
 larger than 20 attributes to the first two and last two attributes with an ellipsis and no visible
 SQL hash; repeated read-query shapes reuse the same detailed audit file across command restarts.
 

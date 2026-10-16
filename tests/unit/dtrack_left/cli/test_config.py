@@ -38,15 +38,6 @@ def test_sas_is_out_of_scope():
         validate_config({"pairs": {"p": pair(left="sas")}})
 
 
-def test_optional_adapters_fail_with_install_instructions_when_absent():
-    from dtrack_left.backends.sources import AthenaSource, HadoopSource
-
-    with pytest.raises(ImportError, match=r"\[athena\]"):
-        AthenaSource({"source": "athena"}).connect()
-    with pytest.raises(NotImplementedError, match="disabled"):
-        HadoopSource({"source": "hadoop"})
-
-
 def test_conn_macro_expands_named_profiles_and_pair_fields_win():
     config = {
         "connections": {
@@ -383,52 +374,6 @@ def test_query_windows_are_oracle_only():
         query_windows={"driver": {"expression": "dt"}},
     )
     with pytest.raises(ValueError, match="only for Oracle"):
-        validate_config({"pairs": {"p": row}})
-
-
-def test_oracle_query_projection_requires_explicit_expressions_for_used_columns():
-    row = pair()
-    row["left"].update(
-        query=("SELECT {{dtrack_projection}} FROM driver d WHERE {{query_windows:driver}}"),
-        date_col="FINAL_DT",
-        date_type="date",
-        query_windows={"driver": {"expression": "d.dt"}},
-        query_projection={
-            "FINAL_DT": "d.dt",
-            "ACCOUNT_ID": "d.account_id",
-            "amount": "d.amount",
-        },
-    )
-    row["key"] = "ACCOUNT_ID"
-
-    left = validate_config({"pairs": {"p": row}})["pairs"]["p"]["left"]
-
-    assert left["query_projection"]["FINAL_DT"] == "d.dt"
-
-    row["left"]["query_projection"].pop("amount")
-    with pytest.raises(ValueError, match="query_projection lacks configured columns: amount"):
-        validate_config({"pairs": {"p": row}})
-
-
-@pytest.mark.parametrize(
-    ("change", "message"),
-    [
-        (lambda left: left.pop("query_projection"), "requires query_projection"),
-        (
-            lambda left: left.update(query="SELECT d.dt FROM driver d"),
-            "requires {{dtrack_projection}}",
-        ),
-    ],
-)
-def test_oracle_query_projection_fails_closed(change, message):
-    row = pair()
-    row["left"].update(
-        query="SELECT {{dtrack_projection}} FROM driver d",
-        query_projection={"dt": "d.dt", "amount": "d.amount"},
-    )
-    change(row["left"])
-
-    with pytest.raises((TypeError, ValueError), match=message):
         validate_config({"pairs": {"p": row}})
 
 

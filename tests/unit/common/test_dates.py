@@ -74,7 +74,7 @@ def test_contiguous_runs_splits_on_holes_and_ignores_order_and_duplicates(common
         ("OWNER.ORDERS", "oracle", "OWNER.ORDERS"),
         ("own.v_app_analysis", "oracle", "own.v_app_analysis"),
         ('OWN."DATE"', "oracle", 'OWN."DATE"'),
-        ("db.t", "hadoop", '"db"."t"'),
+        ("db.t", "hadoop", "`db`.`t`"),
         ('a"b', "sql", '"a""b"'),
         ("a.b", "sql", '"a.b"'),
     ],
@@ -139,9 +139,7 @@ def test_parameterized_string_and_sas_formats_share_one_class_each(common):
         ("sas", ["24108.75", "24109"], {"type": "sas", "format": "days"}),
     ],
 )
-def test_probe_values_resolve_a_family_to_one_concrete_format(
-    common, configured, values, expected
-):
+def test_probe_values_resolve_a_family_to_one_concrete_format(common, configured, values, expected):
     detected = common.dates.resolve_date_type(configured).detect(values)
     assert detected.spec(portable=True) == expected
 
@@ -361,9 +359,7 @@ def test_inline_date_type_can_define_dialect_sql_and_day_ranges(common):
         "range": "day",
     }
     assert common.dates.day_expr("DT", "oracle", spec) == "TO_DATE(DT, 'YYYY/MM/DD')"
-    assert common.dates.partition_where(
-        "DT", ["2026-01-02"], dialect="spark", date_type=spec
-    ) == (
+    assert common.dates.partition_where("DT", ["2026-01-02"], dialect="spark", date_type=spec) == (
         "((to_date(`DT`, 'yyyy/MM/dd') >= DATE '2026-01-02' "
         "AND to_date(`DT`, 'yyyy/MM/dd') < DATE '2026-01-03'))"
     )

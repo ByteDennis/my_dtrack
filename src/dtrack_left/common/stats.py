@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import logging
 import os
 import threading
 import uuid
@@ -16,8 +15,9 @@ import pandas as pd
 
 from .column_types import resolve_column_type
 from .hashing import collapse_decimal
+from .run_logging import get_left_logger
 
-log = logging.getLogger("dtrack.left.stats")
+log = get_left_logger("stats")
 
 
 def infer_column_type(
@@ -29,9 +29,7 @@ def infer_column_type(
     comparison: bool = False,
 ) -> tuple[str, bool]:
     """Return the statistics type and whether every present value is integral text."""
-    is_integral = (
-        integers is not None and present > 0 and present == parsed == integers
-    )
+    is_integral = integers is not None and present > 0 and present == parsed == integers
     is_numeric = (
         requested == "numeric"
         if requested
@@ -222,9 +220,7 @@ def _parallel_statistics(
     )
     if shard_status:
         shard_status(workers, 0, len(groups))
-    phase_done = {
-        phase: [0] * len(groups) for phase in ("infer", "aggregate", "finalize")
-    }
+    phase_done = {phase: [0] * len(groups) for phase in ("infer", "aggregate", "finalize")}
     progress_lock = threading.Lock()
 
     def group_progress(group_index):
@@ -259,8 +255,7 @@ def _parallel_statistics(
     completed_groups = 0
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dtrack-stats") as executor:
         jobs = {
-            executor.submit(calculate, index, group): index
-            for index, group in enumerate(groups)
+            executor.submit(calculate, index, group): index for index, group in enumerate(groups)
         }
         try:
             for job in as_completed(jobs):

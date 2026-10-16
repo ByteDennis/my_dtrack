@@ -53,7 +53,7 @@ def test_pipeline_commits_one_atomic_unit_and_closes_only_when_complete():
     assert store.exists("_status/col_check.closed.json")
 
 
-def test_projection_query_computes_and_commits_one_window_at_a_time(caplog):
+def test_query_computes_and_commits_one_window_at_a_time(caplog):
     store = MemoryStore()
     columns = [f"c{i}" for i in range(5)]
     row = {
@@ -64,11 +64,7 @@ def test_projection_query_computes_and_commits_one_window_at_a_time(caplog):
         "left": {
             "source": "oracle",
             "date_col": "dt",
-            "query": "SELECT {{dtrack_projection}} FROM wide_source",
-            "query_projection": {
-                "dt": "s.dt",
-                **{column: f"s.{column}" for column in columns},
-            },
+            "query": f"SELECT dt, {', '.join(columns)} FROM wide_source",
         },
     }
     store.put_json("pairs/pair/plan.json", row)

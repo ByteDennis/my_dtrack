@@ -75,27 +75,6 @@ def test_sas_export_pushes_each_vintage_into_query_windows(tmp_path):
     assert "IN (&dtrack_partitions)" in script
 
 
-def test_sas_export_renders_the_configured_query_projection(tmp_path):
-    config = _all_partition_config()
-    config["pairs"]["ledger"]["left"].update(
-        query=("SELECT {{dtrack_projection}} FROM LEDGER d WHERE {{query_windows:driver}}"),
-        query_windows={"driver": {"expression": "d.BUSINESS_DATE", "date_type": "date"}},
-        query_projection={
-            "BUSINESS_DATE": "d.BUSINESS_DATE",
-            "AMOUNT": "d.AMOUNT",
-        },
-    )
-    validate_config(config)
-    bundle = tmp_path / "sas"
-
-    export_sas_bundle(config, bundle, run_id="query-projection")
-    script = (bundle / "left-run.sas").read_text()
-
-    assert "{{dtrack_projection}}" not in script
-    assert "d.BUSINESS_DATE AS BUSINESS_DATE" in script
-    assert "d.AMOUNT AS AMOUNT" in script
-
-
 def test_sas_export_canonicalizes_only_the_final_sample_projection(tmp_path):
     config = _all_partition_config()
     pair = config["pairs"]["ledger"]

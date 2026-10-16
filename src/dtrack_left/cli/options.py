@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import functools
 import json
-import logging
 import os
-import sys
-import time
 from pathlib import Path
 from typing import ClassVar
 
@@ -14,6 +11,7 @@ from click.core import UNSET
 from dotenv import find_dotenv, load_dotenv
 
 from ..backends.store import S3Store
+from ..common.run_logging import configure_console_logging
 from .config import load_config
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": 100}
@@ -214,13 +212,7 @@ class DistributedGroup(ConfigDefaultsGroup):
 
 # >>> UTC timestamps on stderr, so stdout stays one JSON line per command <<< #
 def setup_logging(level: str) -> None:
-    logging.Formatter.converter = time.gmtime
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s.%(msecs)03dZ %(levelname)s %(name)s: %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-        stream=sys.stderr,
-    )
+    configure_console_logging(level)
 
 
 # >>> --log-level on every command, applied before the command body runs <<< #

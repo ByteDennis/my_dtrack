@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -558,7 +557,3 @@ USING (SELECT * FROM VALUES
 AS s({columns})) AS s
 ON t.pair_name = s.pair_name
 WHEN NOT MATCHED THEN INSERT ({columns}) VALUES ({", ".join("s." + c for c in PLAN_COLUMNS)})"""
-
-
-def to_json(rows: list[dict[str, Any]]) -> str:
-    return json.dumps(rows, ensure_ascii=False, indent=1, default=str)

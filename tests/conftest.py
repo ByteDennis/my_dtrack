@@ -10,7 +10,7 @@ GATES = {
     "spark": ("--run-spark", "starts a local pyspark session (needs Java); pass --run-spark"),
     "oracle": ("--run-oracle", "starts an Oracle container via testcontainers; pass --run-oracle"),
     "e2e": ("--run-e2e", "runs the full examples/e2e script; pass --run-e2e"),
-    "live": ("--run-live", "talks to real AWS S3 and Databricks; pass --run-live"),
+    "live": ("--run-live", "talks to configured external services; pass --run-live"),
     "confluence": (
         "--run-confluence",
         "needs the local Confluence DC (just confluence up); pass --run-confluence",
@@ -43,7 +43,7 @@ def docker_available() -> bool:
 def pytest_collection_modifyitems(config, items):
     for item in items:
         for marker, (flag, reason) in GATES.items():
-            if marker in item.keywords and not config.getoption(flag):
+            if item.get_closest_marker(marker) is not None and not config.getoption(flag):
                 item.add_marker(pytest.mark.skip(reason=reason))
         if (
             "docker" in item.keywords
