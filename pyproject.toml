@@ -25,7 +25,10 @@ athena = ["pyathena>=2.0"]
 confluence = ["atlassian-python-api==5.0.5"]
 hadoop = ["pyodbc>=5.0"]
 ldap = ["ldap3>=2.9"]
-dbx = ["databricks-sdk>=0.143.0"]
+dbx = [
+    "databricks-sdk>=0.40",
+    "pywin32>=312; sys_platform == 'win32'",
+]
 
 [dependency-groups]
 dev = [
@@ -41,7 +44,7 @@ dev = [
 ]
 spark = ["pyspark>=3.5,<4"]
 live = [
-    "databricks-sdk>=0.143.0",
+    "databricks-sdk>=0.40",
     "databricks-connect>=16.4 ; python_version == '3.12'",
 ]
 

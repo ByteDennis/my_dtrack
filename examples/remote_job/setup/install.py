@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import os
 import re
@@ -44,8 +43,6 @@ def job_specs(
     right_runs: str,
     schema: str,
     *,
-    alert_id: str,
-    warehouse_id: str,
     cluster_id: str | None,
     prefix: str,
 ) -> dict[str, dict[str, Any]]:
@@ -84,29 +81,6 @@ def job_specs(
                 )
             ],
         },
-        "alert": {
-            "name": f"{prefix}-alert",
-            "max_concurrent_runs": 1,
-            "queue": {"enabled": True},
-            "timeout_seconds": 600,
-            "parameters": [{"name": "run_id", "default": ""}],
-            "tasks": [
-                _task(
-                    "context",
-                    f"{folder}/alert_context_notebook",
-                    {"schema": schema, "run_id": "{{job.parameters.run_id}}"},
-                    cluster_id,
-                ),
-                {
-                    "task_key": "notify",
-                    "depends_on": [{"task_key": "context"}],
-                    "alert_task": {
-                        "alert_id": alert_id,
-                        "warehouse_id": warehouse_id,
-                    },
-                },
-            ],
-        },
     }
 
 
@@ -126,108 +100,6 @@ WHEN MATCHED THEN UPDATE SET display_name = source.display_name, active = true,
 WHEN NOT MATCHED THEN INSERT
   (pair_name, display_name, priority, active, updated_by, updated_at)
   VALUES (source.pair_name, source.display_name, 100, true, current_user(), current_timestamp())"""
-
-
-def alert_ddl(schema: str) -> str:
-    return f"""CREATE TABLE IF NOT EXISTS {schema}.dtrack_alert_context (
-  context_key STRING NOT NULL, run_id STRING NOT NULL, updated_at TIMESTAMP NOT NULL)"""
-
-
-def alert_sql(schema: str) -> str:
-    return f"""WITH context AS (
-  SELECT run_id FROM {schema}.dtrack_alert_context
-  WHERE context_key = 'current'
-  QUALIFY row_number() OVER (ORDER BY updated_at DESC) = 1),
-latest AS (
-  SELECT snapshot.*
-  FROM {schema}.dtrack_progress_snapshot AS snapshot
-  INNER JOIN context USING (run_id)
-  QUALIFY row_number() OVER (
-    PARTITION BY snapshot.run_id, snapshot.pair_name ORDER BY snapshot.snapshot_ts DESC) = 1),
-rollup AS (
-  SELECT context.run_id, count(latest.run_id) AS snapshot_rows,
-         max(snapshot_ts) AS snapshot_at, max(run_root) AS run_uri,
-         count_if(pair_name <> '*') AS pair_count,
-         count_if(collector_error IS NOT NULL) AS collector_errors,
-         count_if(pair_name <> '*' AND (run_state IS NULL OR run_state <> 'complete')) AS unfinished_pairs,
-         count_if(pair_name <> '*' AND (gate_passed = false OR coalesce(units_dead, 0) > 0)) AS failed_pairs,
-         count_if(pair_name <> '*' AND (
-           coalesce(row_days_count_diff, 0) + coalesce(row_days_left_only, 0)
-             + coalesce(row_days_right_only, 0) + coalesce(units_diff, 0) > 0)) AS diff_pairs,
-         sum(coalesce(row_days_total, 0)) AS row_partitions,
-         sum(coalesce(row_days_count_diff, 0) + coalesce(row_days_left_only, 0)
-           + coalesce(row_days_right_only, 0)) AS row_mismatches,
-         sum(coalesce(units_expected, 0)) AS units_expected,
-         sum(coalesce(units_compared, 0)) AS units_compared,
-         sum(coalesce(units_dead, 0)) AS units_dead,
-         sum(coalesce(units_diff, 0)) AS differing_units
-  FROM context LEFT JOIN latest ON latest.run_id = context.run_id
-  GROUP BY context.run_id)
-SELECT 1 AS notify, run_id,
-       CASE WHEN snapshot_rows = 0 THEN 'NO_DATA'
-            WHEN collector_errors > 0 THEN 'ERROR'
-            WHEN unfinished_pairs > 0 THEN 'INCOMPLETE'
-            WHEN failed_pairs > 0 THEN 'FAILED'
-            WHEN diff_pairs > 0 THEN 'DIFF'
-            ELSE 'MATCH' END AS result,
-       pair_count, row_partitions, row_mismatches,
-       units_expected, units_compared, units_dead, differing_units,
-       snapshot_at, concat(run_uri, '/report/index.html') AS report_uri
-FROM rollup"""
-
-
-def alert_definition(
-    schema: str,
-    workspace_dir: str,
-    warehouse_id: str,
-    display_name: str,
-    recipients: list[str],
-    dashboard_url: str,
-) -> Any:
-    from databricks.sdk.service.sql import (
-        AlertEvaluationState,
-        AlertV2,
-        AlertV2Evaluation,
-        AlertV2Notification,
-        AlertV2Operand,
-        AlertV2OperandColumn,
-        AlertV2OperandValue,
-        AlertV2Subscription,
-        ComparisonOperator,
-        CronSchedule,
-        SchedulePauseStatus,
-    )
-
-    dashboard_link = html.escape(dashboard_url, quote=True)
-    return AlertV2(
-        display_name=display_name,
-        parent_path=workspace_dir,
-        query_text=alert_sql(schema),
-        warehouse_id=warehouse_id,
-        evaluation=AlertV2Evaluation(
-            source=AlertV2OperandColumn(name="notify", display="notify"),
-            comparison_operator=ComparisonOperator.GREATER_THAN,
-            empty_result_state=AlertEvaluationState.ERROR,
-            threshold=AlertV2Operand(value=AlertV2OperandValue(double_value=0.0)),
-            notification=AlertV2Notification(
-                notify_on_ok=False,
-                retrigger_seconds=1,
-                subscriptions=[AlertV2Subscription(user_email=value) for value in recipients],
-            ),
-        ),
-        schedule=CronSchedule(
-            quartz_cron_schedule="0 0 0 * * ?",
-            timezone_id="UTC",
-            pause_status=SchedulePauseStatus.PAUSED,
-        ),
-        custom_summary="[DTrack] reconciliation result — {{ALERT_STATUS}}",
-        custom_description=(
-            "<h2>DTrack reconciliation result</h2>"
-            "<p>The collector committed the latest snapshot for this run.</p>"
-            "{{QUERY_RESULT_TABLE}}"
-            f'<p><a href="{dashboard_link}">Open the live dashboard</a></p>'
-        ),
-    )
 
 
 def write_state(path: Path, values: dict[str, Any]) -> None:
@@ -267,33 +139,6 @@ def _upsert_jobs(workspace: Any, specs: dict[str, dict[str, Any]]) -> dict[str, 
         ids[kind] = job_id
         log.info("job ready: kind=%s name=%s job_id=%s", kind, spec["name"], job_id)
     return ids
-
-
-def _upsert_alert(workspace: Any, definition: Any) -> str:
-    existing = next(
-        (
-            value
-            for value in workspace.alerts_v2.list_alerts()
-            if value.display_name == definition.display_name
-            and value.parent_path == definition.parent_path
-        ),
-        None,
-    )
-    if existing:
-        saved = workspace.alerts_v2.update_alert(
-            str(existing.id),
-            definition,
-            update_mask=(
-                "display_name,query_text,warehouse_id,evaluation,schedule,"
-                "custom_summary,custom_description"
-            ),
-        )
-    else:
-        saved = workspace.alerts_v2.create_alert(definition)
-    if not saved.id:
-        raise RuntimeError("Databricks did not return an alert id")
-    log.info("alert ready: name=%s alert_id=%s", definition.display_name, saved.id)
-    return str(saved.id)
 
 
 def _publish_dashboard(
@@ -340,7 +185,6 @@ def install(args: argparse.Namespace) -> dict[str, Any]:
     uploads = (
         (ROOT / "src" / "dtrack_right", target),
         (EXAMPLE / "src" / "progress_notebook.py", f"{target}/progress_notebook.py"),
-        (EXAMPLE / "src" / "alert_context_notebook.py", f"{target}/alert_context_notebook.py"),
     )
     for source, destination in uploads:
         result = databricks.upload_workspace(
@@ -353,11 +197,7 @@ def install(args: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError(f"workspace upload failed: {result['failed']}")
         log.info("uploaded %s object(s) to %s", result["uploaded"], result["target"])
 
-    for statement in [
-        *progress.ddl(args.schema),
-        alert_ddl(args.schema),
-        *progress.views(args.schema),
-    ]:
+    for statement in [*progress.ddl(args.schema), *progress.views(args.schema)]:
         databricks.run_sql(workspace, statement, args.warehouse_id)
     databricks.run_sql(workspace, plan_sql(args.schema, pairs), args.warehouse_id)
     log.info("tables/views ready: schema=%s pairs=%s", args.schema, len(pairs))
@@ -369,24 +209,10 @@ def install(args: argparse.Namespace) -> dict[str, Any]:
         args.warehouse_id,
         args.dashboard_name,
     )
-    recipients = _alert_recipients(workspace, args.alert_email)
-    alert_id = _upsert_alert(
-        workspace,
-        alert_definition(
-            args.schema,
-            args.workspace_dir,
-            args.warehouse_id,
-            args.alert_name,
-            recipients,
-            dashboard_url,
-        ),
-    )
     specs = job_specs(
         args.workspace_dir,
         args.right_runs,
         args.schema,
-        alert_id=alert_id,
-        warehouse_id=args.warehouse_id,
         cluster_id=args.cluster_id,
         prefix=args.job_prefix,
     )
@@ -398,9 +224,7 @@ def install(args: argparse.Namespace) -> dict[str, Any]:
         "schema": args.schema,
         "right_job_id": jobs["right"],
         "collector_job_id": jobs["collector"],
-        "alert_job_id": jobs["alert"],
-        "alert_id": alert_id,
-        "alert_recipients": recipients,
+        "email_to": args.email_to,
         "dashboard_id": dashboard_id,
         "dashboard_url": dashboard_url,
         "aws_secret_scope": args.aws_secret_scope,
@@ -426,17 +250,18 @@ def _value(value: str | None, env: str, prompt: str, default: str | None = None)
     raise ValueError(f"{prompt} is required")
 
 
-def _alert_recipients(workspace: Any, configured: list[str] | None) -> list[str]:
-    recipients = [value.strip() for value in configured or [] if value.strip()]
-    if not recipients:
-        current = workspace.current_user.me().user_name
-        if current:
-            recipients = [str(current)]
+def email_recipients(configured: list[str]) -> list[str]:
+    recipients = [
+        address.strip()
+        for value in configured
+        for address in re.split(r"[,;]", value)
+        if address.strip()
+    ]
     if not recipients or any(
         "@" not in address or address.startswith("@") or address.endswith("@")
         for address in recipients
     ):
-        raise ValueError("--alert-email must name a valid Databricks workspace user email")
+        raise ValueError("--email-to must name at least one valid email address")
     return list(dict.fromkeys(recipients))
 
 
@@ -454,10 +279,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--aws-secret-scope", default=os.getenv("DTRACK_LIVE_AWS_SECRET_SCOPE", ""))
     parser.add_argument("--job-prefix", default="dtrack-example")
     parser.add_argument("--dashboard-name", default="dtrack pair progress")
-    parser.add_argument("--alert-name", default="dtrack reconciliation result")
-    parser.add_argument(
-        "--alert-email", action="append", help="Databricks user email; repeat as needed"
-    )
+    parser.add_argument("--email-to", action="append", help="Outlook recipient; repeat as needed")
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument(
         "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO"
@@ -485,11 +307,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "DTRACK_DBX_WAREHOUSE_ID",
         "SQL warehouse id",
     )
-    configured_recipients = os.getenv("DTRACK_ALERT_EMAIL", "")
-    if not args.alert_email and configured_recipients:
-        args.alert_email = [
-            value.strip() for value in re.split(r"[,;]", configured_recipients) if value.strip()
-        ]
+    configured_recipients = args.email_to or [
+        _value(None, "DTRACK_EMAIL_TO", "Outlook recipient(s), comma-separated")
+    ]
+    args.email_to = email_recipients(configured_recipients)
     return args
 
 

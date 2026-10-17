@@ -20,7 +20,8 @@ def test_left_dependencies():
     assert extras["hadoop"] == ["pyodbc>=5.0"]
     assert sorted(extras) == ["athena", "confluence", "dbx", "hadoop", "ldap"]
     assert extras["confluence"] == ["atlassian-python-api==5.0.5"]
-    assert [item.split(">")[0] for item in extras["dbx"]] == ["databricks-sdk"]
+    assert [item.split(">")[0] for item in extras["dbx"]] == ["databricks-sdk", "pywin32"]
+    assert extras["dbx"][1].endswith("sys_platform == 'win32'")
     assert project["project"]["scripts"] == {"dtrack": "dtrack.cli:main"}
 
 

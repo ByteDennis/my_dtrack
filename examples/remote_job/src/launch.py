@@ -9,8 +9,10 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from outlook_mail import require_outlook, send_report
+
 from dtrack_left.backends import databricks
-from dtrack_left.backends.store import validate_run_id
+from dtrack_left.backends.store import S3Store, validate_run_id
 from dtrack_left.checks.row_check import make_run_id
 from dtrack_left.common.run_logging import configure_console_logging, get_logger
 
@@ -129,21 +131,38 @@ def _refresh(workspace: Any, state: dict[str, Any], timeout: float) -> int:
     return int(wait.run_id)
 
 
-def _notify(workspace: Any, state: dict[str, Any], run_id: str, timeout: float) -> int:
-    wait = workspace.jobs.run_now(
-        int(state["alert_job_id"]),
-        job_parameters={"run_id": run_id},
+def _send_email(
+    state: dict[str, Any],
+    run_id: str,
+    run_uri: str,
+    error: str | None = None,
+) -> dict[str, Any]:
+    recipients = list(state.get("email_to") or [])
+    if not recipients:
+        raise ValueError("setup state has no email_to; rerun the one-time setup")
+    result = send_report(
+        S3Store(run_uri),
+        run_id=run_id,
+        run_uri=run_uri,
+        dashboard_url=str(state.get("dashboard_url") or ""),
+        recipients=recipients,
+        error=error,
     )
-    log.info("alert started: run_id=%s", wait.run_id)
-    completed = wait.result(timeout=timedelta(minutes=timeout))
-    _result(completed, "alert")
-    return int(wait.run_id)
+    log.info(
+        "Outlook email sent: status=%s recipients=%s attachments=%s",
+        result["status"],
+        len(recipients),
+        len(result["attachments"]),
+    )
+    return result
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     state = load_json(args.state)
     document = load_json(args.config)
     args.run_id = validate_run_id(args.run_id or make_run_id(document))
+    run_uri = f"{args.run_s3.rstrip('/')}/{args.run_id}"
+    require_outlook()
     workspace = databricks.workspace(str(state.get("profile") or "corp"))
     right = workspace.jobs.run_now(
         int(state["right_job_id"]),
@@ -154,7 +173,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         _run_left(document, args)
         completed = right.result(timeout=timedelta(minutes=args.remote_timeout))
         _result(completed, "Right")
-    except BaseException:
+    except BaseException as failure:
         log.exception("run failed; cancelling the Right run started by this launcher")
         try:
             workspace.jobs.cancel_run(int(right.run_id))
@@ -162,21 +181,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             log.error("could not cancel Right run %s: %s", right.run_id, exc)
         try:
             _refresh(workspace, state, args.collector_timeout)
-            _notify(workspace, state, args.run_id, args.alert_timeout)
         except Exception as exc:  # noqa: BLE001 - cleanup must not hide the original failure
-            log.error("could not snapshot or alert the failed run: %s", exc)
+            log.error("could not snapshot the failed run: %s", exc)
+        try:
+            _send_email(state, args.run_id, run_uri, error=str(failure))
+        except Exception as exc:  # noqa: BLE001 - cleanup must not hide the original failure
+            log.error("could not email the failed run: %s", exc)
         raise
 
-    collector_run_id = _refresh(workspace, state, args.collector_timeout)
-    alert_run_id = _notify(workspace, state, args.run_id, args.alert_timeout)
+    try:
+        collector_run_id = _refresh(workspace, state, args.collector_timeout)
+    except BaseException as failure:
+        log.exception("collector failed after Right completed")
+        try:
+            _send_email(state, args.run_id, run_uri, error=str(failure))
+        except Exception as exc:  # noqa: BLE001 - cleanup must not hide the original failure
+            log.error("could not email the collector failure: %s", exc)
+        raise
+    email = _send_email(state, args.run_id, run_uri)
     outcome = {
         "run_id": args.run_id,
-        "run": f"{args.run_s3.rstrip('/')}/{args.run_id}",
+        "run": run_uri,
         "right_run_id": int(right.run_id),
         "collector_run_id": collector_run_id,
-        "alert_run_id": alert_run_id,
-        "alert_id": state.get("alert_id"),
-        "alert_recipients": list(state.get("alert_recipients") or []),
+        "email_status": email["status"],
+        "email_to": list(state.get("email_to") or []),
+        "email_attachments": email["attachments"],
         "dashboard_url": state.get("dashboard_url"),
     }
     log.info("run complete: %s", json.dumps(outcome, ensure_ascii=False))
@@ -214,7 +244,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--collector-timeout", type=float, default=20, help="collector timeout in minutes"
     )
-    parser.add_argument("--alert-timeout", type=float, default=20, help="alert timeout in minutes")
     parser.add_argument(
         "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO"
     )

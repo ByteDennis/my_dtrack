@@ -23,6 +23,7 @@ def _module(name: str, path: Path):
     return module
 
 
+outlook_mail = _module("outlook_mail", EXAMPLE / "src" / "outlook_mail.py")
 launch = _module("remote_job_launch", EXAMPLE / "src" / "launch.py")
 install = _module("remote_job_install", EXAMPLE / "setup" / "install.py")
 dashboard = _module("remote_job_dashboard", EXAMPLE / "src" / "dashboard.py")
@@ -99,49 +100,101 @@ def test_jobs(cluster):
         "/Workspace/Shared/dtrack",
         "/Volumes/main/dtrack/runs",
         "main.dtrack",
-        alert_id="alert-1",
-        warehouse_id="warehouse-1",
         cluster_id=cluster,
         prefix="example",
     )
-    assert set(specs) == {"right", "collector", "alert"}
+    assert set(specs) == {"right", "collector"}
     assert specs["collector"]["schedule"]["pause_status"] == "UNPAUSED"
     assert all(spec["queue"] == {"enabled": True} for spec in specs.values())
-    tasks = [specs[name]["tasks"][0] for name in ("right", "collector", "alert")]
+    tasks = [specs[name]["tasks"][0] for name in ("right", "collector")]
     assert all((task.get("existing_cluster_id") == cluster) for task in tasks)
-    alert = specs["alert"]
-    assert alert["max_concurrent_runs"] == 1
-    assert alert["parameters"] == [{"name": "run_id", "default": ""}]
-    assert alert["tasks"][0]["notebook_task"]["base_parameters"]["run_id"] == (
-        "{{job.parameters.run_id}}"
+
+
+@pytest.mark.parametrize(
+    ("files", "error", "status", "attached"),
+    [
+        (
+            {
+                "report/summary.json": (
+                    b'{"status":"DONE","pairs":2,"units_expected":4,"units_completed":4,'
+                    b'"findings":{"row_count_diff":1,"partition_missing":0,'
+                    b'"col_stat_diff":1},"errors":[]}'
+                ),
+                "report/index.html": b"<html>report</html>",
+                "report/report.xlsx": b"xlsx",
+            },
+            None,
+            "DONE",
+            ["index.html", "report.xlsx", "summary.json"],
+        ),
+        ({}, "Right failed: boom", "FAILED", []),
+    ],
+)
+def test_email(files, error, status, attached):
+    events = []
+    attachments = {}
+
+    class Store:
+        def exists(self, path):
+            return path in files
+
+        def get_bytes(self, path):
+            return files[path]
+
+        def get_json(self, path):
+            return json.loads(files[path])
+
+    class Attachments:
+        def Add(self, path):
+            source = Path(path)
+            attachments[source.name] = source.read_bytes()
+
+    class Mail:
+        def Save(self):
+            events.append("save")
+
+        def Send(self):
+            events.append("send")
+
+    mail = Mail()
+    mail.Attachments = Attachments()
+
+    class Outlook:
+        def CreateItem(self, kind):
+            assert kind == 0
+            return mail
+
+    def dispatch(name):
+        assert name == "Outlook.Application"
+        return Outlook()
+
+    outcome = outlook_mail.send_report(
+        Store(),
+        run_id="run-1",
+        run_uri="s3://bucket/runs/run-1",
+        dashboard_url="https://example/dashboard?a=1&b=2",
+        recipients=["owner@example.com"],
+        error=error,
+        dispatch=dispatch,
+        platform="win32",
     )
-    assert alert["tasks"][1]["alert_task"] == {
-        "alert_id": "alert-1",
-        "warehouse_id": "warehouse-1",
-    }
+    assert outcome == {"status": status, "attachments": attached}
+    assert mail.To == "owner@example.com"
+    assert mail.Subject == f"[DTrack] {status} — run-1"
+    assert "https://example/dashboard?a=1&amp;b=2" in mail.HTMLBody
+    assert sorted(attachments) == attached
+    assert events == ["save", "send"]
 
 
-def test_alert():
-    query = install.alert_sql("main.dtrack")
-    assert "dtrack_alert_context" in query
-    assert "dtrack_progress_snapshot" in query
-    assert "LEFT JOIN latest" in query
-    assert "NO_DATA" in query
-    assert "notify" in query
-    value = install.alert_definition(
-        "main.dtrack",
-        "/Workspace/Shared/dtrack",
-        "warehouse-1",
-        "dtrack result",
-        ["owner@example.com"],
-        "https://example/dashboard",
-    ).as_dict()
-    assert value["schedule"]["pause_status"] == "PAUSED"
-    assert value["evaluation"]["notification"]["retrigger_seconds"] == 1
-    assert value["evaluation"]["notification"]["subscriptions"] == [
-        {"user_email": "owner@example.com"}
-    ]
-    assert "{{QUERY_RESULT_TABLE}}" in value["custom_description"]
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (["owner@example.com", "owner@example.com"], ["owner@example.com"]),
+        (["one@example.com; two@example.com"], ["one@example.com", "two@example.com"]),
+    ],
+)
+def test_recipients(values, expected):
+    assert install.email_recipients(values) == expected
 
 
 def test_dashboard():
@@ -162,8 +215,8 @@ def test_state(tmp_path):
     assert not path.with_suffix(".json.tmp").exists()
 
 
-@pytest.mark.parametrize("failure", [False, True])
-def test_sequence(failure, tmp_path, monkeypatch):
+@pytest.mark.parametrize("phase", ["success", "right", "collector"])
+def test_sequence(phase, tmp_path, monkeypatch):
     events = []
     config = tmp_path / "config.json"
     state = tmp_path / "state.json"
@@ -176,9 +229,8 @@ def test_sequence(failure, tmp_path, monkeypatch):
                 "schema": "main.dtrack",
                 "right_job_id": 10,
                 "collector_job_id": 20,
-                "alert_job_id": 30,
-                "alert_id": "alert-1",
-                "alert_recipients": ["owner@example.com"],
+                "email_to": ["owner@example.com"],
+                "dashboard_url": "https://example/dashboard",
             }
         ),
         encoding="utf-8",
@@ -189,7 +241,7 @@ def test_sequence(failure, tmp_path, monkeypatch):
 
         def result(self, timeout):
             events.append("right-wait")
-            result = SimpleNamespace(value="FAILED" if failure else "SUCCESS")
+            result = SimpleNamespace(value="FAILED" if phase == "right" else "SUCCESS")
             return SimpleNamespace(state=SimpleNamespace(result_state=result))
 
     jobs = SimpleNamespace(
@@ -197,16 +249,26 @@ def test_sequence(failure, tmp_path, monkeypatch):
         cancel_run=lambda run_id: events.append(("cancel", run_id)),
     )
     monkeypatch.setattr(launch.databricks, "workspace", lambda profile: SimpleNamespace(jobs=jobs))
+    monkeypatch.setattr(launch, "require_outlook", lambda: None)
     monkeypatch.setattr(launch, "_run_left", lambda document, args: events.append("left"))
+
+    def refresh(workspace, values, timeout):
+        events.append("collector")
+        if phase == "collector":
+            raise RuntimeError("collector boom")
+        return 202
+
+    monkeypatch.setattr(launch, "_refresh", refresh)
     monkeypatch.setattr(
         launch,
-        "_refresh",
-        lambda workspace, values, timeout: events.append("collector") or 202,
-    )
-    monkeypatch.setattr(
-        launch,
-        "_notify",
-        lambda workspace, values, run_id, timeout: events.append("alert") or 303,
+        "_send_email",
+        lambda values, run_id, run_uri, error=None: (
+            events.append("email")
+            or {
+                "status": "FAILED" if error else "DONE",
+                "attachments": ["report.xlsx"],
+            }
+        ),
     )
     args = Namespace(
         state=state,
@@ -215,43 +277,18 @@ def test_sequence(failure, tmp_path, monkeypatch):
         run_id="run-1",
         remote_timeout=60,
         collector_timeout=20,
-        alert_timeout=20,
     )
-    if failure:
-        with pytest.raises(RuntimeError, match="Right"):
+    if phase != "success":
+        with pytest.raises(RuntimeError, match="Right|collector"):
             launch.run(args)
-        assert events == [
-            ("right", 10),
-            "left",
-            "right-wait",
-            ("cancel", 101),
-            "collector",
-            "alert",
-        ]
+        expected = [("right", 10), "left", "right-wait"]
+        if phase == "right":
+            expected.append(("cancel", 101))
+        assert events == [*expected, "collector", "email"]
     else:
         outcome = launch.run(args)
-        assert events == [("right", 10), "left", "right-wait", "collector", "alert"]
+        assert events == [("right", 10), "left", "right-wait", "collector", "email"]
         assert outcome["right_run_id"] == 101 and outcome["collector_run_id"] == 202
-        assert outcome["alert_run_id"] == 303
-        assert outcome["alert_recipients"] == ["owner@example.com"]
-
-
-def test_notify():
-    events = []
-
-    class Wait:
-        run_id = 303
-
-        def result(self, timeout):
-            events.append(timeout)
-            result = SimpleNamespace(value="SUCCESS")
-            return SimpleNamespace(state=SimpleNamespace(result_state=result))
-
-    def run_now(job_id, **kwargs):
-        events.append((job_id, kwargs))
-        return Wait()
-
-    workspace = SimpleNamespace(jobs=SimpleNamespace(run_now=run_now))
-    actual = launch._notify(workspace, {"alert_job_id": 30}, "run-1", 12)
-    assert actual == 303
-    assert events[0] == (30, {"job_parameters": {"run_id": "run-1"}})
+        assert outcome["email_status"] == "DONE"
+        assert outcome["email_to"] == ["owner@example.com"]
+        assert outcome["email_attachments"] == ["report.xlsx"]

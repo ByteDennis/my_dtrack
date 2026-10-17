@@ -1,3 +1,32 @@
+Unreleased: use Outlook as the only remote-job email path
+
+Changed files (all tracked files in this change set):
+- M `README.md` — Describe the remote-job example as a Windows Outlook launcher with Databricks dashboard refresh.
+- M `changelog.txt` — Record this exact modified/added/deleted file manifest and verification evidence.
+- M `examples/remote_job/README.md` — Replace Databricks Alert setup/runtime guidance with Classic Outlook prerequisites, UTF-8 and Windows/Linux boundaries, attachments, and failure delivery.
+- M `examples/remote_job/setup/install.py` — Remove Alerts v2 definitions, Alert SQL/context state, Alert Job creation, and Alert parameters; persist validated `--email-to`/`DTRACK_EMAIL_TO` recipients instead.
+- M `examples/remote_job/src/launch.py` — Preflight the local Outlook dependency, refresh the collector, send success/failure emails, and return email status and attachment names without a mail-mode switch.
+- M `pyproject.toml` — Restore the non-Alert Databricks SDK floor and add Windows-only `pywin32` to the `dbx` extra.
+- M `tests/unit/examples/test_remote_job.py` — Replace Alert tests with parameterized Outlook attachments, recipient parsing, queued Job, and success/Right-failure/collector-failure ordering coverage.
+- M `tests/unit/test_packaging.py` — Require the Windows-only `pywin32` dependency in the `dbx` packaging contract.
+- M `uv.lock` — Lock the Outlook COM dependency marker and restored Databricks SDK constraints.
+
+Added files:
+- A `examples/remote_job/src/outlook_mail.py` — Send a UTF-8 custom HTML message through Classic Outlook COM, attach available HTML/XLSX/JSON reports, and provide a no-report failure fallback.
+
+Deleted files:
+- D `examples/remote_job/src/alert_context_notebook.py` — Remove the run-context notebook used only by the deleted Databricks Alert Job.
+
+Verification:
+- `uv run pytest -q --timeout=60 tests/unit/examples/test_remote_job.py`: 15 passed.
+- `uv run pytest -q --timeout=60 tests/unit`: 881 passed, 12 skipped.
+- `uv run ruff check src tests examples/remote_job`: passed.
+- Changed Python files are Ruff-formatted; Python bytecode compilation, Bash syntax checks, `git diff --check`, and `uv build` passed.
+- External live tests were intentionally not run, per operator instruction. Outlook COM and real Databricks execution remain operator-run validation.
+
+Migration note:
+- A new setup no longer creates or references Databricks Alert resources. Existing cloud Alert/Alert Job objects from an older setup are not deleted automatically.
+
 Unreleased: add one-click remote Left/Right example with dashboard and Alert delivery
 
 Changed files (all tracked files in this change set):
