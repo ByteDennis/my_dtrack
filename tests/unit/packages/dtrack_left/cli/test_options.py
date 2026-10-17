@@ -1,0 +1,72 @@
+import json
+import logging
+
+import click
+from click.testing import CliRunner
+
+from dtrack_left.backends.store import S3Store
+from dtrack_left.cli import options
+from dtrack_left.common.runtime.run_logging import get_logger
+
+
+# >>> a throwaway command wired with every shared decorator, echoing what it received <<< #
+@click.command(context_settings=options.CONTEXT_SETTINGS)
+@options.store_option("--where", "DTRACK_UNIT_WHERE", "somewhere")
+@options.pair_option
+@click.option("--code", default=0)
+@options.log_level_option
+@options.emit_json
+def probe(store, pairs, code):
+    return {
+        "type": type(store).__name__,
+        "uri": store.root_uri,
+        "pairs": pairs,
+        "exit_code": code,
+    }
+
+
+def _invoke(args, **env):
+    return CliRunner().invoke(probe, args, env=env, standalone_mode=False)
+
+
+def test_decorators_build():
+    result = _invoke(
+        ["--where", "s3://b/p", "--pair", "a", "--pair", "b"],
+        AWS_DEFAULT_REGION="us-east-1",
+    )
+    assert result.return_value == 0
+    assert json.loads(result.output) == {
+        "pairs": ["a", "b"],
+        "type": S3Store.__name__,
+        "uri": "s3://b/p",
+    }
+
+
+def test_options_fall():
+    result = _invoke(
+        ["--code", "3"], DTRACK_UNIT_WHERE="s3://env/p", AWS_DEFAULT_REGION="us-east-1"
+    )
+    assert result.return_value == 3
+    assert json.loads(result.output)["uri"] == "s3://env/p"
+    assert json.loads(result.output)["pairs"] is None
+
+
+def test_log_level(monkeypatch):
+    seen = []
+    monkeypatch.setattr(options, "setup_logging", seen.append)
+    _invoke(["--where", "s3://b/p", "--log-level", "warning"], AWS_DEFAULT_REGION="us-east-1")
+    assert seen == ["WARNING"]
+
+
+def test_setup_logging(monkeypatch):
+    logger = get_logger()
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "level", logger.level)
+    monkeypatch.setattr(logger, "propagate", logger.propagate)
+    options.setup_logging("debug")
+    options.setup_logging("debug")
+    assert logger.name == "dtrack"
+    assert logger.level == logging.DEBUG
+    assert logger.propagate is False
+    assert len(logger.handlers) == 1
+    assert logger.handlers[0].formatter._fmt.startswith("%(asctime)s.%(msecs)03dZ")

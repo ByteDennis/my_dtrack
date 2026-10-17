@@ -16,7 +16,7 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-e2e"
 RUNS="s3://$WORK_BUCKET/dtrack/v1/runs"
 S3="$RUNS/$RUN_ID"
 RIGHT="examples/e2e/data/right"
-RIGHT_CMD="env PYTHONPATH=$REPO/src uv run python -m dtrack_local.right_job"
+RIGHT_CMD="env PYTHONPATH=$REPO/src uv run python -m dtrack_local.support.right_job"
 
 rm -rf "$LOGS" "$OUT" "$WORK" "$EXEC"
 mkdir -p "$LOGS" "$OUT" "$WORK"
@@ -45,7 +45,7 @@ log "moto endpoint=$DTRACK_S3_ENDPOINT_URL container=$(docker ps --filter name=d
 log "run_id=$RUN_ID"
 log "runs root=$RUNS   run folder=$S3 (report/ is written inside it)"
 log "LEFT process: uv run dtrack (src/dtrack_left, no Databricks credentials)"
-log "RIGHT process: python -m dtrack_local.right_job (local CSV adapter driving dtrack_right.job)"
+log "RIGHT process: python -m dtrack_local.support.right_job (local CSV adapter driving dtrack_right.engine.job)"
 log "databricks env vars present: $(env | grep -c '^DATABRICKS_' || true) (expected 0)"
 
 section "1. unit + integration tests"

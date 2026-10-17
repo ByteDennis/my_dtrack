@@ -6,8 +6,8 @@ import io
 from datetime import UTC, datetime
 from typing import Any
 
-from .backends.store import open_store
-from .common.protocol import (
+from .engine.backends.store import open_store
+from .engine.common.model.protocol import (
     COL_CHECK_CLOSED,
     HEARTBEAT,
     LEFT_ROW_CHECK_CLOSED,

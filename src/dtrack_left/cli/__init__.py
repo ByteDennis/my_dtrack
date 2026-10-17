@@ -77,16 +77,16 @@ import click
 from dotenv import find_dotenv, load_dotenv
 
 from .. import __version__
-from .blog import blog_group
-from .checks import col_check_command, left_run_command, row_check_command
-from .ops import dbx_group
-from .options import CONTEXT_SETTINGS, DistributedGroup
-from .tools import (
+from .commands.blog import blog_group
+from .commands.checks import col_check_command, left_run_command, row_check_command
+from .commands.tools import (
     doctor_command,
     materialize_command,
     rollback_command,
     tools_group,
 )
+from .ops import dbx_group
+from .options import CONTEXT_SETTINGS, DistributedGroup
 
 
 # >>> dtrack: the Left-side CLI; .env loads before any subcommand parses its options (shell variables win) <<< #

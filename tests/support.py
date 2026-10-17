@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from dtrack_right.common.protocol import (
+from dtrack_right.engine.common.model.protocol import (
     COL_CHECK_CLOSED,
     HEARTBEAT,
     ROW_CHECK_CLOSED,

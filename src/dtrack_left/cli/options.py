@@ -11,7 +11,7 @@ from click.core import UNSET
 from dotenv import find_dotenv, load_dotenv
 
 from ..backends.store import S3Store
-from ..common.run_logging import configure_console_logging
+from ..common.runtime.run_logging import configure_console_logging
 from .config import load_config
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": 100}
@@ -83,7 +83,7 @@ def debug_option(func):
     def wrapper(*args, debug, **kwargs):
         if debug is None:
             return func(*args, **kwargs)
-        from .debugging import run_under_debugger
+        from .commands.tools import run_under_debugger
 
         target = lambda _argv: func(*args, **kwargs)
         return run_under_debugger(target, [], attach=5678 if debug.lower() == "attach" else None)

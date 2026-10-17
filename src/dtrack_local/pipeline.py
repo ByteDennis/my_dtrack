@@ -13,24 +13,24 @@ from typing import Any
 
 from dtrack_left.backends.sources import source_from_config
 from dtrack_left.backends.store import validate_run_id
-from dtrack_left.checks.col_check import (
+from dtrack_left.cli.config import load_config
+from dtrack_left.common.checks.col_check import (
     ColCheckPipeline,
     LeftRuntime,
     publish_fixed_keys,
     wait_for_manifests,
 )
-from dtrack_left.checks.row_check import make_run_id
-from dtrack_left.checks.row_check import run_row_check as left_row_check
-from dtrack_left.cli.config import load_config
-from dtrack_left.common.audit import SqlAudit, attach_sql_audit, prune_audit_history
-from dtrack_left.common.dates import partition_where, quote_ident
-from dtrack_left.common.duck import connect, use_temp
-from dtrack_left.common.stats import compute_csv_statistics
-from dtrack_right.backends.store import S3Store, VolumeStore
-from dtrack_right.backends.targets import SparkTarget
-from dtrack_right.checks.col_check import ColCheck
-from dtrack_right.checks.row_check import run_row_check as right_row_check
-from dtrack_right.common.protocol import (
+from dtrack_left.common.checks.row_check import make_run_id
+from dtrack_left.common.checks.row_check import run_row_check as left_row_check
+from dtrack_left.common.model.audit import SqlAudit, attach_sql_audit, prune_audit_history
+from dtrack_left.common.runtime.duck import connect, use_temp
+from dtrack_left.common.runtime.stats import compute_csv_statistics
+from dtrack_left.common.sql.dates import partition_where, quote_ident
+from dtrack_right.engine.backends.store import S3Store, VolumeStore
+from dtrack_right.engine.backends.targets import SparkTarget
+from dtrack_right.engine.checks.col_check import ColCheck
+from dtrack_right.engine.checks.row_check import run_row_check as right_row_check
+from dtrack_right.engine.common.model.protocol import (
     col_check_close_document,
     get_run_status,
     list_failures,
@@ -38,10 +38,10 @@ from dtrack_right.common.protocol import (
     row_check_is_closed,
     write_run_status,
 )
-from dtrack_right.report import build_report
+from dtrack_right.engine.report import build_report
 
-from .run_logging import configure_run_logging, log_exception_once
-from .warehouse import Warehouse
+from .support.run_logging import configure_run_logging, log_exception_once
+from .support.warehouse import Warehouse
 
 log = logging.getLogger("dtrack.local")
 LOCAL = "_local"
@@ -265,7 +265,7 @@ def open_run(
         sql_audit=SqlAudit(run_store, "local"),
     )
     if target_factory is None:
-        from dtrack_left.backends.databricks import DEFAULT_PROFILE, workspace
+        from dtrack_left.backends.cloud.databricks import DEFAULT_PROFILE, workspace
 
         client = workspace(profile or os.getenv("DTRACK_DBX_PROFILE") or DEFAULT_PROFILE)
         warehouse = Warehouse(

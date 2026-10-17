@@ -6,7 +6,15 @@ from types import SimpleNamespace
 import pytest
 from support import mock_aws_env, synthetic_data
 
-COMMON = ("dates", "hashing", "manifest")
+COMMON = {
+    "dates": "sql.dates",
+    "hashing": "model.hashing",
+    "manifest": "model.manifest",
+}
+COMMON_ROOTS = {
+    "dtrack_left": "dtrack_left.common",
+    "dtrack_right": "dtrack_right.engine.common",
+}
 REPO = Path(__file__).resolve().parents[2]
 DOTENV_MODULES = (
     "dtrack_left.cli",
@@ -39,7 +47,8 @@ def isolated_environment():
 # >>> the shared common/ package, once per side: every common test runs against both copies <<< #
 @pytest.fixture(params=["dtrack_left", "dtrack_right"])
 def common(request):
-    modules = {name: importlib.import_module(f"{request.param}.common.{name}") for name in COMMON}
+    root = COMMON_ROOTS[request.param]
+    modules = {name: importlib.import_module(f"{root}.{path}") for name, path in COMMON.items()}
     return SimpleNamespace(side=request.param, **modules)
 
 

@@ -3,11 +3,11 @@ import pytest
 from support import assert_stats_agree, synthetic_data
 
 from dtrack_left.backends.sources import FileSource
-from dtrack_left.common.hashing import key_family
-from dtrack_left.common.stats import compute_csv_statistics
-from dtrack_left.csv_sampling import sample_csv
+from dtrack_left.common.model.hashing import key_family
+from dtrack_left.common.runtime.stats import compute_csv_statistics
+from dtrack_left.common.sql.sampling import sample_csv
 from dtrack_local.pipeline import WarehouseTarget
-from dtrack_right.backends.targets import SparkTarget
+from dtrack_right.engine.backends.targets import SparkTarget
 
 pytestmark = pytest.mark.spark
 

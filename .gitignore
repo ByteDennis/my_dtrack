@@ -16,7 +16,9 @@ reports/
 tests/live/
 !tests/live/
 tests/live/*
-!tests/live/test_source_queries.py
+!tests/live/sources/
+tests/live/sources/*
+!tests/live/sources/test_source_queries.py
 tests/local/confluence/
 tests/local/e2e/
 tests/local/oracle/

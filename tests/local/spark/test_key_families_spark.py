@@ -1,6 +1,6 @@
 import pytest
 
-from dtrack_right.common.hashing import FAMILIES, STEPS, key_family
+from dtrack_right.engine.common.model.hashing import FAMILIES, STEPS, key_family
 
 pytestmark = pytest.mark.spark
 

@@ -9,7 +9,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
-from ..common.dates import (
+from ..common.model.hashing import HASH_BUCKET_SPACE, key_family
+from ..common.sql.dates import (
     bounds_where,
     canonical_date,
     day_expr,
@@ -17,9 +18,8 @@ from ..common.dates import (
     quote_ident,
     resolve_date_type,
 )
-from ..common.hashing import HASH_BUCKET_SPACE, key_family
-from ..common.query_windows import normalize_query_windows, render_query_windows
-from ..common.sampling import fixed_keys_sql, sample_predicate_sql
+from ..common.sql.query_windows import normalize_query_windows, render_query_windows
+from ..common.sql.sampling import fixed_keys_sql, sample_predicate_sql
 
 
 # >>> CSV written to <path>.part and renamed, so a file that exists is a complete pull <<< #
@@ -378,7 +378,7 @@ class FileSource(SqlSource):
         return f"(SELECT * REPLACE ({parsed} AS {column}) FROM {source}) dtrack_source"
 
     def connect(self):
-        from ..common.duck import connect
+        from ..common.runtime.duck import connect
 
         return connect(ordered=False)
 
@@ -455,7 +455,7 @@ class DuckDBSource(SqlSource):
     def connect(self):
         import duckdb
 
-        from ..common.duck import connect
+        from ..common.runtime.duck import connect
 
         connection = connect(ordered=False)
         alias = quote_ident(self.alias, self.dialect)

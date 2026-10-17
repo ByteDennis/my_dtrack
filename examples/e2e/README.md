@@ -9,8 +9,8 @@ just e2e            # starts docker/compose.s3.yaml (Moto on 127.0.0.1:4566) and
 ```
 
 Two processes, exactly like production: the on-prem CLI (`dtrack`, no Databricks credential) and
-the Right job (`python -m dtrack_local.right_job`, a local CSV adapter driving the same
-`dtrack_right.job` orchestration instead of `spark.sql`). The S3 protocol, Barrier, Producer, Consumer, gates, report and
+the Right job (`python -m dtrack_local.support.right_job`, a local CSV adapter driving the same
+`dtrack_right.engine.job` orchestration instead of `spark.sql`). The S3 protocol, Barrier, Producer, Consumer, gates, report and
 resume semantics are the real code paths.
 
 ## Files

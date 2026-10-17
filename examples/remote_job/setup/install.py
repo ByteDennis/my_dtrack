@@ -15,8 +15,8 @@ sys.path.insert(0, str(EXAMPLE / "src"))
 
 from dashboard import build as build_dashboard
 
-from dtrack_left.backends import databricks
-from dtrack_left.common.run_logging import configure_console_logging, get_logger
+from dtrack_left.backends.cloud import databricks
+from dtrack_left.common.runtime.run_logging import configure_console_logging, get_logger
 from dtrack_right import progress
 
 NAME = "example.remote_job.setup"

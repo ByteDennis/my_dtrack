@@ -46,9 +46,9 @@ test kind="unit" *args:
 live action="test" *args:
     @case "{{action}}" in \
       sync)     UV_PROJECT_ENVIRONMENT=.venv-live uv sync --python 3.12 --group live --extra athena --extra hadoop ;; \
-      setup)    {{live_py}} python tests/live/provision.py setup {{args}} ;; \
-      teardown) {{live_py}} python tests/live/provision.py teardown {{args}} ;; \
-      profile)  shift; {{live_py}} pytest -v -s --run-live -m live_performance tests/live/test_source_queries.py "$@" ;; \
+      setup)    {{live_py}} python tests/live/sources/provision.py setup {{args}} ;; \
+      teardown) {{live_py}} python tests/live/sources/provision.py teardown {{args}} ;; \
+      profile)  shift; {{live_py}} pytest -v -s --run-live -m live_performance tests/live/sources/test_source_queries.py "$@" ;; \
       test)     shift; t=""; for a in "$@"; do [ -e "tests/live/${a%%::*}" ] && t="$t tests/live/$a"; done; \
                 for a in "$@"; do shift; [ -e "tests/live/${a%%::*}" ] || set -- "$@" "$a"; done; \
                 {{live_py}} pytest -v --run-live -rs ${t:-tests/live} "$@" ;; \

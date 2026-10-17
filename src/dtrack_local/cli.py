@@ -40,11 +40,12 @@ from dtrack_left.cli.options import (
     pair_option,
     runtime_option,
 )
-from dtrack_left.common.audit import SqlAudit, attach_sql_audit
-from dtrack_right.backends.store import VolumeStore
+from dtrack_left.common.model.audit import SqlAudit, attach_sql_audit
+from dtrack_right.engine.backends.store import VolumeStore
 
-from . import keycheck, pipeline
-from .run_logging import current_error_log, log_exception_once
+from . import pipeline
+from .support import keycheck
+from .support.run_logging import current_error_log, log_exception_once
 
 log = logging.getLogger("dtrack.local")
 
@@ -192,7 +193,7 @@ def cli():
 
 
 def _keycheck_target(pair, work, *, profile, warehouse_id, sql_audit=None):
-    from dtrack_left.backends.databricks import DEFAULT_PROFILE, workspace
+    from dtrack_left.backends.cloud.databricks import DEFAULT_PROFILE, workspace
 
     client = workspace(profile or os.getenv("DTRACK_DBX_PROFILE") or DEFAULT_PROFILE)
     warehouse = pipeline.Warehouse(

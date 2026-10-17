@@ -89,6 +89,5 @@ extend-exclude = ["src/dtrack_right/notebook.py"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/dtrack_right/**/*.py" = ["BLE001"]
-"src/dtrack_left/cli/tools.py" = ["T100"]
-"src/dtrack_left/cli/debugging.py" = ["T100"]
+"src/dtrack_left/cli/commands/tools.py" = ["T100"]
 "src/dtrack_left/backends/*.py" = ["BLE001"]

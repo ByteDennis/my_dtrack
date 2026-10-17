@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from ..common.protocol import (
+from ..common.model.protocol import (
     COL_CHECK_CLOSED,
     HEARTBEAT,
     ROW_CHECK_CLOSED,

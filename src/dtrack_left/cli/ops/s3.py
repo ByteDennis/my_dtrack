@@ -5,8 +5,8 @@ import time
 
 import click
 
-from ...backends import aws
-from ...common.run_logging import get_left_logger
+from ...backends.cloud import aws
+from ...common.runtime.run_logging import get_left_logger
 from ..options import CONTEXT_SETTINGS, emit_json, log_level_option
 
 s3_log = get_left_logger("aws")

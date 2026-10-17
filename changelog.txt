@@ -1,769 +1,137 @@
-Unreleased: use Outlook as the only remote-job email path
+DTrack change log — 2026-10-17
 
-Changed files (all tracked files in this change set):
-- M `README.md` — Describe the remote-job example as a Windows Outlook launcher with Databricks dashboard refresh.
-- M `changelog.txt` — Record this exact modified/added/deleted file manifest and verification evidence.
-- M `examples/remote_job/README.md` — Replace Databricks Alert setup/runtime guidance with Classic Outlook prerequisites, UTF-8 and Windows/Linux boundaries, attachments, and failure delivery.
-- M `examples/remote_job/setup/install.py` — Remove Alerts v2 definitions, Alert SQL/context state, Alert Job creation, and Alert parameters; persist validated `--email-to`/`DTRACK_EMAIL_TO` recipients instead.
-- M `examples/remote_job/src/launch.py` — Preflight the local Outlook dependency, refresh the collector, send success/failure emails, and return email status and attachment names without a mail-mode switch.
-- M `pyproject.toml` — Restore the non-Alert Databricks SDK floor and add Windows-only `pywin32` to the `dbx` extra.
-- M `tests/unit/examples/test_remote_job.py` — Replace Alert tests with parameterized Outlook attachments, recipient parsing, queued Job, and success/Right-failure/collector-failure ordering coverage.
-- M `tests/unit/test_packaging.py` — Require the Windows-only `pywin32` dependency in the `dbx` packaging contract.
-- M `uv.lock` — Lock the Outlook COM dependency marker and restored Databricks SDK constraints.
+This file intentionally replaces the previous history and records only the current cleanup.
 
-Added files:
-- A `examples/remote_job/src/outlook_mail.py` — Send a UTF-8 custom HTML message through Classic Outlook COM, attach available HTML/XLSX/JSON reports, and provide a no-report failure fallback.
+Changed
 
-Deleted files:
-- D `examples/remote_job/src/alert_context_notebook.py` — Remove the run-context notebook used only by the deleted Databricks Alert Job.
+- Enforced a maximum of five direct, non-generated child items in every directory under `src/`
+  and `tests/`.
+- Reorganized Left modules into `backends/cloud`, `cli/commands`, and the
+  `common/{checks,model,runtime,sql}` domains.
+- Reorganized local-only adapters under `dtrack_local/support`.
+- Reorganized the standalone Databricks package under `dtrack_right/engine` while keeping
+  `notebook.py`, `progress.py`, and `requirements.txt` at the upload root.
+- Reorganized unit tests into `common/{data,protocol,runtime}`, `flows`, and `packages`; moved
+  the tracked live-source contract under `tests/live/sources`.
+- Updated source, test, example, notebook, CLI, Workspace-upload, and guidance references to the
+  canonical module paths.
+- Kept UTF-8 file handling and Windows/Linux path behavior unchanged.
 
-Verification:
-- `uv run pytest -q --timeout=60 tests/unit/examples/test_remote_job.py`: 15 passed.
-- `uv run pytest -q --timeout=60 tests/unit`: 881 passed, 12 skipped.
-- `uv run ruff check src tests examples/remote_job`: passed.
-- Changed Python files are Ruff-formatted; Python bytecode compilation, Bash syntax checks, `git diff --check`, and `uv build` passed.
-- External live tests were intentionally not run, per operator instruction. Outlook COM and real Databricks execution remain operator-run validation.
+Merged and removed
 
-Migration note:
-- A new setup no longer creates or references Databricks Alert resources. Existing cloud Alert/Alert Job objects from an older setup are not deleted automatically.
+- Merged `src/dtrack_left/cli/debugging.py` into
+  `src/dtrack_left/cli/commands/tools.py` and removed the standalone debugger module.
+- Merged `src/dtrack_left/csv_sampling.py` into
+  `src/dtrack_left/common/sql/sampling.py` and removed the standalone CSV sampler.
+- Removed obsolete package marker files where implicit namespace directories are sufficient.
+- Removed empty legacy source/test directories and generated caches left behind by the moves.
 
-Unreleased: add one-click remote Left/Right example with dashboard and Alert delivery
+Tests
 
-Changed files (all tracked files in this change set):
-- M `README.md` — Add the new remote-job example to the repository map.
-- M `changelog.txt` — Record the complete file-level manifest and verification evidence.
-- M `pyproject.toml` — Raise the `dbx` and `live` Databricks SDK floor to the first pinned version used to validate Alerts v2 and Alert Job task models.
-- M `uv.lock` — Lock the matching `databricks-sdk>=0.143.0` optional/development requirements.
-- A `examples/remote_job/.gitignore` — Keep generated non-secret setup state out of Git.
-- A `examples/remote_job/README.md` — Document one-time setup, run-level inputs, cross-platform entrypoints, Databricks Alert delivery, run isolation, resume safety, and the collector-to-View/Dashboard/Alert data paths.
-- A `examples/remote_job/run.cmd` — Add the UTF-8 Windows launcher with interactive input fallback.
-- A `examples/remote_job/run.sh` — Add the Linux/macOS launcher.
-- A `examples/remote_job/setup/install.py` — Upload Right sources, create tables/Views, seed Pair plans, publish the Lakeview dashboard, create/update an Alerts v2 definition and template, upsert queued Right/collector/Alert Jobs, return `NO_DATA` for pre-snapshot failures, and persist all identifiers.
-- A `examples/remote_job/setup/setup.cmd` — Add the UTF-8 Windows one-time setup entrypoint.
-- A `examples/remote_job/setup/setup.sh` — Add the Linux/macOS one-time setup entrypoint.
-- A `examples/remote_job/src/dashboard.py` — Build the Executive and Detailed Lakeview dashboard over the progress Views.
-- A `examples/remote_job/src/alert_context_notebook.py` — Persist the launcher's validated `run_id` immediately before Alert evaluation so serialized notification runs cannot select another run's snapshot.
-- A `examples/remote_job/src/launch.py` — Start Right before local Left work, wait for both sides, refresh the collector, run the Databricks Alert Job, and report the dashboard/notification identifiers.
-- A `examples/remote_job/src/progress_notebook.py` — Append progress snapshots, recreate stable Views idempotently, and merge automatic blockers on Databricks.
-- A `tests/unit/examples/test_remote_job.py` — Parameterize config-version command selection, job compute, widget parameters, and success/failure launch paths; cover the Alert definition/template, queued run-scoped Job graph, empty-snapshot fallback, dashboard structure, atomic state output, and Right/Left/collector/Alert ordering with short test names.
+- Added a recursive layout contract for both `src/` and `tests/`.
+- Added an isolated standalone-Right import test and a real-package Workspace upload dry-run.
+- Preserved the one-to-two-word test-name policy and updated moved test imports and fixtures.
+- Live services were not executed; `tests/live` remains operator-run.
 
-Deleted files:
-- None in Git. The uncommitted `examples/remote_job/src/email_report.py` SMTP prototype was removed before publication and is not part of this change set.
+File manifest
 
-Verification:
-- `uv run pytest -q --timeout=60 tests/unit/examples/test_remote_job.py`: 12 passed.
-- `uv run pytest -q --timeout=60 tests/unit`: 878 passed, 12 skipped.
-- `uv run ruff check src tests examples/remote_job`: passed.
-- Changed-path Ruff format check: 7 files already formatted.
-- Bash syntax checks, Python bytecode compilation, `git diff --check`, and `uv build` passed.
-- External live tests were intentionally not run, per operator instruction; real Databricks setup and job execution remain operator-run validation.
+`M` = modified, `R` = moved (and updated where needed), `D` = deleted.
 
-Unreleased: select column statistics per Pair
+Modified files
 
-Changed files (all tracked files in this change set):
-- M `README.md` — Document Pair-level statistic selection and the hash-sum/distinct-count example.
-- M `changelog.txt` — Record the complete file-level manifest and verification evidence for selectable statistics.
-- M `guideme.txt` — Add the `statistics` contract, supported names, example, and rollback classification.
-- M `src/dtrack_left/checks/col_check.py` — Pass the manifest statistic selection into Left CSV aggregation.
-- M `src/dtrack_left/cli/__init__.py` — Describe the Pair-level `statistics` setting in built-in CLI guidance.
-- M `src/dtrack_left/cli/config.py` — Validate, deduplicate, and canonically order each Pair's statistic selection.
-- M `src/dtrack_left/cli/tools.py` — Show the selected statistic list in doctor output.
-- M `src/dtrack_left/common/manifest.py` — Carry selected statistics in Pair plans and Version 2 Unit identity while preserving default identities.
-- M `src/dtrack_left/common/stats.py` — Generate only selected DuckDB aggregates and skip unselected Top-10 work.
-- M `src/dtrack_local/csv_target.py` — Apply Pair-level statistic selection to local CSV Right calculations.
-- M `src/dtrack_local/pipeline.py` — Apply Pair-level statistic selection to local warehouse CSV calculations.
-- M `src/dtrack_right/backends/targets.py` — Generate only selected Spark aggregate expressions and payload fields.
-- M `src/dtrack_right/checks/col_check.py` — Compare only selected statistics when deciding each column verdict.
-- M `src/dtrack_right/common/manifest.py` — Mirror the selectable-statistics Pair-plan contract in the standalone Right package.
-- M `tests/local/spark/test_spark_target.py` — Verify selected Spark statistics match DuckDB/Pandas reference results.
-- M `tests/unit/common/test_manifest.py` — Cover canonical selection and Version 2 Unit identity on both package sides.
-- M `tests/unit/common/test_stats.py` — Cover selected DuckDB statistic payloads.
-- M `tests/unit/dtrack_left/cli/test_config.py` — Parameterize valid, duplicate, unknown, non-list, and empty selections.
-- M `tests/unit/dtrack_local/test_pipeline.py` — Cover the full local all-partition flow using only hash sum and distinct count.
-- M `tests/unit/dtrack_right/backends/test_targets.py` — Verify Spark SQL omits every unselected aggregate.
-- M `tests/unit/dtrack_right/checks/test_col_check.py` — Verify unselected metrics do not affect or appear in comparison results.
+- M `.gitignore`, `guideme.txt`, `justfile`, `pyproject.toml`, `changelog.txt`
+- M `examples/e2e/README.md`, `examples/e2e/run_e2e.sh`
+- M `examples/nbs/00_row_check.ipynb`, `examples/nbs/01_col_check.ipynb`,
+  `examples/nbs/02_local.ipynb`, `examples/nbs/04_common.ipynb`,
+  `examples/nbs/05_reuse_pulled.ipynb`, `examples/nbs/06_pair_progress.ipynb`
+- M `examples/remote_job/setup/install.py`, `examples/remote_job/src/launch.py`
+- M `src/dtrack/cli.py`
+- M `src/dtrack_left/backends/materialize.py`, `src/dtrack_left/backends/sources.py`,
+  `src/dtrack_left/backends/store.py`
+- M `src/dtrack_left/cli/__init__.py`, `src/dtrack_left/cli/config.py`,
+  `src/dtrack_left/cli/options.py`, `src/dtrack_left/cli/ops/dbx.py`,
+  `src/dtrack_left/cli/ops/s3.py`
+- M `src/dtrack_left/common/__init__.py`
+- M `src/dtrack_local/__init__.py`, `src/dtrack_local/cli.py`,
+  `src/dtrack_local/pipeline.py`
+- M `src/dtrack_right/notebook.py`, `src/dtrack_right/progress.py`
+- M `tests/support.py`, `tests/unit/conftest.py`
+- M `tests/local/spark/test_key_families_spark.py`,
+  `tests/local/spark/test_spark_target.py`
 
-Added files:
-- None.
+Moved source files
 
-Deleted files:
-- None.
+- R `src/dtrack_left/backends/aws.py` -> `src/dtrack_left/backends/cloud/aws.py`
+- R `src/dtrack_left/backends/databricks.py` ->
+  `src/dtrack_left/backends/cloud/databricks.py`
+- R `src/dtrack_left/confluence.py` -> `src/dtrack_left/backends/cloud/confluence.py`
+- R `src/dtrack_left/confluence_templates.py` ->
+  `src/dtrack_left/backends/cloud/templates.py`
+- R `src/dtrack_left/cli/blog.py` -> `src/dtrack_left/cli/commands/blog.py`
+- R `src/dtrack_left/cli/checks.py` -> `src/dtrack_left/cli/commands/checks.py`
+- R `src/dtrack_left/cli/tools.py` -> `src/dtrack_left/cli/commands/tools.py`
+- R `src/dtrack_left/checks/{col_check.py,rollback.py,row_check.py,sas.py}` ->
+  `src/dtrack_left/common/checks/{col_check.py,rollback.py,row_check.py,sas.py}`
+- R `src/dtrack_left/common/{audit.py,hashing.py,manifest.py,protocol.py}` ->
+  `src/dtrack_left/common/model/{audit.py,hashing.py,manifest.py,protocol.py}`
+- R `src/dtrack_left/common/{duck.py,progress.py,run_logging.py,stats.py}` ->
+  `src/dtrack_left/common/runtime/{duck.py,progress.py,run_logging.py,stats.py}`
+- R `src/dtrack_left/common/{column_types.py,date_platforms.py,dates.py,query_windows.py,sampling.py}`
+  -> `src/dtrack_left/common/sql/{column_types.py,date_platforms.py,dates.py,query_windows.py,sampling.py}`
+- R `src/dtrack_local/{csv_target.py,keycheck.py,right_job.py,run_logging.py,warehouse.py}` ->
+  `src/dtrack_local/support/{csv_target.py,keycheck.py,right_job.py,run_logging.py,warehouse.py}`
+- R `src/dtrack_right/backends/{store.py,targets.py}` ->
+  `src/dtrack_right/engine/backends/{store.py,targets.py}`
+- R `src/dtrack_right/checks/{col_check.py,row_check.py}` ->
+  `src/dtrack_right/engine/checks/{col_check.py,row_check.py}`
+- R `src/dtrack_right/common/__init__.py` -> `src/dtrack_right/engine/common/__init__.py`
+- R `src/dtrack_right/common/{audit.py,hashing.py,manifest.py,protocol.py}` ->
+  `src/dtrack_right/engine/common/model/{audit.py,hashing.py,manifest.py,protocol.py}`
+- R `src/dtrack_right/common/{column_types.py,date_platforms.py,dates.py,sampling.py}` ->
+  `src/dtrack_right/engine/common/sql/{column_types.py,date_platforms.py,dates.py,sampling.py}`
+- R `src/dtrack_right/job.py` -> `src/dtrack_right/engine/job.py`
+- R `src/dtrack_right/report/{__init__.py,build.py,excel.py,html.py}` ->
+  `src/dtrack_right/engine/report/{__init__.py,build.py,excel.py,html.py}`
 
-Local ignored artifact:
-- M `CONTEXT.md` — Define the Pair-level Statistic set term; this repository intentionally ignores the local domain glossary, so it is not part of the commit.
+Moved test files
 
-Verification:
-- `uv run pytest --collect-only -q tests/unit`: 878 tests collected.
-- `uv run pytest -q --timeout=60 tests/unit`: 866 passed, 12 skipped.
-- `uv run pytest -q --run-spark tests/local/spark/test_spark_target.py::test_fraction_stats`:
-  3 passed, including selected-statistic Spark/DuckDB parity.
-- Ruff, changed-file format checks, Left/Right manifest parity, `git diff --check`, Vulture,
-  package build, and the pytest naming policy passed.
-- External live tests will not be run, per operator instruction.
+- R `tests/live/test_source_queries.py` -> `tests/live/sources/test_source_queries.py`
+- R `tests/unit/common/{test_dates.py,test_hashing.py,test_key_families.py,test_sampling_sql.py}`
+  -> `tests/unit/common/data/{test_dates.py,test_hashing.py,test_key_families.py,test_sampling_sql.py}`
+- R `tests/unit/common/{test_audit.py,test_manifest.py,test_parity.py,test_protocol.py}` ->
+  `tests/unit/common/protocol/{test_audit.py,test_manifest.py,test_parity.py,test_protocol.py}`
+- R `tests/unit/common/{test_duck.py,test_stats.py}` ->
+  `tests/unit/common/runtime/{test_duck.py,test_stats.py}`
+- R `tests/unit/{test_packaging.py,test_protocol_flow.py,test_sas_protocol_flow.py}` ->
+  `tests/unit/flows/{test_packaging.py,test_protocol_flow.py,test_sas_protocol_flow.py}`
+- R `tests/unit/dtrack/test_cli.py` -> `tests/unit/packages/dtrack/test_cli.py`
+- R `tests/unit/dtrack_left/backends/{test_aws.py,test_databricks.py,test_materialize.py,test_sources.py,test_store.py}`
+  -> `tests/unit/packages/dtrack_left/backends/{test_aws.py,test_databricks.py,test_materialize.py,test_sources.py,test_store.py}`
+- R `tests/unit/dtrack_left/checks/{test_col_check.py,test_rollback.py,test_row_check.py}` ->
+  `tests/unit/packages/dtrack_left/checks/{test_col_check.py,test_rollback.py,test_row_check.py}`
+- R `tests/unit/dtrack_left/cli/{test_blog.py,test_checks.py,test_tools.py}` ->
+  `tests/unit/packages/dtrack_left/cli/commands/{test_blog.py,test_checks.py,test_tools.py}`
+- R `tests/unit/dtrack_left/cli/ops/{test_dbx.py,test_s3.py}` ->
+  `tests/unit/packages/dtrack_left/cli/ops/{test_dbx.py,test_s3.py}`
+- R `tests/unit/dtrack_left/cli/{test_config.py,test_options.py}` ->
+  `tests/unit/packages/dtrack_left/cli/{test_config.py,test_options.py}`
+- R `tests/unit/dtrack_left/{test_confluence_admin.py,test_confluence_templates.py}` ->
+  `tests/unit/packages/dtrack_left/{test_confluence_admin.py,test_confluence_templates.py}`
+- R `tests/unit/dtrack_local/{test_csv_target.py,test_keycheck.py,test_pipeline.py,test_run_logging.py,test_warehouse.py}`
+  -> `tests/unit/packages/dtrack_local/{test_csv_target.py,test_keycheck.py,test_pipeline.py,test_run_logging.py,test_warehouse.py}`
+- R `tests/unit/dtrack_right/backends/{test_store.py,test_targets.py}` ->
+  `tests/unit/packages/dtrack_right/backends/{test_store.py,test_targets.py}`
+- R `tests/unit/dtrack_right/checks/{test_col_check.py,test_row_check.py}` ->
+  `tests/unit/packages/dtrack_right/checks/{test_col_check.py,test_row_check.py}`
+- R `tests/unit/dtrack_right/report/{test_build.py,test_excel.py,test_html.py}` ->
+  `tests/unit/packages/dtrack_right/report/{test_build.py,test_excel.py,test_html.py}`
+- R `tests/unit/dtrack_right/{test_job.py,test_progress.py}` ->
+  `tests/unit/packages/dtrack_right/{test_job.py,test_progress.py}`
 
-Unreleased: add whole-dataset partition mode
+Deleted files
 
-Changed files (all tracked files in this change set):
-- M `README.md` — Document Pair-level `partition_mode: "all"`, whole-dataset sampling, incompatible date controls, and supported workflow boundaries.
-- M `changelog.txt` — Record the complete file-level manifest and verification evidence for whole-dataset partitioning.
-- M `guideme.txt` — Add the all-mode contract, an undated Pair example, rollback semantics, and operator constraints.
-- M `src/dtrack_left/backends/materialize.py` — Fail clearly because date-partitioned materialization requires `partition_mode: "date"`.
-- M `src/dtrack_left/backends/sources.py` — Count one `all` partition and pull/fixed-sample the complete relation without a date column or predicate.
-- M `src/dtrack_left/checks/col_check.py` — Carry partition mode into Left sources and omit the date column from all-mode pull/cache schemas.
-- M `src/dtrack_left/checks/row_check.py` — Treat partition mode as Stage-1 identity, pass it to sources, and publish it in row-count documents.
-- M `src/dtrack_left/checks/sas.py` — Reject all mode explicitly because SAS bundle generation remains date-window based.
-- M `src/dtrack_left/cli/__init__.py` — Describe date and all partition modes in built-in CLI configuration guidance.
-- M `src/dtrack_left/cli/config.py` — Validate `date|all`, make `date_col` optional in all mode, and reject incompatible date-only settings.
-- M `src/dtrack_left/cli/tools.py` — Pass each Pair's partition mode through doctor preflight.
-- M `src/dtrack_left/common/manifest.py` — Build and validate one `all` window while preserving unchanged date-mode plan identities.
-- M `src/dtrack_local/cli.py` — Run key-check over the all window and reject explicit date bounds in all mode.
-- M `src/dtrack_local/csv_target.py` — Preflight, count, and sample undated CSV anchor datasets as one complete partition.
-- M `src/dtrack_local/keycheck.py` — Compare whole-dataset keys without requiring or projecting date columns.
-- M `src/dtrack_local/pipeline.py` — Carry partition mode through local preflight and warehouse sampling without date predicates.
-- M `src/dtrack_right/backends/targets.py` — Count and calculate sampled Spark statistics over the complete relation in all mode.
-- M `src/dtrack_right/checks/col_check.py` — Carry manifest partition mode into cached Right targets.
-- M `src/dtrack_right/checks/row_check.py` — Reconcile the literal all partition, propagate the mode, and fail closed with an actionable whole-dataset mismatch error.
-- M `src/dtrack_right/common/manifest.py` — Mirror the Left all-window manifest contract for the standalone Right package.
-- M `src/dtrack_right/report/build.py` — Pass partition mode into rendered column-statistics sections.
-- M `src/dtrack_right/report/excel.py` — Label all-mode reports as `all rows` with non-applicable date bounds.
-- M `src/dtrack_right/report/html.py` — Render whole-dataset row/column outcomes without fake date language.
-- M `tests/unit/common/test_manifest.py` — Cover the single all-window manifest on both package sides.
-- M `tests/unit/dtrack_left/backends/test_sources.py` — Cover undated Oracle/file counts plus global fraction and fixed-key sampling.
-- M `tests/unit/dtrack_left/checks/test_row_check.py` — Cover all-mode source construction and published Left row documents.
-- M `tests/unit/dtrack_left/cli/test_config.py` — Parameterize valid and invalid partition-mode configurations and date-only conflicts.
-- M `tests/unit/dtrack_local/test_csv_target.py` — Cover whole-dataset local CSV counts and statistics without a date column.
-- M `tests/unit/dtrack_local/test_pipeline.py` — Cover global warehouse sampling SQL without a date projection or predicate.
-- M `tests/unit/dtrack_right/backends/test_targets.py` — Cover all-mode Databricks preflight, counts, and sampled statistics SQL.
-- M `tests/unit/dtrack_right/checks/test_row_check.py` — Cover all-partition reconciliation and fail-closed Version 2 count mismatches.
-- M `tests/unit/dtrack_right/report/test_excel.py` — Cover all-mode spreadsheet labels and non-applicable bounds.
-- M `tests/unit/dtrack_right/report/test_html.py` — Cover whole-dataset HTML row and column messaging.
-
-Added files:
-- None.
-
-Deleted files:
-- None.
-
-Local ignored artifact:
-- M `CONTEXT.md` — Define Partition mode and update Partition/Barrier language; this repository intentionally ignores the local domain glossary, so it is not part of the commit.
-
-Verification:
-- `uv run pytest --collect-only -q tests/unit`: 872 tests collected.
-- `uv run pytest -q --timeout=60 tests/unit`: 860 passed, 12 skipped.
-- Ruff, changed-file format checks, Left/Right manifest parity, `git diff --check`, and the pytest naming policy passed.
-- External live tests were intentionally not run.
-
-Unreleased: compact pytest names and consolidate parameterized cases
-
-Changed files (all files in this change set):
-- M `changelog.txt` — Record every test file changed by the naming and parameterization cleanup.
-- M `tests/live/test_source_queries.py` — Shorten the live query, timing, and UTF-8 test names; live connections remain operator-run only.
-- M `tests/local/spark/test_key_families_spark.py` — Shorten the Spark key-family test name.
-- M `tests/local/spark/test_spark_target.py` — Shorten Spark target test names while preserving the existing parameter tables.
-- M `tests/unit/common/test_audit.py` — Shorten audit test names.
-- M `tests/unit/common/test_dates.py` — Shorten date test names and combine valid/error canonical-date and bucket-date cases with `pytest.mark.parametrize`.
-- M `tests/unit/common/test_duck.py` — Shorten DuckDB resource test names.
-- M `tests/unit/common/test_hashing.py` — Shorten hashing test names.
-- M `tests/unit/common/test_key_families.py` — Shorten key-family test names.
-- M `tests/unit/common/test_manifest.py` — Shorten manifest test names and combine valid/error sample-plan cases with `pytest.mark.parametrize`.
-- M `tests/unit/common/test_parity.py` — Shorten shared-module parity test names.
-- M `tests/unit/common/test_protocol.py` — Shorten protocol contract test names.
-- M `tests/unit/common/test_sampling_sql.py` — Shorten sampling SQL test names.
-- M `tests/unit/common/test_stats.py` — Shorten statistics test names.
-- M `tests/unit/dtrack/test_cli.py` — Shorten top-level CLI test names.
-- M `tests/unit/dtrack_left/backends/test_aws.py` — Shorten AWS helper test names.
-- M `tests/unit/dtrack_left/backends/test_databricks.py` — Shorten Databricks backend test names and parameterize the workspace availability cases.
-- M `tests/unit/dtrack_left/backends/test_materialize.py` — Shorten materialization test names.
-- M `tests/unit/dtrack_left/backends/test_sources.py` — Shorten source test names and parameterize valid/invalid source dispatch.
-- M `tests/unit/dtrack_left/backends/test_store.py` — Shorten Left store test names.
-- M `tests/unit/dtrack_left/checks/test_col_check.py` — Shorten Left column-check test names.
-- M `tests/unit/dtrack_left/checks/test_rollback.py` — Shorten rollback test names.
-- M `tests/unit/dtrack_left/checks/test_row_check.py` — Shorten Left row-check test names.
-- M `tests/unit/dtrack_left/cli/ops/test_dbx.py` — Shorten Databricks CLI operation test names.
-- M `tests/unit/dtrack_left/cli/ops/test_s3.py` — Shorten S3 CLI operation test names.
-- M `tests/unit/dtrack_left/cli/test_blog.py` — Shorten Confluence blog CLI test names.
-- M `tests/unit/dtrack_left/cli/test_checks.py` — Shorten reconciliation CLI test names.
-- M `tests/unit/dtrack_left/cli/test_config.py` — Shorten config test names and parameterize supported-source, SAS-source, and `nullstr` cases.
-- M `tests/unit/dtrack_left/cli/test_options.py` — Shorten shared CLI option test names.
-- M `tests/unit/dtrack_left/cli/test_tools.py` — Shorten tools CLI test names.
-- M `tests/unit/dtrack_left/test_confluence_admin.py` — Shorten Confluence administration test names.
-- M `tests/unit/dtrack_left/test_confluence_templates.py` — Shorten Confluence template test names.
-- M `tests/unit/dtrack_local/test_csv_target.py` — Shorten local CSV target test names.
-- M `tests/unit/dtrack_local/test_keycheck.py` — Shorten local key-check test names.
-- M `tests/unit/dtrack_local/test_pipeline.py` — Shorten local pipeline test names.
-- M `tests/unit/dtrack_local/test_run_logging.py` — Shorten logging test names while retaining the parameterized logger-name cases.
-- M `tests/unit/dtrack_local/test_warehouse.py` — Shorten local warehouse test names.
-- M `tests/unit/dtrack_right/backends/test_store.py` — Shorten Right store test names and parameterize the two unresolved-run cases.
-- M `tests/unit/dtrack_right/backends/test_targets.py` — Shorten Spark target test names and parameterize column-type override cases.
-- M `tests/unit/dtrack_right/checks/test_col_check.py` — Shorten Right column-check test names.
-- M `tests/unit/dtrack_right/checks/test_row_check.py` — Shorten Right row-check test names.
-- M `tests/unit/dtrack_right/report/test_build.py` — Shorten report-builder test names and parameterize partial-run scenarios.
-- M `tests/unit/dtrack_right/report/test_excel.py` — Shorten Excel report test names.
-- M `tests/unit/dtrack_right/report/test_html.py` — Shorten HTML report test names.
-- M `tests/unit/dtrack_right/test_job.py` — Shorten Right job test names.
-- M `tests/unit/dtrack_right/test_progress.py` — Shorten progress test names.
-- M `tests/unit/test_packaging.py` — Shorten packaging test names and enforce one-to-two-word semantic test names with an AST policy test.
-- M `tests/unit/test_protocol_flow.py` — Shorten the protocol-flow test name.
-- M `tests/unit/test_sas_protocol_flow.py` — Shorten SAS protocol-flow test names.
-
-Added files:
-- None.
-
-Deleted files:
-- None.
-
-Verification:
-- Tracked pytest functions: 480 before, 471 after; names over two words: 0; duplicate names per scope: 0.
-- `uv run pytest --collect-only -q tests/unit`: 854 tests collected, up from 852 because the naming-policy check and parameterized coverage add cases without removing scenarios.
-- `uv run pytest -q --timeout=60 tests/unit`: 842 passed, 12 skipped.
-- Ruff, changed-file format checks, the naming-policy test, and `git diff --check` passed.
-- External live tests were intentionally not run.
-
-Unreleased: remove query projection, enable pyodbc Hadoop, stabilize Left logging, add live profiling
-
-Changed files (all files in this change set):
-- M `.gitignore` — Keep existing `tests/live` content ignored while exposing only the new source-query test.
-- M `README.md` — Remove the Oracle query-projection contract and require explicit query result columns.
-- M `changelog.txt` — Remove unreleased projection claims and record this complete file-level change manifest.
-- M `guideme.txt` — Remove projection guidance; document Hadoop DSNs, UTF-8, cross-platform live profiling, and tuning controls.
-- M `justfile` — Install Athena/Hadoop live extras and add `just live profile`.
-- M `pyproject.toml` — Replace Impyla Hadoop dependencies with `pyodbc` and register the live-performance marker.
-- M `src/dtrack_left/backends/aws.py` — Use the stable named Left logger.
-- M `src/dtrack_left/backends/materialize.py` — Use the stable named Left logger.
-- M `src/dtrack_left/backends/sources.py` — Remove query-projection execution and dead relation arguments; enable Hadoop through a pyodbc DSN.
-- M `src/dtrack_left/checks/col_check.py` — Use the stable named Left logger.
-- M `src/dtrack_left/checks/rollback.py` — Use the stable named Left logger.
-- M `src/dtrack_left/checks/row_check.py` — Use the stable named Left logger.
-- M `src/dtrack_left/checks/sas.py` — Remove SAS query-projection rendering and its dead column argument.
-- M `src/dtrack_left/cli/__init__.py` — Document Hadoop as an enabled pyodbc source.
-- M `src/dtrack_left/cli/config.py` — Remove query-projection validation and the stale `column_batch_size` compatibility path.
-- M `src/dtrack_left/cli/debugging.py` — Use the stable named Left logger.
-- M `src/dtrack_left/cli/ops/dbx.py` — Use the stable named Left logger.
-- M `src/dtrack_left/cli/ops/s3.py` — Use the stable named Left logger.
-- M `src/dtrack_left/cli/options.py` — Replace root `logging.basicConfig()` with idempotent named-console configuration.
-- M `src/dtrack_left/common/__init__.py` — Delete the now-unused `disabled()` decorator.
-- M `src/dtrack_left/common/dates.py` — Quote Hadoop identifiers with backticks for Hive-compatible SQL.
-- M `src/dtrack_left/common/duck.py` — Use the stable named Left logger.
-- M `src/dtrack_left/common/progress.py` — Use the stable named Left logger.
-- M `src/dtrack_left/common/query_windows.py` — Delete query-projection markers, normalization, and rendering.
-- M `src/dtrack_left/common/run_logging.py` — Add stable `dtrack`/`dtrack.left.*` logger factories and idempotent handlers.
-- M `src/dtrack_left/common/stats.py` — Use the stable named Left logger.
-- M `src/dtrack_local/run_logging.py` — Attach console/error/Left handlers to the named `dtrack` tree instead of the root logger.
-- M `src/dtrack_right/common/dates.py` — Mirror Hadoop backtick quoting in the shared Right-side date module.
-- M `src/dtrack_right/progress.py` — Delete the unreferenced `to_json()` helper and its import.
-- M `tests/conftest.py` — Gate tests by actual pytest markers so a parameter named `oracle` does not trigger the Oracle-container gate.
-- M `tests/unit/common/test_dates.py` — Cover Hadoop backtick identifier quoting.
-- M `tests/unit/common/test_parity.py` — Remove tests for the deleted `disabled()` helper while retaining Left/Right parity checks.
-- M `tests/unit/dtrack_left/backends/test_sources.py` — Remove projection contracts and cover pyodbc Hadoop connection, errors, and dispatch.
-- M `tests/unit/dtrack_left/checks/test_col_check.py` — Preserve one-window scheduling coverage without query projection.
-- M `tests/unit/dtrack_left/cli/test_config.py` — Remove query-projection and disabled-Hadoop validation tests.
-- M `tests/unit/dtrack_left/cli/test_options.py` — Verify stable named, UTC, idempotent console logging.
-- M `tests/unit/dtrack_local/test_pipeline.py` — Flush and clean the named error logger in pipeline tests.
-- M `tests/unit/dtrack_local/test_run_logging.py` — Verify console, Left, and private-error files share one stable logger namespace.
-- M `tests/unit/test_packaging.py` — Assert the Hadoop extra contains `pyodbc` instead of Impyla.
-- M `tests/unit/test_sas_protocol_flow.py` — Remove the deleted SAS query-projection contract.
-- M `uv.lock` — Lock `pyodbc` and remove the obsolete Impyla/Thrift dependency chain.
-
-Added files:
-- A `tests/live/test_source_queries.py` — Add UTF-8 Oracle/Athena/Hadoop query/CSV correctness tests plus cross-platform per-step performance reports using `pandas.DataFrame.from_records`.
-
-Deleted files:
-- None. Dead code was deleted inside the modified files above; no complete file was removed.
-
-Verification:
-- `uv run pytest -q --timeout=60 tests/unit`: 840 passed, 12 skipped.
-- Ruff, format check, lockfile check, package build, `git diff --check`, and Vulture 80% dead-code scan passed.
-- External live connections were intentionally not run; local credentials/configuration and timing reports remain ignored.
-
-Unreleased: intra-vintage Left statistics and Workspace download
-src/dtrack_left/common/stats.py, duck.py, and progress.py — Run one vintage at a time while calculating DTRACK_STATS_BATCH column shards in parallel under one DTRACK_DUCKDB_WORKERS CPU/RAM budget; publish every completed shard immediately and expose running shards plus calculated/uploaded attribute counts through tqdm and periodic logs.
-src/dtrack_left/common/run_logging.py, dtrack_local/run_logging.py, pipeline.py, and Left CLI commands — Append all dtrack.left records to one run-scoped left.log and return that path in command results while retaining the dedicated error log.
-src/dtrack_left/checks/col_check.py, backends/sources.py, and cli/config.py — Make WIP a hard ceiling with Left-ready/Right-finished status and pull one complete configured vintage at a time.
-src/dtrack_left/backends/databricks.py and cli/ops/dbx.py — Add `dtrack tools dbx workspace download SOURCE [TARGET]` with recursive file/notebook export, restored notebook suffixes, atomic local writes, overwrite protection, dry-run output, per-object failures, and profile support.
-tests/unit/common, dtrack_left, and dtrack_local — Cover intra-vintage shard publication, one-vintage scheduling, progress counters, unified DuckDB resources, persistent logging, hard WIP, and Workspace download backend/CLI behavior.
-README.md, guideme.txt, examples, pyproject.toml, and uv.lock — Document the 32GB/10-core starting profile, DTRACK_STATS_BATCH publication waves, the single DuckDB worker knob, progress/log locations, and Workspace download; add tqdm as the console progress dependency.
-
-Unreleased: protocol-v2-only runtime
-src/dtrack_left/backends/sources.py and cli/config.py — Removed DuckDBSource's non-portable live database/WAL copy option; DuckDB files are attached directly read-only, obsolete snapshot config is rejected early, and an active writer gets actionable CHECKPOINT/close guidance on every platform.
-tests/unit/dtrack_left/backends/test_sources.py and cli/test_config.py — Replaced the WAL-copy success contract with direct-query, lock-error, and removed-option coverage for the stable-file handoff required by DuckDB sources.
-src/dtrack_left/checks/col_check.py — Made backpressure logs show the exact ready-unclaimed backlog, WIP limit, and over-limit count; repeated polls are quiet except for a 30-second status update and one clear message.
-src/dtrack_left/common/audit.py and src/dtrack_right/common/audit.py — Reused one deterministic read-query audit file across process restarts and shortened wide SELECT lists to their first two and last two attributes with an ellipsis; the audit contains no visible SQL hash and execution still receives the full SQL.
-src/dtrack_left/checks/row_check.py, col_check.py, rollback.py, and cli/checks.py — Reused same-run row counts, completed Units, and provenance-matched local pulls by default; added `--force` to row-check, col-check, and left-run to clear the selected run stage before recomputing without duplicate active Units.
-tests/unit/common/test_audit.py, dtrack_left/checks tests, dtrack_left/cli/test_checks.py, and dtrack_local/test_pipeline.py — Covered cross-process audit deduplication, first/last projection evidence, empty-count reuse, provenance-safe pull reuse, stage reset, same-run resume, and forced full Left recomputation.
-README.md and guideme.txt — Documented compact SQL audit evidence, cross-command same-run checkpoints, provenance sidecars, and `--force` behavior.
-src/dtrack_left/checks/sas.py — Added fail-closed SAS bundle export/import for Oracle-only Left execution, including all-partition vintage loops, deterministic sampling SQL, config locking, and local statistics publication.
-src/dtrack_left/cli/checks.py and options.py — Extended `left-run` with mutually exclusive `--export-sas` and `--import-sas` phases without adding another subcommand; export needs no S3 and import publishes the existing v2 protocol.
-src/dtrack_left/checks/row_check.py — Reused one active-Pair selector and one row-result publisher so direct Oracle and SAS-import paths produce the same protocol documents.
-tests/unit/dtrack_left/cli/test_checks.py and tests/unit/test_sas_protocol_flow.py — Covered credential-free bundles, mapping/type preservation, default all-partition generation, strict import validation, S3 publication, and the simulated SAS-to-Right report workflow.
-tests/support.py and store tests — Kept deterministic unit timestamps while allowing the shared contract to validate real timezone-aware timestamps against live S3.
-README.md and guideme.txt — Documented SAS bundle contents, editable paths/connections, config behavior, first-version limits, upload boundary, and the required Right-side completion step.
-src/dtrack_left/common/stats.py — Added one column-type inference boundary, treated inferred integral values as categorical without computing top values, and retained explicit numeric overrides.
-src/dtrack_left/common/dates.py and column_types.py — Removed portable and detection wrapper aliases in favor of the underlying resolved type methods.
-src/dtrack_left/common/hashing.py and src/dtrack_left/csv_sampling.py — Removed normalization aliases, exposed the canonical composite-key operation, and moved pandas-backed CSV sampling out of the mirrored common module.
-src/dtrack_right/backends/store.py — Consolidated S3 and Volume protocol-document behavior while leaving backend byte and key primitives separate.
-src/dtrack_left/backends/store.py and src/dtrack_right/backends/store.py — Retried only transient Windows sharing-lock failures during atomic local file replacement and cleaned partial files safely.
-src/dtrack_left/checks/rollback.py and src/dtrack_right/backends/targets.py — Removed redundant single-item and SQL-normalization aliases and migrated callers to the original APIs.
-Test files changed in the latest commit (`Simplify reconciliation internals`):
-tests/local/spark/test_spark_target.py — Migrated Spark sampling coverage to the canonical key-family API and the dedicated CSV-sampling module.
-tests/support.py — Expanded the shared store contract to verify deterministic JSON, exact paths and timestamps, results, failures, heartbeats, and closure documents.
-tests/unit/common/test_dates.py — Replaced date wrapper coverage with direct `resolve_date_type`, `detect`, and portable `spec` method coverage.
-tests/unit/common/test_hashing.py — Replaced normalization aliases with direct key-family normalization and moved CSV sampling coverage to its dedicated module.
-tests/unit/common/test_parity.py — Enforced byte-identical audit, hashing, manifest, and protocol modules across Left and Right and checked canonical normalization parity.
-tests/unit/common/test_stats.py — Covered the centralized inference function, integral values as categorical, skipped top-value calculations, and explicit numeric overrides.
-tests/unit/dtrack_left/backends/test_sources.py — Updated source-sampling coverage to import `sample_csv` from its dedicated module.
-tests/unit/dtrack_left/backends/test_store.py — Made the shared S3-store contract deterministic by fixing protocol timestamps.
-tests/unit/dtrack_left/checks/test_rollback.py — Replaced the single-pair alias with `next_steps_many` and covered transient Windows replacement retries and partial-file cleanup.
-tests/unit/dtrack_right/backends/test_store.py — Covered consolidated S3/Volume behavior plus transient, permanent, and exhausted Windows replacement failures.
-tests/unit/dtrack_right/backends/test_targets.py — Removed alias-only SQL coverage and verified default integral-categorical statistics plus explicit numeric override behavior.
-tests/unit/test_packaging.py — Added AST-based stale-import checks, dedicated CSV-sampling packaging coverage, direct date detection, and Right-side dependency isolation.
-Test files changed in commit b1a348e (`Add unit test timeouts`):
-tests/unit/dtrack_left/backends/test_databricks.py — Added a 15-second timeout to the Git initialization subprocess used by workspace-upload tests.
-tests/unit/dtrack_left/backends/test_sources.py — Added 15-second pytest timeouts to the two DuckDB writer-lock tests.
-tests/unit/test_packaging.py — Added a 15-second timeout to the `python -m dtrack` packaging subprocess.
-src/dtrack_left/cli/checks.py — Added `left-run` for config Version 2 so Left counts and statistics finish without waiting for a Right signal.
-src/dtrack_left/cli/config.py — Added exact config versions 1/2 plus validated `excluded_partitions` and `excluded_columns` for Version 2.
-src/dtrack_left/common/manifest.py — Added current-plan fingerprints so same-run reruns reuse unchanged Units and replace only affected vintages or columns.
-src/dtrack_right/checks/row_check.py — Persisted row verdicts before failing closed on Version 2 mismatches that are not explicitly excluded.
-src/dtrack_right/checks/col_check.py — Limited scans, completion, and reuse to Units in the current Pair plan.
-src/dtrack_right/report/build.py — Excluded inactive Unit results and failures from current Version 2 reports.
-src/dtrack_left/backends/sources.py — Streamed database CSV exports in bounded batches instead of materializing each sampled vintage in Python memory.
-README.md and guideme.txt — Documented the two reconciliation versions, exclusion controls, fail-closed recovery flow, and conservative 16GB-memory settings.
-tests — Covered Version 2 config validation, Left-first execution, mismatch failure/recovery, selective vintage reruns, and streaming database exports.
-src/dtrack_left/common/protocol.py — Removed protocol-v1 path constants and fallback readers; Pair and `_status` artifacts are now the only accepted runtime layout.
-src/dtrack_right/common/protocol.py — Mirrored the protocol-v2-only reader and barrier contract on Databricks.
-src/dtrack_left/backends/store.py — Removed the old heartbeat fallback.
-src/dtrack_right/backends/store.py — Removed the old heartbeat fallback and made concurrent Volume status writes use collision-free atomic temporary files.
-src/dtrack_left/checks/rollback.py — Limited discovery, planning, and rebuilds to Pair-scoped protocol-v2 artifacts.
-src/dtrack_left/checks/row_check.py — Accepted already validated Left source instances and health so full local runs do not repeat preflight queries.
-src/dtrack_right/checks/row_check.py — Removed old Left-document, verdict, and closure fallbacks and reused already validated Right targets during full local runs.
-src/dtrack_local/pipeline.py — Retained run-level preflight resources and reused them during row-check while preserving standalone row-check validation.
-src/dtrack_right/checks/col_check.py — Removed old index polling and now consumes Pair Units only.
-src/dtrack_right/progress.py — Removed old run-status, heartbeat, and closure fallbacks.
-src/dtrack_left/common/audit.py — Removed reads and pruning for the old run-level audit event folder.
-src/dtrack_right/common/audit.py — Mirrored protocol-v2-only audit discovery and retention.
-src/dtrack_left/common/manifest.py — Rejected manifests whose protocol version is not the current version.
-src/dtrack_right/common/manifest.py — Mirrored strict current-version manifest validation.
-examples/nbs — Updated executable examples to use Pair and `_status` paths exclusively.
-tests — Replaced old-layout fixtures and compatibility assertions with protocol-v2 artifacts, covered concurrent status publication, and verified one preflight per side and Pair in `run_all`.
-
-Commit: a086678db03562d21d9ef9668814cf3c61495c2c
-CONTEXT.md — Modified: distinguished immutable Pair plans and audit events from mutable run status and derived Unit state snapshots.
-README.md — Modified: documented the Pair-centric protocol-v2 flow, atomic statistics-bearing Units, and `_status/units.csv` progress view.
-changelog.txt — Modified: recorded the Pair-centric run layout changes that were prepared before this commit.
-examples/e2e/README.md — Modified: documented Pair-scoped row/column artifacts, atomic Unit publication, and the unified report tree.
-examples/e2e/run_e2e.sh — Modified: exercised and counted protocol-v2 Pair plans, Units, results, failures, and nested report outputs.
-examples/nbs/06_pair_progress.ipynb — Added: generated the Left launch script, Databricks Right and scheduled progress-collector Jobs, Delta progress tables/views, automatic blockers, and a pair-progress AI/BI dashboard with a dry-run mode.
-guideme.txt — Modified: documented CSV `nullstr`, the progress setup notebook, protocol-v2 monitoring, rollback, audit, and completion paths.
-src/dtrack_left/backends/sources.py — Modified: accepted CSV missing-value markers through `left.nullstr`, retained `options.nullstr` compatibility, and rejected conflicting or non-CSV use.
-src/dtrack_left/cli/config.py — Modified: validated optional run timezones and CSV-only string/list `nullstr` configuration.
-src/dtrack_left/common/date_platforms.py — Modified: used non-throwing DuckDB date casts so invalid source values become visible statistical differences instead of aborting a run.
-src/dtrack_left/common/protocol.py — Added: defined v2 paths, v1-compatible readers, run-timezone timestamps, and `_status/units.csv` generation.
-src/dtrack_right/common/protocol.py — Added: shipped the identical Databricks-side protocol contract.
-src/dtrack_left/backends/store.py — Modified: published one atomic Unit object and moved heartbeat, closures, results, and failures into the new layout.
-src/dtrack_right/backends/store.py — Modified: mirrored the v2 store contract for S3 and Volume stores while retaining v1 reads.
-src/dtrack_left/checks/row_check.py — Modified: wrote Pair-scoped Left row inputs and protocol-v2 run/barrier status.
-src/dtrack_left/checks/col_check.py — Modified: consumed Pair plans and fixed keys, atomically published Units, refreshed status snapshots, and preserved resumability.
-src/dtrack_left/checks/rollback.py — Modified: resolved and safely removed protocol-v1 or Pair-scoped protocol-v2 rollback targets.
-src/dtrack_right/checks/row_check.py — Modified: wrote Pair-scoped row verdicts, plans, row reports, and protocol-v2 barriers.
-src/dtrack_right/checks/col_check.py — Modified: incrementally consumed Pair Units, persisted Right readiness and comparison outcomes, and refreshed Unit status snapshots.
-src/dtrack_left/common/audit.py — Modified: moved SQL evidence under Pair/status paths, reduced headers to timestamp/side/backend/operation, and used the run timezone.
-src/dtrack_right/common/audit.py — Modified: mirrored the concise timezone-aware audit contract.
-src/dtrack_right/job.py — Modified: resolved both protocol generations, published cumulative and newly added result counts, and finalized the v2 run status.
-src/dtrack_right/progress.py — Added: collected one progress snapshot per run and Pair, derived deterministic automatic blockers, and generated idempotent Delta DDL, views, snapshot inserts, blocker merges, and plan metadata merges.
-src/dtrack_right/report/build.py — Modified: read both protocol versions and emitted one `report/` tree with per-Pair row/column subfolders.
-src/dtrack_local/pipeline.py — Modified: initialized/resumed v2 status and preserved `_local/` as backup-excluded scratch data.
-tests — Modified: covered `nullstr`, safe date parsing, every Unit state, v1 compatibility, concise timezone-aware audit headers, atomic Unit publication, Pair progress/blockers/SQL, reports, rollback, packaging, and full local/Right job flows.
-
-Commit: 5ff56230a9efd598ae59fb38660fdc3fc8e12d3f
-examples/nbs/05_reuse_pulled.ipynb — Added: provided an executable recovery notebook that recomputes statistics and reports from previously pulled Left and Right window CSVs without contacting either source.
-guideme.txt — Modified: documented the reuse-pulled recovery workflow, including disabling landing writes and attaching no live warehouse.
-plans/local-run-memory-and-wide-table-stats.md — Modified: recorded the implemented per-window retry and reuse behavior, atomic partial-file handling, and remaining recovery gaps.
-src/dtrack_left/backends/sources.py — Modified: wrote CSV exports to temporary .part files and atomically renamed them so reusable pull files are always complete.
-src/dtrack_local/pipeline.py — Modified: added reusable Left and Right window pulls, statistics from existing sampled CSVs, optional landing, and clear failures when a required pull is missing.
-tests/unit/dtrack_local/test_pipeline.py — Modified: covered reuse of completed window files, missing-file failures, and propagation of reuse and landing controls.
-tests/unit/test_packaging.py — Modified: registered and validated the new reuse-pulled notebook in the packaged executable notebook inventory.
-
-Commit: 4af9b49236380d1905719d381de3b52c7bc9abf8
-plans/local-run-memory-and-wide-table-stats.md — Added: documented the concurrent local-run OOM evidence, bounded DuckDB design, wide-table batching strategy, resume behavior, benchmarks, and verification plan.
-src/dtrack_left/backends/sources.py — Modified: routed file and DuckDB sources through shared memory, thread, spill-directory, and insertion-order settings.
-src/dtrack_left/checks/col_check.py — Modified: registered run-scoped DuckDB scratch space and skipped pulling windows whose units were already fully indexed.
-src/dtrack_left/common/duck.py — Added: centralized physical-memory detection, configurable DuckDB resource budgets, spill-directory fallback, and connection settings.
-src/dtrack_left/common/stats.py — Modified: parsed each CSV once and computed inference, exact aggregates, and stable top values in bounded column batches without changing statistics payloads.
-src/dtrack_local/pipeline.py — Modified: applied the shared DuckDB resource budget to local landing databases and placed spill files beneath each local run.
-tests/unit/common/test_duck.py — Added: covered size parsing, budget splitting, physical-memory defaults, spill settings, work-directory precedence, and fallback behavior.
-tests/unit/common/test_stats.py — Modified: verified batched statistics match the prior single-query payload and preserve first-appearance ordering for tied top values.
-tests/unit/dtrack_left/checks/test_col_check.py — Modified: verified resumed column checks do not repull fully indexed windows.
-
-Commit: a9e3cbcc7635e1ad1c32acbb9f6cba78ea717058
-README.md — Modified: documented config-relative Oracle query files, controlled query-window pushdown, and structured Confluence page updates.
-changelog.txt — Modified: recorded the config-relative query, Confluence update, and Databricks result-streaming changes under the final amended commit identity.
-examples/nbs/03_tools.ipynb — Modified: added the current Confluence blog update command to the tools notebook.
-guideme.txt — Modified: documented multi-view Oracle query-window markers and incremental Confluence template updates.
-src/dtrack_left/backends/sources.py — Modified: rendered row bounds and admitted partitions inside Oracle consolidation queries while retaining outer filtering and final-result sampling.
-src/dtrack_left/cli/blog.py — Modified: added structured page updates for appended tables, evidence, statuses, attachments, and local XHTML previews.
-src/dtrack_left/cli/config.py — Modified: loaded Left and Right SQL files relative to the config and validated Oracle query-window declarations.
-src/dtrack_left/common/dates.py — Modified: added reusable date predicates for configured SQL expressions without identifier quoting.
-src/dtrack_left/common/query_windows.py — Added: validated and rendered controlled query-window markers for bounds, exact partitions, and metadata probes.
-src/dtrack_left/confluence.py — Modified: stored versioned template state, listed attachments, and safely updated an exact Confluence page id.
-src/dtrack_left/confluence_templates.py — Modified: rebuilt pages from stored template state and merged tables, evidence, and phase or overall statuses.
-src/dtrack_local/cli.py — Modified: documented proxy environment variables used for Databricks result-chunk downloads.
-src/dtrack_local/warehouse.py — Modified: streamed large Databricks SQL results through EXTERNAL_LINKS with optional authenticated corporate proxy support.
-templates/confluence/README.md — Modified: documented structured template-state updates and evidence or status merge inputs.
-tests/unit/dtrack_left/backends/test_sources.py — Modified: covered Oracle query-window bounds, exact admitted dates, metadata probes, and post-join sampling.
-tests/unit/dtrack_left/cli/test_blog.py — Modified: covered structured Confluence update options, output, and validation errors.
-tests/unit/dtrack_left/cli/test_config.py — Modified: covered config-relative query files and fail-closed query-window validation.
-tests/unit/dtrack_left/test_confluence_admin.py — Modified: covered versioned template-state storage and exact-page updates.
-tests/unit/dtrack_left/test_confluence_templates.py — Modified: covered stored-template rebuilding and table, evidence, and status merges.
-tests/unit/dtrack_local/test_warehouse.py — Modified: covered EXTERNAL_LINKS disposition and escaped corporate proxy credentials.
-
-Commit: ef1c5fd0b95c5274324080ad5b9f9ad615360ca7
-README.md — Modified: documented editable Confluence templates, private publishing, and direct command debugging.
-examples/e2e/README.md — Modified: removed fetch-report guidance and documented run-bound report access.
-examples/e2e/run_e2e.sh — Modified: removed the obsolete fetch-report execution step.
-examples/nbs/00_row_check.ipynb — Modified: linked the distributed handoff directly to the run report prefix.
-examples/nbs/01_col_check.ipynb — Modified: replaced report downloading with exact run status and report locations.
-examples/nbs/02_local.ipynb — Modified: verified locally published report bytes without the removed fetch helper.
-examples/nbs/03_tools.ipynb — Modified: demonstrated current tools and direct local debug options.
-guideme.txt — Modified: documented Confluence templates, private pages, materialization progress, direct debugging, and report locations.
-src/dtrack/cli.py — Modified: removed the obsolete debug and fetch-report commands from the unified tools group.
-src/dtrack_left/__main__.py — Modified: directed report consumers to the resolved run folder or Confluence publisher.
-src/dtrack_left/backends/materialize.py — Modified: added interactive DuckDB progress, non-interactive heartbeats, and validated config replacement.
-src/dtrack_left/backends/store.py — Modified: removed the obsolete report download helper.
-src/dtrack_left/cli/__init__.py — Modified: removed obsolete debug and fetch-report command registration.
-src/dtrack_left/cli/blog.py — Modified: grouped page lifecycle commands and added template-backed private publishing.
-src/dtrack_left/cli/tools.py — Modified: removed obsolete debug and fetch-report implementations.
-src/dtrack_left/confluence.py — Modified: added page inspection and current-user default restrictions.
-src/dtrack_left/confluence_templates.py — Added: safely rendered editable business-validation Confluence templates and derived status metrics.
-templates/confluence/README.md — Added: documented template preview, publishing, visibility, and artifact inputs.
-templates/confluence/business-validation-overall.example.json — Added: provided example validation tables, phases, statuses, links, and attachments.
-templates/confluence/business-validation-overall.xhtml — Added: provided the clean overall business-validation status page layout.
-tests/live/README.md — Modified: replaced fetch-report coverage with exact-run report readability.
-tests/live/dtrack_left/test_s3.py — Modified: verified completed report artifacts directly through the run store.
-tests/live/test_job_flow.py — Modified: read the published summary directly from the completed run.
-tests/local/confluence/test_confluence_dc.py — Modified: covered the grouped Confluence page lifecycle.
-tests/unit/dtrack/test_cli.py — Modified: enforced removal of obsolete tools from the unified CLI.
-tests/unit/dtrack_left/backends/test_materialize.py — Modified: covered materialization progress, stored hashes, config replacement, and safe deletion.
-tests/unit/dtrack_left/backends/test_store.py — Modified: removed obsolete report-download behavior coverage.
-tests/unit/dtrack_left/cli/test_blog.py — Modified: covered template preview, private publication, and grouped blog operations.
-tests/unit/dtrack_left/cli/test_tools.py — Modified: enforced the reduced tools command surface and retained direct debugger coverage.
-tests/unit/dtrack_left/test_confluence_admin.py — Modified: covered default publishing-user restrictions.
-tests/unit/dtrack_left/test_confluence_templates.py — Added: covered metrics, escaping, links, attachments, statuses, and safe XHTML rendering.
-tests/unit/dtrack_right/report/test_build.py — Modified: verified report publication directly inside a resolved run store.
-tests/unit/test_protocol_flow.py — Modified: verified the published report directly without the removed fetch helper.
-
-Commit: d56a7bfeadbdf9fd4b0f1577a9b6fa801b3adf6d
-examples/nbs/00_pipeline_end_to_end.ipynb — Deleted: replaced the broad legacy tutorial with focused executable workflow notebooks.
-examples/nbs/00_row_check.ipynb — Added: demonstrated distributed row-check and direct row reconciliation assertions on real CSV data.
-examples/nbs/01_col_check.ipynb — Added: demonstrated distributed col-check, deterministic cross-side sampling, and statistics assertions.
-examples/nbs/01_left_sources.ipynb — Deleted: consolidated source learning into the current row-check and common notebooks.
-examples/nbs/02_local.ipynb — Added: demonstrated SQL Warehouse local commands and the complete offline protocol with direct assertions.
-examples/nbs/02_store_protocol.ipynb — Deleted: consolidated the store protocol into the executable local workflow notebook.
-examples/nbs/03_row_check_and_gate.ipynb — Deleted: replaced by the current row-check notebook.
-examples/nbs/03_tools.ipynb — Added: demonstrated doctor, materialize, rollback, debug, Databricks, and blog tools with safety assertions.
-examples/nbs/04_common.ipynb — Added: grouped every unit-test module and demonstrated date, hash, manifest, and statistics contracts.
-examples/nbs/04_databricks_reads.ipynb — Deleted: moved current Databricks boundaries into the focused workflow notebooks.
-examples/nbs/05_col_check_statistics.ipynb — Deleted: replaced by the current col-check and common contract notebooks.
-examples/nbs/06_job_and_report.ipynb — Deleted: consolidated job and report behavior into the local protocol notebook.
-examples/nbs/07_dtrack_cli.ipynb — Deleted: replaced by the four current CLI-layout notebooks.
-examples/nbs/08_databricks_sdk_and_ui.ipynb — Deleted: removed the obsolete Databricks SDK tutorial.
-examples/nbs/09_manual_handoff.ipynb — Deleted: removed the obsolete manual handoff workflow.
-examples/nbs/10_preload_left.ipynb — Deleted: replaced preload guidance with reusable file materialization.
-examples/nbs/11_adopt_preload.ipynb — Deleted: replaced preload adoption with atomic config materialization.
-examples/nbs/12_developer_workflow.ipynb — Deleted: consolidated current developer behavior into the five executable notebooks.
-examples/nbs/13_change_recipes.ipynb — Deleted: removed recipes superseded by current CLI and registered types.
-examples/nbs/handoff.py — Deleted: removed the obsolete manual notebook handoff helper.
-examples/nbs/nbkit.py — Deleted: removed the unused notebook presentation helper.
-guideme.txt — Modified: documented materialization, registered column types, and the five executable learning notebooks.
-src/dtrack/cli.py — Modified: registered the materialize operator command in the public tools group.
-src/dtrack_left/backends/materialize.py — Added: atomically converted large CSV sources to validated hash-sorted partitioned Parquet.
-src/dtrack_left/backends/sources.py — Modified: added streaming file export, stored-hash sampling, case-insensitive columns, and Parquet support.
-src/dtrack_left/checks/col_check.py — Modified: propagated registered column comparison types into Left statistics.
-src/dtrack_left/cli/__init__.py — Modified: exposed the materialize command through the grouped CLI.
-src/dtrack_left/cli/config.py — Modified: parsed typed column mappings and validated registered comparison types.
-src/dtrack_left/cli/tools.py — Modified: added the safe materialize command and simplified current tool options.
-src/dtrack_left/common/column_types.py — Added: registered reusable cross-side attribute comparison normalizers.
-src/dtrack_left/common/manifest.py — Modified: serialized typed column comparison rules into distributed manifests.
-src/dtrack_left/common/stats.py — Modified: computed streaming DuckDB statistics and normalized registered column types.
-src/dtrack_local/__init__.py — Modified: exported the current local workflow without obsolete inline transfer options.
-src/dtrack_local/__main__.py — Modified: pointed users to the consolidated local notebook and current sampling contract.
-src/dtrack_local/cli.py — Modified: removed inline disposition and propagated current typed comparison settings.
-src/dtrack_local/csv_target.py — Modified: reused registered date and column comparison rules in the local Right adapter.
-src/dtrack_local/notebooks/00_setup_and_preflight.ipynb — Deleted: consolidated local notebooks under examples/nbs.
-src/dtrack_local/notebooks/01_row_check.ipynb — Deleted: consolidated local notebooks under examples/nbs.
-src/dtrack_local/notebooks/02_col_check.ipynb — Deleted: consolidated local notebooks under examples/nbs.
-src/dtrack_local/notebooks/03_report_and_backup.ipynb — Deleted: consolidated local notebooks under examples/nbs.
-src/dtrack_local/notebooks/04_rollback.ipynb — Deleted: consolidated local notebooks under examples/nbs.
-src/dtrack_local/notebooks/05_key_families.ipynb — Deleted: consolidated local notebooks under examples/nbs.
-src/dtrack_local/pipeline.py — Modified: propagated registered column comparison types through local Left and Right statistics.
-src/dtrack_local/warehouse.py — Modified: streamed Databricks SQL results without obsolete inline disposition selection.
-src/dtrack_right/backends/targets.py — Modified: normalized registered comparison columns directly in Spark statistics SQL.
-src/dtrack_right/common/column_types.py — Added: provided the Databricks-side registered attribute comparison rules.
-src/dtrack_right/common/manifest.py — Modified: validated typed column comparison rules received from Left.
-tests/unit/common/test_manifest.py — Modified: covered registered column types in portable manifests.
-tests/unit/common/test_parity.py — Modified: verified Left and Right registered type parity.
-tests/unit/common/test_stats.py — Modified: covered DuckDB aggregation and SAS-datetime attribute normalization.
-tests/unit/dtrack/test_cli.py — Modified: covered the current grouped materialize command.
-tests/unit/dtrack_left/backends/test_materialize.py — Added: covered validated Parquet conversion, stored hashes, config updates, and safe deletion.
-tests/unit/dtrack_left/backends/test_sources.py — Modified: covered streaming exports, case-insensitive CSV columns, Parquet, and stored sampling hashes.
-tests/unit/dtrack_left/cli/test_config.py — Modified: covered typed CSV and JSON column mappings.
-tests/unit/dtrack_left/cli/test_tools.py — Modified: covered the renamed materialize command and removed obsolete options.
-tests/unit/dtrack_local/test_pipeline.py — Modified: covered registered comparison types throughout local execution.
-tests/unit/dtrack_local/test_warehouse.py — Modified: covered streamed Databricks SQL result downloads.
-tests/unit/dtrack_right/backends/test_targets.py — Modified: covered Spark registered-type normalization and sampling parity.
-tests/unit/test_packaging.py — Modified: enforced the five-notebook layout and direct production-API assertions.
-
-Commit: 65267cad21e31f59d7fe336dd586d9c126a1d420
-src/dtrack_left/backends/sources.py — Modified: streamed file exports in bounded batches and reused compatible materialized sample hashes.
-src/dtrack_local/cli.py — Modified: removed the obsolete inline result-disposition option from local commands.
-src/dtrack_local/pipeline.py — Modified: removed inline disposition and applied registered column comparison types on Right results.
-tests/unit/dtrack_left/backends/test_sources.py — Modified: covered bounded CSV export and stored materialized hash reuse.
-tests/unit/dtrack_local/test_pipeline.py — Modified: covered local option removal and registered comparison-type propagation.
-
-Commit: 6130721140a9735ec0225c716e0c60d1f1fb3de7
-.gitignore — Modified: ignored local audit, report, and Confluence runtime artifacts.
-CONTEXT.md — Modified: updated the distributed reconciliation domain language and boundaries.
-README.md — Modified: documented deterministic sampling, grouped tools, Confluence, local workflows, and the Spark-only Right boundary.
-changelog.txt — Modified: recorded exact path-level changes for the five most recent commits.
-docker/compose.confluence.yaml — Added: added a local Confluence integration-test service.
-examples/e2e/README.md — Modified: documented the local Right adapter and run-bound report layout.
-examples/e2e/config.json — Modified: updated the end-to-end configuration for current date and sampling semantics.
-examples/e2e/run_e2e.sh — Modified: updated the E2E workflow for backend-native deterministic sampling.
-examples/nbs/00_pipeline_end_to_end.ipynb — Modified: identified the relocated local CSV Right adapter.
-examples/nbs/04_databricks_reads.ipynb — Modified: used Left pandas statistics only as a Databricks comparison reference.
-examples/nbs/12_developer_workflow.ipynb — Modified: documented the Spark-only Right subset and cleared obsolete rendered output.
-examples/nbs/13_change_recipes.ipynb — Modified: routed platform dates and statistics to their correct package boundaries and cleared stale output.
-examples/nbs/nbkit.py — Modified: used the local CSV adapter and replaced byte parity with Right inventory and behavior guardrails.
-guideme.txt — Added: documented the compact config-to-row-to-col workflow and Spark-only Right boundary.
-justfile — Modified: added current test and integration workflow commands.
-plans/date-type-registry-cleanup.md — Added: documented the four-name date registry cleanup and behavior lock.
-plans/right-common-boundary-cleanup.md — Added: documented the Databricks-only Right package cleanup and behavior lock.
-pyproject.toml — Modified: updated package metadata and locked dependencies for the new CLI and Confluence features.
-src/dtrack/cli.py — Modified: added the top-level grouped command router.
-src/dtrack_left/__main__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/backends/sources.py — Modified: moved deterministic sampling into backend queries instead of post-export CSV sampling.
-src/dtrack_left/backends/store.py — Modified: updated run-store resolution and safety checks.
-src/dtrack_left/checks/col_check.py — Modified: consumed backend-selected samples during column comparison.
-src/dtrack_left/checks/rollback.py — Modified: expanded rollback target selection and safer artifact cleanup.
-src/dtrack_left/checks/row_check.py — Modified: propagated resolved date and audit metadata through Stage 1.
-src/dtrack_left/cli/__init__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/cli/blog.py — Modified: added Confluence v1 page and blog integration.
-src/dtrack_left/cli/checks.py — Modified: updated row and column command workflow behavior.
-src/dtrack_left/cli/config.py — Modified: simplified date-type validation and current configuration defaults.
-src/dtrack_left/cli/options.py — Modified: centralized current shared CLI options.
-src/dtrack_left/cli/tools.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/common/audit.py — Added: recorded representative SQL shapes and separate audit write failures.
-src/dtrack_left/common/date_platforms.py — Added: isolated source-platform date SQL implementations.
-src/dtrack_left/common/dates.py — Modified: extended date normalization used by deterministic sampling and hashing.
-src/dtrack_left/common/hashing.py — Modified: added registered date-backed key families and deterministic normalization.
-src/dtrack_left/common/manifest.py — Modified: serialized side-specific date key families into manifests.
-src/dtrack_left/common/sampling.py — Modified: added platform-specific deterministic sampling SQL and shared sample-key rules.
-src/dtrack_left/confluence.py — Modified: added Confluence v1 page and blog integration.
-src/dtrack_local/__init__.py — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/__main__.py — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/cli.py — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/csv_target.py — Added: moved the local CSV Right stand-in out of the Databricks package.
-src/dtrack_local/keycheck.py — Modified: implemented executable cross-platform sample-key and key-family checks.
-src/dtrack_local/notebooks/00_setup_and_preflight.ipynb — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/03_report_and_backup.ipynb — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/04_rollback.ipynb — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/05_key_families.ipynb — Modified: implemented sample-key checks and documented behavioral rather than byte-level parity.
-src/dtrack_local/pipeline.py — Modified: coordinated local and Databricks stages and reused Left CSV helpers outside the Right package.
-src/dtrack_local/right_job.py — Added: provided the local CSV launcher for protocol E2E runs without changing dtrack_right.
-src/dtrack_local/warehouse.py — Modified: audited submitted Databricks SQL and preserved native result columns.
-src/dtrack_right/__main__.py — Deleted: removed the local CSV entry point from the Databricks package.
-src/dtrack_right/backends/store.py — Modified: hardened run-root and run-id resolution.
-src/dtrack_right/backends/targets.py — Modified: retained only the Spark target with backend-native deterministic sampling.
-src/dtrack_right/checks/col_check.py — Modified: consumed backend-selected samples during column comparison.
-src/dtrack_right/checks/row_check.py — Modified: attached Right SQL audit recording during Stage 1.
-src/dtrack_right/common/__init__.py — Modified: removed the unused mirrored disabled decorator.
-src/dtrack_right/common/audit.py — Added: recorded representative Spark SQL and separate audit failures.
-src/dtrack_right/common/date_platforms.py — Added: provided only Spark and Databricks date SQL.
-src/dtrack_right/common/dates.py — Modified: extended date normalization used by deterministic sampling and hashing.
-src/dtrack_right/common/hashing.py — Modified: retained deterministic key normalization without pandas CSV sampling.
-src/dtrack_right/common/manifest.py — Modified: consumed portable side-specific date key families.
-src/dtrack_right/common/sampling.py — Modified: implemented Spark-only deterministic sampling SQL and shared sample-key rules.
-src/dtrack_right/common/stats.py — Deleted: removed pandas CSV statistics from the Databricks package.
-src/dtrack_right/job.py — Modified: bound reports and SQL audit output to the resolved run.
-src/dtrack_right/notebook.py — Modified: updated the Databricks job parameters and run-root contract.
-src/dtrack_right/report/__init__.py — Modified: exposed only current report-building APIs.
-src/dtrack_right/report/build.py — Modified: built final reports directly inside the resolved run.
-tests/conftest.py — Modified: registered current integration-test gates.
-tests/live/README.md — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/live/dtrack_left/test_oracle_to_s3.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/live/dtrack_left/test_s3.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/live/dtrack_right/test_databricks_target.py — Modified: used Left CSV helpers only as external Databricks result references.
-tests/live/dtrack_right/test_volume.py — Modified: expanded current Volume-store coverage.
-tests/live/live.env.example — Modified: documented current live-test environment variables.
-tests/live/provision.py — Modified: updated live test resource provisioning.
-tests/live/test_job_flow.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/local/confluence/provision.py — Added: provisioned the local Confluence integration-test fixture.
-tests/local/confluence/test_confluence_dc.py — Added: covered Confluence v1 page and blog operations.
-tests/local/oracle/test_oracle_source.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/local/spark/test_spark_target.py — Modified: verified Spark sample keys and statistics against the Left-side reference helpers.
-tests/support.py — Modified: updated shared test doubles and synthetic data helpers.
-tests/unit/common/test_audit.py — Added: covered SQL shape deduplication and audit error isolation.
-tests/unit/common/test_dates.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/common/test_hashing.py — Modified: separated shared hash behavior from Left-only CSV sampling tests.
-tests/unit/common/test_key_families.py — Modified: covered date-backed and side-specific key-family normalization.
-tests/unit/common/test_manifest.py — Modified: covered portable date key-family manifest payloads.
-tests/unit/common/test_parity.py — Modified: replaced byte-identical copies with normalization and Spark sample-predicate behavior parity.
-tests/unit/common/test_sampling_sql.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/common/test_stats.py — Modified: scoped pandas CSV statistics tests to the Left/local implementation.
-tests/unit/conftest.py — Modified: stopped requiring a mirrored Right pandas statistics module.
-tests/unit/dtrack_left/backends/test_sources.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/backends/test_store.py — Modified: covered current run-store resolution rules.
-tests/unit/dtrack_left/checks/test_rollback.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/checks/test_row_check.py — Modified: covered resolved date types and Stage-1 audit behavior.
-tests/unit/dtrack_left/cli/test_blog.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/cli/test_checks.py — Modified: covered current row and column CLI behavior.
-tests/unit/dtrack_left/cli/test_tools.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/test_confluence_admin.py — Added: covered Confluence administration helpers.
-tests/unit/dtrack_local/test_csv_target.py — Added: covered the relocated CSV Right stand-in and SAS dates.
-tests/unit/dtrack_local/test_keycheck.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_local/test_pipeline.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_local/test_warehouse.py — Modified: covered SQL auditing and native Databricks result retrieval.
-tests/unit/dtrack_right/backends/test_store.py — Modified: covered safe Right run resolution.
-tests/unit/dtrack_right/backends/test_targets.py — Modified: removed CSV fallback coverage and retained Spark-only target tests.
-tests/unit/dtrack_right/report/test_build.py — Modified: covered report publication inside a resolved run.
-tests/unit/dtrack_right/test_job.py — Modified: tested job orchestration with an external local adapter instead of a Right CLI fallback.
-tests/unit/test_packaging.py — Modified: enforced the Databricks-only Right inventory and absence of pandas or CSV fallbacks.
-tests/unit/test_protocol_flow.py — Modified: used the relocated local CSV adapter for protocol integration coverage.
-
-Commit: 51d3c78fe50cab94a2da9404070d6a305f559707
-README.md — Modified: documented deterministic sampling, grouped tools, Confluence, local workflows, and the Spark-only Right boundary.
-changelog.txt — Added: introduced the commit-level file change ledger.
-examples/e2e/run_e2e.sh — Modified: updated the E2E workflow for backend-native deterministic sampling.
-examples/nbs/12_developer_workflow.ipynb — Modified: updated the developer workflow examples for the new commands.
-examples/nbs/13_change_recipes.ipynb — Modified: updated the developer workflow examples for the new commands.
-pyproject.toml — Modified: updated package metadata and locked dependencies for the new CLI and Confluence features.
-src/dtrack/__init__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack/__main__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack/cli.py — Added: added the top-level grouped command router.
-src/dtrack_left/__main__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/backends/databricks.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/backends/sources.py — Modified: moved deterministic sampling into backend queries instead of post-export CSV sampling.
-src/dtrack_left/checks/col_check.py — Modified: consumed backend-selected samples during column comparison.
-src/dtrack_left/checks/rollback.py — Modified: expanded rollback target selection and safer artifact cleanup.
-src/dtrack_left/cli/__init__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/cli/blog.py — Added: added Confluence v1 page and blog integration.
-src/dtrack_left/cli/ops/__init__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/cli/ops/dbx.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/cli/ops/s3.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/cli/tools.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/common/dates.py — Modified: extended date normalization used by deterministic sampling and hashing.
-src/dtrack_left/common/sampling.py — Added: added platform-specific deterministic sampling SQL and shared sample-key rules.
-src/dtrack_left/confluence.py — Added: added Confluence v1 page and blog integration.
-src/dtrack_local/__init__.py — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/__main__.py — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/cli.py — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/keycheck.py — Modified: implemented executable cross-platform sample-key and key-family checks.
-src/dtrack_local/notebooks/00_setup_and_preflight.ipynb — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/01_row_check.ipynb — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/02_col_check.ipynb — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/03_report_and_backup.ipynb — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/04_rollback.ipynb — Modified: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/05_key_families.ipynb — Modified: implemented executable cross-platform sample-key and key-family checks.
-src/dtrack_local/pipeline.py — Modified: coordinated local and Databricks stages and reused Left CSV helpers outside the Right package.
-src/dtrack_local/run_logging.py — Added: added dedicated run and error log routing.
-src/dtrack_right/backends/targets.py — Modified: retained only the Spark target with backend-native deterministic sampling.
-src/dtrack_right/checks/col_check.py — Modified: consumed backend-selected samples during column comparison.
-src/dtrack_right/common/dates.py — Modified: extended date normalization used by deterministic sampling and hashing.
-src/dtrack_right/common/sampling.py — Added: implemented Spark-only deterministic sampling SQL and shared sample-key rules.
-tests/live/README.md — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/live/dtrack_left/test_oracle_to_s3.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/live/dtrack_left/test_s3.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/live/test_job_flow.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/local/oracle/test_oracle_source.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/local/spark/test_spark_target.py — Modified: verified Spark sample keys and statistics against the Left-side reference helpers.
-tests/unit/common/test_dates.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/common/test_parity.py — Modified: replaced byte-identical copies with normalization and Spark sample-predicate behavior parity.
-tests/unit/common/test_sampling_sql.py — Added: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack/test_cli.py — Added: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/backends/test_sources.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/checks/test_col_check.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/checks/test_rollback.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/cli/ops/test_dbx.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/cli/ops/test_s3.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/cli/test_blog.py — Added: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/cli/test_tools.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_local/test_keycheck.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_local/test_pipeline.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_local/test_run_logging.py — Added: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/test_packaging.py — Modified: enforced the Databricks-only Right inventory and absence of pandas or CSV fallbacks.
-uv.lock — Modified: updated package metadata and locked dependencies for the new CLI and Confluence features.
-
-Commit: b85152c5f978aa16b3929ba37edcd24e7b90770b
-src/dtrack_left/cli/__init__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/common/dates.py — Modified: extended date normalization used by deterministic sampling and hashing.
-src/dtrack_left/common/hashing.py — Modified: added registered date-backed key families and deterministic normalization.
-src/dtrack_left/common/manifest.py — Modified: serialized side-specific date key families into manifests.
-src/dtrack_local/keycheck.py — Added: implemented executable cross-platform sample-key and key-family checks.
-src/dtrack_local/notebooks/05_key_families.ipynb — Added: implemented executable cross-platform sample-key and key-family checks.
-src/dtrack_local/pipeline.py — Modified: coordinated local and Databricks stages and reused Left CSV helpers outside the Right package.
-src/dtrack_right/backends/targets.py — Modified: retained only the Spark target with backend-native deterministic sampling.
-src/dtrack_right/common/dates.py — Modified: extended date normalization used by deterministic sampling and hashing.
-src/dtrack_right/common/hashing.py — Modified: retained deterministic key normalization without pandas CSV sampling.
-src/dtrack_right/common/manifest.py — Modified: consumed portable side-specific date key families.
-tests/local/spark/test_key_families_spark.py — Added: added or expanded coverage for cross-platform key-family hashing and sample-key comparison.
-tests/unit/common/test_dates.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/common/test_hashing.py — Modified: separated shared hash behavior from Left-only CSV sampling tests.
-tests/unit/common/test_key_families.py — Added: covered date-backed and side-specific key-family normalization.
-tests/unit/common/test_parity.py — Modified: replaced byte-identical copies with normalization and Spark sample-predicate behavior parity.
-tests/unit/dtrack_local/test_keycheck.py — Added: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_right/backends/test_targets.py — Modified: removed CSV fallback coverage and retained Spark-only target tests.
-
-Commit: 3afe74b29c6b497fe4dafef524e4ca6c6dfe4734
-justfile — Modified: added current test and integration workflow commands.
-src/dtrack_left/__main__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/backends/databricks.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/cli/ops/__init__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/cli/ops/dbx.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-tests/live/test_job_flow.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/backends/test_databricks.py — Modified: added or updated coverage for Databricks workspace package upload.
-tests/unit/dtrack_left/cli/ops/test_dbx.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-
-Commit: c2c2fa8b01a2186768816594ccd4a1e3c98af89c
-.env.example — Modified: documented environment settings for local, S3, and Databricks workflows.
-.gitignore — Modified: ignored local audit, report, and Confluence runtime artifacts.
-pyproject.toml — Modified: updated package metadata and locked dependencies for the new CLI and Confluence features.
-src/dtrack/__main__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/__main__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/backends/aws.py — Added: added AWS and S3 backend helpers.
-src/dtrack_left/backends/sources.py — Modified: moved deterministic sampling into backend queries instead of post-export CSV sampling.
-src/dtrack_left/checks/rollback.py — Added: expanded rollback target selection and safer artifact cleanup.
-src/dtrack_left/cli/__init__.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/cli/config.py — Modified: simplified date-type validation and current configuration defaults.
-src/dtrack_left/cli/ops/__init__.py — Added: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/cli/ops/dbx.py — Added: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/cli/ops/s3.py — Added: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/cli/tools.py — Modified: integrated deterministic sampling and the reorganized command workflow.
-src/dtrack_left/common/__init__.py — Modified: integrated local execution, grouped operations, and rollback support.
-src/dtrack_left/common/dates.py — Modified: extended date normalization used by deterministic sampling and hashing.
-src/dtrack_local/__init__.py — Added: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/__main__.py — Added: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/cli.py — Added: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/00_setup_and_preflight.ipynb — Added: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/01_row_check.ipynb — Added: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/02_col_check.ipynb — Added: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/03_report_and_backup.ipynb — Added: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/notebooks/04_rollback.ipynb — Added: updated the local workflow to coordinate local and Databricks stages.
-src/dtrack_local/pipeline.py — Added: coordinated local and Databricks stages and reused Left CSV helpers outside the Right package.
-src/dtrack_local/warehouse.py — Added: audited submitted Databricks SQL and preserved native result columns.
-src/dtrack_right/backends/targets.py — Modified: retained only the Spark target with backend-native deterministic sampling.
-src/dtrack_right/common/__init__.py — Modified: removed the unused mirrored disabled decorator.
-src/dtrack_right/common/dates.py — Modified: extended date normalization used by deterministic sampling and hashing.
-tests/local/oracle/test_oracle_source.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/common/test_dates.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/common/test_parity.py — Modified: replaced byte-identical copies with normalization and Spark sample-predicate behavior parity.
-tests/unit/conftest.py — Modified: stopped requiring a mirrored Right pandas statistics module.
-tests/unit/dtrack_left/backends/test_aws.py — Added: added or updated coverage for local execution, auxiliary commands, rollback, and backend integration.
-tests/unit/dtrack_left/backends/test_sources.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/checks/test_rollback.py — Added: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/cli/ops/test_dbx.py — Added: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/cli/ops/test_s3.py — Added: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_left/cli/test_config.py — Modified: added or updated coverage for local execution, auxiliary commands, rollback, and backend integration.
-tests/unit/dtrack_left/cli/test_tools.py — Modified: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_local/test_pipeline.py — Added: expanded coverage for deterministic backend sampling, key checks, grouped commands, and run logging.
-tests/unit/dtrack_local/test_warehouse.py — Added: covered SQL auditing and native Databricks result retrieval.
-tests/unit/dtrack_right/backends/test_targets.py — Modified: removed CSV fallback coverage and retained Spark-only target tests.
-tests/unit/test_packaging.py — Modified: enforced the Databricks-only Right inventory and absence of pandas or CSV fallbacks.
+- D `src/dtrack_left/checks/__init__.py`
+- D `src/dtrack_left/cli/debugging.py`
+- D `src/dtrack_left/csv_sampling.py`
+- D `src/dtrack_right/backends/__init__.py`
+- D `src/dtrack_right/checks/__init__.py`

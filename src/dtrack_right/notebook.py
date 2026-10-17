@@ -9,7 +9,7 @@
 # MAGIC attach `src/dtrack_right/requirements.txt` as a job library and delete that cell.
 # MAGIC `run_s3` is the stable runs root on a Volume, or an `s3://` URL read with boto3. The report is
 # MAGIC always published under the resolved run's `report/`. For S3 on compute without an
-# MAGIC instance profile, `aws_secret_scope` names a secret scope holding the AWS key (see tests/live/provision.py).
+# MAGIC instance profile, `aws_secret_scope` names a secret scope holding the AWS key (see tests/live/sources/provision.py).
 
 # COMMAND ----------
 
@@ -27,8 +27,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.getcwd()))
-from dtrack_right.job import run
-from dtrack_right.backends.targets import SparkTarget
+from dtrack_right.engine.backends.targets import SparkTarget
+from dtrack_right.engine.job import run
 
 dbutils.widgets.text("run_s3", "/Volumes/main/dtrack/work/dtrack/v1/runs")
 dbutils.widgets.text("run_id", "")

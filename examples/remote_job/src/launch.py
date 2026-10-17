@@ -11,10 +11,10 @@ from typing import Any
 
 from outlook_mail import require_outlook, send_report
 
-from dtrack_left.backends import databricks
+from dtrack_left.backends.cloud import databricks
 from dtrack_left.backends.store import S3Store, validate_run_id
-from dtrack_left.checks.row_check import make_run_id
-from dtrack_left.common.run_logging import configure_console_logging, get_logger
+from dtrack_left.common.checks.row_check import make_run_id
+from dtrack_left.common.runtime.run_logging import configure_console_logging, get_logger
 
 NAME = "example.remote_job"
 log = get_logger(NAME)

@@ -83,8 +83,8 @@ DuckDB budget (every Left/local DuckDB connection: file sources, statistics, loc
 
 Live source query profiling (Oracle, Athena, Hadoop):
 
-  Create the ignored `tests/live/source_queries.json` described in
-  `tests/live/test_source_queries.py`, then run:
+  Create the ignored `tests/live/config/source_queries.json` described in
+  `tests/live/sources/test_source_queries.py`, then run:
 
     just live profile
 

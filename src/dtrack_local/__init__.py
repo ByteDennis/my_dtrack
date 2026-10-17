@@ -34,7 +34,7 @@ from .pipeline import (
     row_check,
     run_all,
 )
-from .warehouse import Warehouse
+from .support.warehouse import Warehouse
 
 __all__ = [
     "Landing",

@@ -8,10 +8,10 @@ from zoneinfo import ZoneInfo
 
 from dotenv import find_dotenv, load_dotenv
 
-from ..common.column_types import resolve_column_type
-from ..common.dates import canonical_date, resolve_date_type
-from ..common.manifest import statistics_plan
-from ..common.query_windows import normalize_query_windows
+from ..common.model.manifest import statistics_plan
+from ..common.sql.column_types import resolve_column_type
+from ..common.sql.dates import canonical_date, resolve_date_type
+from ..common.sql.query_windows import normalize_query_windows
 
 LEFT_SOURCES = {"oracle", "athena", "aws", "hadoop", "csv", "file", "duckdb"}
 COL_TYPES = {"numeric", "categorical"}
