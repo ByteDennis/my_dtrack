@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-debug = ["ipdb>=0.13"]
+debug = ["debugpy>=1.8", "ipdb>=0.13"]
 hadoop = ["pyodbc>=5.0"]
 
 [dependency-groups]

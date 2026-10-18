@@ -7,6 +7,7 @@ from support import MemoryStore
 
 from pair_recon.app import cli, runner
 from pair_recon.app.runner import make_run_id, retry_failed
+from pair_recon.core import debug, sas
 from pair_recon.core.progress import ProgressSampler, progress_snapshot
 from pair_recon.core.sas import export_bundle
 from pair_recon_left.common.model.protocol import (
@@ -48,6 +49,30 @@ def test_logging():
     record.msecs = 0
     rendered = ZonedFormatter(CONSOLE_LOG_FORMAT, "America/New_York").format(record)
     assert rendered.startswith("1969-12-31T19:00:00.000-0500 INFO pair_recon: done")
+
+
+def test_debug(monkeypatch):
+    events = []
+    attach = SimpleNamespace(
+        listen=lambda address: events.append(("listen", address)),
+        wait_for_client=lambda: events.append("wait"),
+        breakpoint=lambda: events.append("break"),
+    )
+    ipdb = SimpleNamespace(runcall=lambda callback: events.append("ipdb") or callback())
+    monkeypatch.setattr(debug, "import_module", lambda name: attach if name == "debugpy" else ipdb)
+    assert debug.run_debugger(None, lambda: "plain") == "plain"
+    assert debug.run_debugger("attach", lambda: "attached") == "attached"
+    assert debug.run_debugger("ipdb", lambda: "stepped") == "stepped"
+    assert events == [("listen", ("0.0.0.0", 5678)), "wait", "break", "ipdb"]
+
+
+@pytest.mark.parametrize(
+    ("module", "argv"), [(cli, ["--debug", "attach"]), (sas, ["export", "--debug", "attach"])]
+)
+def test_modes(monkeypatch, module, argv):
+    seen = []
+    monkeypatch.setattr(module, "run_debugger", lambda mode, _callback: seen.append(mode) or 7)
+    assert module.main(argv) == 7 and seen == ["attach"]
 
 
 def test_progress():

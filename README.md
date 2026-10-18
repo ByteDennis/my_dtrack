@@ -62,6 +62,6 @@ Live Oracle query/export/timing tests are opt-in and are not part of the default
 just live
 ```
 
-Every executable Just recipe defaults to normal mode and accepts `--debug`; Python run failures open `ipdb`, while build and lint recipes emit verbose diagnostics. `just sas` creates only `left.sas`; use `just sas side=right` or `just sas side=both` when needed. After SAS writes either sampled CSV, use the normal `run.cmd` or `just run` prompts to select CSV inputs. When Right is CSV, comparison stays local and reuses the existing multithread statistics engine; no extra recipe is needed.
+Every recipe defaults to normal mode. Python workflows accept `--debug ipdb` or `--debug attach`; attach waits for VS Code `debugpy` on port 5678. Build and lint use `--debug` for verbose diagnostics. `just sas` creates only `left.sas`; use `just sas side=right` or `just sas side=both` when needed. After SAS writes either sampled CSV, use the normal `run.cmd` or `just run` prompts to select CSV inputs. When Right is CSV, comparison stays local and reuses the existing multithread statistics engine; no extra recipe is needed.
 
 See [guideme.txt](guideme.txt) for the complete local, Databricks, Hadoop, CSV, SAS, progress, Outlook, and troubleshooting flow.

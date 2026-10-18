@@ -6,7 +6,7 @@ import yaml
 from dotenv import find_dotenv, load_dotenv
 from tzlocal import get_localzone_name
 
-from pair_recon.core.debug import attach
+from pair_recon.core.debug import run_debugger
 from pair_recon.mail import send_outlook
 from pair_recon_left.common.runtime.run_logging import configure_console_logging, get_logger
 
@@ -249,13 +249,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
     return settings, config, action, client, catalog
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="pair_recon")
-    parser.add_argument("--defaults", type=Path, default=DEFAULTS)
-    parser.add_argument("--log-level", default="INFO")
-    parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args(argv)
-    configure_console_logging(args.log_level)
+def execute(args) -> int:
     load_dotenv(find_dotenv(filename=".pair_recon.env", usecwd=True))
     settings = None
     try:
@@ -308,6 +302,14 @@ def main(argv=None) -> int:
                 )
             except Exception:
                 log.exception("Outlook notification failed")
-        if args.debug:
-            attach(exc.__traceback__)
         return 1
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="pair_recon")
+    parser.add_argument("--defaults", type=Path, default=DEFAULTS)
+    parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--debug", nargs="?", const="ipdb", choices=("ipdb", "attach"))
+    args = parser.parse_args(argv)
+    configure_console_logging(args.log_level)
+    return run_debugger(args.debug, lambda: execute(args))

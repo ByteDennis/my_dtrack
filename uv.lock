@@ -1178,6 +1178,7 @@ dependencies = [
 
 [package.optional-dependencies]
 debug = [
+    { name = "debugpy" },
     { name = "ipdb" },
 ]
 hadoop = [
@@ -1204,6 +1205,7 @@ spark = [
 [package.metadata]
 requires-dist = [
     { name = "databricks-sdk", specifier = ">=0.143.0" },
+    { name = "debugpy", marker = "extra == 'debug'", specifier = ">=1.8" },
     { name = "duckdb", specifier = ">=1.1" },
     { name = "ipdb", marker = "extra == 'debug'", specifier = ">=0.13" },
     { name = "oracledb", specifier = ">=3.0" },

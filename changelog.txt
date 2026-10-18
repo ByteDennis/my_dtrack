@@ -8,7 +8,7 @@ Added
 - Interactive local CSV override in the normal run command, reusing the existing multithread statistics path.
 - Local CSV Right target in the same normal run command; local Right skips Databricks job startup while retaining UC results and progress.
 - Sample provenance reuse so a non-sampled counterpart applies the same deterministic predicate.
-- Optional --debug behavior for Just recipes; Python failures attach ipdb.
+- Restored --debug ipdb and --debug attach modes; VS Code attach uses debugpy port 5678.
 - Concise end-to-end setup, run, SAS, CSV, progress, Outlook, and troubleshooting guide.
 
 Changed
@@ -24,7 +24,7 @@ Removed
 - No files or capabilities were removed in this change.
 
 Verification
-- 508 unit tests pass; 12 optional tests skip.
+- 511 unit tests pass; 12 optional tests skip.
 - 9 live tests collect successfully and were not executed.
 - Ruff check and format checks pass.
 - Wheel and source distribution build successfully.
