@@ -7,6 +7,19 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_pair_meta (
   updated_at TIMESTAMP_NTZ
 ) USING DELTA;
 
+CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_column_map (
+  pair_name STRING NOT NULL,
+  left_column STRING NOT NULL,
+  right_column STRING NOT NULL,
+  data_type STRING
+) USING DELTA;
+
+CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_pair_sql (
+  pair_name STRING NOT NULL,
+  left_sql STRING,
+  right_sql STRING
+) USING DELTA;
+
 CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_run_status (
   run_id STRING NOT NULL,
   pair_name STRING NOT NULL,

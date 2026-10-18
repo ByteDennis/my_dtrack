@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any
 
+from ..common.model.attribute_checks import get_attribute_check
 from ..common.model.audit import SqlAudit, attach_sql_audit
 from ..common.model.manifest import DEFAULT_STATISTICS, planned_unit_ids, unit_id_for, window_id
 from ..common.model.protocol import (
@@ -33,23 +34,6 @@ class DrainTask:
     payload: dict[str, Any]
 
 
-def _number(row: dict[str, Any], name: str) -> int:
-    value = row.get(name)
-    return 0 if value in (None, "") else int(value)
-
-
-def _float_match(left: Any, right: Any, tolerance: float = 1e-6) -> bool | None:
-    if left in (None, "") or right in (None, ""):
-        return None
-    try:
-        left_number, right_number = float(left), float(right)
-    except (TypeError, ValueError):
-        return str(left).strip() == str(right).strip()
-    return abs(left_number - right_number) <= max(
-        1e-9, tolerance * max(abs(left_number), abs(right_number), 1.0)
-    )
-
-
 def compare_statistics(
     *,
     pair: str,
@@ -62,43 +46,11 @@ def compare_statistics(
     selected = statistics or list(DEFAULT_STATISTICS)
     result: dict[str, Any] = {"pair": pair, "vintage": window, "column": column}
     checks = []
-    for name in ("n_total", "n_missing", "n_unique"):
-        if name not in selected:
-            continue
-        left_value, right_value = _number(left, name), _number(right, name)
-        result[f"{name}_left"] = left_value
-        result[f"{name}_right"] = right_value
-        result[f"{name}_diff"] = right_value - left_value
-        checks.append(result[f"{name}_diff"] == 0)
-    for name in ("mean", "std", "length_avg", "length_max", "hash_sum"):
-        if name not in selected:
-            continue
-        match = _float_match(left.get(name), right.get(name))
-        result[f"{name}_left"] = left.get(name)
-        result[f"{name}_right"] = right.get(name)
-        result[f"{name}_match"] = match
+    for name in selected:
+        values, match = get_attribute_check(name).compare(left, right)
+        result.update(values)
         if match is not None:
             checks.append(match)
-    for name in ("mean", "std"):
-        if name not in selected:
-            continue
-        try:
-            result[f"{name}_diff"] = float(right[name]) - float(left[name])
-        except (KeyError, TypeError, ValueError):
-            result[f"{name}_diff"] = None
-    for name in ("min_val", "max_val"):
-        if name.removesuffix("_val") not in selected:
-            continue
-        left_value = "" if left.get(name) is None else str(left.get(name)).strip()
-        right_value = "" if right.get(name) is None else str(right.get(name)).strip()
-        label = "min" if name == "min_val" else "max"
-        result[f"{label}_left"] = left_value
-        result[f"{label}_right"] = right_value
-        same = left_value == right_value
-        if not same and "numeric" in (left.get("col_type"), right.get("col_type")):
-            same = bool(left_value and right_value and _float_match(left_value, right_value, 0))
-        result[f"{label}_match"] = same
-        checks.append(same)
     if statistics is None:
         result["top_10_left"] = left.get("top_10") or ""
         result["top_10_right"] = right.get("top_10") or ""

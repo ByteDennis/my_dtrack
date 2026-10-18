@@ -7,6 +7,10 @@ from pair_recon_right.catalog import error_rows
 _TABLE = re.compile(r"^[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){2}$")
 
 
+def _companion_table(pair_table: str, name: str) -> str:
+    return f"{pair_table.rsplit('.', 1)[0]}.{name}"
+
+
 class Catalog:
     def __init__(
         self,
@@ -15,8 +19,19 @@ class Catalog:
         status_table: str,
         error_table: str,
         progress_table: str,
+        column_map_table: str | None = None,
+        pair_sql_table: str | None = None,
     ):
-        for table in (pair_table, status_table, error_table, progress_table):
+        column_map_table = column_map_table or _companion_table(pair_table, "pair_recon_column_map")
+        pair_sql_table = pair_sql_table or _companion_table(pair_table, "pair_recon_pair_sql")
+        for table in (
+            pair_table,
+            status_table,
+            error_table,
+            progress_table,
+            column_map_table,
+            pair_sql_table,
+        ):
             if not _TABLE.fullmatch(table):
                 raise ValueError(f"invalid table name: {table}")
         self.sql = sql
@@ -24,11 +39,51 @@ class Catalog:
         self.status_table = status_table
         self.error_table = error_table
         self.progress_table = progress_table
+        self.column_map_table = column_map_table
+        self.pair_sql_table = pair_sql_table
 
     def pairs(self):
-        return self.sql.execute(
+        pairs = self.sql.execute(
             f"SELECT * FROM {self.pair_table} WHERE enabled = true ORDER BY pair_name"
         )
+        active = {row["pair_name"] for row in pairs}
+        if not active:
+            return pairs
+
+        mappings: dict[str, list[dict]] = {}
+        seen_columns = set()
+        for row in self.sql.execute(
+            f"SELECT pair_name, left_column, right_column, data_type "
+            f"FROM {self.column_map_table} ORDER BY pair_name, left_column"
+        ):
+            pair = row["pair_name"]
+            if pair not in active:
+                continue
+            key = (pair, row["left_column"])
+            if key in seen_columns:
+                raise ValueError(f"duplicate column mapping: {pair}.{row['left_column']}")
+            seen_columns.add(key)
+            mappings.setdefault(pair, []).append(row)
+
+        queries = {}
+        for row in self.sql.execute(
+            f"SELECT pair_name, left_sql, right_sql FROM {self.pair_sql_table} ORDER BY pair_name"
+        ):
+            pair = row["pair_name"]
+            if pair not in active:
+                continue
+            if pair in queries:
+                raise ValueError(f"duplicate pair SQL: {pair}")
+            queries[pair] = row
+
+        return [
+            {
+                **row,
+                "column_map_rows": mappings.get(row["pair_name"], []),
+                "pair_sql": queries.get(row["pair_name"]),
+            }
+            for row in pairs
+        ]
 
     def run(self, run_id: str):
         rows = self.sql.execute(

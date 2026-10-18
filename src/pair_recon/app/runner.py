@@ -2,6 +2,7 @@ import json
 import secrets
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,6 +25,9 @@ from pair_recon_left.common.runtime.run_logging import configure_left_logging
 from pair_recon_right.engine.backends.targets import CsvTarget
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
 from pair_recon_right.engine.job import run as run_right
+
+_SENSITIVE_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
+_SENSITIVE_WORDS = ("password", "secret", "token", "credential")
 
 
 class StatementSql:
@@ -95,7 +99,92 @@ def pair_config(row: dict) -> dict:
         value = json.loads(value)
     if not isinstance(value, dict):
         raise TypeError("pair metadata requires config_json")
+    value = deepcopy(value)
+    pair = row.get("pair_name") or "pair"
+
+    mappings = row.get("column_map_rows") or []
+    if mappings:
+        col_map = {}
+        overrides = {}
+        column_types = {}
+        for mapping in mappings:
+            left = str(mapping.get("left_column") or "").strip()
+            right = str(mapping.get("right_column") or "").strip()
+            if not left or not right:
+                raise ValueError(f"{pair}: column mapping names must be non-empty")
+            col_map[left] = right
+            data_type = str(mapping.get("data_type") or "").strip()
+            if not data_type:
+                continue
+            if data_type in {"numeric", "categorical"}:
+                overrides[left] = data_type
+            elif data_type.startswith("{"):
+                try:
+                    column_types[left] = json.loads(data_type)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"{pair}.{left}: invalid custom data_type JSON") from exc
+            else:
+                column_types[left] = data_type
+        value["col_map"] = col_map
+        value["col_type_overrides"] = overrides
+        value["column_types"] = column_types
+
+    query_row = row.get("pair_sql")
+    if query_row is not None:
+        for side, field in (("left", "left_sql"), ("right", "right_sql")):
+            target = value.setdefault(side, {})
+            sql = str(query_row.get(field) or "").strip().rstrip(";").rstrip()
+            if sql:
+                target["query"] = sql
+            else:
+                target.pop("query", None)
+                target.pop("query_windows", None)
     return value
+
+
+def _snapshot_value(value):
+    if isinstance(value, dict):
+        clean = {}
+        for key, item in value.items():
+            normalized = str(key).lower()
+            if (
+                normalized in _SENSITIVE_FIELDS
+                or normalized.endswith("_env")
+                or any(word in normalized for word in _SENSITIVE_WORDS)
+            ):
+                continue
+            clean[key] = _snapshot_value(item)
+        return clean
+    if isinstance(value, list):
+        return [_snapshot_value(item) for item in value]
+    return value
+
+
+def write_request_snapshot(settings: dict, config: dict) -> Path:
+    catalog = deepcopy(settings.get("_catalog_row") or {})
+    raw_config = catalog.get("config_json")
+    if isinstance(raw_config, str):
+        try:
+            catalog["config_json"] = json.loads(raw_config)
+        except json.JSONDecodeError:
+            pass
+    public_settings = {key: value for key, value in settings.items() if not key.startswith("_")}
+    payload = {
+        "format": "pair-recon-request-v1",
+        "saved_at": datetime.now(ZoneInfo(settings["timezone"])).isoformat(timespec="seconds"),
+        "settings": _snapshot_value(public_settings),
+        "catalog": _snapshot_value(catalog),
+        "effective_config": _snapshot_value(config),
+    }
+    target = Path(settings["work_dir"]) / settings["run_id"] / "request.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_name(target.name + ".part")
+    part.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    part.replace(target)
+    return target
 
 
 def run_left(

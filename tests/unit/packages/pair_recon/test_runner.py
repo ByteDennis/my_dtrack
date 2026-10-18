@@ -1,3 +1,4 @@
+import json
 import logging
 import threading
 from types import SimpleNamespace
@@ -6,7 +7,7 @@ import pytest
 from support import MemoryStore
 
 from pair_recon.app import cli, runner
-from pair_recon.app.runner import make_run_id, retry_failed
+from pair_recon.app.runner import make_run_id, pair_config, retry_failed, write_request_snapshot
 from pair_recon.core import debug, sas
 from pair_recon.core.progress import ProgressSampler, progress_snapshot
 from pair_recon.core.sas import export_bundle
@@ -20,12 +21,131 @@ from pair_recon_left.common.runtime.run_logging import CONSOLE_LOG_FORMAT, Zoned
 from pair_recon_right.engine.backends.store import VolumeStore as LocalStore
 from pair_recon_right.engine.backends.targets import CsvTarget
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
+from pair_recon_right.engine.common.model.attribute_checks import (
+    AttributeCheck,
+    attribute_check_names,
+    get_attribute_check,
+)
 from pair_recon_right.engine.job import run as run_right
 
 
 def test_runid():
     value = make_run_id("订单 pair", "测试 owner", "America/New_York")
     assert "/" not in value and "订单-pair-测试-owner" in value
+
+
+def test_pair_metadata_tables_override_json():
+    config = pair_config(
+        {
+            "pair_name": "orders",
+            "config_json": {
+                "left": {"source": "oracle", "query": "old", "query_windows": {"old": {}}},
+                "right": {
+                    "source": "databricks",
+                    "query": "old",
+                    "query_windows": {"old": {}},
+                },
+                "col_map": {"OLD": "old"},
+            },
+            "column_map_rows": [
+                {
+                    "left_column": "AMOUNT",
+                    "right_column": "amount",
+                    "data_type": "numeric",
+                },
+                {
+                    "left_column": "SAS_DT",
+                    "right_column": "event_date",
+                    "data_type": "sas_datetime_date",
+                },
+                {
+                    "left_column": "POSTED_AT",
+                    "right_column": "posted_at",
+                    "data_type": '{"type":"date","left_date_type":"timestamp",'
+                    '"right_date_type":"date"}',
+                },
+            ],
+            "pair_sql": {"left_sql": " SELECT * FROM L; ", "right_sql": ""},
+        }
+    )
+    assert config["col_map"] == {
+        "AMOUNT": "amount",
+        "SAS_DT": "event_date",
+        "POSTED_AT": "posted_at",
+    }
+    assert config["col_type_overrides"] == {"AMOUNT": "numeric"}
+    assert config["column_types"]["SAS_DT"] == "sas_datetime_date"
+    assert config["column_types"]["POSTED_AT"]["right_date_type"] == "date"
+    assert config["left"]["query"] == "SELECT * FROM L"
+    assert "query" not in config["right"] and "query_windows" not in config["right"]
+
+
+def test_request_snapshot_contains_catalog_and_effective_config(tmp_path):
+    settings = {
+        "run_id": "r1",
+        "work_dir": str(tmp_path),
+        "timezone": "America/New_York",
+        "owner": "me",
+        "profile": "corp",
+        "_catalog_row": {
+            "pair_name": "orders",
+            "config_json": '{"left":{"source":"oracle","user":"hidden"}}',
+            "column_map_rows": [
+                {
+                    "left_column": "A",
+                    "right_column": "a",
+                    "data_type": "numeric",
+                }
+            ],
+            "pair_sql": {"left_sql": "SELECT * FROM L", "right_sql": None},
+        },
+    }
+    config = {
+        "pairs": {
+            "orders": {
+                "left": {
+                    "source": "oracle",
+                    "password": "hidden",
+                    "ACCESS_TOKEN": "also-hidden",
+                },
+                "right": {"source": "databricks"},
+                "col_map": {"A": "a"},
+            }
+        }
+    }
+    path = write_request_snapshot(settings, config)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    assert path == tmp_path / "r1" / "request.json"
+    assert value["settings"]["owner"] == "me" and "_catalog_row" not in value["settings"]
+    assert value["catalog"]["column_map_rows"][0]["left_column"] == "A"
+    assert value["catalog"]["pair_sql"]["left_sql"] == "SELECT * FROM L"
+    assert "user" not in value["catalog"]["config_json"]["left"]
+    assert "password" not in value["effective_config"]["pairs"]["orders"]["left"]
+    assert "ACCESS_TOKEN" not in value["effective_config"]["pairs"]["orders"]["left"]
+    assert not path.with_name("request.json.part").exists()
+
+
+def test_attribute_check_registry_and_multiselect(monkeypatch):
+    names = attribute_check_names()
+    assert names == (
+        "n_total",
+        "n_missing",
+        "n_unique",
+        "mean",
+        "std",
+        "min",
+        "max",
+        "length_avg",
+        "length_max",
+        "hash_sum",
+    )
+    assert all(isinstance(get_attribute_check(name), AttributeCheck) for name in names)
+    answers = iter(("1,3,3", ""))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    assert cli.choose_many("Checks", ["row_count", *names], "") == [
+        "row_count",
+        "n_missing",
+    ]
 
 
 def test_retry():

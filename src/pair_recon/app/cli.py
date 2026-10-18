@@ -9,11 +9,19 @@ from tzlocal import get_localzone_name
 
 from pair_recon.core.debug import run_debugger
 from pair_recon.mail import send_outlook
+from pair_recon_left.common.model.attribute_checks import attribute_check_names
 from pair_recon_left.common.runtime.run_logging import configure_console_logging, get_logger
 
 from .catalog import Catalog
 from .config import load_defaults, run_config, save_defaults
-from .runner import StatementSql, launch, make_run_id, pair_config, workspace
+from .runner import (
+    StatementSql,
+    launch,
+    make_run_id,
+    pair_config,
+    workspace,
+    write_request_snapshot,
+)
 
 log = get_logger("cli")
 DEFAULTS = Path(".pair_recon.yaml")
@@ -40,6 +48,32 @@ def choose(label: str, values: list[str], default=None) -> str:
     if answer not in values:
         raise ValueError(f"choose one of: {', '.join(values)}")
     return answer
+
+
+def choose_many(label: str, values: list[str], default) -> list[str]:
+    raw = default if isinstance(default, list | tuple) else str(default).split(",")
+    selected = {str(value).strip() for value in raw if str(value).strip()}
+    unknown = selected - set(values)
+    if unknown:
+        raise ValueError(f"unknown default choices: {', '.join(sorted(unknown))}")
+    while True:
+        print(label)
+        for index, value in enumerate(values, 1):
+            print(f"  [{'x' if value in selected else ' '}] {index}. {value}")
+        answer = input("Toggle by number/name, comma-separated; Enter confirms: ").strip()
+        if not answer:
+            if not selected:
+                raise ValueError(f"choose one or more of: {', '.join(values)}")
+            return [value for value in values if value in selected]
+        toggles = set()
+        for item in (value.strip() for value in answer.split(",")):
+            choice = (
+                values[int(item) - 1] if item.isdigit() and 1 <= int(item) <= len(values) else item
+            )
+            if choice not in values:
+                raise ValueError(f"choose one or more of: {', '.join(values)}")
+            toggles.add(choice)
+        selected.symmetric_difference_update(toggles)
 
 
 def yes_no(label: str, default=False) -> bool:
@@ -179,11 +213,11 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
             defaults.get("partition_mode", metadata.get("partition_mode", "date")),
         ),
     )
-    checks = ask("Checks", defaults.get("checks", "row_count,hash_sum,n_unique"))
-    selected = [value.strip() for value in checks.split(",") if value.strip()]
-    allowed = {"row_count", "hash_sum", "n_unique"}
-    if not selected or set(selected) - allowed:
-        raise ValueError("checks must use row_count, hash_sum, n_unique")
+    selected = choose_many(
+        "Checks",
+        ["row_count", *attribute_check_names()],
+        defaults.get("checks", "row_count,hash_sum,n_unique"),
+    )
     answers = {
         "partition_mode": mode,
         "checks": selected,
@@ -242,6 +276,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "timeout": defaults.get("timeout", 120),
         "progress_interval": defaults.get("progress_interval", 10),
         "pull_workers": defaults.get("pull_workers", 2),
+        "_catalog_row": by_name[pair],
     }
     for key in ("from_date", "to_date", "vintage"):
         if key in answers:
@@ -258,17 +293,30 @@ def execute(args) -> int:
         configure_console_logging(args.log_level, settings["timezone"])
         print(
             json.dumps(
-                {"settings": settings, "pair": next(iter(config["pairs"]))},
+                {
+                    "settings": {
+                        key: value for key, value in settings.items() if not key.startswith("_")
+                    },
+                    "pair": next(iter(config["pairs"])),
+                },
                 ensure_ascii=False,
                 indent=2,
             )
         )
         if not yes_no("Run now", True):
             return 0
+        snapshot = write_request_snapshot(settings, config)
+        log.info("request snapshot: %s", snapshot)
         save_defaults(
-            args.defaults, {key: value for key, value in settings.items() if key != "run_id"}
+            args.defaults,
+            {
+                key: value
+                for key, value in settings.items()
+                if key != "run_id" and not key.startswith("_")
+            },
         )
         result = launch(settings, config, action=action, workspace_client=client, catalog=catalog)
+        result["request_snapshot"] = str(snapshot)
         if settings.get("email_to"):
             try:
                 result["email"] = send_outlook(

@@ -26,8 +26,8 @@ def normalize_query_windows(
         raise ValueError("malformed query_windows marker")
     if not markers and not specs:
         return {}
-    if source.lower() != "oracle":
-        raise ValueError("query_windows is currently supported only for Oracle queries")
+    if source.lower() not in {"oracle", "databricks"}:
+        raise ValueError("query_windows is supported only for Oracle or Databricks queries")
     if not text:
         raise ValueError("query_windows requires query")
     if not isinstance(specs, dict) or not specs:

@@ -4,7 +4,7 @@
 
 ## Runtime
 
-1. The local launcher reads one enabled pair from the Unity Catalog metadata table.
+1. The local launcher reads one enabled pair plus its mappings and optional SQL from Unity Catalog.
 2. Left pulls source counts and selected column statistics with bounded worker threads.
 3. Artifacts are written to a Unity Catalog Volume under an isolated `run_id`.
 4. Progress snapshots are appended to a Delta table while validation runs.
@@ -29,7 +29,11 @@ copy .pair_recon.env.example .pair_recon.env
 setup\setup.cmd --profile corp --workspace-dir /Workspace/Users/name/pair_recon --cluster-id CLUSTER_ID
 ```
 
-Install Hadoop support with `uv sync --extra hadoop`; the `hive` ODBC DSN comes from `HADOOP_DSN`, so the run prompt only needs the Hadoop schema. Use [setup/schema.sql](setup/schema.sql) when the four Delta tables do not already exist.
+Install Hadoop support with `uv sync --extra hadoop`; the `hive` ODBC DSN comes from `HADOOP_DSN`, so the run prompt only needs the Hadoop schema. Use [setup/schema.sql](setup/schema.sql) to create the six Delta tables. The column-map and pair-SQL tables are resolved automatically in the same catalog/schema as the configured pair table.
+
+`pair_recon_column_map.data_type` accepts `numeric`, `categorical`, a registered type such as `sas_datetime_date`, or a custom JSON type such as `{"type":"date","left_date_type":"timestamp","right_date_type":"date"}`. Mapping rows replace `col_map`, `col_type_overrides`, and `column_types` from `config_json` for that pair.
+
+`pair_recon_pair_sql` contains at most one row per pair. A non-blank `left_sql` or `right_sql` replaces that side's table relation; a blank value uses its configured table. SQL remains the base relation so PairRecon can apply outer date guards, sampling, and aggregation. Named `{{query_windows:name}}` markers are supported on Oracle Left and Databricks Right SQL; declarations remain under the matching side's `query_windows` object in `config_json`.
 
 ## Run
 
@@ -42,9 +46,11 @@ just run
 run.cmd
 ```
 
-The prompts ask for owner, Databricks profile and table locations, pair, Left and Right inputs, timezone, partition mode, checks, sample, strict normalization, optional date range and vintage, run ID, and confirmation. Press Enter to reuse saved defaults. A generated run ID remains the default so a normal run does not overwrite history.
+The prompts ask for owner, Databricks profile and table locations, pair, Left and Right inputs, timezone, partition mode, checks, sample, strict normalization, optional date range and vintage, run ID, and confirmation. Checks use a terminal checkbox list: enter comma-separated names or numbers to toggle `[x]` selections, then press Enter to confirm. Press Enter elsewhere to reuse saved defaults. A generated run ID remains the default so a normal run does not overwrite history.
 
-Supported checks are `row_count`, `hash_sum`, and `n_unique`. `partition_mode=all` treats the complete relation as the pair-level `all` partition and does not require a date column.
+After confirmation and before execution, PairRecon atomically writes `.pair_recon-work/<run_id>/request.json`. The UTF-8 snapshot contains the current user settings, the pair/mapping/SQL rows pulled from Catalog, and the merged effective config; credential fields are omitted. SQL text is retained verbatim for audit, so credentials must never be embedded in SQL.
+
+Registered attribute checks are `n_total`, `n_missing`, `n_unique`, `mean`, `std`, `min`, `max`, `length_avg`, `length_max`, and `hash_sum`; `row_count` remains the pair-level check. `partition_mode=all` treats the complete relation as the pair-level `all` partition and does not require a date column.
 
 For a current-view Left source against Right history, set `snapshot: true` in that pair's metadata. Left is counted as a complete snapshot; Right chooses the latest partition in the configured range whose row count matches, then column checks compare the snapshot with that partition.
 

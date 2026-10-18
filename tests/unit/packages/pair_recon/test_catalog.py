@@ -2,6 +2,7 @@ import pytest
 from support import MemoryStore
 
 from pair_recon.app.catalog import Catalog
+from pair_recon_right.catalog import error_rows
 
 
 class Sql:
@@ -11,6 +12,53 @@ class Sql:
     def execute(self, statement, parameters=None):
         self.calls.append((statement, parameters or {}))
         return []
+
+
+def test_pairs_load_companion_metadata():
+    class MetadataSql(Sql):
+        def execute(self, statement, parameters=None):
+            self.calls.append((statement, parameters or {}))
+            if "WHERE enabled = true" in statement:
+                return [{"pair_name": "orders", "config_json": {"left": {}, "right": {}}}]
+            if "pair_recon_column_map" in statement:
+                return [
+                    {
+                        "pair_name": "orders",
+                        "left_column": "AMOUNT",
+                        "right_column": "amount",
+                        "data_type": "numeric",
+                    }
+                ]
+            if "pair_recon_pair_sql" in statement:
+                return [{"pair_name": "orders", "left_sql": "SELECT 1", "right_sql": None}]
+            return []
+
+    sql = MetadataSql()
+    catalog = Catalog(sql, "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress")
+    assert catalog.column_map_table == "c.s.pair_recon_column_map"
+    assert catalog.pair_sql_table == "c.s.pair_recon_pair_sql"
+    row = catalog.pairs()[0]
+    assert row["column_map_rows"][0]["left_column"] == "AMOUNT"
+    assert row["pair_sql"]["left_sql"] == "SELECT 1"
+
+
+def test_pairs_reject_duplicate_metadata():
+    class DuplicateSql(Sql):
+        def execute(self, statement, parameters=None):
+            if "WHERE enabled = true" in statement:
+                return [{"pair_name": "p", "config_json": {}}]
+            if "pair_recon_column_map" in statement:
+                row = {
+                    "pair_name": "p",
+                    "left_column": "A",
+                    "right_column": "a",
+                    "data_type": None,
+                }
+                return [row, row]
+            return []
+
+    with pytest.raises(ValueError, match="duplicate column mapping"):
+        Catalog(DuplicateSql(), "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress").pairs()
 
 
 @pytest.mark.parametrize("state", ["running", "complete", "failed"])
@@ -77,3 +125,27 @@ def test_finish():
     assert result == {"status": "different", "errors": 1}
     assert any("INSERT INTO c.s.errors" in statement for statement in statements)
     assert any("UPDATE c.s.pairs" in statement for statement in statements)
+
+
+def test_error_rows_use_attribute_registry():
+    from datetime import UTC, datetime
+
+    store = MemoryStore()
+    store.put_json(
+        "pairs/orders/col_check/results/u.json",
+        {
+            "pair": "orders",
+            "vintage": "2026-01",
+            "column": "AMOUNT",
+            "mean_left": 1.0,
+            "mean_right": 1.1,
+            "mean_match": False,
+            "n_unique_left": 2,
+            "n_unique_right": 2,
+            "n_unique_diff": 0,
+        },
+    )
+    rows = error_rows(store, "r1", "orders", datetime(2026, 1, 1, tzinfo=UTC))
+    assert [(row["check_name"], row["left_value"], row["right_value"]) for row in rows] == [
+        ("mean", "1.0", "1.1")
+    ]

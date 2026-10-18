@@ -10,10 +10,10 @@ from pair_recon_right.engine.common.sql import sampling as right_sampling
 
 SRC = Path(__file__).resolve().parents[4] / "src"
 RIGHT_MODULES = {
-    "model": {"audit.py", "hashing.py", "manifest.py", "protocol.py"},
-    "sql": {"column_types.py", "date_platforms.py", "dates.py", "sampling.py"},
+    "model": {"attribute_checks.py", "audit.py", "hashing.py", "manifest.py", "protocol.py"},
+    "sql": {"column_types.py", "date_platforms.py", "dates.py", "query_windows.py", "sampling.py"},
 }
-EXACT_MIRRORS = ("audit.py", "hashing.py", "manifest.py", "protocol.py")
+EXACT_MIRRORS = ("attribute_checks.py", "audit.py", "hashing.py", "manifest.py", "protocol.py")
 
 
 def test_right():
@@ -30,6 +30,12 @@ def test_right():
 def test_module(name):
     left = (SRC / "pair_recon_left/common/model" / name).read_bytes()
     right = (SRC / "pair_recon_right/engine/common/model" / name).read_bytes()
+    assert left == right
+
+
+def test_query_windows_module():
+    left = (SRC / "pair_recon_left/common/sql/query_windows.py").read_bytes()
+    right = (SRC / "pair_recon_right/engine/common/sql/query_windows.py").read_bytes()
     assert left == right
 
 

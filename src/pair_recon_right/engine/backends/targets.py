@@ -17,6 +17,7 @@ from ..common.sql.dates import (
     quote_ident,
     resolve_date_type,
 )
+from ..common.sql.query_windows import normalize_query_windows, render_query_windows
 from ..common.sql.sampling import sample_predicate_sql
 
 log = logging.getLogger("pair_recon.right.target")
@@ -101,6 +102,15 @@ class SparkTarget:
         macro = str(config.get("conn_macro") or "")
         if "." in macro and not (config.get("catalog") or config.get("schema")):
             self.config["catalog"], self.config["schema"] = macro.split(".", 1)
+        windows = normalize_query_windows(
+            self.config.get("query"),
+            self.config.get("query_windows"),
+            source=str(self.config.get("source") or "databricks"),
+        )
+        if windows:
+            self.config["query_windows"] = windows
+        else:
+            self.config.pop("query_windows", None)
 
     def set_sql_audit(self, audit):
         self.sql_audit = audit
@@ -124,15 +134,31 @@ class SparkTarget:
             arguments.append(f"{key} => '" + str(value).replace("'", "''") + "'")
         return f"read_files({', '.join(arguments)})"
 
-    def relation(self) -> str:
+    def relation(
+        self,
+        *,
+        partitions: list[str] | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> str:
         kind = {"volume_raw": "files"}.get(self.config.get("kind"), self.config.get("kind"))
         if kind == "files":
             query = self.config.get("query")
             if not query:
                 return self._files()
-            return f"({query.replace('{src}', self._files())}) pair_recon_source"
-        if self.config.get("query"):
-            return f"({self.config['query']}) pair_recon_source"
+            query = query.replace("{src}", self._files())
+        else:
+            query = self.config.get("query")
+        if query:
+            query = render_query_windows(
+                query,
+                self.config.get("query_windows") or {},
+                dialect="spark",
+                partitions=partitions,
+                from_date=from_date,
+                to_date=to_date,
+            )
+            return f"({query}) pair_recon_source"
         parts = [self.config.get(name) for name in ("catalog", "schema", "table")]
         return ".".join(quote_ident(str(part), "spark") for part in parts if part)
 
@@ -218,7 +244,7 @@ class SparkTarget:
         )
         predicate = f"({bounds}) AND ({sampled})" if bounds and sampled else bounds or sampled
         rows = self._rows(
-            f"SELECT {ref}, COUNT(*) FROM {self.relation()} "
+            f"SELECT {ref}, COUNT(*) FROM {self.relation(from_date=from_date, to_date=to_date)} "
             f"WHERE {self._where(predicate)} GROUP BY {ref}",
             "partition_counts",
         )
@@ -325,7 +351,10 @@ class SparkTarget:
                     if numeric
                     else f"max(length({text})) AS length_max_{i}"
                 )
-        sql = f"SELECT {', '.join(selects)} FROM {self.relation()} WHERE {where}"
+        sql = (
+            f"SELECT {', '.join(selects)} "
+            f"FROM {self.relation(partitions=window['partitions'])} WHERE {where}"
+        )
         self._audit(sql, "window_statistics")
         row = self.spark.sql(sql).collect()[0].asDict()
         stats = {}

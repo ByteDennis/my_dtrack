@@ -141,6 +141,16 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{name}: partition_mode all cannot use Left query_windows")
         if not left["query_windows"]:
             left.pop("query_windows", None)
+        try:
+            right["query_windows"] = normalize_query_windows(
+                right.get("query"), right.get("query_windows"), source=right_source
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name}: invalid Right query_windows: {exc}") from None
+        if partition_mode == "all" and right["query_windows"]:
+            raise ValueError(f"{name}: partition_mode all cannot use Right query_windows")
+        if not right["query_windows"]:
+            right.pop("query_windows", None)
         for side_name, side in (("Left", left), ("Right", right)):
             if (partition_mode == "date" and (side_name == "Right" or not snapshot)) or (
                 "date_type" in side

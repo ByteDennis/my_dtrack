@@ -54,6 +54,26 @@ def test_relations():
     )
 
 
+def test_query_windows():
+    target = SparkTarget(
+        None,
+        {
+            **ORDERS,
+            "query": "SELECT * FROM raw r WHERE {{query_windows:driver}}",
+            "query_windows": {"driver": {"expression": "r.business_date", "date_type": "date"}},
+        },
+    )
+    bounded = target.relation(from_date="2026-01-01", to_date="2026-01-31")
+    assert "r.business_date >= DATE '2026-01-01'" in bounded
+    assert "r.business_date < DATE '2026-02-01'" in bounded
+    exact = target.relation(partitions=["2026-01-01", "2026-01-03"])
+    assert "r.business_date >= DATE '2026-01-01'" in exact
+    assert "r.business_date < DATE '2026-01-02'" in exact
+    assert "r.business_date >= DATE '2026-01-03'" in exact
+    assert "r.business_date < DATE '2026-01-04'" in exact
+    assert "{{" not in bounded + exact
+
+
 def test_file():
     config = {
         "kind": "files",

@@ -9,21 +9,11 @@ from typing import Any
 from .. import PROTOCOL_VERSION
 from ..sql.column_types import resolve_column_type
 from ..sql.dates import bucket_date, resolve_date_type
+from .attribute_checks import attribute_check_names
 from .hashing import HASH_BUCKET_SPACE, key_family
 
 STATS_VERSION = 1
-DEFAULT_STATISTICS = (
-    "n_total",
-    "n_missing",
-    "n_unique",
-    "mean",
-    "std",
-    "min",
-    "max",
-    "length_avg",
-    "length_max",
-    "hash_sum",
-)
+DEFAULT_STATISTICS = attribute_check_names()
 
 
 def statistics_plan(raw: Any) -> list[str] | None:

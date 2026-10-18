@@ -60,6 +60,32 @@ def test_snapshot():
     assert validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]["snapshot"]
 
 
+def test_query_windows_on_both_sides():
+    value = pair("date")
+    value["left"] |= {
+        "query": "SELECT * FROM L l WHERE {{query_windows:driver}}",
+        "query_windows": {"driver": {"expression": "l.D", "date_type": "date"}},
+    }
+    value["right"] |= {
+        "query": "SELECT * FROM R r WHERE {{query_windows:driver}}",
+        "query_windows": {"driver": {"expression": "r.D", "date_type": "date"}},
+    }
+    configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
+    assert configured["left"]["query_windows"]["driver"]["expression"] == "l.D"
+    assert configured["right"]["query_windows"]["driver"]["expression"] == "r.D"
+
+
+def test_query_windows_require_date_mode_and_declarations():
+    value = pair()
+    value["right"] |= {"query": "SELECT * FROM R WHERE {{query_windows:driver}}"}
+    with pytest.raises(ValueError, match="Right query_windows"):
+        validate_config({"version": 2, "pairs": {"p": value}})
+
+    value["right"]["query_windows"] = {"driver": {"expression": "D"}}
+    with pytest.raises(ValueError, match="partition_mode all"):
+        validate_config({"version": 2, "pairs": {"p": value}})
+
+
 @pytest.mark.parametrize("sample", [10, "10"])
 def test_sample(sample):
     value = pair()

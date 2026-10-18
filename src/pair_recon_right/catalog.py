@@ -1,6 +1,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from .engine.common.model.attribute_checks import ATTRIBUTE_CHECKS
 from .engine.common.model.protocol import list_failures, list_results, list_row_results
 
 
@@ -26,22 +27,19 @@ def error_rows(store, run_id, pair, now):
                 }
             )
     for _, result in list_results(store):
-        for check in ("hash_sum", "n_unique"):
-            different = result.get(f"{check}_match") is False or result.get(
-                f"{check}_diff"
-            ) not in (None, 0)
-            if not different:
+        for name, check in ATTRIBUTE_CHECKS.items():
+            if check.result_match(result) is not False:
                 continue
             rows.append(
                 {
                     "run_id": run_id,
-                    "check_name": check,
+                    "check_name": name,
                     "pair_name": pair,
                     "vintage": result.get("vintage"),
                     "column_name": result.get("column"),
                     "partition_value": None,
-                    "left_value": str(result.get(f"{check}_left")),
-                    "right_value": str(result.get(f"{check}_right")),
+                    "left_value": str(result.get(f"{name}_left")),
+                    "right_value": str(result.get(f"{name}_right")),
                     "detail": "different",
                     "payload": __import__("json").dumps(result, ensure_ascii=False, sort_keys=True),
                     "created_at": now,
