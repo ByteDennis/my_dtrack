@@ -1,137 +1,60 @@
-# dtrack
+# pair_recon
 
-Two-stage data reconciliation between on-prem sources and Databricks. The distributed packages
-only exchange protocol payloads through S3; the local runner executes both sides against a local
-directory with the same run layout:
+`pair_recon` validates one Oracle/Databricks table pair per execution. Pair definitions and SQL stay in Unity Catalog. Local defaults are saved in UTF-8 YAML; credentials stay in `.pair_recon.env` and `~/.databrickscfg`.
 
-| Package | Runs on | Commands / entry | Needs |
-| --- | --- | --- | --- |
-| `src/dtrack_left` | on-prem PC | `dtrack left-run`, `dtrack row-check`, `dtrack col-check`, `dtrack tools ...` | Left DB access; shared runs root |
-| `src/dtrack_right` | a Databricks job, started once | `src/dtrack_right/notebook.py` | table/Volume read; same runs root |
-| `src/dtrack_local` | one operator machine | `dtrack local ...` | both connections; runs root optional for backup |
+## Runtime
 
-- **row check** (stage 1): exact row counts per day on both sides; only days whose counts agree
-  go on. Left and Right publish Pair-scoped inputs/verdicts; a passed Pair receives an immutable
-  `pairs/<pair>/plan.json`.
-- **col check** (stage 2): deterministic sampling and per-column statistics on both sides,
-  compared on the Right. Left atomically publishes one statistics-bearing Unit object; Right
-  prefetches its own side, compares, writes Pair-scoped results, and builds the report.
+1. The local launcher reads one enabled pair from the Unity Catalog metadata table.
+2. Left pulls Oracle counts and selected column statistics.
+3. Artifacts are written to a Unity Catalog Volume under an isolated `run_id`.
+4. A Databricks job validates the Right side and updates pair, run-status, and run-error Delta tables.
+5. Windows sends the result through the signed-in Outlook profile when recipients are configured.
 
-Top-level config `version: 1` keeps the Right-admitted flow above. With `version: 2`, `dtrack
-left-run` publishes Left counts and statistics first. Right later persists row-count evidence and
-fails before any statistics scan unless every mismatch is explicitly listed in
-`excluded_partitions`. Rerunning Left with the same run id reuses unchanged Unit identities and
-republishes only vintages or columns affected by exclusion changes.
+Concurrent users may validate the same pair because all artifacts and result rows are isolated by `run_id`. Resume removes failed or different results and preserves matches. Restart replaces the selected run.
 
-When Oracle is reachable only from SAS, keep the same `left-run` workflow and split it into export
-and import phases:
-
-```bash
-dtrack left-run --config config.json --run-id "$RUN_ID" --export-sas ./sas-run
-# Copy the whole directory to the SAS host, edit dtrack_bundle / dtrack_connect_* in left-run.sas,
-# and run left-run.sas there.
-dtrack left-run --config config.json --run-s3 "$RUN_S3" --import-sas ./sas-run
-```
-
-After applying the configured source query/`where`, the generated script counts every returned
-partition by default, then loops over every configured vintage and exports sampled data.
-`fromDate`, `toDate`, and `excluded_partitions` are the explicit DTrack partition filters. The
-import validates the bundle, computes the normal Left statistics, and uploads protocol documents
-and Units—not the raw SAS CSV files. The existing Right job must still run afterward to compare row
-counts and column statistics and to publish the final report.
-
-The on-prem side holds no Databricks credential and installs no Databricks package. The Right
-side never imports the Left package and contains no CSV/pandas fallback or source-platform sampling
-SQL. Oracle is installed by default; Athena and Hadoop are extras.
-`dtrack_local` deliberately combines both packages, but writes the same `_status/`,
-`pairs/<pair>/`, and `report/` layout through a directory-backed store. `_status/units.csv` is the
-human-readable progress view; protocol JSON remains authoritative.
-That keeps sampling/hash behavior and rollback semantics common without making local runs depend
-on S3 or making the distributed packages depend on the local runner.
-
-`date_type` has four values only: `date`, `string`, `number`, and `sas`. For example,
-`2025-04-02` uses `string`, while `01AUG2026:09:45:35` uses `sas`. Preflight probes a small
-non-null sample for `string`/`sas`, then carries the detected internal format through the row and
-manifest payloads. The standalone Right package contains only the Spark/Databricks SQL adapter;
-source-platform adapters stay on the Left.
-
-Pairs without a business date can set `"partition_mode": "all"` at Pair level and omit
-`date_col` on both sides. DTrack then counts the complete Left and Right relations as one `all`
-partition and runs fraction or fixed-key sampling once across the whole dataset. A real stable
-`key` is still required for sampling; the mode deliberately rejects `fromDate`, `toDate`,
-`vintage`, `date_synonyms`, `excluded_partitions`, and Left query-window markers because those
-settings would otherwise imply date filtering that cannot occur. Date-partitioned CSV
-materialization and SAS bundle export remain `partition_mode: date` workflows.
-
-Column comparison work is also configurable per Pair. Set, for example,
-`"statistics": ["hash_sum", "n_unique"]` to calculate and compare only the normalized hash sum
-and distinct-value count for that Pair. Omitting `statistics` preserves the full standard set;
-`col_type` remains metadata used to keep Left and Right normalization aligned.
-
-An Oracle `query` may be inline or a `.sql` path relative to the config file. Large consolidation
-queries can push the selected DTrack window into each dated driver before the join with controlled
-markers such as `{{query_windows:driver_one}}`; declare each marker under the Left
-`query_windows` map. DTrack still applies the final-result date predicate and samples only after
-the consolidated relation is built. The query must select the configured date, key, and mapped
-columns explicitly. Col-check pulls one complete vintage at a time; statistics run parallel column
-shards inside that vintage and publish each completed `DTRACK_STATS_BATCH` wave immediately.
-Oracle always receives the complete rendered SQL. Human audit files compact SELECT lists
-larger than 20 attributes to the first two and last two attributes with an ellipsis and no visible
-SQL hash; repeated read-query shapes reuse the same detailed audit file across command restarts.
-
-Rerunning `row-check`, `col-check`, or `left-run` with the same `--run-id` resumes by default:
-compatible row counts and existing Units are reused, and incomplete local pulls are reused only
-when their provenance sidecar matches the run, plan, window, columns, and sampled keys. Keep the
-same `--work-dir` to reuse those local CSVs. Add `--force` to clear the selected run stage and
-recompute it; prior Units/results are removed first, so the rerun does not create duplicate active
-Units. `left-run --force --import-sas` recomputes from the validated SAS output, while
-`--force --export-sas` is rejected because export has no uploaded run state.
+## Install
 
 ```bash
 uv sync
-uv run pytest
-uv run dtrack --help          # or: python -m dtrack --help (no console-script launcher)
-uv run dtrack tools --help    # reports, diagnostics, sampling, rollback, Databricks, Confluence
-just e2e            # both sides against a local Moto S3
+cp .pair_recon.env.example .pair_recon.env
+./setup/setup.sh --profile corp --workspace-dir /Workspace/Users/name/pair_recon --cluster-id CLUSTER_ID
 ```
 
-With the `dbx` extra installed, Workspace package transfer is symmetric and profile-aware:
+Windows:
+
+```bat
+copy .pair_recon.env.example .pair_recon.env
+setup\setup.cmd --profile corp --workspace-dir /Workspace/Users/name/pair_recon --cluster-id CLUSTER_ID
+```
+
+Use [setup/schema.sql](setup/schema.sql) only when the three Delta tables do not already exist.
+
+## Run
 
 ```bash
-dtrack tools dbx workspace upload src/dtrack_right /Users/me/dtrack/dtrack_right --overwrite
-dtrack tools dbx workspace download /Users/me/dtrack/dtrack_right ./downloaded-right
+./run.sh
 ```
 
-Download recursively mirrors Workspace files and notebooks, restores source-notebook suffixes,
-and supports `--dry-run` and overwrite protection.
+```bat
+run.cmd
+```
 
-`dtrack local key-check` can override `--key`, `--family KEY=...`, and `--sample` to compare
-the exact sampled key set selected by the Left source and Databricks. `dtrack tools blog preview`
-renders a local tracking-page preview; `blog publish`, `inspect`, and `delete` make the Confluence
-lifecycle explicit. Editable storage-XHTML templates and JSON examples live under
-`templates/confluence/`; publishing is view/edit restricted to the current user unless
-`--space-visible` is given. `blog update` merges table, evidence, and status changes into the
-page's versioned structured state before redrawing the exact page id.
-Add `--debug ipdb` or `--debug attach` directly to `row-check`, `col-check`, or any
-`dtrack local` subcommand. Attach mode waits for debugpy on port 5678.
-Install that optional integration with `uv sync --extra confluence`. Server/Data Center PAT auth uses
-`CONFLUENCE_URL` + `CONFLUENCE_TOKEN`; Cloud additionally needs `CONFLUENCE_USERNAME` and `--cloud`.
-The integration is pinned to `atlassian-python-api==5.0.5` and uses Confluence REST API v1 by
-default (`/rest/api` on Server/Data Center and `/wiki/rest/api` on Cloud).
+The prompts ask for owner, Databricks profile and table locations, pair, timezone, partition mode, checks, sample, strict normalization, optional date range and vintage, run ID, and confirmation. Press Enter to reuse saved defaults. A generated run ID remains the default so a normal run does not overwrite history.
 
-See `docs/workflow.md` for commands and the S3 contract, `docs/notes/` for the walkthrough, and
-`docs/plans/plan_coverage.md` for what is and is not implemented.
+Supported checks are `row_count`, `hash_sum`, and `n_unique`. `partition_mode=all` treats the complete relation as the pair-level `all` partition and does not require a date column.
 
-## Repository shape
+For a current-view Left source against Right history, set `snapshot: true` in that pair's metadata. Left is counted as a complete snapshot; Right chooses the latest partition in the configured range whose row count matches, then column checks compare the snapshot with that partition.
 
-```text
-src/dtrack_left/     cli, config, sources (oracle/csv/athena/hadoop), s3, row_check, col_check, fetch, debug,
-                     manifest, sampling, statistics, normalization, dates, sql
-src/dtrack_right/    notebook, Spark-only target/sampling, row/col comparison, scheduler,
-                     S3/Volume store, and report
-tests/               backend, protocol, behavioral parity, local Spark, and live integration tests
-examples/e2e/        two-process end-to-end run with synthetic data
-examples/remote_job/ one-time Databricks setup plus a Windows Left/Right launcher, dashboard refresh, and Outlook delivery
-docker/              Moto S3 simulator
-docs/                workflow, ADRs, plans, notes, slides
+## Verify
+
+```bash
+just test
+just lint
+just build
+```
+
+Live Oracle query/export/timing tests are opt-in and are not part of the default suite:
+
+```bash
+just live
 ```

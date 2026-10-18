@@ -2,11 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from dtrack_left.common.model import hashing
-from dtrack_left.common.sql import sampling as left_sampling
-from dtrack_right.engine.checks import col_check as cloud_col_check
-from dtrack_right.engine.common.model import hashing as cloud_hashing
-from dtrack_right.engine.common.sql import sampling as right_sampling
+from pair_recon_left.common.model import hashing
+from pair_recon_left.common.sql import sampling as left_sampling
+from pair_recon_right.engine.checks import col_check as cloud_col_check
+from pair_recon_right.engine.common.model import hashing as cloud_hashing
+from pair_recon_right.engine.common.sql import sampling as right_sampling
 
 SRC = Path(__file__).resolve().parents[4] / "src"
 RIGHT_MODULES = {
@@ -16,8 +16,8 @@ RIGHT_MODULES = {
 EXACT_MIRRORS = ("audit.py", "hashing.py", "manifest.py", "protocol.py")
 
 
-def test_right_modules():
-    right = SRC / "dtrack_right/engine/common"
+def test_right():
+    right = SRC / "pair_recon_right/engine/common"
     assert {path.name for path in right.iterdir() if path.name != "__pycache__"} == {
         "__init__.py",
         *RIGHT_MODULES,
@@ -27,21 +27,23 @@ def test_right_modules():
 
 
 @pytest.mark.parametrize("name", EXACT_MIRRORS)
-def test_module_parity(name):
-    left = (SRC / "dtrack_left/common/model" / name).read_bytes()
-    right = (SRC / "dtrack_right/engine/common/model" / name).read_bytes()
+def test_module(name):
+    left = (SRC / "pair_recon_left/common/model" / name).read_bytes()
+    right = (SRC / "pair_recon_right/engine/common/model" / name).read_bytes()
     assert left == right
 
 
-def test_right_platforms():
-    from dtrack_left.common.sql.date_platforms import DATE_SQL_PLATFORMS as left_platforms
-    from dtrack_right.engine.common.sql.date_platforms import DATE_SQL_PLATFORMS as right_platforms
+def test_right2():
+    from pair_recon_left.common.sql.date_platforms import DATE_SQL_PLATFORMS as left_platforms
+    from pair_recon_right.engine.common.sql.date_platforms import (
+        DATE_SQL_PLATFORMS as right_platforms,
+    )
 
     assert set(right_platforms) == {"spark", "databricks"}
     assert set(left_platforms) == {"oracle", "spark", "databricks", "hadoop", "athena", "duckdb"}
 
 
-def test_cloud_comparison():
+def test_cloud():
     left = {
         "col_type": "numeric",
         "n_total": 3,
@@ -62,7 +64,7 @@ def test_cloud_comparison():
     assert same["verdict"] == "match" and changed["verdict"] == "diff"
 
 
-def test_key_normalisation():
+def test_key():
     cases = {
         ("007", "numeric"): "7",
         ("007", "string"): "007",
@@ -89,7 +91,7 @@ def test_key_normalisation():
     ],
 )
 @pytest.mark.parametrize("side", ["left", "right"])
-def test_sample_parity(plan, key_tuples, side):
+def test_sample(plan, key_tuples, side):
     arguments = (
         plan,
         ["`id`", "`label`"],

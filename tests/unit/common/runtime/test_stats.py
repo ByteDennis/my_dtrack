@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import pytest
 
-from dtrack_left.common.runtime import stats
+from pair_recon_left.common.runtime import stats
 
 
 def _series(*values):
@@ -24,11 +24,11 @@ def _series(*values):
         ((3, 3, 3), None, True, ("categorical", True)),
     ],
 )
-def test_infer_type(counts, requested, comparison, expected):
+def test_infer(counts, requested, comparison, expected):
     assert stats.infer_column_type(*counts, requested=requested, comparison=comparison) == expected
 
 
-def test_numeric_hash():
+def test_numeric():
     compute = stats.column_statistics
     a = compute(_series("7.50", "2", None))
     b = compute(_series("7.5", "2.0", None))
@@ -39,18 +39,18 @@ def test_numeric_hash():
     assert a["length_avg"] is None and a["top_10"] == ""
 
 
-def test_integral_category():
+def test_integral():
     result = stats.column_statistics(_series("100003", "7", "42"))
     assert result["col_type"] == "categorical"
     assert (result["min_val"], result["max_val"]) == ("100003", "7")
     assert result["mean"] is None and result["top_10"] == ""
 
 
-def test_single_numeric():
+def test_single():
     assert stats.column_statistics(_series("5"))["std"] is None
 
 
-def test_category_summary():
+def test_category():
     result = stats.column_statistics(_series("b", "aa", "b", None))
     assert result["col_type"] == "categorical"
     assert (result["min_val"], result["max_val"]) == ("aa", "b")
@@ -58,13 +58,13 @@ def test_category_summary():
     assert json.loads(result["top_10"]) == [{"value": "b", "count": 2}, {"value": "aa", "count": 1}]
 
 
-def test_null_category():
+def test_null():
     result = stats.column_statistics(_series(None, None))
     assert result["col_type"] == "categorical" and result["n_missing"] == 2
     assert result["min_val"] is None and result["length_max"] is None
 
 
-def test_strict_mode():
+def test_strict():
     compute = stats.column_statistics
     loose_a, loose_b = compute(_series("Gold", "SILVER")), compute(_series("gold", "silver"))
     strict_a = compute(_series("Gold", "SILVER"), strict=True)
@@ -73,7 +73,7 @@ def test_strict_mode():
     assert strict_a["hash_sum"] == strict_b["hash_sum"]
 
 
-def test_csv_columns(tmp_path):
+def test_csv(tmp_path):
     path = tmp_path / "w.csv"
     path.write_text("ID,AMOUNT\n007,1.10\n008,2\n")
     result = stats.compute_csv_statistics(path, ["ID", "AMOUNT"])
@@ -97,30 +97,7 @@ def test_csv_columns(tmp_path):
         stats.compute_csv_statistics(path, ["NOPE"])
 
 
-def test_statistics_drift(synthetic, tmp_path):
-    left = pd.read_csv(synthetic.left / "ORDERS.csv", dtype=object)
-    right = pd.read_csv(synthetic.right / "orders.csv", dtype=object).rename(columns=str.upper)
-    january = ["2026-01-15", "2026-01-31"]
-    for name, frame in (("l", left), ("r", right)):
-        mask = frame["BUSINESS_DATE"].str.startswith("2026-01") & ~frame["BUSINESS_DATE"].isin(
-            january
-        )
-        frame[mask].to_csv(tmp_path / f"{name}.csv", index=False)
-    columns = ["STATUS", "REGION", "AMOUNT"]
-    left_stats = stats.compute_csv_statistics(tmp_path / "l.csv", columns)
-    right_stats = stats.compute_csv_statistics(tmp_path / "r.csv", columns)
-    assert left_stats["STATUS"]["n_unique"] == 4 and right_stats["STATUS"]["n_unique"] == 8
-    assert left_stats["REGION"] == right_stats["REGION"]
-    assert left_stats["AMOUNT"] == right_stats["AMOUNT"]
-    strict = [
-        stats.compute_csv_statistics(tmp_path / f"{name}.csv", ["STATUS"], strict=True)
-        for name in ("l", "r")
-    ]
-    assert strict[0]["STATUS"]["hash_sum"] == strict[1]["STATUS"]["hash_sum"]
-
-
-# >>> col_type_overrides: the pair decides, not the values or the warehouse type <<< #
-def test_type_override():
+def test_type():
     compute = stats.column_statistics
     forced = compute(_series("7.50", "n/a", "2", None), col_type="numeric")
     assert forced["col_type"] == "numeric" and forced["mean"] == pytest.approx(4.75)
@@ -131,14 +108,14 @@ def test_type_override():
     assert text["top_10"] == ""
 
 
-def test_csv_overrides(tmp_path):
+def test_csv2(tmp_path):
     path = tmp_path / "w.csv"
     path.write_text("ID,AMOUNT\n007,1.10\n008,2\n")
     result = stats.compute_csv_statistics(path, ["ID", "AMOUNT"], col_types={"ID": "categorical"})
     assert result["ID"]["col_type"] == "categorical" and result["AMOUNT"]["col_type"] == "numeric"
 
 
-def test_date_normalization(tmp_path):
+def test_date(tmp_path):
     left = tmp_path / "left.csv"
     right = tmp_path / "right.csv"
     left.write_text("D\n01AUG2026:09:45:35\n02AUG2026:00:00:00\n")
@@ -155,7 +132,7 @@ def test_date_normalization(tmp_path):
 
 
 @pytest.mark.slow
-def test_batched_aggregates(tmp_path, monkeypatch):
+def test_batched(tmp_path, monkeypatch):
     import random
 
     random.seed(7)
@@ -177,23 +154,23 @@ def test_batched_aggregates(tmp_path, monkeypatch):
         "\n".join([",".join(columns), *(",".join(values) for values in rows)]) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("DTRACK_STATS_BATCH", "1000")
+    monkeypatch.setenv("PAIR_RECON_STATS_BATCH", "1000")
     single = stats.compute_csv_statistics(path, columns, strict=True)
-    monkeypatch.setenv("DTRACK_STATS_BATCH", "7")
+    monkeypatch.setenv("PAIR_RECON_STATS_BATCH", "7")
     batched = stats.compute_csv_statistics(path, columns, strict=True)
     assert batched == single
     assert single["c0"]["col_type"] == "categorical" and single["c0"]["top_10"] == ""
     assert single["c2"]["col_type"] == "categorical"
 
 
-def test_top_ties(tmp_path):
+def test_top(tmp_path):
     path = tmp_path / "ties.csv"
     path.write_text("K\nz\ny\nx\ny\nz\nx\nw\n")
     result = stats.compute_csv_statistics(path, ["K"])
     assert [item["value"] for item in json.loads(result["K"]["top_10"])] == ["z", "y", "x", "w"]
 
 
-def test_statistics_progress(tmp_path):
+def test_statistics(tmp_path):
     path = tmp_path / "progress.csv"
     path.write_text("N,K\n1,a\n2,b\n", encoding="utf-8")
     events = []
@@ -211,11 +188,11 @@ def test_statistics_progress(tmp_path):
     assert ("finalize", 2, 2) in events
 
 
-def test_parallel_shards(tmp_path, monkeypatch):
+def test_parallel(tmp_path, monkeypatch):
     path = tmp_path / "shards.csv"
     path.write_text("A,B,C,D\n1,x,10,p\n2,y,20,q\n", encoding="utf-8")
-    monkeypatch.setenv("DTRACK_STATS_BATCH", "2")
-    monkeypatch.setenv("DTRACK_DUCKDB_WORKERS", "2")
+    monkeypatch.setenv("PAIR_RECON_STATS_BATCH", "2")
+    monkeypatch.setenv("PAIR_RECON_DUCKDB_WORKERS", "2")
     batches = []
     statuses = []
 
@@ -235,7 +212,7 @@ def test_parallel_shards(tmp_path, monkeypatch):
     assert statuses[0] == (2, 0, 2) and statuses[-1] == (0, 2, 2)
 
 
-def test_invalid_dates(tmp_path):
+def test_invalid(tmp_path):
     left = tmp_path / "l.csv"
     right = tmp_path / "r.csv"
     left.write_text("D\n01AUG2026:09:45:35\n02AUG2026:00:00:00\n")

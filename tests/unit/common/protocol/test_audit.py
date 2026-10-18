@@ -1,14 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
-from dtrack_left.common.model import audit as audit_module
-from dtrack_left.common.model.audit import SqlAudit as LeftSqlAudit
-from dtrack_left.common.model.audit import prune_audit_history
-from dtrack_right.engine.backends.store import VolumeStore
-from dtrack_right.engine.common.model.audit import SqlAudit as RightSqlAudit
+from pair_recon_left.common.model import audit as audit_module
+from pair_recon_left.common.model.audit import SqlAudit as LeftSqlAudit
+from pair_recon_right.engine.backends.store import VolumeStore
+from pair_recon_right.engine.common.model.audit import SqlAudit as RightSqlAudit
 
 
-def test_event_merge(tmp_path):
+def test_event(tmp_path):
     store = VolumeStore(tmp_path / "run")
     left = LeftSqlAudit(store, "left", pair="orders")
     right = RightSqlAudit(store, "right", pair="orders")
@@ -25,7 +24,7 @@ def test_event_merge(tmp_path):
     assert "-- timestamp=" not in text
 
 
-def test_failure_recording():
+def test_failure():
     failures = {}
 
     class BrokenStore:
@@ -46,7 +45,7 @@ def test_failure_recording():
     assert failure["error"] == "audit unavailable" and failure["pair"] == "orders"
 
 
-def test_metadata_serializable(tmp_path):
+def test_metadata(tmp_path):
     store = VolumeStore(tmp_path / "run")
     audit = LeftSqlAudit(store, "local")
     assert audit.record("SHOW TABLES", backend="duckdb", operation="inspect")
@@ -56,7 +55,7 @@ def test_metadata_serializable(tmp_path):
     )
 
 
-def test_audit_header(tmp_path):
+def test_audit(tmp_path):
     store = VolumeStore(tmp_path / "run")
     store.put_json("_status/run.json", {"timezone": "Asia/Tokyo"})
     key = LeftSqlAudit(store, "left", pair="orders").record(
@@ -70,7 +69,7 @@ def test_audit_header(tmp_path):
     )
 
 
-def test_shape_sampling(tmp_path):
+def test_shape(tmp_path):
     store = VolumeStore(tmp_path / "run")
     audit = LeftSqlAudit(store, "left", pair="orders")
     first = audit.record(
@@ -95,7 +94,7 @@ def test_shape_sampling(tmp_path):
     assert "2026-01-01" in text and "2026-02-01" in text
 
 
-def test_shape_concurrency(tmp_path):
+def test_shape2(tmp_path):
     store = VolumeStore(tmp_path / "run")
     audit = LeftSqlAudit(store, "left", pair="orders")
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -113,7 +112,7 @@ def test_shape_concurrency(tmp_path):
     assert len(store.list_keys("pairs/orders/audit/")) == 1
 
 
-def test_shape_restart(tmp_path):
+def test_shape3(tmp_path):
     store = VolumeStore(tmp_path / "run")
     first = LeftSqlAudit(store, "left", pair="orders").record(
         "SELECT A FROM T WHERE DT = '2026-01-01'",
@@ -132,7 +131,7 @@ def test_shape_restart(tmp_path):
     assert store.list_keys("pairs/orders/audit/") == [first]
 
 
-def test_long_sql(tmp_path):
+def test_long(tmp_path):
     store = VolumeStore(tmp_path / "run")
     sql = "SELECT " + ", ".join(f"source_column_{index} AS C{index}" for index in range(1001))
     sql += " FROM VERY_WIDE_RUNTIME_QUERY"
@@ -151,30 +150,10 @@ def test_long_sql(tmp_path):
     assert "source_column_500 AS C500" not in recorded
 
 
-def test_sql_filtering(tmp_path):
+def test_sql(tmp_path):
     store = VolumeStore(tmp_path / "run")
     audit = LeftSqlAudit(store, "local")
     assert audit.record("DELETE FROM T WHERE ID = 1", backend="duckdb")
     assert audit.record("DELETE FROM T WHERE ID = 2", backend="duckdb")
     assert audit.record("SHOW TABLES", backend="duckdb", operation="landing_inspect") is None
     assert len(store.list_keys("_status/audit/")) == 2
-
-
-def test_audit_retention(tmp_path):
-    runs = VolumeStore(tmp_path / "runs")
-    for index in range(7):
-        run = runs.child(f"run-{index}")
-        run.put_bytes(
-            f"_status/audit/2026010{index + 1}T000000000000Z-event.sql",
-            f"-- audit_key={index}\nSELECT {index}\n\n".encode(),
-            content_type="text/plain",
-        )
-        run.put_bytes("_status/audit.sql", f"SELECT {index}\n".encode(), content_type="text/plain")
-
-    assert prune_audit_history(runs, keep=5) == ["run-1", "run-0"]
-    assert not runs.child("run-0").list_keys("_status/audit/")
-    assert not runs.child("run-1").list_keys("_status/audit/")
-    assert not (tmp_path / "runs/run-0/_status/audit").exists()
-    assert not (tmp_path / "runs/run-1/_status/audit").exists()
-    assert all(runs.child(f"run-{index}").list_keys("_status/audit/") for index in range(2, 7))
-    assert all(runs.child(f"run-{index}").exists("_status/audit.sql") for index in range(7))

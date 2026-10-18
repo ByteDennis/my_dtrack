@@ -23,7 +23,7 @@ ROW_CHECK = {
 }
 
 
-def test_unit_id(common):
+def test_unit(common):
     unit_id = common.manifest.unit_id
     assert unit_id("p", "2026-01-01", "AMOUNT") == unit_id("p", "2026-01-01", "AMOUNT")
     assert unit_id("p", "2026-01-01", "AMOUNT").startswith("p--2026-01-01--amount--")
@@ -57,7 +57,7 @@ def test_sample(common, raw, expected, error):
             common.manifest.sample_plan(raw)
 
 
-def test_manifest_windows(common):
+def test_manifest(common):
     manifest = common.manifest.build_manifest("run", "p", PAIR, ROW_CHECK)
     assert manifest["columns"] == ["ID", "AMOUNT"]
     assert manifest["windows"] == [
@@ -113,12 +113,12 @@ def _variant(**changes):
         (_variant(col_type_overrides={"ID": "date"}), ROW_CHECK, "got date"),
     ],
 )
-def test_manifest_invalid(common, pair, row_check, message):
+def test_manifest2(common, pair, row_check, message):
     with pytest.raises(ValueError, match=message):
         common.manifest.build_manifest("run", "p", pair, row_check)
 
 
-def test_manifest_defaults(common):
+def test_manifest3(common):
     manifest = common.manifest.build_manifest(
         "run", "p", _variant(vintage=None, sample=None, key=""), ROW_CHECK
     )
@@ -126,7 +126,7 @@ def test_manifest_defaults(common):
     assert manifest["sample"] == {"mode": "all"}
 
 
-def test_all_window(common):
+def test_all(common):
     pair = {
         "partition_mode": "all",
         "left": {"source": "oracle", "table": "A"},
@@ -148,7 +148,7 @@ def test_all_window(common):
     assert manifest["expected_units"] == 2
 
 
-def test_version_two(common):
+def test_version(common):
     pair = _variant(
         version=2,
         excluded_partitions=["2026-01-02", "2026-02-02"],
@@ -163,7 +163,7 @@ def test_version_two(common):
     ]
 
 
-def test_version_ids(common):
+def test_version2(common):
     first = common.manifest.build_manifest("run", "p", _variant(version=2), ROW_CHECK)
     second = common.manifest.build_manifest(
         "run", "p", _variant(version=2, excluded_partitions=["2026-01-02"]), ROW_CHECK
@@ -192,7 +192,7 @@ def test_version_ids(common):
     assert right_only["plan_id"] != first["plan_id"]
 
 
-def test_date_key(common):
+def test_date(common):
     pair = _variant(
         key="DT",
         key_families={},
@@ -223,7 +223,7 @@ def test_date_key(common):
         (lambda m: m["windows"][0].update(partitions=["b", "a"]), "sorted and unique"),
     ],
 )
-def test_manifest_validation(common, change, message):
+def test_manifest4(common, change, message):
     manifest = common.manifest.build_manifest("run", "p", PAIR, ROW_CHECK)
     change(manifest)
     with pytest.raises(ValueError, match=message):

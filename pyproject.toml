@@ -3,60 +3,44 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "dtrack"
+name = "pair-recon"
 version = "0.1.0"
-description = "S3-coordinated two-stage data reconciliation"
+description = "Oracle and Databricks table-pair reconciliation"
 requires-python = ">=3.11"
 dependencies = [
-    "boto3>=1.34",
-    "click>=8.1",
+    "databricks-sdk>=0.143.0",
     "duckdb>=1.1",
-    "openpyxl>=3.1",
     "oracledb>=3.0",
     "pandas>=2.0",
     "python-dotenv>=1.0",
-    "tqdm>=4.67",
-    "ipdb>=0.13",
-    "debugpy>=1.8",
-]
-
-[project.optional-dependencies]
-athena = ["pyathena>=2.0"]
-confluence = ["atlassian-python-api==5.0.5"]
-hadoop = ["pyodbc>=5.0"]
-ldap = ["ldap3>=2.9"]
-dbx = [
-    "databricks-sdk>=0.40",
+    "pyyaml>=6.0",
     "pywin32>=312; sys_platform == 'win32'",
+    "tqdm>=4.67",
+    "tzlocal>=5.3",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8",
     "pytest-timeout>=2.4,<2.5",
-    "databricks-sdk>=0.143.0",
     "ipykernel>=6.29",
     "nbclient>=0.10",
     "pytest-cov>=7.1.0",
     "ruff>=0.9",
-    "moto[s3]>=5",
     "testcontainers>=4",
 ]
 spark = ["pyspark>=3.5,<4"]
-live = [
-    "databricks-sdk>=0.40",
-    "databricks-connect>=16.4 ; python_version == '3.12'",
-]
+live = ["databricks-connect>=16.4 ; python_version == '3.12'"]
 
 [tool.uv]
 default-groups = ["dev"]
 conflicts = [[{ group = "spark" }, { group = "live" }]]
 
 [project.scripts]
-dtrack = "dtrack.cli:main"
+pair_recon = "pair_recon.app.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dtrack_left", "src/dtrack", "src/dtrack_right", "src/dtrack_local"]
+packages = ["src/pair_recon", "src/pair_recon_left", "src/pair_recon_right"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -64,19 +48,16 @@ pythonpath = ["src", "tests"]
 addopts = "--import-mode=importlib"
 markers = [
     "slow: unit tests that exercise a full pipeline or another intentionally expensive path",
-    "moto: tests/local/s3, needs the Moto S3 container (run with --run-moto)",
     "spark: tests/local/spark, local pyspark session (run with --run-spark)",
     "oracle: tests/local/oracle, Oracle via testcontainers (run with --run-oracle)",
-    "e2e: tests/local/e2e, runs examples/e2e/run_e2e.sh (run with --run-e2e)",
     "live: tests/live, configured external services (run with --run-live)",
     "live_performance: opt-in external source timing profiles without fixed thresholds",
-    "confluence: tests/local/confluence, local Confluence DC 9.2 (just confluence up; run with --run-confluence)",
     "docker: needs a local Docker daemon; skipped when none is reachable (select with -m 'not docker')",
 ]
 
 [tool.coverage.run]
 source = ["src"]
-omit = ["src/dtrack_right/notebook.py"]
+omit = ["src/pair_recon_right/notebook.py"]
 
 [tool.coverage.report]
 show_missing = true
@@ -85,9 +66,10 @@ skip_covered = true
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["src/dtrack_right/notebook.py"]
+extend-exclude = ["src/pair_recon_right/notebook.py"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/dtrack_right/**/*.py" = ["BLE001"]
-"src/dtrack_left/cli/commands/tools.py" = ["T100"]
-"src/dtrack_left/backends/*.py" = ["BLE001"]
+"src/pair_recon_right/**/*.py" = ["BLE001"]
+"src/pair_recon_left/backends/*.py" = ["BLE001"]
+"**/common/model/audit.py" = ["BLE001"]
+"**/common/sql/dates.py" = ["DTZ007"]

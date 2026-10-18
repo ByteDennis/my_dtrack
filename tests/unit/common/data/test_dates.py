@@ -5,7 +5,7 @@ import pytest
 
 
 def require_date_platform(common, dialect):
-    if common.side == "dtrack_right" and dialect not in {"spark", "databricks"}:
+    if common.side == "pair_recon_right" and dialect not in {"spark", "databricks"}:
         pytest.skip("the Databricks package intentionally ships only its Spark adapter")
 
 
@@ -51,14 +51,14 @@ def test_bucket(common, vintage, expected, error):
             common.dates.bucket_date("2026-05-14", vintage)
 
 
-def test_apply_synonyms(common):
+def test_apply(common):
     counts = {"20260101": 2, "2026-01-01": 3, "3000-01-01": 4}
     folded = common.dates.apply_synonyms(counts, {"3000-01-01": "2026-07-01"})
     assert folded == {"2026-01-01": 5, "2026-07-01": 4}
     assert common.dates.apply_synonyms({"20260101": 1}) == {"2026-01-01": 1}
 
 
-def test_contiguous_runs(common):
+def test_contiguous(common):
     runs = common.dates.contiguous_runs(
         ["2026-01-05", "2026-01-01", "2026-01-02", "2026-01-02", "2026-01-03"]
     )
@@ -79,7 +79,7 @@ def test_contiguous_runs(common):
         ("a.b", "sql", '"a.b"'),
     ],
 )
-def test_quote_ident(common, name, dialect, expected):
+def test_quote(common, name, dialect, expected):
     assert common.dates.quote_ident(name, dialect) == expected
 
 
@@ -94,15 +94,15 @@ def test_quote_ident(common, name, dialect, expected):
         ({"type": "sas", "format": "days"}, "24108"),
     ],
 )
-def test_date_literal(common, date_type, expected):
+def test_date(common, date_type, expected):
     assert common.dates.date_literal("2026-01-02", "oracle", date_type) == expected
 
 
-def test_registry_names(common):
+def test_registry(common):
     assert set(common.dates.DATE_TYPES) == {"date", "string", "number", "sas"}
 
 
-def test_builtin_types(common):
+def test_builtin(common):
     dates = common.dates
     assert isinstance(dates.resolve_date_type("date"), dates.NativeDateType)
     assert isinstance(dates.resolve_date_type("string"), dates.StringDateType)
@@ -110,7 +110,7 @@ def test_builtin_types(common):
     assert isinstance(dates.resolve_date_type("sas"), dates.SasDateType)
 
 
-def test_format_classes(common):
+def test_format(common):
     dates = common.dates
     compact = dates.resolve_date_type({"type": "string", "format": "compact"})
     assert isinstance(compact, dates.StringDateType)
@@ -139,12 +139,12 @@ def test_format_classes(common):
         ("sas", ["24108.75", "24109"], {"type": "sas", "format": "days"}),
     ],
 )
-def test_probe_values(common, configured, values, expected):
+def test_probe(common, configured, values, expected):
     detected = common.dates.resolve_date_type(configured).detect(values)
     assert detected.spec(portable=True) == expected
 
 
-def test_probe_invalid(common):
+def test_probe2(common):
     with pytest.raises(ValueError, match="no non-null values"):
         common.dates.resolve_date_type("string").detect([None, ""])
     with pytest.raises(ValueError, match="mixed string date formats"):
@@ -153,12 +153,12 @@ def test_probe_invalid(common):
         common.dates.resolve_date_type("sas").detect(["01AUG2026", "24108"])
 
 
-def test_sas_datetime(common):
+def test_sas(common):
     kind = common.dates.resolve_date_type({"type": "sas", "format": "datetime"})
     assert kind.normalize("01AUG2026:09:45:35") == "2026-08-01"
 
 
-def test_oracle_normalizer(common):
+def test_oracle(common):
     require_date_platform(common, "oracle")
     kind = common.dates.resolve_date_type({"type": "string", "format": "dash"})
     assert kind.normalize_sql("DT", "oracle") == (
@@ -167,7 +167,7 @@ def test_oracle_normalizer(common):
     )
 
 
-def test_register_type(common):
+def test_register(common):
     dates = common.dates
     kind = dates.DateType(
         "test_slash",
@@ -202,12 +202,12 @@ def test_register_type(common):
         "sas_date",
     ],
 )
-def test_removed_names(common, removed_name):
+def test_removed(common, removed_name):
     with pytest.raises(ValueError, match="date, number, sas, string"):
         common.dates.resolve_date_type(removed_name)
 
 
-def test_partition_where(common):
+def test_partition(common):
     where = common.dates.partition_where(
         "dt", ["2026-01-01", "2026-01-02", "2026-01-04"], dialect="oracle", date_type="date"
     )
@@ -218,7 +218,7 @@ def test_partition_where(common):
     assert common.dates.partition_where("dt", [], dialect="spark") == "1=0"
 
 
-def test_bounds_where(common):
+def test_bounds(common):
     bounds_where = common.dates.bounds_where
     assert bounds_where("dt", dialect="spark", date_type=None, from_date=None, to_date=None) is None
     assert (
@@ -276,12 +276,12 @@ def test_bounds_where(common):
         ("spark", "number", "`DT`"),
     ],
 )
-def test_day_expr(common, dialect, date_type, expected):
+def test_day(common, dialect, date_type, expected):
     require_date_platform(common, dialect)
     assert common.dates.day_expr("DT", dialect, date_type) == expected
 
 
-def test_day_bounds(common):
+def test_day2(common):
     where = common.dates.bounds_where(
         "dt", dialect="oracle", date_type="date", from_date="2026-01-30", to_date="2026-12-31"
     )
@@ -298,7 +298,7 @@ def test_day_bounds(common):
     ) == ("((dt = '2026-01-01'))")
 
 
-def test_compact_predicates(common):
+def test_compact(common):
     assert (
         common.dates.bounds_where(
             "dt",
@@ -320,7 +320,7 @@ def test_compact_predicates(common):
     )
 
 
-def test_date9_predicates(common):
+def test_date9(common):
     require_date_platform(common, "oracle")
     where = common.dates.bounds_where(
         "dt",
@@ -336,7 +336,7 @@ def test_date9_predicates(common):
     assert where == f"{parsed} >= DATE '2026-01-31' AND {parsed} < DATE '2026-02-02'"
 
 
-def test_sas_predicates(common):
+def test_sas2(common):
     require_date_platform(common, "oracle")
     where = common.dates.partition_where(
         "dt",
@@ -347,7 +347,7 @@ def test_sas_predicates(common):
     assert where == ("((TRUNC(TO_NUMBER(dt)) >= 24107 AND TRUNC(TO_NUMBER(dt)) < 24109))")
 
 
-def test_inline_type(common):
+def test_inline(common):
     spec = {
         "predicate_sql": {
             "oracle": "TO_DATE({column}, 'YYYY/MM/DD')",
@@ -363,7 +363,7 @@ def test_inline_type(common):
     )
 
 
-def test_portable_spec(common):
+def test_portable(common):
     dates = common.dates
     dates.register_date_type(
         "test_slash",
@@ -393,7 +393,7 @@ def test_portable_spec(common):
         dates.DATE_TYPES.pop("test_slash")
 
 
-def test_sas_family(common):
+def test_sas3(common):
     dates = common.dates
     sas = dates.resolve_date_type("sas")
     assert isinstance(sas, dates.SasDateType)
@@ -404,14 +404,14 @@ def test_sas_family(common):
     assert days.normalize("24108.75") == "2026-01-02"
     spark = dates.day_expr("DT", "spark", days)
     assert "1960-01-01" in spark
-    if common.side == "dtrack_left":
+    if common.side == "pair_recon_left":
         assert "DDMONYYYY" in dates.day_expr("DT", "oracle", date9)
         assert dates.partition_where(
             "DT", ["2026-01-02"], dialect="oracle", date_type=date9
         ).endswith("< DATE '2026-01-03'))")
 
 
-def test_fractional_days(common):
+def test_fractional(common):
     require_date_platform(common, "duckdb")
     dates = common.dates
     kind = dates.resolve_date_type({"type": "sas", "format": "days"})
@@ -423,7 +423,7 @@ def test_fractional_days(common):
     assert [row[0] for row in rows] == [kind.normalize(value) for value in values]
 
 
-def test_sas_specs(common):
+def test_sas4(common):
     dates = common.dates
     inline = dates.resolve_date_type({"type": "sas", "format": "days"})
     assert isinstance(inline, dates.SasDateType)
@@ -442,7 +442,7 @@ def test_sas_specs(common):
         dates.DATE_TYPES.pop("test_sas")
 
 
-def test_custom_normalizers(common):
+def test_custom(common):
     dates = common.dates
     dates.register_date_type(
         "test_slash",
@@ -473,6 +473,6 @@ def test_custom_normalizers(common):
         (7, "date type must be a name or an object"),
     ],
 )
-def test_invalid_types(common, spec, message):
+def test_invalid(common, spec, message):
     with pytest.raises((TypeError, ValueError), match=message):
         common.dates.resolve_date_type(spec)

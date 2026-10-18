@@ -3,8 +3,8 @@ import io
 
 from support import MemoryStore
 
-from dtrack_right.engine.common.model.manifest import unit_id
-from dtrack_right.engine.common.model.protocol import (
+from pair_recon_right.engine.common.model.manifest import unit_id
+from pair_recon_right.engine.common.model.protocol import (
     get_run_status,
     refresh_units_status,
     right_ready_path,
@@ -27,7 +27,7 @@ def _status_rows(store):
     return {row["column"]: row for row in csv.DictReader(io.StringIO(text))}
 
 
-def test_unit_states():
+def test_unit():
     store = MemoryStore()
     store.put_json("pairs/orders/plan.json", _plan())
     assert {row["state"] for row in _status_rows(store).values()} == {"waiting_left"}
@@ -58,7 +58,7 @@ def test_unit_states():
     assert rows["amount"]["completed_at"] and rows["status"]["completed_at"]
 
 
-def test_status_timezone():
+def test_status():
     store = MemoryStore()
     write_run_status(
         store,
