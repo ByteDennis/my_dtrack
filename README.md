@@ -64,6 +64,19 @@ just dbx runs --limit 10
 
 Set `PAIR_RECON_DBX_PROFILE`, `PAIR_RECON_DBX_CLUSTER_ID`, and `PAIR_RECON_DBX_WAREHOUSE_ID` in `.pair_recon.env` to omit repeated options. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. Use `just dbx --debug attach ...` or `just dbx --debug ipdb ...` only when troubleshooting.
 
+## GitLab tools
+
+PairRecon can create a private GitLab project and dispatch a validation-only snapshot through an installed and authenticated `glab` CLI:
+
+```bash
+just gitlab create pair-validation --group GROUP
+just gitlab plan --scope both
+just gitlab dispatch GROUP/pair-validation --scope both --dry-run
+just gitlab dispatch GROUP/pair-validation --scope both
+```
+
+Scopes are `left`, `right`, `both`, and `all`. `both` includes the local orchestrator, Left, Right, shared tests, and setup files. The default [pair_recon.ignore](pair_recon.ignore) excludes DBX, GitLab tooling, credentials, generated output, local/live tests, and caches. Selection walks the filesystem independently of `.gitignore`; negation rules are intentionally unsupported. Dispatch tracks its files in `.pair_recon-dispatch.json`, preserves unrelated destination files, creates a normal commit, and pushes without force. Use `GITLAB_HOST` for a self-managed hostname and `just gitlab --debug attach ...` when troubleshooting.
+
 ## Verify
 
 ```bash

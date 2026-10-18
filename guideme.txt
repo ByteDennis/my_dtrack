@@ -46,6 +46,17 @@ Databricks operator commands use ~/.databrickscfg and may reuse these .pair_reco
 
 Remove --dry-run only after checking planned Workspace paths. Add --overwrite only when replacement is intended. Workspace notebooks regain their language suffix when downloaded.
 
+GitLab snapshots require authenticated glab and git:
+
+  just gitlab create pair-validation --group GROUP
+  just gitlab plan --scope left
+  just gitlab plan --scope right
+  just gitlab plan --scope both
+  just gitlab dispatch GROUP/pair-validation --scope both --dry-run
+  just gitlab dispatch GROUP/pair-validation --scope both
+
+create always requests a private project. left and right select only that side plus shared tests. both adds the local orchestrator and setup but excludes DBX by default. all walks everything not excluded by pair_recon.ignore. This file, not .gitignore, controls the snapshot; use forward-slash patterns and no ! negation. Credentials, private keys, local defaults, and .git are always excluded. Dispatch records controlled files in .pair_recon-dispatch.json, removes only obsolete files from an earlier dispatch, preserves unrelated repository files, makes a normal commit, and never force-pushes.
+
 4. Run
 
   just run
@@ -80,6 +91,7 @@ Normal commands do not enter a debugger. Use ipdb or VS Code attach only when ne
   just run --debug attach
   just sas --debug attach
   just dbx --debug attach compute status
+  just gitlab --debug attach plan --scope both
   just test --debug attach
 
 Attach listens on 0.0.0.0:5678 and waits for a VS Code debugpy attach configuration using localhost:5678. A bare --debug still selects ipdb. Lint/build --debug emits verbose diagnostics. On Windows, a configured Outlook recipient uses the signed-in Outlook desktop profile and attaches left.log.
@@ -93,6 +105,9 @@ Attach listens on 0.0.0.0:5678 and waits for a VS Code debugpy attach configurat
 - Databricks 403/not found: verify profile, warehouse/job ids, UC grants, Volume path, and cluster access.
 - Workspace upload/download failure: run with --dry-run, use an absolute remote path, and check Workspace permissions; symbolic links are rejected.
 - DBX id missing: set PAIR_RECON_DBX_CLUSTER_ID or PAIR_RECON_DBX_WAREHOUSE_ID, or pass the matching option.
+- glab missing or unauthorized: install glab, run glab auth login, and confirm GITLAB_HOST for self-managed GitLab.
+- GitLab snapshot has unexpected files: run plan first, then update pair_recon.ignore; .gitignore does not control dispatch.
+- GitLab push rejected: confirm repository membership, SSH/HTTPS Git credentials, branch rules, and that another user did not update the branch first.
 - Progress table errors: apply the latest schema and confirm INSERT/DELETE permission.
 - Right timeout: for catalog Right, verify job state, Volume visibility, and cluster access; for CSV Right, verify its local path and headers.
 - SAS connection error: set PAIR_RECON_CONNECTION separately for Oracle/ODBC and inspect the generated SQL.

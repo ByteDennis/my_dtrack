@@ -1,24 +1,28 @@
 pair_recon 0.1.0 — 2026-10-18
 
 Added
-- pair_recon_dbx package for Databricks profile login, Workspace upload/download, compute, SQL Warehouse, SQL statement, and job-run operations.
-- just dbx recipe and standalone pair_recon_dbx command.
-- PAIR_RECON_DBX_PROFILE, PAIR_RECON_DBX_CLUSTER_ID, and PAIR_RECON_DBX_WAREHOUSE_ID defaults.
-- Unit coverage for the DBX command router, environment defaults, SDK lifecycle helpers, UTF-8 Workspace transfer, notebook suffix handling, and recursive downloads.
+- pair_recon_gitlab package for private GitLab project creation, validation snapshot planning, and normal commit/push dispatch.
+- left, right, both, and all dispatch scopes.
+- pair_recon.ignore as the snapshot exclusion source, independent of .gitignore.
+- just gitlab recipe and standalone pair_recon_gitlab command with optional debug attach/ipdb.
+- Unit coverage for scope selection, protected files, private create commands, remote validation, first/repeated local Git pushes, CLI routing, and packaging.
 
 Changed
-- pair_recon dbx now delegates to the same DBX command implementation.
-- Package/build verification now includes pair_recon_dbx.
-- README and guideme.txt document DBX commands, debug attach, safety checks, and common failures.
+- pair_recon gitlab delegates to the shared GitLab CLI implementation.
+- Snapshot pyproject.toml and justfile entries are reduced to packages actually dispatched.
+- Environment example, README, and guideme.txt document GitLab host, preview, dispatch, safety, and troubleshooting.
 
 Removed
 - No tracked files or existing capabilities were removed.
 
 Verification
-- 526 unit tests pass; 12 optional tests skip.
+- 542 unit tests pass; 12 optional tests skip.
 - Ruff check and format checks pass.
-- Wheel and source distribution build successfully and include pair_recon_dbx.
+- Wheel and source distribution build successfully and include pair_recon_gitlab.
 - 9 live source tests collect successfully and were not executed.
+- Dispatched snapshots pass 34 Left tests, 73 Right tests, and 508 Both tests with 12 optional skips.
+- Local bare-repository tests prove first push, repeated dispatch, ordinary-file preservation, and no force-push.
+- No GitLab project was created and no external GitLab push was performed.
 
 File manifest
 M	.pair_recon.env.example
@@ -26,12 +30,13 @@ M	README.md
 M	changelog.txt
 M	guideme.txt
 M	justfile
+A	pair_recon.ignore
 M	pyproject.toml
 M	src/pair_recon/app/cli.py
-A	src/pair_recon_dbx/__init__.py
-A	src/pair_recon_dbx/cli.py
-A	src/pair_recon_dbx/runtime.py
-A	src/pair_recon_dbx/workspace.py
+A	src/pair_recon_gitlab/__init__.py
+A	src/pair_recon_gitlab/cli.py
+A	src/pair_recon_gitlab/dispatch.py
+A	src/pair_recon_gitlab/snapshot.py
 M	tests/unit/flows/test_packaging.py
-A	tests/unit/packages/pair_recon_dbx/test_cli.py
-A	tests/unit/packages/pair_recon_dbx/test_ops.py
+A	tests/unit/packages/pair_recon_gitlab/test_cli.py
+A	tests/unit/packages/pair_recon_gitlab/test_dispatch.py

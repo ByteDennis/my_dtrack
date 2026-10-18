@@ -43,9 +43,10 @@ conflicts = [[{ group = "spark" }, { group = "live" }]]
 [project.scripts]
 pair_recon = "pair_recon.app.cli:main"
 pair_recon_dbx = "pair_recon_dbx.cli:main"
+pair_recon_gitlab = "pair_recon_gitlab.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pair_recon", "src/pair_recon_dbx", "src/pair_recon_left", "src/pair_recon_right"]
+packages = ["src/pair_recon", "src/pair_recon_dbx", "src/pair_recon_gitlab", "src/pair_recon_left", "src/pair_recon_right"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

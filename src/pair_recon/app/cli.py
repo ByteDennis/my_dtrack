@@ -312,6 +312,10 @@ def main(argv=None) -> int:
         from pair_recon_dbx.cli import main as dbx_main
 
         return dbx_main(values[1:])
+    if values[:1] == ["gitlab"]:
+        from pair_recon_gitlab.cli import main as gitlab_main
+
+        return gitlab_main(values[1:])
     parser = argparse.ArgumentParser(prog="pair_recon")
     parser.add_argument("--defaults", type=Path, default=DEFAULTS)
     parser.add_argument("--log-level", default="INFO")
