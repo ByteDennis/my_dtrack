@@ -23,16 +23,20 @@ def test_layout():
 def test_packages():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert project["project"]["name"] == "pair-recon"
-    assert project["project"]["scripts"] == {"pair_recon": "pair_recon.app.cli:main"}
+    assert project["project"]["scripts"] == {
+        "pair_recon": "pair_recon.app.cli:main",
+        "pair_recon_dbx": "pair_recon_dbx.cli:main",
+    }
     assert project["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == [
         "src/pair_recon",
+        "src/pair_recon_dbx",
         "src/pair_recon_left",
         "src/pair_recon_right",
     ]
 
 
 def test_imports():
-    code = "import pair_recon, pair_recon_left, pair_recon_right; print('ok')"
+    code = "import pair_recon, pair_recon_dbx, pair_recon_left, pair_recon_right; print('ok')"
     result = subprocess.run(
         [sys.executable, "-c", code],
         cwd=ROOT,

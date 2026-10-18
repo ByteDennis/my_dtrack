@@ -42,9 +42,10 @@ conflicts = [[{ group = "spark" }, { group = "live" }]]
 
 [project.scripts]
 pair_recon = "pair_recon.app.cli:main"
+pair_recon_dbx = "pair_recon_dbx.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pair_recon", "src/pair_recon_left", "src/pair_recon_right"]
+packages = ["src/pair_recon", "src/pair_recon_dbx", "src/pair_recon_left", "src/pair_recon_right"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -75,5 +76,6 @@ extend-exclude = ["src/pair_recon_right/notebook.py"]
 [tool.ruff.lint.per-file-ignores]
 "src/pair_recon_right/**/*.py" = ["BLE001"]
 "src/pair_recon_left/backends/*.py" = ["BLE001"]
+"src/pair_recon_dbx/workspace.py" = ["BLE001"]
 "**/common/model/audit.py" = ["BLE001"]
 "**/common/sql/dates.py" = ["DTZ007"]

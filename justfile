@@ -23,6 +23,9 @@ build *args:
 run *args:
     uv run --extra debug pair_recon {{args}}
 
+dbx *args:
+    uv run --extra debug pair_recon dbx {{args}}
+
 live *args:
     if [ "{{args}}" = "--debug attach" ]; then uv run --extra debug python -m debugpy --listen 5678 --wait-for-client -m pytest -x -s --run-live tests/live/sources/test_source_queries.py; elif [ "{{args}}" = "--debug" ] || [ "{{args}}" = "--debug ipdb" ]; then uv run --extra debug pytest -v -s --pdb --pdbcls=IPython.terminal.debugger:TerminalPdb --run-live tests/live/sources/test_source_queries.py; elif [ -n "{{args}}" ]; then echo "usage: just live [--debug ipdb|attach]" >&2; exit 2; else uv run pytest -v -s --run-live tests/live/sources/test_source_queries.py; fi
 

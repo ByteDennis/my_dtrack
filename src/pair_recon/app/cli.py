@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import yaml
@@ -306,10 +307,15 @@ def execute(args) -> int:
 
 
 def main(argv=None) -> int:
+    values = list(sys.argv[1:] if argv is None else argv)
+    if values[:1] == ["dbx"]:
+        from pair_recon_dbx.cli import main as dbx_main
+
+        return dbx_main(values[1:])
     parser = argparse.ArgumentParser(prog="pair_recon")
     parser.add_argument("--defaults", type=Path, default=DEFAULTS)
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--debug", nargs="?", const="ipdb", choices=("ipdb", "attach"))
-    args = parser.parse_args(argv)
+    args = parser.parse_args(values)
     configure_console_logging(args.log_level)
     return run_debugger(args.debug, lambda: execute(args))

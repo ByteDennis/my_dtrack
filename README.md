@@ -48,6 +48,22 @@ Supported checks are `row_count`, `hash_sum`, and `n_unique`. `partition_mode=al
 
 For a current-view Left source against Right history, set `snapshot: true` in that pair's metadata. Left is counted as a complete snapshot; Right chooses the latest partition in the configured range whose row count matches, then column checks compare the snapshot with that partition.
 
+## Databricks tools
+
+`just dbx` uses the Databricks SDK profile without storing credentials in PairRecon files:
+
+```bash
+just dbx login --no-open
+just dbx workspace upload src/pair_recon_right /Workspace/Users/name/pair_recon_right --dry-run
+just dbx workspace download /Workspace/Users/name/pair_recon_right downloaded-right
+just dbx compute status --cluster-id CLUSTER_ID
+just dbx warehouse status --warehouse-id WAREHOUSE_ID
+just dbx sql "SELECT current_user()" --warehouse-id WAREHOUSE_ID
+just dbx runs --limit 10
+```
+
+Set `PAIR_RECON_DBX_PROFILE`, `PAIR_RECON_DBX_CLUSTER_ID`, and `PAIR_RECON_DBX_WAREHOUSE_ID` in `.pair_recon.env` to omit repeated options. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. Use `just dbx --debug attach ...` or `just dbx --debug ipdb ...` only when troubleshooting.
+
 ## Verify
 
 ```bash

@@ -28,6 +28,24 @@ Hadoop uses HADOOP_DSN, default hive; the prompt asks only for schema and reuses
 
 Record the Right job id when Right uses Databricks. A local Right CSV does not start this job. Both paths need UC metadata/results tables and the UC Volume.
 
+Databricks operator commands use ~/.databrickscfg and may reuse these .pair_recon.env defaults:
+
+  PAIR_RECON_DBX_PROFILE=corp
+  PAIR_RECON_DBX_CLUSTER_ID=...
+  PAIR_RECON_DBX_WAREHOUSE_ID=...
+
+  just dbx login --no-open
+  just dbx workspace upload src/pair_recon_right /Workspace/Users/name/pair_recon_right --dry-run
+  just dbx workspace download /Workspace/Users/name/pair_recon_right downloaded-right
+  just dbx compute status
+  just dbx compute start --wait
+  just dbx warehouse status
+  just dbx warehouse start --wait
+  just dbx sql "SELECT current_user()"
+  just dbx runs --limit 10
+
+Remove --dry-run only after checking planned Workspace paths. Add --overwrite only when replacement is intended. Workspace notebooks regain their language suffix when downloaded.
+
 4. Run
 
   just run
@@ -61,6 +79,7 @@ Normal commands do not enter a debugger. Use ipdb or VS Code attach only when ne
   just run --debug ipdb
   just run --debug attach
   just sas --debug attach
+  just dbx --debug attach compute status
   just test --debug attach
 
 Attach listens on 0.0.0.0:5678 and waits for a VS Code debugpy attach configuration using localhost:5678. A bare --debug still selects ipdb. Lint/build --debug emits verbose diagnostics. On Windows, a configured Outlook recipient uses the signed-in Outlook desktop profile and attaches left.log.
@@ -72,6 +91,8 @@ Attach listens on 0.0.0.0:5678 and waits for a VS Code debugpy attach configurat
 - Oracle connection fails: verify user/password/DSN variables without printing secrets.
 - CSV missing or mojibake: use an existing local path and save UTF-8; verify delimiter/read_csv options.
 - Databricks 403/not found: verify profile, warehouse/job ids, UC grants, Volume path, and cluster access.
+- Workspace upload/download failure: run with --dry-run, use an absolute remote path, and check Workspace permissions; symbolic links are rejected.
+- DBX id missing: set PAIR_RECON_DBX_CLUSTER_ID or PAIR_RECON_DBX_WAREHOUSE_ID, or pass the matching option.
 - Progress table errors: apply the latest schema and confirm INSERT/DELETE permission.
 - Right timeout: for catalog Right, verify job state, Volume visibility, and cluster access; for CSV Right, verify its local path and headers.
 - SAS connection error: set PAIR_RECON_CONNECTION separately for Oracle/ODBC and inspect the generated SQL.

@@ -1,64 +1,37 @@
 pair_recon 0.1.0 — 2026-10-18
 
 Added
-- Hadoop Left source through pyodbc and an ODBC DSN.
-- UTF-8 local CSV Left source through DuckDB read_csv.
-- Periodic Unity Catalog progress snapshots with run/unit counts and active worker threads.
-- Optional SAS bundle generation: Left only by default, or Right/both on request.
-- Interactive local CSV override in the normal run command, reusing the existing multithread statistics path.
-- Local CSV Right target in the same normal run command; local Right skips Databricks job startup while retaining UC results and progress.
-- Sample provenance reuse so a non-sampled counterpart applies the same deterministic predicate.
-- Restored --debug ipdb and --debug attach modes; VS Code attach uses debugpy port 5678.
-- Concise end-to-end setup, run, SAS, CSV, progress, Outlook, and troubleshooting guide.
+- pair_recon_dbx package for Databricks profile login, Workspace upload/download, compute, SQL Warehouse, SQL statement, and job-run operations.
+- just dbx recipe and standalone pair_recon_dbx command.
+- PAIR_RECON_DBX_PROFILE, PAIR_RECON_DBX_CLUSTER_ID, and PAIR_RECON_DBX_WAREHOUSE_ID defaults.
+- Unit coverage for the DBX command router, environment defaults, SDK lifecycle helpers, UTF-8 Workspace transfer, notebook suffix handling, and recursive downloads.
 
 Changed
-- Local column pulls now use named bounded worker threads visible in progress snapshots.
-- Row counts apply the same deterministic sample when only one side is already sampled.
-- Hadoop validation accepts query-only metadata or schema plus table.
-- Just recipes avoid shell startup warnings while keeping debug opt-in.
-- Live source tests cover configured Oracle, Hadoop, and CSV query/DataFrame/CSV/timing paths.
-- setup/schema.sql now includes pair_recon_progress_snapshot.
-- README and environment examples document the restored workflows.
+- pair_recon dbx now delegates to the same DBX command implementation.
+- Package/build verification now includes pair_recon_dbx.
+- README and guideme.txt document DBX commands, debug attach, safety checks, and common failures.
 
 Removed
-- No files or capabilities were removed in this change.
+- No tracked files or existing capabilities were removed.
 
 Verification
-- 511 unit tests pass; 12 optional tests skip.
-- 9 live tests collect successfully and were not executed.
+- 526 unit tests pass; 12 optional tests skip.
 - Ruff check and format checks pass.
-- Wheel and source distribution build successfully.
+- Wheel and source distribution build successfully and include pair_recon_dbx.
+- 9 live source tests collect successfully and were not executed.
 
 File manifest
 M	.pair_recon.env.example
 M	README.md
 M	changelog.txt
-A	guideme.txt
+M	guideme.txt
 M	justfile
 M	pyproject.toml
-M	setup/schema.sql
-M	src/pair_recon/app/catalog.py
 M	src/pair_recon/app/cli.py
-M	src/pair_recon/app/runner.py
-A	src/pair_recon/core/debug.py
-A	src/pair_recon/core/progress.py
-A	src/pair_recon/core/sas.py
-M	src/pair_recon_left/backends/sources.py
-M	src/pair_recon_left/cli/config.py
-M	src/pair_recon_left/common/checks/col_check.py
-M	src/pair_recon_left/common/checks/row_check.py
-M	src/pair_recon_left/common/model/manifest.py
-M	src/pair_recon_right/catalog.py
-M	src/pair_recon_right/engine/backends/targets.py
-M	src/pair_recon_right/engine/checks/row_check.py
-M	src/pair_recon_right/engine/common/model/manifest.py
-M	src/pair_recon_right/engine/job.py
-M	tests/live/sources/test_source_queries.py
-M	tests/unit/common/protocol/test_manifest.py
-M	tests/unit/packages/pair_recon/test_catalog.py
-M	tests/unit/packages/pair_recon/test_runner.py
-M	tests/unit/packages/pair_recon_left/backends/test_sources.py
-M	tests/unit/packages/pair_recon_left/cli/test_config.py
-M	tests/unit/packages/pair_recon_right/backends/test_targets.py
-M	tests/unit/packages/pair_recon_right/checks/test_row_check.py
-M	uv.lock
+A	src/pair_recon_dbx/__init__.py
+A	src/pair_recon_dbx/cli.py
+A	src/pair_recon_dbx/runtime.py
+A	src/pair_recon_dbx/workspace.py
+M	tests/unit/flows/test_packaging.py
+A	tests/unit/packages/pair_recon_dbx/test_cli.py
+A	tests/unit/packages/pair_recon_dbx/test_ops.py
