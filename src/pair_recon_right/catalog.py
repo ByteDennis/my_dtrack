@@ -1,9 +1,6 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from delta.tables import DeltaTable
-from pyspark.sql import functions as F
-
 from .engine.common.model.protocol import list_failures, list_results, list_row_results
 
 
@@ -72,6 +69,9 @@ def error_rows(store, run_id, pair, now):
 def publish(
     spark, store, *, run_id, pair, owner, timezone, pair_table, status_table, error_table, state
 ):
+    from delta.tables import DeltaTable
+    from pyspark.sql import functions as F
+
     spark.conf.set("spark.sql.session.timeZone", timezone)
     spark.conf.set("spark.sql.timestampType", "TIMESTAMP_NTZ")
     now = datetime.now(ZoneInfo(timezone)).replace(tzinfo=None)

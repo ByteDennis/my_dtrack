@@ -1,0 +1,86 @@
+pair_recon guide
+
+1. Prepare
+
+Install uv, Python 3.11+, Databricks CLI/profile access, and an ODBC driver when Hadoop is used.
+
+  uv sync
+  uv sync --extra hadoop
+  copy .pair_recon.env.example .pair_recon.env        Windows
+  cp .pair_recon.env.example .pair_recon.env          Linux
+
+Keep Oracle/Hadoop secrets only in .pair_recon.env or the operating-system ODBC DSN. Databricks credentials stay in ~/.databrickscfg. Local .pair_recon.yaml contains defaults, never secrets. All text files and sampled CSVs are UTF-8.
+
+2. Unity Catalog
+
+Create or confirm pair_recon_pair_meta, pair_recon_run_status, pair_recon_run_error, and pair_recon_progress_snapshot using setup/schema.sql. Pair metadata config_json selects one Left source:
+
+  Oracle: {"source":"oracle","table":"L","conn_macro":"pb30"}
+  Hadoop: {"source":"hadoop","schema":"risk","table":"L"}
+  CSV:    {"source":"csv","path":"C:/data/left.csv"}
+
+Hadoop uses HADOOP_DSN, default hive; the prompt asks only for schema and reuses the pair table. A query-only Hadoop definition is also valid. CSV accepts nullstr, date_format, and DuckDB read_csv options. Use forward slashes or a quoted Windows path. Right metadata remains Databricks, but the run prompt may replace it with a local CSV. One execution handles one pair; concurrent run_ids may handle the same pair safely.
+
+3. One-time remote setup
+
+  ./setup/setup.sh --profile corp --workspace-dir /Workspace/Users/name/pair_recon --cluster-id CLUSTER_ID
+  setup\setup.cmd --profile corp --workspace-dir /Workspace/Users/name/pair_recon --cluster-id CLUSTER_ID
+
+Record the Right job id when Right uses Databricks. A local Right CSV does not start this job. Both paths need UC metadata/results tables and the UC Volume.
+
+4. Run
+
+  just run
+  ./run.sh
+  run.cmd
+
+Prompts reuse .pair_recon.yaml defaults when Enter is pressed. Confirm owner, profile, warehouse, four tables, Volume, optional Outlook recipients, pair, Left input, Right input, timezone, checks, range, run_id, and action. Left supports catalog, hadoop, or csv. Right supports catalog or csv; Right job id is asked only for catalog. SAS request.yaml restores exact partition/range/sample defaults. Resume keeps successful artifacts and retries failed/different work. Restart clears only that run_id.
+
+PAIR_RECON_DUCKDB_WORKERS controls local statistics threads; pull_workers in .pair_recon.yaml controls source pulls. progress_interval controls seconds between progress rows. Query pair_recon_progress_snapshot by run_id for state, ready/completed/failed units, and active pair_recon thread names.
+
+5. Optional SAS sampling
+
+  just sas                              creates/updates left.sas only
+  just sas side=right                   creates/updates right.sas only
+  just sas side=both                    creates/updates both scripts
+  just sas rate=0.01 bundle=work/sas
+
+Separate runs preserve the other script and any sampled CSV already present. Set PAIR_RECON_CONNECTION to SAS connection options for the side being run, then run left.sas and/or right.sas manually. The expected files are left_sample.csv and right_sample.csv in the bundle. Scripts contain no credentials.
+
+After SAS writes one or both CSVs, start the normal tool:
+
+  run.cmd
+  just run
+
+Keep request.yaml beside the CSVs. Choose Left input=csv for left_sample.csv and Right input=csv for right_sample.csv. Either side may stay on its catalog source. When Right is CSV, the normal run compares locally without starting Databricks Right; UC status, errors, progress, artifacts, multithread statistics, and Outlook remain active. If request.yaml was moved, enter the exact SAS mode/range/rate manually. There is no csv-run command.
+
+6. Debug and email
+
+Normal commands do not enter a debugger. Add --debug only when needed:
+
+  just run --debug
+  just sas --debug
+  just test --debug
+
+Run/SAS exceptions open ipdb. Test failures stop in an interactive debugger. Lint/build --debug emits verbose diagnostics. On Windows, a configured Outlook recipient uses the signed-in Outlook desktop profile and attaches left.log.
+
+7. Common failures
+
+- pyodbc missing: run uv sync --extra hadoop.
+- Hadoop DSN not found: create the same-bit hive ODBC DSN/driver or update HADOOP_DSN; the run prompt needs only schema.
+- Oracle connection fails: verify user/password/DSN variables without printing secrets.
+- CSV missing or mojibake: use an existing local path and save UTF-8; verify delimiter/read_csv options.
+- Databricks 403/not found: verify profile, warehouse/job ids, UC grants, Volume path, and cluster access.
+- Progress table errors: apply the latest schema and confirm INSERT/DELETE permission.
+- Right timeout: for catalog Right, verify job state, Volume visibility, and cluster access; for CSV Right, verify its local path and headers.
+- SAS connection error: set PAIR_RECON_CONNECTION separately for Oracle/ODBC and inspect the generated SQL.
+- Sample CSV mismatch: preserve key/mapped headers, keep request.yaml beside the CSV, and confirm both sides use its mode/range/rate.
+- Outlook failure: use Windows desktop Outlook with a signed-in profile; non-Windows runs skip mail unless recipients are empty.
+
+8. Verify
+
+  just test
+  just lint
+  just build
+
+Live tests are opt-in. Do not run just live unless real source credentials and network access are intended.

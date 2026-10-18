@@ -2,9 +2,11 @@ import argparse
 import json
 from pathlib import Path
 
+import yaml
 from dotenv import find_dotenv, load_dotenv
 from tzlocal import get_localzone_name
 
+from pair_recon.core.debug import attach
 from pair_recon.mail import send_outlook
 from pair_recon_left.common.runtime.run_logging import configure_console_logging, get_logger
 
@@ -58,6 +60,20 @@ def sample_value(value: str):
     return int(number) if number.is_integer() and number > 1 else number
 
 
+def csv_defaults(path: str, pair: str, side: str) -> dict:
+    request = Path(path).with_name("request.yaml")
+    if not request.is_file():
+        return {}
+    value = yaml.safe_load(request.read_text(encoding="utf-8")) or {}
+    if value.get("format") != "pair-recon-sas-v1" or value.get("pair") != pair:
+        return {}
+    generated = value.get("generated") or {}
+    if side not in generated or (value.get("outputs") or {}).get(side) != Path(path).name:
+        return {}
+    rate = generated[side].get("rate", value.get("rate"))
+    return {**value, "sample": rate}
+
+
 def prompts(defaults: dict, *, workspace_factory=workspace):
     owner = ask("Run owner", defaults.get("owner"))
     profile = ask("Databricks profile", defaults.get("profile", "corp"))
@@ -65,22 +81,102 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
     pair_table = ask("Pair metadata table", defaults.get("pair_table"))
     status_table = ask("Run status table", defaults.get("status_table"))
     error_table = ask("Run error table", defaults.get("error_table"))
+    progress_default = defaults.get("progress_table")
+    if not progress_default and status_table.count(".") == 2:
+        progress_default = status_table.rsplit(".", 1)[0] + ".pair_recon_progress_snapshot"
+    progress_table = ask("Progress snapshot table", progress_default)
     volume_root = ask("Volume runs path", defaults.get("volume_root"))
-    right_job_id = ask("Right job id", defaults.get("right_job_id"))
     email_to = ask("Outlook recipients", defaults.get("email_to"), required=False)
     client = workspace_factory(profile)
-    catalog = Catalog(StatementSql(client, warehouse), pair_table, status_table, error_table)
+    catalog = Catalog(
+        StatementSql(client, warehouse),
+        pair_table,
+        status_table,
+        error_table,
+        progress_table,
+    )
     rows = catalog.pairs()
     by_name = {row["pair_name"]: row for row in rows}
     if not by_name:
         raise RuntimeError("pair metadata has no enabled pair")
     pair = choose("Table pair", list(by_name), defaults.get("pair"))
     metadata = pair_config(by_name[pair])
+    left_input = choose(
+        "Left input", ["catalog", "hadoop", "csv"], defaults.get("left_input", "catalog")
+    )
+    left_csv = str(defaults.get("left_csv") or "")
+    right_csv = str(defaults.get("right_csv") or "")
+    hadoop_schema = str(defaults.get("hadoop_schema") or "")
+    provenances = []
+    if left_input == "csv":
+        left_csv = ask("Left CSV path", left_csv)
+        provenances.append(csv_defaults(left_csv, pair, "left"))
+        inherited = metadata["left"]
+        metadata = {
+            **metadata,
+            "pre_sampled": True,
+            "left": {
+                "source": "csv",
+                "path": left_csv,
+                **{
+                    name: inherited[name] for name in ("date_col", "date_type") if name in inherited
+                },
+            },
+        }
+    elif left_input == "hadoop":
+        hadoop_schema = ask("Hadoop schema", hadoop_schema or metadata["left"].get("schema"))
+        inherited = metadata["left"]
+        if not inherited.get("table"):
+            raise ValueError("Hadoop override requires a table in pair metadata")
+        metadata = {
+            **metadata,
+            "left": {
+                "source": "hadoop",
+                "schema": hadoop_schema,
+                "table": inherited["table"],
+                **{
+                    name: inherited[name]
+                    for name in ("date_col", "date_type", "where")
+                    if name in inherited
+                },
+            },
+        }
+    right_input = choose("Right input", ["catalog", "csv"], defaults.get("right_input", "catalog"))
+    right_job_id = str(defaults.get("right_job_id") or "")
+    if right_input == "csv":
+        if not right_csv and left_csv:
+            right_csv = str(Path(left_csv).with_name("right_sample.csv"))
+        right_csv = ask("Right CSV path", right_csv)
+        provenances.append(csv_defaults(right_csv, pair, "right"))
+        inherited = metadata["right"]
+        metadata = {
+            **metadata,
+            "right_pre_sampled": True,
+            "right": {
+                "source": "csv",
+                "path": right_csv,
+                "pre_sampled": True,
+                **{
+                    name: inherited[name] for name in ("date_col", "date_type") if name in inherited
+                },
+            },
+        }
+    else:
+        right_job_id = ask("Right job id", right_job_id)
+    provenances = [value for value in provenances if value]
+    provenance = provenances[0] if provenances else {}
+    for value in provenances[1:]:
+        fields = ("partition_mode", "from_date", "to_date", "vintage", "sample")
+        if any(value.get(field) != provenance.get(field) for field in fields):
+            raise ValueError("Left and Right CSV provenance does not match")
     timezone = ask("IANA timezone", defaults.get("timezone", timezone_default()))
     mode = choose(
         "Partition mode",
         ["date", "all"],
-        defaults.get("partition_mode", metadata.get("partition_mode", "date")),
+        provenance.get(
+            "partition_mode",
+            defaults.get("partition_mode", metadata.get("partition_mode", "date")),
+        ),
     )
     checks = ask("Checks", defaults.get("checks", "row_count,hash_sum,n_unique"))
     selected = [value.strip() for value in checks.split(",") if value.strip()]
@@ -90,17 +186,19 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
     answers = {
         "partition_mode": mode,
         "checks": selected,
-        "sample": sample_value(ask("Sample", defaults.get("sample", "all"))),
+        "sample": sample_value(
+            ask("Sample", provenance.get("sample", defaults.get("sample", "all")))
+        ),
         "strict": yes_no("Strict normalization", bool(defaults.get("strict", False))),
     }
     if mode == "date":
         answers.update(
-            from_date=ask("From date", defaults.get("from_date")),
-            to_date=ask("To date", defaults.get("to_date")),
+            from_date=ask("From date", provenance.get("from_date", defaults.get("from_date"))),
+            to_date=ask("To date", provenance.get("to_date", defaults.get("to_date"))),
             vintage=choose(
                 "Vintage",
                 ["day", "week", "month", "quarter", "year"],
-                defaults.get("vintage", metadata.get("vintage", "day")),
+                provenance.get("vintage", defaults.get("vintage", metadata.get("vintage", "day"))),
             ),
         )
     generated = make_run_id(pair, owner, timezone)
@@ -122,10 +220,16 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "pair_table": pair_table,
         "status_table": status_table,
         "error_table": error_table,
+        "progress_table": progress_table,
         "volume_root": volume_root,
         "right_job_id": right_job_id,
         "email_to": email_to,
         "pair": pair,
+        "left_input": left_input,
+        "right_input": right_input,
+        "left_csv": left_csv,
+        "right_csv": right_csv,
+        "hadoop_schema": hadoop_schema,
         "run_id": run_id,
         "last_run_id": run_id,
         "timezone": timezone,
@@ -135,6 +239,8 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "strict": answers["strict"],
         "work_dir": defaults.get("work_dir", ".pair_recon-work"),
         "timeout": defaults.get("timeout", 120),
+        "progress_interval": defaults.get("progress_interval", 10),
+        "pull_workers": defaults.get("pull_workers", 2),
     }
     for key in ("from_date", "to_date", "vintage"):
         if key in answers:
@@ -147,6 +253,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="pair_recon")
     parser.add_argument("--defaults", type=Path, default=DEFAULTS)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args(argv)
     configure_console_logging(args.log_level)
     load_dotenv(find_dotenv(filename=".pair_recon.env", usecwd=True))
@@ -201,4 +308,6 @@ def main(argv=None) -> int:
                 )
             except Exception:
                 log.exception("Outlook notification failed")
+        if args.debug:
+            attach(exc.__traceback__)
         return 1

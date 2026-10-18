@@ -1,24 +1,30 @@
-set shell := ["bash", "-cu"]
+set shell := ["bash", "-c"]
 
 default:
     @just --list --unsorted
 
-sync:
-    uv sync
+sync *args:
+    if [ "{{args}}" = "--debug" ]; then uv -v sync --extra debug; elif [ -n "{{args}}" ]; then echo "usage: just sync [--debug]" >&2; exit 2; else uv sync; fi
 
-test:
-    uv run pytest -q --timeout=60 tests/unit
+test *args:
+    if [ "{{args}}" = "--debug" ]; then uv run --extra debug pytest -q --timeout=60 --pdb --pdbcls=IPython.terminal.debugger:TerminalPdb tests/unit; elif [ -n "{{args}}" ]; then echo "usage: just test [--debug]" >&2; exit 2; else uv run pytest -q --timeout=60 tests/unit; fi
 
-lint:
-    uv run ruff check src tests/unit tests/live/sources
-    uv run ruff format --check src tests/unit tests/live/sources
+lint *args:
+    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; elif [ -n "{{args}}" ]; then echo "usage: just lint [--debug]" >&2; exit 2; else verbose=""; fi; uv run ruff check $verbose src tests/unit tests/live/sources
+    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; else verbose=""; fi; uv run ruff format $verbose --check src tests/unit tests/live/sources
 
-format:
-    uv run ruff format src tests/unit tests/live/sources
-    uv run ruff check --fix src tests/unit tests/live/sources
+format *args:
+    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; elif [ -n "{{args}}" ]; then echo "usage: just format [--debug]" >&2; exit 2; else verbose=""; fi; uv run ruff format $verbose src tests/unit tests/live/sources
+    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; else verbose=""; fi; uv run ruff check $verbose --fix src tests/unit tests/live/sources
 
-build:
-    uv build
+build *args:
+    if [ "{{args}}" = "--debug" ]; then uv build --verbose; elif [ -n "{{args}}" ]; then echo "usage: just build [--debug]" >&2; exit 2; else uv build; fi
 
-live:
-    uv run pytest -v -s --run-live tests/live/sources/test_source_queries.py
+run *args:
+    uv run --extra debug pair_recon {{args}}
+
+live *args:
+    if [ "{{args}}" = "--debug" ]; then uv run --extra debug pytest -v -s --pdb --pdbcls=IPython.terminal.debugger:TerminalPdb --run-live tests/live/sources/test_source_queries.py; elif [ -n "{{args}}" ]; then echo "usage: just live [--debug]" >&2; exit 2; else uv run pytest -v -s --run-live tests/live/sources/test_source_queries.py; fi
+
+sas *args:
+    uv run --extra debug python -m pair_recon.core.sas export {{args}}

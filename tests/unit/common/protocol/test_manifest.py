@@ -104,7 +104,7 @@ def _variant(**changes):
 @pytest.mark.parametrize(
     ("pair", "row_check", "message"),
     [
-        (_variant(right={"source": "csv"}), ROW_CHECK, "must be databricks"),
+        (_variant(right={"source": "oracle"}), ROW_CHECK, "unsupported Right source"),
         (PAIR, {**ROW_CHECK, "gate_decision": {"passed": False}}, "has not passed"),
         (_variant(col_map={"DT": "dt"}), ROW_CHECK, "no mapped value columns"),
         (_variant(key_families={"ID": "blob"}), ROW_CHECK, "unsupported key families"),
@@ -218,7 +218,7 @@ def test_date(common):
         (lambda m: m.pop("windows"), "missing fields: windows"),
         (lambda m: m.update(protocol_version=1), "protocol version"),
         (lambda m: m.update(protocol_version=99), "protocol version"),
-        (lambda m: m.update(right={"source": "csv"}), "must be databricks"),
+        (lambda m: m.update(right={"source": "oracle"}), "unsupported Right source"),
         (lambda m: m.update(expected_units=1), "expected_units"),
         (lambda m: m["windows"][0].update(partitions=["b", "a"]), "sorted and unique"),
     ],

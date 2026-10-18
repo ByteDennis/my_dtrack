@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from ..common.model.hashing import collapse_decimal_sql as _collapse_decimal_sql
@@ -30,6 +32,61 @@ NUMERIC_TYPES = (
     "short",
 )
 INTEGRAL_TYPES = ("int", "bigint", "smallint", "tinyint", "long", "short")
+
+
+class CsvTarget:
+    def __init__(self, config: dict[str, Any]):
+        from pair_recon_left.backends.sources import CsvSource
+
+        self.config = dict(config)
+        self.source = CsvSource(self.config)
+
+    def set_sql_audit(self, audit):
+        self.source.set_sql_audit(audit)
+        return self
+
+    def preflight(self):
+        health = self.source.preflight()
+        self.config.update(self.source.config)
+        return health
+
+    def partition_counts(self, from_date=None, to_date=None, **options):
+        if self.config.get("pre_sampled"):
+            options = {}
+        return self.source.partition_counts(from_date, to_date, **options)
+
+    def window_statistics(self, manifest, window):
+        from pair_recon_left.common.runtime.stats import compute_csv_statistics
+
+        mapping = manifest["col_map"]
+        columns = [mapping[column] for column in manifest["columns"]]
+        overrides = {
+            mapping[column]: value
+            for column, value in (manifest.get("col_type_overrides") or {}).items()
+        }
+        comparisons = {
+            mapping[column]: value for column, value in (manifest.get("column_types") or {}).items()
+        }
+        with TemporaryDirectory(prefix="pair_recon-right-") as folder:
+            path = self.source.pull_window(
+                window["partitions"],
+                columns,
+                Path(folder) / "window.csv",
+                key_columns=manifest["right_key_cols"],
+                sample_plan=manifest["sample"],
+                key_families=manifest["key_families"],
+                side="right",
+                key_tuples=window.get("key_tuples"),
+            )
+            return compute_csv_statistics(
+                path,
+                columns,
+                strict=manifest.get("strict", False),
+                col_types=overrides,
+                column_types=comparisons,
+                side="right",
+                statistics=manifest.get("statistics"),
+            )
 
 
 class SparkTarget:
@@ -128,11 +185,24 @@ class SparkTarget:
             return {"ok": False, "source": "databricks", "error": str(exc)}
 
     def partition_counts(
-        self, from_date: str | None = None, to_date: str | None = None
+        self,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        *,
+        sample: dict[str, Any] | None = None,
+        key_columns: list[str] | None = None,
+        key_families: list[Any] | None = None,
     ) -> dict[str, int]:
+        sampled = sample_predicate_sql(
+            sample,
+            [quote_ident(key, "spark") for key in key_columns or []],
+            key_families or [],
+            "spark",
+            "right",
+        )
         if self.partition_mode == "all":
             rows = self._rows(
-                f"SELECT COUNT(*) FROM {self.relation()} WHERE {self._where(None)}",
+                f"SELECT COUNT(*) FROM {self.relation()} WHERE {self._where(sampled)}",
                 "partition_counts",
             )
             return {"all": int(rows[0][0]) if rows else 0}
@@ -146,8 +216,10 @@ class SparkTarget:
             from_date=from_date,
             to_date=to_date,
         )
+        predicate = f"({bounds}) AND ({sampled})" if bounds and sampled else bounds or sampled
         rows = self._rows(
-            f"SELECT {ref}, COUNT(*) FROM {self.relation()} WHERE {self._where(bounds)} GROUP BY {ref}",
+            f"SELECT {ref}, COUNT(*) FROM {self.relation()} "
+            f"WHERE {self._where(predicate)} GROUP BY {ref}",
             "partition_counts",
         )
         counts: dict[str, int] = {}

@@ -5,7 +5,7 @@ import pytest
 from support import FakeRow, FakeSpark
 
 from pair_recon_right.engine.backends import targets
-from pair_recon_right.engine.backends.targets import SparkTarget
+from pair_recon_right.engine.backends.targets import CsvTarget, SparkTarget
 from pair_recon_right.engine.common.model.hashing import collapse_decimal
 
 ORDERS = {"source": "databricks", "catalog": "main", "schema": "sales", "table": "orders"}
@@ -70,6 +70,22 @@ def test_file():
     patch = "SELECT *, to_date(d, 'dd/MM/yyyy') AS dt FROM {src}"
     patched = SparkTarget(None, {**config, "query": patch}).relation()
     assert patched == f"(SELECT *, to_date(d, 'dd/MM/yyyy') AS dt FROM {reader}) pair_recon_source"
+
+
+def test_csv(tmp_path):
+    path = tmp_path / "right.csv"
+    path.write_text("order_id,amount,status\n1,2.5,好\n2,7.0,✓\n", encoding="utf-8")
+    target = CsvTarget(
+        {"source": "csv", "path": str(path), "partition_mode": "all", "pre_sampled": True}
+    )
+    assert target.preflight()["ok"]
+    assert target.partition_counts() == {"all": 2}
+    manifest = _manifest({"mode": "all"})
+    manifest["partition_mode"] = "all"
+    manifest["statistics"] = ["n_unique", "hash_sum"]
+    stats = target.window_statistics(manifest, {"partitions": ["all"]})
+    assert stats["status"]["n_unique"] == 2
+    assert set(stats["amount"]) == {"col_type", "n_unique", "hash_sum"}
 
 
 def test_preflight():
@@ -137,10 +153,17 @@ def test_all():
     target = SparkTarget(spark, config)
     assert target.preflight()["ok"]
     assert target.partition_counts() == {"all": 7}
+    count_sql = spark.statements[-1]
+    target.partition_counts(
+        sample={"mode": "fraction", "threshold": 1000},
+        key_columns=["order_id"],
+        key_families=["numeric"],
+    )
+    assert "< 1000" in spark.statements[-1]
     manifest = _manifest({"mode": "fraction", "threshold": 1000})
     manifest["partition_mode"] = "all"
     target.window_statistics(manifest, {"bucket": "all", "partitions": ["all"]})
-    count_sql, stats_sql = spark.statements[-2:]
+    stats_sql = spark.statements[-1]
     assert count_sql == "SELECT COUNT(*) FROM `main`.`sales`.`orders` WHERE 1=1"
     assert "business_date" not in stats_sql
     assert "< 1000" in stats_sql

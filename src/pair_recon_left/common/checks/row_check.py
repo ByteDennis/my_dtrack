@@ -10,7 +10,7 @@ from typing import Any
 
 from ...backends.sources import source_from_config
 from ..model.audit import SqlAudit, attach_sql_audit
-from ..model.manifest import build_manifest
+from ..model.manifest import build_manifest, key_family_specs, sample_plan
 from ..model.protocol import (
     LEFT_ROW_CHECK_CLOSED,
     left_row_path,
@@ -30,6 +30,11 @@ STAGE_ONE_FIELDS = (
     "fromDate",
     "toDate",
     "date_synonyms",
+    "sample",
+    "pre_sampled",
+    "right_pre_sampled",
+    "key",
+    "key_families",
 )
 
 
@@ -227,7 +232,17 @@ def run_row_check(
     def count(name: str):
         pair = pairs[name]
         begun = time.monotonic()
-        values = sources[name].partition_counts(pair.get("fromDate"), pair.get("toDate"))
+        options = {}
+        if pair.get("right_pre_sampled") and not pair.get("pre_sampled"):
+            keys = [
+                value.strip() for value in str(pair.get("key") or "").split(",") if value.strip()
+            ]
+            options = {
+                "sample": sample_plan(pair.get("sample")),
+                "key_columns": keys,
+                "key_families": key_family_specs(pair, keys),
+            }
+        values = sources[name].partition_counts(pair.get("fromDate"), pair.get("toDate"), **options)
         return values, round(time.monotonic() - begun, 6)
 
     with ThreadPoolExecutor(max_workers=max(1, pair_workers)) as pool:

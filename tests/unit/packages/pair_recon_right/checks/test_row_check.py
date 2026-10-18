@@ -67,6 +67,45 @@ def test_all():
     assert rows == {"all": {"left": 9, "right": 9, "verdict": "match"}}
 
 
+@pytest.mark.parametrize(
+    ("key", "mode", "family", "right_pre_sampled"),
+    [("id", "all", "string", False), ("dt", "date", "date_type", False), ("id", "all", None, True)],
+)
+def test_sample(key, mode, family, right_pre_sampled):
+    seen = {}
+
+    class Target(FakeTarget):
+        def partition_counts(self, *_args, **options):
+            seen.update(options)
+            return self.counts
+
+    counts = {"all": 5} if mode == "all" else {"2026-01-01": 5}
+    left = left_document(counts=counts, sample=0.1)
+    left["partition_mode"] = mode
+    left["bounds"] = (
+        {"from": None, "to": None} if mode == "all" else {"from": "2026-01-01", "to": "2026-01-01"}
+    )
+    left["pair_config"].update(
+        version=2,
+        checks=["row_count"],
+        partition_mode=mode,
+        pre_sampled=True,
+        right_pre_sampled=right_pre_sampled,
+        key=key,
+    )
+    if mode == "date":
+        left["pair_config"]["left"]["date_type"] = "date"
+        left["pair_config"]["right"]["date_type"] = "date"
+    reconcile_pair(MemoryStore(), left, Target(counts=counts))
+    if right_pre_sampled:
+        assert seen == {}
+    else:
+        assert seen["sample"]["mode"] == "fraction"
+        assert seen["key_columns"] == [key]
+        resolved = seen["key_families"][0]
+        assert (resolved if isinstance(resolved, str) else resolved["family"]) == family
+
+
 ROWS = {
     "a": {"verdict": "match"},
     "b": {"verdict": "match"},

@@ -1,5 +1,6 @@
 import json
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -8,6 +9,7 @@ from zoneinfo import ZoneInfo
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementParameterListItem
 
+from pair_recon.core.progress import ProgressSampler
 from pair_recon_left.backends.store import VolumeStore, validate_run_id
 from pair_recon_left.cli.config import validate_config
 from pair_recon_left.common.checks.col_check import (
@@ -19,14 +21,22 @@ from pair_recon_left.common.checks.col_check import (
 from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
 from pair_recon_left.common.model.protocol import list_failures, list_results, list_row_results
 from pair_recon_left.common.runtime.run_logging import configure_left_logging
+from pair_recon_right.engine.backends.targets import CsvTarget
+from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
+from pair_recon_right.engine.job import run as run_right
 
 
 class StatementSql:
     def __init__(self, workspace, warehouse_id: str):
         self.api = workspace.statement_execution
         self.warehouse_id = warehouse_id
+        self.lock = threading.Lock()
 
     def execute(self, statement: str, parameters=None):
+        with self.lock:
+            return self._execute(statement, parameters)
+
+    def _execute(self, statement: str, parameters=None):
         values = [
             StatementParameterListItem(
                 name=name,
@@ -95,11 +105,15 @@ def run_left(
     pair: str,
     work_dir: str | Path,
     manifest_timeout: float = 1800,
+    pull_workers: int = 2,
+    release=None,
 ):
     config = validate_config(config)
     reused = reuse_row_check(config, store, run_id=run_id, pair_names=[pair])
     if reused is None:
         run_row_check(config, store, run_id=run_id, pair_names=[pair], pair_workers=1)
+    if release:
+        release()
     checks = config["pairs"][pair].get("checks") or []
     if not any(check != "row_count" for check in checks):
         return {"row": "ready", "units": 0}
@@ -112,8 +126,8 @@ def run_left(
         store,
         pull_window=runtime.pull_window,
         compute_stats=runtime.compute_stats,
-        pull_workers=1,
-        stat_workers=1,
+        pull_workers=max(1, int(pull_workers)),
+        stat_workers=max(1, int(pull_workers)),
     ).run(manifests)
     return {"row": "ready", "units": units}
 
@@ -151,6 +165,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             state="running",
             timezone=settings["timezone"],
         )
+    sampler = None
     params = {
         "run_root": settings["volume_root"],
         "run_id": run_id,
@@ -161,8 +176,22 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         "status_table": settings["status_table"],
         "error_table": settings["error_table"],
     }
-    remote = client.jobs.run_now(int(settings["right_job_id"]), notebook_params=params)
+    remote = None
+    final_state = "failed"
+    local_right = config["pairs"][pair]["right"].get("source") == "csv"
     try:
+        if catalog:
+            sampler = ProgressSampler(
+                store,
+                run_id,
+                pair,
+                settings["timezone"],
+                catalog.progress,
+                interval=float(settings.get("progress_interval", 10)),
+            ).start(required=True)
+        target_factory = lambda values: CsvTarget(values)
+        if not local_right:
+            remote = client.jobs.run_now(int(settings["right_job_id"]), notebook_params=params)
         left = run_left(
             config,
             store,
@@ -170,23 +199,56 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             pair,
             Path(settings["work_dir"]) / run_id,
             float(settings.get("timeout", 120)) * 60,
+            int(settings.get("pull_workers", 2)),
+            (lambda: run_right_row_check(store, target_factory)) if local_right else None,
         )
-        completed = remote.result(timeout=timedelta(minutes=float(settings.get("timeout", 120))))
-        result = getattr(getattr(completed, "state", None), "result_state", None)
-        if getattr(result, "value", result) != "SUCCESS":
-            raise RuntimeError(f"Right job finished with {getattr(result, 'value', result)}")
-        status = catalog.run(run_id) if catalog else None
+        if local_right:
+            right = run_right(
+                None,
+                target_factory,
+                run_id=run_id,
+                store=store,
+                poll_interval=0.1,
+                wait_timeout=float(settings.get("timeout", 120)) * 60,
+            )
+            final_state = (
+                "different"
+                if sum(right.get(name, 0) for name in ("row_errors", "column_errors", "failures"))
+                else "passed"
+            )
+            if catalog:
+                catalog.finish(
+                    store,
+                    run_id=run_id,
+                    pair=pair,
+                    owner=settings["owner"],
+                    state=final_state,
+                    timezone=settings["timezone"],
+                )
+        else:
+            completed = remote.result(
+                timeout=timedelta(minutes=float(settings.get("timeout", 120)))
+            )
+            result = getattr(getattr(completed, "state", None), "result_state", None)
+            if getattr(result, "value", result) != "SUCCESS":
+                raise RuntimeError(f"Right job finished with {getattr(result, 'value', result)}")
+            status = catalog.run(run_id) if catalog else None
+            final_state = (status or {}).get("state", "finished")
+        if sampler:
+            sampler.stop(final_state, required=True)
+            sampler = None
         return {
             "run_id": run_id,
             "pair": pair,
-            "state": (status or {}).get("state", "finished"),
+            "state": final_state,
             "left": left,
             "left_log": str(left_log),
-            "right_run_id": int(remote.run_id),
+            "right": right if local_right else {"run_id": int(remote.run_id)},
         }
     except BaseException:
         try:
-            client.jobs.cancel_run(int(remote.run_id))
+            if remote is not None:
+                client.jobs.cancel_run(int(remote.run_id))
         finally:
             if catalog:
                 catalog.status(
@@ -197,3 +259,6 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                     timezone=settings["timezone"],
                 )
         raise
+    finally:
+        if sampler:
+            sampler.stop(final_state)

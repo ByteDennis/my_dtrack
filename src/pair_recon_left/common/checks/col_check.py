@@ -247,7 +247,7 @@ class ColCheckPipeline:
                 total_attributes=total_attributes,
                 total_vintages=len(plan_rows),
             ) as progress,
-            ThreadPoolExecutor(self.pull_workers) as pulls,
+            ThreadPoolExecutor(self.pull_workers, thread_name_prefix="pair_recon-pull") as pulls,
             ThreadPoolExecutor(1, thread_name_prefix="pair_recon-vintage") as stats,
         ):
             pull_jobs, stat_jobs = {}, {}

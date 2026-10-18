@@ -3,12 +3,13 @@ from __future__ import annotations
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..common.model.manifest import statistics_plan
+from ..common.model.manifest import sample_plan, statistics_plan
 from ..common.sql.column_types import resolve_column_type
 from ..common.sql.dates import canonical_date, resolve_date_type
 from ..common.sql.query_windows import normalize_query_windows
 
-LEFT_SOURCES = {"oracle"}
+LEFT_SOURCES = {"oracle", "hadoop", "csv"}
+RIGHT_SOURCES = {"databricks", "csv"}
 COL_TYPES = {"numeric", "categorical"}
 RIGHT_KINDS = {"table": ("table",), "query": ("query",), "files": ("path", "format")}
 
@@ -51,16 +52,53 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         right_source = str(right.get("source") or "").lower()
         if left_source not in LEFT_SOURCES:
             raise ValueError(f"{name}: unsupported Left source {left_source!r}")
-        if right_source != "databricks":
-            raise ValueError(f"{name}: Right side must be databricks")
-        kind = {"volume_raw": "files"}.get(right.get("kind"), right.get("kind") or "table")
-        if kind not in RIGHT_KINDS:
-            raise ValueError(f"{name}: unsupported Right kind {kind!r}")
-        needed = [field for field in RIGHT_KINDS[kind] if not right.get(field)]
-        if needed:
-            raise ValueError(f"{name}: Right kind {kind!r} requires {', '.join(needed)}")
-        if "{src}" in str(right.get("query") or "") and kind != "files":
-            raise ValueError(f"{name}: {{src}} in a Right query needs kind 'files'")
+        if left_source == "csv":
+            if not left.get("path"):
+                raise ValueError(f"{name}: CSV Left source requires path")
+            if "nullstr" in left:
+                nullstr = left["nullstr"]
+                if not isinstance(nullstr, str | list) or (
+                    isinstance(nullstr, list)
+                    and not all(isinstance(value, str) for value in nullstr)
+                ):
+                    raise TypeError(f"{name}: CSV nullstr must be a string or list")
+        if (
+            left_source == "hadoop"
+            and not left.get("query")
+            and not (left.get("schema") and left.get("table"))
+        ):
+            raise ValueError(f"{name}: Hadoop Left source requires query or schema and table")
+        pre_sampled = pair.get("pre_sampled", False)
+        if not isinstance(pre_sampled, bool):
+            raise TypeError(f"{name}: pre_sampled must be true or false")
+        if pre_sampled and left_source != "csv":
+            raise ValueError(f"{name}: pre_sampled requires a CSV Left source")
+        right_pre_sampled = pair.get("right_pre_sampled", False)
+        if not isinstance(right_pre_sampled, bool):
+            raise TypeError(f"{name}: right_pre_sampled must be true or false")
+        if right_pre_sampled and right_source != "csv":
+            raise ValueError(f"{name}: right_pre_sampled requires a CSV Right source")
+        if pre_sampled or right_pre_sampled:
+            sampling = sample_plan(pair.get("sample"))
+            if sampling["mode"] == "fixed":
+                raise ValueError(f"{name}: pre-sampled CSV requires all or fraction sampling")
+            keys = [part.strip() for part in str(pair.get("key") or "").split(",") if part.strip()]
+            if sampling["mode"] != "all" and not keys:
+                raise ValueError(f"{name}: pre-sampled CSV fraction requires a key")
+        if right_source not in RIGHT_SOURCES:
+            raise ValueError(f"{name}: unsupported Right source {right_source!r}")
+        if right_source == "csv":
+            if not right.get("path"):
+                raise ValueError(f"{name}: CSV Right source requires path")
+        else:
+            kind = {"volume_raw": "files"}.get(right.get("kind"), right.get("kind") or "table")
+            if kind not in RIGHT_KINDS:
+                raise ValueError(f"{name}: unsupported Right kind {kind!r}")
+            needed = [field for field in RIGHT_KINDS[kind] if not right.get(field)]
+            if needed:
+                raise ValueError(f"{name}: Right kind {kind!r} requires {', '.join(needed)}")
+            if "{src}" in str(right.get("query") or "") and kind != "files":
+                raise ValueError(f"{name}: {{src}} in a Right query needs kind 'files'")
         raw_partition_mode = pair.get("partition_mode", "date")
         if not isinstance(raw_partition_mode, str):
             raise TypeError(f"{name}: partition_mode must be date or all")

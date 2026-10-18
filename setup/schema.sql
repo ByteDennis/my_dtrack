@@ -31,3 +31,16 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_run_error (
   payload STRING,
   created_at TIMESTAMP_NTZ
 ) USING DELTA;
+
+CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_progress_snapshot (
+  snapshot_ts TIMESTAMP_NTZ NOT NULL,
+  run_id STRING NOT NULL,
+  pair_name STRING NOT NULL,
+  state STRING NOT NULL,
+  units_expected BIGINT NOT NULL,
+  units_ready BIGINT NOT NULL,
+  units_complete BIGINT NOT NULL,
+  units_failed BIGINT NOT NULL,
+  worker_threads BIGINT NOT NULL,
+  detail STRING
+) USING DELTA;

@@ -8,7 +8,7 @@ from collections import Counter
 from typing import Any
 
 from ..common.model.audit import SqlAudit, attach_sql_audit
-from ..common.model.manifest import build_manifest
+from ..common.model.manifest import build_manifest, key_family_specs, sample_plan
 from ..common.model.protocol import (
     left_row_check_close_document,
     list_left_documents,
@@ -166,8 +166,21 @@ def reconcile_pair(
         left_doc["right"]["date_type"] = right_date_type
         left_doc["pair_config"]["right"]["date_type"] = right_date_type
     started = time.monotonic()
+    pair_config = left_doc["pair_config"]
+    options = {}
+    if pair_config.get("pre_sampled") and not pair_config.get("right_pre_sampled"):
+        keys = [
+            value.strip() for value in str(pair_config.get("key") or "").split(",") if value.strip()
+        ]
+        if not keys:
+            raise ValueError("pre-sampled CSV requires a pair key")
+        options = {
+            "sample": sample_plan(pair_config.get("sample")),
+            "key_columns": [pair_config["col_map"].get(key, key) for key in keys],
+            "key_families": key_family_specs(pair_config, keys),
+        }
     right_counts = target.partition_counts(
-        left_doc["bounds"].get("from"), left_doc["bounds"].get("to")
+        left_doc["bounds"].get("from"), left_doc["bounds"].get("to"), **options
     )
     right_s = round(time.monotonic() - started, 6)
     log.info(

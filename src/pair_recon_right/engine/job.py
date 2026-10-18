@@ -41,15 +41,20 @@ def run(
     prefetch_depth=3,
     max_attempts=3,
     wait_timeout=1800,
+    store=None,
 ):
-    started = time.monotonic()
-    while True:
-        store, resolved = resolve_run(run_root, run_id)
-        if store is not None and list_left_documents(store):
-            break
-        if time.monotonic() - started > wait_timeout:
-            raise TimeoutError("Left row data did not arrive before wait_timeout")
-        time.sleep(poll_interval)
+    resolved = run_id
+    if store is None:
+        started = time.monotonic()
+        while True:
+            store, resolved = resolve_run(run_root, run_id)
+            if store is not None and list_left_documents(store):
+                break
+            if time.monotonic() - started > wait_timeout:
+                raise TimeoutError("Left row data did not arrive before wait_timeout")
+            time.sleep(poll_interval)
+    elif not resolved:
+        raise ValueError("run_id is required with an existing store")
     write_run_status(store, {"state": "right_row_check", "role": "right", "run_id": resolved})
 
     def reconcile():

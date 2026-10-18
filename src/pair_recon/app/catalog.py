@@ -2,18 +2,28 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from pair_recon_right.catalog import error_rows
+
 _TABLE = re.compile(r"^[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){2}$")
 
 
 class Catalog:
-    def __init__(self, sql, pair_table: str, status_table: str, error_table: str):
-        for table in (pair_table, status_table, error_table):
+    def __init__(
+        self,
+        sql,
+        pair_table: str,
+        status_table: str,
+        error_table: str,
+        progress_table: str,
+    ):
+        for table in (pair_table, status_table, error_table, progress_table):
             if not _TABLE.fullmatch(table):
                 raise ValueError(f"invalid table name: {table}")
         self.sql = sql
         self.pair_table = pair_table
         self.status_table = status_table
         self.error_table = error_table
+        self.progress_table = progress_table
 
     def pairs(self):
         return self.sql.execute(
@@ -30,7 +40,42 @@ class Catalog:
     def clear(self, run_id: str):
         values = {"run_id": run_id}
         self.sql.execute(f"DELETE FROM {self.error_table} WHERE run_id=:run_id", values)
+        self.sql.execute(f"DELETE FROM {self.progress_table} WHERE run_id=:run_id", values)
         self.sql.execute(f"DELETE FROM {self.status_table} WHERE run_id=:run_id", values)
+
+    def progress(self, row: dict):
+        columns = (
+            "snapshot_ts",
+            "run_id",
+            "pair_name",
+            "state",
+            "units_expected",
+            "units_ready",
+            "units_complete",
+            "units_failed",
+            "worker_threads",
+            "detail",
+        )
+        fields = ", ".join(columns)
+        numeric = {
+            "units_expected",
+            "units_ready",
+            "units_complete",
+            "units_failed",
+            "worker_threads",
+        }
+        values = ", ".join(
+            f"CAST(:{name} AS TIMESTAMP_NTZ)"
+            if name == "snapshot_ts"
+            else f"CAST(:{name} AS BIGINT)"
+            if name in numeric
+            else f":{name}"
+            for name in columns
+        )
+        self.sql.execute(
+            f"INSERT INTO {self.progress_table} ({fields}) VALUES ({values})",
+            {name: row[name] for name in columns},
+        )
 
     def status(self, *, run_id: str, pair: str, owner: str, state: str, timezone: str):
         now = (
@@ -56,3 +101,50 @@ VALUES (:run_id, :pair, :owner, :state, :timezone,
 CAST(:now AS TIMESTAMP_NTZ), CAST(:now AS TIMESTAMP_NTZ))""",
             values,
         )
+
+    def finish(self, store, *, run_id: str, pair: str, owner: str, state: str, timezone: str):
+        self.status(run_id=run_id, pair=pair, owner=owner, state=state, timezone=timezone)
+        self.sql.execute(f"DELETE FROM {self.error_table} WHERE run_id=:run_id", {"run_id": run_id})
+        now = datetime.now(ZoneInfo(timezone)).replace(tzinfo=None)
+        rows = error_rows(store, run_id, pair, now)
+        columns = (
+            "run_id",
+            "check_name",
+            "pair_name",
+            "vintage",
+            "column_name",
+            "partition_value",
+            "left_value",
+            "right_value",
+            "detail",
+            "payload",
+            "created_at",
+        )
+        for start in range(0, len(rows), 100):
+            parameters = {}
+            values = []
+            for index, row in enumerate(rows[start : start + 100]):
+                names = []
+                for column in columns:
+                    name = f"r{index}_{column}"
+                    parameters[name] = row[column]
+                    names.append(
+                        f"CAST(:{name} AS TIMESTAMP_NTZ)" if column == "created_at" else f":{name}"
+                    )
+                values.append(f"({', '.join(names)})")
+            self.sql.execute(
+                f"INSERT INTO {self.error_table} ({', '.join(columns)}) VALUES "
+                + ", ".join(values),
+                parameters,
+            )
+        self.sql.execute(
+            f"UPDATE {self.pair_table} SET latest_run_id=:run_id, latest_status=:state, "
+            "updated_at=CAST(:now AS TIMESTAMP_NTZ) WHERE pair_name=:pair",
+            {
+                "run_id": run_id,
+                "state": state,
+                "now": now.isoformat(timespec="microseconds"),
+                "pair": pair,
+            },
+        )
+        return {"status": state, "errors": len(rows)}

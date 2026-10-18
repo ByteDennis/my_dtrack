@@ -33,6 +33,28 @@ def write_rows(path: str | Path, columns: list[str], rows: Iterable[Iterable[obj
     return target
 
 
+def _resolve_column_name(columns: Iterable[str], requested: str) -> str:
+    names = [str(column) for column in columns]
+    if requested in names:
+        return requested
+    matches = [name for name in names if name.casefold() == requested.casefold()]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(f"ambiguous column {requested!r}: {', '.join(matches)}")
+    raise ValueError(f"missing columns: {requested}")
+
+
+def _duckdb_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(_duckdb_value(item) for item in value) + "]"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 class SqlSource(ABC):
     dialect = "sql"
     date_probe_size = 16
@@ -169,11 +191,26 @@ class SqlSource(ABC):
         return [None] * len(key_columns)
 
     def partition_counts(
-        self, from_date: str | None = None, to_date: str | None = None
+        self,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        *,
+        sample: dict[str, Any] | None = None,
+        key_columns: list[str] | None = None,
+        key_families: list[Any] | None = None,
     ) -> dict[str, int]:
+        sampled = sample_predicate_sql(
+            sample,
+            [quote_ident(column, self.dialect) for column in key_columns or []],
+            key_families or [],
+            self.dialect,
+            "left",
+            key_types=self.key_types(key_columns or []),
+        )
         if self.partition_mode == "all":
             sql = (
-                f"SELECT COUNT(*) AS pair_recon_count FROM {self.relation()} WHERE {self._where()}"
+                f"SELECT COUNT(*) AS pair_recon_count FROM {self.relation()} "
+                f"WHERE {self._where(sampled)}"
             )
             _columns, rows = self.query(sql, operation="partition_counts")
             return {"all": int(rows[0][0]) if rows else 0}
@@ -187,10 +224,11 @@ class SqlSource(ABC):
             from_date=from_date,
             to_date=to_date,
         )
+        predicate = f"({bounds}) AND ({sampled})" if bounds and sampled else bounds or sampled
         sql = (
             f"SELECT {date_ref} AS pair_recon_partition, COUNT(*) AS pair_recon_count "
             f"FROM {self.relation(from_date=from_date, to_date=to_date)} "
-            f"WHERE {self._where(bounds)} GROUP BY {date_ref}"
+            f"WHERE {self._where(predicate)} GROUP BY {date_ref}"
         )
         _columns, rows = self.query(sql, operation="partition_counts")
         counts: dict[str, int] = {}
@@ -294,6 +332,90 @@ class SqlSource(ABC):
         return write_rows(output, key_columns, rows)
 
 
+class CsvSource(SqlSource):
+    dialect = "duckdb"
+
+    def __init__(self, config: dict[str, Any]):
+        super().__init__(config)
+        self.path = str(config.get("path") or "")
+        if not self.path:
+            raise ValueError("CSV source requires path")
+        nullstr = config.get("nullstr")
+        if nullstr is not None and not isinstance(nullstr, str | list | tuple):
+            raise TypeError("CSV nullstr must be a string or list")
+        if isinstance(nullstr, list | tuple) and not all(isinstance(item, str) for item in nullstr):
+            raise TypeError("CSV nullstr must be a string or list")
+        if config.get("date_format"):
+            self.config["date_type"] = "date"
+
+    def reader(self) -> str:
+        options = {"all_varchar": True, "header": True, **(self.config.get("options") or {})}
+        if "nullstr" in self.config:
+            options["nullstr"] = self.config["nullstr"]
+        arguments = [_duckdb_value(self.path)]
+        arguments += [f"{key} = {_duckdb_value(value)}" for key, value in options.items()]
+        return f"read_csv({', '.join(arguments)})"
+
+    def relation(
+        self,
+        *,
+        partitions: list[str] | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> str:
+        source = self.reader()
+        if self.config.get("query"):
+            source = f"({self.config['query'].replace('{src}', source)})"
+        date_format = self.config.get("date_format") if self.partition_mode == "date" else None
+        if not date_format:
+            return f"{source} pair_recon_source"
+        column = quote_ident(self.config["date_col"], self.dialect)
+        parsed = f"strptime(CAST({column} AS VARCHAR), {_duckdb_value(date_format)})::DATE"
+        return f"(SELECT * REPLACE ({parsed} AS {column}) FROM {source}) pair_recon_source"
+
+    def connect(self):
+        from ..common.runtime.duck import connect
+
+        return connect(ordered=False)
+
+    def query_to_csv(
+        self, sql: str, output: Path, columns: list[str], *, operation: str = "query"
+    ) -> Path:
+        target = Path(output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        part = target.with_name(target.name + ".part")
+        connection = self.connect()
+        try:
+            self._audit(sql, operation)
+            cursor = connection.execute(sql)
+            with part.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle, lineterminator="\n")
+                writer.writerow(columns)
+                while rows := cursor.fetchmany(10_000):
+                    writer.writerows(rows)
+            os.replace(part, target)
+            return target
+        except Exception:
+            part.unlink(missing_ok=True)
+            raise
+        finally:
+            connection.close()
+
+    def preflight(self) -> dict[str, Any]:
+        try:
+            columns, _rows = self.query(
+                f"SELECT * FROM {self.relation()} WHERE 1=0", operation="preflight"
+            )
+            if self.partition_mode == "date":
+                self.config["date_col"] = _resolve_column_name(
+                    columns, str(self.config["date_col"])
+                )
+                self.date_type()
+            return {"ok": True, "source": "csv", "columns": columns}
+        except Exception as exc:
+            return {"ok": False, "source": "csv", "error": str(exc)}
+
+
 def oracle_macro_services() -> dict[str, str]:
     pairs = (item.split(":", 1) for item in os.getenv("PAIR_RECON_ORACLE_MACROS", "").split(","))
     return {key.strip(): value.strip() for key, value in (p for p in pairs if len(p) == 2)}
@@ -358,8 +480,32 @@ class OracleSource(SqlSource):
             return list(self._key_types[cache_key])
 
 
+class HadoopSource(SqlSource):
+    dialect = "hadoop"
+
+    def __init__(self, config: dict[str, Any]):
+        super().__init__(config)
+        self.dsn = config.get("dsn") or os.getenv("HADOOP_DSN")
+        self.autocommit = config.get("autocommit", True)
+        if not isinstance(self.autocommit, bool):
+            raise TypeError("Hadoop autocommit must be true or false")
+
+    def connect(self):
+        try:
+            import pyodbc
+        except ImportError as exc:
+            raise ImportError("Hadoop support requires pair-recon[hadoop]") from exc
+        if not self.dsn:
+            raise ValueError("Hadoop requires dsn or HADOOP_DSN")
+        return pyodbc.connect(f"DSN={self.dsn}", autocommit=self.autocommit)
+
+
 def source_from_config(config: dict[str, Any]):
     source = str(config.get("source") or "").lower()
     if source == "oracle":
         return OracleSource(config)
+    if source == "hadoop":
+        return HadoopSource(config)
+    if source == "csv":
+        return CsvSource(config)
     raise ValueError(f"unsupported Left source: {source}")

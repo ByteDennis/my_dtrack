@@ -121,6 +121,30 @@ def sample_plan(raw: Any) -> dict[str, Any]:
     return {"mode": "fixed", "count": count}
 
 
+def key_family_specs(pair: dict[str, Any], keys: list[str]) -> list[dict[str, Any]]:
+    configured = pair.get("key_families") or {}
+    date_col = str(pair["left"].get("date_col") or "").casefold()
+    specs = []
+    for key in keys:
+        value = configured.get(key)
+        if (
+            pair.get("partition_mode", "date") == "date"
+            and value is None
+            and key.casefold() == date_col
+        ):
+            value = {
+                "family": "date_type",
+                "left_date_type": resolve_date_type(pair["left"].get("date_type")).spec(
+                    portable=True
+                ),
+                "right_date_type": resolve_date_type(pair["right"].get("date_type")).spec(
+                    portable=True
+                ),
+            }
+        specs.append(key_family(value).spec())
+    return specs
+
+
 def build_manifest(
     run_id: str,
     pair_name: str,
@@ -130,8 +154,8 @@ def build_manifest(
     version = int(pair.get("version") or 1)
     if version not in {1, 2}:
         raise ValueError(f"{pair_name}: version must be 1 or 2")
-    if str((pair.get("right") or {}).get("source", "")).lower() != "databricks":
-        raise ValueError(f"{pair_name}: Right side must be databricks")
+    if str((pair.get("right") or {}).get("source", "")).lower() not in {"databricks", "csv"}:
+        raise ValueError(f"{pair_name}: unsupported Right source")
     if version == 1 and not row_check["gate_decision"].get("passed"):
         raise ValueError(f"{pair_name}: row check has not passed")
     partition_mode = str(pair.get("partition_mode") or "date")
@@ -178,22 +202,8 @@ def build_manifest(
             f"{pair_name}: key_families names non-key columns: {', '.join(unknown_keys)}"
         )
 
-    def family_spec(key: str):
-        configured = key_family_config.get(key)
-        if partition_mode == "date" and configured is None and key.lower() == date_col:
-            configured = {
-                "family": "date_type",
-                "left_date_type": resolve_date_type(pair["left"].get("date_type")).spec(
-                    portable=True
-                ),
-                "right_date_type": resolve_date_type(pair["right"].get("date_type")).spec(
-                    portable=True
-                ),
-            }
-        return key_family(configured).spec()
-
     try:
-        key_families = [family_spec(key) for key in keys]
+        key_families = key_family_specs(pair, keys)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{pair_name}: unsupported key families: {exc}") from None
     raw_overrides = pair.get("col_type_overrides") or {}
@@ -282,8 +292,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("manifest version must be 1 or 2")
     if version == 2 and not manifest.get("plan_id"):
         raise ValueError("version 2 manifest requires plan_id")
-    if str(manifest["right"].get("source", "")).lower() != "databricks":
-        raise ValueError("manifest Right side must be databricks")
+    if str(manifest["right"].get("source", "")).lower() not in {"databricks", "csv"}:
+        raise ValueError("manifest has unsupported Right source")
     partition_mode = str(manifest.get("partition_mode") or "date")
     if partition_mode not in {"date", "all"}:
         raise ValueError("manifest partition_mode must be date or all")

@@ -1,235 +1,64 @@
 pair_recon 0.1.0 — 2026-10-18
 
 Added
-- Interactive Bash/CMD launcher with saved UTF-8 YAML defaults and one pair per run.
-- Unity Catalog metadata, run-status, run-error, and Volume artifact integration.
-- Resume, restart, and cancel handling for existing run IDs; resume keeps matches and retries failed or different checks.
-- Pair-level row_count, hash_sum, and n_unique selection.
-- Pair-level partition_mode=date|all and snapshot alignment to the latest matching Right history partition.
-- Persistent named Left logging and local Win32 Outlook result delivery with the Left log attached.
-- One-time Databricks Right package/job setup and optional Delta table schema.
-- Focused unit, packaging, Outlook, snapshot, UTF-8, Volume, and opt-in live Oracle query/export/timing tests.
+- Hadoop Left source through pyodbc and an ODBC DSN.
+- UTF-8 local CSV Left source through DuckDB read_csv.
+- Periodic Unity Catalog progress snapshots with run/unit counts and active worker threads.
+- Optional SAS bundle generation: Left only by default, or Right/both on request.
+- Interactive local CSV override in the normal run command, reusing the existing multithread statistics path.
+- Local CSV Right target in the same normal run command; local Right skips Databricks job startup while retaining UC results and progress.
+- Sample provenance reuse so a non-sampled counterpart applies the same deterministic predicate.
+- Optional --debug behavior for Just recipes; Python failures attach ipdb.
+- Concise end-to-end setup, run, SAS, CSV, progress, Outlook, and troubleshooting guide.
 
 Changed
-- Renamed every shipped package, command, environment prefix, artifact, job, and configuration surface to pair_recon.
-- Reduced src and tests directory fan-out to at most five direct children per folder.
-- Simplified every test function name to at most two underscore-separated words and retained parametrization.
-- Standardized local timestamps on a confirmed IANA timezone and stored wall-clock values as TIMESTAMP_NTZ.
-- Replaced root/basic logging setup with one stable pair_recon logger tree and one run-scoped Left log.
+- Local column pulls now use named bounded worker threads visible in progress snapshots.
+- Row counts apply the same deterministic sample when only one side is already sampled.
+- Hadoop validation accepts query-only metadata or schema plus table.
+- Just recipes avoid shell startup warnings while keeping debug opt-in.
+- Live source tests cover configured Oracle, Hadoop, and CSV query/DataFrame/CSV/timing paths.
+- setup/schema.sql now includes pair_recon_progress_snapshot.
+- README and environment examples document the restored workflows.
 
-Removed functionality
-- Dashboard, progress snapshot collector, and Databricks alert delivery.
-- S3/AWS credential relay, WinSCP helpers, Athena, Hadoop, CSV, DuckDB, and SAS source paths.
-- Confluence publishing, HTML/Excel report generation, blog tooling, and report templates.
-- Alternate local dual-connection pipeline, key-check command, multi-pair CLI, manual rollback command, and legacy examples/notebooks.
-- Deprecated query-projection configuration and unused helpers, adapters, tests, dependencies, and generated legacy archives.
-
-Preserved functionality
-- Oracle Left extraction, Databricks/Spark Right validation, deterministic sampling, date/all partitions, vintage windows, normalization, query-window SQL, selective statistics, resumable protocol artifacts, and SQL audit evidence.
+Removed
+- No files or capabilities were removed in this change.
 
 Verification
-- ruff check and ruff format --check pass.
-- 487 unit tests pass and 12 optional tests skip.
+- 508 unit tests pass; 12 optional tests skip.
+- 9 live tests collect successfully and were not executed.
+- Ruff check and format checks pass.
 - Wheel and source distribution build successfully.
-- Live tests remain opt-in and were not executed.
 
 File manifest
-M	changelog.txt
-D	.env.example
-M	.gitignore
-A	.pair_recon.env.example
-D	.vscode/notes.txt
+M	.pair_recon.env.example
 M	README.md
-D	examples/config.json
-D	examples/e2e/README.md
-D	examples/e2e/config.json
-D	examples/e2e/data/SYNTHETIC.json
-D	examples/e2e/data/left/CUSTOMERS.csv
-D	examples/e2e/data/left/ORDERS.csv
-D	examples/e2e/data/right/customers.csv
-D	examples/e2e/data/right/orders.csv
-D	examples/e2e/make_synthetic.py
-D	examples/e2e/run_e2e.sh
-D	examples/e2e/s3_mirror.py
-D	examples/nbs/00_row_check.ipynb
-D	examples/nbs/01_col_check.ipynb
-D	examples/nbs/02_local.ipynb
-D	examples/nbs/03_tools.ipynb
-D	examples/nbs/04_common.ipynb
-D	examples/nbs/05_reuse_pulled.ipynb
-D	examples/nbs/06_pair_progress.ipynb
-D	examples/nbs/strip_outputs.py
-D	examples/remote_job/.gitignore
-D	examples/remote_job/README.md
-D	examples/remote_job/setup/install.py
-D	examples/remote_job/src/dashboard.py
-D	examples/remote_job/src/launch.py
-D	examples/remote_job/src/outlook_mail.py
-D	examples/remote_job/src/progress_notebook.py
-D	guideme.txt
+M	changelog.txt
+A	guideme.txt
 M	justfile
 M	pyproject.toml
-R069	examples/remote_job/setup/setup.cmd	run.cmd
-R063	examples/remote_job/setup/setup.sh	run.sh
-A	setup/install.py
-A	setup/schema.sql
-R065	examples/remote_job/run.cmd	setup/setup.cmd
-R060	examples/remote_job/run.sh	setup/setup.sh
-D	src/<legacy>/__init__.py
-D	src/<legacy>/__main__.py
-D	src/<legacy>/cli.py
-D	src/<legacy>_left/__main__.py
-D	src/<legacy>_left/backends/cloud/aws.py
-D	src/<legacy>_left/backends/cloud/confluence.py
-D	src/<legacy>_left/backends/cloud/databricks.py
-D	src/<legacy>_left/backends/cloud/templates.py
-D	src/<legacy>_left/backends/materialize.py
-D	src/<legacy>_left/backends/store.py
-D	src/<legacy>_left/cli/__init__.py
-D	src/<legacy>_left/cli/commands/blog.py
-D	src/<legacy>_left/cli/commands/checks.py
-D	src/<legacy>_left/cli/commands/tools.py
-D	src/<legacy>_left/cli/ops/__init__.py
-D	src/<legacy>_left/cli/ops/dbx.py
-D	src/<legacy>_left/cli/ops/s3.py
-D	src/<legacy>_left/cli/options.py
-D	src/<legacy>_left/common/checks/rollback.py
-D	src/<legacy>_left/common/checks/sas.py
-D	src/<legacy>_left/common/runtime/run_logging.py
-D	src/<legacy>_local/__init__.py
-D	src/<legacy>_local/__main__.py
-D	src/<legacy>_local/cli.py
-D	src/<legacy>_local/pipeline.py
-D	src/<legacy>_local/support/csv_target.py
-D	src/<legacy>_local/support/keycheck.py
-D	src/<legacy>_local/support/right_job.py
-D	src/<legacy>_local/support/run_logging.py
-D	src/<legacy>_local/support/warehouse.py
-D	src/<legacy>_right/engine/backends/store.py
-D	src/<legacy>_right/engine/common/__init__.py
-D	src/<legacy>_right/engine/job.py
-D	src/<legacy>_right/engine/report/__init__.py
-D	src/<legacy>_right/engine/report/build.py
-D	src/<legacy>_right/engine/report/excel.py
-D	src/<legacy>_right/engine/report/html.py
-D	src/<legacy>_right/notebook.py
-D	src/<legacy>_right/progress.py
-D	src/<legacy>_right/requirements.txt
-A	src/pair_recon/__init__.py
-A	src/pair_recon/__main__.py
-A	src/pair_recon/app/__init__.py
-A	src/pair_recon/app/catalog.py
-A	src/pair_recon/app/cli.py
-A	src/pair_recon/app/config.py
-A	src/pair_recon/app/runner.py
-A	src/pair_recon/core/backends/__init__.py
-A	src/pair_recon/core/backends/store.py
-A	src/pair_recon/mail.py
-R050	src/<legacy>_left/__init__.py	src/pair_recon_left/__init__.py
-R100	src/<legacy>_left/backends/__init__.py	src/pair_recon_left/backends/__init__.py
-R052	src/<legacy>_left/backends/sources.py	src/pair_recon_left/backends/sources.py
-A	src/pair_recon_left/backends/store.py
-A	src/pair_recon_left/cli/__init__.py
-R058	src/<legacy>_left/cli/config.py	src/pair_recon_left/cli/config.py
-R100	src/<legacy>_left/common/__init__.py	src/pair_recon_left/common/__init__.py
-R096	src/<legacy>_left/common/checks/col_check.py	src/pair_recon_left/common/checks/col_check.py
-R096	src/<legacy>_left/common/checks/row_check.py	src/pair_recon_left/common/checks/row_check.py
-R089	src/<legacy>_right/engine/common/model/audit.py	src/pair_recon_left/common/model/audit.py
-R093	src/<legacy>_left/common/model/hashing.py	src/pair_recon_left/common/model/hashing.py
-R099	src/<legacy>_left/common/model/manifest.py	src/pair_recon_left/common/model/manifest.py
-R100	src/<legacy>_left/common/model/protocol.py	src/pair_recon_left/common/model/protocol.py
-R078	src/<legacy>_left/common/runtime/duck.py	src/pair_recon_left/common/runtime/duck.py
-R098	src/<legacy>_left/common/runtime/progress.py	src/pair_recon_left/common/runtime/progress.py
-A	src/pair_recon_left/common/runtime/run_logging.py
-R096	src/<legacy>_left/common/runtime/stats.py	src/pair_recon_left/common/runtime/stats.py
-R092	src/<legacy>_left/common/sql/column_types.py	src/pair_recon_left/common/sql/column_types.py
-R099	src/<legacy>_left/common/sql/date_platforms.py	src/pair_recon_left/common/sql/date_platforms.py
-R097	src/<legacy>_left/common/sql/dates.py	src/pair_recon_left/common/sql/dates.py
-R100	src/<legacy>_left/common/sql/query_windows.py	src/pair_recon_left/common/sql/query_windows.py
-R098	src/<legacy>_left/common/sql/sampling.py	src/pair_recon_left/common/sql/sampling.py
-R100	src/<legacy>_right/__init__.py	src/pair_recon_right/__init__.py
-A	src/pair_recon_right/catalog.py
-A	src/pair_recon_right/engine/backends/store.py
-R097	src/<legacy>_right/engine/backends/targets.py	src/pair_recon_right/engine/backends/targets.py
-R098	src/<legacy>_right/engine/checks/col_check.py	src/pair_recon_right/engine/checks/col_check.py
-R089	src/<legacy>_right/engine/checks/row_check.py	src/pair_recon_right/engine/checks/row_check.py
-A	src/pair_recon_right/engine/common/__init__.py
-R089	src/<legacy>_left/common/model/audit.py	src/pair_recon_right/engine/common/model/audit.py
-R093	src/<legacy>_right/engine/common/model/hashing.py	src/pair_recon_right/engine/common/model/hashing.py
-R099	src/<legacy>_right/engine/common/model/manifest.py	src/pair_recon_right/engine/common/model/manifest.py
-R100	src/<legacy>_right/engine/common/model/protocol.py	src/pair_recon_right/engine/common/model/protocol.py
-R094	src/<legacy>_right/engine/common/sql/column_types.py	src/pair_recon_right/engine/common/sql/column_types.py
-R098	src/<legacy>_right/engine/common/sql/date_platforms.py	src/pair_recon_right/engine/common/sql/date_platforms.py
-R097	src/<legacy>_right/engine/common/sql/dates.py	src/pair_recon_right/engine/common/sql/dates.py
-R100	src/<legacy>_right/engine/common/sql/sampling.py	src/pair_recon_right/engine/common/sql/sampling.py
-A	src/pair_recon_right/engine/job.py
-A	src/pair_recon_right/notebook.py
-D	templates/confluence/README.md
-D	templates/confluence/business-validation-overall.example.json
-D	templates/confluence/business-validation-overall.xhtml
-M	tests/conftest.py
-A	tests/live/conftest.py
+M	setup/schema.sql
+M	src/pair_recon/app/catalog.py
+M	src/pair_recon/app/cli.py
+M	src/pair_recon/app/runner.py
+A	src/pair_recon/core/debug.py
+A	src/pair_recon/core/progress.py
+A	src/pair_recon/core/sas.py
+M	src/pair_recon_left/backends/sources.py
+M	src/pair_recon_left/cli/config.py
+M	src/pair_recon_left/common/checks/col_check.py
+M	src/pair_recon_left/common/checks/row_check.py
+M	src/pair_recon_left/common/model/manifest.py
+M	src/pair_recon_right/catalog.py
+M	src/pair_recon_right/engine/backends/targets.py
+M	src/pair_recon_right/engine/checks/row_check.py
+M	src/pair_recon_right/engine/common/model/manifest.py
+M	src/pair_recon_right/engine/job.py
 M	tests/live/sources/test_source_queries.py
-D	tests/local/spark/test_key_families_spark.py
-D	tests/local/spark/test_spark_target.py
-M	tests/support.py
-M	tests/unit/common/data/test_dates.py
-M	tests/unit/common/data/test_hashing.py
-M	tests/unit/common/data/test_key_families.py
-M	tests/unit/common/data/test_sampling_sql.py
-M	tests/unit/common/protocol/test_audit.py
 M	tests/unit/common/protocol/test_manifest.py
-M	tests/unit/common/protocol/test_parity.py
-M	tests/unit/common/protocol/test_protocol.py
-M	tests/unit/common/runtime/test_duck.py
-M	tests/unit/common/runtime/test_stats.py
-M	tests/unit/conftest.py
-D	tests/unit/examples/test_remote_job.py
-M	tests/unit/flows/test_packaging.py
-D	tests/unit/flows/test_protocol_flow.py
-D	tests/unit/flows/test_sas_protocol_flow.py
-D	tests/unit/packages/<legacy>/test_cli.py
-D	tests/unit/packages/<legacy>_left/backends/test_aws.py
-D	tests/unit/packages/<legacy>_left/backends/test_databricks.py
-D	tests/unit/packages/<legacy>_left/backends/test_materialize.py
-D	tests/unit/packages/<legacy>_left/backends/test_sources.py
-D	tests/unit/packages/<legacy>_left/backends/test_store.py
-D	tests/unit/packages/<legacy>_left/checks/test_col_check.py
-D	tests/unit/packages/<legacy>_left/checks/test_rollback.py
-D	tests/unit/packages/<legacy>_left/checks/test_row_check.py
-D	tests/unit/packages/<legacy>_left/cli/commands/test_blog.py
-D	tests/unit/packages/<legacy>_left/cli/commands/test_checks.py
-D	tests/unit/packages/<legacy>_left/cli/commands/test_tools.py
-D	tests/unit/packages/<legacy>_left/cli/ops/test_dbx.py
-D	tests/unit/packages/<legacy>_left/cli/ops/test_s3.py
-D	tests/unit/packages/<legacy>_left/cli/test_config.py
-D	tests/unit/packages/<legacy>_left/cli/test_options.py
-D	tests/unit/packages/<legacy>_left/test_confluence_admin.py
-D	tests/unit/packages/<legacy>_left/test_confluence_templates.py
-D	tests/unit/packages/<legacy>_local/test_csv_target.py
-D	tests/unit/packages/<legacy>_local/test_keycheck.py
-D	tests/unit/packages/<legacy>_local/test_pipeline.py
-D	tests/unit/packages/<legacy>_local/test_run_logging.py
-D	tests/unit/packages/<legacy>_local/test_warehouse.py
-D	tests/unit/packages/<legacy>_right/backends/test_store.py
-D	tests/unit/packages/<legacy>_right/report/test_build.py
-D	tests/unit/packages/<legacy>_right/report/test_excel.py
-D	tests/unit/packages/<legacy>_right/report/test_html.py
-D	tests/unit/packages/<legacy>_right/test_job.py
-D	tests/unit/packages/<legacy>_right/test_progress.py
-A	tests/unit/packages/pair_recon/test_catalog.py
-A	tests/unit/packages/pair_recon/test_config.py
-A	tests/unit/packages/pair_recon/test_mail.py
-A	tests/unit/packages/pair_recon/test_runner.py
-A	tests/unit/packages/pair_recon/test_store.py
-A	tests/unit/packages/pair_recon_left/backends/test_sources.py
-A	tests/unit/packages/pair_recon_left/backends/test_store.py
-A	tests/unit/packages/pair_recon_left/checks/test_col_check.py
-A	tests/unit/packages/pair_recon_left/checks/test_row_check.py
-A	tests/unit/packages/pair_recon_left/cli/test_config.py
-A	tests/unit/packages/pair_recon_right/backends/test_store.py
-R094	tests/unit/packages/<legacy>_right/backends/test_targets.py	tests/unit/packages/pair_recon_right/backends/test_targets.py
-R092	tests/unit/packages/<legacy>_right/checks/test_col_check.py	tests/unit/packages/pair_recon_right/checks/test_col_check.py
-R083	tests/unit/packages/<legacy>_right/checks/test_row_check.py	tests/unit/packages/pair_recon_right/checks/test_row_check.py
-A	tests/unit/packages/pair_recon_right/test_job.py
+M	tests/unit/packages/pair_recon/test_catalog.py
+M	tests/unit/packages/pair_recon/test_runner.py
+M	tests/unit/packages/pair_recon_left/backends/test_sources.py
+M	tests/unit/packages/pair_recon_left/cli/test_config.py
+M	tests/unit/packages/pair_recon_right/backends/test_targets.py
+M	tests/unit/packages/pair_recon_right/checks/test_row_check.py
 M	uv.lock
