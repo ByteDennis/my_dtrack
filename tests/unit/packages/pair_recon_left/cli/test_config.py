@@ -86,6 +86,35 @@ def test_query_windows_require_date_mode_and_declarations():
         validate_config({"version": 2, "pairs": {"p": value}})
 
 
+def test_vintage_selection_config():
+    value = pair("date")
+    value["vintage_values"] = ["2026-01-01", "2026-01-01"]
+    configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
+    assert configured["vintage_values"] == ["2026-01-01"]
+
+    value = pair("date")
+    value["vintage_sample_size"] = "3"
+    configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
+    assert configured["vintage_sample_size"] == 3
+
+
+def test_vintage_selection_config_rejects_ambiguity_and_all_mode():
+    value = pair("date")
+    value.update(vintage_sample_size=2, vintage_values=["2026-01-01"])
+    with pytest.raises(ValueError, match="not both"):
+        validate_config({"version": 2, "pairs": {"p": value}})
+
+    value = pair()
+    value["vintage_sample_size"] = 2
+    with pytest.raises(ValueError, match="cannot select vintages"):
+        validate_config({"version": 2, "pairs": {"p": value}})
+
+    value = pair("date")
+    value["vintage_sample_size"] = 1.5
+    with pytest.raises(TypeError, match="positive integer"):
+        validate_config({"version": 2, "pairs": {"p": value}})
+
+
 @pytest.mark.parametrize("sample", [10, "10"])
 def test_sample(sample):
     value = pair()

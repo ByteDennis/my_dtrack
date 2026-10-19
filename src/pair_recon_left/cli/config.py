@@ -129,8 +129,37 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             ]
             if date_only:
                 raise ValueError(f"{name}: partition_mode all cannot use {', '.join(date_only)}")
+            if pair.get("vintage_values") or pair.get("vintage_sample_size") not in (None, ""):
+                raise ValueError(f"{name}: partition_mode all cannot select vintages")
         else:
             pair.pop("partition_mode", None)
+        vintage_values = pair.get("vintage_values") or []
+        vintage_sample_size = pair.get("vintage_sample_size")
+        if not isinstance(vintage_values, list) or not all(
+            isinstance(value, str) and value.strip() for value in vintage_values
+        ):
+            raise TypeError(f"{name}: vintage_values must be a list of dates")
+        pair["vintage_values"] = list(dict.fromkeys(value.strip() for value in vintage_values))
+        if vintage_sample_size not in (None, ""):
+            if isinstance(vintage_sample_size, bool):
+                raise TypeError(f"{name}: vintage_sample_size must be a positive integer")
+            try:
+                parsed_sample_size = int(vintage_sample_size)
+            except (TypeError, ValueError):
+                raise TypeError(f"{name}: vintage_sample_size must be a positive integer") from None
+            if isinstance(vintage_sample_size, float) and not vintage_sample_size.is_integer():
+                raise TypeError(f"{name}: vintage_sample_size must be a positive integer")
+            if isinstance(vintage_sample_size, str) and not vintage_sample_size.strip().isdigit():
+                raise TypeError(f"{name}: vintage_sample_size must be a positive integer")
+            if parsed_sample_size <= 0:
+                raise ValueError(f"{name}: vintage_sample_size must be a positive integer")
+            pair["vintage_sample_size"] = parsed_sample_size
+        else:
+            pair.pop("vintage_sample_size", None)
+        if pair["vintage_values"] and "vintage_sample_size" in pair:
+            raise ValueError(f"{name}: use vintage_values or vintage_sample_size, not both")
+        if not pair["vintage_values"]:
+            pair.pop("vintage_values", None)
         try:
             left["query_windows"] = normalize_query_windows(
                 left.get("query"), left.get("query_windows"), source=left_source

@@ -139,6 +139,28 @@ def pair_config(row: dict) -> dict:
             else:
                 target.pop("query", None)
                 target.pop("query_windows", None)
+        sample_size = query_row.get("vintage_sample_size")
+        if sample_size in (None, ""):
+            value.pop("vintage_sample_size", None)
+        else:
+            try:
+                value["vintage_sample_size"] = int(sample_size)
+            except (TypeError, ValueError):
+                raise ValueError(f"{pair}: vintage_sample_size must be an integer") from None
+        vintage_values = query_row.get("vintage_values")
+        if isinstance(vintage_values, str):
+            try:
+                vintage_values = json.loads(vintage_values)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{pair}: vintage_values must be an array") from exc
+        if vintage_values in (None, []):
+            value.pop("vintage_values", None)
+        elif isinstance(vintage_values, list) and all(
+            isinstance(item, str) for item in vintage_values
+        ):
+            value["vintage_values"] = vintage_values
+        else:
+            raise ValueError(f"{pair}: vintage_values must be an array of strings")
     return value
 
 

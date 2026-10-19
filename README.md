@@ -29,11 +29,19 @@ copy .pair_recon.env.example .pair_recon.env
 setup\setup.cmd --profile corp --workspace-dir /Workspace/Users/name/pair_recon --cluster-id CLUSTER_ID
 ```
 
-Install Hadoop support with `uv sync --extra hadoop`; the `hive` ODBC DSN comes from `HADOOP_DSN`, so the run prompt only needs the Hadoop schema. Use [setup/schema.sql](setup/schema.sql) to create the six Delta tables. The column-map and pair-SQL tables are resolved automatically in the same catalog/schema as the configured pair table.
+Install Hadoop support with `uv sync --extra hadoop`; put its non-secret ODBC DSN name in the pair's `left.dsn` metadata so the run prompt only needs the Hadoop schema. Use [setup/schema.sql](setup/schema.sql) to create the six Delta tables. The column-map and pair-SQL tables are resolved automatically in the same catalog/schema as the configured pair table. Existing installations created before vintage selection must run [setup/migrate_pair_sql_vintages.sql](setup/migrate_pair_sql_vintages.sql) once.
 
 `pair_recon_column_map.data_type` accepts `numeric`, `categorical`, a registered type such as `sas_datetime_date`, or a custom JSON type such as `{"type":"date","left_date_type":"timestamp","right_date_type":"date"}`. Mapping rows replace `col_map`, `col_type_overrides`, and `column_types` from `config_json` for that pair.
 
 `pair_recon_pair_sql` contains at most one row per pair. A non-blank `left_sql` or `right_sql` replaces that side's table relation; a blank value uses its configured table. SQL remains the base relation so PairRecon can apply outer date guards, sampling, and aggregation. Named `{{query_windows:name}}` markers are supported on Oracle Left and Databricks Right SQL; declarations remain under the matching side's `query_windows` object in `config_json`.
+
+Row checks always cover the complete requested range. Attribute checks may use all vintage buckets (both selection fields null), a deterministic random subset (`vintage_sample_size`), or exact buckets (`vintage_values`). Exact values are normalized to the selected day/week/month/quarter/year bucket. Random selection changes with a new run ID but is stable when the same run is resumed. Set only one selection field; unavailable explicit buckets fail before attribute work starts.
+
+## Environment
+
+The normal UC-driven run needs only `ORACLE_USER` and `ORACLE_PASSWORD` in `.pair_recon.env` when Left is Oracle. Add `ORACLE_DSN` only when the pair metadata does not already provide `left.service` or `left.dsn`. A pair may instead name custom `user_env`, `password_env`, and `dsn_env` variables. Databricks authentication stays in `~/.databrickscfg`; Hadoop's DSN, DBX IDs, GitLab host, worker counts, memory, and paths are metadata, prompt defaults, CLI options, or optional tuning—not required environment variables.
+
+The earlier `pkg/distributed` branch used S3/AWS/WinSCP paths and many `DTRACK_*` runtime variables. The current UC Volume design does not require them.
 
 ## Run
 
@@ -89,7 +97,10 @@ Scopes are `left`, `right`, `both`, and `all`. `both` includes the local orchest
 just test
 just lint
 just build
+just publish
 ```
+
+`just publish` builds a main-program-only portable ZIP for the current operating system and CPU under `dist/`. Run it on Windows x64 to produce the full Windows x64 artifact. The extracted `pair-recon` folder contains only the main executable, its no-Python launcher, and required runtime libraries; DBX/GitLab tools, source documentation, setup SQL, and credentials are excluded. Build and test each target platform on that platform. Windows publishing includes `pyodbc` for the Hadoop input path; non-Windows portable builds currently omit Hadoop/pyodbc. ODBC drivers remain external.
 
 Live Oracle query/export/timing tests are opt-in and are not part of the default suite:
 

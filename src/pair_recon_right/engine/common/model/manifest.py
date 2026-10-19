@@ -111,6 +111,72 @@ def sample_plan(raw: Any) -> dict[str, Any]:
     return {"mode": "fixed", "count": count}
 
 
+def select_vintage_windows(
+    run_id: str,
+    pair_name: str,
+    pair: dict[str, Any],
+    windows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    raw_values = pair.get("vintage_values") or []
+    raw_size = pair.get("vintage_sample_size")
+    if raw_values and raw_size not in (None, ""):
+        raise ValueError(f"{pair_name}: use vintage_values or vintage_sample_size, not both")
+    available = {window["bucket"]: window for window in windows}
+    if raw_values:
+        if not isinstance(raw_values, list) or not all(
+            isinstance(value, str) and value.strip() for value in raw_values
+        ):
+            raise TypeError(f"{pair_name}: vintage_values must be a non-empty list of dates")
+        vintage = str(pair.get("vintage") or "day")
+        selected_values = list(
+            dict.fromkeys(bucket_date(value.strip(), vintage) for value in raw_values)
+        )
+        missing = [value for value in selected_values if value not in available]
+        if missing:
+            raise ValueError(
+                f"{pair_name}: requested vintages are not available: {', '.join(missing)}"
+            )
+        selected = [available[value] for value in sorted(selected_values)]
+        return selected, {
+            "mode": "specified",
+            "available": len(windows),
+            "selected": [window["bucket"] for window in selected],
+        }
+    if raw_size not in (None, ""):
+        if isinstance(raw_size, bool):
+            raise ValueError(f"{pair_name}: vintage_sample_size must be a positive integer")
+        try:
+            size = int(raw_size)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{pair_name}: vintage_sample_size must be a positive integer"
+            ) from None
+        if (
+            size <= 0
+            or (isinstance(raw_size, float) and not raw_size.is_integer())
+            or (isinstance(raw_size, str) and not raw_size.strip().isdigit())
+        ):
+            raise ValueError(f"{pair_name}: vintage_sample_size must be a positive integer")
+        ranked = sorted(
+            windows,
+            key=lambda window: hashlib.sha256(
+                f"{run_id}\0{pair_name}\0{window['bucket']}".encode()
+            ).hexdigest(),
+        )
+        selected = sorted(ranked[:size], key=lambda window: window["bucket"])
+        return selected, {
+            "mode": "random",
+            "requested": size,
+            "available": len(windows),
+            "selected": [window["bucket"] for window in selected],
+        }
+    return windows, {
+        "mode": "all",
+        "available": len(windows),
+        "selected": [window["bucket"] for window in windows],
+    }
+
+
 def key_family_specs(pair: dict[str, Any], keys: list[str]) -> list[dict[str, Any]]:
     configured = pair.get("key_families") or {}
     date_col = str(pair["left"].get("date_col") or "").casefold()
@@ -184,6 +250,7 @@ def build_manifest(
         }
         for bucket, partitions in sorted(grouped.items())
     ]
+    windows, vintage_selection = select_vintage_windows(run_id, pair_name, pair, windows)
     keys = [part.strip() for part in str(pair.get("key") or "").split(",") if part.strip()]
     key_family_config = dict(pair.get("key_families") or {})
     unknown_keys = sorted(set(key_family_config) - set(keys))
@@ -231,6 +298,7 @@ def build_manifest(
         "pair": pair_name,
         "sample": sampling,
         "vintage": vintage,
+        "vintage_selection": vintage_selection,
         "key_cols": keys,
         "right_key_cols": [(pair["col_map"]).get(key, key) for key in keys],
         "key_families": key_families,

@@ -60,6 +60,35 @@ def test_plan():
     assert store.get_json("pairs/p/plan.json")["statistics"] == ["n_unique", "hash_sum"]
 
 
+def test_vintage_sampling_keeps_full_row_counts():
+    counts = {"2026-01-01": 2, "2026-02-01": 3, "2026-03-01": 4}
+    pair = {
+        "left": {"source": "oracle", "table": "L", "date_col": "D", "date_type": "date"},
+        "right": {
+            "source": "databricks",
+            "table": "R",
+            "date_col": "D",
+            "date_type": "date",
+        },
+        "col_map": {"A": "a"},
+        "checks": ["hash_sum"],
+        "vintage": "month",
+        "vintage_sample_size": 1,
+        "version": 2,
+    }
+    store = MemoryStore()
+    run_row_check(
+        {"version": 2, "pairs": {"p": pair}},
+        store,
+        run_id="run",
+        source_factory=lambda _value: Source(counts),
+    )
+    assert store.get_json("pairs/p/row_check/left.json")["counts"] == counts
+    plan = store.get_json("pairs/p/plan.json")
+    assert len(plan["windows"]) == 1
+    assert plan["vintage_selection"]["available"] == 3
+
+
 def test_snapshot():
     seen = []
     pair = {

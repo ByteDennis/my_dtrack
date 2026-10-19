@@ -65,7 +65,12 @@ def test_pair_metadata_tables_override_json():
                     '"right_date_type":"date"}',
                 },
             ],
-            "pair_sql": {"left_sql": " SELECT * FROM L; ", "right_sql": ""},
+            "pair_sql": {
+                "left_sql": " SELECT * FROM L; ",
+                "right_sql": "",
+                "vintage_sample_size": "2",
+                "vintage_values": None,
+            },
         }
     )
     assert config["col_map"] == {
@@ -78,6 +83,23 @@ def test_pair_metadata_tables_override_json():
     assert config["column_types"]["POSTED_AT"]["right_date_type"] == "date"
     assert config["left"]["query"] == "SELECT * FROM L"
     assert "query" not in config["right"] and "query_windows" not in config["right"]
+    assert config["vintage_sample_size"] == 2
+
+
+def test_pair_metadata_reads_specified_vintages_from_json_cell():
+    config = pair_config(
+        {
+            "pair_name": "orders",
+            "config_json": {"left": {}, "right": {}},
+            "pair_sql": {
+                "left_sql": None,
+                "right_sql": None,
+                "vintage_sample_size": None,
+                "vintage_values": '["2026-01-01", "2026-04-01"]',
+            },
+        }
+    )
+    assert config["vintage_values"] == ["2026-01-01", "2026-04-01"]
 
 
 def test_request_snapshot_contains_catalog_and_effective_config(tmp_path):
@@ -267,7 +289,7 @@ def test_sas(tmp_path):
 )
 def test_prompt(monkeypatch, left_input, right_input, tmp_path):
     metadata = {
-        "left": {"source": "oracle", "table": "L"},
+        "left": {"source": "oracle", "table": "L", "dsn": "hive"},
         "right": {"source": "databricks", "table": "R"},
         "partition_mode": "all",
         "col_map": {"A": "a"},
@@ -325,6 +347,7 @@ def test_prompt(monkeypatch, left_input, right_input, tmp_path):
         assert config["pairs"]["orders"]["pre_sampled"] is True
     if left_input == "hadoop":
         assert config["pairs"]["orders"]["left"]["schema"] == "risk"
+        assert config["pairs"]["orders"]["left"]["dsn"] == "hive"
     if right_input == "csv":
         assert config["pairs"]["orders"]["right"]["source"] == "csv"
         assert config["pairs"]["orders"]["right_pre_sampled"] is True

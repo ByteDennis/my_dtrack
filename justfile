@@ -10,15 +10,18 @@ test *args:
     if [ "{{args}}" = "--debug attach" ]; then uv run --extra debug python -m debugpy --listen 5678 --wait-for-client -m pytest -x -s tests/unit; elif [ "{{args}}" = "--debug" ] || [ "{{args}}" = "--debug ipdb" ]; then uv run --extra debug pytest -q --timeout=60 --pdb --pdbcls=IPython.terminal.debugger:TerminalPdb tests/unit; elif [ -n "{{args}}" ]; then echo "usage: just test [--debug ipdb|attach]" >&2; exit 2; else uv run pytest -q --timeout=60 tests/unit; fi
 
 lint *args:
-    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; elif [ -n "{{args}}" ]; then echo "usage: just lint [--debug]" >&2; exit 2; else verbose=""; fi; uv run ruff check $verbose src tests/unit tests/live/sources
-    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; else verbose=""; fi; uv run ruff format $verbose --check src tests/unit tests/live/sources
+    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; elif [ -n "{{args}}" ]; then echo "usage: just lint [--debug]" >&2; exit 2; else verbose=""; fi; uv run ruff check $verbose src tests/unit tests/live/sources tools
+    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; else verbose=""; fi; uv run ruff format $verbose --check src tests/unit tests/live/sources tools
 
 format *args:
-    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; elif [ -n "{{args}}" ]; then echo "usage: just format [--debug]" >&2; exit 2; else verbose=""; fi; uv run ruff format $verbose src tests/unit tests/live/sources
-    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; else verbose=""; fi; uv run ruff check $verbose --fix src tests/unit tests/live/sources
+    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; elif [ -n "{{args}}" ]; then echo "usage: just format [--debug]" >&2; exit 2; else verbose=""; fi; uv run ruff format $verbose src tests/unit tests/live/sources tools
+    if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; else verbose=""; fi; uv run ruff check $verbose --fix src tests/unit tests/live/sources tools
 
 build *args:
     if [ "{{args}}" = "--debug" ]; then uv build --verbose; elif [ -n "{{args}}" ]; then echo "usage: just build [--debug]" >&2; exit 2; else uv build; fi
+
+publish *args:
+    if [ "{{args}}" = "--debug" ]; then verbose="--debug"; elif [ -n "{{args}}" ]; then echo "usage: just publish [--debug]" >&2; exit 2; else verbose=""; fi; uv run --isolated --locked --no-dev --group publish python tools/publish_portable.py $verbose
 
 run *args:
     uv run --extra debug pair_recon {{args}}

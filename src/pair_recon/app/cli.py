@@ -171,7 +171,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
                 "table": inherited["table"],
                 **{
                     name: inherited[name]
-                    for name in ("date_col", "date_type", "where")
+                    for name in ("date_col", "date_type", "where", "dsn", "autocommit")
                     if name in inherited
                 },
             },
@@ -354,6 +354,17 @@ def execute(args) -> int:
         return 1
 
 
+def main_program(argv=None) -> int:
+    values = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(prog="pair_recon")
+    parser.add_argument("--defaults", type=Path, default=DEFAULTS)
+    parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--debug", nargs="?", const="ipdb", choices=("ipdb", "attach"))
+    args = parser.parse_args(values)
+    configure_console_logging(args.log_level)
+    return run_debugger(args.debug, lambda: execute(args))
+
+
 def main(argv=None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     if values[:1] == ["dbx"]:
@@ -364,10 +375,4 @@ def main(argv=None) -> int:
         from pair_recon_gitlab.cli import main as gitlab_main
 
         return gitlab_main(values[1:])
-    parser = argparse.ArgumentParser(prog="pair_recon")
-    parser.add_argument("--defaults", type=Path, default=DEFAULTS)
-    parser.add_argument("--log-level", default="INFO")
-    parser.add_argument("--debug", nargs="?", const="ipdb", choices=("ipdb", "attach"))
-    args = parser.parse_args(values)
-    configure_console_logging(args.log_level)
-    return run_debugger(args.debug, lambda: execute(args))
+    return main_program(values)

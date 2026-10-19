@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_column_map (
 CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_pair_sql (
   pair_name STRING NOT NULL,
   left_sql STRING,
-  right_sql STRING
+  right_sql STRING,
+  vintage_sample_size INT,
+  vintage_values ARRAY<STRING>
 ) USING DELTA;
 
 CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_run_status (

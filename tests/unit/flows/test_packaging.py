@@ -35,6 +35,22 @@ def test_packages():
         "src/pair_recon_left",
         "src/pair_recon_right",
     ]
+    assert project["dependency-groups"]["publish"] == [
+        "pyinstaller>=6.22,<7",
+        "pyodbc>=5.0; sys_platform == 'win32'",
+    ]
+
+
+def test_portable_publish_recipe():
+    recipe = (ROOT / "justfile").read_text(encoding="utf-8")
+    script = (ROOT / "tools/publish_portable.py").read_text(encoding="utf-8")
+    assert "publish *args:" in recipe and "tools/publish_portable.py" in recipe
+    assert "--isolated --locked --no-dev" in recipe
+    assert "--onedir" in script and "archive_bundle" in script
+    assert "tempfile.mkdtemp" in script and "temporary.replace(target)" in script
+    assert "--exclude-module=pair_recon_dbx" in script
+    assert "--exclude-module=pair_recon_gitlab" in script
+    assert "README.md" not in script and "setup/schema.sql" not in script
 
 
 def test_imports():

@@ -30,7 +30,15 @@ def test_pairs_load_companion_metadata():
                     }
                 ]
             if "pair_recon_pair_sql" in statement:
-                return [{"pair_name": "orders", "left_sql": "SELECT 1", "right_sql": None}]
+                return [
+                    {
+                        "pair_name": "orders",
+                        "left_sql": "SELECT 1",
+                        "right_sql": None,
+                        "vintage_sample_size": 3,
+                        "vintage_values": None,
+                    }
+                ]
             return []
 
     sql = MetadataSql()
@@ -40,6 +48,7 @@ def test_pairs_load_companion_metadata():
     row = catalog.pairs()[0]
     assert row["column_map_rows"][0]["left_column"] == "AMOUNT"
     assert row["pair_sql"]["left_sql"] == "SELECT 1"
+    assert row["pair_sql"]["vintage_sample_size"] == 3
 
 
 def test_pairs_reject_duplicate_metadata():

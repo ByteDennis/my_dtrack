@@ -126,6 +126,47 @@ def test_manifest3(common):
     assert manifest["sample"] == {"mode": "all"}
 
 
+def test_vintage_selection(common):
+    specified = common.manifest.build_manifest(
+        "run",
+        "p",
+        _variant(vintage_values=["2026-02-18"]),
+        ROW_CHECK,
+    )
+    assert [window["bucket"] for window in specified["windows"]] == ["2026-02-01"]
+    assert specified["vintage_selection"] == {
+        "mode": "specified",
+        "available": 2,
+        "selected": ["2026-02-01"],
+    }
+    first = common.manifest.build_manifest(
+        "same-run", "p", _variant(vintage_sample_size=1), ROW_CHECK
+    )
+    second = common.manifest.build_manifest(
+        "same-run", "p", _variant(vintage_sample_size=1), ROW_CHECK
+    )
+    assert first["windows"] == second["windows"]
+    assert first["vintage_selection"]["mode"] == "random"
+    assert first["vintage_selection"]["requested"] == 1
+    assert len(first["windows"]) == 1 and first["expected_units"] == 2
+
+
+def test_vintage_selection_rejects_missing_or_conflicting_values(common):
+    with pytest.raises(ValueError, match="not available"):
+        common.manifest.build_manifest(
+            "run", "p", _variant(vintage_values=["2025-01-01"]), ROW_CHECK
+        )
+    with pytest.raises(ValueError, match="not both"):
+        common.manifest.build_manifest(
+            "run",
+            "p",
+            _variant(vintage_values=["2026-01-01"], vintage_sample_size=1),
+            ROW_CHECK,
+        )
+    with pytest.raises(ValueError, match="positive integer"):
+        common.manifest.build_manifest("run", "p", _variant(vintage_sample_size=1.5), ROW_CHECK)
+
+
 def test_all(common):
     pair = {
         "partition_mode": "all",

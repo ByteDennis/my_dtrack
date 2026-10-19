@@ -9,14 +9,16 @@ Install uv, Python 3.11+, Databricks CLI/profile access, and an ODBC driver when
   copy .pair_recon.env.example .pair_recon.env        Windows
   cp .pair_recon.env.example .pair_recon.env          Linux
 
-Keep Oracle/Hadoop secrets only in .pair_recon.env or the operating-system ODBC DSN. Databricks credentials stay in ~/.databrickscfg. Local .pair_recon.yaml contains defaults, never secrets. All text files and sampled CSVs are UTF-8.
+For the normal UC-driven Oracle run, .pair_recon.env needs only ORACLE_USER and ORACLE_PASSWORD. Add ORACLE_DSN only if the selected pair does not provide left.service or left.dsn. A pair may instead name custom user_env/password_env/dsn_env variables. Databricks credentials stay in ~/.databrickscfg. Hadoop uses the non-secret left.dsn metadata plus an installed ODBC driver. Local .pair_recon.yaml contains prompt defaults, never secrets. All text files and sampled CSVs are UTF-8.
+
+The previous pkg/distributed branch used DTRACK_S3, AWS/WinSCP, DTRACK_DBX_*, and many DTRACK_* runtime controls. They are not required by the current UC Volume design. PAIR_RECON_DBX_*, GITLAB_HOST, HADOOP_DSN, PAIR_RECON_DUCKDB_*, PAIR_RECON_STATS_BATCH, and PAIR_RECON_ORACLE_MACROS remain optional compatibility or operator overrides and do not belong in the minimal .pair_recon.env.
 
 2. Unity Catalog
 
-Create or confirm pair_recon_pair_meta, pair_recon_column_map, pair_recon_pair_sql, pair_recon_run_status, pair_recon_run_error, and pair_recon_progress_snapshot using setup/schema.sql. The two companion metadata tables are read from the same catalog/schema as pair_recon_pair_meta. Pair metadata config_json selects one Left source:
+Create or confirm pair_recon_pair_meta, pair_recon_column_map, pair_recon_pair_sql, pair_recon_run_status, pair_recon_run_error, and pair_recon_progress_snapshot using setup/schema.sql. For an existing pair_recon_pair_sql created before vintage selection, run setup/migrate_pair_sql_vintages.sql once. The two companion metadata tables are read from the same catalog/schema as pair_recon_pair_meta. Pair metadata config_json selects one Left source:
 
-  Oracle: {"source":"oracle","table":"L","conn_macro":"pb30"}
-  Hadoop: {"source":"hadoop","schema":"risk","table":"L"}
+  Oracle: {"source":"oracle","table":"L","service":"host:1521/service"}
+  Hadoop: {"source":"hadoop","dsn":"hive","schema":"risk","table":"L"}
   CSV:    {"source":"csv","path":"C:/data/left.csv"}
 
 Put one row per mapped Left attribute in pair_recon_column_map:
@@ -30,14 +32,20 @@ data_type may be blank, numeric, categorical, a registered type name, or a custo
 
 Put at most one row per pair in pair_recon_pair_sql:
 
-  INSERT INTO catalog.schema.pair_recon_pair_sql VALUES
+  INSERT INTO catalog.schema.pair_recon_pair_sql
+    (pair_name, left_sql, right_sql, vintage_sample_size, vintage_values)
+  VALUES
     ('orders',
      'SELECT * FROM left_orders l WHERE {{query_windows:driver}}',
-     'SELECT * FROM right_orders r WHERE {{query_windows:driver}}');
+     'SELECT * FROM right_orders r WHERE {{query_windows:driver}}',
+     3,
+     NULL);
 
 Non-blank SQL replaces that side's table relation; blank SQL uses the configured table. A SQL-only Right definition uses "kind":"query". Keep each marker declaration in config_json under the matching side, for example "query_windows":{"driver":{"expression":"l.BUSINESS_DT","date_type":"date"}} on Left and the corresponding r expression on Right. Metadata/preflight renders markers as 1=1, row checks use the requested bounds, and attribute checks use the exact admitted dates.
 
-Hadoop uses HADOOP_DSN, default hive; the prompt asks only for schema and reuses the pair table. A query-only Hadoop definition is also valid. CSV accepts nullstr, date_format, and DuckDB read_csv options. Use forward slashes or a quoted Windows path. Right metadata remains Databricks, but the run prompt may replace it with a local CSV. One execution handles one pair; concurrent run_ids may handle the same pair safely.
+Row check always covers the complete requested range. Attribute checks use all vintage buckets when vintage_sample_size and vintage_values are NULL. Set vintage_sample_size to a positive integer for a deterministic random subset. The same run_id selects the same buckets on resume; a new run_id may select different buckets. For exact buckets set vintage_sample_size to NULL and use, for example, array('2026-01-01', '2026-04-01') in vintage_values. Values normalize to the chosen day/week/month/quarter/year bucket. Never set both fields; an unavailable explicit bucket fails closed.
+
+Hadoop reads left.dsn from UC metadata; HADOOP_DSN remains an optional fallback. The prompt asks only for schema and reuses the pair table and DSN. A query-only Hadoop definition is also valid. CSV accepts nullstr, date_format, and DuckDB read_csv options. Use forward slashes or a quoted Windows path. Right metadata remains Databricks, but the run prompt may replace it with a local CSV. One execution handles one pair; concurrent run_ids may handle the same pair safely.
 
 3. One-time remote setup
 
@@ -85,7 +93,7 @@ Prompts reuse .pair_recon.yaml defaults when Enter is pressed. Confirm owner, pr
 
 After Run now is confirmed, .pair_recon-work/<run_id>/request.json is written atomically before execution. It contains the current prompt settings, raw pair/mapping/SQL metadata pulled from Catalog, and the merged effective config. Credential fields are removed. SQL text is retained verbatim for audit, so never embed credentials in SQL. Keep this file with left.log when auditing or backing up a run.
 
-PAIR_RECON_DUCKDB_WORKERS controls local statistics threads; pull_workers in .pair_recon.yaml controls source pulls. progress_interval controls seconds between progress rows. Query pair_recon_progress_snapshot by run_id for state, ready/completed/failed units, and active pair_recon thread names.
+Optional PAIR_RECON_DUCKDB_WORKERS controls local statistics threads; pull_workers in .pair_recon.yaml controls source pulls. progress_interval controls seconds between progress rows. Query pair_recon_progress_snapshot by run_id for state, ready/completed/failed units, and active pair_recon thread names.
 
 5. Optional SAS sampling
 
@@ -140,5 +148,8 @@ Attach listens on 0.0.0.0:5678 and waits for a VS Code debugpy attach configurat
   just test
   just lint
   just build
+  just publish
+
+just publish creates a main-program-only dist/pair-recon-<version>-<os>-<cpu>.zip for the current platform. Build the full Windows artifact on Windows x64. After extraction, run run.cmd; target users do not install Python. The ZIP excludes DBX/GitLab tools, source documentation, setup SQL, and credentials. Windows publishing includes pyodbc for Hadoop; non-Windows portable builds currently omit Hadoop/pyodbc. Databricks authentication, Oracle credentials, Outlook, and ODBC drivers remain external.
 
 Live tests are opt-in. Do not run just live unless real source credentials and network access are intended.
