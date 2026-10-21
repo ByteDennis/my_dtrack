@@ -72,3 +72,15 @@ def test_status():
     write_run_status(store, {"state": "complete", "role": "right"})
     assert get_run_status(store)["timezone"] == "Asia/Tokyo"
     assert get_run_status(store)["updated_at"].endswith("+09:00")
+
+
+def test_environment_timezone_default(monkeypatch):
+    monkeypatch.setenv("PAIR_RECON_TIMEZONE", "Asia/Tokyo")
+    store = MemoryStore()
+
+    write_run_status(store, {"state": "started"})
+
+    status = get_run_status(store)
+    assert status["timezone"] == "Asia/Tokyo"
+    assert status["updated_at"].endswith("+09:00")
+    assert timestamp().endswith("+09:00")

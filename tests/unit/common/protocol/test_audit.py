@@ -25,6 +25,32 @@ def test_event(tmp_path):
     assert "-- timestamp=" not in text
 
 
+def test_event_order_uses_internal_order_when_timestamps_match(tmp_path):
+    store = VolumeStore(tmp_path / "run")
+    timestamp = "2026-10-21T04:38:46-04:00"
+    store.put_bytes(
+        "pairs/orders/audit/a.sql",
+        (
+            f"-- timestamp={timestamp} side=right backend=spark operation=query "
+            "audit_order=2026-10-21T04:38:46.000002-04:00\n"
+            "SELECT * FROM main.sales.orders\n\n"
+        ).encode(),
+    )
+    store.put_bytes(
+        "pairs/orders/audit/z.sql",
+        (
+            f"-- timestamp={timestamp} side=left backend=oracle operation=query "
+            "audit_order=2026-10-21T04:38:46.000001-04:00\n"
+            "SELECT * FROM APP.ORDERS\n\n"
+        ).encode(),
+    )
+
+    assert LeftSqlAudit(store, "left", pair="orders").refresh()
+    assert store.get_bytes("_status/audit.sql").decode() == (
+        "SELECT * FROM APP.ORDERS\n\nSELECT * FROM main.sales.orders\n\n"
+    )
+
+
 def test_failure():
     failures = {}
 

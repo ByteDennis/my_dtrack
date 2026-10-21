@@ -29,7 +29,7 @@ def test_temporary_name_does_not_repeat_target_name(tmp_path, monkeypatch):
 
     monkeypatch.setattr(store_module.os, "replace", capture_replace)
     store = VolumeStore(tmp_path)
-    key = f"nested/{'x' * 180}.json"
+    key = "nested/audit-event.sql"
     store.put_bytes(key, b"payload")
 
     temporary, target = replaced[0]

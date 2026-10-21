@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import re
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
@@ -176,6 +177,9 @@ def _offset_name(value: datetime) -> str:
 
 
 def local_timezone_name() -> str:
+    configured = os.environ.get("PAIR_RECON_TIMEZONE", "").strip()
+    if configured:
+        return configured
     value = datetime.now().astimezone()
     return str(getattr(value.tzinfo, "key", "") or _offset_name(value))
 

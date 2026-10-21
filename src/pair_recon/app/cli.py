@@ -5,11 +5,11 @@ from pathlib import Path
 
 import yaml
 from dotenv import find_dotenv, load_dotenv
-from tzlocal import get_localzone_name
 
 from pair_recon.core.debug import run_debugger
 from pair_recon.mail import send_outlook
 from pair_recon_left.common.model.attribute_checks import attribute_check_names
+from pair_recon_left.common.model.protocol import local_timezone_name
 from pair_recon_left.common.runtime.run_logging import configure_console_logging, get_logger
 
 from .catalog import Catalog
@@ -84,7 +84,7 @@ def yes_no(label: str, default=False) -> bool:
 
 
 def timezone_default() -> str:
-    return get_localzone_name()
+    return local_timezone_name()
 
 
 def sample_value(value: str):

@@ -34,6 +34,11 @@ def test_runid():
     assert "/" not in value and "订单-pair-测试-owner" in value
 
 
+def test_timezone_default(monkeypatch):
+    monkeypatch.setenv("PAIR_RECON_TIMEZONE", "Asia/Tokyo")
+    assert cli.timezone_default() == "Asia/Tokyo"
+
+
 def test_pair_metadata_tables_override_json():
     config = pair_config(
         {

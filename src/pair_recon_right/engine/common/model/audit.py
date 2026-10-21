@@ -16,9 +16,6 @@ from .protocol import (
     get_run_status,
     timezone_from_name,
 )
-from .protocol import (
-    timestamp as protocol_timestamp,
-)
 
 log = logging.getLogger("pair_recon.sql_audit")
 _LOCKS: dict[str, threading.RLock] = {}
@@ -209,6 +206,7 @@ class SqlAudit:
         sql: str,
         *,
         timestamp: str,
+        audit_order: str,
         backend: str,
         operation: str,
     ) -> bytes:
@@ -218,6 +216,7 @@ class SqlAudit:
             f"side={self.side}",
             f"backend={backend}",
             f"operation={operation}",
+            f"audit_order={audit_order}",
         ]
         fields.extend(f"{key}={value}" for key, value in compact_fields.items())
         return ("-- " + " ".join(fields) + "\n" + statement + "\n\n").encode("utf-8")
@@ -248,8 +247,18 @@ class SqlAudit:
                     )
                     audit_key = audit_key or (match.group(1) if match else key)
                     timestamp = re.search(r"\btimestamp=([^\s]+)", header)
+                    audit_order = re.search(r"\baudit_order=([^\s]+)", header)
                     entries.append(
-                        (timestamp.group(1) if timestamp else key, key, audit_key, block)
+                        (
+                            audit_order.group(1)
+                            if audit_order
+                            else timestamp.group(1)
+                            if timestamp
+                            else key,
+                            key,
+                            audit_key,
+                            block,
+                        )
                     )
                 for _order, _key, audit_key, block in sorted(entries):
                     if audit_key in seen:
@@ -270,7 +279,8 @@ class SqlAudit:
             return None
         zone = get_run_status(self.store).get("timezone")
         now = datetime.now(timezone_from_name(zone))
-        timestamp = protocol_timestamp(self.store)
+        timestamp = now.isoformat(timespec="seconds")
+        audit_order = now.isoformat(timespec="microseconds")
         event_id = f"{now.strftime('%Y%m%dT%H%M%S%z')}-{uuid.uuid4().hex}"
         shape = sql_shape(sql)
         root = str(getattr(self.store, "root_uri", id(self.store)))
@@ -290,6 +300,7 @@ class SqlAudit:
         block = self._block(
             sql,
             timestamp=timestamp,
+            audit_order=audit_order,
             backend=backend,
             operation=operation,
         )
