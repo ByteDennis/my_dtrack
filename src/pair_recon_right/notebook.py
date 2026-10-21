@@ -1,16 +1,31 @@
 # Databricks notebook source
+import importlib
 import logging
 import os
+import subprocess
 import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-sys.path.insert(0, os.path.dirname(os.getcwd()))
+notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+if not notebook_path.startswith("/Workspace/"):
+    notebook_path = "/Workspace" + notebook_path
+package_dir = os.path.dirname(notebook_path)
+sys.path.insert(0, os.path.dirname(package_dir))
+package = os.path.basename(package_dir)
 
-from pair_recon_right.catalog import publish
-from pair_recon_right.engine.backends.store import open_store
-from pair_recon_right.engine.backends.targets import SparkTarget
-from pair_recon_right.engine.job import run
+requirements = os.path.join(package_dir, "requirements.txt")
+if os.path.isfile(requirements):
+    with open(requirements, encoding="utf-8") as stream:
+        needed = [line.strip() for line in stream if line.strip() and not line.lstrip().startswith("#")]
+    if needed:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-r", requirements])
+        importlib.invalidate_caches()
+
+publish = importlib.import_module(f"{package}.catalog").publish
+open_store = importlib.import_module(f"{package}.engine.backends.store").open_store
+SparkTarget = importlib.import_module(f"{package}.engine.backends.targets").SparkTarget
+run = importlib.import_module(f"{package}.engine.job").run
 
 for name in (
     "run_root",

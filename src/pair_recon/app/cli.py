@@ -13,6 +13,7 @@ from pair_recon.core.metadata.workbook import (
     upsert_pair_configuration,
 )
 from pair_recon.mail import send_outlook
+from pair_recon_dbx.deploy import RIGHT_PACKAGE, RIGHT_PACKAGE_ENV, WORKSPACE_DIR_ENV, sync_right
 from pair_recon_left.common.model.attribute_checks import attribute_check_names
 from pair_recon_left.common.model.protocol import local_timezone_name
 from pair_recon_left.common.runtime.run_logging import configure_console_logging, get_logger
@@ -33,6 +34,7 @@ from .runner import (
     local_run_directory,
     make_run_id,
     pair_config,
+    resolve_job_id,
     workspace,
     write_request_snapshot,
 )
@@ -358,10 +360,23 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
     return settings, config, action, client, catalog
 
 
+# >>> mirror pair_recon_right to the workspace and repoint the right job <<< #
+def sync_right_package(settings: dict, client) -> dict:
+    job = settings.get("right_job_id") if settings.get("right_input") == "database" else None
+    return sync_right(
+        client,
+        env_value(WORKSPACE_DIR_ENV),
+        env_value(RIGHT_PACKAGE_ENV, default=RIGHT_PACKAGE),
+        resolve_job_id(client, job) if job else None,
+    )
+
+
 def execute(args, *, raise_errors: bool = False) -> int:
     load_environment()
     settings = None
     try:
+        if getattr(args, "sync", False) and not env_value(WORKSPACE_DIR_ENV):
+            raise ValueError(f"--sync requires {WORKSPACE_DIR_ENV} in .pair_recon.env")
         defaults = load_config(args.config) if args.config else load_defaults(DEFAULTS)
         settings, config, action, client, catalog = prompts(defaults)
         configure_console_logging(args.log_level, settings["timezone"])
@@ -379,6 +394,9 @@ def execute(args, *, raise_errors: bool = False) -> int:
         )
         if not yes_no("Run now", True):
             return 0
+        if getattr(args, "sync", False):
+            synced = sync_right_package(settings, client)
+            log.info("synced right package: %s", json.dumps(synced, ensure_ascii=False))
         snapshot = write_request_snapshot(settings, config)
         log.info("request snapshot: %s", snapshot)
         save_defaults(
@@ -439,6 +457,7 @@ def main_program(argv=None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="pair_recon")
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--sync", action="store_true")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))
     args = parser.parse_args(values)

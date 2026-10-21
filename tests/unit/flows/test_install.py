@@ -154,7 +154,8 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
     for name in (
         "DBX_PROFILE",
-        "DBX_WORKSPACE_DIR",
+        "DBX_WORKSPACE_PDIR",
+        "DBX_RIGHT_PACKAGE",
         "DBX_CLUSTER_ID",
         "DBX_WAREHOUSE_ID",
         "DBX_PAIR_TABLE",
@@ -162,7 +163,8 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
     ):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".pair_recon.env").write_text(
-        "DBX_PROFILE=team\nDBX_WORKSPACE_DIR=deploy\nDBX_CLUSTER_ID=c9\n"
+        "DBX_PROFILE=team\nDBX_WORKSPACE_PDIR=deploy\nDBX_RIGHT_PACKAGE=pair_recon\n"
+        "DBX_CLUSTER_ID=c9\n"
         "DBX_WAREHOUSE_ID=w9\nDBX_PAIR_TABLE=main.recon.pair_recon_pair_meta\n"
         "DBX_PAIR_WORKBOOK=config/pairs.xlsx\n",
         encoding="utf-8",
@@ -176,9 +178,9 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
     )
     monkeypatch.setattr(
         install,
-        "resolve_workspace_path",
-        lambda actual, path: (
-            calls.update({"resolve": (actual, path)}) or install.PurePosixPath("/Users/me/deploy")
+        "right_target",
+        lambda actual, path, name: (
+            calls.update({"resolve": (actual, path, name)}) or f"/Users/me/{path}/{name}"
         ),
     )
     monkeypatch.setattr(install, "read_pair_workbook", lambda _path: [])
@@ -197,7 +199,10 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
     assert install.main([]) == 0
 
     assert calls["profile"] == "team"
-    assert calls["resolve"] == (client, "deploy")
+    assert calls["resolve"] == (client, "deploy", "pair_recon")
+    assert calls["job"][1]["tasks"][0]["notebook_task"]["notebook_path"] == (
+        "/Users/me/deploy/pair_recon/notebook"
+    )
     assert calls["job"][1]["tasks"][0]["existing_cluster_id"] == "c9"
     assert calls["refresh"][1:3] == ("w9", "main.recon.pair_recon_pair_meta")
     assert calls["refresh"][3] == Path("config/pairs.xlsx")

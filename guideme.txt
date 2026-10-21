@@ -13,7 +13,7 @@ Workstation execution is supported only through uv run. run.cmd and run.sh are t
 
 Every PairRecon CLI, install.py, and mapping.ipynb automatically loads only .pair_recon.env; an existing process environment value wins. For Oracle, use ORACLE_USER plus ORACLE_PASSWORD or the selected macro's <MACRO>_PWD. ORACLE_SVC may map aliases such as pb30:service,pcds:service. Add ORACLE_DSN only if the selected pair does not provide a service through its macro. A pair may instead name custom user_env/password_env/dsn_env variables in left_options_json. Databricks credentials stay in ~/.databrickscfg. Hadoop uses HADOOP_DSN plus the left_conn schema and an installed ODBC driver. Local .pair_recon.yaml contains prompt defaults, never secrets. All text files and sampled CSVs are UTF-8.
 
-The previous pkg/distributed branch used DTRACK_S3, AWS/WinSCP, DTRACK_DBX_*, and many DTRACK_* runtime controls. They are not required by the current UC Volume design. PAIR_RECON_OUTPUT_DIR optionally selects the local artifact root and defaults to outputs under the current working directory. DBX_PROFILE, DBX_CLUSTER_ID, DBX_WAREHOUSE_ID, DBX_WORKSPACE_DIR, DBX_PAIR_TABLE, DBX_PAIR_WORKBOOK, DBX_STATUS_TABLE, DBX_ERROR_TABLE, and DBX_RUN_PATH are the Databricks defaults.
+The previous pkg/distributed branch used DTRACK_S3, AWS/WinSCP, DTRACK_DBX_*, and many DTRACK_* runtime controls. They are not required by the current UC Volume design. PAIR_RECON_OUTPUT_DIR optionally selects the local artifact root and defaults to outputs under the current working directory. DBX_PROFILE, DBX_CLUSTER_ID, DBX_WAREHOUSE_ID, DBX_WORKSPACE_PDIR, DBX_RIGHT_PACKAGE, DBX_PAIR_TABLE, DBX_PAIR_WORKBOOK, DBX_STATUS_TABLE, DBX_ERROR_TABLE, and DBX_RUN_PATH are the Databricks defaults.
 
 2. Unity Catalog
 
@@ -67,7 +67,8 @@ Databricks operator commands use ~/.databrickscfg and may reuse these .pair_reco
   DBX_PROFILE=corp
   DBX_CLUSTER_ID=...
   DBX_WAREHOUSE_ID=...
-  DBX_WORKSPACE_DIR=pair_recon
+  DBX_WORKSPACE_PDIR=pair_recon_app
+  DBX_RIGHT_PACKAGE=pair_recon
   DBX_PAIR_TABLE=catalog.schema.pair_recon_pair_meta
   DBX_STATUS_TABLE=catalog.schema.pair_recon_run_status
   DBX_ERROR_TABLE=catalog.schema.pair_recon_run_error
