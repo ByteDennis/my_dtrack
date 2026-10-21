@@ -1,3 +1,23 @@
+pair_recon merge changes (0bed413) — 2026-10-21
+
+Changed
+- README.md: documents daily pair-owner-YYYYMMDD run ids, in-place progress row, and the flat single-pair Volume layout.
+- guideme.txt: same daily run id, flat Volume layout, and progress refresh wording as README.
+- setup/setup.sql: example run ids use the daily format; progress example merges on run_id only.
+- src/pair_recon/app/catalog.py: progress snapshot MERGE upserts one current row per run_id instead of appending.
+- src/pair_recon/app/cli.py: run id is generated, no longer prompted; an existing same-day run is replaced instead of resume/restart/cancel.
+- src/pair_recon/app/runner.py: make_run_id drops time and random suffix; new runs clear the store; final failed status is written after the sampler stops.
+- src/pair_recon/core/progress.py: counts units/results/failures from the flat run root.
+- src/pair_recon_left/common/checks/row_check.py: requires exactly one active pair and an explicit run_id; drops the config-hash run id.
+- src/pair_recon_left/common/model/audit.py: lists audit files from the flat audit/ prefix.
+- src/pair_recon_left/common/model/protocol.py: removes the pairs/<pair>/ layer; all paths live directly under the run directory.
+- src/pair_recon_left/common/runtime/progress.py: tqdm bar only on an interactive terminal, with logging redirected through it.
+- src/pair_recon_left/common/runtime/run_logging.py: console filter hides records marked console_silent while a bar is shown.
+- src/pair_recon_right/engine/checks/row_check.py: follows the flat protocol paths.
+- src/pair_recon_right/engine/common/model/audit.py: mirrors the Left flat audit listing.
+- src/pair_recon_right/engine/common/model/protocol.py: mirrors the Left flat protocol paths.
+- src/pair_recon_right/notebook.py: publish receives only catalog fields (no run_root); formatting cleanup.
+
 pair_recon 0.1.0 — 2026-10-18
 
 Added
