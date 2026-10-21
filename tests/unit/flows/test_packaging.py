@@ -46,11 +46,29 @@ def test_portable_publish_recipe():
     script = (ROOT / "tools/publish_portable.py").read_text(encoding="utf-8")
     assert "publish *args:" in recipe and "tools/publish_portable.py" in recipe
     assert "--isolated --locked --no-dev" in recipe
-    assert "--onedir" in script and "archive_bundle" in script
+    assert "--onedir" in script and '"--console"' in script and "archive_bundle" in script
+    assert "portable publishing is Windows-only" in script
+    assert '"%~dp0pair-recon.exe" %*' in script
     assert "tempfile.mkdtemp" in script and "temporary.replace(target)" in script
     assert "--exclude-module=pair_recon_dbx" in script
     assert "--exclude-module=pair_recon_gitlab" in script
     assert "README.md" not in script and "setup/schema.sql" not in script
+
+
+def test_setup_example_has_an_upsert_for_every_catalog_table():
+    sql = (ROOT / "setup" / "setup.sql").read_text(encoding="utf-8")
+    tables = (
+        "pair_recon_pair_meta",
+        "pair_recon_column_map",
+        "pair_recon_pair_sql",
+        "pair_recon_run_status",
+        "pair_recon_run_error",
+        "pair_recon_progress_snapshot",
+    )
+    for table in tables:
+        assert f"-- # catalog.schema.{table}" in sql
+        assert f"MERGE INTO catalog.schema.{table}" in sql
+    assert sql.count("MERGE INTO catalog.schema.") == len(tables)
 
 
 def test_imports():

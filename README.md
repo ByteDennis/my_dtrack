@@ -29,7 +29,7 @@ copy .pair_recon.env.example .pair_recon.env
 setup\setup.cmd --profile corp --workspace-dir /Workspace/Users/name/pair_recon --cluster-id CLUSTER_ID
 ```
 
-Install Hadoop support with `uv sync --extra hadoop`; put its non-secret ODBC DSN name in the pair's `left.dsn` metadata so the run prompt only needs the Hadoop schema. Use [setup/schema.sql](setup/schema.sql) to create the six Delta tables. The column-map and pair-SQL tables are resolved automatically in the same catalog/schema as the configured pair table. Existing installations created before vintage selection must run [setup/migrate_pair_sql_vintages.sql](setup/migrate_pair_sql_vintages.sql) once.
+Install Hadoop support with `uv sync --extra hadoop`; put its non-secret ODBC DSN name in the pair's `left.dsn` metadata so the run prompt only needs the Hadoop schema. Use [setup/schema.sql](setup/schema.sql) to create the six Delta tables, then adapt the repeatable `MERGE` examples in [setup/setup.sql](setup/setup.sql). Each `-- # catalog.schema.table` section covers one table; the final three program-managed tables are marked as repair/testing examples. The column-map and pair-SQL tables are resolved automatically in the same catalog/schema as the configured pair table. Existing installations created before vintage selection must run [setup/migrate_pair_sql_vintages.sql](setup/migrate_pair_sql_vintages.sql) once.
 
 `pair_recon_column_map.data_type` accepts `numeric`, `categorical`, a registered type such as `sas_datetime_date`, or a custom JSON type such as `{"type":"date","left_date_type":"timestamp","right_date_type":"date"}`. Mapping rows replace `col_map`, `col_type_overrides`, and `column_types` from `config_json` for that pair.
 
@@ -100,7 +100,7 @@ just build
 just publish
 ```
 
-`just publish` builds a main-program-only portable ZIP for the current operating system and CPU under `dist/`. Run it on Windows x64 to produce the full Windows x64 artifact. The extracted `pair-recon` folder contains only the main executable, its no-Python launcher, and required runtime libraries; DBX/GitLab tools, source documentation, setup SQL, and credentials are excluded. Build and test each target platform on that platform. Windows publishing includes `pyodbc` for the Hadoop input path; non-Windows portable builds currently omit Hadoop/pyodbc. ODBC drivers remain external.
+`just publish` is Windows-only and builds a main-program-only portable ZIP under `dist/`; Linux and macOS releases are intentionally not generated. Run it on Windows x64 to produce the Windows x64 artifact. The extracted `pair-recon` folder contains only the console executable, `run.cmd`, and required runtime libraries; DBX/GitLab tools, source documentation, setup SQL, and credentials are excluded. The target user can double-click `run.cmd` (recommended because it pauses on an error) or `pair-recon.exe`; both use the Windows console and require neither Python nor Git Bash. Publishing includes `pyodbc` for the Hadoop input path, while the ODBC driver remains external.
 
 Live Oracle query/export/timing tests are opt-in and are not part of the default suite:
 

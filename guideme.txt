@@ -15,7 +15,7 @@ The previous pkg/distributed branch used DTRACK_S3, AWS/WinSCP, DTRACK_DBX_*, an
 
 2. Unity Catalog
 
-Create or confirm pair_recon_pair_meta, pair_recon_column_map, pair_recon_pair_sql, pair_recon_run_status, pair_recon_run_error, and pair_recon_progress_snapshot using setup/schema.sql. For an existing pair_recon_pair_sql created before vintage selection, run setup/migrate_pair_sql_vintages.sql once. The two companion metadata tables are read from the same catalog/schema as pair_recon_pair_meta. Pair metadata config_json selects one Left source:
+Create or confirm pair_recon_pair_meta, pair_recon_column_map, pair_recon_pair_sql, pair_recon_run_status, pair_recon_run_error, and pair_recon_progress_snapshot using setup/schema.sql. Then copy and adapt the repeatable MERGE examples in setup/setup.sql; every -- # catalog.schema.table section covers one table, and the final three program-managed tables are explicitly marked for repair/testing only. For an existing pair_recon_pair_sql created before vintage selection, run setup/migrate_pair_sql_vintages.sql once. The two companion metadata tables are read from the same catalog/schema as pair_recon_pair_meta. Pair metadata config_json selects one Left source:
 
   Oracle: {"source":"oracle","table":"L","service":"host:1521/service"}
   Hadoop: {"source":"hadoop","dsn":"hive","schema":"risk","table":"L"}
@@ -150,6 +150,6 @@ Attach listens on 0.0.0.0:5678 and waits for a VS Code debugpy attach configurat
   just build
   just publish
 
-just publish creates a main-program-only dist/pair-recon-<version>-<os>-<cpu>.zip for the current platform. Build the full Windows artifact on Windows x64. After extraction, run run.cmd; target users do not install Python. The ZIP excludes DBX/GitLab tools, source documentation, setup SQL, and credentials. Windows publishing includes pyodbc for Hadoop; non-Windows portable builds currently omit Hadoop/pyodbc. Databricks authentication, Oracle credentials, Outlook, and ODBC drivers remain external.
+just publish is Windows-only and creates a main-program-only dist/pair-recon-<version>-windows-<cpu>.zip; it intentionally creates no Linux/macOS release. Build it on Windows x64. After extraction, double-click run.cmd (recommended because it pauses on an error) or pair-recon.exe. Both use the Windows console, so target users need neither Python nor Git Bash. The ZIP excludes DBX/GitLab tools, source documentation, setup SQL, and credentials. Publishing includes pyodbc for Hadoop; Databricks authentication, Oracle credentials, Outlook, and the ODBC driver remain external.
 
 Live tests are opt-in. Do not run just live unless real source credentials and network access are intended.

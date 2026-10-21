@@ -64,6 +64,8 @@ def archive_bundle(bundle: Path, target: Path) -> Path:
 
 
 def build(*, debug: bool = False) -> Path:
+    if platform.system() != "Windows":
+        raise OSError("portable publishing is Windows-only")
     from PyInstaller.__main__ import run as pyinstaller
 
     BUILD_PARENT.mkdir(parents=True, exist_ok=True)
@@ -74,6 +76,7 @@ def build(*, debug: bool = False) -> Path:
             str(ROOT / "tools" / "pair_recon_entry.py"),
             "--name=pair-recon",
             "--onedir",
+            "--console",
             "--noconfirm",
             "--clean",
             f"--distpath={build_root}",
@@ -98,9 +101,11 @@ def build(*, debug: bool = False) -> Path:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Build a platform-native PairRecon portable ZIP")
+    parser = argparse.ArgumentParser(description="Build the Windows PairRecon portable ZIP")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args(argv)
+    if platform.system() != "Windows":
+        parser.error("portable publishing is Windows-only; run just publish on Windows")
     target = build(debug=args.debug)
     print(target)
     return 0

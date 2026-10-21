@@ -45,7 +45,7 @@ class VolumeStore:
     def put_bytes(self, relative, body, *, content_type=""):
         path = self._path(relative)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.part")
+        temporary = path.with_name(f".tmp-{uuid.uuid4().hex}.part")
         try:
             temporary.write_bytes(body)
             os.replace(temporary, path)

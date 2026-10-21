@@ -195,7 +195,7 @@ def timezone_from_name(name: str | None):
 def timestamp(store=None, *, timezone_name: str | None = None) -> str:
     if timezone_name is None and store is not None:
         timezone_name = get_run_status(store).get("timezone")
-    return datetime.now(timezone_from_name(timezone_name)).isoformat(timespec="microseconds")
+    return datetime.now(timezone_from_name(timezone_name)).isoformat(timespec="seconds")
 
 
 def write_run_status(

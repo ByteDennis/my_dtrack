@@ -271,7 +271,7 @@ class SqlAudit:
         zone = get_run_status(self.store).get("timezone")
         now = datetime.now(timezone_from_name(zone))
         timestamp = protocol_timestamp(self.store)
-        event_id = f"{now.strftime('%Y%m%dT%H%M%S%f%z')}-{uuid.uuid4().hex}"
+        event_id = f"{now.strftime('%Y%m%dT%H%M%S%z')}-{uuid.uuid4().hex}"
         shape = sql_shape(sql)
         root = str(getattr(self.store, "root_uri", id(self.store)))
         capture = (root, self.side, self.pair or "", backend, operation, shape)
@@ -284,7 +284,7 @@ class SqlAudit:
         audit_key = hashlib.sha256("|".join(capture).encode()).hexdigest()[:20]
         if mutating:
             audit_key = f"{audit_key}-{event_id}"
-            key = f"{audit_prefix(self.pair)}{event_id}--{audit_key}.sql"
+            key = f"{audit_prefix(self.pair)}{event_id}.sql"
         else:
             key = f"{audit_prefix(self.pair)}{audit_key}.sql"
         block = self._block(

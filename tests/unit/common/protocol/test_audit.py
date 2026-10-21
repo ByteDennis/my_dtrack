@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from types import SimpleNamespace
 
 from pair_recon_left.common.model import audit as audit_module
@@ -64,6 +65,8 @@ def test_audit(tmp_path):
     header = store.get_bytes(key).decode().splitlines()[0]
     assert header.startswith("-- timestamp=") and "+09:00 side=left" in header
     assert " backend=oracle operation=pull_window" in header
+    recorded_at = header.split("timestamp=", 1)[1].split(" ", 1)[0]
+    assert datetime.fromisoformat(recorded_at).microsecond == 0
     assert not any(
         field in header for field in ("event_id=", "audit_key=", "shape=", "policy=", "pair=")
     )
@@ -156,4 +159,6 @@ def test_sql(tmp_path):
     assert audit.record("DELETE FROM T WHERE ID = 1", backend="duckdb")
     assert audit.record("DELETE FROM T WHERE ID = 2", backend="duckdb")
     assert audit.record("SHOW TABLES", backend="duckdb", operation="landing_inspect") is None
-    assert len(store.list_keys("_status/audit/")) == 2
+    keys = store.list_keys("_status/audit/")
+    assert len(keys) == 2
+    assert all("--" not in key and len(key.rsplit("/", 1)[-1]) <= 64 for key in keys)

@@ -1,5 +1,6 @@
 import csv
 import io
+from datetime import datetime
 
 from support import MemoryStore
 
@@ -67,6 +68,7 @@ def test_status():
     )
     status = get_run_status(store)
     assert status["timezone"] == "Asia/Tokyo" and status["updated_at"].endswith("+09:00")
+    assert datetime.fromisoformat(status["updated_at"]).microsecond == 0
     write_run_status(store, {"state": "complete", "role": "right"})
     assert get_run_status(store)["timezone"] == "Asia/Tokyo"
     assert get_run_status(store)["updated_at"].endswith("+09:00")
