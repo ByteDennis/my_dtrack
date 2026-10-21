@@ -45,6 +45,10 @@ PAIR_WORKBOOK = Path(__file__).resolve().parents[3] / "setup" / "pairs.xlsx"
 PAIR_WORKBOOK_ENV = "DBX_PAIR_WORKBOOK"
 
 
+def console(message: str):
+    print(message, flush=True)
+
+
 def ask(label: str, default=None, *, required=True) -> str:
     shown = "" if default in (None, "") else f" [{default}]"
     value = input(f"{label}{shown}: ").strip()
@@ -183,8 +187,11 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         env_value("DBX_RUN_PATH", default=defaults.get("volume_root")),
     )
     email_to = ask("Outlook recipients", defaults.get("email_to"), required=False)
+    workbook_path = pair_workbook_path(defaults)
+    console(f"Initializing Databricks client for profile {profile!r}...")
     client = workspace_factory(profile)
-    statement_sql = StatementSql(client, warehouse)
+    console(f"Checking {workbook_path} against {pair_table} through SQL warehouse {warehouse!r}.")
+    statement_sql = StatementSql(client, warehouse, reporter=console)
     catalog = Catalog(
         statement_sql,
         pair_table,
@@ -192,16 +199,21 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         error_table,
         progress_table,
     )
-    workbook_path = pair_workbook_path(defaults)
-    _workbook_rows, sync = synchronize_pair_workbook(
+    workbook_rows, sync = synchronize_pair_workbook(
         statement_sql, catalog, pair_table, workbook_path
     )
     if sync["rows"]:
-        print(
+        console(
             f"Updated {sync['rows']} Pair(s) from {workbook_path} in "
             f"{sync['pair_meta_table']}: {', '.join(sync['pairs'])}"
         )
+    elif workbook_rows:
+        console("Pair workbook metadata is already current; no remote upsert was needed.")
+    else:
+        console("Pair workbook has no configuration rows; remote metadata was not changed.")
+    console("Loading enabled pairs, column mappings, and pair SQL from Databricks...")
     by_name = {row["pair_name"]: row for row in catalog.pairs()}
+    console(f"Loaded {len(by_name)} enabled pair(s).")
     pair_names = list(by_name)
     if not pair_names:
         raise RuntimeError(f"Catalog and {workbook_path} have no enabled pair")
@@ -312,6 +324,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         )
     run_id = make_run_id(pair, owner, timezone)
     existing = catalog.run(run_id)
+    statement_sql.reporter = None
     action = "restart" if existing else "new"
     if existing:
         print(f"Replacing today's run: {run_id}")
@@ -386,8 +399,11 @@ def execute(args, *, raise_errors: bool = False) -> int:
         if not yes_no("Run now", True):
             return 0
         if getattr(args, "sync", False):
+            log.info("syncing Right package files to Databricks Workspace")
             synced = sync_right_package(settings, client)
-            log.info("synced right package: %s", json.dumps(synced, ensure_ascii=False))
+            log.info("Right package sync completed: %s", json.dumps(synced, ensure_ascii=False))
+        else:
+            log.info("Right package sync skipped: --sync was not requested")
         snapshot = write_request_snapshot(settings, config)
         log.info("request snapshot: %s", snapshot)
         save_defaults(

@@ -11,6 +11,7 @@ from support import MemoryStore
 
 from pair_recon.app import cli, runner
 from pair_recon.app.runner import (
+    StatementSql,
     local_run_directory,
     make_run_id,
     pair_config,
@@ -62,6 +63,48 @@ def test_runid():
         "America/New_York",
         now=datetime(2026, 10, 22, 9, tzinfo=ZoneInfo("America/New_York")),
     ) == Path("outputs/2026-10-22/custom-run")
+
+
+def test_statement_sql_reports_waiting_and_completion(monkeypatch):
+    def response(state, rows=None):
+        return SimpleNamespace(
+            statement_id="statement-1",
+            status=SimpleNamespace(state=state, error=None),
+            manifest=SimpleNamespace(
+                schema=SimpleNamespace(columns=[SimpleNamespace(name="value")])
+            ),
+            result=SimpleNamespace(data_array=rows),
+        )
+
+    pending = response("PENDING")
+    running = response("RUNNING")
+    succeeded = response("SUCCEEDED", [["ready"]])
+    remaining = iter([running, succeeded])
+    submitted = {}
+
+    def execute_statement(*_args, **kwargs):
+        submitted.update(kwargs)
+        return pending
+
+    api = SimpleNamespace(
+        execute_statement=execute_statement,
+        get_statement=lambda _statement_id: next(remaining),
+    )
+    messages = []
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+
+    rows = StatementSql(
+        SimpleNamespace(statement_execution=api),
+        "warehouse-1",
+        reporter=messages.append,
+    ).execute("SELECT 'ready' AS value")
+
+    assert rows == [{"value": "ready"}]
+    assert submitted["wait_timeout"] == "10s"
+    assert "submitted to warehouse warehouse-1" in messages[0]
+    assert any("pending" in message for message in messages)
+    assert any("running" in message for message in messages)
+    assert "completed" in messages[-1] and "1 row(s)" in messages[-1]
 
 
 def test_resolve_job_id_accepts_id_or_unique_name():

@@ -39,16 +39,27 @@ log = get_left_logger("runner")
 
 
 class StatementSql:
-    def __init__(self, workspace, warehouse_id: str):
+    def __init__(self, workspace, warehouse_id: str, reporter=None):
         self.api = workspace.statement_execution
         self.warehouse_id = warehouse_id
+        self.reporter = reporter
         self.lock = threading.Lock()
+
+    def _report(self, message: str):
+        if self.reporter:
+            self.reporter(message)
 
     def execute(self, statement: str, parameters=None):
         with self.lock:
             return self._execute(statement, parameters)
 
     def _execute(self, statement: str, parameters=None):
+        operation = statement.lstrip().split(None, 1)[0].upper()
+        started = time.monotonic()
+        self._report(
+            f"Databricks SQL {operation}: submitted to warehouse {self.warehouse_id}; "
+            "waiting for completion (a stopped warehouse may take a few minutes to start)."
+        )
         values = [
             StatementParameterListItem(
                 name=name,
@@ -61,16 +72,33 @@ class StatementSql:
             statement,
             self.warehouse_id,
             parameters=values,
-            wait_timeout="50s",
+            wait_timeout="10s",
         )
         state = getattr(getattr(response, "status", None), "state", None)
-        while getattr(state, "value", state) in {"PENDING", "RUNNING"}:
+        state_name = getattr(state, "value", state)
+        last_reported = None
+        last_reported_at = started
+        while state_name in {"PENDING", "RUNNING"}:
+            now = time.monotonic()
+            if state_name != last_reported or now - last_reported_at >= 15:
+                self._report(
+                    f"Databricks SQL {operation}: {str(state_name).lower()} "
+                    f"for {int(now - started)}s..."
+                )
+                last_reported = state_name
+                last_reported_at = now
             time.sleep(1)
             response = self.api.get_statement(response.statement_id)
             state = getattr(getattr(response, "status", None), "state", None)
-        if getattr(state, "value", state) != "SUCCEEDED":
+            state_name = getattr(state, "value", state)
+        if state_name != "SUCCEEDED":
             error = getattr(getattr(response, "status", None), "error", None)
-            raise RuntimeError(getattr(error, "message", None) or f"SQL finished with {state}")
+            message = getattr(error, "message", None) or f"SQL finished with {state}"
+            self._report(
+                f"Databricks SQL {operation}: failed after "
+                f"{int(time.monotonic() - started)}s: {message}"
+            )
+            raise RuntimeError(message)
         columns = (
             [
                 column.name
@@ -80,6 +108,10 @@ class StatementSql:
             else []
         )
         rows = getattr(getattr(response, "result", None), "data_array", None) or []
+        self._report(
+            f"Databricks SQL {operation}: completed in "
+            f"{int(time.monotonic() - started)}s ({len(rows)} row(s))."
+        )
         return [dict(zip(columns, row)) for row in rows]
 
 
