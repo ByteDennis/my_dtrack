@@ -37,13 +37,6 @@ def test_load_environment_does_not_override_process_environment(monkeypatch, tmp
     assert env_value("DBX_PROFILE") == "process"
 
 
-def test_env_value_uses_compatibility_fallback(monkeypatch):
-    monkeypatch.delenv("DBX_WAREHOUSE_ID", raising=False)
-    monkeypatch.setenv("PAIR_RECON_DBX_WAREHOUSE_ID", "legacy")
-
-    assert env_value("DBX_WAREHOUSE_ID", "PAIR_RECON_DBX_WAREHOUSE_ID") == "legacy"
-
-
 @pytest.mark.parametrize(
     ("mode", "answers", "expected"),
     [

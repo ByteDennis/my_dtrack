@@ -14,7 +14,7 @@ from . import workspace as workspace_ops
 def add_profile(parser) -> None:
     parser.add_argument(
         "--profile",
-        default=env_value("DBX_PROFILE", "PAIR_RECON_DBX_PROFILE", default=runtime.DEFAULT_PROFILE),
+        default=env_value("DBX_PROFILE", default=runtime.DEFAULT_PROFILE),
     )
 
 
@@ -47,9 +47,7 @@ def parser() -> argparse.ArgumentParser:
     add_profile(delete)
     compute = commands.add_parser("compute")
     compute.add_argument("action", nargs="?", choices=("status", "start", "stop"), default="status")
-    compute.add_argument(
-        "--cluster-id", default=env_value("DBX_CLUSTER_ID", "PAIR_RECON_DBX_CLUSTER_ID")
-    )
+    compute.add_argument("--cluster-id", default=env_value("DBX_CLUSTER_ID"))
     add_wait(compute)
     add_profile(compute)
     warehouse = commands.add_parser("warehouse")
@@ -58,7 +56,7 @@ def parser() -> argparse.ArgumentParser:
     )
     warehouse.add_argument(
         "--warehouse-id",
-        default=env_value("DBX_WAREHOUSE_ID", "PAIR_RECON_DBX_WAREHOUSE_ID"),
+        default=env_value("DBX_WAREHOUSE_ID"),
     )
     add_wait(warehouse)
     add_profile(warehouse)
@@ -67,7 +65,7 @@ def parser() -> argparse.ArgumentParser:
     sql.add_argument("--file", type=Path)
     sql.add_argument(
         "--warehouse-id",
-        default=env_value("DBX_WAREHOUSE_ID", "PAIR_RECON_DBX_WAREHOUSE_ID"),
+        default=env_value("DBX_WAREHOUSE_ID"),
     )
     sql.add_argument("--limit", type=int, default=20)
     add_profile(sql)

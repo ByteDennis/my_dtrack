@@ -20,7 +20,7 @@ Concurrent users may validate the same pair because all artifacts and result row
 uv sync
 cp .pair_recon.env.example .pair_recon.env
 # Fill DBX_* in .pair_recon.env, then:
-./setup/setup.sh --pair-table catalog.schema.pair_recon_pair_meta
+./setup/setup.sh
 ```
 
 Windows:
@@ -29,7 +29,7 @@ Windows:
 uv sync --locked
 copy .pair_recon.env.example .pair_recon.env
 rem Fill DBX_* in .pair_recon.env, then:
-setup\setup.cmd --pair-table catalog.schema.pair_recon_pair_meta
+setup\setup.cmd
 run.cmd
 ```
 
@@ -64,7 +64,7 @@ just run
 run.cmd
 ```
 
-The prompts ask for owner, Databricks profile and table locations, pair, run mode, Left input, timezone, partition mode, checks, sample, strict normalization, optional date range and vintage, run ID, and confirmation. `full` mode also asks for a Right input and starts either the configured Databricks job or local CSV Right. `left-only` does neither: it uses the Left definition, vintage selection, sample, checks, and approved column mapping to publish Left artifacts only. Owner defaults to the `USERNAME` environment variable, falling back to the saved value only when `USERNAME` is unavailable. Checks use a terminal checkbox list: enter comma-separated names or numbers to toggle `[x]` selections, then press Enter to confirm. Press Enter elsewhere to reuse saved defaults. A generated run ID remains the default so a normal run does not overwrite history.
+The prompts ask for owner, Databricks profile and table locations, pair, run mode, Left input, timezone, partition mode, checks, sample, strict normalization, optional date range and vintage, run ID, and confirmation. Pair choices combine enabled UC rows with enabled rows from `setup/pairs.xlsx`. Selecting a Pair that exists only in Excel first upserts its metadata and SQL into UC, reloads it through `Catalog`, and then continues; existing remote Pairs are not overwritten automatically. `full` mode also asks for a Right input and starts either the configured Databricks job or local CSV Right. `left-only` does neither: it uses the Left definition, vintage selection, sample, checks, and approved column mapping to publish Left artifacts only. Owner defaults to the `USERNAME` environment variable, falling back to the saved value only when `USERNAME` is unavailable. Checks use a terminal checkbox list: enter comma-separated names or numbers to toggle `[x]` selections, then press Enter to confirm. Press Enter elsewhere to reuse saved defaults. A generated run ID remains the default so a normal run does not overwrite history.
 
 After confirmation and before execution, PairRecon creates the local output root when needed and atomically writes `outputs/<run_id>/request.json` by default. Set `PAIR_RECON_OUTPUT_DIR` to change that root; a relative value is resolved from the current working directory. The same run directory contains `left.log`, DuckDB temporary state, pulled Left CSVs, fixed-key CSVs, and their metadata. Source input files are never moved. The UTF-8 snapshot contains the current user settings, the pair/mapping/SQL rows pulled from Catalog, and the merged effective config; credential fields are omitted. SQL text is retained verbatim for audit, so credentials must never be embedded in SQL.
 
@@ -92,7 +92,7 @@ just dbx sql "SELECT current_user()" --warehouse-id WAREHOUSE_ID
 just dbx runs --limit 10
 ```
 
-Set `DBX_PROFILE`, `DBX_CLUSTER_ID`, `DBX_WAREHOUSE_ID`, and `DBX_WORKSPACE_DIR` in `.pair_recon.env` to omit repeated setup and operator options. The older `PAIR_RECON_DBX_*` names remain compatibility fallbacks. Relative Workspace paths resolve below `/Users/<current-user>/`; absolute paths remain supported. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. Delete accepts multiple paths, `-r/--recursive`, `-f/--force`, and `--dry-run`, with `rm` as an alias. The setup installer mirrors `src/pair_recon_right`, deleting remote objects that no longer exist locally only after every upload succeeds. Use `just dbx --debug attach ...` or `just dbx --debug ipdb ...` only when troubleshooting.
+Set `DBX_PROFILE`, `DBX_CLUSTER_ID`, `DBX_WAREHOUSE_ID`, `DBX_WORKSPACE_DIR`, `DBX_PAIR_TABLE`, `DBX_STATUS_TABLE`, `DBX_ERROR_TABLE`, and `DBX_RUN_PATH` in `.pair_recon.env` to omit repeated setup and operator options. The table variables provide the corresponding run-prompt defaults; the progress table defaults to the status table's schema. `DBX_RUN_PATH` supplies the Volume runs path. Relative Workspace paths resolve below `/Users/<current-user>/`; absolute paths remain supported. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. Delete accepts multiple paths, `-r/--recursive`, `-f/--force`, and `--dry-run`, with `rm` as an alias. The setup installer mirrors `src/pair_recon_right`, deleting remote objects that no longer exist locally only after every upload succeeds. Use `just dbx --debug attach ...` or `just dbx --debug ipdb ...` only when troubleshooting.
 
 ## GitLab tools
 

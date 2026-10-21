@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from pair_recon.core.debug import run_debugger
+from pair_recon.core.metadata.workbook import read_pair_workbook, upsert_pair_configuration
 from pair_recon.mail import send_outlook
 from pair_recon_left.common.model.attribute_checks import attribute_check_names
 from pair_recon_left.common.model.protocol import local_timezone_name
@@ -33,6 +34,7 @@ from .runner import (
 
 log = get_logger("cli")
 DEFAULTS = Path(".pair_recon.yaml")
+PAIR_WORKBOOK = Path(__file__).resolve().parents[3] / "setup" / "pairs.xlsx"
 
 
 def ask(label: str, default=None, *, required=True) -> str:
@@ -117,42 +119,85 @@ def csv_defaults(path: str, pair: str, side: str) -> dict:
     return {**value, "sample": rate}
 
 
+def pair_candidates(catalog, workbook_path: str | Path | None = None):
+    rows = catalog.pairs()
+    remote = {row["pair_name"]: row for row in rows}
+    source = Path(workbook_path or PAIR_WORKBOOK)
+    workbook = (
+        {row["pair_name"]: row for row in read_pair_workbook(source) if row["enabled"]}
+        if source.is_file()
+        else {}
+    )
+    names = [*remote, *(name for name in workbook if name not in remote)]
+    return remote, workbook, names
+
+
+def import_workbook_pair(sql, catalog, pair_table: str, row: dict):
+    result = upsert_pair_configuration(sql, pair_table, [row])
+    refreshed = {item["pair_name"]: item for item in catalog.pairs()}
+    pair = row["pair_name"]
+    if pair not in refreshed:
+        raise RuntimeError(f"Pair {pair!r} was upserted but is not enabled in Catalog")
+    return refreshed[pair], result
+
+
 def prompts(defaults: dict, *, workspace_factory=workspace):
     owner = ask("Run owner", os.getenv("USERNAME") or defaults.get("owner"))
     profile = ask(
         "Databricks profile",
-        env_value("DBX_PROFILE", "PAIR_RECON_DBX_PROFILE", default=defaults.get("profile", "corp")),
+        env_value("DBX_PROFILE", default=defaults.get("profile", "corp")),
     )
     warehouse = ask(
         "SQL warehouse id",
-        env_value(
-            "DBX_WAREHOUSE_ID",
-            "PAIR_RECON_DBX_WAREHOUSE_ID",
-            default=defaults.get("warehouse_id"),
-        ),
+        env_value("DBX_WAREHOUSE_ID", default=defaults.get("warehouse_id")),
     )
-    pair_table = ask("Pair metadata table", defaults.get("pair_table"))
-    status_table = ask("Run status table", defaults.get("status_table"))
-    error_table = ask("Run error table", defaults.get("error_table"))
+    pair_table = ask(
+        "Pair metadata table",
+        env_value("DBX_PAIR_TABLE", default=defaults.get("pair_table")),
+    )
+    status_table = ask(
+        "Run status table",
+        env_value("DBX_STATUS_TABLE", default=defaults.get("status_table")),
+    )
+    error_table = ask(
+        "Run error table",
+        env_value("DBX_ERROR_TABLE", default=defaults.get("error_table")),
+    )
     progress_default = defaults.get("progress_table")
     if not progress_default and status_table.count(".") == 2:
         progress_default = status_table.rsplit(".", 1)[0] + ".pair_recon_progress_snapshot"
     progress_table = ask("Progress snapshot table", progress_default)
-    volume_root = ask("Volume runs path", defaults.get("volume_root"))
+    volume_root = ask(
+        "Volume runs path",
+        env_value("DBX_RUN_PATH", default=defaults.get("volume_root")),
+    )
     email_to = ask("Outlook recipients", defaults.get("email_to"), required=False)
     client = workspace_factory(profile)
+    statement_sql = StatementSql(client, warehouse)
     catalog = Catalog(
-        StatementSql(client, warehouse),
+        statement_sql,
         pair_table,
         status_table,
         error_table,
         progress_table,
     )
-    rows = catalog.pairs()
-    by_name = {row["pair_name"]: row for row in rows}
-    if not by_name:
-        raise RuntimeError("pair metadata has no enabled pair")
-    pair = choose("Table pair", list(by_name), defaults.get("pair"))
+    by_name, workbook_pairs, pair_names = pair_candidates(catalog)
+    if not pair_names:
+        raise RuntimeError("Catalog and setup/pairs.xlsx have no enabled pair")
+    saved_pair = defaults.get("pair")
+    pair = choose(
+        "Table pair",
+        pair_names,
+        saved_pair if saved_pair in pair_names else None,
+    )
+    if pair not in by_name:
+        by_name[pair], imported = import_workbook_pair(
+            statement_sql,
+            catalog,
+            pair_table,
+            workbook_pairs[pair],
+        )
+        print(f"Imported {pair!r} from {PAIR_WORKBOOK} into {imported['pair_meta_table']}")
     metadata = pair_config(by_name[pair])
     run_defaults = metadata.get("_run_defaults") or {}
     same_pair = defaults.get("pair") == pair

@@ -500,20 +500,89 @@ def test_prompt_uses_dbx_environment_defaults(monkeypatch):
 
     def stop(label, default=None, **_options):
         seen[label] = default
-        if label == "SQL warehouse id":
+        if label == "Volume runs path":
             raise RuntimeError("stop after dbx defaults")
         return default
 
     monkeypatch.setenv("USERNAME", "owner")
     monkeypatch.setenv("DBX_PROFILE", "team")
     monkeypatch.setenv("DBX_WAREHOUSE_ID", "warehouse-from-env")
+    monkeypatch.setenv("DBX_PAIR_TABLE", "main.recon.pairs_from_env")
+    monkeypatch.setenv("DBX_STATUS_TABLE", "main.recon.status_from_env")
+    monkeypatch.setenv("DBX_ERROR_TABLE", "main.recon.errors_from_env")
+    monkeypatch.setenv("DBX_RUN_PATH", "/Volumes/main/recon/runs_from_env")
     monkeypatch.setattr(cli, "ask", stop)
 
     with pytest.raises(RuntimeError, match="stop after dbx defaults"):
-        cli.prompts({"profile": "saved", "warehouse_id": "saved-warehouse"})
+        cli.prompts(
+            {
+                "profile": "saved",
+                "warehouse_id": "saved-warehouse",
+                "pair_table": "main.recon.saved_pairs",
+                "status_table": "main.recon.saved_status",
+                "error_table": "main.recon.saved_errors",
+                "volume_root": "/Volumes/main/recon/saved_runs",
+            }
+        )
 
     assert seen["Databricks profile"] == "team"
     assert seen["SQL warehouse id"] == "warehouse-from-env"
+    assert seen["Pair metadata table"] == "main.recon.pairs_from_env"
+    assert seen["Run status table"] == "main.recon.status_from_env"
+    assert seen["Run error table"] == "main.recon.errors_from_env"
+    assert seen["Volume runs path"] == "/Volumes/main/recon/runs_from_env"
+
+
+def test_pair_candidates_add_enabled_workbook_pairs(monkeypatch, tmp_path):
+    workbook = tmp_path / "pairs.xlsx"
+    workbook.touch()
+    catalog = SimpleNamespace(pairs=lambda: [{"pair_name": "remote", "enabled": True}])
+    monkeypatch.setattr(
+        cli,
+        "read_pair_workbook",
+        lambda path: (
+            [
+                {"pair_name": "remote", "enabled": True},
+                {"pair_name": "local", "enabled": True},
+                {"pair_name": "disabled", "enabled": False},
+            ]
+            if path == workbook
+            else []
+        ),
+    )
+
+    remote, local, names = cli.pair_candidates(catalog, workbook)
+
+    assert list(remote) == ["remote"]
+    assert list(local) == ["remote", "local"]
+    assert names == ["remote", "local"]
+
+
+def test_import_workbook_pair_upserts_then_reloads(monkeypatch):
+    row = {"pair_name": "orders", "enabled": True}
+    refreshed = {"pair_name": "orders", "config_json": {"left": {}, "right": {}}}
+    catalog = SimpleNamespace(pairs=lambda: [refreshed])
+    seen = {}
+    monkeypatch.setattr(
+        cli,
+        "upsert_pair_configuration",
+        lambda sql, table, rows: (
+            seen.update({"sql": sql, "table": table, "rows": rows})
+            or {"pair_meta_table": table, "rows": 1}
+        ),
+    )
+
+    actual, result = cli.import_workbook_pair(
+        "sql", catalog, "main.recon.pair_recon_pair_meta", row
+    )
+
+    assert actual == refreshed
+    assert result["rows"] == 1
+    assert seen == {
+        "sql": "sql",
+        "table": "main.recon.pair_recon_pair_meta",
+        "rows": [row],
+    }
 
 
 def test_local(monkeypatch, tmp_path):

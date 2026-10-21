@@ -1,6 +1,5 @@
 import argparse
 import json
-import os
 from pathlib import Path, PurePosixPath
 
 from databricks.sdk import WorkspaceClient
@@ -107,21 +106,15 @@ def refresh_configuration(workspace, warehouse_id: str, pair_table: str, workboo
 def main(argv=None):
     load_environment(ROOT)
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--profile", default=env_value("DBX_PROFILE", "PAIR_RECON_DBX_PROFILE", default="corp")
-    )
-    parser.add_argument(
-        "--workspace-dir", default=env_value("DBX_WORKSPACE_DIR", "PAIR_RECON_DBX_WORKSPACE_DIR")
-    )
-    parser.add_argument(
-        "--cluster-id", default=env_value("DBX_CLUSTER_ID", "PAIR_RECON_DBX_CLUSTER_ID")
-    )
+    parser.add_argument("--profile", default=env_value("DBX_PROFILE", default="corp"))
+    parser.add_argument("--workspace-dir", default=env_value("DBX_WORKSPACE_DIR"))
+    parser.add_argument("--cluster-id", default=env_value("DBX_CLUSTER_ID"))
     parser.add_argument("--job-name", default="pair_recon_right")
     parser.add_argument(
         "--warehouse-id",
-        default=env_value("DBX_WAREHOUSE_ID", "PAIR_RECON_DBX_WAREHOUSE_ID"),
+        default=env_value("DBX_WAREHOUSE_ID"),
     )
-    parser.add_argument("--pair-table", default=os.getenv("PAIR_RECON_PAIR_TABLE"))
+    parser.add_argument("--pair-table", default=env_value("DBX_PAIR_TABLE"))
     parser.add_argument("--config-workbook", type=Path, default=ROOT / "setup" / "pairs.xlsx")
     parser.add_argument("--skip-config", action="store_true")
     args = parser.parse_args(argv)

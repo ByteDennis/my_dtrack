@@ -150,21 +150,19 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "right_query_windows_json STRING" in migration
 
 
-def test_main_uses_pair_recon_environment_defaults(monkeypatch, tmp_path, capsys):
+def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
     for name in (
         "DBX_PROFILE",
         "DBX_WORKSPACE_DIR",
         "DBX_CLUSTER_ID",
         "DBX_WAREHOUSE_ID",
-        "PAIR_RECON_DBX_PROFILE",
-        "PAIR_RECON_DBX_WORKSPACE_DIR",
-        "PAIR_RECON_DBX_CLUSTER_ID",
-        "PAIR_RECON_DBX_WAREHOUSE_ID",
+        "DBX_PAIR_TABLE",
     ):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".pair_recon.env").write_text(
-        "DBX_PROFILE=team\nDBX_WORKSPACE_DIR=deploy\nDBX_CLUSTER_ID=c9\nDBX_WAREHOUSE_ID=w9\n",
+        "DBX_PROFILE=team\nDBX_WORKSPACE_DIR=deploy\nDBX_CLUSTER_ID=c9\n"
+        "DBX_WAREHOUSE_ID=w9\nDBX_PAIR_TABLE=main.recon.pair_recon_pair_meta\n",
         encoding="utf-8",
     )
     client = object()
@@ -194,7 +192,7 @@ def test_main_uses_pair_recon_environment_defaults(monkeypatch, tmp_path, capsys
         ),
     )
 
-    assert install.main(["--pair-table", "main.recon.pair_recon_pair_meta"]) == 0
+    assert install.main([]) == 0
 
     assert calls["profile"] == "team"
     assert calls["resolve"] == (client, "deploy")
