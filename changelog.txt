@@ -1,3 +1,14 @@
+pair_recon Report Databricks wait progress (47f74e0) — 2026-10-21
+
+Changed
+- src/pair_recon/app/cli.py: reports Databricks client initialization, workbook comparison, metadata upsert decisions, enabled-pair loading, and Workspace sync start/finish/skip stages.
+- src/pair_recon/app/runner.py: StatementSql optionally reports submission, pending/running state, elapsed time, completion rows, and failures; the initial server wait is 10 seconds and continued waits report at 15-second intervals.
+- tests/unit/packages/pair_recon/test_runner.py: covers SQL wait-state messages, completion output, results, and the 10-second initial wait.
+
+Verification
+- 628 unit tests pass; 12 optional tests skip.
+- Targeted console-progress tests pass (11 tests), and Ruff check, Ruff format check, and git diff check pass.
+
 pair_recon Simplify right notebook imports (3fa58a4) — 2026-10-21
 
 Changed
