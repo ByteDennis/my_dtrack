@@ -510,6 +510,92 @@ def read_pair_workbook(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _normalized_json(value: Any) -> Any:
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return value.strip()
+    if isinstance(value, dict):
+        return {key: _normalized_json(item) for key, item in sorted(value.items())}
+    if isinstance(value, list | tuple):
+        return [_normalized_json(item) for item in value]
+    return value
+
+
+def _normalized_enabled(value: Any) -> bool | str:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float) and value in {0, 1}:
+        return bool(value)
+    text = str(value or "").strip().casefold()
+    if text in {"true", "yes", "y", "1"}:
+        return True
+    if text in {"false", "no", "n", "0"}:
+        return False
+    return text
+
+
+def _normalized_keys(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = value.split(",")
+    else:
+        parsed = value
+    if not isinstance(parsed, list | tuple):
+        return [str(parsed).strip()]
+    return [str(item).strip() for item in parsed]
+
+
+def pair_configuration_signature(row: dict[str, Any]) -> dict[str, Any]:
+    meta = {}
+    for field in PAIR_WORKBOOK_COLUMNS:
+        value = row.get(field)
+        if field == "enabled":
+            meta[field] = _normalized_enabled(value)
+        elif field == "key_columns":
+            meta[field] = _normalized_keys(value)
+        elif field.endswith("_json"):
+            meta[field] = _normalized_json(value)
+        else:
+            meta[field] = None if value in (None, "") else str(value).strip()
+    effective = row.get("config_json")
+    if "config_json" not in row:
+        effective = build_pair_config(row)
+        effective.pop("_run_defaults", None)
+    meta["config_json"] = _normalized_json(effective)
+    pair_sql = row.get("pair_sql") or {}
+    sql = {
+        field: (
+            _normalized_json(pair_sql.get(field))
+            if field.endswith("_json")
+            else (None if pair_sql.get(field) in (None, "") else str(pair_sql[field]).strip())
+        )
+        for field in PAIR_SQL_WORKBOOK_COLUMNS
+        if field != "pair_name"
+    }
+    return {"meta": meta, "sql": sql}
+
+
+def changed_pair_configurations(
+    workbook_rows: list[dict[str, Any]], remote_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    remote = {str(row.get("pair_name")): row for row in remote_rows}
+    return [
+        row
+        for row in workbook_rows
+        if row["pair_name"] not in remote
+        or pair_configuration_signature(row)
+        != pair_configuration_signature(remote[row["pair_name"]])
+    ]
+
+
 def upsert_pair_configuration(sql, pair_table: str, rows: list[dict[str, Any]]) -> dict:
     pair_table = validate_table_name(pair_table)
     pair_sql_table = companion_table(pair_table, "pair_recon_pair_sql")

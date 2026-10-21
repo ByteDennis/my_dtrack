@@ -7,7 +7,11 @@ from pathlib import Path
 import yaml
 
 from pair_recon.core.debug import debugging, run_debugger
-from pair_recon.core.metadata.workbook import read_pair_workbook, upsert_pair_configuration
+from pair_recon.core.metadata.workbook import (
+    changed_pair_configurations,
+    read_pair_workbook,
+    upsert_pair_configuration,
+)
 from pair_recon.mail import send_outlook
 from pair_recon_left.common.model.attribute_checks import attribute_check_names
 from pair_recon_left.common.model.protocol import local_timezone_name
@@ -26,6 +30,7 @@ from .config import (
 from .runner import (
     StatementSql,
     launch,
+    local_run_directory,
     make_run_id,
     pair_config,
     workspace,
@@ -35,6 +40,7 @@ from .runner import (
 log = get_logger("cli")
 DEFAULTS = Path(".pair_recon.yaml")
 PAIR_WORKBOOK = Path(__file__).resolve().parents[3] / "setup" / "pairs.xlsx"
+PAIR_WORKBOOK_ENV = "DBX_PAIR_WORKBOOK"
 
 
 def ask(label: str, default=None, *, required=True) -> str:
@@ -119,26 +125,29 @@ def csv_defaults(path: str, pair: str, side: str) -> dict:
     return {**value, "sample": rate}
 
 
-def pair_candidates(catalog, workbook_path: str | Path | None = None):
-    rows = catalog.pairs()
-    remote = {row["pair_name"]: row for row in rows}
-    source = Path(workbook_path or PAIR_WORKBOOK)
-    workbook = (
-        {row["pair_name"]: row for row in read_pair_workbook(source) if row["enabled"]}
-        if source.is_file()
-        else {}
+def pair_workbook_path(defaults: dict | None = None) -> Path:
+    configured = env_value(
+        PAIR_WORKBOOK_ENV,
+        default=str((defaults or {}).get("pair_workbook") or PAIR_WORKBOOK),
     )
-    names = [*remote, *(name for name in workbook if name not in remote)]
-    return remote, workbook, names
+    source = Path(str(configured)).expanduser()
+    if not source.is_file():
+        raise FileNotFoundError(f"Pair workbook not found: {source}")
+    return source
 
 
-def import_workbook_pair(sql, catalog, pair_table: str, row: dict):
-    result = upsert_pair_configuration(sql, pair_table, [row])
-    refreshed = {item["pair_name"]: item for item in catalog.pairs()}
-    pair = row["pair_name"]
-    if pair not in refreshed:
-        raise RuntimeError(f"Pair {pair!r} was upserted but is not enabled in Catalog")
-    return refreshed[pair], result
+def synchronize_pair_workbook(sql, catalog, pair_table: str, workbook_path: str | Path):
+    source = Path(workbook_path)
+    rows = read_pair_workbook(source)
+    if not rows:
+        return rows, {"rows": 0, "pairs": [], "source": str(source)}
+    changed = changed_pair_configurations(rows, catalog.configuration_rows())
+    result = (
+        upsert_pair_configuration(sql, pair_table, changed)
+        if changed
+        else {"pair_meta_table": pair_table, "rows": 0, "sql_rows": 0, "pairs": []}
+    )
+    return rows, {**result, "source": str(source)}
 
 
 def prompts(defaults: dict, *, workspace_factory=workspace):
@@ -181,23 +190,25 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         error_table,
         progress_table,
     )
-    by_name, workbook_pairs, pair_names = pair_candidates(catalog)
+    workbook_path = pair_workbook_path(defaults)
+    _workbook_rows, sync = synchronize_pair_workbook(
+        statement_sql, catalog, pair_table, workbook_path
+    )
+    if sync["rows"]:
+        print(
+            f"Updated {sync['rows']} Pair(s) from {workbook_path} in "
+            f"{sync['pair_meta_table']}: {', '.join(sync['pairs'])}"
+        )
+    by_name = {row["pair_name"]: row for row in catalog.pairs()}
+    pair_names = list(by_name)
     if not pair_names:
-        raise RuntimeError("Catalog and setup/pairs.xlsx have no enabled pair")
+        raise RuntimeError(f"Catalog and {workbook_path} have no enabled pair")
     saved_pair = defaults.get("pair")
     pair = choose(
         "Table pair",
         pair_names,
         saved_pair if saved_pair in pair_names else None,
     )
-    if pair not in by_name:
-        by_name[pair], imported = import_workbook_pair(
-            statement_sql,
-            catalog,
-            pair_table,
-            workbook_pairs[pair],
-        )
-        print(f"Imported {pair!r} from {PAIR_WORKBOOK} into {imported['pair_meta_table']}")
     metadata = pair_config(by_name[pair])
     run_defaults = metadata.get("_run_defaults") or {}
     same_pair = defaults.get("pair") == pair
@@ -209,10 +220,8 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
 
     run_mode = choose("Run mode", ["full", "left-only"], run_default("run_mode", "full"))
     saved_left_input = str(defaults.get("left_input") or "database")
-    if saved_left_input in {"catalog", "hadoop"}:
-        saved_left_input = "database"
     if saved_left_input not in {"database", "csv"}:
-        saved_left_input = "database"
+        raise ValueError("saved left_input must be database or csv")
     left_input = choose("Left input", ["database", "csv"], saved_left_input)
     left_csv = str(defaults.get("left_csv") or "")
     right_csv = str(defaults.get("right_csv") or "")
@@ -233,10 +242,8 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
             },
         }
     saved_right_input = str(defaults.get("right_input") or "database")
-    if saved_right_input == "catalog":
-        saved_right_input = "database"
     if saved_right_input not in {"database", "csv"}:
-        saved_right_input = "database"
+        raise ValueError("saved right_input must be database or csv")
     right_input = "none"
     right_job_id = str(defaults.get("right_job_id") or "")
     if run_mode == "full":
@@ -318,6 +325,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "profile": profile,
         "warehouse_id": warehouse,
         "pair_table": pair_table,
+        "pair_workbook": str(workbook_path),
         "status_table": status_table,
         "error_table": error_table,
         "progress_table": progress_table,
@@ -411,7 +419,12 @@ def execute(args, *, raise_errors: bool = False) -> int:
                     str(exc),
                     [path]
                     if (
-                        path := Path(settings["work_dir"]) / settings["run_id"] / "left.log"
+                        path := local_run_directory(
+                            settings["work_dir"],
+                            settings["run_id"],
+                            settings["timezone"],
+                        )
+                        / "left.log"
                     ).is_file()
                     else (),
                 )

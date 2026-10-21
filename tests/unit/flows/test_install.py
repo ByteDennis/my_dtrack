@@ -158,11 +158,13 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
         "DBX_CLUSTER_ID",
         "DBX_WAREHOUSE_ID",
         "DBX_PAIR_TABLE",
+        "DBX_PAIR_WORKBOOK",
     ):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".pair_recon.env").write_text(
         "DBX_PROFILE=team\nDBX_WORKSPACE_DIR=deploy\nDBX_CLUSTER_ID=c9\n"
-        "DBX_WAREHOUSE_ID=w9\nDBX_PAIR_TABLE=main.recon.pair_recon_pair_meta\n",
+        "DBX_WAREHOUSE_ID=w9\nDBX_PAIR_TABLE=main.recon.pair_recon_pair_meta\n"
+        "DBX_PAIR_WORKBOOK=config/pairs.xlsx\n",
         encoding="utf-8",
     )
     client = object()
@@ -198,4 +200,5 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
     assert calls["resolve"] == (client, "deploy")
     assert calls["job"][1]["tasks"][0]["existing_cluster_id"] == "c9"
     assert calls["refresh"][1:3] == ("w9", "main.recon.pair_recon_pair_meta")
+    assert calls["refresh"][3] == Path("config/pairs.xlsx")
     assert json.loads(capsys.readouterr().out)["job_id"] == 7

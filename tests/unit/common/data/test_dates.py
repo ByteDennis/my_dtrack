@@ -128,6 +128,7 @@ def test_format(common):
 @pytest.mark.parametrize(
     ("configured", "values", "expected"),
     [
+        ("string", [datetime(2000, 10, 24, 4, 52, tzinfo=UTC), date(2000, 10, 25)], "date"),
         ("string", ["2025-04-02", "2026-08-01"], {"type": "string", "format": "dash"}),
         ("string", ["20250402", "20260801"], {"type": "string", "format": "compact"}),
         ("sas", ["01AUG2026", "02AUG2026"], {"type": "sas", "format": "date9"}),
@@ -149,6 +150,10 @@ def test_probe2(common):
         common.dates.resolve_date_type("string").detect([None, ""])
     with pytest.raises(ValueError, match="mixed string date formats"):
         common.dates.resolve_date_type("string").detect(["2025-04-02", "20250403"])
+    with pytest.raises(ValueError, match="mixed native and string"):
+        common.dates.resolve_date_type("string").detect(
+            [datetime(2025, 4, 2, tzinfo=UTC), "2025-04-03"]
+        )
     with pytest.raises(ValueError, match="mixed SAS date formats"):
         common.dates.resolve_date_type("sas").detect(["01AUG2026", "24108"])
 

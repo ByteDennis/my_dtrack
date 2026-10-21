@@ -17,7 +17,7 @@ UNITS_STATUS = "_status/units.csv"
 LEFT_ROW_CHECK_CLOSED = "_status/left_row_check.closed.json"
 ROW_CHECK_CLOSED = "_status/row_check.closed.json"
 COL_CHECK_CLOSED = "_status/col_check.closed.json"
-AUDIT_SUMMARY = "_status/audit.sql"
+AUDIT_SUMMARY = "_status/audit.txt"
 
 UNIT_STATUS_FIELDS = (
     "pair",

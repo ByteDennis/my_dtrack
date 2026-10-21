@@ -15,12 +15,12 @@ def test_event(tmp_path):
 
     left_key = left.record("SELECT * FROM APP.ORDERS", backend="oracle")
     right_key = right.record("SELECT * FROM main.sales.orders", backend="spark")
-    assert not store.exists("_status/audit.sql")
+    assert not store.exists("_status/audit.txt")
     right.refresh()
 
     assert left_key and right_key
     assert len(store.list_keys("pairs/orders/audit/")) == 2
-    text = store.get_bytes("_status/audit.sql").decode()
+    text = store.get_bytes("_status/audit.txt").decode()
     assert text == "SELECT * FROM APP.ORDERS\n\nSELECT * FROM main.sales.orders\n\n"
     assert "-- timestamp=" not in text
 
@@ -29,7 +29,7 @@ def test_event_order_uses_internal_order_when_timestamps_match(tmp_path):
     store = VolumeStore(tmp_path / "run")
     timestamp = "2026-10-21T04:38:46-04:00"
     store.put_bytes(
-        "pairs/orders/audit/a.sql",
+        "pairs/orders/audit/a.txt",
         (
             f"-- timestamp={timestamp} side=right backend=spark operation=query "
             "audit_order=2026-10-21T04:38:46.000002-04:00\n"
@@ -37,7 +37,7 @@ def test_event_order_uses_internal_order_when_timestamps_match(tmp_path):
         ).encode(),
     )
     store.put_bytes(
-        "pairs/orders/audit/z.sql",
+        "pairs/orders/audit/z.txt",
         (
             f"-- timestamp={timestamp} side=left backend=oracle operation=query "
             "audit_order=2026-10-21T04:38:46.000001-04:00\n"
@@ -46,7 +46,7 @@ def test_event_order_uses_internal_order_when_timestamps_match(tmp_path):
     )
 
     assert LeftSqlAudit(store, "left", pair="orders").refresh()
-    assert store.get_bytes("_status/audit.sql").decode() == (
+    assert store.get_bytes("_status/audit.txt").decode() == (
         "SELECT * FROM APP.ORDERS\n\nSELECT * FROM main.sales.orders\n\n"
     )
 
@@ -77,7 +77,7 @@ def test_metadata(tmp_path):
     audit = LeftSqlAudit(store, "local")
     assert audit.record("SHOW TABLES", backend="duckdb", operation="inspect")
     assert audit.refresh()
-    assert SimpleNamespace(text=store.get_bytes("_status/audit.sql").decode()).text.endswith(
+    assert SimpleNamespace(text=store.get_bytes("_status/audit.txt").decode()).text.endswith(
         "SHOW TABLES\n\n"
     )
 
@@ -119,7 +119,7 @@ def test_shape(tmp_path):
     assert first and repeated is None and changed
     assert len(store.list_keys("pairs/orders/audit/")) == 2
     audit.refresh()
-    text = store.get_bytes("_status/audit.sql").decode()
+    text = store.get_bytes("_status/audit.txt").decode()
     assert "2026-01-01" in text and "2026-02-01" in text
 
 

@@ -1,4 +1,5 @@
 import json
+import re
 import secrets
 import threading
 import time
@@ -34,6 +35,7 @@ from pair_recon_right.engine.job import run as run_right
 
 _SENSITIVE_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
 _SENSITIVE_WORDS = ("password", "secret", "token", "credential")
+_RUN_DATE = re.compile(r"-(\d{4})(\d{2})(\d{2})T\d{6}-[0-9a-f]{4}$")
 log = get_left_logger("runner")
 
 
@@ -100,6 +102,24 @@ def make_run_id(pair: str, owner: str, timezone: str, now=None) -> str:
     return validate_run_id(f"{clean}-{stamp}-{secrets.token_hex(2)}")
 
 
+def local_run_directory(
+    work_dir: str | Path,
+    run_id: str,
+    timezone: str,
+    *,
+    now: datetime | None = None,
+) -> Path:
+    value = validate_run_id(run_id)
+    root = Path(work_dir)
+    match = _RUN_DATE.search(value)
+    day = (
+        "-".join(match.groups())
+        if match is not None
+        else (now or datetime.now(ZoneInfo(timezone))).date().isoformat()
+    )
+    return root / day / value
+
+
 def pair_config(row: dict) -> dict:
     return build_pair_config(row)
 
@@ -161,7 +181,10 @@ def write_request_snapshot(settings: dict, config: dict) -> Path:
         "catalog": _snapshot_value(catalog),
         "effective_config": _snapshot_value(config),
     }
-    target = Path(settings["work_dir"]) / settings["run_id"] / "request.json"
+    target = (
+        local_run_directory(settings["work_dir"], settings["run_id"], settings["timezone"])
+        / "request.json"
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     part = target.with_name(target.name + ".part")
     part.write_text(
@@ -230,7 +253,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
     if run_mode not in {"full", "left-only"}:
         raise ValueError("run_mode must be full or left-only")
     left_only = run_mode == "left-only"
-    run_dir = Path(settings["work_dir"]) / run_id
+    run_dir = local_run_directory(settings["work_dir"], run_id, settings["timezone"])
     run_dir.mkdir(parents=True, exist_ok=True)
     left_log = run_dir / "left.log"
     configure_left_logging(left_log, settings["timezone"])

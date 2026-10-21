@@ -1,13 +1,17 @@
 import json
 import logging
 import threading
+from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from support import MemoryStore
 
 from pair_recon.app import cli, runner
 from pair_recon.app.runner import (
+    local_run_directory,
     make_run_id,
     pair_config,
     resolve_job_id,
@@ -36,8 +40,22 @@ from pair_recon_right.engine.job import run as run_right
 
 
 def test_runid():
-    value = make_run_id("订单 pair", "测试 owner", "America/New_York")
+    value = make_run_id(
+        "订单 pair",
+        "测试 owner",
+        "America/New_York",
+        now=datetime(2026, 10, 21, 9, 46, 33, tzinfo=ZoneInfo("America/New_York")),
+    )
     assert "/" not in value and "订单-pair-测试-owner" in value
+    assert local_run_directory("outputs", value, "America/New_York") == (
+        Path("outputs/2026-10-21") / value
+    )
+    assert local_run_directory(
+        "outputs",
+        "custom-run",
+        "America/New_York",
+        now=datetime(2026, 10, 22, 9, tzinfo=ZoneInfo("America/New_York")),
+    ) == Path("outputs/2026-10-22/custom-run")
 
 
 def test_resolve_job_id_accepts_id_or_unique_name():
@@ -104,8 +122,7 @@ def test_pair_metadata_tables_override_json():
                 {
                     "left_column": "POSTED_AT",
                     "right_column": "posted_at",
-                    "data_type": '{"type":"date","left_date_type":"timestamp",'
-                    '"right_date_type":"date"}',
+                    "data_type": '{"type":"date","left_date_type":"date","right_date_type":"date"}',
                 },
             ],
             "pair_sql": {
@@ -256,7 +273,7 @@ def test_request_snapshot_contains_catalog_and_effective_config(tmp_path):
     }
     path = write_request_snapshot(settings, config)
     value = json.loads(path.read_text(encoding="utf-8"))
-    assert path == tmp_path / "r1" / "request.json"
+    assert path == local_run_directory(tmp_path, "r1", settings["timezone"]) / "request.json"
     assert value["settings"]["owner"] == "me" and "_catalog_row" not in value["settings"]
     assert value["catalog"]["column_map_rows"][0]["left_column"] == "A"
     assert value["catalog"]["pair_sql"]["left_sql"] == "SELECT * FROM L"
@@ -480,8 +497,6 @@ def test_sas_default_bundle_uses_output_root(monkeypatch, tmp_path, capsys):
         ("full", "database", "csv"),
         ("full", "csv", "csv"),
         ("left-only", "database", "database"),
-        ("full", "catalog", "catalog"),
-        ("full", "hadoop", "database"),
     ],
 )
 def test_prompt(monkeypatch, run_mode, left_input, right_input, tmp_path):
@@ -536,25 +551,23 @@ def test_prompt(monkeypatch, run_mode, left_input, right_input, tmp_path):
     settings, config, action, _client, _catalog = cli.prompts(
         defaults, workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object())
     )
-    normalized_left_input = "database" if left_input in {"catalog", "hadoop"} else left_input
-    normalized_right_input = "database" if right_input == "catalog" else right_input
     assert settings["run_id"] == "r-new" and action == "new"
     assert settings["run_mode"] == run_mode
-    assert settings["left_input"] == normalized_left_input
+    assert settings["left_input"] == left_input
     assert settings["work_dir"] == str(tmp_path / "artifacts")
     assert (tmp_path / "artifacts").is_dir()
     assert config["pairs"]["orders"]["statistics"] == ["hash_sum"]
-    expected = {"database": "oracle", "csv": "csv"}[normalized_left_input]
+    expected = {"database": "oracle", "csv": "csv"}[left_input]
     assert config["pairs"]["orders"]["left"]["source"] == expected
-    if normalized_left_input == "csv":
+    if left_input == "csv":
         assert config["pairs"]["orders"]["sample"] == 0.1
         assert config["pairs"]["orders"]["pre_sampled"] is True
     if run_mode == "left-only":
         assert settings["right_input"] == "none"
         assert config["pairs"]["orders"]["right"]["source"] == "databricks"
     else:
-        assert settings["right_input"] == normalized_right_input
-    if normalized_right_input == "csv":
+        assert settings["right_input"] == right_input
+    if right_input == "csv":
         assert config["pairs"]["orders"]["right"]["source"] == "csv"
         assert config["pairs"]["orders"]["right_pre_sampled"] is True
 
@@ -622,56 +635,48 @@ def test_prompt_uses_dbx_environment_defaults(monkeypatch):
     assert seen["Volume runs path"] == "/Volumes/main/recon/runs_from_env"
 
 
-def test_pair_candidates_add_enabled_workbook_pairs(monkeypatch, tmp_path):
+def test_synchronize_pair_workbook_upserts_only_changes(monkeypatch, tmp_path):
     workbook = tmp_path / "pairs.xlsx"
     workbook.touch()
-    catalog = SimpleNamespace(pairs=lambda: [{"pair_name": "remote", "enabled": True}])
+    rows = [
+        {"pair_name": "same", "enabled": True},
+        {"pair_name": "changed", "enabled": True},
+    ]
+    changed = [rows[1]]
+    seen = {}
+    catalog = SimpleNamespace(configuration_rows=lambda: [{"pair_name": "same"}])
+    monkeypatch.setattr(cli, "read_pair_workbook", lambda path: rows if path == workbook else [])
     monkeypatch.setattr(
         cli,
-        "read_pair_workbook",
-        lambda path: (
-            [
-                {"pair_name": "remote", "enabled": True},
-                {"pair_name": "local", "enabled": True},
-                {"pair_name": "disabled", "enabled": False},
-            ]
-            if path == workbook
-            else []
+        "changed_pair_configurations",
+        lambda local, remote: (
+            changed if local == rows and remote == [{"pair_name": "same"}] else []
         ),
     )
-
-    remote, local, names = cli.pair_candidates(catalog, workbook)
-
-    assert list(remote) == ["remote"]
-    assert list(local) == ["remote", "local"]
-    assert names == ["remote", "local"]
-
-
-def test_import_workbook_pair_upserts_then_reloads(monkeypatch):
-    row = {"pair_name": "orders", "enabled": True}
-    refreshed = {"pair_name": "orders", "config_json": {"left": {}, "right": {}}}
-    catalog = SimpleNamespace(pairs=lambda: [refreshed])
-    seen = {}
     monkeypatch.setattr(
         cli,
         "upsert_pair_configuration",
-        lambda sql, table, rows: (
-            seen.update({"sql": sql, "table": table, "rows": rows})
-            or {"pair_meta_table": table, "rows": 1}
+        lambda sql, table, values: (
+            seen.update(sql=sql, table=table, rows=values)
+            or {"pair_meta_table": table, "rows": 1, "sql_rows": 0, "pairs": ["changed"]}
         ),
     )
 
-    actual, result = cli.import_workbook_pair(
-        "sql", catalog, "main.recon.pair_recon_pair_meta", row
+    actual, result = cli.synchronize_pair_workbook(
+        "sql", catalog, "main.recon.pair_recon_pair_meta", workbook
     )
 
-    assert actual == refreshed
-    assert result["rows"] == 1
-    assert seen == {
-        "sql": "sql",
-        "table": "main.recon.pair_recon_pair_meta",
-        "rows": [row],
-    }
+    assert actual == rows
+    assert result["pairs"] == ["changed"] and result["source"] == str(workbook)
+    assert seen["rows"] == changed
+
+
+def test_pair_workbook_path_uses_environment(monkeypatch, tmp_path):
+    workbook = tmp_path / "pairs.xlsx"
+    workbook.touch()
+    monkeypatch.setenv("DBX_PAIR_WORKBOOK", str(workbook))
+
+    assert cli.pair_workbook_path({"pair_workbook": "ignored.xlsx"}) == workbook
 
 
 def test_local(monkeypatch, tmp_path):
@@ -736,7 +741,7 @@ def test_local(monkeypatch, tmp_path):
         settings, config, action="new", workspace_client=client, catalog=Catalog()
     )
     assert result["state"] == "passed" and result["left"]["units"] == 2
-    assert (tmp_path / "r1").is_dir()
+    assert local_run_directory(tmp_path, "r1", settings["timezone"]).is_dir()
     assert events == ["running", "start", "row", "finish:passed", "passed"]
 
 
@@ -858,7 +863,9 @@ def test_launch_writes_early_failure_to_left_log(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="job 42 was not found"):
         runner.launch(settings, config, action="new", workspace_client=client)
 
-    content = (tmp_path / "failed-1" / "left.log").read_text(encoding="utf-8")
+    content = (
+        local_run_directory(tmp_path, "failed-1", settings["timezone"]) / "left.log"
+    ).read_text(encoding="utf-8")
     assert "run started" in content
     assert "starting Right Databricks job: reference=test-run job_id=42" in content
     assert "run failed" in content

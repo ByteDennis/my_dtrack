@@ -225,7 +225,7 @@ class SqlAudit:
         current = [
             key
             for key in self.store.list_keys("pairs/")
-            if "/audit/" in key and key.endswith(".sql")
+            if "/audit/" in key and key.endswith(".txt")
         ]
         current.extend(self.store.list_keys("_status/audit/"))
         return sorted(set(current))
@@ -242,10 +242,9 @@ class SqlAudit:
                     name = key.rsplit("/", 1)[-1]
                     header = block.split(b"\n", 1)[0].decode("utf-8", errors="replace")
                     match = re.search(r"\baudit_key=([^\s]+)", header)
-                    audit_key = (
-                        name.rsplit("--", 1)[1].removesuffix(".sql") if "--" in name else None
-                    )
-                    audit_key = audit_key or (match.group(1) if match else key)
+                    stem = name.removesuffix(".txt")
+                    audit_key = stem.rsplit("--", 1)[-1]
+                    audit_key = match.group(1) if match else audit_key
                     timestamp = re.search(r"\btimestamp=([^\s]+)", header)
                     audit_order = re.search(r"\baudit_order=([^\s]+)", header)
                     entries.append(
@@ -271,7 +270,7 @@ class SqlAudit:
                 self.store.put_bytes(AUDIT_SUMMARY, body, content_type="text/plain; charset=utf-8")
             return True
         except Exception:
-            log.debug("could not refresh audit.sql", exc_info=True)
+            log.debug("could not refresh audit.txt", exc_info=True)
             return False
 
     def record(self, sql: str, *, backend: str, operation: str = "query") -> str | None:
@@ -294,9 +293,9 @@ class SqlAudit:
         audit_key = hashlib.sha256("|".join(capture).encode()).hexdigest()[:20]
         if mutating:
             audit_key = f"{audit_key}-{event_id}"
-            key = f"{audit_prefix(self.pair)}{event_id}.sql"
+            key = f"{audit_prefix(self.pair)}{event_id}.txt"
         else:
-            key = f"{audit_prefix(self.pair)}{audit_key}.sql"
+            key = f"{audit_prefix(self.pair)}{audit_key}.txt"
         block = self._block(
             sql,
             timestamp=timestamp,

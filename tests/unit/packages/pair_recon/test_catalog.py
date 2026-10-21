@@ -51,6 +51,31 @@ def test_pairs_load_companion_metadata():
     assert row["pair_sql"]["vintage_sample_size"] == 3
 
 
+def test_configuration_rows_include_disabled_pairs_and_sql():
+    class MetadataSql(Sql):
+        def execute(self, statement, parameters=None):
+            self.calls.append((statement, parameters or {}))
+            if "FROM c.s.pairs ORDER BY" in statement:
+                return [
+                    {"pair_name": "disabled", "enabled": False},
+                    {"pair_name": "orders", "enabled": True},
+                ]
+            if "pair_recon_pair_sql" in statement:
+                return [{"pair_name": "orders", "right_sql": "SELECT 1"}]
+            return []
+
+    catalog = Catalog(MetadataSql(), "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress")
+
+    assert catalog.configuration_rows() == [
+        {"pair_name": "disabled", "enabled": False, "pair_sql": None},
+        {
+            "pair_name": "orders",
+            "enabled": True,
+            "pair_sql": {"pair_name": "orders", "right_sql": "SELECT 1"},
+        },
+    ]
+
+
 def test_pairs_reject_duplicate_metadata():
     class DuplicateSql(Sql):
         def execute(self, statement, parameters=None):

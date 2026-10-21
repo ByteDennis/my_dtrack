@@ -67,7 +67,7 @@ USING (
   SELECT 'orders', 'AMOUNT', 'amount', 'numeric'
   UNION ALL
   SELECT 'orders', 'POSTED_AT', 'posted_date',
-         '{"type":"date","left_date_type":"timestamp","right_date_type":"date"}'
+         '{"type":"date","left_date_type":"date","right_date_type":"date"}'
 ) AS s
 ON t.pair_name = s.pair_name AND t.left_column = s.left_column
 WHEN MATCHED THEN UPDATE SET

@@ -115,7 +115,13 @@ def main(argv=None):
         default=env_value("DBX_WAREHOUSE_ID"),
     )
     parser.add_argument("--pair-table", default=env_value("DBX_PAIR_TABLE"))
-    parser.add_argument("--config-workbook", type=Path, default=ROOT / "setup" / "pairs.xlsx")
+    parser.add_argument(
+        "--config-workbook",
+        type=Path,
+        default=Path(
+            env_value("DBX_PAIR_WORKBOOK", default=str(ROOT / "setup" / "pairs.xlsx"))
+        ).expanduser(),
+    )
     parser.add_argument("--skip-config", action="store_true")
     args = parser.parse_args(argv)
     if not args.workspace_dir:

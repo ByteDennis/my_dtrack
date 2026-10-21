@@ -276,7 +276,13 @@ class StringDateType(DateType):
     def detect(self, values: list[object]) -> DateType:
         if not self.requires_probe:
             return self
-        found = {_string_format(value) for value in _probe_values(values)}
+        probed = _probe_values(values)
+        native = [isinstance(value, date) for value in probed]
+        if all(native):
+            return NativeDateType()
+        if any(native):
+            raise ValueError("mixed native and string date values")
+        found = {_string_format(value) for value in probed}
         if len(found) != 1:
             raise ValueError(f"mixed string date formats: {', '.join(sorted(found))}")
         return StringDateType(self.name, found.pop())

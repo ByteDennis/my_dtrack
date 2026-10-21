@@ -42,6 +42,16 @@ class Catalog:
         self.column_map_table = column_map_table
         self.pair_sql_table = pair_sql_table
 
+    def configuration_rows(self):
+        pairs = self.sql.execute(f"SELECT * FROM {self.pair_table} ORDER BY pair_name")
+        queries = {}
+        for row in self.sql.execute(f"SELECT * FROM {self.pair_sql_table} ORDER BY pair_name"):
+            pair = row["pair_name"]
+            if pair in queries:
+                raise ValueError(f"duplicate pair SQL: {pair}")
+            queries[pair] = row
+        return [{**row, "pair_sql": queries.get(row["pair_name"])} for row in pairs]
+
     def pairs(self):
         pairs = self.sql.execute(
             f"SELECT * FROM {self.pair_table} WHERE enabled = true ORDER BY pair_name"
