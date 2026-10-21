@@ -20,7 +20,12 @@ REPO = Path(__file__).resolve().parents[2]
 @pytest.fixture(autouse=True)
 def isolated_environment(monkeypatch):
     saved = dict(os.environ)
-    for module_name in ("pair_recon.app.cli", "pair_recon_left.cli", "pair_recon_left.cli.config"):
+    for module_name in (
+        "pair_recon.app.config",
+        "pair_recon.app.cli",
+        "pair_recon_left.cli",
+        "pair_recon_left.cli.config",
+    ):
         module = importlib.import_module(module_name)
         if not hasattr(module, "find_dotenv"):
             continue
@@ -31,6 +36,8 @@ def isolated_environment(monkeypatch):
             return "" if found and Path(found).resolve().is_relative_to(REPO.parent) else found
 
         monkeypatch.setattr(module, "find_dotenv", guarded)
+        if module_name == "pair_recon.app.config":
+            monkeypatch.setattr(module, "PROJECT_ROOT", REPO / "__missing_project_root__")
     yield
     os.environ.clear()
     os.environ.update(saved)

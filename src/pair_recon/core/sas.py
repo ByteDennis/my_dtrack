@@ -6,9 +6,8 @@ import sys
 from pathlib import Path
 
 import yaml
-from dotenv import find_dotenv, load_dotenv
 
-from pair_recon.app.config import local_output_root
+from pair_recon.app.config import load_environment, local_output_root
 from pair_recon.core.debug import run_debugger
 from pair_recon_left.backends.sources import source_from_config
 from pair_recon_left.common.model.manifest import key_family_specs, sample_plan
@@ -166,7 +165,7 @@ def _catalog_pair(defaults_path, pair_name=None):
 
 
 def execute(args):
-    load_dotenv(find_dotenv(filename=".pair_recon.env", usecwd=True))
+    load_environment()
     name, pair = _catalog_pair(args.defaults, args.pair)
     sides = ("left", "right") if args.side == "both" else (args.side,)
     bundle = args.bundle or local_output_root() / "sas"

@@ -1,7 +1,20 @@
 CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_pair_meta (
   pair_name STRING NOT NULL,
   enabled BOOLEAN NOT NULL,
-  config_json STRING NOT NULL,
+  key_columns ARRAY<STRING>,
+  vintage STRING NOT NULL,
+  left_source STRING NOT NULL,
+  left_conn STRING NOT NULL,
+  left_table STRING,
+  left_date_col STRING,
+  left_options_json STRING,
+  right_source STRING NOT NULL,
+  right_conn STRING,
+  right_table STRING,
+  right_date_col STRING,
+  right_options_json STRING,
+  run_defaults_json STRING,
+  config_json STRING COMMENT 'Deprecated compatibility snapshot; explicit columns are authoritative',
   latest_run_id STRING,
   latest_status STRING,
   updated_at TIMESTAMP_NTZ
@@ -17,9 +30,10 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_column_map (
 CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_pair_sql (
   pair_name STRING NOT NULL,
   left_sql STRING,
+  left_query_windows_json STRING,
   right_sql STRING,
-  vintage_sample_size INT,
-  vintage_values ARRAY<STRING>
+  right_query_windows_json STRING,
+  updated_at TIMESTAMP_NTZ
 ) USING DELTA;
 
 CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_run_status (

@@ -5,10 +5,30 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import find_dotenv, load_dotenv
 
 _PRIVATE = ("password", "secret", "token", "credential")
 OUTPUT_DIR_ENV = "PAIR_RECON_OUTPUT_DIR"
 DEFAULT_OUTPUT_DIR = "outputs"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def load_environment(root: str | Path | None = None) -> Path | None:
+    """Load only .pair_recon.env without replacing process environment values."""
+    found = find_dotenv(filename=".pair_recon.env", usecwd=True)
+    source = Path(found) if found else Path(root or PROJECT_ROOT) / ".pair_recon.env"
+    if not source.is_file():
+        return None
+    load_dotenv(source, override=False)
+    return source
+
+
+def env_value(*names: str, default: str | None = None) -> str | None:
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return default
 
 
 def local_output_root(defaults: dict[str, Any] | None = None) -> Path:
@@ -63,6 +83,8 @@ def run_config(
     name: str, pair: dict[str, Any], answers: dict[str, Any], *, timezone: str
 ) -> dict[str, Any]:
     selected = deepcopy(pair)
+    selected.pop("_run_defaults", None)
+    selected.pop("run_mode", None)
     mode = answers.get("partition_mode", selected.get("partition_mode", "date"))
     selected["partition_mode"] = mode
     selected.update({key: answers[key] for key in ("sample", "strict") if key in answers})

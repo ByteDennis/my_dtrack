@@ -9,18 +9,50 @@ USING (
   SELECT
     'orders' AS pair_name,
     true AS enabled,
-    '{"left":{"source":"oracle","table":"LEFT_ORDERS","service":"host:1521/service","date_col":"BUSINESS_DT","date_type":"date","query_windows":{"driver":{"expression":"l.BUSINESS_DT","date_type":"date"}}},"right":{"source":"databricks","kind":"query","date_col":"business_dt","date_type":"date","query_windows":{"driver":{"expression":"r.business_dt","date_type":"date"}}},"vintage":"month","key":"ORDER_ID"}' AS config_json,
+    array('ORDER_ID') AS key_columns,
+    'month' AS vintage,
+    'oracle' AS left_source,
+    'PCDS' AS left_conn,
+    'SALES.LEFT_ORDERS' AS left_table,
+    'BUSINESS_DT' AS left_date_col,
+    CAST(NULL AS STRING) AS left_options_json,
+    'databricks_query' AS right_source,
+    CAST(NULL AS STRING) AS right_conn,
+    CAST(NULL AS STRING) AS right_table,
+    'business_dt' AS right_date_col,
+    CAST(NULL AS STRING) AS right_options_json,
+    '{"partition_mode":"date","sample":0.1,"checks":["row_count","hash_sum"]}' AS run_defaults_json,
+    '{"key":"ORDER_ID","vintage":"month","left":{"source":"oracle","conn_macro":"PCDS","schema":"SALES","table":"LEFT_ORDERS","date_col":"BUSINESS_DT"},"right":{"source":"databricks","kind":"query","date_col":"business_dt"}}' AS config_json,
     CAST(current_timestamp() AS TIMESTAMP_NTZ) AS updated_at
 ) AS s
 ON t.pair_name = s.pair_name
 WHEN MATCHED THEN UPDATE SET
   t.enabled = s.enabled,
+  t.key_columns = s.key_columns,
+  t.vintage = s.vintage,
+  t.left_source = s.left_source,
+  t.left_conn = s.left_conn,
+  t.left_table = s.left_table,
+  t.left_date_col = s.left_date_col,
+  t.left_options_json = s.left_options_json,
+  t.right_source = s.right_source,
+  t.right_conn = s.right_conn,
+  t.right_table = s.right_table,
+  t.right_date_col = s.right_date_col,
+  t.right_options_json = s.right_options_json,
+  t.run_defaults_json = s.run_defaults_json,
   t.config_json = s.config_json,
   t.updated_at = s.updated_at
 WHEN NOT MATCHED THEN INSERT (
-  pair_name, enabled, config_json, latest_run_id, latest_status, updated_at
+  pair_name, enabled, key_columns, vintage,
+  left_source, left_conn, left_table, left_date_col, left_options_json,
+  right_source, right_conn, right_table, right_date_col, right_options_json,
+  run_defaults_json, config_json, latest_run_id, latest_status, updated_at
 ) VALUES (
-  s.pair_name, s.enabled, s.config_json, NULL, NULL, s.updated_at
+  s.pair_name, s.enabled, s.key_columns, s.vintage,
+  s.left_source, s.left_conn, s.left_table, s.left_date_col, s.left_options_json,
+  s.right_source, s.right_conn, s.right_table, s.right_date_col, s.right_options_json,
+  s.run_defaults_json, s.config_json, NULL, NULL, s.updated_at
 );
 
 -- # catalog.schema.pair_recon_column_map
@@ -53,25 +85,25 @@ USING (
   SELECT
     'orders' AS pair_name,
     'SELECT * FROM LEFT_ORDERS l WHERE {{query_windows:driver}}' AS left_sql,
+    '{"driver":{"expression":"l.BUSINESS_DT","date_type":"date"}}' AS left_query_windows_json,
     'SELECT * FROM catalog.source.orders r WHERE {{query_windows:driver}}' AS right_sql,
-    3 AS vintage_sample_size,
-    CAST(NULL AS ARRAY<STRING>) AS vintage_values
+    '{"driver":{"expression":"r.business_dt","date_type":"date"}}' AS right_query_windows_json,
+    CAST(current_timestamp() AS TIMESTAMP_NTZ) AS updated_at
 ) AS s
 ON t.pair_name = s.pair_name
 WHEN MATCHED THEN UPDATE SET
   t.left_sql = s.left_sql,
+  t.left_query_windows_json = s.left_query_windows_json,
   t.right_sql = s.right_sql,
-  t.vintage_sample_size = s.vintage_sample_size,
-  t.vintage_values = s.vintage_values
+  t.right_query_windows_json = s.right_query_windows_json,
+  t.updated_at = s.updated_at
 WHEN NOT MATCHED THEN INSERT (
-  pair_name, left_sql, right_sql, vintage_sample_size, vintage_values
+  pair_name, left_sql, left_query_windows_json,
+  right_sql, right_query_windows_json, updated_at
 ) VALUES (
-  s.pair_name, s.left_sql, s.right_sql, s.vintage_sample_size, s.vintage_values
+  s.pair_name, s.left_sql, s.left_query_windows_json,
+  s.right_sql, s.right_query_windows_json, s.updated_at
 );
-
--- For exact monthly vintages, replace the two selection expressions above with:
---   CAST(NULL AS INT) AS vintage_sample_size,
---   array('2026-01-01', '2026-04-01') AS vintage_values
 
 -- # catalog.schema.pair_recon_run_status
 -- Normally written by PairRecon. This example is for repair/testing only.

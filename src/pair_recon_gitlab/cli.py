@@ -5,8 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from dotenv import find_dotenv, load_dotenv
-
+from pair_recon.app.config import load_environment
 from pair_recon.core.debug import run_debugger
 
 from . import dispatch as operations
@@ -66,7 +65,7 @@ def execute(args) -> dict:
 
 
 def main(argv=None) -> int:
-    load_dotenv(find_dotenv(filename=".pair_recon.env", usecwd=True))
+    load_environment()
     args = parser().parse_args(argv)
 
     def command() -> int:

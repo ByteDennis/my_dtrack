@@ -4,12 +4,44 @@ from pathlib import Path
 import pytest
 
 from pair_recon.app.config import (
+    env_value,
     load_config,
     load_defaults,
+    load_environment,
     local_output_root,
     run_config,
     save_defaults,
 )
+
+
+def test_load_environment_reads_only_pair_recon_file(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DBX_PROFILE", raising=False)
+    monkeypatch.delenv("DBX_WAREHOUSE_ID", raising=False)
+    (tmp_path / ".env").write_text("DBX_PROFILE=wrong\n", encoding="utf-8")
+    source = tmp_path / ".pair_recon.env"
+    source.write_text("DBX_PROFILE=team\nDBX_WAREHOUSE_ID=w9\n", encoding="utf-8")
+
+    assert load_environment() == source
+    assert env_value("DBX_PROFILE") == "team"
+    assert env_value("DBX_WAREHOUSE_ID") == "w9"
+
+
+def test_load_environment_does_not_override_process_environment(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DBX_PROFILE", "process")
+    (tmp_path / ".pair_recon.env").write_text("DBX_PROFILE=file\n", encoding="utf-8")
+
+    load_environment()
+
+    assert env_value("DBX_PROFILE") == "process"
+
+
+def test_env_value_uses_compatibility_fallback(monkeypatch):
+    monkeypatch.delenv("DBX_WAREHOUSE_ID", raising=False)
+    monkeypatch.setenv("PAIR_RECON_DBX_WAREHOUSE_ID", "legacy")
+
+    assert env_value("DBX_WAREHOUSE_ID", "PAIR_RECON_DBX_WAREHOUSE_ID") == "legacy"
 
 
 @pytest.mark.parametrize(

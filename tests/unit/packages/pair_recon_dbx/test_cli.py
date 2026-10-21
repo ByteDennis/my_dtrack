@@ -106,18 +106,26 @@ def test_commands(calls, capsys, argv, expected):
 
 def test_defaults(calls, monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DBX_PROFILE", raising=False)
+    monkeypatch.delenv("DBX_CLUSTER_ID", raising=False)
+    monkeypatch.delenv("DBX_WAREHOUSE_ID", raising=False)
     monkeypatch.delenv("PAIR_RECON_DBX_PROFILE", raising=False)
     monkeypatch.delenv("PAIR_RECON_DBX_CLUSTER_ID", raising=False)
     (tmp_path / ".pair_recon.env").write_text(
-        "PAIR_RECON_DBX_PROFILE=team\nPAIR_RECON_DBX_CLUSTER_ID=c9\n", encoding="utf-8"
+        "DBX_PROFILE=team\nDBX_CLUSTER_ID=c9\nDBX_WAREHOUSE_ID=w9\n", encoding="utf-8"
     )
     assert app_cli.main(["dbx", "compute"]) == 0
-    assert calls == [("compute_status", ("client:team", "c9"), {})]
+    assert app_cli.main(["dbx", "warehouse"]) == 0
+    assert calls == [
+        ("compute_status", ("client:team", "c9"), {}),
+        ("warehouse_status", ("client:team", "w9"), {}),
+    ]
     assert cli.parser().parse_args(["--debug", "attach", "runs"]).debug == "attach"
     capsys.readouterr()
 
 
 def test_errors(calls, monkeypatch, capsys):
+    monkeypatch.delenv("DBX_CLUSTER_ID", raising=False)
     monkeypatch.delenv("PAIR_RECON_DBX_CLUSTER_ID", raising=False)
     assert cli.main(["compute"]) == 1
     assert json.loads(capsys.readouterr().out) == {"error": "ValueError: --cluster-id is required"}

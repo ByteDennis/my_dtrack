@@ -107,6 +107,82 @@ def test_pair_metadata_reads_specified_vintages_from_json_cell():
     assert config["vintage_values"] == ["2026-01-01", "2026-04-01"]
 
 
+def test_pair_metadata_builds_config_from_explicit_columns():
+    config = pair_config(
+        {
+            "pair_name": "orders",
+            "key_columns": ["ORDER_ID", "LINE_ID"],
+            "vintage": "month",
+            "left_source": "oracle",
+            "left_conn": "PCDS",
+            "left_table": "SALES.ORDERS",
+            "left_date_col": "ORDER_DT",
+            "left_options_json": '{"where":"ACTIVE = 1"}',
+            "right_source": "databricks_query",
+            "right_conn": None,
+            "right_table": None,
+            "right_date_col": "order_dt",
+            "right_options_json": None,
+            "run_defaults_json": (
+                '{"checks":["row_count","hash_sum"],"run_mode":"left-only","sample":0.1}'
+            ),
+            "column_map_rows": [
+                {
+                    "left_column": "ORDER_ID",
+                    "right_column": "order_id",
+                    "data_type": "numeric",
+                }
+            ],
+            "pair_sql": {
+                "left_sql": None,
+                "left_query_windows_json": None,
+                "right_sql": "SELECT * FROM main.sales.orders",
+                "right_query_windows_json": None,
+            },
+        }
+    )
+
+    assert config["key"] == "ORDER_ID,LINE_ID"
+    assert config["vintage"] == "month"
+    assert config["sample"] == 0.1
+    assert config["left"] == {
+        "source": "oracle",
+        "conn_macro": "PCDS",
+        "schema": "SALES",
+        "table": "ORDERS",
+        "date_col": "ORDER_DT",
+        "where": "ACTIVE = 1",
+    }
+    assert config["right"] == {
+        "source": "databricks",
+        "kind": "query",
+        "date_col": "order_dt",
+        "query": "SELECT * FROM main.sales.orders",
+    }
+    assert config["_run_defaults"] == {
+        "checks": ["row_count", "hash_sum"],
+        "run_mode": "left-only",
+        "sample": 0.1,
+    }
+    runtime = cli.run_config(
+        "orders",
+        config,
+        {
+            "partition_mode": "date",
+            "sample": 0.1,
+            "strict": False,
+            "checks": ["row_count", "hash_sum"],
+            "from_date": "2026-01-01",
+            "to_date": "2026-01-31",
+            "vintage": "month",
+        },
+        timezone="America/New_York",
+    )
+    assert runner.validate_config(runtime)["pairs"]["orders"]["sample"] == 0.1
+    assert "_run_defaults" not in runtime["pairs"]["orders"]
+    assert "run_mode" not in runtime["pairs"]["orders"]
+
+
 def test_request_snapshot_contains_catalog_and_effective_config(tmp_path):
     settings = {
         "run_id": "r1",
@@ -417,6 +493,27 @@ def test_prompt_owner_default(monkeypatch, defaults, environment, expected):
     with pytest.raises(RuntimeError, match="stop after owner"):
         cli.prompts(defaults)
     assert seen == {"Run owner": expected}
+
+
+def test_prompt_uses_dbx_environment_defaults(monkeypatch):
+    seen = {}
+
+    def stop(label, default=None, **_options):
+        seen[label] = default
+        if label == "SQL warehouse id":
+            raise RuntimeError("stop after dbx defaults")
+        return default
+
+    monkeypatch.setenv("USERNAME", "owner")
+    monkeypatch.setenv("DBX_PROFILE", "team")
+    monkeypatch.setenv("DBX_WAREHOUSE_ID", "warehouse-from-env")
+    monkeypatch.setattr(cli, "ask", stop)
+
+    with pytest.raises(RuntimeError, match="stop after dbx defaults"):
+        cli.prompts({"profile": "saved", "warehouse_id": "saved-warehouse"})
+
+    assert seen["Databricks profile"] == "team"
+    assert seen["SQL warehouse id"] == "warehouse-from-env"
 
 
 def test_local(monkeypatch, tmp_path):

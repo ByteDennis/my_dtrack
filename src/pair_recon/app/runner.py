@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementParameterListItem
 
+from pair_recon.core.metadata.configuration import build_pair_config
 from pair_recon.core.progress import ProgressSampler
 from pair_recon_left.backends.store import VolumeStore, validate_run_id
 from pair_recon_left.cli.config import validate_config
@@ -99,74 +100,7 @@ def make_run_id(pair: str, owner: str, timezone: str, now=None) -> str:
 
 
 def pair_config(row: dict) -> dict:
-    value = row.get("config_json")
-    if isinstance(value, str):
-        value = json.loads(value)
-    if not isinstance(value, dict):
-        raise TypeError("pair metadata requires config_json")
-    value = deepcopy(value)
-    pair = row.get("pair_name") or "pair"
-
-    mappings = row.get("column_map_rows") or []
-    if mappings:
-        col_map = {}
-        overrides = {}
-        column_types = {}
-        for mapping in mappings:
-            left = str(mapping.get("left_column") or "").strip()
-            right = str(mapping.get("right_column") or "").strip()
-            if not left or not right:
-                raise ValueError(f"{pair}: column mapping names must be non-empty")
-            col_map[left] = right
-            data_type = str(mapping.get("data_type") or "").strip()
-            if not data_type:
-                continue
-            if data_type in {"numeric", "categorical"}:
-                overrides[left] = data_type
-            elif data_type.startswith("{"):
-                try:
-                    column_types[left] = json.loads(data_type)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"{pair}.{left}: invalid custom data_type JSON") from exc
-            else:
-                column_types[left] = data_type
-        value["col_map"] = col_map
-        value["col_type_overrides"] = overrides
-        value["column_types"] = column_types
-
-    query_row = row.get("pair_sql")
-    if query_row is not None:
-        for side, field in (("left", "left_sql"), ("right", "right_sql")):
-            target = value.setdefault(side, {})
-            sql = str(query_row.get(field) or "").strip().rstrip(";").rstrip()
-            if sql:
-                target["query"] = sql
-            else:
-                target.pop("query", None)
-                target.pop("query_windows", None)
-        sample_size = query_row.get("vintage_sample_size")
-        if sample_size in (None, ""):
-            value.pop("vintage_sample_size", None)
-        else:
-            try:
-                value["vintage_sample_size"] = int(sample_size)
-            except (TypeError, ValueError):
-                raise ValueError(f"{pair}: vintage_sample_size must be an integer") from None
-        vintage_values = query_row.get("vintage_values")
-        if isinstance(vintage_values, str):
-            try:
-                vintage_values = json.loads(vintage_values)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"{pair}: vintage_values must be an array") from exc
-        if vintage_values in (None, []):
-            value.pop("vintage_values", None)
-        elif isinstance(vintage_values, list) and all(
-            isinstance(item, str) for item in vintage_values
-        ):
-            value["vintage_values"] = vintage_values
-        else:
-            raise ValueError(f"{pair}: vintage_values must be an array of strings")
-    return value
+    return build_pair_config(row)
 
 
 def _snapshot_value(value):

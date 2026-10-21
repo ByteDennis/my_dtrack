@@ -11,17 +11,17 @@ Install uv, Python 3.11+, Databricks CLI/profile access, and an ODBC driver when
 
 Workstation execution is supported only through uv run. run.cmd and run.sh are thin uv run wrappers; PairRecon does not build or distribute a standalone executable or portable ZIP.
 
-For the normal UC-driven Oracle run, .pair_recon.env needs only ORACLE_USER and ORACLE_PASSWORD. Add ORACLE_DSN only if the selected pair does not provide left.service or left.dsn. A pair may instead name custom user_env/password_env/dsn_env variables. Databricks credentials stay in ~/.databrickscfg. Hadoop uses the non-secret left.dsn metadata plus an installed ODBC driver. Local .pair_recon.yaml contains prompt defaults, never secrets. All text files and sampled CSVs are UTF-8.
+Every PairRecon CLI, install.py, and mapping.ipynb automatically loads only .pair_recon.env; an existing process environment value wins. For Oracle, use ORACLE_USER plus ORACLE_PASSWORD or the selected macro's <MACRO>_PWD. ORACLE_SVC may map aliases such as pb30:service,pcds:service. Add ORACLE_DSN only if the selected pair does not provide a service through its macro. A pair may instead name custom user_env/password_env/dsn_env variables in left_options_json. Databricks credentials stay in ~/.databrickscfg. Hadoop uses HADOOP_DSN plus the left_conn schema and an installed ODBC driver. Local .pair_recon.yaml contains prompt defaults, never secrets. All text files and sampled CSVs are UTF-8.
 
-The previous pkg/distributed branch used DTRACK_S3, AWS/WinSCP, DTRACK_DBX_*, and many DTRACK_* runtime controls. They are not required by the current UC Volume design. PAIR_RECON_OUTPUT_DIR optionally selects the local artifact root and defaults to outputs under the current working directory. PAIR_RECON_DBX_*, GITLAB_HOST, HADOOP_DSN, PAIR_RECON_DUCKDB_*, PAIR_RECON_STATS_BATCH, and PAIR_RECON_ORACLE_MACROS remain optional compatibility or operator overrides.
+The previous pkg/distributed branch used DTRACK_S3, AWS/WinSCP, DTRACK_DBX_*, and many DTRACK_* runtime controls. They are not required by the current UC Volume design. PAIR_RECON_OUTPUT_DIR optionally selects the local artifact root and defaults to outputs under the current working directory. DBX_PROFILE, DBX_CLUSTER_ID, DBX_WAREHOUSE_ID, and DBX_WORKSPACE_DIR are the preferred Databricks defaults. PAIR_RECON_DBX_* and PAIR_RECON_ORACLE_MACROS remain compatibility aliases.
 
 2. Unity Catalog
 
-Create or confirm pair_recon_pair_meta, pair_recon_column_map, pair_recon_pair_sql, pair_recon_run_status, pair_recon_run_error, and pair_recon_progress_snapshot using setup/schema.sql. Fill the single pairs table in setup/pairs.xlsx. Its columns are pair_name, enabled, config_json, left_sql, right_sql, vintage_sample_size, and vintage_values. vintage_values is a JSON string array; set it or vintage_sample_size, never both. install.py upserts pair_meta and pair_sql without deleting omitted pairs or overwriting latest_run_id/latest_status. setup/setup.sql remains a manual SQL example and repair reference. For an existing pair_recon_pair_sql created before vintage selection, run setup/migrate_pair_sql_vintages.sql once. The two companion metadata tables are read from the same catalog/schema as pair_recon_pair_meta. Pair metadata config_json selects one Left source:
+Create or confirm pair_recon_pair_meta, pair_recon_column_map, pair_recon_pair_sql, pair_recon_run_status, pair_recon_run_error, and pair_recon_progress_snapshot using setup/schema.sql. Existing installations must run setup/migrate_pair_metadata.sql once before importing the new workbook.
 
-  Oracle: {"source":"oracle","table":"L","service":"host:1521/service"}
-  Hadoop: {"source":"hadoop","dsn":"hive","schema":"risk","table":"L"}
-  CSV:    {"source":"csv","path":"C:/data/left.csv"}
+setup/pairs.xlsx has three worksheets. pairs contains the compact source metadata and run defaults. pair_sql contains optional SQL/query-window JSON, joined by pair_name. field_guide gives a short definition and example for every field. install.py upserts pair_meta and pair_sql without deleting omitted pairs or overwriting latest_run_id/latest_status. setup/setup.sql remains a manual SQL example and repair reference.
+
+In pairs, left_conn is the Oracle macro, Hadoop schema, or CSV path. right_conn is catalog.schema for databricks_table, a file path for databricks_files/CSV, and blank for databricks_query. left_table/right_table are filled only for table sources. vintage is a dedicated field. Put uncommon source settings in left_options_json/right_options_json. Put prompt defaults in run_defaults_json, normally using a sample fraction such as {"sample":0.1}; sampled runs require key_columns. Relative CSV paths use the current working directory. Date types are auto-detected unless a side option overrides them.
 
 Put one row per mapped Left attribute in pair_recon_column_map:
 
@@ -30,29 +30,29 @@ Put one row per mapped Left attribute in pair_recon_column_map:
     ('orders', 'SAS_DT',    'event_date', 'sas_datetime_date'),
     ('orders', 'POSTED_AT', 'posted_at',  '{"type":"date","left_date_type":"timestamp","right_date_type":"date"}');
 
-data_type may be blank, numeric, categorical, a registered type name, or a custom JSON type. When mapping rows exist for a pair, they replace col_map, col_type_overrides, and column_types from config_json.
+data_type may be blank, numeric, categorical, a registered type name, or a custom JSON type. Mapping rows define the effective column map and type overrides. config_json is now only a generated compatibility snapshot; explicit pair_meta columns are authoritative.
 
 Put at most one row per pair in pair_recon_pair_sql:
 
   INSERT INTO catalog.schema.pair_recon_pair_sql
-    (pair_name, left_sql, right_sql, vintage_sample_size, vintage_values)
+    (pair_name, left_sql, left_query_windows_json, right_sql, right_query_windows_json)
   VALUES
     ('orders',
      'SELECT * FROM left_orders l WHERE {{query_windows:driver}}',
+     '{"driver":{"expression":"l.BUSINESS_DT"}}',
      'SELECT * FROM right_orders r WHERE {{query_windows:driver}}',
-     3,
-     NULL);
+     '{"driver":{"expression":"r.business_dt"}}');
 
-Non-blank SQL replaces that side's table relation; blank SQL uses the configured table. A SQL-only Right definition uses "kind":"query". Keep each marker declaration in config_json under the matching side, for example "query_windows":{"driver":{"expression":"l.BUSINESS_DT","date_type":"date"}} on Left and the corresponding r expression on Right. Metadata/preflight renders markers as 1=1, row checks use the requested bounds, and attribute checks use the exact admitted dates.
+Non-blank SQL replaces that side's table relation; blank SQL uses the configured table. Set right_source=databricks_query for a SQL-only Right. Keep marker declarations beside their SQL in left_query_windows_json/right_query_windows_json. Metadata/preflight renders markers as 1=1, row checks use the requested bounds, and attribute checks use the exact admitted dates.
 
-Row check always covers the complete requested range. Attribute checks use all vintage buckets when vintage_sample_size and vintage_values are NULL. Set vintage_sample_size to a positive integer for a deterministic random subset. The same run_id selects the same buckets on resume; a new run_id may select different buckets. For exact buckets set vintage_sample_size to NULL and use, for example, array('2026-01-01', '2026-04-01') in vintage_values. Values normalize to the chosen day/week/month/quarter/year bucket. Never set both fields; an unavailable explicit bucket fails closed.
+Row check always covers the complete requested range. Attribute rows normally use a percentage sample: set sample to a fraction in run_defaults_json or at the prompt. The hash sample is deterministic for the configured key_columns. Optional vintage_values or vintage_sample_size in run_defaults_json may narrow the date buckets; never set both.
 
-Hadoop reads left.dsn from UC metadata; HADOOP_DSN remains an optional fallback. The prompt asks only for schema and reuses the pair table and DSN. A query-only Hadoop definition is also valid. CSV accepts nullstr, date_format, and DuckDB read_csv options. Use forward slashes or a quoted Windows path. Right metadata remains Databricks, but the run prompt may replace it with a local CSV. One execution handles one pair; concurrent run_ids may handle the same pair safely.
+Hadoop reads its schema from left_conn and its DSN from HADOOP_DSN. The prompt asks only for an optional schema override. A query-only Hadoop definition is also valid. CSV accepts nullstr, date_format, and DuckDB read_csv options. Use forward slashes or a quoted Windows path. Right metadata remains Databricks, but the run prompt may replace it with a local CSV. One execution handles one pair; concurrent run_ids may handle the same pair safely.
 
 3. One-time remote setup
 
-  ./setup/setup.sh --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID --warehouse-id WAREHOUSE_ID --pair-table catalog.schema.pair_recon_pair_meta
-  setup\setup.cmd --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID --warehouse-id WAREHOUSE_ID --pair-table catalog.schema.pair_recon_pair_meta
+  ./setup/setup.sh --pair-table catalog.schema.pair_recon_pair_meta
+  setup\setup.cmd --pair-table catalog.schema.pair_recon_pair_meta
 
 The installer uploads and mirrors Right code, upserts the job, then refreshes pair_meta and pair_sql from setup/pairs.xlsx. Use --skip-config only for a code/job-only deployment. Record the Right job id when Right uses Databricks. A local Right CSV does not start this job. Both paths need UC metadata/results tables and the UC Volume.
 
@@ -60,13 +60,14 @@ To build column mappings from live schemas, run:
 
   uv run --with jupyterlab jupyter lab setup/mapping.ipynb
 
-Set PROFILE, WAREHOUSE_ID, PAIR_TABLE, and PAIR_NAME. The notebook queries Oracle and Databricks through PairRecon src functions, previews exact/case-insensitive/normalized matches, and leaves unmatched or ambiguous columns unapplied. Review approved, set any data_type overrides, then set APPLY = True to upsert pair_recon_column_map.
+PROFILE, WAREHOUSE_ID, and PAIR_TABLE default from .pair_recon.env. Set PAIR_NAME in the notebook. It queries Oracle and Databricks through PairRecon src functions, previews exact/case-insensitive/normalized matches, and leaves unmatched or ambiguous columns unapplied. Review approved, set any data_type overrides, then set APPLY = True to upsert pair_recon_column_map.
 
 Databricks operator commands use ~/.databrickscfg and may reuse these .pair_recon.env defaults:
 
-  PAIR_RECON_DBX_PROFILE=corp
-  PAIR_RECON_DBX_CLUSTER_ID=...
-  PAIR_RECON_DBX_WAREHOUSE_ID=...
+  DBX_PROFILE=corp
+  DBX_CLUSTER_ID=...
+  DBX_WAREHOUSE_ID=...
+  DBX_WORKSPACE_DIR=pair_recon
 
   just dbx login --no-open
   just dbx workspace upload src/pair_recon_right pair_recon_right --dry-run
@@ -146,7 +147,7 @@ Attach listens on 0.0.0.0:5678 and waits for a VS Code debugpy attach configurat
 - CSV missing or mojibake: use an existing local path and save UTF-8; verify delimiter/read_csv options.
 - Databricks 403/not found: verify profile, warehouse/job ids, UC grants, Volume path, and cluster access.
 - Workspace upload/download/delete failure: run with --dry-run, verify the absolute or user-home-relative Workspace path, and check Workspace permissions; symbolic links are rejected.
-- DBX id missing: set PAIR_RECON_DBX_CLUSTER_ID or PAIR_RECON_DBX_WAREHOUSE_ID, or pass the matching option.
+- DBX id missing: set DBX_CLUSTER_ID or DBX_WAREHOUSE_ID in .pair_recon.env, or pass the matching option.
 - glab missing or unauthorized: install glab, run glab auth login, and confirm GITLAB_HOST for self-managed GitLab.
 - GitLab snapshot has unexpected files: run plan first, then update pair_recon.ignore; .gitignore does not control dispatch.
 - GitLab push rejected: confirm repository membership, SSH/HTTPS Git credentials, branch rules, and that another user did not update the branch first.

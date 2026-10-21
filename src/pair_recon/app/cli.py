@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 
 import yaml
-from dotenv import find_dotenv, load_dotenv
 
 from pair_recon.core.debug import run_debugger
 from pair_recon.mail import send_outlook
@@ -14,7 +13,15 @@ from pair_recon_left.common.model.protocol import local_timezone_name
 from pair_recon_left.common.runtime.run_logging import configure_console_logging, get_logger
 
 from .catalog import Catalog
-from .config import load_config, load_defaults, local_output_root, run_config, save_defaults
+from .config import (
+    env_value,
+    load_config,
+    load_defaults,
+    load_environment,
+    local_output_root,
+    run_config,
+    save_defaults,
+)
 from .runner import (
     StatementSql,
     launch,
@@ -112,8 +119,18 @@ def csv_defaults(path: str, pair: str, side: str) -> dict:
 
 def prompts(defaults: dict, *, workspace_factory=workspace):
     owner = ask("Run owner", os.getenv("USERNAME") or defaults.get("owner"))
-    profile = ask("Databricks profile", defaults.get("profile", "corp"))
-    warehouse = ask("SQL warehouse id", defaults.get("warehouse_id"))
+    profile = ask(
+        "Databricks profile",
+        env_value("DBX_PROFILE", "PAIR_RECON_DBX_PROFILE", default=defaults.get("profile", "corp")),
+    )
+    warehouse = ask(
+        "SQL warehouse id",
+        env_value(
+            "DBX_WAREHOUSE_ID",
+            "PAIR_RECON_DBX_WAREHOUSE_ID",
+            default=defaults.get("warehouse_id"),
+        ),
+    )
     pair_table = ask("Pair metadata table", defaults.get("pair_table"))
     status_table = ask("Run status table", defaults.get("status_table"))
     error_table = ask("Run error table", defaults.get("error_table"))
@@ -137,7 +154,15 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         raise RuntimeError("pair metadata has no enabled pair")
     pair = choose("Table pair", list(by_name), defaults.get("pair"))
     metadata = pair_config(by_name[pair])
-    run_mode = choose("Run mode", ["full", "left-only"], defaults.get("run_mode", "full"))
+    run_defaults = metadata.get("_run_defaults") or {}
+    same_pair = defaults.get("pair") == pair
+
+    def run_default(name, fallback=None):
+        if same_pair and name in defaults:
+            return defaults[name]
+        return run_defaults.get(name, fallback)
+
+    run_mode = choose("Run mode", ["full", "left-only"], run_default("run_mode", "full"))
     left_input = choose(
         "Left input", ["catalog", "hadoop", "csv"], defaults.get("left_input", "catalog")
     )
@@ -219,21 +244,21 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         ["date", "all"],
         provenance.get(
             "partition_mode",
-            defaults.get("partition_mode", metadata.get("partition_mode", "date")),
+            run_default("partition_mode", metadata.get("partition_mode", "date")),
         ),
     )
     selected = choose_many(
         "Checks",
         ["row_count", *attribute_check_names()],
-        defaults.get("checks", "row_count,hash_sum,n_unique"),
+        run_default("checks", "row_count,hash_sum,n_unique"),
     )
     answers = {
         "partition_mode": mode,
         "checks": selected,
         "sample": sample_value(
-            ask("Sample", provenance.get("sample", defaults.get("sample", "all")))
+            ask("Sample", provenance.get("sample", run_default("sample", "all")))
         ),
-        "strict": yes_no("Strict normalization", bool(defaults.get("strict", False))),
+        "strict": yes_no("Strict normalization", bool(run_default("strict", False))),
     }
     if mode == "date":
         answers.update(
@@ -242,7 +267,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
             vintage=choose(
                 "Vintage",
                 ["day", "week", "month", "quarter", "year"],
-                provenance.get("vintage", defaults.get("vintage", metadata.get("vintage", "day"))),
+                provenance.get("vintage", run_default("vintage", metadata.get("vintage", "day"))),
             ),
         )
     generated = make_run_id(pair, owner, timezone)
@@ -296,7 +321,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
 
 
 def execute(args) -> int:
-    load_dotenv(find_dotenv(filename=".pair_recon.env", usecwd=True))
+    load_environment()
     settings = None
     try:
         defaults = load_config(args.config) if args.config else load_defaults(DEFAULTS)

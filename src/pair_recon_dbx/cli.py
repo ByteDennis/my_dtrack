@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
-from dotenv import find_dotenv, load_dotenv
-
+from pair_recon.app.config import env_value, load_environment
 from pair_recon.core.debug import run_debugger
 
 from . import runtime
@@ -15,7 +13,8 @@ from . import workspace as workspace_ops
 
 def add_profile(parser) -> None:
     parser.add_argument(
-        "--profile", default=os.getenv("PAIR_RECON_DBX_PROFILE", runtime.DEFAULT_PROFILE)
+        "--profile",
+        default=env_value("DBX_PROFILE", "PAIR_RECON_DBX_PROFILE", default=runtime.DEFAULT_PROFILE),
     )
 
 
@@ -48,20 +47,28 @@ def parser() -> argparse.ArgumentParser:
     add_profile(delete)
     compute = commands.add_parser("compute")
     compute.add_argument("action", nargs="?", choices=("status", "start", "stop"), default="status")
-    compute.add_argument("--cluster-id", default=os.getenv("PAIR_RECON_DBX_CLUSTER_ID"))
+    compute.add_argument(
+        "--cluster-id", default=env_value("DBX_CLUSTER_ID", "PAIR_RECON_DBX_CLUSTER_ID")
+    )
     add_wait(compute)
     add_profile(compute)
     warehouse = commands.add_parser("warehouse")
     warehouse.add_argument(
         "action", nargs="?", choices=("status", "start", "stop"), default="status"
     )
-    warehouse.add_argument("--warehouse-id", default=os.getenv("PAIR_RECON_DBX_WAREHOUSE_ID"))
+    warehouse.add_argument(
+        "--warehouse-id",
+        default=env_value("DBX_WAREHOUSE_ID", "PAIR_RECON_DBX_WAREHOUSE_ID"),
+    )
     add_wait(warehouse)
     add_profile(warehouse)
     sql = commands.add_parser("sql")
     sql.add_argument("statement", nargs="?")
     sql.add_argument("--file", type=Path)
-    sql.add_argument("--warehouse-id", default=os.getenv("PAIR_RECON_DBX_WAREHOUSE_ID"))
+    sql.add_argument(
+        "--warehouse-id",
+        default=env_value("DBX_WAREHOUSE_ID", "PAIR_RECON_DBX_WAREHOUSE_ID"),
+    )
     sql.add_argument("--limit", type=int, default=20)
     add_profile(sql)
     runs = commands.add_parser("runs")
@@ -126,7 +133,7 @@ def execute(args) -> dict:
 
 
 def main(argv=None) -> int:
-    load_dotenv(find_dotenv(filename=".pair_recon.env", usecwd=True))
+    load_environment()
     args = parser().parse_args(argv)
 
     def command() -> int:

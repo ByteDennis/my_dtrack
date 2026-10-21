@@ -50,11 +50,22 @@ def test_csv(tmp_path):
 
 
 def test_credentials(monkeypatch):
-    monkeypatch.setenv("PAIR_RECON_ORACLE_MACROS", "pb30:svc30")
+    monkeypatch.setenv("ORACLE_SVC", "pb30:svc30")
     monkeypatch.setenv("pb30_USR", "reader")
     monkeypatch.setenv("pb30_PWD", "secret")
     source = OracleSource({"source": "oracle", "conn_macro": "pb30", "table": "T"})
     assert (source.user, source.password, source.resolve_dsn()) == ("reader", "secret", "svc30")
+
+
+def test_legacy_oracle_service_alias(monkeypatch):
+    monkeypatch.delenv("ORACLE_SVC", raising=False)
+    monkeypatch.setenv("PAIR_RECON_ORACLE_MACROS", "pb30:svc30")
+
+    source = OracleSource(
+        {"source": "oracle", "conn_macro": "pb30", "user": "reader", "password": "secret"}
+    )
+
+    assert source.resolve_dsn() == "svc30"
 
 
 def test_query(tmp_path):

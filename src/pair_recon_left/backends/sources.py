@@ -417,7 +417,8 @@ class CsvSource(SqlSource):
 
 
 def oracle_macro_services() -> dict[str, str]:
-    pairs = (item.split(":", 1) for item in os.getenv("PAIR_RECON_ORACLE_MACROS", "").split(","))
+    configured = os.getenv("ORACLE_SVC") or os.getenv("PAIR_RECON_ORACLE_MACROS", "")
+    pairs = (item.split(":", 1) for item in configured.split(","))
     return {key.strip(): value.strip() for key, value in (p for p in pairs if len(p) == 2)}
 
 

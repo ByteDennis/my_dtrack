@@ -120,15 +120,84 @@ def test_refresh_configuration_uses_workbook_and_statement_sql(monkeypatch, tmp_
     }
 
 
-def test_setup_assets_are_single_sheet_workbook_and_mapping_notebook():
+def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     from openpyxl import load_workbook
 
     workbook = load_workbook(ROOT / "setup" / "pairs.xlsx")
-    assert workbook.sheetnames == ["pairs"]
+    assert workbook.sheetnames == ["pairs", "pair_sql", "field_guide"]
     assert list(workbook["pairs"].tables) == ["PairReconPairs"]
+    assert list(workbook["pair_sql"].tables) == ["PairReconSql"]
+    assert list(workbook["field_guide"].tables) == []
     notebook = json.loads((ROOT / "setup" / "mapping.ipynb").read_text(encoding="utf-8"))
     source = "\n".join(line for cell in notebook["cells"] for line in cell.get("source", []))
     assert "discover_oracle_columns" in source
     assert "discover_databricks_columns" in source
     assert "upsert_column_mappings" in source
+    assert "load_environment()" in source
+    assert "DBX_WAREHOUSE_ID" in source
+    assert "pair_config(row)" in source
     assert "APPLY = False" in source
+
+    schema = (ROOT / "setup" / "schema.sql").read_text(encoding="utf-8")
+    pair_sql_schema = schema.split("pair_recon_pair_sql", 1)[1].split(");", 1)[0]
+    assert "left_source STRING NOT NULL" in schema
+    assert "run_defaults_json STRING" in schema
+    assert "left_query_windows_json STRING" in pair_sql_schema
+    assert "right_query_windows_json STRING" in pair_sql_schema
+    assert "vintage_sample_size" not in pair_sql_schema
+    migration = (ROOT / "setup" / "migrate_pair_metadata.sql").read_text(encoding="utf-8")
+    assert "left_conn STRING" in migration
+    assert "right_query_windows_json STRING" in migration
+
+
+def test_main_uses_pair_recon_environment_defaults(monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    for name in (
+        "DBX_PROFILE",
+        "DBX_WORKSPACE_DIR",
+        "DBX_CLUSTER_ID",
+        "DBX_WAREHOUSE_ID",
+        "PAIR_RECON_DBX_PROFILE",
+        "PAIR_RECON_DBX_WORKSPACE_DIR",
+        "PAIR_RECON_DBX_CLUSTER_ID",
+        "PAIR_RECON_DBX_WAREHOUSE_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".pair_recon.env").write_text(
+        "DBX_PROFILE=team\nDBX_WORKSPACE_DIR=deploy\nDBX_CLUSTER_ID=c9\nDBX_WAREHOUSE_ID=w9\n",
+        encoding="utf-8",
+    )
+    client = object()
+    calls = {}
+    monkeypatch.setattr(
+        install,
+        "WorkspaceClient",
+        lambda *, profile: calls.setdefault("profile", profile) and client,
+    )
+    monkeypatch.setattr(
+        install,
+        "resolve_workspace_path",
+        lambda actual, path: (
+            calls.update({"resolve": (actual, path)}) or install.PurePosixPath("/Users/me/deploy")
+        ),
+    )
+    monkeypatch.setattr(install, "read_pair_workbook", lambda _path: [])
+    monkeypatch.setattr(install, "upload", lambda *_args: (["uploaded.py"], []))
+    monkeypatch.setattr(
+        install, "upsert", lambda actual, spec: calls.update({"job": (actual, spec)}) or 7
+    )
+    monkeypatch.setattr(
+        install,
+        "refresh_configuration",
+        lambda actual, warehouse, table, workbook: (
+            calls.update({"refresh": (actual, warehouse, table, workbook)}) or {"pairs": 0}
+        ),
+    )
+
+    assert install.main(["--pair-table", "main.recon.pair_recon_pair_meta"]) == 0
+
+    assert calls["profile"] == "team"
+    assert calls["resolve"] == (client, "deploy")
+    assert calls["job"][1]["tasks"][0]["existing_cluster_id"] == "c9"
+    assert calls["refresh"][1:3] == ("w9", "main.recon.pair_recon_pair_meta")
+    assert json.loads(capsys.readouterr().out)["job_id"] == 7

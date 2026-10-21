@@ -19,9 +19,8 @@ Concurrent users may validate the same pair because all artifacts and result row
 ```bash
 uv sync
 cp .pair_recon.env.example .pair_recon.env
-./setup/setup.sh --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID \
-  --warehouse-id WAREHOUSE_ID \
-  --pair-table catalog.schema.pair_recon_pair_meta
+# Fill DBX_* in .pair_recon.env, then:
+./setup/setup.sh --pair-table catalog.schema.pair_recon_pair_meta
 ```
 
 Windows:
@@ -29,25 +28,28 @@ Windows:
 ```bat
 uv sync --locked
 copy .pair_recon.env.example .pair_recon.env
-setup\setup.cmd --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID --warehouse-id WAREHOUSE_ID --pair-table catalog.schema.pair_recon_pair_meta
+rem Fill DBX_* in .pair_recon.env, then:
+setup\setup.cmd --pair-table catalog.schema.pair_recon_pair_meta
 run.cmd
 ```
 
 Workstation execution is supported only through `uv run`. `run.cmd` and `run.sh` are thin wrappers around `uv run --project ... pair_recon`; PairRecon does not build or distribute a standalone executable or portable ZIP.
 
-Install Hadoop support with `uv sync --extra hadoop`; put its non-secret ODBC DSN name in the pair's `left.dsn` metadata so the run prompt only needs the Hadoop schema. Use [setup/schema.sql](setup/schema.sql) to create the six Delta tables. Fill the single `pairs` table in [setup/pairs.xlsx](setup/pairs.xlsx); `install.py` validates every row and upserts `pair_recon_pair_meta` plus `pair_recon_pair_sql`. It preserves `latest_run_id` and `latest_status`, and it does not delete pairs omitted from the workbook. The workbook columns are `pair_name`, `enabled`, `config_json`, `left_sql`, `right_sql`, `vintage_sample_size`, and `vintage_values`; the last field is a JSON string array, and only one vintage selector may be set. Use `--skip-config` only when deploying code/job changes without refreshing configuration.
+Install Hadoop support with `uv sync --extra hadoop`; its DSN defaults from `HADOOP_DSN`. Use [setup/schema.sql](setup/schema.sql) to create the six Delta tables, then fill [setup/pairs.xlsx](setup/pairs.xlsx). The workbook has three worksheets: `pairs` for compact source/run metadata, `pair_sql` for optional SQL and query-window declarations, and a concise read-only `field_guide`. Rows join by `pair_name`. `install.py` validates the workbook and upserts `pair_recon_pair_meta` plus `pair_recon_pair_sql`; it preserves `latest_run_id`/`latest_status` and does not delete omitted pairs. Existing installations must run [setup/migrate_pair_metadata.sql](setup/migrate_pair_metadata.sql) once before importing this workbook. Use `--skip-config` only for code/job-only deployment.
 
-For column mappings, run `uv run --with jupyterlab jupyter lab setup/mapping.ipynb`. Set the profile, warehouse, pair table, and pair name. The notebook calls PairRecon functions from `src` to query real Oracle cursor metadata and Databricks `DESCRIBE QUERY`, proposes exact/case-insensitive/normalized-name matches, and previews them. Review or edit `approved`, then set `APPLY = True` to upsert `pair_recon_column_map`; unmatched and ambiguous columns are never applied automatically. [setup/setup.sql](setup/setup.sql) remains a manual SQL example and repair reference. Existing installations created before vintage selection must run [setup/migrate_pair_sql_vintages.sql](setup/migrate_pair_sql_vintages.sql) once.
+In `pairs`, `left_conn` means an Oracle macro, Hadoop schema, or CSV path. `right_conn` means `catalog.schema` for `databricks_table`, or a path for `databricks_files`/CSV; it stays blank for `databricks_query`. `left_table` and `right_table` are used only where the selected source needs them. `vintage` is explicit. Rare source settings go in the side `*_options_json`; prompt defaults go in `run_defaults_json`. Prefer percentage sampling such as `{"sample":0.1}`; sampled runs also need stable `key_columns`. Relative CSV paths resolve from the process working directory. Date types are auto-detected unless explicitly overridden in side options.
 
-`pair_recon_column_map.data_type` accepts `numeric`, `categorical`, a registered type such as `sas_datetime_date`, or a custom JSON type such as `{"type":"date","left_date_type":"timestamp","right_date_type":"date"}`. Mapping rows replace `col_map`, `col_type_overrides`, and `column_types` from `config_json` for that pair.
+For Oracle-to-Databricks column mappings, run `uv run --with jupyterlab jupyter lab setup/mapping.ipynb`. The notebook loads profile, warehouse, and pair-table defaults from `.pair_recon.env`; set `PAIR_NAME` in the notebook. It reads the new workbook row directly, queries real Oracle cursor metadata and Databricks `DESCRIBE QUERY`, proposes deterministic matches, and previews them. Review or edit `approved`, then set `APPLY = True` to upsert `pair_recon_column_map`; unmatched and ambiguous columns are never applied automatically. [setup/setup.sql](setup/setup.sql) remains a manual SQL example and repair reference.
 
-`pair_recon_pair_sql` contains at most one row per pair. A non-blank `left_sql` or `right_sql` replaces that side's table relation; a blank value uses its configured table. SQL remains the base relation so PairRecon can apply outer date guards, sampling, and aggregation. Named `{{query_windows:name}}` markers are supported on Oracle Left and Databricks Right SQL; declarations remain under the matching side's `query_windows` object in `config_json`.
+`pair_recon_column_map.data_type` accepts `numeric`, `categorical`, a registered type such as `sas_datetime_date`, or a custom JSON type such as `{"type":"date","left_date_type":"timestamp","right_date_type":"date"}`. Mapping rows define the effective `col_map` and type overrides. `config_json` remains in `pair_recon_pair_meta` only as a generated compatibility snapshot for older rows/tools; the explicit columns are authoritative.
 
-Row checks always cover the complete requested range. Attribute checks may use all vintage buckets (both selection fields null), a deterministic random subset (`vintage_sample_size`), or exact buckets (`vintage_values`). Exact values are normalized to the selected day/week/month/quarter/year bucket. Random selection changes with a new run ID but is stable when the same run is resumed. Set only one selection field; unavailable explicit buckets fail before attribute work starts.
+`pair_recon_pair_sql` contains at most one row per pair. A non-blank `left_sql` or `right_sql` replaces that side's table relation; a blank value uses its configured table. SQL remains the base relation so PairRecon can apply outer date guards, sampling, and aggregation. Named `{{query_windows:name}}` markers are supported on Oracle Left and Databricks Right SQL; declarations live beside that SQL in `left_query_windows_json` or `right_query_windows_json`.
+
+Row checks always cover the complete requested range. Attribute sampling normally uses the `sample` fraction in `run_defaults_json` or the run prompt; for example, `0.1` means ten percent by deterministic key hash. Optional `vintage_values` or `vintage_sample_size` defaults may narrow which date buckets receive attribute checks; exact values normalize to the configured `vintage`, and only one vintage selector may be set.
 
 ## Environment
 
-The normal UC-driven run needs only `ORACLE_USER` and `ORACLE_PASSWORD` in `.pair_recon.env` when Left is Oracle. Add `ORACLE_DSN` only when the pair metadata does not already provide `left.service` or `left.dsn`. A pair may instead name custom `user_env`, `password_env`, and `dsn_env` variables. `PAIR_RECON_OUTPUT_DIR` optionally selects the local artifact root and defaults to `outputs` under the current working directory. Databricks authentication stays in `~/.databrickscfg`; Hadoop's DSN, DBX IDs, GitLab host, worker counts, memory, and other paths are metadata, prompt defaults, CLI options, or optional tuning—not required environment variables.
+Every PairRecon CLI, the installer, and the mapping notebook automatically load only `.pair_recon.env`; a value already present in the process environment wins. The normal UC-driven run needs `ORACLE_USER` plus either `ORACLE_PASSWORD` or the selected connection macro's `<MACRO>_PWD` value when Left is Oracle. `ORACLE_SVC` may map macros to services, for example `pb30:service,pcds:service`; `PAIR_RECON_ORACLE_MACROS` remains a compatibility alias. Add `ORACLE_DSN` only when the macro map does not provide the service. A pair may instead name custom `user_env`, `password_env`, and `dsn_env` variables in `left_options_json`. `PAIR_RECON_OUTPUT_DIR` optionally selects the local artifact root and defaults to `outputs` under the current working directory. Databricks authentication stays in `~/.databrickscfg`.
 
 The earlier `pkg/distributed` branch used S3/AWS/WinSCP paths and many `DTRACK_*` runtime variables. The current UC Volume design does not require them.
 
@@ -90,7 +92,7 @@ just dbx sql "SELECT current_user()" --warehouse-id WAREHOUSE_ID
 just dbx runs --limit 10
 ```
 
-Set `PAIR_RECON_DBX_PROFILE`, `PAIR_RECON_DBX_CLUSTER_ID`, and `PAIR_RECON_DBX_WAREHOUSE_ID` in `.pair_recon.env` to omit repeated options. Relative Workspace paths resolve below `/Users/<current-user>/`; absolute paths remain supported. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. Delete accepts multiple paths, `-r/--recursive`, `-f/--force`, and `--dry-run`, with `rm` as an alias. The setup installer mirrors `src/pair_recon_right`, deleting remote objects that no longer exist locally only after every upload succeeds. Use `just dbx --debug attach ...` or `just dbx --debug ipdb ...` only when troubleshooting.
+Set `DBX_PROFILE`, `DBX_CLUSTER_ID`, `DBX_WAREHOUSE_ID`, and `DBX_WORKSPACE_DIR` in `.pair_recon.env` to omit repeated setup and operator options. The older `PAIR_RECON_DBX_*` names remain compatibility fallbacks. Relative Workspace paths resolve below `/Users/<current-user>/`; absolute paths remain supported. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. Delete accepts multiple paths, `-r/--recursive`, `-f/--force`, and `--dry-run`, with `rm` as an alias. The setup installer mirrors `src/pair_recon_right`, deleting remote objects that no longer exist locally only after every upload succeeds. Use `just dbx --debug attach ...` or `just dbx --debug ipdb ...` only when troubleshooting.
 
 ## GitLab tools
 

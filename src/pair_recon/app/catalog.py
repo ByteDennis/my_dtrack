@@ -66,10 +66,7 @@ class Catalog:
             mappings.setdefault(pair, []).append(row)
 
         queries = {}
-        for row in self.sql.execute(
-            f"SELECT pair_name, left_sql, right_sql, vintage_sample_size, vintage_values "
-            f"FROM {self.pair_sql_table} ORDER BY pair_name"
-        ):
+        for row in self.sql.execute(f"SELECT * FROM {self.pair_sql_table} ORDER BY pair_name"):
             pair = row["pair_name"]
             if pair not in active:
                 continue
