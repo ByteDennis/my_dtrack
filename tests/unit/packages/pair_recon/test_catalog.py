@@ -70,7 +70,7 @@ def test_pairs_reject_duplicate_metadata():
         Catalog(DuplicateSql(), "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress").pairs()
 
 
-@pytest.mark.parametrize("state", ["running", "complete", "failed"])
+@pytest.mark.parametrize("state", ["running", "complete", "left_complete", "failed"])
 def test_status(state):
     sql = Sql()
     catalog = Catalog(
@@ -90,6 +90,7 @@ def test_status(state):
     statement, values = sql.calls[-1]
     assert "MERGE INTO main.recon.run_status" in statement
     assert values["run_id"] == "run-1" and values["state"] == state
+    assert (values["ended"] is not None) == (state in {"left_complete", "failed"})
 
 
 def test_progress():

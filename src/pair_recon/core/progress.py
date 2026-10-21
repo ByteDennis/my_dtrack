@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from pair_recon_right.engine.common.model.protocol import (
     get_run_status,
+    left_row_path,
     pair_root,
     plan_path,
     row_result_path,
@@ -20,9 +21,12 @@ def progress_snapshot(store, run_id: str, pair: str, timezone: str, state: str |
     keys = store.list_keys(prefix)
     plan_key = plan_path(pair)
     row_key = row_result_path(pair)
+    left_key = left_row_path(pair)
     plan = store.get_json(plan_key) if plan_key in keys else {}
     row = store.get_json(row_key) if row_key in keys else {}
+    left = store.get_json(left_key) if left_key in keys else {}
     partitions = row.get("partitions") or {}
+    left_counts = left.get("counts") or {}
     units = sum("/units/" in key and key.endswith(".json") for key in keys)
     results = sum("/col_check/results/" in key and key.endswith(".json") for key in keys)
     failures = sum("/col_check/failures/" in key and key.endswith(".json") for key in keys)
@@ -32,6 +36,8 @@ def progress_snapshot(store, run_id: str, pair: str, timezone: str, state: str |
     detail = {
         "row_matches": sum(value.get("verdict") == "match" for value in partitions.values()),
         "row_partitions": len(partitions),
+        "left_partitions": len(left_counts),
+        "left_rows": sum(int(value) for value in left_counts.values()),
         "threads": threads,
     }
     return {

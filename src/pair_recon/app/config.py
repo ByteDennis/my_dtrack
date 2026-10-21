@@ -1,3 +1,5 @@
+import json
+import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -5,6 +7,16 @@ from typing import Any
 import yaml
 
 _PRIVATE = ("password", "secret", "token", "credential")
+OUTPUT_DIR_ENV = "PAIR_RECON_OUTPUT_DIR"
+DEFAULT_OUTPUT_DIR = "outputs"
+
+
+def local_output_root(defaults: dict[str, Any] | None = None) -> Path:
+    configured = os.getenv(OUTPUT_DIR_ENV, "").strip()
+    selected = configured or (defaults or {}).get("work_dir") or DEFAULT_OUTPUT_DIR
+    target = Path(selected).expanduser()
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 def _public(value: Any) -> Any:
@@ -26,6 +38,16 @@ def load_defaults(path: str | Path) -> dict[str, Any]:
     value = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
     if not isinstance(value, dict):
         raise TypeError("defaults must be a YAML mapping")
+    return value
+
+
+# >>> load a json run config, unwrapping request snapshots <<< #
+def load_config(path: str | Path) -> dict[str, Any]:
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(value, dict) and value.get("format") == "pair-recon-request-v1":
+        value = value.get("settings")
+    if not isinstance(value, dict):
+        raise TypeError("config must be a JSON object")
     return value
 
 

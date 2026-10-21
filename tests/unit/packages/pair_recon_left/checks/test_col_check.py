@@ -1,3 +1,4 @@
+import pytest
 from support import MemoryStore
 
 from pair_recon_left.backends.sources import write_rows
@@ -37,6 +38,28 @@ def test_pipeline():
     ).run([row])
     uid = unit_id("pair", "all", "amount")
     assert count == 1 and store.exists(f"pairs/pair/units/00000001-{uid}.json")
+
+
+def test_left_only_pipeline_does_not_wait_for_right(monkeypatch):
+    store = MemoryStore()
+    row = manifest()
+    store.put_json("pairs/pair/plan.json", row)
+    stats = {"amount": {"col_type": "numeric", "n_unique": 2, "hash_sum": "3"}}
+    pipeline = ColCheckPipeline(
+        store,
+        pull_window=lambda *_args: "pulled",
+        compute_stats=lambda *_args: stats,
+        wip=1,
+        wait_for_right=False,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_capacity",
+        lambda *_args: pytest.fail("left-only mode must not wait for Right"),
+    )
+
+    assert pipeline.run([row]) == 1
+    assert store.exists("_status/col_check.closed.json")
 
 
 def test_cache(tmp_path):

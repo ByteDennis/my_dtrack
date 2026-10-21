@@ -19,7 +19,9 @@ Concurrent users may validate the same pair because all artifacts and result row
 ```bash
 uv sync
 cp .pair_recon.env.example .pair_recon.env
-./setup/setup.sh --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID
+./setup/setup.sh --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID \
+  --warehouse-id WAREHOUSE_ID \
+  --pair-table catalog.schema.pair_recon_pair_meta
 ```
 
 Windows:
@@ -27,13 +29,15 @@ Windows:
 ```bat
 uv sync --locked
 copy .pair_recon.env.example .pair_recon.env
-setup\setup.cmd --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID
+setup\setup.cmd --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID --warehouse-id WAREHOUSE_ID --pair-table catalog.schema.pair_recon_pair_meta
 run.cmd
 ```
 
 Workstation execution is supported only through `uv run`. `run.cmd` and `run.sh` are thin wrappers around `uv run --project ... pair_recon`; PairRecon does not build or distribute a standalone executable or portable ZIP.
 
-Install Hadoop support with `uv sync --extra hadoop`; put its non-secret ODBC DSN name in the pair's `left.dsn` metadata so the run prompt only needs the Hadoop schema. Use [setup/schema.sql](setup/schema.sql) to create the six Delta tables, then adapt the repeatable `MERGE` examples in [setup/setup.sql](setup/setup.sql). Each `-- # catalog.schema.table` section covers one table; the final three program-managed tables are marked as repair/testing examples. The column-map and pair-SQL tables are resolved automatically in the same catalog/schema as the configured pair table. Existing installations created before vintage selection must run [setup/migrate_pair_sql_vintages.sql](setup/migrate_pair_sql_vintages.sql) once.
+Install Hadoop support with `uv sync --extra hadoop`; put its non-secret ODBC DSN name in the pair's `left.dsn` metadata so the run prompt only needs the Hadoop schema. Use [setup/schema.sql](setup/schema.sql) to create the six Delta tables. Fill the single `pairs` table in [setup/pairs.xlsx](setup/pairs.xlsx); `install.py` validates every row and upserts `pair_recon_pair_meta` plus `pair_recon_pair_sql`. It preserves `latest_run_id` and `latest_status`, and it does not delete pairs omitted from the workbook. The workbook columns are `pair_name`, `enabled`, `config_json`, `left_sql`, `right_sql`, `vintage_sample_size`, and `vintage_values`; the last field is a JSON string array, and only one vintage selector may be set. Use `--skip-config` only when deploying code/job changes without refreshing configuration.
+
+For column mappings, run `uv run --with jupyterlab jupyter lab setup/mapping.ipynb`. Set the profile, warehouse, pair table, and pair name. The notebook calls PairRecon functions from `src` to query real Oracle cursor metadata and Databricks `DESCRIBE QUERY`, proposes exact/case-insensitive/normalized-name matches, and previews them. Review or edit `approved`, then set `APPLY = True` to upsert `pair_recon_column_map`; unmatched and ambiguous columns are never applied automatically. [setup/setup.sql](setup/setup.sql) remains a manual SQL example and repair reference. Existing installations created before vintage selection must run [setup/migrate_pair_sql_vintages.sql](setup/migrate_pair_sql_vintages.sql) once.
 
 `pair_recon_column_map.data_type` accepts `numeric`, `categorical`, a registered type such as `sas_datetime_date`, or a custom JSON type such as `{"type":"date","left_date_type":"timestamp","right_date_type":"date"}`. Mapping rows replace `col_map`, `col_type_overrides`, and `column_types` from `config_json` for that pair.
 
@@ -43,7 +47,7 @@ Row checks always cover the complete requested range. Attribute checks may use a
 
 ## Environment
 
-The normal UC-driven run needs only `ORACLE_USER` and `ORACLE_PASSWORD` in `.pair_recon.env` when Left is Oracle. Add `ORACLE_DSN` only when the pair metadata does not already provide `left.service` or `left.dsn`. A pair may instead name custom `user_env`, `password_env`, and `dsn_env` variables. Databricks authentication stays in `~/.databrickscfg`; Hadoop's DSN, DBX IDs, GitLab host, worker counts, memory, and paths are metadata, prompt defaults, CLI options, or optional tuning—not required environment variables.
+The normal UC-driven run needs only `ORACLE_USER` and `ORACLE_PASSWORD` in `.pair_recon.env` when Left is Oracle. Add `ORACLE_DSN` only when the pair metadata does not already provide `left.service` or `left.dsn`. A pair may instead name custom `user_env`, `password_env`, and `dsn_env` variables. `PAIR_RECON_OUTPUT_DIR` optionally selects the local artifact root and defaults to `outputs` under the current working directory. Databricks authentication stays in `~/.databrickscfg`; Hadoop's DSN, DBX IDs, GitLab host, worker counts, memory, and other paths are metadata, prompt defaults, CLI options, or optional tuning—not required environment variables.
 
 The earlier `pkg/distributed` branch used S3/AWS/WinSCP paths and many `DTRACK_*` runtime variables. The current UC Volume design does not require them.
 
@@ -58,11 +62,15 @@ just run
 run.cmd
 ```
 
-The prompts ask for owner, Databricks profile and table locations, pair, Left and Right inputs, timezone, partition mode, checks, sample, strict normalization, optional date range and vintage, run ID, and confirmation. Checks use a terminal checkbox list: enter comma-separated names or numbers to toggle `[x]` selections, then press Enter to confirm. Press Enter elsewhere to reuse saved defaults. A generated run ID remains the default so a normal run does not overwrite history.
+The prompts ask for owner, Databricks profile and table locations, pair, run mode, Left input, timezone, partition mode, checks, sample, strict normalization, optional date range and vintage, run ID, and confirmation. `full` mode also asks for a Right input and starts either the configured Databricks job or local CSV Right. `left-only` does neither: it uses the Left definition, vintage selection, sample, checks, and approved column mapping to publish Left artifacts only. Owner defaults to the `USERNAME` environment variable, falling back to the saved value only when `USERNAME` is unavailable. Checks use a terminal checkbox list: enter comma-separated names or numbers to toggle `[x]` selections, then press Enter to confirm. Press Enter elsewhere to reuse saved defaults. A generated run ID remains the default so a normal run does not overwrite history.
 
-After confirmation and before execution, PairRecon atomically writes `.pair_recon-work/<run_id>/request.json`. The UTF-8 snapshot contains the current user settings, the pair/mapping/SQL rows pulled from Catalog, and the merged effective config; credential fields are omitted. SQL text is retained verbatim for audit, so credentials must never be embedded in SQL.
+After confirmation and before execution, PairRecon creates the local output root when needed and atomically writes `outputs/<run_id>/request.json` by default. Set `PAIR_RECON_OUTPUT_DIR` to change that root; a relative value is resolved from the current working directory. The same run directory contains `left.log`, DuckDB temporary state, pulled Left CSVs, fixed-key CSVs, and their metadata. Source input files are never moved. The UTF-8 snapshot contains the current user settings, the pair/mapping/SQL rows pulled from Catalog, and the merged effective config; credential fields are omitted. SQL text is retained verbatim for audit, so credentials must never be embedded in SQL.
+
+A successful `left-only` run ends as `left_complete`, not `passed`, because no reconciliation verdict exists. It uploads the full-range Left row counts to `pairs/<pair>/row_check/left.json`; sampling affects attribute statistics, not those counts. When column checks are selected, it also uploads the selected vintage/sample/mapping plan to `pairs/<pair>/plan.json`, fixed sample keys when applicable, and one `left_statistics` unit per selected vintage and mapped Left column under `pairs/<pair>/units/`; `_status/col_check.closed.json` then marks all planned Left statistics ready. In `pair_recon_progress_snapshot`, `units_ready` counts uploaded Left units while `units_complete` remains the count of completed Right comparisons. Snapshot pairs are excluded from left-only mode because choosing their historical comparison vintage requires Right row counts.
 
 Registered attribute checks are `n_total`, `n_missing`, `n_unique`, `mean`, `std`, `min`, `max`, `length_avg`, `length_max`, and `hash_sum`; `row_count` remains the pair-level check. `partition_mode=all` treats the complete relation as the pair-level `all` partition and does not require a date column.
+
+Detailed differences are stored in `pair_recon_run_error`. For a column-statistic mismatch, `column_name` identifies the Left column, `vintage` identifies the comparison bucket, `check_name` identifies the failed statistic, and `left_value`/`right_value` contain the compared values. `payload` contains the complete result JSON, including the mapped Right column and every calculated match/difference field. Row-count findings use `check_name='row_count'` and `partition_value`; execution failures use `check_name='runtime'` and put the message in `detail`. A successful left-only run produces no findings. `pair_recon_run_status` contains lifecycle/aggregate state only, while `pair_recon_pair_meta.latest_run_id/latest_status` points to the latest outcome, including `left_complete`.
 
 For a current-view Left source against Right history, set `snapshot: true` in that pair's metadata. Left is counted as a complete snapshot; Right chooses the latest partition in the configured range whose row count matches, then column checks compare the snapshot with that partition.
 
@@ -110,6 +118,6 @@ Live Oracle query/export/timing tests are opt-in and are not part of the default
 just live
 ```
 
-Every recipe defaults to normal mode. Python workflows accept `--debug ipdb` or `--debug attach`; attach waits for VS Code `debugpy` on port 5678. Lint uses `--debug` for verbose diagnostics. `just sas` creates only `left.sas`; use `just sas side=right` or `just sas side=both` when needed. After SAS writes either sampled CSV, use the normal `run.cmd` or `just run` prompts to select CSV inputs. When Right is CSV, comparison stays local and reuses the existing multithread statistics engine; no extra recipe is needed.
+Every recipe defaults to normal mode. Python workflows accept `--debug ipdb` or `--debug attach`; attach waits for VS Code `debugpy` on port 5678. Lint uses `--debug` for verbose diagnostics. `just sas` creates only `left.sas` under `${PAIR_RECON_OUTPUT_DIR:-outputs}/sas`; use `just sas side=right` or `just sas side=both` when needed, or pass `bundle=...` for an explicit location. After SAS writes either sampled CSV, use the normal `run.cmd` or `just run` prompts to select CSV inputs. When Right is CSV, comparison stays local and reuses the existing multithread statistics engine; no extra recipe is needed.
 
 See [guideme.txt](guideme.txt) for the complete local, Databricks, Hadoop, CSV, SAS, progress, Outlook, and troubleshooting flow.

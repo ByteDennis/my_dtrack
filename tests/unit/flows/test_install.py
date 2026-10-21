@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -87,3 +88,47 @@ def test_upload_failure_does_not_delete_remote_files(tmp_path):
 
     assert files.deleted == []
     assert f"{root}/old.py" in files.objects
+
+
+def test_refresh_configuration_uses_workbook_and_statement_sql(monkeypatch, tmp_path):
+    workbook = tmp_path / "pairs.xlsx"
+    workbook.touch()
+    rows = [{"pair_name": "orders"}]
+    sql = object()
+    monkeypatch.setattr(
+        install, "read_pair_workbook", lambda path: rows if path == workbook else []
+    )
+    monkeypatch.setattr(install, "StatementSql", lambda workspace, warehouse: sql)
+    monkeypatch.setattr(
+        install,
+        "upsert_pair_configuration",
+        lambda actual_sql, table, actual_rows: {
+            "sql": actual_sql,
+            "table": table,
+            "rows": actual_rows,
+        },
+    )
+
+    result = install.refresh_configuration(
+        object(), "warehouse", "main.recon.pair_recon_pair_meta", workbook
+    )
+
+    assert result == {
+        "sql": sql,
+        "table": "main.recon.pair_recon_pair_meta",
+        "rows": rows,
+    }
+
+
+def test_setup_assets_are_single_sheet_workbook_and_mapping_notebook():
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(ROOT / "setup" / "pairs.xlsx")
+    assert workbook.sheetnames == ["pairs"]
+    assert list(workbook["pairs"].tables) == ["PairReconPairs"]
+    notebook = json.loads((ROOT / "setup" / "mapping.ipynb").read_text(encoding="utf-8"))
+    source = "\n".join(line for cell in notebook["cells"] for line in cell.get("source", []))
+    assert "discover_oracle_columns" in source
+    assert "discover_databricks_columns" in source
+    assert "upsert_column_mappings" in source
+    assert "APPLY = False" in source

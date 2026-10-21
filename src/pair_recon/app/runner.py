@@ -20,7 +20,12 @@ from pair_recon_left.common.checks.col_check import (
     wait_for_manifests,
 )
 from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
-from pair_recon_left.common.model.protocol import list_failures, list_results, list_row_results
+from pair_recon_left.common.model.protocol import (
+    list_failures,
+    list_results,
+    list_row_results,
+    write_run_status,
+)
 from pair_recon_left.common.runtime.run_logging import configure_left_logging
 from pair_recon_right.engine.backends.targets import CsvTarget
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
@@ -218,17 +223,21 @@ def run_left(
     manifest_timeout: float = 1800,
     pull_workers: int = 2,
     release=None,
+    left_only: bool = False,
 ):
     config = validate_config(config)
+    pair_config = config["pairs"][pair]
+    if left_only and pair_config.get("snapshot"):
+        raise ValueError("left-only mode does not support snapshot pairs that require Right")
     reused = reuse_row_check(config, store, run_id=run_id, pair_names=[pair])
     if reused is None:
         run_row_check(config, store, run_id=run_id, pair_names=[pair], pair_workers=1)
     if release:
         release()
-    checks = config["pairs"][pair].get("checks") or []
+    checks = pair_config.get("checks") or []
     if not any(check != "row_count" for check in checks):
         return {"row": "ready", "units": 0}
-    timeout = manifest_timeout if config["pairs"][pair].get("snapshot") else 0
+    timeout = manifest_timeout if pair_config.get("snapshot") else 0
     manifests = wait_for_manifests(store, timeout=timeout, poll_interval=2, pair_names=[pair])
     for manifest in manifests:
         publish_fixed_keys(store, manifest, work_dir)
@@ -239,6 +248,7 @@ def run_left(
         compute_stats=runtime.compute_stats,
         pull_workers=max(1, int(pull_workers)),
         stat_workers=max(1, int(pull_workers)),
+        wait_for_right=not left_only,
     ).run(manifests)
     return {"row": "ready", "units": units}
 
@@ -258,6 +268,12 @@ def retry_failed(store) -> int:
 def launch(settings: dict, config: dict, *, action: str, workspace_client=None, catalog=None):
     pair = next(iter(config["pairs"]))
     run_id = validate_run_id(settings["run_id"])
+    run_mode = str(settings.get("run_mode") or "full")
+    if run_mode not in {"full", "left-only"}:
+        raise ValueError("run_mode must be full or left-only")
+    left_only = run_mode == "left-only"
+    run_dir = Path(settings["work_dir"]) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
     client = workspace_client or workspace(settings["profile"])
     store = VolumeStore(settings["volume_root"], files=client.files).child(run_id)
     if action == "restart":
@@ -266,7 +282,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             catalog.clear(run_id)
     elif action == "resume":
         retry_failed(store)
-    left_log = Path(settings["work_dir"]) / run_id / "left.log"
+    left_log = run_dir / "left.log"
     configure_left_logging(left_log, settings["timezone"])
     if catalog:
         catalog.status(
@@ -288,8 +304,9 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         "error_table": settings["error_table"],
     }
     remote = None
+    right = None
     final_state = "failed"
-    local_right = config["pairs"][pair]["right"].get("source") == "csv"
+    local_right = not left_only and config["pairs"][pair]["right"].get("source") == "csv"
     try:
         if catalog:
             sampler = ProgressSampler(
@@ -301,19 +318,37 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 interval=float(settings.get("progress_interval", 10)),
             ).start(required=True)
         target_factory = lambda values: CsvTarget(values)
-        if not local_right:
+        if not left_only and not local_right:
             remote = client.jobs.run_now(int(settings["right_job_id"]), notebook_params=params)
         left = run_left(
             config,
             store,
             run_id,
             pair,
-            Path(settings["work_dir"]) / run_id,
+            run_dir,
             float(settings.get("timeout", 120)) * 60,
             int(settings.get("pull_workers", 2)),
             (lambda: run_right_row_check(store, target_factory)) if local_right else None,
+            left_only=left_only,
         )
-        if local_right:
+        if left_only:
+            final_state = "left_complete"
+            right = {"state": "not_run"}
+            write_run_status(
+                store,
+                {"state": final_state, "run_id": run_id, "role": "left", "mode": run_mode},
+                timezone_name=settings["timezone"],
+            )
+            if catalog:
+                catalog.finish(
+                    store,
+                    run_id=run_id,
+                    pair=pair,
+                    owner=settings["owner"],
+                    state=final_state,
+                    timezone=settings["timezone"],
+                )
+        elif local_right:
             right = run_right(
                 None,
                 target_factory,
@@ -345,16 +380,19 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 raise RuntimeError(f"Right job finished with {getattr(result, 'value', result)}")
             status = catalog.run(run_id) if catalog else None
             final_state = (status or {}).get("state", "finished")
+            right = {"run_id": int(remote.run_id)}
         if sampler:
             sampler.stop(final_state, required=True)
             sampler = None
         return {
             "run_id": run_id,
             "pair": pair,
+            "mode": run_mode,
             "state": final_state,
             "left": left,
             "left_log": str(left_log),
-            "right": right if local_right else {"run_id": int(remote.run_id)},
+            "right": right,
+            "volume_run_root": store.root_uri,
         }
     except BaseException:
         try:

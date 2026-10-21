@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from pair_recon_left.common.model.protocol import local_timezone_name
 from pair_recon_left.common.runtime.run_logging import configure_console_logging, get_logger
 
 from .catalog import Catalog
-from .config import load_defaults, run_config, save_defaults
+from .config import load_config, load_defaults, local_output_root, run_config, save_defaults
 from .runner import (
     StatementSql,
     launch,
@@ -110,7 +111,7 @@ def csv_defaults(path: str, pair: str, side: str) -> dict:
 
 
 def prompts(defaults: dict, *, workspace_factory=workspace):
-    owner = ask("Run owner", defaults.get("owner"))
+    owner = ask("Run owner", os.getenv("USERNAME") or defaults.get("owner"))
     profile = ask("Databricks profile", defaults.get("profile", "corp"))
     warehouse = ask("SQL warehouse id", defaults.get("warehouse_id"))
     pair_table = ask("Pair metadata table", defaults.get("pair_table"))
@@ -136,6 +137,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         raise RuntimeError("pair metadata has no enabled pair")
     pair = choose("Table pair", list(by_name), defaults.get("pair"))
     metadata = pair_config(by_name[pair])
+    run_mode = choose("Run mode", ["full", "left-only"], defaults.get("run_mode", "full"))
     left_input = choose(
         "Left input", ["catalog", "hadoop", "csv"], defaults.get("left_input", "catalog")
     )
@@ -176,28 +178,35 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
                 },
             },
         }
-    right_input = choose("Right input", ["catalog", "csv"], defaults.get("right_input", "catalog"))
+    saved_right_input = str(defaults.get("right_input") or "catalog")
+    if saved_right_input not in {"catalog", "csv"}:
+        saved_right_input = "catalog"
+    right_input = "none"
     right_job_id = str(defaults.get("right_job_id") or "")
-    if right_input == "csv":
-        if not right_csv and left_csv:
-            right_csv = str(Path(left_csv).with_name("right_sample.csv"))
-        right_csv = ask("Right CSV path", right_csv)
-        provenances.append(csv_defaults(right_csv, pair, "right"))
-        inherited = metadata["right"]
-        metadata = {
-            **metadata,
-            "right_pre_sampled": True,
-            "right": {
-                "source": "csv",
-                "path": right_csv,
-                "pre_sampled": True,
-                **{
-                    name: inherited[name] for name in ("date_col", "date_type") if name in inherited
+    if run_mode == "full":
+        right_input = choose("Right input", ["catalog", "csv"], saved_right_input)
+        if right_input == "csv":
+            if not right_csv and left_csv:
+                right_csv = str(Path(left_csv).with_name("right_sample.csv"))
+            right_csv = ask("Right CSV path", right_csv)
+            provenances.append(csv_defaults(right_csv, pair, "right"))
+            inherited = metadata["right"]
+            metadata = {
+                **metadata,
+                "right_pre_sampled": True,
+                "right": {
+                    "source": "csv",
+                    "path": right_csv,
+                    "pre_sampled": True,
+                    **{
+                        name: inherited[name]
+                        for name in ("date_col", "date_type")
+                        if name in inherited
+                    },
                 },
-            },
-        }
-    else:
-        right_job_id = ask("Right job id", right_job_id)
+            }
+        else:
+            right_job_id = ask("Right job id", right_job_id)
     provenances = [value for value in provenances if value]
     provenance = provenances[0] if provenances else {}
     for value in provenances[1:]:
@@ -260,6 +269,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "right_job_id": right_job_id,
         "email_to": email_to,
         "pair": pair,
+        "run_mode": run_mode,
         "left_input": left_input,
         "right_input": right_input,
         "left_csv": left_csv,
@@ -272,7 +282,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "checks": ",".join(selected),
         "sample": answers["sample"],
         "strict": answers["strict"],
-        "work_dir": defaults.get("work_dir", ".pair_recon-work"),
+        "work_dir": str(local_output_root(defaults)),
         "timeout": defaults.get("timeout", 120),
         "progress_interval": defaults.get("progress_interval", 10),
         "pull_workers": defaults.get("pull_workers", 2),
@@ -289,7 +299,8 @@ def execute(args) -> int:
     load_dotenv(find_dotenv(filename=".pair_recon.env", usecwd=True))
     settings = None
     try:
-        settings, config, action, client, catalog = prompts(load_defaults(args.defaults))
+        defaults = load_config(args.config) if args.config else load_defaults(DEFAULTS)
+        settings, config, action, client, catalog = prompts(defaults)
         configure_console_logging(args.log_level, settings["timezone"])
         print(
             json.dumps(
@@ -308,7 +319,7 @@ def execute(args) -> int:
         snapshot = write_request_snapshot(settings, config)
         log.info("request snapshot: %s", snapshot)
         save_defaults(
-            args.defaults,
+            DEFAULTS,
             {
                 key: value
                 for key, value in settings.items()
@@ -357,7 +368,7 @@ def execute(args) -> int:
 def main_program(argv=None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="pair_recon")
-    parser.add_argument("--defaults", type=Path, default=DEFAULTS)
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--debug", nargs="?", const="ipdb", choices=("ipdb", "attach"))
     args = parser.parse_args(values)

@@ -160,6 +160,7 @@ class ColCheckPipeline:
         wip: int = 200,
         backpressure_sleep: float = 1.0,
         progress_interval: float | None = None,
+        wait_for_right: bool = True,
     ):
         self.store = store
         self.pull_window = pull_window
@@ -169,6 +170,7 @@ class ColCheckPipeline:
         self.stat_workers = 1
         self.wip = max(1, wip)
         self.backpressure_sleep = max(0, backpressure_sleep)
+        self.wait_for_right = wait_for_right
         self.progress_interval = max(
             0.01,
             float(
@@ -232,12 +234,12 @@ class ColCheckPipeline:
             )
         log.info(
             "col_check start: %d plan(s), %d vintage(s), %d attribute unit(s) already ready, "
-            "next sequence=%d, wip=%d, active_vintages=1",
+            "next sequence=%d, wip=%s, active_vintages=1",
             len(manifests),
             len(plan_rows),
             len(ready_ids),
             sequence,
-            self.wip,
+            self.wip if self.wait_for_right else "disabled",
         )
         total_attributes = sum(len(manifest["columns"]) for manifest, _ in plan_rows)
         progress_steps = sum(1 + 4 * len(manifest["columns"]) for manifest, _ in plan_rows)
@@ -276,7 +278,8 @@ class ColCheckPipeline:
                         published_columns.add(column)
                         if uid in existing:
                             continue
-                        self._wait_for_capacity(active_ids, version2)
+                        if self.wait_for_right:
+                            self._wait_for_capacity(active_ids, version2)
                         self.store.commit_unit(
                             sequence,
                             uid,

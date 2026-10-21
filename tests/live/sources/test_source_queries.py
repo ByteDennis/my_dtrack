@@ -16,7 +16,10 @@ from tzlocal import get_localzone_name
 from pair_recon_left.backends.sources import source_from_config
 
 CONFIG = Path(os.environ.get("PAIR_RECON_LIVE_SOURCE_QUERIES", "tests/live/source_queries.json"))
-TIMINGS = Path(os.environ.get("PAIR_RECON_LIVE_TIMINGS_DIR", ".pair_recon-work/live-timings"))
+TIMINGS = Path(
+    os.environ.get("PAIR_RECON_LIVE_TIMINGS_DIR")
+    or Path(os.environ.get("PAIR_RECON_OUTPUT_DIR", "outputs")) / "live-timings"
+)
 TIMEZONE = os.environ.get("PAIR_RECON_TIMEZONE", get_localzone_name())
 SOURCES = ("oracle", "hadoop", "csv")
 

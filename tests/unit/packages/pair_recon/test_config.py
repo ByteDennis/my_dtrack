@@ -1,8 +1,15 @@
+import json
 from pathlib import Path
 
 import pytest
 
-from pair_recon.app.config import load_defaults, run_config, save_defaults
+from pair_recon.app.config import (
+    load_config,
+    load_defaults,
+    local_output_root,
+    run_config,
+    save_defaults,
+)
 
 
 @pytest.mark.parametrize(
@@ -69,3 +76,37 @@ def test_defaults(tmp_path: Path):
     assert saved == {"owner": "测试用户", "profile": "corp"}
     assert load_defaults(path) == saved
     assert "hidden" not in path.read_text(encoding="utf-8")
+
+
+def test_load_config(tmp_path: Path):
+    plain = tmp_path / "plain.json"
+    plain.write_text(json.dumps({"owner": "测试用户", "pair": "orders"}), encoding="utf-8")
+    assert load_config(plain) == {"owner": "测试用户", "pair": "orders"}
+    snapshot = tmp_path / "request.json"
+    snapshot.write_text(
+        json.dumps({"format": "pair-recon-request-v1", "settings": {"pair": "orders"}}),
+        encoding="utf-8",
+    )
+    assert load_config(snapshot) == {"pair": "orders"}
+    bad = tmp_path / "bad.json"
+    bad.write_text("[]", encoding="utf-8")
+    with pytest.raises(TypeError):
+        load_config(bad)
+    with pytest.raises(FileNotFoundError):
+        load_config(tmp_path / "missing.json")
+
+
+def test_local_output_root_defaults_to_outputs_and_creates_it(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PAIR_RECON_OUTPUT_DIR", raising=False)
+
+    assert local_output_root() == Path("outputs")
+    assert (tmp_path / "outputs").is_dir()
+
+
+def test_local_output_root_environment_overrides_saved_work_dir(monkeypatch, tmp_path: Path):
+    target = tmp_path / "artifacts"
+    monkeypatch.setenv("PAIR_RECON_OUTPUT_DIR", str(target))
+
+    assert local_output_root({"work_dir": "legacy"}) == target
+    assert target.is_dir()

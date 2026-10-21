@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 from dotenv import find_dotenv, load_dotenv
 
+from pair_recon.app.config import local_output_root
 from pair_recon.core.debug import run_debugger
 from pair_recon_left.backends.sources import source_from_config
 from pair_recon_left.common.model.manifest import key_family_specs, sample_plan
@@ -168,7 +169,8 @@ def execute(args):
     load_dotenv(find_dotenv(filename=".pair_recon.env", usecwd=True))
     name, pair = _catalog_pair(args.defaults, args.pair)
     sides = ("left", "right") if args.side == "both" else (args.side,)
-    result = export_bundle(name, pair, args.bundle, args.rate, sides)
+    bundle = args.bundle or local_output_root() / "sas"
+    result = export_bundle(name, pair, bundle, args.rate, sides)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
@@ -187,7 +189,7 @@ def main(argv=None):
     export = commands.add_parser("export")
     export.add_argument("--defaults", type=Path, default=Path(".pair_recon.yaml"))
     export.add_argument("--pair")
-    export.add_argument("--bundle", type=Path, default=Path(".pair_recon-work/sas"))
+    export.add_argument("--bundle", type=Path)
     export.add_argument("--rate", type=float, default=0.01)
     export.add_argument("--side", choices=("left", "right", "both"), default="left")
     export.add_argument("--debug", nargs="?", const="ipdb", choices=("ipdb", "attach"))

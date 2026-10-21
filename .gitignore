@@ -13,6 +13,7 @@ build/
 .pair_recon.env
 .pair_recon.yaml
 .pair_recon-work/
+outputs/
 .*-work/
 .coverage
 .coverage-html/

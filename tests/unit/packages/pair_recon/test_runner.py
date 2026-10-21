@@ -227,6 +227,7 @@ def test_progress():
     write_run_status(
         store, {"state": "left_col_check", "run_id": "r", "timezone": "America/New_York"}
     )
+    store.put_json("pairs/p/row_check/left.json", {"counts": {"all": 2}})
     store.put_json(plan_path("p"), {"pair": "p", "expected_units": 2, "windows": [], "columns": []})
     store.put_json(unit_path("p", 1, "u1"), {"pair": "p", "unit_id": "u1"})
     store.put_json(result_path("p", "u1"), {"pair": "p", "unit_id": "u1", "verdict": "match"})
@@ -244,6 +245,7 @@ def test_progress():
     sampler.stop("passed")
     row = progress_snapshot(store, "r", "p", "America/New_York")
     assert row["units_expected"] == 2 and row["units_complete"] == 1
+    assert json.loads(row["detail"])["left_rows"] == 2
     assert any(name == "pair_recon-progress" for name, _row in seen)
     assert seen[-1][1]["state"] == "passed"
 
@@ -282,17 +284,43 @@ def test_sas(tmp_path):
     assert (bundle / "left.sas").is_file() and (bundle / "right.sas").is_file()
 
 
+def test_sas_default_bundle_uses_output_root(monkeypatch, tmp_path, capsys):
+    target = tmp_path / "artifacts"
+    seen = {}
+    monkeypatch.setenv("PAIR_RECON_OUTPUT_DIR", str(target))
+    monkeypatch.setattr(sas, "_catalog_pair", lambda *_args: ("orders", {}))
+
+    def export(pair_name, pair, bundle, rate, sides):
+        seen.update(pair_name=pair_name, pair=pair, bundle=bundle, rate=rate, sides=sides)
+        return {"bundle": str(bundle), "scripts": {}}
+
+    monkeypatch.setattr(sas, "export_bundle", export)
+    args = SimpleNamespace(
+        defaults=tmp_path / ".pair_recon.yaml",
+        pair=None,
+        side="left",
+        bundle=None,
+        rate=0.01,
+    )
+
+    assert sas.execute(args) == 0
+    assert seen["bundle"] == target / "sas"
+    assert target.is_dir()
+    assert json.loads(capsys.readouterr().out)["bundle"] == str(target / "sas")
+
+
 @pytest.mark.parametrize(
-    ("left_input", "right_input"),
+    ("run_mode", "left_input", "right_input"),
     [
-        ("catalog", "catalog"),
-        ("hadoop", "catalog"),
-        ("csv", "catalog"),
-        ("catalog", "csv"),
-        ("csv", "csv"),
+        ("full", "catalog", "catalog"),
+        ("full", "hadoop", "catalog"),
+        ("full", "csv", "catalog"),
+        ("full", "catalog", "csv"),
+        ("full", "csv", "csv"),
+        ("left-only", "catalog", "catalog"),
     ],
 )
-def test_prompt(monkeypatch, left_input, right_input, tmp_path):
+def test_prompt(monkeypatch, run_mode, left_input, right_input, tmp_path):
     metadata = {
         "left": {"source": "oracle", "table": "L", "dsn": "hive"},
         "right": {"source": "databricks", "table": "R"},
@@ -320,6 +348,7 @@ def test_prompt(monkeypatch, left_input, right_input, tmp_path):
         "volume_root": "/Volumes/main/recon/artifacts/runs",
         "right_job_id": "42",
         "pair": "orders",
+        "run_mode": run_mode,
         "left_input": left_input,
         "right_input": right_input,
         "left_csv": str(tmp_path / "left_sample.csv"),
@@ -340,10 +369,14 @@ def test_prompt(monkeypatch, left_input, right_input, tmp_path):
     monkeypatch.setattr(cli, "Catalog", Catalog)
     monkeypatch.setattr(cli, "make_run_id", lambda *_args: "r-new")
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    monkeypatch.setenv("PAIR_RECON_OUTPUT_DIR", str(tmp_path / "artifacts"))
     settings, config, action, _client, _catalog = cli.prompts(
         defaults, workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object())
     )
     assert settings["run_id"] == "r-new" and action == "new"
+    assert settings["run_mode"] == run_mode
+    assert settings["work_dir"] == str(tmp_path / "artifacts")
+    assert (tmp_path / "artifacts").is_dir()
     assert config["pairs"]["orders"]["statistics"] == ["hash_sum"]
     expected = {"catalog": "oracle", "hadoop": "hadoop", "csv": "csv"}[left_input]
     assert config["pairs"]["orders"]["left"]["source"] == expected
@@ -353,9 +386,37 @@ def test_prompt(monkeypatch, left_input, right_input, tmp_path):
     if left_input == "hadoop":
         assert config["pairs"]["orders"]["left"]["schema"] == "risk"
         assert config["pairs"]["orders"]["left"]["dsn"] == "hive"
-    if right_input == "csv":
+    if run_mode == "left-only":
+        assert settings["right_input"] == "none"
+        assert config["pairs"]["orders"]["right"]["source"] == "databricks"
+    elif right_input == "csv":
         assert config["pairs"]["orders"]["right"]["source"] == "csv"
         assert config["pairs"]["orders"]["right_pre_sampled"] is True
+
+
+@pytest.mark.parametrize(
+    ("defaults", "environment", "expected"),
+    [
+        ({}, "environment-owner", "environment-owner"),
+        ({"owner": "saved-owner"}, "environment-owner", "environment-owner"),
+        ({"owner": "saved-owner"}, None, "saved-owner"),
+    ],
+)
+def test_prompt_owner_default(monkeypatch, defaults, environment, expected):
+    seen = {}
+
+    def stop(label, default=None, **_options):
+        seen[label] = default
+        raise RuntimeError("stop after owner")
+
+    if environment is None:
+        monkeypatch.delenv("USERNAME", raising=False)
+    else:
+        monkeypatch.setenv("USERNAME", environment)
+    monkeypatch.setattr(cli, "ask", stop)
+    with pytest.raises(RuntimeError, match="stop after owner"):
+        cli.prompts(defaults)
+    assert seen == {"Run owner": expected}
 
 
 def test_local(monkeypatch, tmp_path):
@@ -389,7 +450,7 @@ def test_local(monkeypatch, tmp_path):
         def finish(self, _store, **values):
             events.append(f"finish:{values['state']}")
 
-    def left(*_args):
+    def left(*_args, **_kwargs):
         _args[-1]()
         return {"row": "ready", "units": 2}
 
@@ -420,7 +481,87 @@ def test_local(monkeypatch, tmp_path):
         settings, config, action="new", workspace_client=client, catalog=Catalog()
     )
     assert result["state"] == "passed" and result["left"]["units"] == 2
+    assert (tmp_path / "r1").is_dir()
     assert events == ["running", "start", "row", "finish:passed", "passed"]
+
+
+def test_left_only_does_not_start_or_run_right(monkeypatch, tmp_path):
+    store = MemoryStore()
+    events = []
+
+    class Root:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def child(self, _run_id):
+            return store
+
+    class Sampler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self, **_kwargs):
+            events.append("start")
+            return self
+
+        def stop(self, state, **_kwargs):
+            events.append(state)
+
+    class Catalog:
+        progress = staticmethod(lambda _row: None)
+
+        def status(self, **values):
+            events.append(values["state"])
+
+        def finish(self, _store, **values):
+            events.append(f"finish:{values['state']}")
+
+    def left(*_args, **kwargs):
+        events.append(f"left-only:{kwargs['left_only']}")
+        return {"row": "ready", "units": 3}
+
+    def right_called(*_args, **_kwargs):
+        pytest.fail("Right must not run in left-only mode")
+
+    monkeypatch.setattr(runner, "VolumeStore", Root)
+    monkeypatch.setattr(runner, "ProgressSampler", Sampler)
+    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args: None)
+    monkeypatch.setattr(runner, "run_left", left)
+    monkeypatch.setattr(runner, "run_right_row_check", right_called)
+    monkeypatch.setattr(runner, "run_right", right_called)
+    settings = {
+        "run_id": "left-1",
+        "run_mode": "left-only",
+        "profile": "corp",
+        "volume_root": "/Volumes/c/s/v/runs",
+        "work_dir": str(tmp_path),
+        "timezone": "America/New_York",
+        "owner": "me",
+        "pair_table": "c.s.pairs",
+        "status_table": "c.s.status",
+        "error_table": "c.s.errors",
+        "right_job_id": "42",
+    }
+    jobs = SimpleNamespace(run_now=right_called, cancel_run=right_called)
+    client = SimpleNamespace(files=object(), jobs=jobs)
+    config = {"pairs": {"orders": {"right": {"source": "databricks"}}}}
+
+    result = runner.launch(
+        settings, config, action="new", workspace_client=client, catalog=Catalog()
+    )
+
+    assert result["mode"] == "left-only"
+    assert result["state"] == "left_complete"
+    assert result["right"] == {"state": "not_run"}
+    assert result["volume_run_root"] == "memory://run"
+    assert store.get_json("_status/run.json")["state"] == "left_complete"
+    assert events == [
+        "running",
+        "start",
+        "left-only:True",
+        "finish:left_complete",
+        "left_complete",
+    ]
 
 
 def test_csvrun(tmp_path):
@@ -460,3 +601,69 @@ def test_csvrun(tmp_path):
         "results": 2,
         "new_results": 2,
     }
+
+
+def test_left_only_csvrun_uploads_left_artifacts(tmp_path):
+    left_path = tmp_path / "left.csv"
+    left_path.write_text("ID,VALUE\n1,文字\n2,✓\n", encoding="utf-8")
+    pair = {
+        "version": 2,
+        "partition_mode": "all",
+        "left": {"source": "csv", "path": str(left_path)},
+        "right": {"source": "databricks", "table": "orders"},
+        "sample": False,
+        "checks": ["row_count", "hash_sum", "n_unique"],
+        "statistics": ["hash_sum", "n_unique"],
+        "col_map": {"ID": "id", "VALUE": "value"},
+    }
+    config = {"version": 2, "timezone": "America/New_York", "pairs": {"orders": pair}}
+    store = LocalStore(tmp_path / "run")
+
+    left = runner.run_left(
+        config,
+        store,
+        "left-1",
+        "orders",
+        tmp_path / "work",
+        left_only=True,
+    )
+
+    units = store.list_json("pairs/orders/units/")
+    assert left == {"row": "ready", "units": 2}
+    assert store.get_json("pairs/orders/row_check/left.json")["counts"] == {"all": 2}
+    assert store.get_json("pairs/orders/plan.json")["expected_units"] == 2
+    assert len(units) == 2
+    assert all("left_statistics" in value for _key, value in units)
+    assert store.exists("_status/col_check.closed.json")
+    assert not store.list_keys("pairs/orders/col_check/results/")
+
+
+def test_left_only_rejects_snapshot_pair(tmp_path):
+    config = {
+        "version": 2,
+        "timezone": "America/New_York",
+        "pairs": {
+            "orders": {
+                "snapshot": True,
+                "left": {"source": "csv", "path": str(tmp_path / "left.csv")},
+                "right": {
+                    "source": "databricks",
+                    "table": "orders",
+                    "date_col": "event_date",
+                    "date_type": "date",
+                },
+                "checks": ["row_count", "hash_sum"],
+                "col_map": {"VALUE": "value"},
+            }
+        },
+    }
+
+    with pytest.raises(ValueError, match="snapshot pairs"):
+        runner.run_left(
+            config,
+            MemoryStore(),
+            "r1",
+            "orders",
+            tmp_path / "work",
+            left_only=True,
+        )

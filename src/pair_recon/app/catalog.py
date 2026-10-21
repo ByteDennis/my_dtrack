@@ -137,7 +137,11 @@ class Catalog:
         now = (
             datetime.now(ZoneInfo(timezone)).replace(tzinfo=None).isoformat(timespec="microseconds")
         )
-        ended = now if state in {"passed", "different", "failed", "cancelled"} else None
+        ended = (
+            now
+            if state in {"passed", "different", "left_complete", "failed", "cancelled"}
+            else None
+        )
         values = {
             "run_id": run_id,
             "pair": pair,
