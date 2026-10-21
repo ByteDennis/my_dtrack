@@ -1,10 +1,8 @@
-import keyword
 from pathlib import Path, PurePosixPath
 
 from .workspace import resolve_workspace_path
 
 RIGHT_PACKAGE = "pair_recon_right"
-RIGHT_PACKAGE_ENV = "DBX_RIGHT_PACKAGE"
 WORKSPACE_DIR_ENV = "DBX_WORKSPACE_PDIR"
 
 
@@ -15,19 +13,17 @@ def right_source() -> Path:
     return Path(pair_recon_right.__file__).resolve().parent
 
 
-# >>> validate the remote right package folder name <<< #
-def right_package(name: str | None = None) -> str:
-    value = str(name or RIGHT_PACKAGE).strip()
-    if not value.isidentifier() or keyword.iskeyword(value):
-        raise ValueError(f"{RIGHT_PACKAGE_ENV} must be a Python package name: {value!r}")
-    return value
-
-
 # >>> remote workspace folder holding the right package <<< #
-def right_target(workspace, parent: str | None, name: str | None = None) -> str:
+def right_target(workspace, parent: str | None) -> str:
     if not str(parent or "").strip():
         raise ValueError(f"{WORKSPACE_DIR_ENV} is required")
-    return str(resolve_workspace_path(workspace, str(parent)) / right_package(name))
+    return str(resolve_workspace_path(workspace, str(parent)) / RIGHT_PACKAGE)
+
+
+# >>> job notebook sits beside the importable right package <<< #
+def right_notebook(target: str) -> str:
+    root = PurePosixPath(target)
+    return str(root.parent / f"{root.name}_job")
 
 
 # >>> mirror a local folder to a workspace folder <<< #
@@ -42,15 +38,15 @@ def upload(workspace, source: Path, target: str):
         if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
             continue
         remote = root.joinpath(*path.relative_to(source).parts)
-        workspace.workspace.mkdirs(str(remote.parent))
         options = {"format": ImportFormat.AUTO, "overwrite": True}
         if path.name == "notebook.py":
-            remote = remote.with_suffix("")
+            remote = PurePosixPath(right_notebook(str(root)))
             options = {
                 "format": ImportFormat.SOURCE,
                 "language": Language.PYTHON,
                 "overwrite": True,
             }
+        workspace.workspace.mkdirs(str(remote.parent))
         workspace.workspace.upload(str(remote), path.read_bytes(), **options)
         uploaded.append(str(remote))
         expected.add(str(remote))
@@ -108,11 +104,17 @@ def repoint_job(workspace, job_id: int, notebook: str) -> bool:
 
 
 # >>> sync local pair_recon_right to the workspace and the right job <<< #
-def sync_right(workspace, parent: str | None, name: str | None = None, job_id=None) -> dict:
-    target = right_target(workspace, parent, name)
+def sync_right(workspace, parent: str | None, job_id=None) -> dict:
+    target = right_target(workspace, parent)
     uploaded, deleted = upload(workspace, right_source(), target)
-    result = {"target": target, "uploaded": len(uploaded), "deleted": deleted}
+    notebook = right_notebook(target)
+    result = {
+        "target": target,
+        "notebook": notebook,
+        "uploaded": len(uploaded),
+        "deleted": deleted,
+    }
     if job_id is not None:
         result["job_id"] = int(job_id)
-        result["job_updated"] = repoint_job(workspace, int(job_id), target + "/notebook")
+        result["job_updated"] = repoint_job(workspace, int(job_id), notebook)
     return result

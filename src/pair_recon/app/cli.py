@@ -13,7 +13,7 @@ from pair_recon.core.metadata.workbook import (
     upsert_pair_configuration,
 )
 from pair_recon.mail import send_outlook
-from pair_recon_dbx.deploy import RIGHT_PACKAGE, RIGHT_PACKAGE_ENV, WORKSPACE_DIR_ENV, sync_right
+from pair_recon_dbx.deploy import WORKSPACE_DIR_ENV, sync_right
 from pair_recon_left.common.model.attribute_checks import attribute_check_names
 from pair_recon_left.common.model.protocol import local_timezone_name
 from pair_recon_left.common.runtime.run_logging import configure_console_logging, get_logger
@@ -358,7 +358,6 @@ def sync_right_package(settings: dict, client) -> dict:
     return sync_right(
         client,
         env_value(WORKSPACE_DIR_ENV),
-        env_value(RIGHT_PACKAGE_ENV, default=RIGHT_PACKAGE),
         resolve_job_id(client, job) if job else None,
     )
 

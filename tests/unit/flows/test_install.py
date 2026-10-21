@@ -63,12 +63,17 @@ def test_upload_removes_remote_files_missing_locally(tmp_path):
 
     uploaded, deleted = install.upload(NS(workspace=files), source, root)
 
-    assert uploaded == [f"{root}/keep.py", f"{root}/new.py", f"{root}/notebook"]
-    assert set(deleted) == {f"{root}/old.py", f"{root}/old", f"{root}/old/child.py"}
+    assert uploaded == [f"{root}/keep.py", f"{root}/new.py", f"{root}_job"]
+    assert set(deleted) == {
+        f"{root}/notebook",
+        f"{root}/old.py",
+        f"{root}/old",
+        f"{root}/old/child.py",
+    }
     assert set(files.objects) == {
         f"{root}/keep.py",
         f"{root}/new.py",
-        f"{root}/notebook",
+        f"{root}_job",
     }
 
 
@@ -141,6 +146,9 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     right_notebook = (ROOT / "src/pair_recon_right/notebook.py").read_text(encoding="utf-8")
     assert right_notebook.count("**publish_values") == 2
     assert "publish(spark, store, **values" not in right_notebook
+    assert "from pair_recon_right.catalog import publish" in right_notebook
+    assert "importlib" not in right_notebook
+    assert "sys.path" not in right_notebook
 
     schema = (ROOT / "setup" / "schema.sql").read_text(encoding="utf-8")
     pair_sql_schema = schema.split("pair_recon_pair_sql", 1)[1].split(");", 1)[0]
@@ -159,7 +167,6 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
     for name in (
         "DBX_PROFILE",
         "DBX_WORKSPACE_PDIR",
-        "DBX_RIGHT_PACKAGE",
         "DBX_CLUSTER_ID",
         "DBX_WAREHOUSE_ID",
         "DBX_PAIR_TABLE",
@@ -167,8 +174,7 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
     ):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".pair_recon.env").write_text(
-        "DBX_PROFILE=team\nDBX_WORKSPACE_PDIR=deploy\nDBX_RIGHT_PACKAGE=pair_recon\n"
-        "DBX_CLUSTER_ID=c9\n"
+        "DBX_PROFILE=team\nDBX_WORKSPACE_PDIR=deploy\nDBX_CLUSTER_ID=c9\n"
         "DBX_WAREHOUSE_ID=w9\nDBX_PAIR_TABLE=main.recon.pair_recon_pair_meta\n"
         "DBX_PAIR_WORKBOOK=config/pairs.xlsx\n",
         encoding="utf-8",
@@ -183,8 +189,8 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         install,
         "right_target",
-        lambda actual, path, name: (
-            calls.update({"resolve": (actual, path, name)}) or f"/Users/me/{path}/{name}"
+        lambda actual, path: (
+            calls.update({"resolve": (actual, path)}) or f"/Users/me/{path}/pair_recon_right"
         ),
     )
     monkeypatch.setattr(install, "read_pair_workbook", lambda _path: [])
@@ -203,9 +209,9 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
     assert install.main([]) == 0
 
     assert calls["profile"] == "team"
-    assert calls["resolve"] == (client, "deploy", "pair_recon")
+    assert calls["resolve"] == (client, "deploy")
     assert calls["job"][1]["tasks"][0]["notebook_task"]["notebook_path"] == (
-        "/Users/me/deploy/pair_recon/notebook"
+        "/Users/me/deploy/pair_recon_right_job"
     )
     assert calls["job"][1]["tasks"][0]["existing_cluster_id"] == "c9"
     assert calls["refresh"][1:3] == ("w9", "main.recon.pair_recon_pair_meta")

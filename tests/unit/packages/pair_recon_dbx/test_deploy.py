@@ -23,40 +23,34 @@ def job_client(path):
     ), calls
 
 
-@pytest.mark.parametrize("name", ["pair-recon", "1right", "class", ""])
-def test_right_package_rejects_invalid_names(name):
-    if name == "":
-        assert deploy.right_package(name) == "pair_recon_right"
-        return
-    with pytest.raises(ValueError, match="DBX_RIGHT_PACKAGE"):
-        deploy.right_package(name)
-
-
-def test_right_target_requires_parent_and_uses_name(monkeypatch):
+def test_right_target_requires_parent_and_uses_fixed_package(monkeypatch):
     monkeypatch.setattr(
         deploy, "resolve_workspace_path", lambda _ws, path: PurePosixPath("/Users/me") / path
     )
-    assert deploy.right_target(object(), "apps", "pair_recon") == "/Users/me/apps/pair_recon"
+    assert deploy.right_target(object(), "apps") == "/Users/me/apps/pair_recon_right"
+    assert deploy.right_notebook("/Users/me/apps/pair_recon_right") == (
+        "/Users/me/apps/pair_recon_right_job"
+    )
     with pytest.raises(ValueError, match="DBX_WORKSPACE_PDIR"):
-        deploy.right_target(object(), "", "pair_recon")
+        deploy.right_target(object(), "")
 
 
 def test_repoint_job_updates_only_when_path_differs():
     client, calls = job_client("/Users/me/apps/pair_recon_right/notebook")
-    assert deploy.repoint_job(client, 7, "/Users/me/apps/pair_recon/notebook")
+    assert deploy.repoint_job(client, 7, "/Users/me/apps/pair_recon_right_job")
     body = calls[0][1]["body"]
     assert body["job_id"] == 7
     assert body["new_settings"]["tasks"][0]["notebook_task"]["notebook_path"] == (
-        "/Users/me/apps/pair_recon/notebook"
+        "/Users/me/apps/pair_recon_right_job"
     )
-    client, calls = job_client("/Users/me/apps/pair_recon/notebook")
-    assert not deploy.repoint_job(client, 7, "/Users/me/apps/pair_recon/notebook")
+    client, calls = job_client("/Users/me/apps/pair_recon_right_job")
+    assert not deploy.repoint_job(client, 7, "/Users/me/apps/pair_recon_right_job")
     assert calls == []
 
 
 def test_sync_right_uploads_local_package_and_repoints(monkeypatch):
     seen = {}
-    monkeypatch.setattr(deploy, "right_target", lambda _ws, parent, name: f"/W/{parent}/{name}")
+    monkeypatch.setattr(deploy, "right_target", lambda _ws, parent: f"/W/{parent}/pair_recon_right")
     monkeypatch.setattr(
         deploy,
         "upload",
@@ -65,8 +59,9 @@ def test_sync_right_uploads_local_package_and_repoints(monkeypatch):
     monkeypatch.setattr(
         deploy, "repoint_job", lambda _ws, job_id, notebook: seen.update(job=(job_id, notebook))
     )
-    result = deploy.sync_right(object(), "apps", "pair_recon", "7")
+    result = deploy.sync_right(object(), "apps", "7")
     assert seen["source"].name == "pair_recon_right"
-    assert seen["target"] == "/W/apps/pair_recon"
-    assert seen["job"] == (7, "/W/apps/pair_recon/notebook")
+    assert seen["target"] == "/W/apps/pair_recon_right"
+    assert seen["job"] == (7, "/W/apps/pair_recon_right_job")
+    assert result["notebook"] == "/W/apps/pair_recon_right_job"
     assert result["uploaded"] == 1 and result["deleted"] == ["b"]

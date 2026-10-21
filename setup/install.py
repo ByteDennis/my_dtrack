@@ -8,9 +8,8 @@ from pair_recon.app.config import env_value, load_environment
 from pair_recon.app.runner import StatementSql
 from pair_recon.core.metadata.workbook import read_pair_workbook, upsert_pair_configuration
 from pair_recon_dbx.deploy import (
-    RIGHT_PACKAGE,
-    RIGHT_PACKAGE_ENV,
     WORKSPACE_DIR_ENV,
+    right_notebook,
     right_source,
     right_target,
     upload,
@@ -60,9 +59,6 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", default=env_value("DBX_PROFILE", default="corp"))
     parser.add_argument("--workspace-dir", default=env_value(WORKSPACE_DIR_ENV))
-    parser.add_argument(
-        "--right-package", default=env_value(RIGHT_PACKAGE_ENV, default=RIGHT_PACKAGE)
-    )
     parser.add_argument("--cluster-id", default=env_value("DBX_CLUSTER_ID"))
     parser.add_argument("--job-name", default="pair_recon_right")
     parser.add_argument(
@@ -90,9 +86,9 @@ def main(argv=None):
             parser.error("--pair-table is required unless --skip-config is used")
         read_pair_workbook(args.config_workbook)
     client = WorkspaceClient(profile=args.profile)
-    target = right_target(client, args.workspace_dir, args.right_package)
+    target = right_target(client, args.workspace_dir)
     uploaded, deleted = upload(client, right_source(), target)
-    job_id = upsert(client, job_spec(args.job_name, target + "/notebook", args.cluster_id))
+    job_id = upsert(client, job_spec(args.job_name, right_notebook(target), args.cluster_id))
     configuration = (
         None
         if args.skip_config
