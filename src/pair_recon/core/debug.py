@@ -1,8 +1,13 @@
+import sys
 from importlib import import_module
 
 from pair_recon_left.common.runtime.run_logging import get_logger
 
 log = get_logger("debug")
+
+
+def debugging(mode=None) -> bool:
+    return mode is not None or sys.gettrace() is not None
 
 
 def run_debugger(mode, callback):
@@ -15,5 +20,11 @@ def run_debugger(mode, callback):
         debugger.wait_for_client()
         debugger.breakpoint()
         return callback()
+    if mode != "console":
+        raise ValueError(f"unknown debug mode: {mode}")
     debugger = import_module("ipdb")
-    return debugger.runcall(callback)
+    try:
+        return callback()
+    except Exception:
+        debugger.post_mortem(sys.exc_info()[2])
+        raise

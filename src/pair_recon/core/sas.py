@@ -191,10 +191,12 @@ def main(argv=None):
     export.add_argument("--bundle", type=Path)
     export.add_argument("--rate", type=float, default=0.01)
     export.add_argument("--side", choices=("left", "right", "both"), default="left")
-    export.add_argument("--debug", nargs="?", const="ipdb", choices=("ipdb", "attach"))
+    export.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))
     args = parser.parse_args(normalized)
     return run_debugger(args.debug, lambda: execute(args))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    if exit_code:
+        raise SystemExit(exit_code)

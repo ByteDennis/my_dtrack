@@ -46,6 +46,7 @@ def test_delegate(calls, capsys, tmp_path):
     assert name == "plan"
     assert args == (tmp_path, "both", tmp_path / "pair_recon.ignore")
     assert cli.parser().parse_args(["--debug", "attach", "plan"]).debug == "attach"
+    assert cli.parser().parse_args(["--debug", "console", "plan"]).debug == "console"
     capsys.readouterr()
 
 
@@ -55,6 +56,17 @@ def test_errors(monkeypatch, capsys):
     )
     assert cli.main(["plan", "--root", str(Path.cwd())]) == 1
     assert json.loads(capsys.readouterr().out) == {"error": "ValueError: bad"}
+
+
+def test_debug_reraises_errors(monkeypatch):
+    def fail(*_args):
+        raise ValueError("bad")
+
+    monkeypatch.setattr(cli.snapshot, "plan", fail)
+    monkeypatch.setattr(cli, "run_debugger", lambda _mode, callback: callback())
+
+    with pytest.raises(ValueError, match="bad"):
+        cli.main(["--debug", "console", "plan", "--root", str(Path.cwd())])
 
 
 def test_defaults(calls, monkeypatch, tmp_path, capsys):

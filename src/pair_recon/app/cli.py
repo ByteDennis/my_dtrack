@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from pair_recon.core.debug import run_debugger
+from pair_recon.core.debug import debugging, run_debugger
 from pair_recon.core.metadata.workbook import read_pair_workbook, upsert_pair_configuration
 from pair_recon.mail import send_outlook
 from pair_recon_left.common.model.attribute_checks import attribute_check_names
@@ -208,12 +208,14 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         return run_defaults.get(name, fallback)
 
     run_mode = choose("Run mode", ["full", "left-only"], run_default("run_mode", "full"))
-    left_input = choose(
-        "Left input", ["catalog", "hadoop", "csv"], defaults.get("left_input", "catalog")
-    )
+    saved_left_input = str(defaults.get("left_input") or "database")
+    if saved_left_input in {"catalog", "hadoop"}:
+        saved_left_input = "database"
+    if saved_left_input not in {"database", "csv"}:
+        saved_left_input = "database"
+    left_input = choose("Left input", ["database", "csv"], saved_left_input)
     left_csv = str(defaults.get("left_csv") or "")
     right_csv = str(defaults.get("right_csv") or "")
-    hadoop_schema = str(defaults.get("hadoop_schema") or "")
     provenances = []
     if left_input == "csv":
         left_csv = ask("Left CSV path", left_csv)
@@ -230,31 +232,15 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
                 },
             },
         }
-    elif left_input == "hadoop":
-        hadoop_schema = ask("Hadoop schema", hadoop_schema or metadata["left"].get("schema"))
-        inherited = metadata["left"]
-        if not inherited.get("table"):
-            raise ValueError("Hadoop override requires a table in pair metadata")
-        metadata = {
-            **metadata,
-            "left": {
-                "source": "hadoop",
-                "schema": hadoop_schema,
-                "table": inherited["table"],
-                **{
-                    name: inherited[name]
-                    for name in ("date_col", "date_type", "where", "dsn", "autocommit")
-                    if name in inherited
-                },
-            },
-        }
-    saved_right_input = str(defaults.get("right_input") or "catalog")
-    if saved_right_input not in {"catalog", "csv"}:
-        saved_right_input = "catalog"
+    saved_right_input = str(defaults.get("right_input") or "database")
+    if saved_right_input == "catalog":
+        saved_right_input = "database"
+    if saved_right_input not in {"database", "csv"}:
+        saved_right_input = "database"
     right_input = "none"
     right_job_id = str(defaults.get("right_job_id") or "")
     if run_mode == "full":
-        right_input = choose("Right input", ["catalog", "csv"], saved_right_input)
+        right_input = choose("Right input", ["database", "csv"], saved_right_input)
         if right_input == "csv":
             if not right_csv and left_csv:
                 right_csv = str(Path(left_csv).with_name("right_sample.csv"))
@@ -276,7 +262,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
                 },
             }
         else:
-            right_job_id = ask("Right job id", right_job_id)
+            right_job_id = ask("Right job id or name", right_job_id)
     provenances = [value for value in provenances if value]
     provenance = provenances[0] if provenances else {}
     for value in provenances[1:]:
@@ -344,7 +330,6 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "right_input": right_input,
         "left_csv": left_csv,
         "right_csv": right_csv,
-        "hadoop_schema": hadoop_schema,
         "run_id": run_id,
         "last_run_id": run_id,
         "timezone": timezone,
@@ -365,7 +350,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
     return settings, config, action, client, catalog
 
 
-def execute(args) -> int:
+def execute(args, *, raise_errors: bool = False) -> int:
     load_environment()
     settings = None
     try:
@@ -432,6 +417,8 @@ def execute(args) -> int:
                 )
             except Exception:
                 log.exception("Outlook notification failed")
+        if raise_errors:
+            raise
         return 1
 
 
@@ -440,10 +427,14 @@ def main_program(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="pair_recon")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--log-level", default="INFO")
-    parser.add_argument("--debug", nargs="?", const="ipdb", choices=("ipdb", "attach"))
+    parser.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))
     args = parser.parse_args(values)
     configure_console_logging(args.log_level)
-    return run_debugger(args.debug, lambda: execute(args))
+    raise_errors = debugging(args.debug)
+    return run_debugger(
+        args.debug,
+        lambda: execute(args, raise_errors=raise_errors),
+    )
 
 
 def main(argv=None) -> int:

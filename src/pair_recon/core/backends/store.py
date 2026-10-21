@@ -3,6 +3,16 @@ import json
 import posixpath
 from typing import Any
 
+from databricks.sdk.errors import NotFound
+
+
+def _is_not_found(exc: Exception) -> bool:
+    return (
+        isinstance(exc, (FileNotFoundError, NotFound))
+        or getattr(exc, "status_code", None) == 404
+        or getattr(exc, "error_code", None) == "RESOURCE_DOES_NOT_EXIST"
+    )
+
 
 class ApiVolumeStore:
     def __init__(self, root: str, *, files=None):
@@ -46,7 +56,7 @@ class ApiVolumeStore:
             self.files.get_metadata(self._path(relative))
             return True
         except Exception as exc:
-            if isinstance(exc, FileNotFoundError) or getattr(exc, "status_code", None) == 404:
+            if _is_not_found(exc):
                 return False
             raise
 
@@ -59,7 +69,7 @@ class ApiVolumeStore:
             try:
                 rows = list(self.files.list_directory_contents(current))
             except Exception as exc:
-                if isinstance(exc, FileNotFoundError) or getattr(exc, "status_code", None) == 404:
+                if _is_not_found(exc):
                     continue
                 raise
             for row in rows:
@@ -77,7 +87,7 @@ class ApiVolumeStore:
                 posixpath.basename(row.path.rstrip("/")) for row in rows if row.is_directory
             )
         except Exception as exc:
-            if isinstance(exc, FileNotFoundError) or getattr(exc, "status_code", None) == 404:
+            if _is_not_found(exc):
                 return []
             raise
 

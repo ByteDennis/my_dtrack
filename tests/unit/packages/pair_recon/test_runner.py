@@ -7,7 +7,13 @@ import pytest
 from support import MemoryStore
 
 from pair_recon.app import cli, runner
-from pair_recon.app.runner import make_run_id, pair_config, retry_failed, write_request_snapshot
+from pair_recon.app.runner import (
+    make_run_id,
+    pair_config,
+    resolve_job_id,
+    retry_failed,
+    write_request_snapshot,
+)
 from pair_recon.core import debug, sas
 from pair_recon.core.progress import ProgressSampler, progress_snapshot
 from pair_recon.core.sas import export_bundle
@@ -32,6 +38,38 @@ from pair_recon_right.engine.job import run as run_right
 def test_runid():
     value = make_run_id("订单 pair", "测试 owner", "America/New_York")
     assert "/" not in value and "订单-pair-测试-owner" in value
+
+
+def test_resolve_job_id_accepts_id_or_unique_name():
+    jobs = SimpleNamespace(
+        list=lambda **_options: [
+            SimpleNamespace(job_id=42, settings=SimpleNamespace(name="test-run"))
+        ]
+    )
+    client = SimpleNamespace(jobs=jobs)
+
+    assert resolve_job_id(client, "42") == 42
+    assert resolve_job_id(client, "test-run") == 42
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([], "not found"),
+        (
+            [
+                SimpleNamespace(job_id=41, settings=SimpleNamespace(name="test-run")),
+                SimpleNamespace(job_id=42, settings=SimpleNamespace(name="test-run")),
+            ],
+            "not unique",
+        ),
+    ],
+)
+def test_resolve_job_id_rejects_missing_or_duplicate_name(rows, message):
+    client = SimpleNamespace(jobs=SimpleNamespace(list=lambda **_options: rows))
+
+    with pytest.raises(ValueError, match=message):
+        resolve_job_id(client, "test-run")
 
 
 def test_timezone_default(monkeypatch):
@@ -281,21 +319,70 @@ def test_debug(monkeypatch):
         wait_for_client=lambda: events.append("wait"),
         breakpoint=lambda: events.append("break"),
     )
-    ipdb = SimpleNamespace(runcall=lambda callback: events.append("ipdb") or callback())
+    ipdb = SimpleNamespace(post_mortem=lambda traceback: events.append(("ipdb", traceback)))
     monkeypatch.setattr(debug, "import_module", lambda name: attach if name == "debugpy" else ipdb)
     assert debug.run_debugger(None, lambda: "plain") == "plain"
     assert debug.run_debugger("attach", lambda: "attached") == "attached"
-    assert debug.run_debugger("ipdb", lambda: "stepped") == "stepped"
-    assert events == [("listen", ("0.0.0.0", 5678)), "wait", "break", "ipdb"]
+    assert debug.run_debugger("console", lambda: "stepped") == "stepped"
+    assert events == [("listen", ("0.0.0.0", 5678)), "wait", "break"]
+
+    def fail():
+        raise RuntimeError("stop here")
+
+    with pytest.raises(RuntimeError, match="stop here"):
+        debug.run_debugger("console", fail)
+    assert events[-1][0] == "ipdb"
+    traceback = events[-1][1]
+    while traceback.tb_next:
+        traceback = traceback.tb_next
+    assert traceback.tb_frame.f_code.co_name == "fail"
 
 
 @pytest.mark.parametrize(
-    ("module", "argv"), [(cli, ["--debug", "attach"]), (sas, ["export", "--debug", "attach"])]
+    ("module", "argv", "expected"),
+    [
+        (cli, ["--debug", "console"], "console"),
+        (cli, ["--debug", "attach"], "attach"),
+        (sas, ["export", "--debug", "console"], "console"),
+        (sas, ["export", "--debug", "attach"], "attach"),
+    ],
 )
-def test_modes(monkeypatch, module, argv):
+def test_modes(monkeypatch, module, argv, expected):
     seen = []
     monkeypatch.setattr(module, "run_debugger", lambda mode, _callback: seen.append(mode) or 7)
-    assert module.main(argv) == 7 and seen == ["attach"]
+    assert module.main(argv) == 7 and seen == [expected]
+
+
+def test_run_debug_mode_reraises_original_error(monkeypatch):
+    def fail(_defaults):
+        raise RuntimeError("original failure")
+
+    monkeypatch.setattr(cli, "load_environment", lambda: None)
+    monkeypatch.setattr(cli, "load_defaults", lambda _path: {})
+    monkeypatch.setattr(cli, "prompts", fail)
+    args = SimpleNamespace(config=None)
+
+    assert cli.execute(args) == 1
+    with pytest.raises(RuntimeError, match="original failure"):
+        cli.execute(args, raise_errors=True)
+
+
+def test_main_program_enables_error_reraising_in_debug_mode(monkeypatch):
+    seen = []
+
+    def execute(_args, *, raise_errors=False):
+        seen.append(raise_errors)
+        return 0
+
+    monkeypatch.setattr(cli, "execute", execute)
+    monkeypatch.setattr(cli, "run_debugger", lambda _mode, callback: callback())
+    monkeypatch.setattr(debug.sys, "gettrace", lambda: None)
+
+    assert cli.main_program([]) == 0
+    assert cli.main_program(["--debug", "attach"]) == 0
+    monkeypatch.setattr(debug.sys, "gettrace", lambda: object())
+    assert cli.main_program([]) == 0
+    assert seen == [False, True, True]
 
 
 def test_progress():
@@ -388,12 +475,13 @@ def test_sas_default_bundle_uses_output_root(monkeypatch, tmp_path, capsys):
 @pytest.mark.parametrize(
     ("run_mode", "left_input", "right_input"),
     [
-        ("full", "catalog", "catalog"),
-        ("full", "hadoop", "catalog"),
-        ("full", "csv", "catalog"),
-        ("full", "catalog", "csv"),
+        ("full", "database", "database"),
+        ("full", "csv", "database"),
+        ("full", "database", "csv"),
         ("full", "csv", "csv"),
-        ("left-only", "catalog", "catalog"),
+        ("left-only", "database", "database"),
+        ("full", "catalog", "catalog"),
+        ("full", "hadoop", "database"),
     ],
 )
 def test_prompt(monkeypatch, run_mode, left_input, right_input, tmp_path):
@@ -429,7 +517,6 @@ def test_prompt(monkeypatch, run_mode, left_input, right_input, tmp_path):
         "right_input": right_input,
         "left_csv": str(tmp_path / "left_sample.csv"),
         "right_csv": str(tmp_path / "right_sample.csv"),
-        "hadoop_schema": "risk",
         "timezone": "America/New_York",
         "partition_mode": "all",
         "checks": "row_count,hash_sum",
@@ -449,23 +536,25 @@ def test_prompt(monkeypatch, run_mode, left_input, right_input, tmp_path):
     settings, config, action, _client, _catalog = cli.prompts(
         defaults, workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object())
     )
+    normalized_left_input = "database" if left_input in {"catalog", "hadoop"} else left_input
+    normalized_right_input = "database" if right_input == "catalog" else right_input
     assert settings["run_id"] == "r-new" and action == "new"
     assert settings["run_mode"] == run_mode
+    assert settings["left_input"] == normalized_left_input
     assert settings["work_dir"] == str(tmp_path / "artifacts")
     assert (tmp_path / "artifacts").is_dir()
     assert config["pairs"]["orders"]["statistics"] == ["hash_sum"]
-    expected = {"catalog": "oracle", "hadoop": "hadoop", "csv": "csv"}[left_input]
+    expected = {"database": "oracle", "csv": "csv"}[normalized_left_input]
     assert config["pairs"]["orders"]["left"]["source"] == expected
-    if left_input == "csv":
+    if normalized_left_input == "csv":
         assert config["pairs"]["orders"]["sample"] == 0.1
         assert config["pairs"]["orders"]["pre_sampled"] is True
-    if left_input == "hadoop":
-        assert config["pairs"]["orders"]["left"]["schema"] == "risk"
-        assert config["pairs"]["orders"]["left"]["dsn"] == "hive"
     if run_mode == "left-only":
         assert settings["right_input"] == "none"
         assert config["pairs"]["orders"]["right"]["source"] == "databricks"
-    elif right_input == "csv":
+    else:
+        assert settings["right_input"] == normalized_right_input
+    if normalized_right_input == "csv":
         assert config["pairs"]["orders"]["right"]["source"] == "csv"
         assert config["pairs"]["orders"]["right_pre_sampled"] is True
 
@@ -728,6 +817,52 @@ def test_left_only_does_not_start_or_run_right(monkeypatch, tmp_path):
         "finish:left_complete",
         "left_complete",
     ]
+
+
+def test_launch_writes_early_failure_to_left_log(monkeypatch, tmp_path):
+    class Root:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def child(self, _run_id):
+            return MemoryStore()
+
+    def missing_job(job_id, **_kwargs):
+        assert job_id == 42
+        raise RuntimeError("job 42 was not found")
+
+    monkeypatch.setattr(runner, "VolumeStore", Root)
+    settings = {
+        "run_id": "failed-1",
+        "profile": "corp",
+        "volume_root": "/Volumes/c/s/v/runs",
+        "work_dir": str(tmp_path),
+        "timezone": "America/New_York",
+        "owner": "me",
+        "pair_table": "c.s.pairs",
+        "status_table": "c.s.status",
+        "error_table": "c.s.errors",
+        "right_job_id": "test-run",
+    }
+    client = SimpleNamespace(
+        files=object(),
+        jobs=SimpleNamespace(
+            list=lambda **_options: [
+                SimpleNamespace(job_id=42, settings=SimpleNamespace(name="test-run"))
+            ],
+            run_now=missing_job,
+        ),
+    )
+    config = {"pairs": {"orders": {"right": {"source": "databricks"}}}}
+
+    with pytest.raises(RuntimeError, match="job 42 was not found"):
+        runner.launch(settings, config, action="new", workspace_client=client)
+
+    content = (tmp_path / "failed-1" / "left.log").read_text(encoding="utf-8")
+    assert "run started" in content
+    assert "starting Right Databricks job: reference=test-run job_id=42" in content
+    assert "run failed" in content
+    assert "RuntimeError: job 42 was not found" in content
 
 
 def test_csvrun(tmp_path):

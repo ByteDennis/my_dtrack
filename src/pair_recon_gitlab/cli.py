@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from pair_recon.app.config import load_environment
-from pair_recon.core.debug import run_debugger
+from pair_recon.core.debug import debugging, run_debugger
 
 from . import dispatch as operations
 from . import snapshot
@@ -14,7 +14,7 @@ from . import snapshot
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="pair_recon gitlab")
-    root.add_argument("--debug", nargs="?", const="ipdb", choices=("ipdb", "attach"))
+    root.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))
     commands = root.add_subparsers(dest="command", required=True)
     create = commands.add_parser("create")
     create.add_argument("project")
@@ -67,11 +67,14 @@ def execute(args) -> dict:
 def main(argv=None) -> int:
     load_environment()
     args = parser().parse_args(argv)
+    raise_errors = debugging(args.debug)
 
     def command() -> int:
         try:
             result, exit_code = execute(args), 0
         except (OSError, RuntimeError, ValueError) as exc:
+            if raise_errors:
+                raise
             result, exit_code = {"error": f"{type(exc).__name__}: {exc}"}, 1
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return exit_code

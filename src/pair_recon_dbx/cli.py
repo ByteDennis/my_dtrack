@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from pair_recon.app.config import env_value, load_environment
-from pair_recon.core.debug import run_debugger
+from pair_recon.core.debug import debugging, run_debugger
 
 from . import runtime
 from . import workspace as workspace_ops
@@ -25,7 +25,7 @@ def add_wait(parser) -> None:
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="pair_recon dbx")
-    root.add_argument("--debug", nargs="?", const="ipdb", choices=("ipdb", "attach"))
+    root.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))
     commands = root.add_subparsers(dest="command", required=True)
     login = commands.add_parser("login")
     add_profile(login)
@@ -133,12 +133,15 @@ def execute(args) -> dict:
 def main(argv=None) -> int:
     load_environment()
     args = parser().parse_args(argv)
+    raise_errors = debugging(args.debug)
 
     def command() -> int:
         try:
             result = dict(execute(args))
             exit_code = int(result.pop("exit_code", 0))
         except (ImportError, OSError, RuntimeError, ValueError) as exc:
+            if raise_errors:
+                raise
             result, exit_code = {"error": f"{type(exc).__name__}: {exc}"}, 1
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return exit_code

@@ -8,7 +8,7 @@
 2. Left pulls source counts and selected column statistics with bounded worker threads.
 3. Artifacts are written to a Unity Catalog Volume under an isolated `run_id`.
 4. Progress snapshots are appended to a Delta table while validation runs.
-5. A Databricks job validates a catalog Right side; a CSV Right side runs locally without starting that job.
+5. A Databricks job validates a database Right side; a CSV Right side runs locally without starting that job.
 6. Pair, run-status, and run-error Delta tables are updated for either path.
 7. Windows sends the result through the signed-in Outlook profile when recipients are configured.
 
@@ -92,7 +92,7 @@ just dbx sql "SELECT current_user()" --warehouse-id WAREHOUSE_ID
 just dbx runs --limit 10
 ```
 
-Set `DBX_PROFILE`, `DBX_CLUSTER_ID`, `DBX_WAREHOUSE_ID`, `DBX_WORKSPACE_DIR`, `DBX_PAIR_TABLE`, `DBX_STATUS_TABLE`, `DBX_ERROR_TABLE`, and `DBX_RUN_PATH` in `.pair_recon.env` to omit repeated setup and operator options. The table variables provide the corresponding run-prompt defaults; the progress table defaults to the status table's schema. `DBX_RUN_PATH` supplies the Volume runs path. Relative Workspace paths resolve below `/Users/<current-user>/`; absolute paths remain supported. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. Delete accepts multiple paths, `-r/--recursive`, `-f/--force`, and `--dry-run`, with `rm` as an alias. The setup installer mirrors `src/pair_recon_right`, deleting remote objects that no longer exist locally only after every upload succeeds. Use `just dbx --debug attach ...` or `just dbx --debug ipdb ...` only when troubleshooting.
+Set `DBX_PROFILE`, `DBX_CLUSTER_ID`, `DBX_WAREHOUSE_ID`, `DBX_WORKSPACE_DIR`, `DBX_PAIR_TABLE`, `DBX_STATUS_TABLE`, `DBX_ERROR_TABLE`, and `DBX_RUN_PATH` in `.pair_recon.env` to omit repeated setup and operator options. The table variables provide the corresponding run-prompt defaults; the progress table defaults to the status table's schema. `DBX_RUN_PATH` supplies the Volume runs path. Relative Workspace paths resolve below `/Users/<current-user>/`; absolute paths remain supported. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. Delete accepts multiple paths, `-r/--recursive`, `-f/--force`, and `--dry-run`, with `rm` as an alias. The setup installer mirrors `src/pair_recon_right`, deleting remote objects that no longer exist locally only after every upload succeeds. Use `just dbx --debug attach ...` or `just dbx --debug console ...` only when troubleshooting.
 
 ## GitLab tools
 
@@ -120,6 +120,6 @@ Live Oracle query/export/timing tests are opt-in and are not part of the default
 just live
 ```
 
-Every recipe defaults to normal mode. Python workflows accept `--debug ipdb` or `--debug attach`; attach waits for VS Code `debugpy` on port 5678. Lint uses `--debug` for verbose diagnostics. `just sas` creates only `left.sas` under `${PAIR_RECON_OUTPUT_DIR:-outputs}/sas`; use `just sas side=right` or `just sas side=both` when needed, or pass `bundle=...` for an explicit location. After SAS writes either sampled CSV, use the normal `run.cmd` or `just run` prompts to select CSV inputs. When Right is CSV, comparison stays local and reuses the existing multithread statistics engine; no extra recipe is needed.
+Every recipe defaults to normal mode. Python workflows accept `--debug console` or `--debug attach`; console enters ipdb post-mortem at the original exception frame, while attach waits for VS Code `debugpy` on port 5678. Lint uses `--debug` for verbose diagnostics. `just sas` creates only `left.sas` under `${PAIR_RECON_OUTPUT_DIR:-outputs}/sas`; use `just sas side=right` or `just sas side=both` when needed, or pass `bundle=...` for an explicit location. After SAS writes either sampled CSV, use the normal `run.cmd` or `just run` prompts to select CSV inputs. When Right is CSV, comparison stays local and reuses the existing multithread statistics engine; no extra recipe is needed.
 
 See [guideme.txt](guideme.txt) for the complete local, Databricks, Hadoop, CSV, SAS, progress, Outlook, and troubleshooting flow.

@@ -119,6 +119,7 @@ def test_defaults(calls, monkeypatch, tmp_path, capsys):
         ("warehouse_status", ("client:team", "w9"), {}),
     ]
     assert cli.parser().parse_args(["--debug", "attach", "runs"]).debug == "attach"
+    assert cli.parser().parse_args(["--debug", "console", "runs"]).debug == "console"
     capsys.readouterr()
 
 
@@ -126,3 +127,11 @@ def test_errors(calls, monkeypatch, capsys):
     monkeypatch.delenv("DBX_CLUSTER_ID", raising=False)
     assert cli.main(["compute"]) == 1
     assert json.loads(capsys.readouterr().out) == {"error": "ValueError: --cluster-id is required"}
+
+
+def test_debug_reraises_errors(calls, monkeypatch):
+    monkeypatch.delenv("DBX_CLUSTER_ID", raising=False)
+    monkeypatch.setattr(cli, "run_debugger", lambda _mode, callback: callback())
+
+    with pytest.raises(ValueError, match="--cluster-id is required"):
+        cli.main(["--debug", "console", "compute"])

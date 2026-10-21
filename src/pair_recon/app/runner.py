@@ -27,13 +27,14 @@ from pair_recon_left.common.model.protocol import (
     list_row_results,
     write_run_status,
 )
-from pair_recon_left.common.runtime.run_logging import configure_left_logging
+from pair_recon_left.common.runtime.run_logging import configure_left_logging, get_left_logger
 from pair_recon_right.engine.backends.targets import CsvTarget
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
 from pair_recon_right.engine.job import run as run_right
 
 _SENSITIVE_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
 _SENSITIVE_WORDS = ("password", "secret", "token", "credential")
+log = get_left_logger("runner")
 
 
 class StatementSql:
@@ -101,6 +102,29 @@ def make_run_id(pair: str, owner: str, timezone: str, now=None) -> str:
 
 def pair_config(row: dict) -> dict:
     return build_pair_config(row)
+
+
+def resolve_job_id(client, reference: object) -> int:
+    value = str(reference or "").strip()
+    if not value:
+        raise ValueError("Right job id or name is required")
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    matches = [
+        job
+        for job in client.jobs.list(name=value)
+        if str(getattr(getattr(job, "settings", None), "name", "") or "").casefold()
+        == value.casefold()
+        and getattr(job, "job_id", None) is not None
+    ]
+    if not matches:
+        raise ValueError(f"Right Databricks job not found by name: {value}")
+    if len(matches) > 1:
+        ids = ", ".join(str(job.job_id) for job in matches)
+        raise ValueError(f"Right Databricks job name is not unique: {value} ({ids})")
+    return int(matches[0].job_id)
 
 
 def _snapshot_value(value):
@@ -208,24 +232,17 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
     left_only = run_mode == "left-only"
     run_dir = Path(settings["work_dir"]) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    client = workspace_client or workspace(settings["profile"])
-    store = VolumeStore(settings["volume_root"], files=client.files).child(run_id)
-    if action == "restart":
-        store.clear()
-        if catalog:
-            catalog.clear(run_id)
-    elif action == "resume":
-        retry_failed(store)
     left_log = run_dir / "left.log"
     configure_left_logging(left_log, settings["timezone"])
-    if catalog:
-        catalog.status(
-            run_id=run_id,
-            pair=pair,
-            owner=settings["owner"],
-            state="running",
-            timezone=settings["timezone"],
-        )
+    log.info(
+        "run started: run_id=%s pair=%s mode=%s action=%s",
+        run_id,
+        pair,
+        run_mode,
+        action,
+    )
+    client = None
+    store = None
     sampler = None
     params = {
         "run_root": settings["volume_root"],
@@ -242,6 +259,29 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
     final_state = "failed"
     local_right = not left_only and config["pairs"][pair]["right"].get("source") == "csv"
     try:
+        client = workspace_client or workspace(settings["profile"])
+        log.info(
+            "Databricks target: profile=%s warehouse_id=%s volume_root=%s",
+            settings["profile"],
+            settings.get("warehouse_id"),
+            settings["volume_root"],
+        )
+        store = VolumeStore(settings["volume_root"], files=client.files).child(run_id)
+        if action == "restart":
+            store.clear()
+            if catalog:
+                catalog.clear(run_id)
+        elif action == "resume":
+            retry_failed(store)
+        if catalog:
+            log.info("updating run status: table=%s state=running", settings["status_table"])
+            catalog.status(
+                run_id=run_id,
+                pair=pair,
+                owner=settings["owner"],
+                state="running",
+                timezone=settings["timezone"],
+            )
         if catalog:
             sampler = ProgressSampler(
                 store,
@@ -253,7 +293,15 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             ).start(required=True)
         target_factory = lambda values: CsvTarget(values)
         if not left_only and not local_right:
-            remote = client.jobs.run_now(int(settings["right_job_id"]), notebook_params=params)
+            job_reference = settings["right_job_id"]
+            job_id = resolve_job_id(client, job_reference)
+            log.info(
+                "starting Right Databricks job: reference=%s job_id=%s",
+                job_reference,
+                job_id,
+            )
+            remote = client.jobs.run_now(job_id, notebook_params=params)
+        log.info("starting Left checks")
         left = run_left(
             config,
             store,
@@ -265,6 +313,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             (lambda: run_right_row_check(store, target_factory)) if local_right else None,
             left_only=left_only,
         )
+        log.info("Left checks completed: %s", left)
         if left_only:
             final_state = "left_complete"
             right = {"state": "not_run"}
@@ -318,6 +367,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         if sampler:
             sampler.stop(final_state, required=True)
             sampler = None
+        log.info("run completed: state=%s", final_state)
         return {
             "run_id": run_id,
             "pair": pair,
@@ -329,11 +379,14 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             "volume_run_root": store.root_uri,
         }
     except BaseException:
-        try:
-            if remote is not None:
+        log.exception("run failed")
+        if remote is not None and client is not None:
+            try:
                 client.jobs.cancel_run(int(remote.run_id))
-        finally:
-            if catalog:
+            except Exception:
+                log.exception("could not cancel Right Databricks run: run_id=%s", remote.run_id)
+        if catalog:
+            try:
                 catalog.status(
                     run_id=run_id,
                     pair=pair,
@@ -341,6 +394,8 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                     state="failed",
                     timezone=settings["timezone"],
                 )
+            except Exception:
+                log.exception("could not update failed run status")
         raise
     finally:
         if sampler:

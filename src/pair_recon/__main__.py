@@ -1,3 +1,5 @@
 from .app.cli import main
 
-raise SystemExit(main())
+exit_code = main()
+if exit_code:
+    raise SystemExit(exit_code)
