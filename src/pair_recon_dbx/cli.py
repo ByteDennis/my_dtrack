@@ -40,6 +40,12 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--overwrite", action="store_true")
         command.add_argument("--dry-run", action="store_true")
         add_profile(command)
+    delete = workspace_commands.add_parser("delete", aliases=("rm",))
+    delete.add_argument("source", nargs="+")
+    delete.add_argument("-r", "-R", "--recursive", action="store_true")
+    delete.add_argument("-f", "--force", action="store_true")
+    delete.add_argument("--dry-run", action="store_true")
+    add_profile(delete)
     compute = commands.add_parser("compute")
     compute.add_argument("action", nargs="?", choices=("status", "start", "stop"), default="status")
     compute.add_argument("--cluster-id", default=os.getenv("PAIR_RECON_DBX_CLUSTER_ID"))
@@ -78,6 +84,14 @@ def execute(args) -> dict:
     if args.command == "login":
         return runtime.login(workspace, open_browser=not args.no_open)
     if args.command == "workspace":
+        if args.workspace_command in {"delete", "rm"}:
+            return workspace_ops.delete(
+                workspace,
+                args.source,
+                recursive=args.recursive,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
         operation = (
             workspace_ops.upload if args.workspace_command == "upload" else workspace_ops.download
         )

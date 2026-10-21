@@ -19,15 +19,19 @@ Concurrent users may validate the same pair because all artifacts and result row
 ```bash
 uv sync
 cp .pair_recon.env.example .pair_recon.env
-./setup/setup.sh --profile corp --workspace-dir /Workspace/Users/name/pair_recon --cluster-id CLUSTER_ID
+./setup/setup.sh --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID
 ```
 
 Windows:
 
 ```bat
+uv sync --locked
 copy .pair_recon.env.example .pair_recon.env
-setup\setup.cmd --profile corp --workspace-dir /Workspace/Users/name/pair_recon --cluster-id CLUSTER_ID
+setup\setup.cmd --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID
+run.cmd
 ```
+
+Workstation execution is supported only through `uv run`. `run.cmd` and `run.sh` are thin wrappers around `uv run --project ... pair_recon`; PairRecon does not build or distribute a standalone executable or portable ZIP.
 
 Install Hadoop support with `uv sync --extra hadoop`; put its non-secret ODBC DSN name in the pair's `left.dsn` metadata so the run prompt only needs the Hadoop schema. Use [setup/schema.sql](setup/schema.sql) to create the six Delta tables, then adapt the repeatable `MERGE` examples in [setup/setup.sql](setup/setup.sql). Each `-- # catalog.schema.table` section covers one table; the final three program-managed tables are marked as repair/testing examples. The column-map and pair-SQL tables are resolved automatically in the same catalog/schema as the configured pair table. Existing installations created before vintage selection must run [setup/migrate_pair_sql_vintages.sql](setup/migrate_pair_sql_vintages.sql) once.
 
@@ -68,15 +72,17 @@ For a current-view Left source against Right history, set `snapshot: true` in th
 
 ```bash
 just dbx login --no-open
-just dbx workspace upload src/pair_recon_right /Workspace/Users/name/pair_recon_right --dry-run
-just dbx workspace download /Workspace/Users/name/pair_recon_right downloaded-right
+just dbx workspace upload src/pair_recon_right pair_recon_right --dry-run
+just dbx workspace download pair_recon_right downloaded-right
+just dbx workspace delete obsolete.py --dry-run
+just dbx workspace delete -rf obsolete-folder
 just dbx compute status --cluster-id CLUSTER_ID
 just dbx warehouse status --warehouse-id WAREHOUSE_ID
 just dbx sql "SELECT current_user()" --warehouse-id WAREHOUSE_ID
 just dbx runs --limit 10
 ```
 
-Set `PAIR_RECON_DBX_PROFILE`, `PAIR_RECON_DBX_CLUSTER_ID`, and `PAIR_RECON_DBX_WAREHOUSE_ID` in `.pair_recon.env` to omit repeated options. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. Use `just dbx --debug attach ...` or `just dbx --debug ipdb ...` only when troubleshooting.
+Set `PAIR_RECON_DBX_PROFILE`, `PAIR_RECON_DBX_CLUSTER_ID`, and `PAIR_RECON_DBX_WAREHOUSE_ID` in `.pair_recon.env` to omit repeated options. Relative Workspace paths resolve below `/Users/<current-user>/`; absolute paths remain supported. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. Delete accepts multiple paths, `-r/--recursive`, `-f/--force`, and `--dry-run`, with `rm` as an alias. The setup installer mirrors `src/pair_recon_right`, deleting remote objects that no longer exist locally only after every upload succeeds. Use `just dbx --debug attach ...` or `just dbx --debug ipdb ...` only when troubleshooting.
 
 ## GitLab tools
 
@@ -96,11 +102,7 @@ Scopes are `left`, `right`, `both`, and `all`. `both` includes the local orchest
 ```bash
 just test
 just lint
-just build
-just publish
 ```
-
-`just publish` is Windows-only and builds a main-program-only portable ZIP under `dist/`; Linux and macOS releases are intentionally not generated. Run it on Windows x64 to produce the Windows x64 artifact. The extracted `pair-recon` folder contains only the console executable, `run.cmd`, and required runtime libraries; DBX/GitLab tools, source documentation, setup SQL, and credentials are excluded. The target user can double-click `run.cmd` (recommended because it pauses on an error) or `pair-recon.exe`; both use the Windows console and require neither Python nor Git Bash. Publishing includes `pyodbc` for the Hadoop input path, while the ODBC driver remains external.
 
 Live Oracle query/export/timing tests are opt-in and are not part of the default suite:
 
@@ -108,6 +110,6 @@ Live Oracle query/export/timing tests are opt-in and are not part of the default
 just live
 ```
 
-Every recipe defaults to normal mode. Python workflows accept `--debug ipdb` or `--debug attach`; attach waits for VS Code `debugpy` on port 5678. Build and lint use `--debug` for verbose diagnostics. `just sas` creates only `left.sas`; use `just sas side=right` or `just sas side=both` when needed. After SAS writes either sampled CSV, use the normal `run.cmd` or `just run` prompts to select CSV inputs. When Right is CSV, comparison stays local and reuses the existing multithread statistics engine; no extra recipe is needed.
+Every recipe defaults to normal mode. Python workflows accept `--debug ipdb` or `--debug attach`; attach waits for VS Code `debugpy` on port 5678. Lint uses `--debug` for verbose diagnostics. `just sas` creates only `left.sas`; use `just sas side=right` or `just sas side=both` when needed. After SAS writes either sampled CSV, use the normal `run.cmd` or `just run` prompts to select CSV inputs. When Right is CSV, comparison stays local and reuses the existing multithread statistics engine; no extra recipe is needed.
 
 See [guideme.txt](guideme.txt) for the complete local, Databricks, Hadoop, CSV, SAS, progress, Outlook, and troubleshooting flow.

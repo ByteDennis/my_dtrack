@@ -9,6 +9,8 @@ Install uv, Python 3.11+, Databricks CLI/profile access, and an ODBC driver when
   copy .pair_recon.env.example .pair_recon.env        Windows
   cp .pair_recon.env.example .pair_recon.env          Linux
 
+Workstation execution is supported only through uv run. run.cmd and run.sh are thin uv run wrappers; PairRecon does not build or distribute a standalone executable or portable ZIP.
+
 For the normal UC-driven Oracle run, .pair_recon.env needs only ORACLE_USER and ORACLE_PASSWORD. Add ORACLE_DSN only if the selected pair does not provide left.service or left.dsn. A pair may instead name custom user_env/password_env/dsn_env variables. Databricks credentials stay in ~/.databrickscfg. Hadoop uses the non-secret left.dsn metadata plus an installed ODBC driver. Local .pair_recon.yaml contains prompt defaults, never secrets. All text files and sampled CSVs are UTF-8.
 
 The previous pkg/distributed branch used DTRACK_S3, AWS/WinSCP, DTRACK_DBX_*, and many DTRACK_* runtime controls. They are not required by the current UC Volume design. PAIR_RECON_DBX_*, GITLAB_HOST, HADOOP_DSN, PAIR_RECON_DUCKDB_*, PAIR_RECON_STATS_BATCH, and PAIR_RECON_ORACLE_MACROS remain optional compatibility or operator overrides and do not belong in the minimal .pair_recon.env.
@@ -49,8 +51,8 @@ Hadoop reads left.dsn from UC metadata; HADOOP_DSN remains an optional fallback.
 
 3. One-time remote setup
 
-  ./setup/setup.sh --profile corp --workspace-dir /Workspace/Users/name/pair_recon --cluster-id CLUSTER_ID
-  setup\setup.cmd --profile corp --workspace-dir /Workspace/Users/name/pair_recon --cluster-id CLUSTER_ID
+  ./setup/setup.sh --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID
+  setup\setup.cmd --profile corp --workspace-dir pair_recon --cluster-id CLUSTER_ID
 
 Record the Right job id when Right uses Databricks. A local Right CSV does not start this job. Both paths need UC metadata/results tables and the UC Volume.
 
@@ -61,8 +63,10 @@ Databricks operator commands use ~/.databrickscfg and may reuse these .pair_reco
   PAIR_RECON_DBX_WAREHOUSE_ID=...
 
   just dbx login --no-open
-  just dbx workspace upload src/pair_recon_right /Workspace/Users/name/pair_recon_right --dry-run
-  just dbx workspace download /Workspace/Users/name/pair_recon_right downloaded-right
+  just dbx workspace upload src/pair_recon_right pair_recon_right --dry-run
+  just dbx workspace download pair_recon_right downloaded-right
+  just dbx workspace delete obsolete.py --dry-run
+  just dbx workspace delete -rf obsolete-folder
   just dbx compute status
   just dbx compute start --wait
   just dbx warehouse status
@@ -70,7 +74,7 @@ Databricks operator commands use ~/.databrickscfg and may reuse these .pair_reco
   just dbx sql "SELECT current_user()"
   just dbx runs --limit 10
 
-Remove --dry-run only after checking planned Workspace paths. Add --overwrite only when replacement is intended. Workspace notebooks regain their language suffix when downloaded.
+Relative Workspace paths resolve below /Users/<current-user>/; absolute paths remain supported. Remove --dry-run only after checking planned paths. Add --overwrite only when replacement is intended. delete accepts multiple paths, -r/--recursive, -f/--force, and the rm alias. Workspace notebooks regain their language suffix when downloaded. The setup installer mirrors pair_recon_right and removes remote objects missing locally only after all uploads succeed.
 
 GitLab snapshots require authenticated glab and git:
 
@@ -122,7 +126,7 @@ Normal commands do not enter a debugger. Use ipdb or VS Code attach only when ne
   just gitlab --debug attach plan --scope both
   just test --debug attach
 
-Attach listens on 0.0.0.0:5678 and waits for a VS Code debugpy attach configuration using localhost:5678. A bare --debug still selects ipdb. Lint/build --debug emits verbose diagnostics. On Windows, a configured Outlook recipient uses the signed-in Outlook desktop profile and attaches left.log.
+Attach listens on 0.0.0.0:5678 and waits for a VS Code debugpy attach configuration using localhost:5678. A bare --debug still selects ipdb. Lint --debug emits verbose diagnostics. On Windows, a configured Outlook recipient uses the signed-in Outlook desktop profile and attaches left.log.
 
 7. Common failures
 
@@ -131,7 +135,7 @@ Attach listens on 0.0.0.0:5678 and waits for a VS Code debugpy attach configurat
 - Oracle connection fails: verify user/password/DSN variables without printing secrets.
 - CSV missing or mojibake: use an existing local path and save UTF-8; verify delimiter/read_csv options.
 - Databricks 403/not found: verify profile, warehouse/job ids, UC grants, Volume path, and cluster access.
-- Workspace upload/download failure: run with --dry-run, use an absolute remote path, and check Workspace permissions; symbolic links are rejected.
+- Workspace upload/download/delete failure: run with --dry-run, verify the absolute or user-home-relative Workspace path, and check Workspace permissions; symbolic links are rejected.
 - DBX id missing: set PAIR_RECON_DBX_CLUSTER_ID or PAIR_RECON_DBX_WAREHOUSE_ID, or pass the matching option.
 - glab missing or unauthorized: install glab, run glab auth login, and confirm GITLAB_HOST for self-managed GitLab.
 - GitLab snapshot has unexpected files: run plan first, then update pair_recon.ignore; .gitignore does not control dispatch.
@@ -147,9 +151,5 @@ Attach listens on 0.0.0.0:5678 and waits for a VS Code debugpy attach configurat
 
   just test
   just lint
-  just build
-  just publish
-
-just publish is Windows-only and creates a main-program-only dist/pair-recon-<version>-windows-<cpu>.zip; it intentionally creates no Linux/macOS release. Build it on Windows x64. After extraction, double-click run.cmd (recommended because it pauses on an error) or pair-recon.exe. Both use the Windows console, so target users need neither Python nor Git Bash. The ZIP excludes DBX/GitLab tools, source documentation, setup SQL, and credentials. Publishing includes pyodbc for Hadoop; Databricks authentication, Oracle credentials, Outlook, and the ODBC driver remain external.
 
 Live tests are opt-in. Do not run just live unless real source credentials and network access are intended.

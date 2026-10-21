@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -30,8 +31,8 @@ def upload(
     if not source.is_file() and not source.is_dir():
         raise ValueError(f"source must be a file or directory: {source}")
     if target is None:
-        target = f"/Users/{workspace.current_user.me().user_name}/{source.name}"
-    remote_root = workspace_path(target)
+        target = source.name
+    remote_root = resolve_workspace_path(workspace, target)
     local_files, skipped = ([source], 0) if source.is_file() else local_files_for(source)
     uploads = []
     directories = {remote_root.parent if source.is_file() else remote_root}
@@ -89,7 +90,7 @@ def download(
 ) -> dict:
     from databricks.sdk.service.workspace import ExportFormat
 
-    remote_root = workspace_path(source)
+    remote_root = resolve_workspace_path(workspace, source)
     root = workspace.workspace.get_status(str(remote_root))
     is_directory = value(root.object_type) in {"DIRECTORY", "REPO"}
     local_root = Path(target) if target is not None else Path(remote_root.name)
@@ -157,8 +158,60 @@ def download(
     }
 
 
+def delete(
+    workspace,
+    sources: str | Iterable[str],
+    *,
+    recursive=False,
+    force=False,
+    dry_run=False,
+) -> dict:
+    requested = [sources] if isinstance(sources, str) else list(sources)
+    planned, deleted, failures = [], [], []
+    for source in requested:
+        try:
+            remote = resolve_workspace_path(workspace, source)
+            try:
+                item = workspace.workspace.get_status(str(remote))
+            except Exception as exc:
+                if force and resource_does_not_exist(exc):
+                    continue
+                raise
+            if value(item.object_type) in {"DIRECTORY", "REPO"} and not recursive:
+                raise IsADirectoryError(f"{remote}: use --recursive to remove a directory")
+            planned.append(str(remote))
+            if dry_run:
+                continue
+            try:
+                workspace.workspace.delete(str(remote), recursive=recursive)
+            except Exception as exc:
+                if force and resource_does_not_exist(exc):
+                    continue
+                raise
+            deleted.append(str(remote))
+        except Exception as exc:
+            failures.append(failure(source, exc))
+    return {
+        "sources": [str(source) for source in requested],
+        "recursive": recursive,
+        "force": force,
+        "dry_run": dry_run,
+        "planned": len(planned),
+        "deleted": len(deleted),
+        "paths": planned if dry_run else deleted,
+        "failed": failures,
+        "exit_code": int(bool(failures)),
+    }
+
+
 def failure(path, exc: Exception) -> dict:
     return {"path": str(path), "error": f"{type(exc).__name__}: {exc}"}
+
+
+def resource_does_not_exist(exc: Exception) -> bool:
+    return getattr(exc, "error_code", None) == "RESOURCE_DOES_NOT_EXIST" or type(exc).__name__ == (
+        "NotFound"
+    )
 
 
 def download_objects(workspace, root) -> tuple[list[Any], list[Any]]:
@@ -205,6 +258,19 @@ def workspace_path(path: str) -> PurePosixPath:
     if not path.startswith("/") or ".." in remote.parts or remote == PurePosixPath("/"):
         raise ValueError(f"invalid absolute Workspace path: {path}")
     return remote
+
+
+def resolve_workspace_path(workspace, path: str) -> PurePosixPath:
+    text = str(path).strip()
+    remote = PurePosixPath(text)
+    if not text or remote == PurePosixPath(".") or ".." in remote.parts:
+        raise ValueError(f"invalid Workspace path: {path}")
+    if remote.is_absolute():
+        return workspace_path(text)
+    user = str(workspace.current_user.me().user_name).strip()
+    if not user or "/" in user or "\\" in user:
+        raise ValueError("current Databricks user has an invalid Workspace home path")
+    return workspace_path(str(PurePosixPath("/Users") / user / remote))
 
 
 def local_files_for(root: Path) -> tuple[list[Path], int]:

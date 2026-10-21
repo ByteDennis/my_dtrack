@@ -3,6 +3,7 @@ from enum import Enum
 from types import SimpleNamespace as NS
 
 import pytest
+from databricks.sdk.errors import NotFound
 
 from pair_recon_dbx import runtime
 from pair_recon_dbx import workspace as workspace_ops
@@ -138,6 +139,8 @@ class Files:
         self.calls.append(("upload", path, body, options))
 
     def get_status(self, path):
+        if path not in self.objects:
+            raise NotFound(path, error_code="RESOURCE_DOES_NOT_EXIST")
         return self.objects[path]
 
     def list(self, path):
@@ -151,6 +154,13 @@ class Files:
     def export(self, path, *, format):
         body, file_type = self.content[path]
         return NS(content=base64.b64encode(body).decode(), file_type=file_type)
+
+    def delete(self, path, *, recursive=None):
+        self.calls.append(("delete", path, recursive))
+        prefix = path.rstrip("/") + "/"
+        for name in list(self.objects):
+            if name == path or (recursive and name.startswith(prefix)):
+                del self.objects[name]
 
 
 def item(path, kind, language=None):
@@ -175,6 +185,9 @@ def test_upload(tmp_path):
     assert result["uploaded"] == 2
     assert paths == ["/Shared/source/data.txt", "/Shared/source/notebook"]
     assert workspace_ops.upload(workspace, source, "/Shared/source", dry_run=True)["uploaded"] == 0
+    assert workspace_ops.upload(workspace, source, "project/source", dry_run=True)["target"] == (
+        "/Users/me@example.com/project/source"
+    )
 
 
 def test_download(tmp_path):
@@ -196,3 +209,44 @@ def test_download(tmp_path):
     assert (target / "data.txt").read_text(encoding="utf-8") == "café"
     with pytest.raises(ValueError, match="absolute"):
         workspace_ops.workspace_path("Shared/source")
+
+
+def test_relative_workspace_path_uses_current_user():
+    workspace = NS(current_user=NS(me=lambda: NS(user_name="me@example.com")))
+    assert str(workspace_ops.resolve_workspace_path(workspace, "project/source")) == (
+        "/Users/me@example.com/project/source"
+    )
+    assert str(workspace_ops.resolve_workspace_path(workspace, "/Shared/source")) == (
+        "/Shared/source"
+    )
+    with pytest.raises(ValueError, match="invalid Workspace path"):
+        workspace_ops.resolve_workspace_path(workspace, "../source")
+
+
+def test_delete_matches_rm_semantics():
+    objects = [
+        item("/Users/me@example.com/old.py", "FILE"),
+        item("/Users/me@example.com/folder", "DIRECTORY"),
+        item("/Users/me@example.com/folder/child.py", "FILE"),
+    ]
+    files = Files(objects)
+    workspace = NS(
+        workspace=files,
+        current_user=NS(me=lambda: NS(user_name="me@example.com")),
+    )
+
+    result = workspace_ops.delete(workspace, "old.py")
+    assert result["deleted"] == 1 and result["failed"] == []
+    assert files.calls[-1] == ("delete", "/Users/me@example.com/old.py", False)
+
+    result = workspace_ops.delete(workspace, ["folder", "missing"], force=True)
+    assert result["deleted"] == 0
+    assert result["failed"][0]["error"].startswith("IsADirectoryError:")
+
+    result = workspace_ops.delete(workspace, "folder", recursive=True, dry_run=True)
+    assert result["planned"] == 1 and result["deleted"] == 0
+    assert result["paths"] == ["/Users/me@example.com/folder"]
+
+    result = workspace_ops.delete(workspace, "folder", recursive=True)
+    assert result["deleted"] == 1 and result["failed"] == []
+    assert files.calls[-1] == ("delete", "/Users/me@example.com/folder", True)

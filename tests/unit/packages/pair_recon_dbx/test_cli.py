@@ -31,7 +31,7 @@ def calls(monkeypatch):
                 values.append((_name, args, kwargs)) or {"called": _name}
             ),
         )
-    for name in ("upload", "download"):
+    for name in ("upload", "download", "delete"):
         monkeypatch.setattr(
             cli.workspace_ops,
             name,
@@ -78,6 +78,22 @@ def calls(monkeypatch):
                 "download",
                 ("client:corp", "/Shared/source", Path("local")),
                 {"overwrite": True, "dry_run": False},
+            ),
+        ),
+        (
+            ["workspace", "delete", "old.py", "folder", "-rf", "--dry-run"],
+            (
+                "delete",
+                ("client:corp", ["old.py", "folder"]),
+                {"recursive": True, "force": True, "dry_run": True},
+            ),
+        ),
+        (
+            ["workspace", "rm", "old.py"],
+            (
+                "delete",
+                ("client:corp", ["old.py"]),
+                {"recursive": False, "force": False, "dry_run": False},
             ),
         ),
     ],

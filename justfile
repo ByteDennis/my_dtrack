@@ -17,12 +17,6 @@ format *args:
     if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; elif [ -n "{{args}}" ]; then echo "usage: just format [--debug]" >&2; exit 2; else verbose=""; fi; uv run ruff format $verbose src tests/unit tests/live/sources tools
     if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; else verbose=""; fi; uv run ruff check $verbose --fix src tests/unit tests/live/sources tools
 
-build *args:
-    if [ "{{args}}" = "--debug" ]; then uv build --verbose; elif [ -n "{{args}}" ]; then echo "usage: just build [--debug]" >&2; exit 2; else uv build; fi
-
-publish *args:
-    if [ "{{args}}" = "--debug" ]; then verbose="--debug"; elif [ -n "{{args}}" ]; then echo "usage: just publish [--debug]" >&2; exit 2; else verbose=""; fi; uv run --isolated --locked --no-dev --group publish python tools/publish_portable.py $verbose
-
 run *args:
     uv run --extra debug pair_recon {{args}}
 

@@ -35,24 +35,21 @@ def test_packages():
         "src/pair_recon_left",
         "src/pair_recon_right",
     ]
-    assert project["dependency-groups"]["publish"] == [
-        "pyinstaller>=6.22,<7",
-        "pyodbc>=5.0; sys_platform == 'win32'",
-    ]
+    assert "publish" not in project["dependency-groups"]
 
 
-def test_portable_publish_recipe():
+def test_windows_launcher_uses_uv_without_portable_publish_support():
     recipe = (ROOT / "justfile").read_text(encoding="utf-8")
-    script = (ROOT / "tools/publish_portable.py").read_text(encoding="utf-8")
-    assert "publish *args:" in recipe and "tools/publish_portable.py" in recipe
-    assert "--isolated --locked --no-dev" in recipe
-    assert "--onedir" in script and '"--console"' in script and "archive_bundle" in script
-    assert "portable publishing is Windows-only" in script
-    assert '"%~dp0pair-recon.exe" %*' in script
-    assert "tempfile.mkdtemp" in script and "temporary.replace(target)" in script
-    assert "--exclude-module=pair_recon_dbx" in script
-    assert "--exclude-module=pair_recon_gitlab" in script
-    assert "README.md" not in script and "setup/schema.sql" not in script
+    windows_launcher = (ROOT / "run.cmd").read_text(encoding="utf-8")
+    unix_launcher = (ROOT / "run.sh").read_text(encoding="utf-8")
+    assert 'uv run --project "%~dp0" pair_recon %*' in windows_launcher
+    assert 'uv run --project "$HERE" pair_recon "$@"' in unix_launcher
+    assert "pair-recon.exe" not in windows_launcher
+    assert "publish *args:" not in recipe
+    assert "build *args:" not in recipe
+    assert "uv build" not in recipe
+    assert not (ROOT / "tools" / "publish_portable.py").exists()
+    assert not (ROOT / "tools" / "pair_recon_entry.py").exists()
 
 
 def test_setup_example_has_an_upsert_for_every_catalog_table():
