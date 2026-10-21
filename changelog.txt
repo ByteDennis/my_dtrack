@@ -1,3 +1,19 @@
+pair_recon Simplify right notebook imports (3fa58a4) — 2026-10-21
+
+Changed
+- src/pair_recon_right/notebook.py: uses normal pair_recon_right imports instead of dynamic importlib and sys.path setup.
+- src/pair_recon_dbx/deploy.py: deploys the fixed pair_recon_right package with the sibling pair_recon_right_job notebook and repoints the job to it.
+- setup/install.py and src/pair_recon/app/cli.py: use the fixed deployment layout and no longer accept DBX_RIGHT_PACKAGE.
+- README.md, guideme.txt, and .pair_recon.env.example: document the simplified Workspace layout and environment configuration.
+
+Removed
+- Runtime pip installation from the Right notebook and the empty src/pair_recon_right/requirements.txt file.
+- Configurable Right package naming and its legacy DBX_RIGHT_PACKAGE environment variable.
+
+Verification
+- 627 unit tests pass; 12 optional tests skip.
+- Ruff check, Ruff format check, and git diff check pass.
+
 pair_recon merge changes (0bed413) — 2026-10-21
 
 Changed
