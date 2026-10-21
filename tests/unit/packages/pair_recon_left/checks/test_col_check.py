@@ -29,7 +29,7 @@ def manifest():
 def test_pipeline():
     store = MemoryStore()
     row = manifest()
-    store.put_json("pairs/pair/plan.json", row)
+    store.put_json("plan.json", row)
     stats = {"amount": {"col_type": "numeric", "n_unique": 2, "hash_sum": "3"}}
     count = ColCheckPipeline(
         store,
@@ -37,13 +37,13 @@ def test_pipeline():
         compute_stats=lambda *_args: stats,
     ).run([row])
     uid = unit_id("pair", "all", "amount")
-    assert count == 1 and store.exists(f"pairs/pair/units/00000001-{uid}.json")
+    assert count == 1 and store.exists(f"units/00000001-{uid}.json")
 
 
 def test_left_only_pipeline_does_not_wait_for_right(monkeypatch):
     store = MemoryStore()
     row = manifest()
-    store.put_json("pairs/pair/plan.json", row)
+    store.put_json("plan.json", row)
     stats = {"amount": {"col_type": "numeric", "n_unique": 2, "hash_sum": "3"}}
     pipeline = ColCheckPipeline(
         store,

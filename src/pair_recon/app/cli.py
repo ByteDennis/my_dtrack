@@ -310,18 +310,11 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
                 provenance.get("vintage", run_default("vintage", metadata.get("vintage", "day"))),
             ),
         )
-    generated = make_run_id(pair, owner, timezone)
-    if defaults.get("last_run_id"):
-        print(f"Previous run id: {defaults['last_run_id']}")
-    run_id = ask("Run id", generated)
+    run_id = make_run_id(pair, owner, timezone)
     existing = catalog.run(run_id)
-    action = (
-        choose("Existing run action", ["resume", "restart", "cancel"], "resume")
-        if existing
-        else "new"
-    )
-    if action == "cancel":
-        raise KeyboardInterrupt
+    action = "restart" if existing else "new"
+    if existing:
+        print(f"Replacing today's run: {run_id}")
     settings = {
         "owner": owner,
         "profile": profile,
@@ -341,7 +334,6 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "left_csv": left_csv,
         "right_csv": right_csv,
         "run_id": run_id,
-        "last_run_id": run_id,
         "timezone": timezone,
         "partition_mode": mode,
         "checks": ",".join(selected),

@@ -15,6 +15,15 @@ class Source:
         return self.counts
 
 
+def test_run_requires_exactly_one_pair():
+    with pytest.raises(ValueError, match="exactly one active pair"):
+        run_row_check(
+            {"pairs": {"a": {}, "b": {}}},
+            MemoryStore(),
+            run_id="run",
+        )
+
+
 @pytest.mark.parametrize(
     ("mode", "counts"),
     [("date", {"2026-01-01": 2}), ("all", {"all": 2})],
@@ -36,8 +45,8 @@ def test_counts(mode, counts):
         run_id="run",
         source_factory=lambda _value: Source(counts),
     )
-    assert store.get_json("pairs/p/row_check/left.json")["counts"] == counts
-    assert not store.exists("pairs/p/plan.json")
+    assert store.get_json("row_check/left.json")["counts"] == counts
+    assert not store.exists("plan.json")
 
 
 def test_plan():
@@ -57,7 +66,7 @@ def test_plan():
         run_id="run",
         source_factory=lambda _value: Source({"all": 2}),
     )
-    assert store.get_json("pairs/p/plan.json")["statistics"] == ["n_unique", "hash_sum"]
+    assert store.get_json("plan.json")["statistics"] == ["n_unique", "hash_sum"]
 
 
 def test_vintage_sampling_keeps_full_row_counts():
@@ -83,8 +92,8 @@ def test_vintage_sampling_keeps_full_row_counts():
         run_id="run",
         source_factory=lambda _value: Source(counts),
     )
-    assert store.get_json("pairs/p/row_check/left.json")["counts"] == counts
-    plan = store.get_json("pairs/p/plan.json")
+    assert store.get_json("row_check/left.json")["counts"] == counts
+    plan = store.get_json("plan.json")
     assert len(plan["windows"]) == 1
     assert plan["vintage_selection"]["available"] == 3
 
@@ -112,4 +121,4 @@ def test_snapshot():
         source_factory=factory,
     )
     assert seen[0]["partition_mode"] == "all"
-    assert not store.exists("pairs/p/plan.json")
+    assert not store.exists("plan.json")

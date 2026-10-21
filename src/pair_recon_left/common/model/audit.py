@@ -222,13 +222,9 @@ class SqlAudit:
         return ("-- " + " ".join(fields) + "\n" + statement + "\n\n").encode("utf-8")
 
     def _event_keys(self) -> list[str]:
-        current = [
-            key
-            for key in self.store.list_keys("pairs/")
-            if "/audit/" in key and key.endswith(".txt")
-        ]
+        current = self.store.list_keys("audit/")
         current.extend(self.store.list_keys("_status/audit/"))
-        return sorted(set(current))
+        return sorted({key for key in current if key.endswith(".txt")})
 
     def refresh(self) -> bool:
         try:

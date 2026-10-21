@@ -7,7 +7,6 @@ from zoneinfo import ZoneInfo
 from pair_recon_right.engine.common.model.protocol import (
     get_run_status,
     left_row_path,
-    pair_root,
     plan_path,
     row_result_path,
 )
@@ -17,8 +16,7 @@ log = logging.getLogger("pair_recon.progress")
 
 def progress_snapshot(store, run_id: str, pair: str, timezone: str, state: str | None = None):
     status = get_run_status(store)
-    prefix = pair_root(pair) + "/"
-    keys = store.list_keys(prefix)
+    keys = store.list_keys("")
     plan_key = plan_path(pair)
     row_key = row_result_path(pair)
     left_key = left_row_path(pair)
@@ -27,9 +25,9 @@ def progress_snapshot(store, run_id: str, pair: str, timezone: str, state: str |
     left = store.get_json(left_key) if left_key in keys else {}
     partitions = row.get("partitions") or {}
     left_counts = left.get("counts") or {}
-    units = sum("/units/" in key and key.endswith(".json") for key in keys)
-    results = sum("/col_check/results/" in key and key.endswith(".json") for key in keys)
-    failures = sum("/col_check/failures/" in key and key.endswith(".json") for key in keys)
+    units = sum(key.startswith("units/") and key.endswith(".json") for key in keys)
+    results = sum(key.startswith("col_check/results/") and key.endswith(".json") for key in keys)
+    failures = sum(key.startswith("col_check/failures/") and key.endswith(".json") for key in keys)
     threads = sorted(
         item.name for item in threading.enumerate() if item.name.startswith("pair_recon")
     )

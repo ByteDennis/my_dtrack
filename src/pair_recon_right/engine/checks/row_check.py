@@ -14,7 +14,6 @@ from ..common.model.protocol import (
     list_left_documents,
     list_plans,
     list_row_results,
-    pair_segment,
     plan_path,
     refresh_units_status,
     row_result_path,
@@ -232,7 +231,7 @@ def reconcile_pair(
         decision["excluded_ratio"],
     )
     store.put_bytes(
-        f"report/pairs/{pair_segment(pair)}/row_check.csv",
+        "report/row_check.csv",
         row_check_csv_bytes(document),
         content_type="text/csv",
     )

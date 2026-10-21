@@ -31,7 +31,7 @@ def document(checks):
 
 def test_rowonly(tmp_path):
     store = VolumeStore(tmp_path / "runs" / "r1")
-    store.put_json("pairs/p/row_check/left.json", document(["row_count"]))
+    store.put_json("row_check/left.json", document(["row_count"]))
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
     result = run(
         tmp_path / "runs",

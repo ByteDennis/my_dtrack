@@ -105,10 +105,10 @@ def test_fetched():
 def _drained_store(sample_mode="all"):
     store = MemoryStore()
     doc = left_document(sample=None if sample_mode == "all" else 1)
-    store.put_json("pairs/p/row_check/left.json", doc)
+    store.put_json("row_check/left.json", doc)
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
     run_row_check(store, lambda _cfg: FakeTarget())
-    manifest = store.get_json("pairs/p/plan.json")
+    manifest = store.get_json("plan.json")
     uid = unit_id("p", "2026-01-01", "amount")
     pointer = {"pair": "p", "window": "2026-01-01", "column": "amount", "right_column": "amount"}
     store.commit_unit(1, uid, STATS, pointer)
@@ -122,7 +122,7 @@ def test_unit():
     target = FakeTarget()
     results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert results[0]["verdict"] == "match" and results[0]["right_col"] == "amount"
-    assert store.exists(f"pairs/p/col_check/results/{uid}.json")
+    assert store.exists(f"col_check/results/{uid}.json")
     assert target.calls == [("p", "2026-01-01", None)]
 
 
@@ -132,7 +132,7 @@ def test_fixed():
     with pytest.raises(TimeoutError):
         ColCheck(store, lambda _cfg: target, poll_interval=0, idle_timeout=0).run()
     assert target.calls == []
-    store.put_json("pairs/p/fixed_keys.json", {"pair": "p", "windows": {"2026-01-01": [["7"]]}})
+    store.put_json("fixed_keys.json", {"pair": "p", "windows": {"2026-01-01": [["7"]]}})
     results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert results and target.calls[-1] == ("p", "2026-01-01", [["7"]])
 
@@ -163,7 +163,7 @@ def test_v2():
     }
     store = MemoryStore()
     first = build_manifest("run", "p", pair, row_check)
-    store.put_json("pairs/p/plan.json", first)
+    store.put_json("plan.json", first)
     for sequence, window in enumerate(first["windows"], 1):
         uid = unit_id_for(first, window, "amount")
         store.commit_unit(
@@ -176,7 +176,7 @@ def test_v2():
     ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0).run()
 
     second = build_manifest("run", "p", {**pair, "excluded_partitions": ["2026-01-02"]}, row_check)
-    store.put_json("pairs/p/plan.json", second)
+    store.put_json("plan.json", second)
     january = second["windows"][0]
     changed_uid = unit_id_for(second, january, "amount")
     store.commit_unit(
@@ -200,17 +200,17 @@ def test_prefetch():
             raise ValueError("boom")
 
     results = ColCheck(store, lambda _cfg: Broken(), poll_interval=0, max_attempts=2).run()
-    failure = store.get_json(f"pairs/p/col_check/failures/{uid}.json")
+    failure = store.get_json(f"col_check/failures/{uid}.json")
     assert results == [] and failure["error"] == "boom"
 
 
 def test_compare():
     store, uid = _drained_store()
     target = FakeTarget(stats={"amount": STATS})
-    unit_key = next(key for key in store.objects if "/units/" in key)
+    unit_key = next(key for key in store.objects if key.startswith("units/"))
     store.objects[unit_key].pop("left_statistics")
     results = ColCheck(store, lambda _cfg: target, poll_interval=0, max_attempts=2).run()
-    assert results == [] and store.exists(f"pairs/p/col_check/failures/{uid}.json")
+    assert results == [] and store.exists(f"col_check/failures/{uid}.json")
 
 
 def test_idle():

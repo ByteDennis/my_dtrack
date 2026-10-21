@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
 from typing import Any
 
 from ...backends.sources import source_from_config
@@ -38,14 +35,6 @@ STAGE_ONE_FIELDS = (
 )
 
 
-def make_run_id(config: dict[str, Any], *, now: datetime | None = None) -> str:
-    now = now or datetime.now(UTC)
-    digest = hashlib.sha256(
-        json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()[:6]
-    return f"{now.strftime('%Y%m%dT%H%M%SZ')}-{digest}"
-
-
 def public_pair_config(pair: dict[str, Any]) -> dict[str, Any]:
     result = {key: value for key, value in pair.items() if key not in ("left", "right")}
     for side in ("left", "right"):
@@ -69,6 +58,8 @@ def active_pairs(
     }
     if not pairs:
         raise ValueError("no active pairs selected")
+    if len(pairs) != 1:
+        raise ValueError("exactly one active pair is required per run")
     return pairs
 
 
@@ -176,14 +167,13 @@ def run_row_check(
     config: dict[str, Any],
     store,
     *,
-    run_id: str | None = None,
+    run_id: str,
     pair_names: list[str] | None = None,
     source_factory: Callable[[dict[str, Any]], Any] = source_from_config,
     pair_workers: int = 4,
     sources: dict[str, Any] | None = None,
     preflight_health: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    run_id = run_id or make_run_id(config)
     pairs = active_pairs(config, pair_names)
     log.info("run_id=%s work=%s pairs=%s", run_id, store.root_uri, list(pairs))
     write_run_status(

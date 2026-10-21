@@ -71,6 +71,9 @@ class MemoryStore:
                 deleted += 1
         return deleted
 
+    def clear(self):
+        return self.delete_keys(list(self.objects))
+
     def heartbeat(self, now=None):
         return self.put_json(
             HEARTBEAT,

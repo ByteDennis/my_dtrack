@@ -110,7 +110,7 @@ WHEN NOT MATCHED THEN INSERT (
 MERGE INTO catalog.schema.pair_recon_run_status AS t
 USING (
   SELECT
-    'example-orders-20261021T120000' AS run_id,
+    'example-orders-owner-20261021' AS run_id,
     'orders' AS pair_name,
     'example.owner' AS owner,
     'running' AS state,
@@ -140,7 +140,7 @@ WHEN NOT MATCHED THEN INSERT (
 MERGE INTO catalog.schema.pair_recon_run_error AS t
 USING (
   SELECT
-    'example-orders-20261021T120000' AS run_id,
+    'example-orders-owner-20261021' AS run_id,
     'hash_sum' AS check_name,
     'orders' AS pair_name,
     '2026-10-01' AS vintage,
@@ -173,12 +173,12 @@ WHEN NOT MATCHED THEN INSERT (
 );
 
 -- # catalog.schema.pair_recon_progress_snapshot
--- Normally append-only and written by PairRecon. This example is for repair/testing only.
+-- PairRecon keeps one current progress row per daily run_id. This example is for repair/testing only.
 MERGE INTO catalog.schema.pair_recon_progress_snapshot AS t
 USING (
   SELECT
     CAST('2026-10-21 12:03:00' AS TIMESTAMP_NTZ) AS snapshot_ts,
-    'example-orders-20261021T120000' AS run_id,
+    'example-orders-owner-20261021' AS run_id,
     'orders' AS pair_name,
     'attributes' AS state,
     CAST(30 AS BIGINT) AS units_expected,
@@ -188,8 +188,9 @@ USING (
     CAST(4 AS BIGINT) AS worker_threads,
     'Example progress snapshot' AS detail
 ) AS s
-ON t.snapshot_ts = s.snapshot_ts AND t.run_id = s.run_id
+ON t.run_id = s.run_id
 WHEN MATCHED THEN UPDATE SET
+  t.snapshot_ts = s.snapshot_ts,
   t.pair_name = s.pair_name,
   t.state = s.state,
   t.units_expected = s.units_expected,

@@ -7,7 +7,9 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+notebook_path = (
+    dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+)
 if not notebook_path.startswith("/Workspace/"):
     notebook_path = "/Workspace" + notebook_path
 package_dir = os.path.dirname(notebook_path)
@@ -17,7 +19,9 @@ package = os.path.basename(package_dir)
 requirements = os.path.join(package_dir, "requirements.txt")
 if os.path.isfile(requirements):
     with open(requirements, encoding="utf-8") as stream:
-        needed = [line.strip() for line in stream if line.strip() and not line.lstrip().startswith("#")]
+        needed = [
+            line.strip() for line in stream if line.strip() and not line.lstrip().startswith("#")
+        ]
     if needed:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-r", requirements])
         importlib.invalidate_caches()
@@ -39,20 +43,33 @@ for name in (
 ):
     dbutils.widgets.text(name, "")
 
-values = {name: dbutils.widgets.get(name) for name in (
-    "run_root",
-    "run_id",
-    "pair",
-    "owner",
-    "timezone",
-    "pair_table",
-    "status_table",
-    "error_table",
-)}
+values = {
+    name: dbutils.widgets.get(name)
+    for name in (
+        "run_root",
+        "run_id",
+        "pair",
+        "owner",
+        "timezone",
+        "pair_table",
+        "status_table",
+        "error_table",
+    )
+}
+publish_values = {
+    name: values[name]
+    for name in (
+        "run_id",
+        "pair",
+        "owner",
+        "timezone",
+        "pair_table",
+        "status_table",
+        "error_table",
+    )
+}
 logging.Formatter.converter = staticmethod(
-    lambda timestamp: datetime.fromtimestamp(
-        timestamp, ZoneInfo(values["timezone"])
-    ).timetuple()
+    lambda timestamp: datetime.fromtimestamp(timestamp, ZoneInfo(values["timezone"])).timetuple()
 )
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 store = open_store(values["run_root"]).child(values["run_id"])
@@ -63,9 +80,13 @@ try:
         lambda config: SparkTarget(spark, config),
         run_id=values["run_id"],
     )
-    state = "passed" if not sum(outcome.get(name, 0) for name in ("row_errors", "column_errors", "failures")) else "different"
-    publish(spark, store, **values, state=state)
+    state = (
+        "passed"
+        if not sum(outcome.get(name, 0) for name in ("row_errors", "column_errors", "failures"))
+        else "different"
+    )
+    publish(spark, store, **publish_values, state=state)
     print(outcome)
 except BaseException:
-    publish(spark, store, **values, state="failed")
+    publish(spark, store, **publish_values, state="failed")
     raise

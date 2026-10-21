@@ -35,28 +35,20 @@ UNIT_STATUS_FIELDS = (
 )
 
 
-def pair_segment(pair: str) -> str:
-    return quote(str(pair), safe="")
+def left_row_path(_pair: str) -> str:
+    return "row_check/left.json"
 
 
-def pair_root(pair: str) -> str:
-    return f"pairs/{pair_segment(pair)}"
+def row_result_path(_pair: str) -> str:
+    return "row_check/result.json"
 
 
-def left_row_path(pair: str) -> str:
-    return f"{pair_root(pair)}/row_check/left.json"
+def plan_path(_pair: str) -> str:
+    return "plan.json"
 
 
-def row_result_path(pair: str) -> str:
-    return f"{pair_root(pair)}/row_check/result.json"
-
-
-def plan_path(pair: str) -> str:
-    return f"{pair_root(pair)}/plan.json"
-
-
-def fixed_keys_path(pair: str) -> str:
-    return f"{pair_root(pair)}/fixed_keys.json"
+def fixed_keys_path(_pair: str) -> str:
+    return "fixed_keys.json"
 
 
 def fixed_keys_document(store, pair: str) -> dict[str, Any] | None:
@@ -64,75 +56,70 @@ def fixed_keys_document(store, pair: str) -> dict[str, Any] | None:
     return store.get_json(key) if store.exists(key) else None
 
 
-def unit_prefix(pair: str) -> str:
-    return f"{pair_root(pair)}/units/"
+def unit_prefix(_pair: str) -> str:
+    return "units/"
 
 
 def unit_path(pair: str, sequence: int, unit_id: str) -> str:
     return f"{unit_prefix(pair)}{int(sequence):08d}-{unit_id}.json"
 
 
-def result_path(pair: str, unit_id: str) -> str:
-    return f"{pair_root(pair)}/col_check/results/{unit_id}.json"
+def result_path(_pair: str, unit_id: str) -> str:
+    return f"col_check/results/{unit_id}.json"
 
 
-def failure_path(pair: str, unit_id: str) -> str:
-    return f"{pair_root(pair)}/col_check/failures/{unit_id}.json"
+def failure_path(_pair: str, unit_id: str) -> str:
+    return f"col_check/failures/{unit_id}.json"
 
 
-def right_ready_path(pair: str, window: str) -> str:
-    return f"{pair_root(pair)}/col_check/right_ready/{quote(str(window), safe='')}.json"
+def right_ready_path(_pair: str, window: str) -> str:
+    return f"col_check/right_ready/{quote(str(window), safe='')}.json"
 
 
 def audit_prefix(pair: str | None) -> str:
-    return f"{pair_root(pair)}/audit/" if pair else "_status/audit/"
+    return "audit/" if pair else "_status/audit/"
 
 
 def audit_error_prefix(pair: str | None) -> str:
-    return f"{pair_root(pair)}/audit_errors/" if pair else "_status/audit_errors/"
+    return "audit_errors/" if pair else "_status/audit_errors/"
 
 
-def _list_pair_json(store, predicate) -> list[tuple[str, dict[str, Any]]]:
-    return [
-        (key, store.get_json(key))
-        for key in store.list_keys("pairs/")
-        if key.endswith(".json") and predicate(key)
-    ]
+def _list_json(store, prefix: str) -> list[tuple[str, dict[str, Any]]]:
+    return [(key, store.get_json(key)) for key in store.list_keys(prefix) if key.endswith(".json")]
 
 
-def _list_suffix(store, suffix: str) -> list[tuple[str, dict[str, Any]]]:
-    return _list_pair_json(store, lambda key: key.endswith(suffix))
+def _single_json(store, path: str) -> list[tuple[str, dict[str, Any]]]:
+    return [(path, store.get_json(path))] if store.exists(path) else []
 
 
 def list_left_documents(store) -> list[tuple[str, dict[str, Any]]]:
-    return _list_suffix(store, "/row_check/left.json")
+    return _single_json(store, left_row_path(""))
 
 
 def list_row_results(store) -> list[tuple[str, dict[str, Any]]]:
-    return _list_suffix(store, "/row_check/result.json")
+    return _single_json(store, row_result_path(""))
 
 
 def list_plans(store) -> list[tuple[str, dict[str, Any]]]:
-    return _list_suffix(store, "/plan.json")
+    return _single_json(store, plan_path(""))
 
 
 def list_units(store, pairs: list[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
-    wanted = None if pairs is None else set(pairs)
-    if wanted is None:
-        return _list_pair_json(store, lambda key: "/units/" in key)
-    return [row for pair in sorted(wanted) for row in store.list_json(unit_prefix(pair))]
+    if pairs is not None and not pairs:
+        return []
+    return _list_json(store, unit_prefix(""))
 
 
 def list_results(store) -> list[tuple[str, dict[str, Any]]]:
-    return _list_pair_json(store, lambda key: "/col_check/results/" in key)
+    return _list_json(store, "col_check/results/")
 
 
 def list_failures(store) -> list[tuple[str, dict[str, Any]]]:
-    return _list_pair_json(store, lambda key: "/col_check/failures/" in key)
+    return _list_json(store, "col_check/failures/")
 
 
 def list_right_ready(store) -> list[tuple[str, dict[str, Any]]]:
-    return _list_pair_json(store, lambda key: "/col_check/right_ready/" in key)
+    return _list_json(store, "col_check/right_ready/")
 
 
 def active_unit_ids(store) -> set[str]:

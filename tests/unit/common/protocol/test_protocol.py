@@ -30,7 +30,7 @@ def _status_rows(store):
 
 def test_unit():
     store = MemoryStore()
-    store.put_json("pairs/orders/plan.json", _plan())
+    store.put_json("plan.json", _plan())
     assert {row["state"] for row in _status_rows(store).values()} == {"waiting_left"}
 
     amount = unit_id("orders", "2026-01", "amount")

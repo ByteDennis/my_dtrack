@@ -138,6 +138,10 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "pair_config(row)" in source
     assert "APPLY = False" in source
 
+    right_notebook = (ROOT / "src/pair_recon_right/notebook.py").read_text(encoding="utf-8")
+    assert right_notebook.count("**publish_values") == 2
+    assert "publish(spark, store, **values" not in right_notebook
+
     schema = (ROOT / "setup" / "schema.sql").read_text(encoding="utf-8")
     pair_sql_schema = schema.split("pair_recon_pair_sql", 1)[1].split(");", 1)[0]
     assert "left_source STRING NOT NULL" in schema

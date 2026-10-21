@@ -119,7 +119,6 @@ class Catalog:
             "worker_threads",
             "detail",
         )
-        fields = ", ".join(columns)
         numeric = {
             "units_expected",
             "units_ready",
@@ -127,16 +126,24 @@ class Catalog:
             "units_failed",
             "worker_threads",
         }
-        values = ", ".join(
-            f"CAST(:{name} AS TIMESTAMP_NTZ)"
-            if name == "snapshot_ts"
-            else f"CAST(:{name} AS BIGINT)"
-            if name in numeric
-            else f":{name}"
+        expressions = {
+            name: (
+                f"CAST(:{name} AS TIMESTAMP_NTZ)"
+                if name == "snapshot_ts"
+                else f"CAST(:{name} AS BIGINT)"
+                if name in numeric
+                else f":{name}"
+            )
             for name in columns
-        )
+        }
+        updates = ", ".join(f"{name}={expressions[name]}" for name in columns if name != "run_id")
+        fields = ", ".join(columns)
+        values = ", ".join(expressions[name] for name in columns)
         self.sql.execute(
-            f"INSERT INTO {self.progress_table} ({fields}) VALUES ({values})",
+            f"""MERGE INTO {self.progress_table} AS t
+USING (SELECT :run_id run_id) AS s ON t.run_id = s.run_id
+WHEN MATCHED THEN UPDATE SET {updates}
+WHEN NOT MATCHED THEN INSERT ({fields}) VALUES ({values})""",
             {name: row[name] for name in columns},
         )
 

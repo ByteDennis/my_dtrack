@@ -19,7 +19,7 @@ def test_event(tmp_path):
     right.refresh()
 
     assert left_key and right_key
-    assert len(store.list_keys("pairs/orders/audit/")) == 2
+    assert len(store.list_keys("audit/")) == 2
     text = store.get_bytes("_status/audit.txt").decode()
     assert text == "SELECT * FROM APP.ORDERS\n\nSELECT * FROM main.sales.orders\n\n"
     assert "-- timestamp=" not in text
@@ -29,7 +29,7 @@ def test_event_order_uses_internal_order_when_timestamps_match(tmp_path):
     store = VolumeStore(tmp_path / "run")
     timestamp = "2026-10-21T04:38:46-04:00"
     store.put_bytes(
-        "pairs/orders/audit/a.txt",
+        "audit/a.txt",
         (
             f"-- timestamp={timestamp} side=right backend=spark operation=query "
             "audit_order=2026-10-21T04:38:46.000002-04:00\n"
@@ -37,7 +37,7 @@ def test_event_order_uses_internal_order_when_timestamps_match(tmp_path):
         ).encode(),
     )
     store.put_bytes(
-        "pairs/orders/audit/z.txt",
+        "audit/z.txt",
         (
             f"-- timestamp={timestamp} side=left backend=oracle operation=query "
             "audit_order=2026-10-21T04:38:46.000001-04:00\n"
@@ -117,7 +117,7 @@ def test_shape(tmp_path):
         operation="pull_window",
     )
     assert first and repeated is None and changed
-    assert len(store.list_keys("pairs/orders/audit/")) == 2
+    assert len(store.list_keys("audit/")) == 2
     audit.refresh()
     text = store.get_bytes("_status/audit.txt").decode()
     assert "2026-01-01" in text and "2026-02-01" in text
@@ -138,7 +138,7 @@ def test_shape2(tmp_path):
             )
         )
     assert sum(result is not None for result in results) == 1
-    assert len(store.list_keys("pairs/orders/audit/")) == 1
+    assert len(store.list_keys("audit/")) == 1
 
 
 def test_shape3(tmp_path):
@@ -157,7 +157,7 @@ def test_shape3(tmp_path):
 
     assert first and repeated is None
     assert first.rsplit("/", 1)[-1].count("-") == 0
-    assert store.list_keys("pairs/orders/audit/") == [first]
+    assert store.list_keys("audit/") == [first]
 
 
 def test_long(tmp_path):

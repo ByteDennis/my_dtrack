@@ -13,10 +13,10 @@ def test_runid(value):
 def test_store(tmp_path):
     root = VolumeStore(tmp_path)
     run = root.child("r1")
-    run.put_json("pairs/p/row_check/left.json", {"pair": "p"})
+    run.put_json("row_check/left.json", {"pair": "p"})
     assert root.list_prefixes() == ["r1"]
     selected, run_id = resolve_run(tmp_path)
-    assert run_id == "r1" and selected.get_json("pairs/p/row_check/left.json") == {"pair": "p"}
+    assert run_id == "r1" and selected.get_json("row_check/left.json") == {"pair": "p"}
 
 
 def test_temporary_name_does_not_repeat_target_name(tmp_path, monkeypatch):

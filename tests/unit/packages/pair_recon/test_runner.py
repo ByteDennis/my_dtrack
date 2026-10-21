@@ -40,15 +40,21 @@ from pair_recon_right.engine.job import run as run_right
 
 
 def test_runid():
-    value = make_run_id(
+    morning = make_run_id(
         "订单 pair",
         "测试 owner",
         "America/New_York",
         now=datetime(2026, 10, 21, 9, 46, 33, tzinfo=ZoneInfo("America/New_York")),
     )
-    assert "/" not in value and "订单-pair-测试-owner" in value
-    assert local_run_directory("outputs", value, "America/New_York") == (
-        Path("outputs/2026-10-21") / value
+    evening = make_run_id(
+        "订单 pair",
+        "测试 owner",
+        "America/New_York",
+        now=datetime(2026, 10, 21, 22, 1, tzinfo=ZoneInfo("America/New_York")),
+    )
+    assert morning == evening == "订单-pair-测试-owner-20261021"
+    assert local_run_directory("outputs", morning, "America/New_York") == (
+        Path("outputs/2026-10-21") / morning
     )
     assert local_run_directory(
         "outputs",
@@ -309,16 +315,16 @@ def test_attribute_check_registry_and_multiselect(monkeypatch):
 def test_retry():
     store = MemoryStore()
     store.put_json(
-        "pairs/p/row_check/result.json",
+        "row_check/result.json",
         {"partitions": {"all": {"verdict": "match"}}},
     )
-    store.put_json("pairs/p/col_check/results/good.json", {"verdict": "match"})
-    store.put_json("pairs/p/col_check/results/bad.json", {"verdict": "diff"})
-    store.put_json("pairs/p/col_check/failures/error.json", {"error": "boom"})
+    store.put_json("col_check/results/good.json", {"verdict": "match"})
+    store.put_json("col_check/results/bad.json", {"verdict": "diff"})
+    store.put_json("col_check/failures/error.json", {"error": "boom"})
     assert retry_failed(store) == 2
-    assert store.exists("pairs/p/col_check/results/good.json")
-    assert not store.exists("pairs/p/col_check/results/bad.json")
-    assert not store.exists("pairs/p/col_check/failures/error.json")
+    assert store.exists("col_check/results/good.json")
+    assert not store.exists("col_check/results/bad.json")
+    assert not store.exists("col_check/failures/error.json")
 
 
 def test_logging():
@@ -407,7 +413,7 @@ def test_progress():
     write_run_status(
         store, {"state": "left_col_check", "run_id": "r", "timezone": "America/New_York"}
     )
-    store.put_json("pairs/p/row_check/left.json", {"counts": {"all": 2}})
+    store.put_json("row_check/left.json", {"counts": {"all": 2}})
     store.put_json(plan_path("p"), {"pair": "p", "expected_units": 2, "windows": [], "columns": []})
     store.put_json(unit_path("p", 1, "u1"), {"pair": "p", "unit_id": "u1"})
     store.put_json(result_path("p", "u1"), {"pair": "p", "unit_id": "u1", "verdict": "match"})
@@ -490,16 +496,16 @@ def test_sas_default_bundle_uses_output_root(monkeypatch, tmp_path, capsys):
 
 
 @pytest.mark.parametrize(
-    ("run_mode", "left_input", "right_input"),
+    ("run_mode", "left_input", "right_input", "existing"),
     [
-        ("full", "database", "database"),
-        ("full", "csv", "database"),
-        ("full", "database", "csv"),
-        ("full", "csv", "csv"),
-        ("left-only", "database", "database"),
+        ("full", "database", "database", True),
+        ("full", "csv", "database", False),
+        ("full", "database", "csv", False),
+        ("full", "csv", "csv", False),
+        ("left-only", "database", "database", False),
     ],
 )
-def test_prompt(monkeypatch, run_mode, left_input, right_input, tmp_path):
+def test_prompt(monkeypatch, run_mode, left_input, right_input, existing, tmp_path):
     metadata = {
         "left": {"source": "oracle", "table": "L", "dsn": "hive"},
         "right": {"source": "databricks", "table": "R"},
@@ -515,7 +521,7 @@ def test_prompt(monkeypatch, run_mode, left_input, right_input, tmp_path):
             return [{"pair_name": "orders", "config_json": metadata}]
 
         def run(self, _run_id):
-            return None
+            return {"state": "failed"} if existing else None
 
     defaults = {
         "owner": "me",
@@ -546,12 +552,15 @@ def test_prompt(monkeypatch, run_mode, left_input, right_input, tmp_path):
     )
     monkeypatch.setattr(cli, "Catalog", Catalog)
     monkeypatch.setattr(cli, "make_run_id", lambda *_args: "r-new")
-    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "")
     monkeypatch.setenv("PAIR_RECON_OUTPUT_DIR", str(tmp_path / "artifacts"))
     settings, config, action, _client, _catalog = cli.prompts(
         defaults, workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object())
     )
-    assert settings["run_id"] == "r-new" and action == "new"
+    assert settings["run_id"] == "r-new"
+    assert action == ("restart" if existing else "new")
+    assert not any("Run id" in prompt or "Existing run action" in prompt for prompt in prompts)
     assert settings["run_mode"] == run_mode
     assert settings["left_input"] == left_input
     assert settings["work_dir"] == str(tmp_path / "artifacts")
@@ -704,6 +713,9 @@ def test_local(monkeypatch, tmp_path):
     class Catalog:
         progress = staticmethod(lambda _row: None)
 
+        def clear(self, _run_id):
+            pass
+
         def status(self, **values):
             events.append(values["state"])
 
@@ -770,6 +782,9 @@ def test_left_only_does_not_start_or_run_right(monkeypatch, tmp_path):
     class Catalog:
         progress = staticmethod(lambda _row: None)
 
+        def clear(self, _run_id):
+            pass
+
         def status(self, **values):
             events.append(values["state"])
 
@@ -825,6 +840,8 @@ def test_left_only_does_not_start_or_run_right(monkeypatch, tmp_path):
 
 
 def test_launch_writes_early_failure_to_left_log(monkeypatch, tmp_path):
+    states = []
+
     class Root:
         def __init__(self, *_args, **_kwargs):
             pass
@@ -835,6 +852,16 @@ def test_launch_writes_early_failure_to_left_log(monkeypatch, tmp_path):
     def missing_job(job_id, **_kwargs):
         assert job_id == 42
         raise RuntimeError("job 42 was not found")
+
+    class Catalog:
+        def clear(self, _run_id):
+            pass
+
+        def progress(self, _row):
+            pass
+
+        def status(self, **values):
+            states.append(values["state"])
 
     monkeypatch.setattr(runner, "VolumeStore", Root)
     settings = {
@@ -861,7 +888,13 @@ def test_launch_writes_early_failure_to_left_log(monkeypatch, tmp_path):
     config = {"pairs": {"orders": {"right": {"source": "databricks"}}}}
 
     with pytest.raises(RuntimeError, match="job 42 was not found"):
-        runner.launch(settings, config, action="new", workspace_client=client)
+        runner.launch(
+            settings,
+            config,
+            action="new",
+            workspace_client=client,
+            catalog=Catalog(),
+        )
 
     content = (
         local_run_directory(tmp_path, "failed-1", settings["timezone"]) / "left.log"
@@ -870,6 +903,7 @@ def test_launch_writes_early_failure_to_left_log(monkeypatch, tmp_path):
     assert "starting Right Databricks job: reference=test-run job_id=42" in content
     assert "run failed" in content
     assert "RuntimeError: job 42 was not found" in content
+    assert states == ["running", "failed"]
 
 
 def test_csvrun(tmp_path):
@@ -936,14 +970,14 @@ def test_left_only_csvrun_uploads_left_artifacts(tmp_path):
         left_only=True,
     )
 
-    units = store.list_json("pairs/orders/units/")
+    units = store.list_json("units/")
     assert left == {"row": "ready", "units": 2}
-    assert store.get_json("pairs/orders/row_check/left.json")["counts"] == {"all": 2}
-    assert store.get_json("pairs/orders/plan.json")["expected_units"] == 2
+    assert store.get_json("row_check/left.json")["counts"] == {"all": 2}
+    assert store.get_json("plan.json")["expected_units"] == 2
     assert len(units) == 2
     assert all("left_statistics" in value for _key, value in units)
     assert store.exists("_status/col_check.closed.json")
-    assert not store.list_keys("pairs/orders/col_check/results/")
+    assert not store.list_keys("col_check/results/")
 
 
 def test_left_only_rejects_snapshot_pair(tmp_path):

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from collections.abc import Hashable
 
-from tqdm.auto import tqdm
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
-from .run_logging import get_left_logger
+from .run_logging import get_left_logger, get_logger
 
 log = get_left_logger("progress")
 PHASES = ("load", "infer", "aggregate", "finalize", "publish")
+
+
+def _interactive_terminal() -> bool:
+    return bool(getattr(sys.stderr, "isatty", lambda: False)())
 
 
 class StatisticsProgress:
@@ -30,19 +36,29 @@ class StatisticsProgress:
         self.started = time.monotonic()
         self.lock = threading.Lock()
         self.jobs: dict[Hashable, dict] = {}
+        self.interactive = _interactive_terminal()
+        self.logging_context = None
         self.bar = tqdm(
             total=self.total_steps,
             desc="Left statistics",
             unit="step",
             dynamic_ncols=True,
-            disable=None,
+            disable=not self.interactive,
+            leave=False,
         )
 
     def __enter__(self):
+        if self.interactive:
+            self.logging_context = logging_redirect_tqdm(loggers=[get_logger()], tqdm_class=tqdm)
+            self.logging_context.__enter__()
         return self
 
-    def __exit__(self, _type, _value, _traceback):
-        self.close()
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            self.close()
+        finally:
+            if self.logging_context is not None:
+                self.logging_context.__exit__(exc_type, exc_value, traceback)
 
     def start(self, key: Hashable, label: str, columns: int) -> None:
         with self.lock:
@@ -143,6 +159,7 @@ class StatisticsProgress:
                 100.0 * self.completed_steps / self.total_steps if self.total_steps else 100.0,
                 elapsed,
                 "unknown" if eta is None else f"{eta:.1f}s",
+                extra={"console_silent": self.interactive},
             )
             self.bar.refresh()
 

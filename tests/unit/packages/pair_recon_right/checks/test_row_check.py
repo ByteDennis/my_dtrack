@@ -54,10 +54,10 @@ def test_snapshot():
         checks=["hash_sum"],
         left=left["left"],
     )
-    store.put_json("pairs/p/row_check/left.json", left)
+    store.put_json("row_check/left.json", left)
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
     run_row_check(store, lambda _config: FakeTarget(counts=counts))
-    plan = store.get_json("pairs/p/plan.json")
+    plan = store.get_json("plan.json")
     assert plan["left_snapshot"] is True
     assert plan["windows"][0]["partitions"] == ["2026-01-03"]
 
@@ -164,37 +164,36 @@ def test_csv():
 
 def test_pending():
     store = MemoryStore()
-    store.put_json("pairs/a/row_check/left.json", left_document("a"))
-    store.put_json("pairs/b/row_check/left.json", left_document("b"))
-    store.put_json("pairs/b/row_check/result.json", {"pair": "b"})
-    store.put_json("_status/left_row_check.closed.json", {"pairs": ["a", "b"]})
-    assert [doc["pair"] for doc in pending_left_documents(store)] == ["a"]
+    store.put_json("row_check/left.json", left_document())
+    assert [doc["pair"] for doc in pending_left_documents(store)] == ["p"]
+    store.put_json("row_check/result.json", {"pair": "p"})
+    assert pending_left_documents(store) == []
 
 
 def test_reconcile():
     store = MemoryStore()
-    store.put_json("pairs/p/row_check/left.json", left_document())
+    store.put_json("row_check/left.json", left_document())
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 1
-    doc = store.get_json("pairs/p/row_check/result.json")
+    doc = store.get_json("row_check/result.json")
     assert doc["summary"] == {"match": 1, "count_diff": 1, "left_only": 1, "right_only": 0}
     assert doc["timing"]["left_count_s"] == 0.1
-    manifest = store.get_json("pairs/p/plan.json")
+    manifest = store.get_json("plan.json")
     assert manifest["windows"][0]["partitions"] == ["2026-01-01"]
     assert store.exists("_status/row_check.closed.json")
-    assert store.exists("report/pairs/p/row_check.csv")
+    assert store.exists("report/row_check.csv")
     assert store.exists("_status/units.csv")
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 0
 
 
 def test_restart():
     store = MemoryStore()
-    store.put_json("pairs/p/row_check/left.json", left_document())
+    store.put_json("row_check/left.json", left_document())
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
     real_put = store.put_json
 
     def crash_on_manifest(key, value):
-        if key.endswith("/plan.json"):
+        if key == "plan.json":
             raise ConnectionError("killed")
         return real_put(key, value)
 
@@ -202,33 +201,32 @@ def test_restart():
     with pytest.raises(ConnectionError):
         run_row_check(store, lambda _cfg: FakeTarget())
     store.put_json = real_put
-    assert not store.exists("pairs/p/row_check/result.json")
+    assert not store.exists("row_check/result.json")
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 1
-    assert store.exists("pairs/p/plan.json")
+    assert store.exists("plan.json")
     assert store.exists("_status/row_check.closed.json")
 
 
 def test_open():
     store = MemoryStore()
-    store.put_json("pairs/a/row_check/left.json", left_document("a"))
-    store.put_json("_status/left_row_check.closed.json", {"pairs": ["a", "b"]})
+    store.put_json("row_check/left.json", left_document())
     run_row_check(store, lambda _cfg: FakeTarget())
     assert not store.exists("_status/row_check.closed.json")
 
 
 def test_manual():
     store = MemoryStore()
-    store.put_json("pairs/p/row_check/left.json", left_document())
+    store.put_json("row_check/left.json", left_document())
     run_row_check(store, lambda _cfg: FakeTarget(), gate="manual")
-    assert store.exists("pairs/p/row_check/result.json")
-    assert not store.exists("pairs/p/plan.json")
+    assert store.exists("row_check/result.json")
+    assert not store.exists("plan.json")
 
 
 def test_preflight():
     store = MemoryStore()
     with pytest.raises(RuntimeError, match="TABLE_OR_VIEW_NOT_FOUND"):
         reconcile_pair(store, left_document(), FakeTarget(healthy=False))
-    assert not store.exists("pairs/p/row_check/result.json")
+    assert not store.exists("row_check/result.json")
 
 
 def test_v2():
@@ -243,14 +241,14 @@ def test_v2():
             for day, count in left["counts"].items()
         },
     }
-    store.put_json("pairs/p/row_check/left.json", left)
+    store.put_json("row_check/left.json", left)
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
 
     with pytest.raises(RuntimeError, match=r"p: 2026-01-02, 2026-01-03"):
         run_row_check(store, lambda _cfg: FakeTarget())
-    assert store.exists("pairs/p/row_check/result.json")
-    assert store.exists("report/pairs/p/row_check.csv")
-    assert store.get_json("pairs/p/plan.json")["version"] == 2
+    assert store.exists("row_check/result.json")
+    assert store.exists("report/row_check.csv")
+    assert store.get_json("plan.json")["version"] == 2
 
     updated = build_manifest(
         "run",
@@ -258,7 +256,7 @@ def test_v2():
         {**left["pair_config"], "excluded_partitions": ["2026-01-02", "2026-01-03"]},
         baseline,
     )
-    store.put_json("pairs/p/plan.json", updated)
+    store.put_json("plan.json", updated)
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 0
 
 
@@ -277,7 +275,7 @@ def test_all2():
         "right": left["right"],
         "col_map": {"amount": "amount"},
     }
-    store.put_json("pairs/p/row_check/left.json", left)
+    store.put_json("row_check/left.json", left)
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
     with pytest.raises(RuntimeError, match="partition_mode all row counts differ"):
         run_row_check(store, lambda _cfg: FakeTarget(counts={"all": 6}))

@@ -1,6 +1,5 @@
 import json
 import re
-import secrets
 import threading
 import time
 from copy import deepcopy
@@ -35,7 +34,7 @@ from pair_recon_right.engine.job import run as run_right
 
 _SENSITIVE_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
 _SENSITIVE_WORDS = ("password", "secret", "token", "credential")
-_RUN_DATE = re.compile(r"-(\d{4})(\d{2})(\d{2})T\d{6}-[0-9a-f]{4}$")
+_RUN_DATE = re.compile(r"-(\d{4})(\d{2})(\d{2})$")
 log = get_left_logger("runner")
 
 
@@ -89,7 +88,7 @@ def workspace(profile: str):
 
 
 def make_run_id(pair: str, owner: str, timezone: str, now=None) -> str:
-    stamp = (now or datetime.now(ZoneInfo(timezone))).strftime("%Y%m%dT%H%M%S")
+    stamp = (now or datetime.now(ZoneInfo(timezone))).strftime("%Y%m%d")
     clean = "-".join(
         filter(
             None,
@@ -99,7 +98,7 @@ def make_run_id(pair: str, owner: str, timezone: str, now=None) -> str:
             ),
         )
     )
-    return validate_run_id(f"{clean}-{stamp}-{secrets.token_hex(2)}")
+    return validate_run_id(f"{clean}-{stamp}")
 
 
 def local_run_directory(
@@ -290,7 +289,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             settings["volume_root"],
         )
         store = VolumeStore(settings["volume_root"], files=client.files).child(run_id)
-        if action == "restart":
+        if action in {"new", "restart"}:
             store.clear()
             if catalog:
                 catalog.clear(run_id)
@@ -402,24 +401,27 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             "volume_run_root": store.root_uri,
         }
     except BaseException:
+        final_state = "failed"
         log.exception("run failed")
         if remote is not None and client is not None:
             try:
                 client.jobs.cancel_run(int(remote.run_id))
             except Exception:
                 log.exception("could not cancel Right Databricks run: run_id=%s", remote.run_id)
-        if catalog:
-            try:
-                catalog.status(
-                    run_id=run_id,
-                    pair=pair,
-                    owner=settings["owner"],
-                    state="failed",
-                    timezone=settings["timezone"],
-                )
-            except Exception:
-                log.exception("could not update failed run status")
         raise
     finally:
-        if sampler:
-            sampler.stop(final_state)
+        try:
+            if sampler:
+                sampler.stop(final_state)
+        finally:
+            if catalog and final_state == "failed":
+                try:
+                    catalog.status(
+                        run_id=run_id,
+                        pair=pair,
+                        owner=settings["owner"],
+                        state=final_state,
+                        timezone=settings["timezone"],
+                    )
+                except Exception:
+                    log.exception("could not update final run status: state=%s", final_state)

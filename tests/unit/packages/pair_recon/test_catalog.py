@@ -118,6 +118,20 @@ def test_status(state):
     assert (values["ended"] is not None) == (state in {"left_complete", "failed"})
 
 
+def test_clear_removes_all_rows_for_daily_run_id():
+    sql = Sql()
+    catalog = Catalog(sql, "c.s.pair_meta", "c.s.run_status", "c.s.run_error", "c.s.progress")
+
+    catalog.clear("orders-me-20261021")
+
+    assert [statement for statement, _values in sql.calls] == [
+        "DELETE FROM c.s.run_error WHERE run_id=:run_id",
+        "DELETE FROM c.s.progress WHERE run_id=:run_id",
+        "DELETE FROM c.s.run_status WHERE run_id=:run_id",
+    ]
+    assert all(values == {"run_id": "orders-me-20261021"} for _statement, values in sql.calls)
+
+
 def test_progress():
     sql = Sql()
     catalog = Catalog(sql, "c.s.pair_meta", "c.s.run_status", "c.s.run_error", "c.s.progress")
@@ -136,7 +150,8 @@ def test_progress():
         }
     )
     statement, values = sql.calls[-1]
-    assert "INSERT INTO c.s.progress" in statement
+    assert "MERGE INTO c.s.progress" in statement
+    assert "ON t.run_id = s.run_id" in statement
     assert values["worker_threads"] == 3
 
 
@@ -144,7 +159,7 @@ def test_finish():
     sql = Sql()
     store = MemoryStore()
     store.put_json(
-        "pairs/orders/row_check/result.json",
+        "row_check/result.json",
         {"partitions": {"all": {"left": 2, "right": 1, "verdict": "count_diff"}}},
     )
     catalog = Catalog(sql, "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress")
@@ -167,7 +182,7 @@ def test_error_rows_use_attribute_registry():
 
     store = MemoryStore()
     store.put_json(
-        "pairs/orders/col_check/results/u.json",
+        "col_check/results/u.json",
         {
             "pair": "orders",
             "vintage": "2026-01",
