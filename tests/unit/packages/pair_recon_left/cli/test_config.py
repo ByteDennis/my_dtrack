@@ -106,6 +106,17 @@ def test_vintage_selection_config():
     assert configured["vintage_sample_size"] == 3
 
 
+def test_month_number_date_type_normalizes_excluded_partitions():
+    value = pair("date")
+    value["left"]["date_type"] = {"type": "number", "format": "month"}
+    value["right"]["date_type"] = {"type": "number", "format": "month"}
+    value["excluded_partitions"] = ["2026-01-15", "2026-01-31", "2026-02-01"]
+
+    configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
+
+    assert configured["excluded_partitions"] == ["2026-01-01", "2026-02-01"]
+
+
 def test_vintage_selection_config_rejects_ambiguity_and_all_mode():
     value = pair("date")
     value.update(vintage_sample_size=2, vintage_values=["2026-01-01"])

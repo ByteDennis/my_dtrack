@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from ..common.model.manifest import sample_plan, statistics_plan
 from ..common.sql.column_types import resolve_column_type
-from ..common.sql.dates import canonical_date, resolve_date_type
+from ..common.sql.dates import resolve_date_type
 from ..common.sql.query_windows import normalize_query_windows
 
 LEFT_SOURCES = {"oracle", "hadoop", "csv"}
@@ -217,8 +217,9 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise TypeError(f"{name}: excluded_columns must be a list of Left column names")
         if partition_mode == "date":
             try:
+                partition_type = resolve_date_type(left.get("date_type"))
                 pair["excluded_partitions"] = sorted(
-                    {canonical_date(value) for value in excluded_partitions}
+                    {partition_type.partition_key(value) for value in excluded_partitions}
                 )
             except ValueError as exc:
                 raise ValueError(f"{name}: invalid excluded_partitions: {exc}") from None

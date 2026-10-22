@@ -4,6 +4,20 @@ from zoneinfo import ZoneInfo
 from .engine.common.model.attribute_checks import ATTRIBUTE_CHECKS
 from .engine.common.model.protocol import list_failures, list_results, list_row_results
 
+ERROR_COLUMNS = (
+    "run_id",
+    "check_name",
+    "pair_name",
+    "vintage",
+    "column_name",
+    "partition_value",
+    "left_value",
+    "right_value",
+    "detail",
+    "payload",
+    "created_at",
+)
+
 
 def error_rows(store, run_id, pair, now):
     rows = []
@@ -64,6 +78,13 @@ def error_rows(store, run_id, pair, now):
     return rows
 
 
+def append_error_rows(spark, error_table, rows) -> None:
+    if not rows:
+        return
+    schema = spark.table(error_table).select(*ERROR_COLUMNS).schema
+    spark.createDataFrame(rows, schema=schema).write.mode("append").saveAsTable(error_table)
+
+
 def publish(
     spark, store, *, run_id, pair, owner, timezone, pair_table, status_table, error_table, state
 ):
@@ -107,8 +128,7 @@ def publish(
     errors = DeltaTable.forName(spark, error_table)
     errors.delete(F.col("run_id") == F.lit(run_id))
     rows = error_rows(store, run_id, pair, now)
-    if rows:
-        spark.createDataFrame(rows).write.mode("append").saveAsTable(error_table)
+    append_error_rows(spark, error_table, rows)
     DeltaTable.forName(spark, pair_table).update(
         condition=F.col("pair_name") == F.lit(pair),
         set={

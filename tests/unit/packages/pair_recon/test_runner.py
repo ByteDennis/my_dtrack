@@ -66,6 +66,32 @@ def test_runid():
     ) == Path("outputs/2026-10-22/custom-run")
 
 
+def test_excluded_partition_ranges_and_month_numbers():
+    assert cli.excluded_partition_values("2025-04-02->2025-04-05, 2025-04-10") == [
+        "2025-04-02",
+        "2025-04-03",
+        "2025-04-04",
+        "2025-04-05",
+        "2025-04-10",
+    ]
+    assert (
+        cli.excluded_partitions_text(
+            ["2025-04-02", "2025-04-03", "2025-04-04", "2025-04-05", "2025-04-10"]
+        )
+        == "2025-04-02->2025-04-05, 2025-04-10"
+    )
+    assert cli.excluded_partition_values(
+        "2025-04-02->2025-04-05, 2025-05-10",
+        {"type": "number", "format": "month"},
+    ) == ["2025-04-01", "2025-05-01"]
+
+
+@pytest.mark.parametrize("value", ["20250402", "2025-04-05->2025-04-02", "2025/04/02"])
+def test_excluded_partition_ranges_reject_invalid_values(value):
+    with pytest.raises(ValueError, match="Excluded partition"):
+        cli.excluded_partition_values(value)
+
+
 def test_statement_sql_reports_waiting_and_completion(monkeypatch):
     def response(state, rows=None):
         return SimpleNamespace(
@@ -758,6 +784,114 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
     if right_source == "csv":
         assert config["pairs"]["orders"]["right"]["source"] == "csv"
         assert config["pairs"]["orders"]["right_pre_sampled"] is True
+
+
+def test_prompt_records_and_applies_date_columns_and_types(monkeypatch, tmp_path):
+    metadata = {
+        "left": {
+            "source": "oracle",
+            "table": "L",
+            "date_col": "ORDER_DT",
+            "date_type": {"type": "string", "format": "compact"},
+        },
+        "right": {
+            "source": "databricks",
+            "table": "R",
+            "date_col": "order_dt",
+            "date_type": "date",
+        },
+        "col_map": {"A": "a"},
+    }
+
+    class Catalog:
+        def __init__(self, *_args):
+            pass
+
+        def pairs(self):
+            return [{"pair_name": "orders", "config_json": metadata}]
+
+        def run(self, _run_id):
+            return None
+
+    defaults = {
+        "owner": "me",
+        "profile": "corp",
+        "warehouse_id": "warehouse",
+        "pair_table": "main.recon.pair_recon_pair_meta",
+        "status_table": "main.recon.pair_recon_run_status",
+        "error_table": "main.recon.pair_recon_run_error",
+        "volume_root": "/Volumes/main/recon/artifacts/runs",
+        "right_job_id": "42",
+        "pair": "orders",
+        "run_mode": "full",
+        "timezone": "America/New_York",
+        "partition_mode": "date",
+        "checks": "row_count,hash_sum",
+        "sample": "all",
+        "strict": False,
+        "from_date": "2026-01-01",
+        "to_date": "2026-01-31",
+        "excluded_partitions": [
+            "2026-01-02",
+            "2026-01-03",
+            "2026-01-04",
+            "2026-01-05",
+            "2026-01-10",
+        ],
+    }
+    replies = {
+        "Left date column": "BUSINESS_DT",
+        "Left date type": '{"type":"sas","format":"datetime"}',
+        "Right date column": "business_dt",
+        "Right date type": '{"type":"string","format":"dash"}',
+        "Excluded partitions": "2026-01-02->2026-01-05, 2026-01-10",
+    }
+    prompts = []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return next((value for label, value in replies.items() if prompt.startswith(label)), "")
+
+    monkeypatch.setattr(cli, "Catalog", Catalog)
+    monkeypatch.setattr(cli, "make_run_id", lambda *_args: "r-new")
+    monkeypatch.setattr("builtins.input", answer)
+    monkeypatch.setenv("PAIR_RECON_OUTPUT_DIR", str(tmp_path / "artifacts"))
+
+    settings, config, _action, _client, _catalog = cli.prompts(
+        defaults, workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object())
+    )
+
+    assert any(prompt.startswith("Left date column [ORDER_DT]") for prompt in prompts)
+    assert any(
+        prompt.startswith(
+            'Left date type (date/string/number/sas or JSON) [{"type":"string","format":"compact"}]'
+        )
+        for prompt in prompts
+    )
+    assert any(
+        prompt.startswith(
+            "Excluded partitions (YYYY-MM-DD or start->end, comma-separated) "
+            "[2026-01-02->2026-01-05, 2026-01-10]"
+        )
+        for prompt in prompts
+    )
+    assert settings["left_date_col"] == "BUSINESS_DT"
+    assert settings["left_date_type"] == {"type": "sas", "format": "datetime"}
+    assert settings["right_date_col"] == "business_dt"
+    assert settings["right_date_type"] == {"type": "string", "format": "dash"}
+    assert settings["excluded_partitions"] == [
+        "2026-01-02",
+        "2026-01-03",
+        "2026-01-04",
+        "2026-01-05",
+        "2026-01-10",
+    ]
+    pair = config["pairs"]["orders"]
+    assert pair["left"]["date_col"] == "BUSINESS_DT"
+    assert pair["left"]["date_type"] == {"type": "sas", "format": "datetime"}
+    assert pair["right"]["date_col"] == "business_dt"
+    assert pair["right"]["date_type"] == {"type": "string", "format": "dash"}
+    assert pair["excluded_partitions"] == settings["excluded_partitions"]
 
 
 @pytest.mark.parametrize(

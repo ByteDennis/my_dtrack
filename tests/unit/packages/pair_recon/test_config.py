@@ -46,6 +46,11 @@ def test_load_environment_does_not_override_process_environment(monkeypatch, tmp
                 "from_date": "2026-01-01",
                 "to_date": "2026-01-31",
                 "vintage": "month",
+                "left_date_col": "BUSINESS_DT",
+                "left_date_type": {"type": "string", "format": "compact"},
+                "right_date_col": "business_dt",
+                "right_date_type": "date",
+                "excluded_partitions": ["2026-01-04", "2026-01-05"],
                 "sample": 0.1,
                 "strict": True,
                 "checks": ["row_count", "hash_sum"],
@@ -83,6 +88,18 @@ def test_config(mode, answers, expected):
         assert value["pairs"]["订单"][key] == item
     if mode == "all":
         assert "fromDate" not in value["pairs"]["订单"]
+    else:
+        assert value["pairs"]["订单"]["left"]["date_col"] == "BUSINESS_DT"
+        assert value["pairs"]["订单"]["left"]["date_type"] == {
+            "type": "string",
+            "format": "compact",
+        }
+        assert value["pairs"]["订单"]["right"]["date_col"] == "business_dt"
+        assert value["pairs"]["订单"]["right"]["date_type"] == "date"
+        assert value["pairs"]["订单"]["excluded_partitions"] == [
+            "2026-01-04",
+            "2026-01-05",
+        ]
     if answers["checks"] == ["row_count"]:
         assert "statistics" not in value["pairs"]["订单"]
 

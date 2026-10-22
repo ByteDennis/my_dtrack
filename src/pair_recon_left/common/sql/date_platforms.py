@@ -43,6 +43,7 @@ class OracleDateSqlPlatform(DateSqlPlatform):
         pattern = {
             "dash": "YYYY-MM-DD",
             "compact": "YYYYMMDD",
+            "month": "YYYYMM",
             "date9": "DDMONYYYY",
             "datetime": "DDMONYYYY:HH24:MI:SS",
         }[format]
@@ -96,6 +97,7 @@ class SparkDateSqlPlatform(DateSqlPlatform):
         pattern = {
             "dash": "yyyy-MM-dd",
             "compact": "yyyyMMdd",
+            "month": "yyyyMM",
             "date9": "dMMMyyyy",
             "datetime": "dMMMyyyy:HH:mm:ss",
         }[format]
@@ -159,6 +161,7 @@ class AthenaDateSqlPlatform(DateSqlPlatform):
         pattern = {
             "dash": "%Y-%m-%d",
             "compact": "%Y%m%d",
+            "month": "%Y%m",
             "date9": "%d%b%Y",
             "datetime": "%d%b%Y:%H:%i:%s",
         }[format]
@@ -199,6 +202,7 @@ class DuckDbDateSqlPlatform(DateSqlPlatform):
         pattern = {
             "dash": "%Y-%m-%d",
             "compact": "%Y%m%d",
+            "month": "%Y%m",
             "date9": "%d%b%Y",
             "datetime": "%d%b%Y:%H:%M:%S",
         }[format]

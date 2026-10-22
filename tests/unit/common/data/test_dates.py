@@ -119,6 +119,13 @@ def test_format(common):
     assert days.normalize("24108.75") == "2026-01-02"
     assert days.spec(portable=True) == {"type": "sas", "format": "days"}
 
+    month = dates.resolve_date_type({"type": "number", "format": "month"})
+    assert isinstance(month, dates.NumericDateType)
+    assert month.literal("2026-01-31", "oracle") == "202601"
+    assert month.normalize(202601) == "2026-01-01"
+    assert month.partition_key("2026-01-31") == "2026-01-01"
+    assert month.spec(portable=True) == {"type": "number", "format": "month"}
+
 
 @pytest.mark.parametrize(
     ("configured", "values", "expected"),
@@ -268,6 +275,11 @@ DAY_CASES = [
         "DATE '1960-01-01' + CAST(trunc(CAST(\"DT\" AS DOUBLE)) AS INTEGER)",
     ),
     ("spark", "number", "`DT`"),
+    (
+        "spark",
+        {"type": "number", "format": "month"},
+        "CAST(try_to_timestamp(TRIM(CAST(`DT` AS STRING)), 'yyyyMM') AS DATE)",
+    ),
 ]
 
 
@@ -320,6 +332,16 @@ def test_compact(common):
             date_type={"type": "string", "format": "compact"},
         )
         == "((`dt` BETWEEN '20260101' AND '20260102'))"
+    )
+    assert (
+        common.dates.bounds_where(
+            "dt",
+            dialect="spark",
+            date_type={"type": "number", "format": "month"},
+            from_date="2026-01-15",
+            to_date="2026-02-20",
+        )
+        == "`dt` >= 202601 AND `dt` <= 202602"
     )
 
 

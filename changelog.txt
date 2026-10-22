@@ -1,3 +1,23 @@
+pair_recon Prompt date controls and reliable error publishing — 2026-10-22
+
+Added
+- src/pair_conn_release: builds a small source-only `dist/pair_recon.zip` from the original runtime files, then removes development configuration and non-run tools with explicit filters and regular-expression transforms.
+- just publish: packages the four main runtime packages, launchers, environment template, workbook, minimal pyproject/justfile, and concise English readme.txt; it does not build an executable.
+
+Changed
+- src/pair_recon/app/cli.py: date-mode runs prompt for Left/Right date columns and date types, accept registered names or JSON specifications, and retain the effective values in public settings.
+- src/pair_recon/app/config.py: applies the prompted date fields to the effective runtime config.
+- src/pair_recon/app/cli.py: prompts for excluded partitions, expands inclusive `YYYY-MM-DD->YYYY-MM-DD` ranges, and saves the normalized list.
+- Left/Right date SQL: supports numeric `YYYYMM` partitions through `{"type":"number","format":"month"}` and normalizes exclusions to month-start logical keys.
+- src/pair_recon_right/catalog.py: creates run-error DataFrames with the target table schema so row-count-only failures with all-null vintage/column fields publish reliably.
+- README.md and the operator prompt notes: document the new prompts, defaults, and saved setting names.
+
+Verification
+- 684 unit tests pass.
+- Ruff check and format pass for the full source and unit/live-source test trees.
+- just publish creates a 68-file, 154749-byte ZIP; a clean extraction completes `uv sync` and `just run --help`.
+- Source distribution and wheel builds pass.
+
 pair_recon Report Databricks wait progress (47f74e0) — 2026-10-21
 
 Changed

@@ -45,6 +45,7 @@ class SparkDateSqlPlatform(DateSqlPlatform):
         pattern = {
             "dash": "yyyy-MM-dd",
             "compact": "yyyyMMdd",
+            "month": "yyyyMM",
             "date9": "dMMMyyyy",
             "datetime": "dMMMyyyy:HH:mm:ss",
         }[format]

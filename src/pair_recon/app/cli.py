@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import yaml
@@ -25,6 +26,7 @@ from pair_recon_dbx.workspace import resource_does_not_exist
 from pair_recon_left.common.model.attribute_checks import attribute_check_names
 from pair_recon_left.common.model.protocol import local_timezone_name
 from pair_recon_left.common.runtime.run_logging import configure_console_logging, get_logger
+from pair_recon_left.common.sql.dates import contiguous_runs, resolve_date_type
 
 from .catalog import Catalog
 from .config import (
@@ -123,6 +125,63 @@ def sample_value(value: str):
         return False
     number = float(text)
     return int(number) if number.is_integer() and number > 1 else number
+
+
+def date_type_text(value) -> str:
+    selected = "string" if value in (None, "") else value
+    if isinstance(selected, dict):
+        return json.dumps(selected, ensure_ascii=False, separators=(",", ":"))
+    return str(selected)
+
+
+def date_type_value(value):
+    selected = value
+    if isinstance(value, str):
+        text = value.strip()
+        selected = json.loads(text) if text.startswith("{") else text
+    return resolve_date_type(selected).spec(portable=True)
+
+
+def excluded_partition_values(value, date_type=None) -> list[str]:
+    if value in (None, ""):
+        return []
+    raw_items = value if isinstance(value, list | tuple) else [value]
+    items = [part.strip() for raw in raw_items for part in str(raw).split(",") if part.strip()]
+    expanded = []
+
+    def iso_day(text: str) -> date:
+        try:
+            parsed = date.fromisoformat(text)
+        except ValueError:
+            parsed = None
+        if parsed is None or parsed.isoformat() != text:
+            raise ValueError(
+                "Excluded partitions must use YYYY-MM-DD or YYYY-MM-DD->YYYY-MM-DD, comma-separated"
+            )
+        return parsed
+
+    for item in items:
+        if "->" not in item:
+            expanded.append(iso_day(item).isoformat())
+            continue
+        bounds = [part.strip() for part in item.split("->")]
+        if len(bounds) != 2:
+            raise ValueError(f"Invalid excluded partition range: {item!r}")
+        start, end = map(iso_day, bounds)
+        if start > end:
+            raise ValueError(f"Excluded partition range starts after it ends: {item!r}")
+        expanded.extend(
+            (start + timedelta(days=offset)).isoformat() for offset in range((end - start).days + 1)
+        )
+    partition_type = resolve_date_type(date_type)
+    return sorted({partition_type.partition_key(value) for value in expanded})
+
+
+def excluded_partitions_text(value, date_type=None) -> str:
+    values = excluded_partition_values(value, date_type)
+    return ", ".join(
+        start if start == end else f"{start}->{end}" for start, end in contiguous_runs(values)
+    )
 
 
 def positive_int(label: str, default: int) -> int:
@@ -300,6 +359,34 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
             run_default("partition_mode", metadata.get("partition_mode", "date")),
         ),
     )
+    date_answers = {}
+    if mode == "date":
+        snapshot = bool(metadata.get("snapshot", False))
+        left_date_col = ask(
+            "Left date column",
+            run_default("left_date_col", metadata["left"].get("date_col")),
+            required=not snapshot,
+        )
+        date_answers["left_date_col"] = left_date_col
+        if left_date_col:
+            date_answers["left_date_type"] = date_type_value(
+                ask(
+                    "Left date type (date/string/number/sas or JSON)",
+                    date_type_text(
+                        run_default("left_date_type", metadata["left"].get("date_type"))
+                    ),
+                )
+            )
+        date_answers["right_date_col"] = ask(
+            "Right date column",
+            run_default("right_date_col", metadata["right"].get("date_col")),
+        )
+        date_answers["right_date_type"] = date_type_value(
+            ask(
+                "Right date type (date/string/number/sas or JSON)",
+                date_type_text(run_default("right_date_type", metadata["right"].get("date_type"))),
+            )
+        )
     selected = choose_many(
         "Checks",
         ["row_count", *attribute_check_names()],
@@ -313,6 +400,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         ),
         "strict": yes_no("Strict normalization", bool(run_default("strict", False))),
         "audit": yes_no("Audit SQL", bool(run_default("audit", False))),
+        **date_answers,
     }
     left_workers = positive_int("Left source worker budget", run_default("left_workers", 2))
     right_workers = (
@@ -327,11 +415,22 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         answers.update(
             from_date=ask("From date", provenance.get("from_date", defaults.get("from_date"))),
             to_date=ask("To date", provenance.get("to_date", defaults.get("to_date"))),
-            vintage=choose(
-                "Vintage",
-                ["day", "week", "month", "quarter", "year"],
-                provenance.get("vintage", run_default("vintage", metadata.get("vintage", "day"))),
+        )
+        excluded_default = run_default(
+            "excluded_partitions", metadata.get("excluded_partitions") or []
+        )
+        answers["excluded_partitions"] = excluded_partition_values(
+            ask(
+                "Excluded partitions (YYYY-MM-DD or start->end, comma-separated)",
+                excluded_partitions_text(excluded_default, answers.get("left_date_type")),
+                required=False,
             ),
+            answers.get("left_date_type"),
+        )
+        answers["vintage"] = choose(
+            "Vintage",
+            ["day", "week", "month", "quarter", "year"],
+            provenance.get("vintage", run_default("vintage", metadata.get("vintage", "day"))),
         )
     run_id = make_run_id(pair, owner, timezone)
     existing = catalog.run(run_id)
@@ -368,7 +467,16 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "right_workers": right_workers,
         "_catalog_row": by_name[pair],
     }
-    for key in ("from_date", "to_date", "vintage"):
+    for key in (
+        "left_date_col",
+        "left_date_type",
+        "right_date_col",
+        "right_date_type",
+        "from_date",
+        "to_date",
+        "excluded_partitions",
+        "vintage",
+    ):
         if key in answers:
             settings[key] = answers[key]
     config = run_config(pair, metadata, answers, timezone=timezone)

@@ -216,6 +216,9 @@ class DateType:
                 continue
         return canonical_date(value)
 
+    def partition_key(self, value: object) -> str:
+        return canonical_date(value)
+
     def normalize_sql(self, column: str, dialect: str) -> str:
         template = _pick_template(self.normalizer_sql, dialect, "normalizer_sql")
         if template is not None:
@@ -316,15 +319,50 @@ class StringDateType(DateType):
 
 
 class NumericDateType(DateType):
-    def __init__(self, name: str = "number"):
+    FORMATS = frozenset({"day", "month"})
+
+    def __init__(self, name: str = "number", format: str = "day"):
+        if format not in self.FORMATS:
+            raise ValueError("number date format must be day or month")
+        object.__setattr__(self, "format", format)
         super().__init__(name, literal_sql="{compact}")
+
+    def day(self, column: str, dialect: str) -> str:
+        if self.format == "day":
+            return column
+        platform = date_platform(dialect)
+        return platform.parse_text(column, "month")
+
+    def literal(self, value: str, dialect: str) -> str:
+        del dialect
+        compact = canonical_date(value).replace("-", "")
+        return compact[:6] if self.format == "month" else compact
+
+    def normalize(self, value: object) -> str:
+        if self.format == "month":
+            return datetime.strptime(str(value).strip(), "%Y%m").date().isoformat()
+        return canonical_date(value)
 
     def normalize_sql(self, column: str, dialect: str) -> str:
         platform = date_platform(dialect)
-        return platform.format_day(platform.parse_text(column, "compact"))
+        format = "month" if self.format == "month" else "compact"
+        return platform.format_day(platform.parse_text(column, format))
+
+    def partition_key(self, value: object) -> str:
+        day = canonical_date(value)
+        return f"{day[:7]}-01" if self.format == "month" else day
+
+    def spec(self, *, portable: bool = False) -> str | dict[str, Any]:
+        if (
+            self.format == "day"
+            and DATE_TYPES.get(self.name) is self
+            and (not portable or self.name in BUILTIN_DATE_TYPES)
+        ):
+            return self.name
+        return {"type": "number", "format": self.format}
 
     def renamed(self, name: str) -> DateType:
-        return NumericDateType(name)
+        return NumericDateType(name, self.format)
 
 
 class SasDateType(DateType):
@@ -491,6 +529,8 @@ def resolve_date_type(spec: Any = None) -> DateType:
         if format is not None:
             if isinstance(base, StringDateType):
                 base = StringDateType(base.name, str(format).lower())
+            elif isinstance(base, NumericDateType):
+                base = NumericDateType(base.name, str(format).lower())
             elif isinstance(base, SasDateType):
                 base = SasDateType(base.name, str(format).lower())
             else:

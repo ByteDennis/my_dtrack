@@ -1,8 +1,10 @@
+from datetime import UTC, datetime
+
 import pytest
 from support import MemoryStore
 
 from pair_recon.app.catalog import Catalog
-from pair_recon_right.catalog import error_rows
+from pair_recon_right.catalog import ERROR_COLUMNS, append_error_rows, error_rows
 
 
 class Sql:
@@ -178,8 +180,6 @@ def test_finish():
 
 
 def test_error_rows_use_attribute_registry():
-    from datetime import UTC, datetime
-
     store = MemoryStore()
     store.put_json(
         "col_check/results/u.json",
@@ -199,3 +199,61 @@ def test_error_rows_use_attribute_registry():
     assert [(row["check_name"], row["left_value"], row["right_value"]) for row in rows] == [
         ("mean", "1.0", "1.1")
     ]
+
+
+def test_append_error_rows_uses_target_schema_for_all_null_columns():
+    class Writer:
+        def __init__(self):
+            self.saved = None
+
+        def mode(self, value):
+            assert value == "append"
+            return self
+
+        def saveAsTable(self, value):
+            self.saved = value
+
+    class Frame:
+        schema = object()
+
+        def __init__(self):
+            self.write = Writer()
+
+        def select(self, *columns):
+            assert columns == ERROR_COLUMNS
+            return self
+
+    class Spark:
+        def __init__(self):
+            self.target = Frame()
+            self.created = None
+
+        def table(self, name):
+            assert name == "c.s.errors"
+            return self.target
+
+        def createDataFrame(self, rows, schema=None):
+            assert schema is self.target.schema
+            self.created = Frame()
+            return self.created
+
+    rows = [
+        {
+            "run_id": "r1",
+            "check_name": "row_count",
+            "pair_name": "orders",
+            "vintage": None,
+            "column_name": None,
+            "partition_value": "2026-10-02",
+            "left_value": "10",
+            "right_value": "11",
+            "detail": "count_diff",
+            "payload": "{}",
+            "created_at": datetime(2026, 10, 22, tzinfo=UTC),
+        }
+    ]
+    spark = Spark()
+
+    append_error_rows(spark, "c.s.errors", rows)
+
+    assert spark.created.write.saved == "c.s.errors"

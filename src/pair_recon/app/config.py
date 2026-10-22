@@ -96,12 +96,22 @@ def run_config(
     else:
         selected.pop("statistics", None)
     if mode == "all":
-        for key in ("fromDate", "toDate", "vintage"):
+        for key in ("fromDate", "toDate", "vintage", "excluded_partitions"):
             selected.pop(key, None)
     else:
+        for side in ("left", "right"):
+            side_config = selected.setdefault(side, {})
+            date_col = answers.get(f"{side}_date_col")
+            if date_col:
+                side_config["date_col"] = date_col
+            elif f"{side}_date_col" in answers:
+                side_config.pop("date_col", None)
+            if f"{side}_date_type" in answers:
+                side_config["date_type"] = answers[f"{side}_date_type"]
         for source, target in (
             ("from_date", "fromDate"),
             ("to_date", "toDate"),
+            ("excluded_partitions", "excluded_partitions"),
             ("vintage", "vintage"),
         ):
             if source in answers:

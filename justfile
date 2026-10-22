@@ -17,6 +17,9 @@ format *args:
     if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; elif [ -n "{{args}}" ]; then echo "usage: just format [--debug]" >&2; exit 2; else verbose=""; fi; uv run ruff format $verbose src tests/unit tests/live/sources tools
     if [ "{{args}}" = "--debug" ]; then verbose="--verbose"; else verbose=""; fi; uv run ruff check $verbose --fix src tests/unit tests/live/sources tools
 
+publish *args:
+    uv run python -m pair_conn_release {{args}}
+
 run *args:
     uv run --extra debug pair_recon {{args}}
 
