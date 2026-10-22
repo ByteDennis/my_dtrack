@@ -1,7 +1,7 @@
 import json
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -1150,6 +1150,16 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
         jobs=SimpleNamespace(
             run_now=lambda *_args, **_kwargs: Remote(),
             cancel_run=lambda run_id: cancelled.append(run_id),
+            get_run=lambda run_id: SimpleNamespace(
+                run_id=run_id,
+                run_page_url="https://example/runs/91",
+                tasks=[SimpleNamespace(run_id=910)],
+            ),
+            get_run_output=lambda run_id: SimpleNamespace(
+                error="ModuleNotFoundError: No module named 'pair_recon_right'",
+                error_trace=f"Traceback for {run_id}\n  File notebook, line 6\n",
+                notebook_output=None,
+            ),
         ),
     )
     config = {"pairs": {"orders": {"right": {"source": "databricks"}}}}
@@ -1170,8 +1180,59 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
         local_run_directory(tmp_path, "failed-right-1", settings["timezone"]) / "left.log"
     ).read_text(encoding="utf-8")
     assert "Right Databricks job failed: run_id=91: preflight exploded" in content
+    assert "run page: https://example/runs/91" in content
+    assert "task run 910: ModuleNotFoundError" in content
+    assert "Traceback for 910\n  File notebook, line 6" in content
     assert states == ["running", "failed"]
     assert cancelled == [91]
+
+
+def test_right_job_monitor_reports_failed_task_traceback():
+    class Remote:
+        run_id = 93
+
+        def result(self, *, timeout):
+            return SimpleNamespace(
+                run_id=93,
+                run_page_url="https://example/runs/93",
+                tasks=[SimpleNamespace(run_id=930)],
+                state=SimpleNamespace(result_state="FAILED", state_message="Workload failed"),
+            )
+
+    jobs = SimpleNamespace(
+        get_run=lambda _run_id: pytest.fail("completed run must be reused"),
+        get_run_output=lambda run_id: SimpleNamespace(
+            error="ValueError: boom",
+            error_trace=f"Traceback {run_id}\n  File job.py, line 55\n",
+        ),
+    )
+    monitor = runner.RightJobMonitor(Remote(), timedelta(minutes=1), jobs=jobs).start()
+    with pytest.raises(RuntimeError) as failure:
+        monitor.result()
+    message = str(failure.value)
+    assert message.startswith(
+        "Right Databricks job failed: run_id=93: Right job finished with FAILED: Workload failed"
+    )
+    assert "run page: https://example/runs/93" in message
+    assert "task run 930: ValueError: boom" in message
+    assert "Traceback 930\n  File job.py, line 55" in message
+
+
+def test_right_job_monitor_outcome_is_empty_without_notebook_exit():
+    class Remote:
+        run_id = 94
+
+        def result(self, *, timeout):
+            return SimpleNamespace(run_id=94, state=SimpleNamespace(result_state="SUCCESS"))
+
+    jobs = SimpleNamespace(
+        get_run_output=lambda run_id: SimpleNamespace(
+            notebook_output=SimpleNamespace(result="not json")
+        )
+    )
+    monitor = runner.RightJobMonitor(Remote(), timedelta(minutes=1), jobs=jobs).start()
+    monitor.result()
+    assert monitor.outcome == {}
 
 
 def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
@@ -1213,11 +1274,25 @@ def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
 
         def result(self, *, timeout):
             calls.append(f"result:{int(timeout.total_seconds())}")
-            return SimpleNamespace(state=SimpleNamespace(result_state="SUCCESS"))
+            return SimpleNamespace(
+                run_id=92,
+                tasks=[SimpleNamespace(run_id=920)],
+                state=SimpleNamespace(result_state="SUCCESS"),
+            )
 
     def start_right(_job_id, *, notebook_params):
         calls.append(f"workers:{notebook_params['right_workers']}")
         return Remote()
+
+    def run_output(run_id):
+        calls.append(f"output:{run_id}")
+        return SimpleNamespace(
+            notebook_output=SimpleNamespace(
+                result=json.dumps(
+                    {"row_errors": 0, "column_errors": 0, "failures": 0, "results": 3}
+                )
+            )
+        )
 
     monkeypatch.setattr(runner, "VolumeStore", Root)
     monkeypatch.setattr(runner, "ProgressSampler", Sampler)
@@ -1243,6 +1318,7 @@ def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
         jobs=SimpleNamespace(
             run_now=start_right,
             cancel_run=lambda *_args: pytest.fail("successful Right run must not be cancelled"),
+            get_run_output=run_output,
         ),
     )
     config = {"pairs": {"orders": {"right": {"source": "databricks"}}}}
@@ -1256,10 +1332,16 @@ def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
     )
 
     assert result["state"] == "passed"
-    assert result["right"] == {"run_id": 92}
+    assert result["right"] == {
+        "run_id": 92,
+        "row_errors": 0,
+        "column_errors": 0,
+        "failures": 0,
+        "results": 3,
+    }
     assert "workers:8" in calls
     assert calls.count("result:7200") == 1
-    assert calls == ["status:running", "workers:8", "result:7200", "stop:passed"]
+    assert calls == ["status:running", "workers:8", "result:7200", "output:920", "stop:passed"]
 
 
 def test_csvrun(tmp_path):

@@ -110,6 +110,7 @@ def evaluate_gate(partitions: dict[str, dict[str, Any]], policy: str = "auto") -
 
 
 log = logging.getLogger("pair_recon.right.row_check")
+FINDINGS_SHOWN = 10
 
 
 def row_check_csv_bytes(document: dict[str, Any]) -> bytes:
@@ -168,8 +169,18 @@ def reconcile_pair(
         health = dict(preflight_health)
         preflight_s = float(preflight_s or 0.0)
     if not health.get("ok"):
-        log.error("preflight %s failed: %s", pair, health.get("error"))
-        raise RuntimeError(f"Right-side preflight failed for {pair}: {health.get('error')}")
+        log.error("preflight %s failed: %s", pair, health)
+        raise RuntimeError(
+            f"Right-side preflight failed for {pair} "
+            f"(relation {health.get('relation')}): {health.get('error')}"
+        )
+    log.info(
+        "preflight %s ok: relation=%s %d columns (%.3fs)",
+        pair,
+        health.get("relation"),
+        len(health.get("columns") or ()),
+        preflight_s,
+    )
     right_date_type = getattr(target, "config", {}).get("date_type")
     if right_date_type is not None:
         left_doc["right"]["date_type"] = right_date_type
@@ -193,11 +204,12 @@ def reconcile_pair(
     )
     right_s = round(time.monotonic() - started, 6)
     log.info(
-        "right count %s: %d partitions, %d rows (%.3fs)",
+        "right count %s: %d partitions, %d rows (%.3fs); first %s",
         pair,
         len(right_counts),
         sum(right_counts.values()),
         right_s,
+        next(iter(sorted(right_counts.items())), None),
     )
     snapshot = bool(left_doc["pair_config"].get("snapshot"))
     partitions = (
@@ -229,9 +241,18 @@ def reconcile_pair(
         },
     }
     log.info("reconcile %s: %s", pair, document["summary"])
-    for partition, row in sorted(partitions.items()):
-        if row["verdict"] != "match":
-            log.info("  finding %s %s left=%s right=%s", pair, partition, row["left"], row["right"])
+    findings = [(key, row) for key, row in sorted(partitions.items()) if row["verdict"] != "match"]
+    for partition, row in findings[:FINDINGS_SHOWN]:
+        log.info(
+            "  finding %s %s %s left=%s right=%s",
+            pair,
+            partition,
+            row["verdict"],
+            row["left"],
+            row["right"],
+        )
+    if len(findings) > FINDINGS_SHOWN:
+        log.info("  ... %d more finding(s) in report/row_check.csv", len(findings) - FINDINGS_SHOWN)
     decision = document["gate_decision"]
     log.info(
         "gate %s: policy=%s passed=%s excluded_ratio=%.4f",

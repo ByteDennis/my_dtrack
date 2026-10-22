@@ -8,6 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import DatabricksError
 from databricks.sdk.service.sql import StatementParameterListItem
 
 from pair_recon.core.metadata.configuration import build_pair_config
@@ -38,11 +39,58 @@ _RUN_DATE = re.compile(r"-(\d{4})(\d{2})(\d{2})$")
 log = get_left_logger("runner")
 
 
+# >>> run ids whose notebook output to read: each task's, else the run's own <<< #
+def task_run_ids(run) -> list[int]:
+    ids = [getattr(task, "run_id", None) for task in getattr(run, "tasks", None) or []]
+    return [value for value in ids if value is not None] or [run.run_id]
+
+
+# >>> run page url plus every task's notebook error and traceback <<< #
+def describe_run(jobs, run) -> str:
+    lines = []
+    if getattr(run, "run_page_url", None):
+        lines.append(f"run page: {run.run_page_url}")
+    for task_run_id in task_run_ids(run):
+        try:
+            output = jobs.get_run_output(task_run_id)
+        except (DatabricksError, OSError) as exc:
+            lines.append(f"task run {task_run_id}: output unavailable ({exc})")
+            continue
+        if getattr(output, "error", None):
+            lines.append(f"task run {task_run_id}: {output.error}")
+        if getattr(output, "error_trace", None):
+            lines.append(output.error_trace.rstrip())
+    return "\n".join(lines)
+
+
+# >>> dict the notebook returned through dbutils.notebook.exit, else empty <<< #
+def run_outcome(jobs, run) -> dict:
+    for task_run_id in task_run_ids(run):
+        try:
+            output = jobs.get_run_output(task_run_id)
+        except (DatabricksError, OSError) as exc:
+            log.warning("Right run output unavailable: task run %s: %s", task_run_id, exc)
+            continue
+        text = getattr(getattr(output, "notebook_output", None), "result", None)
+        if not text:
+            continue
+        try:
+            value = json.loads(text)
+        except ValueError:
+            log.warning("Right run output is not JSON: task run %s", task_run_id)
+            continue
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 class RightJobMonitor:
-    def __init__(self, remote, timeout: timedelta):
+    def __init__(self, remote, timeout: timedelta, jobs=None):
         self.remote = remote
         self.timeout = timeout
+        self.jobs = jobs
         self.completed = None
+        self.outcome: dict = {}
         self.error: Exception | None = None
         self.done = threading.Event()
         self.cancel_requested = threading.Event()
@@ -60,7 +108,16 @@ class RightJobMonitor:
         self.thread.start()
         return self
 
+    def _describe(self, completed=None) -> str:
+        if self.jobs is None:
+            return ""
+        try:
+            return describe_run(self.jobs, completed or self.jobs.get_run(self.run_id))
+        except (DatabricksError, OSError) as exc:
+            return f"run details unavailable ({exc})"
+
     def _watch(self):
+        completed = None
         try:
             completed = self.remote.result(timeout=self.timeout)
             result = getattr(getattr(completed, "state", None), "result_state", None)
@@ -70,9 +127,12 @@ class RightJobMonitor:
                 detail = f": {message}" if message else ""
                 raise RuntimeError(f"Right job finished with {result_name}{detail}")
             self.completed = completed
+            if self.jobs is not None:
+                self.outcome = run_outcome(self.jobs, completed)
             log.info("Right Databricks job completed: run_id=%s", self.run_id)
         except Exception as exc:  # noqa: BLE001
-            self.error = exc
+            detail = self._describe(completed)
+            self.error = RuntimeError(f"{exc}\n{detail}") if detail else exc
             if not self.cancel_requested.is_set():
                 log.error(
                     "Right Databricks job failed: run_id=%s: %s",
@@ -436,6 +496,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             monitor = RightJobMonitor(
                 remote,
                 timedelta(minutes=float(settings.get("timeout", 120))),
+                jobs=client.jobs,
             ).start()
         log.info("starting Left checks")
         left = run_left(
@@ -496,7 +557,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             monitor.result()
             status = catalog.run(run_id) if catalog else None
             final_state = (status or {}).get("state", "finished")
-            right = {"run_id": int(remote.run_id)}
+            right = {"run_id": int(remote.run_id), **monitor.outcome}
         if sampler:
             sampler.stop(final_state, required=True)
             sampler = None

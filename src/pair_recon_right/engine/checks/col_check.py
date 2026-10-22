@@ -9,7 +9,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any
 
-from ..common.model.attribute_checks import get_attribute_check
+from ..common.model.attribute_checks import attribute_check_names, get_attribute_check
 from ..common.model.audit import SqlAudit, attach_sql_audit
 from ..common.model.manifest import DEFAULT_STATISTICS, planned_unit_ids, unit_id_for, window_id
 from ..common.model.protocol import (
@@ -59,6 +59,18 @@ def compare_statistics(
     result["col_type"] = left.get("col_type") or right.get("col_type") or ""
     result["verdict"] = "match" if all(checks) else "diff"
     return result
+
+
+# >>> "name=left|right" per compared statistic; only mismatches when diff_only <<< #
+def result_detail(result: dict[str, Any], diff_only: bool = False) -> str:
+    parts = []
+    for name in attribute_check_names():
+        if f"{name}_left" not in result:
+            continue
+        if diff_only and get_attribute_check(name).result_match(result) is not False:
+            continue
+        parts.append(f"{name}={result[f'{name}_left']}|{result[f'{name}_right']}")
+    return " ".join(parts)
 
 
 class DrainScheduler:
@@ -158,6 +170,7 @@ class ColCheck:
         self.active_ids = set()
         self.attempts = defaultdict(int)
         self.results = []
+        self.detailed: set[tuple[str, str]] = set()
         self.targets = {}
         self.target_lock = threading.Lock()
         self.unit_cursors = {}
@@ -277,6 +290,16 @@ class ColCheck:
             len(task.payload["partitions"]),
         )
         stats = self._target(manifest).window_statistics(manifest, task.payload)
+        if stats:
+            column, payload = next(iter(stats.items()))
+            log.info(
+                "B right stats %s %s: %d column(s); first %s = %s",
+                task.pair,
+                task.window,
+                len(stats),
+                column,
+                payload,
+            )
         return stats, time.monotonic() - started
 
     def _complete_prefetch(self, task, stats, elapsed):
@@ -325,12 +348,16 @@ class ColCheck:
             self.store.put_result(pointer["unit_id"], result)
             refresh_units_status(self.store)
             self.results.append(result)
+            first = (task.pair, task.window) not in self.detailed
+            self.detailed.add((task.pair, task.window))
+            detail = result_detail(result, diff_only=not first)
             log.info(
-                "A compare %s %s %s -> %s",
+                "A compare %s %s %s -> %s%s",
                 task.pair,
                 task.window,
                 pointer["column"],
                 result["verdict"].upper(),
+                f" [{result['col_type']}] {detail}" if detail else "",
             )
         except Exception as exc:
             self._failure(task, exc)

@@ -1,5 +1,7 @@
 # Databricks notebook source
+import json
 import logging
+import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -50,7 +52,13 @@ publish_values = {
 logging.Formatter.converter = staticmethod(
     lambda timestamp: datetime.fromtimestamp(timestamp, ZoneInfo(values["timezone"])).timetuple()
 )
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
+logging.getLogger("pair_recon").info("widgets: %s", values)
 store = open_store(values["run_root"]).child(values["run_id"])
 
 try:
@@ -68,5 +76,7 @@ try:
     publish(spark, store, **publish_values, state=state)
     print(outcome)
 except BaseException:
+    logging.getLogger("pair_recon").exception("right job failed")
     publish(spark, store, **publish_values, state="failed")
     raise
+dbutils.notebook.exit(json.dumps(outcome, default=str))

@@ -182,6 +182,22 @@ def test_reconcile(caplog):
     manifest = store.get_json("plan.json")
     assert manifest["windows"][0]["partitions"] == ["2026-01-01"]
     assert "plan released: memory://run/plan.json (1 windows, 1 columns, 1 units)" in caplog.text
+    assert "right count p: 2 partitions, 3 rows" in caplog.text
+    assert "first ('2026-01-01', 1)" in caplog.text
+    assert "finding p 2026-01-02 count_diff left=" in caplog.text
+    assert "more finding(s)" not in caplog.text
+
+
+def test_reconcile_caps_logged_findings(caplog):
+    store = MemoryStore()
+    doc = left_document()
+    doc["counts"] = {f"2026-01-{day:02d}": 1 for day in range(1, 16)}
+    store.put_json("row_check/left.json", doc)
+    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    with caplog.at_level("INFO", logger="pair_recon.right.row_check"):
+        run_row_check(store, lambda _cfg: FakeTarget(counts={"2026-01-01": 1}))
+    assert caplog.text.count("  finding p ") == 10
+    assert "  ... 4 more finding(s) in report/row_check.csv" in caplog.text
     assert store.get_bytes("mapping.csv").decode().splitlines() == [
         "left_column,right_column,usage,data_type",
         "amount,amount,compare,",

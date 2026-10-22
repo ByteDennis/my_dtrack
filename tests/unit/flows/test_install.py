@@ -149,6 +149,14 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "from pair_recon_right.catalog import publish" in right_notebook
     assert "importlib" not in right_notebook
     assert "sys.path" not in right_notebook
+    assert "force=True" in right_notebook
+    assert "stream=sys.stdout" in right_notebook
+    assert right_notebook.rstrip().endswith(
+        "dbutils.notebook.exit(json.dumps(outcome, default=str))"
+    )
+    assert right_notebook.index("except BaseException") < right_notebook.index(
+        "dbutils.notebook.exit"
+    )
 
     schema = (ROOT / "setup" / "schema.sql").read_text(encoding="utf-8")
     pair_sql_schema = schema.split("pair_recon_pair_sql", 1)[1].split(");", 1)[0]

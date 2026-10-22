@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -33,6 +34,13 @@ NUMERIC_TYPES = (
     "short",
 )
 INTEGRAL_TYPES = ("int", "bigint", "smallint", "tinyint", "long", "short")
+SQL_LOG_WIDTH = 4000
+
+
+# >>> single-line sql for logs, clipped to SQL_LOG_WIDTH <<< #
+def sql_summary(sql: str) -> str:
+    text = " ".join(sql.split())
+    return text if len(text) <= SQL_LOG_WIDTH else text[: SQL_LOG_WIDTH - 3] + "..."
 
 
 class CsvTarget:
@@ -166,10 +174,20 @@ class SparkTarget:
         clauses = [item for item in (self.config.get("where"), extra) if item]
         return " AND ".join(f"({item})" for item in clauses) or "1=1"
 
-    def _rows(self, sql: str, operation: str = "query") -> list[tuple]:
-        log.debug("spark.sql: %s", sql)
+    def _collect(self, sql: str, operation: str = "query") -> list:
+        log.info("spark.sql %s: %s", operation, sql_summary(sql))
         self._audit(sql, operation)
-        return [tuple(row) for row in self.spark.sql(sql).collect()]
+        started = time.monotonic()
+        try:
+            rows = self.spark.sql(sql).collect()
+        except Exception:
+            log.exception("spark.sql %s failed after %.3fs", operation, time.monotonic() - started)
+            raise
+        log.info("spark.sql %s: %d rows (%.3fs)", operation, len(rows), time.monotonic() - started)
+        return rows
+
+    def _rows(self, sql: str, operation: str = "query") -> list[tuple]:
+        return [tuple(row) for row in self._collect(sql, operation)]
 
     def date_type(self):
         with self._date_type_lock:
@@ -189,26 +207,42 @@ class SparkTarget:
             return resolved
 
     def preflight(self) -> dict[str, Any]:
+        relation = self.relation()
+        log.info(
+            "preflight relation=%s kind=%s partition_mode=%s date_col=%s date_type=%s where=%s",
+            relation,
+            self.config.get("kind") or "table",
+            self.partition_mode,
+            self.config.get("date_col"),
+            self.config.get("date_type"),
+            self.config.get("where"),
+        )
         try:
             columns = {
                 row[0]: str(row[1]).lower()
-                for row in self._rows(
-                    f"DESCRIBE QUERY SELECT * FROM {self.relation()}", "preflight"
-                )
+                for row in self._rows(f"DESCRIBE QUERY SELECT * FROM {relation}", "preflight")
                 if row[0] and not str(row[0]).startswith("#")
             }
+            log.info("preflight columns: %s", columns)
             if self.partition_mode == "date" and self.config["date_col"] not in columns:
                 raise ValueError(f"date_col {self.config['date_col']!r} not in {sorted(columns)}")
             self.column_types = columns
             if self.partition_mode == "date":
-                self.date_type()
+                log.info("preflight date_type resolved: %s", self.date_type().spec(portable=True))
             return {
                 "ok": True,
                 "source": "databricks",
+                "relation": relation,
                 "columns": sorted(columns),
             }
         except Exception as exc:
-            return {"ok": False, "source": "databricks", "error": str(exc)}
+            log.exception("preflight failed for relation %s", relation)
+            return {
+                "ok": False,
+                "source": "databricks",
+                "relation": relation,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     def partition_counts(
         self,
@@ -351,12 +385,19 @@ class SparkTarget:
                     if numeric
                     else f"max(length({text})) AS length_max_{i}"
                 )
+        log.info(
+            "window_statistics partitions=%s columns=%d statistics=%s strict=%s sample=%s",
+            window["partitions"],
+            len(right_columns),
+            selected,
+            strict,
+            bool(sample),
+        )
         sql = (
             f"SELECT {', '.join(selects)} "
             f"FROM {self.relation(partitions=window['partitions'])} WHERE {where}"
         )
-        self._audit(sql, "window_statistics")
-        row = self.spark.sql(sql).collect()[0].asDict()
+        row = self._collect(sql, "window_statistics")[0].asDict()
         stats = {}
         for i, column in enumerate(right_columns):
             numeric = kinds[column]

@@ -120,13 +120,29 @@ def _drained_store(sample_mode="all"):
     return store, uid
 
 
-def test_unit():
+def test_unit(caplog):
     store, uid = _drained_store()
     target = FakeTarget()
-    results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
+    with caplog.at_level("INFO", logger="pair_recon.right.col_check"):
+        results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert results[0]["verdict"] == "match" and results[0]["right_col"] == "amount"
     assert store.exists(f"col_check/results/{uid}.json")
     assert target.calls == [("p", "2026-01-01", None)]
+    assert f"B right stats p 2026-01-01: 1 column(s); first amount = {STATS}" in caplog.text
+    assert (
+        "A compare p 2026-01-01 amount -> MATCH [numeric] n_total=2|2 n_missing=0|0 "
+        "n_unique=2|2 mean=1.5|1.5 std=0.7|0.7 min=1|1 max=2|2 "
+        "length_avg=None|None length_max=None|None hash_sum=3|3"
+    ) in caplog.text
+
+
+def test_result_detail():
+    changed = {**STATS, "n_unique": 3, "mean": 1.6}
+    result = compare_statistics(pair="p", window="w", column="c", left=STATS, right=changed)
+    assert col_check.result_detail(result, diff_only=True) == "n_unique=2|3 mean=1.5|1.6"
+    same = compare_statistics(pair="p", window="w", column="c", left=STATS, right=STATS)
+    assert col_check.result_detail(same, diff_only=True) == ""
+    assert col_check.result_detail(same).startswith("n_total=2|2 n_missing=0|0 n_unique=2|2")
 
 
 def test_right_worker_budget_runs_window_queries_in_parallel():

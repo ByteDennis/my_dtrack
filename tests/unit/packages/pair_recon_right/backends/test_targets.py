@@ -117,6 +117,29 @@ def test_preflight():
     assert target.column_types["amount"] == "decimal(10,2)"
     missing = SparkTarget(FakeSpark(lambda sql: DESCRIBE), {**ORDERS, "date_col": "dt"}).preflight()
     assert missing["ok"] is False and "'dt'" in missing["error"]
+    assert missing["error"].startswith("ValueError: ")
+    assert missing["relation"] == "`main`.`sales`.`orders`"
+
+
+def test_preflight_logs_sql_and_spark_failure(caplog):
+    def explode(sql):
+        raise RuntimeError("Unable to fetch tables of db sales")
+
+    caplog.set_level("INFO", logger="pair_recon.right.target")
+    health = SparkTarget(FakeSpark(explode), {**ORDERS, "catalog": None}).preflight()
+    assert health == {
+        "ok": False,
+        "source": "databricks",
+        "relation": "`sales`.`orders`",
+        "error": "RuntimeError: Unable to fetch tables of db sales",
+    }
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(m.startswith("preflight relation=`sales`.`orders` kind=table") for m in messages)
+    assert "spark.sql preflight: DESCRIBE QUERY SELECT * FROM `sales`.`orders`" in messages
+    assert any(m.startswith("spark.sql preflight failed after") for m in messages)
+    assert any("Unable to fetch tables" in (record.exc_text or "") for record in caplog.records)
+    assert targets.sql_summary("SELECT  1\n  FROM   t") == "SELECT 1 FROM t"
+    assert len(targets.sql_summary("x" * 5000)) == targets.SQL_LOG_WIDTH
 
 
 def test_sas():
