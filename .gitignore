@@ -24,6 +24,7 @@ tests/live/*
 !tests/live/sources/
 tests/live/sources/*
 !tests/live/sources/test_source_queries.py
+!tests/live/sources/test_right_workspace.py
 tests/local/
 docs/
 examples/

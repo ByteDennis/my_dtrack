@@ -1,4 +1,6 @@
 import copy
+import csv
+import io
 
 import pytest
 
@@ -67,6 +69,7 @@ def test_manifest(common):
     assert manifest["expected_units"] == 4
     assert manifest["key_cols"] == ["ID"] and manifest["right_key_cols"] == ["id"]
     assert manifest["key_families"] == ["numeric"] and manifest["sample"]["mode"] == "fraction"
+    assert manifest["audit"] is False
     forced = common.manifest.build_manifest(
         "run", "p", _variant(col_type_overrides={"AMOUNT": "numeric"}), ROW_CHECK
     )
@@ -93,6 +96,35 @@ def test_manifest(common):
         "type": "sas",
         "format": "datetime",
     }
+
+
+def test_mapping_csv(common):
+    pair = _variant(
+        excluded_columns=["NOTE"],
+        col_map={"DT": "dt", "ID": "id", "AMOUNT": "amount", "NOTE": "note"},
+        col_type_overrides={"AMOUNT": "numeric"},
+        column_types={
+            "ID": {
+                "type": "date",
+                "left_date_type": {"type": "sas", "format": "datetime"},
+                "right_date_type": "date",
+            }
+        },
+    )
+
+    rows = list(
+        csv.DictReader(io.StringIO(common.manifest.mapping_csv_bytes(pair).decode("utf-8")))
+    )
+
+    assert [(row["left_column"], row["usage"]) for row in rows] == [
+        ("DT", "partition"),
+        ("ID", "compare"),
+        ("AMOUNT", "compare"),
+        ("NOTE", "excluded"),
+    ]
+    assert rows[2]["data_type"] == "numeric"
+    assert rows[1]["right_column"] == "id"
+    assert '"type":"date"' in rows[1]["data_type"]
 
 
 def _variant(**changes):

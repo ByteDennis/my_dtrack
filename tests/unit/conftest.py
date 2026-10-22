@@ -48,3 +48,19 @@ def common(request):
     root = ROOTS[request.param]
     modules = {name: importlib.import_module(f"{root}.{path}") for name, path in COMMON.items()}
     return SimpleNamespace(side=request.param, **modules)
+
+
+def _common(side):
+    root = ROOTS[side]
+    modules = {name: importlib.import_module(f"{root}.{path}") for name, path in COMMON.items()}
+    return SimpleNamespace(side=side, **modules)
+
+
+@pytest.fixture
+def left_common():
+    return _common("pair_recon_left")
+
+
+@pytest.fixture
+def right_common():
+    return _common("pair_recon_right")

@@ -11,6 +11,7 @@ from .runtime import value
 
 SOURCE_LANGUAGES = {".py": "PYTHON", ".r": "R"}
 NOTEBOOK_HEADER = "# databricks notebook"
+DIRECTORY_TYPES = {"DIRECTORY", "REPO"}
 
 
 def upload(
@@ -158,7 +159,175 @@ def download(
     }
 
 
-def delete(
+def ls(workspace, source: str | None = None, *, recursive=False) -> dict:
+    remote = (
+        workspace_home(workspace) if source is None else resolve_workspace_path(workspace, source)
+    )
+    root = workspace.workspace.get_status(str(remote))
+    if value(root.object_type) not in DIRECTORY_TYPES:
+        objects = [root]
+    else:
+        objects = list(workspace.workspace.list(str(remote)))
+        if recursive:
+            pending = [item for item in objects if value(item.object_type) in DIRECTORY_TYPES]
+            while pending:
+                directory = pending.pop()
+                children = list(workspace.workspace.list(directory.path))
+                objects.extend(children)
+                pending.extend(
+                    item for item in children if value(item.object_type) in DIRECTORY_TYPES
+                )
+    entries = [workspace_entry(item) for item in sorted(objects, key=lambda item: item.path or "")]
+    return {
+        "source": str(remote),
+        "recursive": recursive,
+        "count": len(entries),
+        "entries": entries,
+    }
+
+
+def copy(
+    workspace,
+    source: str,
+    target: str,
+    *,
+    recursive=False,
+    force=False,
+    dry_run=False,
+) -> dict:
+    from databricks.sdk.service.workspace import ExportFormat, ImportFormat
+
+    source_root = resolve_workspace_path(workspace, source)
+    target_root = resolve_workspace_path(workspace, target)
+    source_item = workspace.workspace.get_status(str(source_root))
+    source_is_directory = value(source_item.object_type) in DIRECTORY_TYPES
+    if source_is_directory and not recursive:
+        raise IsADirectoryError(f"{source_root}: use --recursive to copy a directory")
+
+    target_item = workspace_status(workspace, target_root)
+    destination_root = (
+        target_root / source_root.name
+        if target_item is not None and value(target_item.object_type) in DIRECTORY_TYPES
+        else target_root
+    )
+    validate_workspace_copy(source_root, destination_root, source_is_directory)
+    destination_item = workspace_status(workspace, destination_root)
+    if destination_item is not None and not force:
+        raise FileExistsError(f"{destination_root}: target exists; pass --force to replace it")
+
+    directories, objects = download_objects(workspace, source_item)
+    directory_paths = [
+        destination_root.joinpath(*PurePosixPath(item.path).relative_to(source_root).parts)
+        for item in directories
+    ]
+    object_paths = [
+        destination_root.joinpath(*PurePosixPath(item.path).relative_to(source_root).parts)
+        for item in objects
+    ]
+    planned = [str(path) for path in object_paths]
+    if dry_run:
+        return {
+            "source": str(source_root),
+            "target": str(destination_root),
+            "recursive": recursive,
+            "force": force,
+            "dry_run": True,
+            "planned": len(objects),
+            "copied": 0,
+            "directories": len(directories),
+            "paths": planned,
+            "failed": [],
+            "exit_code": 0,
+        }
+
+    payloads, failures = [], []
+    for item, destination in zip(objects, object_paths):
+        try:
+            response = workspace.workspace.export(item.path, format=ExportFormat.AUTO)
+            if response.content is None:
+                raise ValueError("Workspace export returned no content")
+            payloads.append((item, destination, response.content))
+        except Exception as exc:
+            failures.append(failure(item.path, exc))
+    if failures:
+        return copy_result(
+            source_root,
+            destination_root,
+            recursive,
+            force,
+            directories,
+            objects,
+            (),
+            failures,
+        )
+
+    if destination_item is not None:
+        workspace.workspace.delete(
+            str(destination_root),
+            recursive=value(destination_item.object_type) in DIRECTORY_TYPES,
+        )
+    for directory in sorted(directory_paths, key=lambda path: (len(path.parts), str(path))):
+        try:
+            workspace.workspace.mkdirs(str(directory))
+        except Exception as exc:
+            failures.append(failure(directory, exc))
+    copied = []
+    for item, destination, content in payloads:
+        try:
+            options = {
+                "content": content,
+                "format": ImportFormat.SOURCE
+                if value(item.object_type) == "NOTEBOOK"
+                else ImportFormat.AUTO,
+                "overwrite": force,
+            }
+            if value(item.object_type) == "NOTEBOOK" and item.language is not None:
+                options["language"] = item.language
+            workspace.workspace.import_(str(destination), **options)
+            copied.append(str(destination))
+        except Exception as exc:
+            failures.append(failure(destination, exc))
+    return copy_result(
+        source_root,
+        destination_root,
+        recursive,
+        force,
+        directories,
+        objects,
+        copied,
+        failures,
+    )
+
+
+def move(
+    workspace,
+    source: str,
+    target: str,
+    *,
+    force=False,
+    dry_run=False,
+) -> dict:
+    result = copy(
+        workspace,
+        source,
+        target,
+        recursive=True,
+        force=force,
+        dry_run=dry_run,
+    )
+    if result["exit_code"] or dry_run:
+        return {**result, "moved": 0}
+    removed = rm(workspace, source, recursive=True, force=False)
+    failures = [*result["failed"], *removed["failed"]]
+    return {
+        **result,
+        "moved": 1 if not failures else 0,
+        "failed": failures,
+        "exit_code": int(bool(failures)),
+    }
+
+
+def rm(
     workspace,
     sources: str | Iterable[str],
     *,
@@ -202,6 +371,59 @@ def delete(
         "failed": failures,
         "exit_code": int(bool(failures)),
     }
+
+
+def copy_result(
+    source: PurePosixPath,
+    target: PurePosixPath,
+    recursive: bool,
+    force: bool,
+    directories: list[Any],
+    objects: list[Any],
+    copied: Iterable[str],
+    failures: list[dict],
+) -> dict:
+    copied = list(copied)
+    return {
+        "source": str(source),
+        "target": str(target),
+        "recursive": recursive,
+        "force": force,
+        "dry_run": False,
+        "planned": len(objects),
+        "copied": len(copied),
+        "directories": len(directories),
+        "paths": copied,
+        "failed": failures,
+        "exit_code": int(bool(failures)),
+    }
+
+
+def workspace_entry(item) -> dict:
+    return {
+        "path": item.path,
+        "name": PurePosixPath(item.path).name,
+        "type": value(item.object_type),
+        "language": value(item.language) if item.language is not None else None,
+    }
+
+
+def workspace_status(workspace, path: PurePosixPath):
+    try:
+        return workspace.workspace.get_status(str(path))
+    except Exception as exc:
+        if resource_does_not_exist(exc):
+            return None
+        raise
+
+
+def validate_workspace_copy(
+    source: PurePosixPath, destination: PurePosixPath, source_is_directory: bool
+) -> None:
+    if source == destination:
+        raise ValueError("source and target resolve to the same Workspace path")
+    if source_is_directory and source in destination.parents:
+        raise ValueError("cannot copy a Workspace directory into itself")
 
 
 def failure(path, exc: Exception) -> dict:
@@ -267,10 +489,14 @@ def resolve_workspace_path(workspace, path: str) -> PurePosixPath:
         raise ValueError(f"invalid Workspace path: {path}")
     if remote.is_absolute():
         return workspace_path(text)
+    return workspace_home(workspace) / remote
+
+
+def workspace_home(workspace) -> PurePosixPath:
     user = str(workspace.current_user.me().user_name).strip()
     if not user or "/" in user or "\\" in user:
         raise ValueError("current Databricks user has an invalid Workspace home path")
-    return workspace_path(str(PurePosixPath("/Users") / user / remote))
+    return workspace_path(str(PurePosixPath("/Users") / user))
 
 
 def local_files_for(root: Path) -> tuple[list[Path], int]:

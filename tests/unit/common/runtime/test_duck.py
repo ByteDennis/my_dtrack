@@ -12,7 +12,7 @@ def test_size():
 
 def test_budget(monkeypatch):
     monkeypatch.setenv("PAIR_RECON_DUCKDB_MEMORY", "16GB")
-    monkeypatch.setenv("PAIR_RECON_DUCKDB_WORKERS", "4")
+    monkeypatch.setenv("STATS_WORKERS", "4")
     monkeypatch.setattr(duck.os, "cpu_count", lambda: 12)
     applied = duck.settings()
     assert applied["memory_limit"] == f"{4 * 1024}MiB"
@@ -22,7 +22,7 @@ def test_budget(monkeypatch):
 
 def test_default(monkeypatch):
     monkeypatch.delenv("PAIR_RECON_DUCKDB_MEMORY", raising=False)
-    monkeypatch.delenv("PAIR_RECON_DUCKDB_WORKERS", raising=False)
+    monkeypatch.delenv("STATS_WORKERS", raising=False)
     monkeypatch.setattr(duck, "physical_memory", lambda: 32 * 2**30)
     assert duck.settings()["memory_limit"] == f"{int(32 * 1024 * 0.6 / 2)}MiB"
 
@@ -30,7 +30,7 @@ def test_default(monkeypatch):
 def test_connect(monkeypatch, tmp_path):
     pytest.importorskip("duckdb")
     monkeypatch.setenv("PAIR_RECON_DUCKDB_MEMORY", "2GB")
-    monkeypatch.setenv("PAIR_RECON_DUCKDB_WORKERS", "2")
+    monkeypatch.setenv("STATS_WORKERS", "2")
     monkeypatch.setenv("PAIR_RECON_DUCKDB_TEMP", str(tmp_path / "spill"))
     with duck.connect(ordered=False) as connection:
         setting = lambda name: connection.execute(f"SELECT current_setting('{name}')").fetchone()[0]

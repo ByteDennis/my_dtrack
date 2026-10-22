@@ -72,6 +72,15 @@ def test_failure():
     assert failure["error"] == "audit unavailable" and failure["pair"] == "orders"
 
 
+def test_disabled_audit_creates_no_artifacts(tmp_path):
+    store = VolumeStore(tmp_path / "run")
+    audit = LeftSqlAudit(store, "left", pair="orders", enabled=False)
+
+    assert audit.record("SELECT * FROM APP.ORDERS", backend="oracle") is None
+    assert audit.refresh()
+    assert store.list_keys("") == []
+
+
 def test_metadata(tmp_path):
     store = VolumeStore(tmp_path / "run")
     audit = LeftSqlAudit(store, "local")

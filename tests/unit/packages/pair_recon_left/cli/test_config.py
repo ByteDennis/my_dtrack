@@ -18,6 +18,14 @@ def pair(mode="all"):
 def test_valid(mode):
     value = validate_config({"version": 2, "pairs": {"p": pair(mode)}})
     assert value["pairs"]["p"]["statistics"] == ["n_unique", "hash_sum"]
+    assert value["pairs"]["p"]["audit"] is False
+
+
+def test_audit_must_be_boolean():
+    value = pair()
+    value["audit"] = "false"
+    with pytest.raises(TypeError, match="audit must be true or false"):
+        validate_config({"version": 2, "pairs": {"p": value}})
 
 
 @pytest.mark.parametrize(

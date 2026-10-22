@@ -155,6 +155,9 @@ class Files:
         body, file_type = self.content[path]
         return NS(content=base64.b64encode(body).decode(), file_type=file_type)
 
+    def import_(self, path, **options):
+        self.calls.append(("import", path, options))
+
     def delete(self, path, *, recursive=None):
         self.calls.append(("delete", path, recursive))
         prefix = path.rstrip("/") + "/"
@@ -223,7 +226,102 @@ def test_relative_workspace_path_uses_current_user():
         workspace_ops.resolve_workspace_path(workspace, "../source")
 
 
-def test_delete_matches_rm_semantics():
+def test_ls_lists_workspace_objects_recursively():
+    objects = [
+        item("/Users/me@example.com", "DIRECTORY"),
+        item("/Users/me@example.com/source", "DIRECTORY"),
+        item("/Users/me@example.com/source/notebook", "NOTEBOOK", "PYTHON"),
+        item("/Users/me@example.com/data.txt", "FILE"),
+    ]
+    workspace = NS(
+        workspace=Files(objects),
+        current_user=NS(me=lambda: NS(user_name="me@example.com")),
+    )
+
+    result = workspace_ops.ls(workspace)
+    assert [entry["name"] for entry in result["entries"]] == ["data.txt", "source"]
+    result = workspace_ops.ls(workspace, "source", recursive=True)
+    assert result["entries"] == [
+        {
+            "path": "/Users/me@example.com/source/notebook",
+            "name": "notebook",
+            "type": "NOTEBOOK",
+            "language": "PYTHON",
+        }
+    ]
+
+
+def test_copy_and_move_workspace_objects():
+    objects = [
+        item("/Users/me@example.com/source", "DIRECTORY"),
+        item("/Users/me@example.com/source/notebook", "NOTEBOOK", "PYTHON"),
+        item("/Users/me@example.com/source/data.txt", "FILE"),
+    ]
+    content = {
+        "/Users/me@example.com/source/notebook": (b"# Databricks notebook source\n", "py"),
+        "/Users/me@example.com/source/data.txt": (b"data", "txt"),
+    }
+    files = Files(objects, content)
+    workspace = NS(
+        workspace=files,
+        current_user=NS(me=lambda: NS(user_name="me@example.com")),
+    )
+
+    with pytest.raises(IsADirectoryError, match="--recursive"):
+        workspace_ops.copy(workspace, "source", "archive")
+    result = workspace_ops.copy(workspace, "source", "archive", recursive=True)
+    assert result["paths"] == [
+        "/Users/me@example.com/archive/data.txt",
+        "/Users/me@example.com/archive/notebook",
+    ]
+    imports = [call for call in files.calls if call[0] == "import"]
+    assert imports[0][2]["format"].value == "AUTO"
+    assert imports[1][2]["format"].value == "SOURCE"
+    assert imports[1][2]["language"].value == "PYTHON"
+
+    file_objects = [item("/Users/me@example.com/old.py", "FILE")]
+    moving = Files(file_objects, {"/Users/me@example.com/old.py": (b"value", "py")})
+    workspace.workspace = moving
+    result = workspace_ops.move(workspace, "old.py", "new.py")
+    assert result["moved"] == 1 and result["failed"] == []
+    assert moving.calls[-1] == ("delete", "/Users/me@example.com/old.py", True)
+
+
+def test_copy_rejects_existing_or_descendant_target():
+    objects = [
+        item("/Users/me@example.com/source", "DIRECTORY"),
+        item("/Users/me@example.com/archive", "DIRECTORY"),
+        item("/Users/me@example.com/archive/source", "DIRECTORY"),
+    ]
+    workspace = NS(
+        workspace=Files(objects),
+        current_user=NS(me=lambda: NS(user_name="me@example.com")),
+    )
+    with pytest.raises(FileExistsError, match="--force"):
+        workspace_ops.copy(workspace, "source", "archive", recursive=True)
+    with pytest.raises(ValueError, match="into itself"):
+        workspace_ops.copy(workspace, "source", "source/child", recursive=True)
+
+
+def test_move_keeps_source_when_copy_fails():
+    class BrokenFiles(Files):
+        def export(self, path, *, format):
+            raise RuntimeError("export failed")
+
+    source = item("/Users/me@example.com/old.py", "FILE")
+    files = BrokenFiles([source])
+    workspace = NS(
+        workspace=files,
+        current_user=NS(me=lambda: NS(user_name="me@example.com")),
+    )
+
+    result = workspace_ops.move(workspace, "old.py", "new.py")
+    assert result["exit_code"] == 1 and result["moved"] == 0
+    assert not [call for call in files.calls if call[0] == "delete"]
+    assert "/Users/me@example.com/old.py" in files.objects
+
+
+def test_rm_matches_linux_semantics():
     objects = [
         item("/Users/me@example.com/old.py", "FILE"),
         item("/Users/me@example.com/folder", "DIRECTORY"),
@@ -235,18 +333,18 @@ def test_delete_matches_rm_semantics():
         current_user=NS(me=lambda: NS(user_name="me@example.com")),
     )
 
-    result = workspace_ops.delete(workspace, "old.py")
+    result = workspace_ops.rm(workspace, "old.py")
     assert result["deleted"] == 1 and result["failed"] == []
     assert files.calls[-1] == ("delete", "/Users/me@example.com/old.py", False)
 
-    result = workspace_ops.delete(workspace, ["folder", "missing"], force=True)
+    result = workspace_ops.rm(workspace, ["folder", "missing"], force=True)
     assert result["deleted"] == 0
     assert result["failed"][0]["error"].startswith("IsADirectoryError:")
 
-    result = workspace_ops.delete(workspace, "folder", recursive=True, dry_run=True)
+    result = workspace_ops.rm(workspace, "folder", recursive=True, dry_run=True)
     assert result["planned"] == 1 and result["deleted"] == 0
     assert result["paths"] == ["/Users/me@example.com/folder"]
 
-    result = workspace_ops.delete(workspace, "folder", recursive=True)
+    result = workspace_ops.rm(workspace, "folder", recursive=True)
     assert result["deleted"] == 1 and result["failed"] == []
     assert files.calls[-1] == ("delete", "/Users/me@example.com/folder", True)

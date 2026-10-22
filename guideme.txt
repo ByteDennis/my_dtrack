@@ -85,7 +85,7 @@ Databricks operator commands use ~/.databrickscfg and may reuse these .pair_reco
   just dbx sql "SELECT current_user()"
   just dbx runs --limit 10
 
-Relative Workspace paths resolve below /Users/<current-user>/; absolute paths remain supported. Remove --dry-run only after checking planned paths. Add --overwrite only when replacement is intended. delete accepts multiple paths, -r/--recursive, -f/--force, and the rm alias. Workspace notebooks regain their language suffix when downloaded. The setup installer mirrors the fixed pair_recon_right package and creates pair_recon_right_job beside it; the notebook uses normal package imports. Remote package objects missing locally are removed only after all uploads succeed.
+Relative Workspace paths resolve below /Users/<current-user>/; absolute paths remain supported. Remove --dry-run only after checking planned paths. Add --overwrite only when replacement is intended. delete accepts multiple paths, -r/--recursive, -f/--force, and the rm alias. Workspace notebooks regain their language suffix when downloaded. The setup installer and Sync remote mirror pair_recon_right and create pair_recon_right_job beside it; the notebook uses normal package imports. DBX_PKG_RENAME=pair_recon_right -> pair_recon uploads the folder as pair_recon (notebook pair_recon_job) and rewrites only the notebook's pair_recon_right imports. Remote package objects missing locally are removed only after all uploads succeed.
 
 GitLab snapshots require authenticated glab and git:
 

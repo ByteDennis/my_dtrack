@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import traceback
 from collections import defaultdict, deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any
 
@@ -138,10 +140,12 @@ class ColCheck:
         heartbeat_timeout=180,
         poll_interval=2,
         on_idle=None,
+        right_workers=1,
     ):
         self.store = store
         self.target_factory = target_factory
-        self.scheduler = DrainScheduler(prefetch_depth=prefetch_depth)
+        self.right_workers = max(1, int(right_workers))
+        self.scheduler = DrainScheduler(prefetch_depth=max(int(prefetch_depth), self.right_workers))
         self.max_attempts = max_attempts
         self.idle_timeout = idle_timeout
         self.heartbeat_timeout = heartbeat_timeout
@@ -155,20 +159,27 @@ class ColCheck:
         self.attempts = defaultdict(int)
         self.results = []
         self.targets = {}
+        self.target_lock = threading.Lock()
         self.unit_cursors = {}
 
     def _target(self, manifest):
         pair = manifest["pair"]
-        if pair not in self.targets:
-            self.targets[pair] = attach_sql_audit(
-                self.target_factory(
-                    {
-                        **manifest["right"],
-                        "partition_mode": manifest.get("partition_mode", "date"),
-                    }
-                ),
-                SqlAudit(self.store, "right", pair=pair),
-            )
+        with self.target_lock:
+            if pair not in self.targets:
+                self.targets[pair] = attach_sql_audit(
+                    self.target_factory(
+                        {
+                            **manifest["right"],
+                            "partition_mode": manifest.get("partition_mode", "date"),
+                        }
+                    ),
+                    SqlAudit(
+                        self.store,
+                        "right",
+                        pair=pair,
+                        enabled=bool(manifest.get("audit")),
+                    ),
+                )
         return self.targets[pair]
 
     def poll(self):
@@ -256,38 +267,47 @@ class ColCheck:
         else:
             self.scheduler.requeue_unit(task.payload)
 
+    def _fetch_right(self, task):
+        manifest = self.scheduler.manifests[task.pair]
+        started = time.monotonic()
+        log.info(
+            "B fetch_right %s %s: %d partition(s)",
+            task.pair,
+            task.window,
+            len(task.payload["partitions"]),
+        )
+        stats = self._target(manifest).window_statistics(manifest, task.payload)
+        return stats, time.monotonic() - started
+
+    def _complete_prefetch(self, task, stats, elapsed):
+        manifest = self.scheduler.manifests[task.pair]
+        mapped = {left: stats[right] for left, right in manifest["col_map"].items()}
+        self.scheduler.mark_right_ready(task.pair, task.window, mapped)
+        self.store.put_json(
+            right_ready_path(task.pair, task.window),
+            {
+                "pair": task.pair,
+                "window": task.window,
+                "plan_id": manifest.get("plan_id"),
+                "window_id": window_id(manifest, task.payload),
+                "right_ready_at": timestamp(self.store),
+            },
+        )
+        refresh_units_status(self.store)
+        log.info(
+            "B right stats ready %s %s (%.3fs) -> %d unit(s) promoted to A-queue",
+            task.pair,
+            task.window,
+            elapsed,
+            len(self.scheduler.ready),
+        )
+
     def run_task(self, task):
         try:
             manifest = self.scheduler.manifests[task.pair]
             if task.kind == "prefetch":
-                started = time.monotonic()
-                log.info(
-                    "B fetch_right %s %s: %d partition(s)",
-                    task.pair,
-                    task.window,
-                    len(task.payload["partitions"]),
-                )
-                stats = self._target(manifest).window_statistics(manifest, task.payload)
-                mapped = {left: stats[right] for left, right in manifest["col_map"].items()}
-                self.scheduler.mark_right_ready(task.pair, task.window, mapped)
-                self.store.put_json(
-                    right_ready_path(task.pair, task.window),
-                    {
-                        "pair": task.pair,
-                        "window": task.window,
-                        "plan_id": manifest.get("plan_id"),
-                        "window_id": window_id(manifest, task.payload),
-                        "right_ready_at": timestamp(self.store),
-                    },
-                )
-                refresh_units_status(self.store)
-                log.info(
-                    "B right stats ready %s %s (%.3fs) -> %d unit(s) promoted to A-queue",
-                    task.pair,
-                    task.window,
-                    time.monotonic() - started,
-                    len(self.scheduler.ready),
-                )
+                stats, elapsed = self._fetch_right(task)
+                self._complete_prefetch(task, stats, elapsed)
                 return
             pointer = task.payload
             left = unit_statistics(self.store, pointer)
@@ -331,33 +351,66 @@ class ColCheck:
 
     def run(self):
         last_progress = time.monotonic()
-        while True:
-            if self.poll():
-                last_progress = time.monotonic()
-            task = (
-                None if not self.scheduler.ready and self.complete() else self.scheduler.next_task()
-            )
-            if task:
-                self.run_task(task)
-                last_progress = time.monotonic()
-                continue
-            if self.complete():
-                log.info(
-                    "col_check complete: %d result(s), %d dead",
-                    len(self.results),
-                    sum(
-                        value["unit_id"] in active_unit_ids(self.store)
-                        for _key, value in list_failures(self.store)
-                    ),
-                )
-                return self.results
-            if self.on_idle and self.on_idle():
-                last_progress = time.monotonic()
-                continue
-            age = self.store.heartbeat_age()
-            if age is not None and age > self.heartbeat_timeout:
-                log.error("left heartbeat stale: %.1fs > %.1fs", age, self.heartbeat_timeout)
-                raise RuntimeError(f"left heartbeat is stale ({age:.1f}s)")
-            if time.monotonic() - last_progress > self.idle_timeout:
-                raise TimeoutError("right idle timeout expired")
-            time.sleep(self.poll_interval)
+        jobs = {}
+        log.info("Databricks query worker budget=%d", self.right_workers)
+        with ThreadPoolExecutor(
+            max_workers=self.right_workers,
+            thread_name_prefix="pair_recon-right",
+        ) as executor:
+            while True:
+                if self.poll():
+                    last_progress = time.monotonic()
+                for future in [future for future in jobs if future.done()]:
+                    task = jobs.pop(future)
+                    try:
+                        stats, elapsed = future.result()
+                        self._complete_prefetch(task, stats, elapsed)
+                    except Exception as exc:
+                        self._failure(task, exc)
+                    last_progress = time.monotonic()
+                while len(jobs) < self.right_workers:
+                    task = (
+                        None
+                        if not self.scheduler.ready and self.complete()
+                        else self.scheduler.next_task()
+                    )
+                    if task is None:
+                        break
+                    if task.kind == "prefetch":
+                        jobs[executor.submit(self._fetch_right, task)] = task
+                    else:
+                        self.run_task(task)
+                    last_progress = time.monotonic()
+                if jobs:
+                    wait(
+                        tuple(jobs),
+                        timeout=max(0.01, self.poll_interval),
+                        return_when=FIRST_COMPLETED,
+                    )
+                    continue
+                if self.complete():
+                    plans = [plan for _key, plan in list_plans(self.store)]
+                    SqlAudit(
+                        self.store,
+                        "right",
+                        enabled=any(bool(plan.get("audit")) for plan in plans),
+                    ).refresh()
+                    log.info(
+                        "col_check complete: %d result(s), %d dead",
+                        len(self.results),
+                        sum(
+                            value["unit_id"] in active_unit_ids(self.store)
+                            for _key, value in list_failures(self.store)
+                        ),
+                    )
+                    return self.results
+                if self.on_idle and self.on_idle():
+                    last_progress = time.monotonic()
+                    continue
+                age = self.store.heartbeat_age()
+                if age is not None and age > self.heartbeat_timeout:
+                    log.error("left heartbeat stale: %.1fs > %.1fs", age, self.heartbeat_timeout)
+                    raise RuntimeError(f"left heartbeat is stale ({age:.1f}s)")
+                if time.monotonic() - last_progress > self.idle_timeout:
+                    raise TimeoutError("right idle timeout expired")
+                time.sleep(self.poll_interval)

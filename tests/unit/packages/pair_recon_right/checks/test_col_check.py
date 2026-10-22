@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 from support import STATS, FakeTarget, MemoryStore, left_document
 
@@ -124,6 +127,60 @@ def test_unit():
     assert results[0]["verdict"] == "match" and results[0]["right_col"] == "amount"
     assert store.exists(f"col_check/results/{uid}.json")
     assert target.calls == [("p", "2026-01-01", None)]
+
+
+def test_right_worker_budget_runs_window_queries_in_parallel():
+    pair = {
+        "version": 2,
+        "left": {"source": "oracle", "date_col": "dt"},
+        "right": {"source": "databricks", "date_col": "dt"},
+        "col_map": {"amount": "amount"},
+        "vintage": "month",
+    }
+    row_check = {
+        "gate_decision": {"passed": True},
+        "partitions": {
+            "2026-01-01": {"left": 1, "right": 1, "verdict": "match"},
+            "2026-02-01": {"left": 1, "right": 1, "verdict": "match"},
+        },
+    }
+    manifest = build_manifest("run", "p", pair, row_check)
+    store = MemoryStore()
+    store.put_json("plan.json", manifest)
+    for sequence, window in enumerate(manifest["windows"], 1):
+        uid = unit_id_for(manifest, window, "amount")
+        store.commit_unit(
+            sequence,
+            uid,
+            STATS,
+            {"pair": "p", "window": window["bucket"], "column": "amount"},
+        )
+    store.close_manifests(["p"], manifest["expected_units"], plan_ids={"p": manifest["plan_id"]})
+    store.heartbeat()
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    class ParallelTarget(FakeTarget):
+        def window_statistics(self, *_args):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return {"amount": STATS}
+
+    results = ColCheck(
+        store,
+        lambda _cfg: ParallelTarget(),
+        poll_interval=0,
+        right_workers=2,
+    ).run()
+
+    assert len(results) == 2
+    assert peak == 2
 
 
 def test_fixed():

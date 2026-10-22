@@ -195,10 +195,11 @@ def compact_sql(sql: str) -> tuple[str, dict[str, str | int]]:
 
 
 class SqlAudit:
-    def __init__(self, store, side: str, pair: str | None = None):
+    def __init__(self, store, side: str, pair: str | None = None, *, enabled: bool = True):
         self.store = store
         self.side = side
         self.pair = pair
+        self.enabled = enabled
         self.lock = _lock_for(store)
 
     def _block(
@@ -227,6 +228,8 @@ class SqlAudit:
         return sorted({key for key in current if key.endswith(".txt")})
 
     def refresh(self) -> bool:
+        if not self.enabled:
+            return True
         try:
             with self.lock:
                 keys = self._event_keys()
@@ -270,7 +273,7 @@ class SqlAudit:
             return False
 
     def record(self, sql: str, *, backend: str, operation: str = "query") -> str | None:
-        if operation in SKIPPED_OPERATIONS:
+        if not self.enabled or operation in SKIPPED_OPERATIONS:
             return None
         zone = get_run_status(self.store).get("timezone")
         now = datetime.now(timezone_from_name(zone))

@@ -47,6 +47,15 @@ def plan_path(_pair: str) -> str:
     return "plan.json"
 
 
+def mapping_path(_pair: str) -> str:
+    return "mapping.csv"
+
+
+def artifact_location(store, relative: str) -> str:
+    root = str(getattr(store, "root_uri", "")).rstrip("/\\")
+    return f"{root}/{relative}" if root else relative
+
+
 def fixed_keys_path(_pair: str) -> str:
     return "fixed_keys.json"
 

@@ -117,6 +117,17 @@ def sample_value(value: str):
     return int(number) if number.is_integer() and number > 1 else number
 
 
+def positive_int(label: str, default: int) -> int:
+    raw = ask(label, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a positive integer") from None
+    if value < 1 or str(value) != str(raw).strip():
+        raise ValueError(f"{label} must be a positive integer")
+    return value
+
+
 def csv_defaults(path: str, pair: str, side: str) -> dict:
     request = Path(path).with_name("request.yaml")
     if not request.is_file():
@@ -311,7 +322,15 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
             ask("Sample", provenance.get("sample", run_default("sample", "all")))
         ),
         "strict": yes_no("Strict normalization", bool(run_default("strict", False))),
+        "audit": yes_no("Audit SQL", bool(run_default("audit", False))),
     }
+    left_workers = positive_int("Left source worker budget", run_default("left_workers", 2))
+    right_workers = (
+        positive_int("Databricks query worker budget", run_default("right_workers", 8))
+        if run_mode == "full" and right_input == "database"
+        else 1
+    )
+    sync_remote = yes_no("Sync remote", bool(run_default("sync_remote", True)))
     if mode == "date":
         answers.update(
             from_date=ask("From date", provenance.get("from_date", defaults.get("from_date"))),
@@ -352,10 +371,13 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "checks": ",".join(selected),
         "sample": answers["sample"],
         "strict": answers["strict"],
+        "audit": answers["audit"],
+        "sync_remote": sync_remote,
         "work_dir": str(local_output_root(defaults)),
         "timeout": defaults.get("timeout", 120),
         "progress_interval": defaults.get("progress_interval", 10),
-        "pull_workers": defaults.get("pull_workers", 2),
+        "left_workers": left_workers,
+        "right_workers": right_workers,
         "_catalog_row": by_name[pair],
     }
     for key in ("from_date", "to_date", "vintage"):
@@ -379,8 +401,6 @@ def execute(args, *, raise_errors: bool = False) -> int:
     load_environment()
     settings = None
     try:
-        if getattr(args, "sync", False) and not env_value(WORKSPACE_DIR_ENV):
-            raise ValueError(f"--sync requires {WORKSPACE_DIR_ENV} in .pair_recon.env")
         defaults = load_config(args.config) if args.config else load_defaults(DEFAULTS)
         settings, config, action, client, catalog = prompts(defaults)
         configure_console_logging(args.log_level, settings["timezone"])
@@ -398,12 +418,14 @@ def execute(args, *, raise_errors: bool = False) -> int:
         )
         if not yes_no("Run now", True):
             return 0
-        if getattr(args, "sync", False):
+        if settings["sync_remote"]:
+            if not env_value(WORKSPACE_DIR_ENV):
+                raise ValueError(f"Sync remote requires {WORKSPACE_DIR_ENV} in .pair_recon.env")
             log.info("syncing Right package files to Databricks Workspace")
             synced = sync_right_package(settings, client)
             log.info("Right package sync completed: %s", json.dumps(synced, ensure_ascii=False))
         else:
-            log.info("Right package sync skipped: --sync was not requested")
+            log.info("Right package sync skipped by run option")
         snapshot = write_request_snapshot(settings, config)
         log.info("request snapshot: %s", snapshot)
         save_defaults(
@@ -464,7 +486,6 @@ def main_program(argv=None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="pair_recon")
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--sync", action="store_true")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))
     args = parser.parse_args(values)

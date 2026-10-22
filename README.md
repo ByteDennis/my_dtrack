@@ -86,15 +86,20 @@ For a current-view Left source against Right history, set `snapshot: true` in th
 just dbx login --no-open
 just dbx workspace upload src/pair_recon_right pair_recon_right --dry-run
 just dbx workspace download pair_recon_right downloaded-right
-just dbx workspace delete obsolete.py --dry-run
-just dbx workspace delete -rf obsolete-folder
+just dbx workspace ls pair_recon_right -R
+just dbx workspace cp source.py archive/source.py --dry-run
+just dbx workspace mv old.py new.py
+just dbx workspace rm obsolete.py --dry-run
+just dbx workspace rm -rf obsolete-folder
 just dbx compute status --cluster-id CLUSTER_ID
 just dbx warehouse status --warehouse-id WAREHOUSE_ID
 just dbx sql "SELECT current_user()" --warehouse-id WAREHOUSE_ID
 just dbx runs --limit 10
 ```
 
-Set `DBX_PROFILE`, `DBX_CLUSTER_ID`, `DBX_WAREHOUSE_ID`, `DBX_WORKSPACE_PDIR`, `DBX_PAIR_TABLE`, `DBX_PAIR_WORKBOOK`, `DBX_STATUS_TABLE`, `DBX_ERROR_TABLE`, and `DBX_RUN_PATH` in `.pair_recon.env` to omit repeated setup and operator options. `DBX_PAIR_WORKBOOK` selects the authoritative local workbook used for the pre-run metadata comparison. The table variables provide the corresponding run-prompt defaults; the progress table defaults to the status table's schema. `DBX_RUN_PATH` supplies the Volume runs path. Relative Workspace paths resolve below `/Users/<current-user>/`; absolute paths remain supported. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. Delete accepts multiple paths, `-r/--recursive`, `-f/--force`, and `--dry-run`, with `rm` as an alias. The setup installer mirrors `src/pair_recon_right` to `DBX_WORKSPACE_PDIR/pair_recon_right`, deleting remote package objects that no longer exist locally only after every upload succeeds. Its job notebook is the sibling `DBX_WORKSPACE_PDIR/pair_recon_right_job`, so it imports the package normally. `pair_recon --sync` performs the same mirror after the run prompts and repoints the Right job notebook to it. Use `just dbx --debug attach ...` or `just dbx --debug console ...` only when troubleshooting.
+Set `DBX_PROFILE`, `DBX_CLUSTER_ID`, `DBX_WAREHOUSE_ID`, `DBX_WORKSPACE_PDIR`, `DBX_PAIR_TABLE`, `DBX_PAIR_WORKBOOK`, `DBX_STATUS_TABLE`, `DBX_ERROR_TABLE`, and `DBX_RUN_PATH` in `.pair_recon.env` to omit repeated setup and operator options. `DBX_PAIR_WORKBOOK` selects the authoritative local workbook used for the pre-run metadata comparison. The table variables provide the corresponding run-prompt defaults; the progress table defaults to the status table's schema. `DBX_RUN_PATH` supplies the Volume runs path. Relative Workspace paths resolve below `/Users/<current-user>/`; absolute paths remain supported. Workspace `ls`, `cp`, `mv`, and `rm` follow the same path rule; recursive copy uses `cp -r`, replacement requires `-f`, and mutating operations support `--dry-run`. Because the Workspace API has no server-side rename or copy endpoint, `cp` uses export/import and `mv` deletes the source only after copying succeeds; `mv` is not atomic. Upload and download support files, notebooks, recursive folders, `--dry-run`, and `--overwrite`. `rm` accepts multiple paths, `-r/--recursive`, `-f/--force`, and `--dry-run`. The setup installer and `Sync remote` mirror `src/pair_recon_right` to `DBX_WORKSPACE_PDIR/pair_recon_right`, deleting remote package objects that no longer exist locally only after every upload succeeds. Its job notebook is the sibling `DBX_WORKSPACE_PDIR/pair_recon_right_job`, so it imports the package normally. Set `DBX_PKG_RENAME=pair_recon_right -> pair_recon` to upload the folder as `pair_recon` (notebook `pair_recon_job`); only the notebook's `pair_recon_right` imports are rewritten on upload, because every module inside the package uses relative imports. The run prompt asks whether to sync that package (default `true`), whether to retain SQL audit artifacts (default `false`), the Left source-query budget (default `2`), and the Databricks query budget (default `8`). `STATS_WORKERS` controls local per-vintage statistics shards and defaults to `2`. Use `just dbx --debug attach ...` or `just dbx --debug console ...` only when troubleshooting.
+
+Run `just live-right` on a configured work computer to execute the Right date SQL contract through `WorkspaceClient` and `DBX_WAREHOUSE_ID`. It loads `.pair_recon.env`, uses `DBX_PROFILE` and `DBX_AUTH_TYPE`, and performs read-only SQL without creating Unity Catalog objects.
 
 ## GitLab tools
 

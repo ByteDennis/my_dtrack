@@ -44,10 +44,19 @@ BACKPRESSURE_LOG_INTERVAL = 30.0
 DEFAULT_PROGRESS_INTERVAL = 10.0
 
 
-def wait_for_manifests(store, *, timeout: float = 1800, poll_interval: float = 3, pair_names=None):
+def wait_for_manifests(
+    store,
+    *,
+    timeout: float = 1800,
+    poll_interval: float = 3,
+    pair_names=None,
+    abort_if=None,
+):
+    abort_if = abort_if or (lambda: None)
     started = time.monotonic()
     last_state = None
     while True:
+        abort_if()
         plans = [
             value
             for _key, value in list_plans(store)
@@ -94,7 +103,12 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
                 else manifest.get("partition_mode", "date"),
             }
         ),
-        SqlAudit(store, "left", pair=manifest["pair"]),
+        SqlAudit(
+            store,
+            "left",
+            pair=manifest["pair"],
+            enabled=bool(manifest.get("audit")),
+        ),
     )
     windows = dict((existing or {}).get("windows") or {})
     window_ids = dict((existing or {}).get("window_ids") or {})
@@ -156,21 +170,21 @@ class ColCheckPipeline:
         pull_window: Callable,
         compute_stats: Callable,
         pull_workers: int = 2,
-        stat_workers: int = 2,
         wip: int = 200,
         backpressure_sleep: float = 1.0,
         progress_interval: float | None = None,
         wait_for_right: bool = True,
+        abort_if=None,
     ):
         self.store = store
         self.pull_window = pull_window
         self.compute_stats = compute_stats
         self.pull_workers = max(1, pull_workers)
-        self.requested_stat_workers = max(1, stat_workers)
         self.stat_workers = 1
         self.wip = max(1, wip)
         self.backpressure_sleep = max(0, backpressure_sleep)
         self.wait_for_right = wait_for_right
+        self.abort_if = abort_if or (lambda: None)
         self.progress_interval = max(
             0.01,
             float(
@@ -198,6 +212,7 @@ class ColCheckPipeline:
         return self.compute_stats(manifest, window, value, **options)
 
     def run(self, manifests: Iterable[dict[str, Any]]) -> int:
+        self.abort_if()
         manifests = list(manifests)
         for manifest in manifests:
             validate_manifest(manifest)
@@ -226,12 +241,6 @@ class ColCheckPipeline:
         exhausted = False
         write_run_status(self.store, {"state": "left_col_check", "role": "left"})
         self.store.heartbeat()
-        if self.requested_stat_workers != 1:
-            log.warning(
-                "stat-workers=%d requested; using one active vintage and parallelizing its "
-                "column shards with PAIR_RECON_DUCKDB_WORKERS",
-                self.requested_stat_workers,
-            )
         log.info(
             "col_check start: %d plan(s), %d vintage(s), %d attribute unit(s) already ready, "
             "next sequence=%d, wip=%s, active_vintages=1",
@@ -272,6 +281,7 @@ class ColCheckPipeline:
                     nonlocal sequence
                     first = sequence
                     for column in manifest["columns"]:
+                        self.abort_if()
                         if column not in rows:
                             continue
                         uid = unit_id_for(manifest, window, column)
@@ -323,7 +333,9 @@ class ColCheckPipeline:
                 return publish
 
             while pull_jobs or stat_jobs or ready or not exhausted:
+                self.abort_if()
                 while not exhausted and len(pull_jobs) < self.pull_workers:
+                    self.abort_if()
                     try:
                         manifest, window = next(plans)
                     except StopIteration:
@@ -339,6 +351,7 @@ class ColCheckPipeline:
                     job = pulls.submit(self.pull_window, manifest, window)
                     pull_jobs[job] = (manifest, window)
                 while ready and len(stat_jobs) < self.stat_workers:
+                    self.abort_if()
                     manifest, window, value = ready.popleft()
                     log.info(
                         "statistics %s %s: calculating %d column(s)",
@@ -372,10 +385,12 @@ class ColCheckPipeline:
                     return_when=FIRST_COMPLETED,
                 )
                 if not complete:
+                    self.abort_if()
                     progress.report()
                     self.store.heartbeat()
                     continue
                 for job in complete:
+                    self.abort_if()
                     if job in pull_jobs:
                         manifest, window = pull_jobs.pop(job)
                         log.info(
@@ -406,6 +421,7 @@ class ColCheckPipeline:
                         len(active_ids),
                     )
             progress.report()
+        self.abort_if()
         published = {row["pair"]: row for _key, row in list_plans(self.store)}
         published_ids = set().union(*(planned_unit_ids(row) for row in published.values()))
         expected = sum(row["expected_units"] for row in published.values())
@@ -438,7 +454,11 @@ class ColCheckPipeline:
             },
         )
         refresh_units_status(self.store)
-        SqlAudit(self.store, "left").refresh()
+        SqlAudit(
+            self.store,
+            "left",
+            enabled=any(bool(manifest.get("audit")) for manifest in manifests),
+        ).refresh()
         return sequence - first_sequence
 
     def _unit_progress(self, active_ids: set[str]) -> tuple[int, int, int]:
@@ -459,6 +479,7 @@ class ColCheckPipeline:
         waiting_started = None
         last_wait_log = None
         while True:
+            self.abort_if()
             left_ready, right_finished, active_ready_unclaimed = self._unit_progress(active_ids)
             ready_unclaimed = active_ready_unclaimed if version2 else self.store.ready_unclaimed()
             if ready_unclaimed < self.wip:
@@ -530,7 +551,12 @@ class LeftRuntime:
                             else manifest.get("partition_mode", "date"),
                         }
                     ),
-                    SqlAudit(self.store, "left", pair=pair),
+                    SqlAudit(
+                        self.store,
+                        "left",
+                        pair=pair,
+                        enabled=bool(manifest.get("audit")),
+                    ),
                 )
             return self.sources[pair]
 

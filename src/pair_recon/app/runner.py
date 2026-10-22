@@ -38,6 +38,65 @@ _RUN_DATE = re.compile(r"-(\d{4})(\d{2})(\d{2})$")
 log = get_left_logger("runner")
 
 
+class RightJobMonitor:
+    def __init__(self, remote, timeout: timedelta):
+        self.remote = remote
+        self.timeout = timeout
+        self.completed = None
+        self.error: Exception | None = None
+        self.done = threading.Event()
+        self.cancel_requested = threading.Event()
+        self.thread = threading.Thread(
+            target=self._watch,
+            name="pair-recon-right-monitor",
+            daemon=True,
+        )
+
+    @property
+    def run_id(self):
+        return getattr(self.remote, "run_id", "unknown")
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def _watch(self):
+        try:
+            completed = self.remote.result(timeout=self.timeout)
+            result = getattr(getattr(completed, "state", None), "result_state", None)
+            result_name = getattr(result, "value", result)
+            if result_name != "SUCCESS":
+                message = getattr(getattr(completed, "state", None), "state_message", None)
+                detail = f": {message}" if message else ""
+                raise RuntimeError(f"Right job finished with {result_name}{detail}")
+            self.completed = completed
+            log.info("Right Databricks job completed: run_id=%s", self.run_id)
+        except Exception as exc:  # noqa: BLE001
+            self.error = exc
+            if not self.cancel_requested.is_set():
+                log.error(
+                    "Right Databricks job failed: run_id=%s: %s",
+                    self.run_id,
+                    exc,
+                )
+        finally:
+            self.done.set()
+
+    def request_cancel(self):
+        self.cancel_requested.set()
+
+    def raise_if_failed(self):
+        if self.done.is_set() and self.error is not None:
+            raise RuntimeError(
+                f"Right Databricks job failed: run_id={self.run_id}: {self.error}"
+            ) from self.error
+
+    def result(self):
+        self.done.wait()
+        self.raise_if_failed()
+        return self.completed
+
+
 class StatementSql:
     def __init__(self, workspace, warehouse_id: str, reporter=None):
         self.api = workspace.statement_execution
@@ -233,10 +292,13 @@ def run_left(
     pair: str,
     work_dir: str | Path,
     manifest_timeout: float = 1800,
-    pull_workers: int = 2,
+    left_workers: int = 2,
     release=None,
     left_only: bool = False,
+    abort_if=None,
 ):
+    abort_if = abort_if or (lambda: None)
+    abort_if()
     config = validate_config(config)
     pair_config = config["pairs"][pair]
     if left_only and pair_config.get("snapshot"):
@@ -244,23 +306,33 @@ def run_left(
     reused = reuse_row_check(config, store, run_id=run_id, pair_names=[pair])
     if reused is None:
         run_row_check(config, store, run_id=run_id, pair_names=[pair], pair_workers=1)
+    abort_if()
     if release:
         release()
+    abort_if()
     checks = pair_config.get("checks") or []
     if not any(check != "row_count" for check in checks):
         return {"row": "ready", "units": 0}
     timeout = manifest_timeout if pair_config.get("snapshot") else 0
-    manifests = wait_for_manifests(store, timeout=timeout, poll_interval=2, pair_names=[pair])
+    manifests = wait_for_manifests(
+        store,
+        timeout=timeout,
+        poll_interval=2,
+        pair_names=[pair],
+        abort_if=abort_if,
+    )
     for manifest in manifests:
+        abort_if()
         publish_fixed_keys(store, manifest, work_dir)
+    abort_if()
     runtime = LeftRuntime(work_dir, store)
     units = ColCheckPipeline(
         store,
         pull_window=runtime.pull_window,
         compute_stats=runtime.compute_stats,
-        pull_workers=max(1, int(pull_workers)),
-        stat_workers=max(1, int(pull_workers)),
+        pull_workers=max(1, int(left_workers)),
         wait_for_right=not left_only,
+        abort_if=abort_if,
     ).run(manifests)
     return {"row": "ready", "units": units}
 
@@ -307,8 +379,10 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         "pair_table": settings["pair_table"],
         "status_table": settings["status_table"],
         "error_table": settings["error_table"],
+        "right_workers": str(max(1, int(settings.get("right_workers", 8)))),
     }
     remote = None
+    monitor = None
     right = None
     final_state = "failed"
     local_right = not left_only and config["pairs"][pair]["right"].get("source") == "csv"
@@ -355,6 +429,10 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 job_id,
             )
             remote = client.jobs.run_now(job_id, notebook_params=params)
+            monitor = RightJobMonitor(
+                remote,
+                timedelta(minutes=float(settings.get("timeout", 120))),
+            ).start()
         log.info("starting Left checks")
         left = run_left(
             config,
@@ -363,9 +441,10 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             pair,
             run_dir,
             float(settings.get("timeout", 120)) * 60,
-            int(settings.get("pull_workers", 2)),
+            int(settings.get("left_workers", 2)),
             (lambda: run_right_row_check(store, target_factory)) if local_right else None,
             left_only=left_only,
+            abort_if=monitor.raise_if_failed if monitor else None,
         )
         log.info("Left checks completed: %s", left)
         if left_only:
@@ -393,6 +472,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 store=store,
                 poll_interval=0.1,
                 wait_timeout=float(settings.get("timeout", 120)) * 60,
+                right_workers=1,
             )
             final_state = (
                 "different"
@@ -409,12 +489,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                     timezone=settings["timezone"],
                 )
         else:
-            completed = remote.result(
-                timeout=timedelta(minutes=float(settings.get("timeout", 120)))
-            )
-            result = getattr(getattr(completed, "state", None), "result_state", None)
-            if getattr(result, "value", result) != "SUCCESS":
-                raise RuntimeError(f"Right job finished with {getattr(result, 'value', result)}")
+            monitor.result()
             status = catalog.run(run_id) if catalog else None
             final_state = (status or {}).get("state", "finished")
             right = {"run_id": int(remote.run_id)}
@@ -437,6 +512,8 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         log.exception("run failed")
         if remote is not None and client is not None:
             try:
+                if monitor:
+                    monitor.request_cancel()
                 client.jobs.cancel_run(int(remote.run_id))
             except Exception:
                 log.exception("could not cancel Right Databricks run: run_id=%s", remote.run_id)

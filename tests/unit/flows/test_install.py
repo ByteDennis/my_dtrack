@@ -190,7 +190,7 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
         install,
         "right_target",
         lambda actual, path: (
-            calls.update({"resolve": (actual, path)}) or f"/Users/me/{path}/pair_recon_right"
+            calls.update({"resolve": (actual, path)}) or f"/Users/me/{path}/pair_recon"
         ),
     )
     monkeypatch.setattr(install, "read_pair_workbook", lambda _path: [])
@@ -211,7 +211,7 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
     assert calls["profile"] == "team"
     assert calls["resolve"] == (client, "deploy")
     assert calls["job"][1]["tasks"][0]["notebook_task"]["notebook_path"] == (
-        "/Users/me/deploy/pair_recon_right_job"
+        "/Users/me/deploy/pair_recon_job"
     )
     assert calls["job"][1]["tasks"][0]["existing_cluster_id"] == "c9"
     assert calls["refresh"][1:3] == ("w9", "main.recon.pair_recon_pair_meta")

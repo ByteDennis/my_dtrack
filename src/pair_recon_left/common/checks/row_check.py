@@ -7,10 +7,12 @@ from typing import Any
 
 from ...backends.sources import source_from_config
 from ..model.audit import SqlAudit, attach_sql_audit
-from ..model.manifest import build_manifest, key_family_specs, sample_plan
+from ..model.manifest import build_manifest, key_family_specs, mapping_csv_bytes, sample_plan
 from ..model.protocol import (
     LEFT_ROW_CHECK_CLOSED,
+    artifact_location,
     left_row_path,
+    mapping_path,
     plan_path,
     timestamp,
     write_run_status,
@@ -30,6 +32,7 @@ STAGE_ONE_FIELDS = (
     "sample",
     "pre_sampled",
     "right_pre_sampled",
+    "audit",
     "key",
     "key_families",
 )
@@ -145,10 +148,15 @@ def publish_row_check_results(
                 },
             }
             plan = build_manifest(run_id, name, public, baseline)
+            store.put_bytes(
+                mapping_path(name),
+                mapping_csv_bytes(public),
+                content_type="text/csv; charset=utf-8",
+            )
             store.put_json(plan_path(name), plan)
             log.info(
-                "-> %s: version=2, %d windows x %d columns = %d units",
-                plan_path(name),
+                "plan released: %s (%d windows, %d columns, %d units)",
+                artifact_location(store, plan_path(name)),
                 len(plan["windows"]),
                 len(plan["columns"]),
                 plan["expected_units"],
@@ -198,7 +206,11 @@ def run_row_check(
     if missing_sources:
         raise ValueError(f"preflight sources missing pair(s): {', '.join(missing_sources)}")
     sources = {
-        name: attach_sql_audit(sources[name], SqlAudit(store, "left", pair=name)) for name in pairs
+        name: attach_sql_audit(
+            sources[name],
+            SqlAudit(store, "left", pair=name, enabled=bool(pairs[name].get("audit"))),
+        )
+        for name in pairs
     }
     if preflight_health is None:
         health = {name: source.preflight() for name, source in sources.items()}
@@ -266,5 +278,7 @@ def run_row_check(
             len(pairs),
             time.monotonic() - started,
         )
-    SqlAudit(store, "left").refresh()
+    SqlAudit(
+        store, "left", enabled=any(bool(pair.get("audit")) for pair in pairs.values())
+    ).refresh()
     return run_id, documents

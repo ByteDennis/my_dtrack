@@ -144,6 +144,19 @@ def test_timezone_default(monkeypatch):
     assert cli.timezone_default() == "Asia/Tokyo"
 
 
+@pytest.mark.parametrize(("raw", "expected"), [("3", 3), (8, 8)])
+def test_positive_int(monkeypatch, raw, expected):
+    monkeypatch.setattr(cli, "ask", lambda *_args, **_kwargs: raw)
+    assert cli.positive_int("Worker budget", 2) == expected
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "1.5", "many"])
+def test_positive_int_rejects_invalid_budget(monkeypatch, raw):
+    monkeypatch.setattr(cli, "ask", lambda *_args, **_kwargs: raw)
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        cli.positive_int("Worker budget", 2)
+
+
 def test_pair_metadata_tables_override_json():
     config = pair_config(
         {
@@ -275,6 +288,7 @@ def test_pair_metadata_builds_config_from_explicit_columns():
             "partition_mode": "date",
             "sample": 0.1,
             "strict": False,
+            "audit": True,
             "checks": ["row_count", "hash_sum"],
             "from_date": "2026-01-01",
             "to_date": "2026-01-31",
@@ -283,6 +297,7 @@ def test_pair_metadata_builds_config_from_explicit_columns():
         timezone="America/New_York",
     )
     assert runner.validate_config(runtime)["pairs"]["orders"]["sample"] == 0.1
+    assert runtime["pairs"]["orders"]["audit"] is True
     assert "_run_defaults" not in runtime["pairs"]["orders"]
     assert "run_mode" not in runtime["pairs"]["orders"]
 
@@ -451,6 +466,11 @@ def test_main_program_enables_error_reraising_in_debug_mode(monkeypatch):
     assert seen == [False, True, True]
 
 
+def test_main_program_rejects_removed_sync_option():
+    with pytest.raises(SystemExit):
+        cli.main_program(["--sync"])
+
+
 def test_progress():
     store = MemoryStore()
     write_run_status(
@@ -606,9 +626,16 @@ def test_prompt(monkeypatch, run_mode, left_input, right_input, existing, tmp_pa
     assert not any("Run id" in prompt or "Existing run action" in prompt for prompt in prompts)
     assert settings["run_mode"] == run_mode
     assert settings["left_input"] == left_input
+    assert settings["sync_remote"] is True
+    assert settings["audit"] is False
+    assert settings["left_workers"] == 2
+    assert settings["right_workers"] == (
+        8 if run_mode == "full" and right_input == "database" else 1
+    )
     assert settings["work_dir"] == str(tmp_path / "artifacts")
     assert (tmp_path / "artifacts").is_dir()
     assert config["pairs"]["orders"]["statistics"] == ["hash_sum"]
+    assert config["pairs"]["orders"]["audit"] is False
     expected = {"database": "oracle", "csv": "csv"}[left_input]
     assert config["pairs"]["orders"]["left"]["source"] == expected
     if left_input == "csv":
@@ -947,6 +974,183 @@ def test_launch_writes_early_failure_to_left_log(monkeypatch, tmp_path):
     assert "run failed" in content
     assert "RuntimeError: job 42 was not found" in content
     assert states == ["running", "failed"]
+
+
+def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_path):
+    store = MemoryStore()
+    states = []
+    cancelled = []
+
+    class Root:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def child(self, _run_id):
+            return store
+
+    class Sampler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self, **_kwargs):
+            return self
+
+        def stop(self, _state, **_kwargs):
+            pass
+
+    class Catalog:
+        progress = staticmethod(lambda _row: None)
+
+        def clear(self, _run_id):
+            pass
+
+        def status(self, **values):
+            states.append(values["state"])
+
+    class Remote:
+        run_id = 91
+
+        def result(self, *, timeout):
+            assert timeout.total_seconds() == 7200
+            raise RuntimeError("preflight exploded")
+
+    def left(*_args, abort_if=None, **_kwargs):
+        assert abort_if is not None
+        for _ in range(100):
+            abort_if()
+            threading.Event().wait(0.01)
+        pytest.fail("Left did not observe the Right failure")
+
+    monkeypatch.setattr(runner, "VolumeStore", Root)
+    monkeypatch.setattr(runner, "ProgressSampler", Sampler)
+    monkeypatch.setattr(runner, "run_left", left)
+    settings = {
+        "run_id": "failed-right-1",
+        "profile": "corp",
+        "volume_root": "/Volumes/c/s/v/runs",
+        "work_dir": str(tmp_path),
+        "timezone": "America/New_York",
+        "owner": "me",
+        "pair_table": "c.s.pairs",
+        "status_table": "c.s.status",
+        "error_table": "c.s.errors",
+        "right_job_id": "42",
+    }
+    client = SimpleNamespace(
+        files=object(),
+        jobs=SimpleNamespace(
+            run_now=lambda *_args, **_kwargs: Remote(),
+            cancel_run=lambda run_id: cancelled.append(run_id),
+        ),
+    )
+    config = {"pairs": {"orders": {"right": {"source": "databricks"}}}}
+
+    with pytest.raises(
+        RuntimeError,
+        match="Right Databricks job failed: run_id=91: preflight exploded",
+    ):
+        runner.launch(
+            settings,
+            config,
+            action="new",
+            workspace_client=client,
+            catalog=Catalog(),
+        )
+
+    content = (
+        local_run_directory(tmp_path, "failed-right-1", settings["timezone"]) / "left.log"
+    ).read_text(encoding="utf-8")
+    assert "Right Databricks job failed: run_id=91: preflight exploded" in content
+    assert states == ["running", "failed"]
+    assert cancelled == [91]
+
+
+def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
+    store = MemoryStore()
+    calls = []
+
+    class Root:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def child(self, _run_id):
+            return store
+
+    class Sampler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self, **_kwargs):
+            return self
+
+        def stop(self, state, **_kwargs):
+            calls.append(f"stop:{state}")
+
+    class Catalog:
+        progress = staticmethod(lambda _row: None)
+
+        def clear(self, _run_id):
+            pass
+
+        def status(self, **values):
+            calls.append(f"status:{values['state']}")
+
+        def run(self, run_id):
+            assert run_id == "success-right-1"
+            return {"state": "passed"}
+
+    class Remote:
+        run_id = 92
+
+        def result(self, *, timeout):
+            calls.append(f"result:{int(timeout.total_seconds())}")
+            return SimpleNamespace(state=SimpleNamespace(result_state="SUCCESS"))
+
+    def start_right(_job_id, *, notebook_params):
+        calls.append(f"workers:{notebook_params['right_workers']}")
+        return Remote()
+
+    monkeypatch.setattr(runner, "VolumeStore", Root)
+    monkeypatch.setattr(runner, "ProgressSampler", Sampler)
+    monkeypatch.setattr(
+        runner,
+        "run_left",
+        lambda *_args, **_kwargs: {"row": "ready", "units": 3},
+    )
+    settings = {
+        "run_id": "success-right-1",
+        "profile": "corp",
+        "volume_root": "/Volumes/c/s/v/runs",
+        "work_dir": str(tmp_path),
+        "timezone": "America/New_York",
+        "owner": "me",
+        "pair_table": "c.s.pairs",
+        "status_table": "c.s.status",
+        "error_table": "c.s.errors",
+        "right_job_id": "42",
+    }
+    client = SimpleNamespace(
+        files=object(),
+        jobs=SimpleNamespace(
+            run_now=start_right,
+            cancel_run=lambda *_args: pytest.fail("successful Right run must not be cancelled"),
+        ),
+    )
+    config = {"pairs": {"orders": {"right": {"source": "databricks"}}}}
+
+    result = runner.launch(
+        settings,
+        config,
+        action="new",
+        workspace_client=client,
+        catalog=Catalog(),
+    )
+
+    assert result["state"] == "passed"
+    assert result["right"] == {"run_id": 92}
+    assert "workers:8" in calls
+    assert calls.count("result:7200") == 1
+    assert calls == ["status:running", "workers:8", "result:7200", "stop:passed"]
 
 
 def test_csvrun(tmp_path):

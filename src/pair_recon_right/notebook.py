@@ -17,6 +17,7 @@ for name in (
     "pair_table",
     "status_table",
     "error_table",
+    "right_workers",
 ):
     dbutils.widgets.text(name, "")
 
@@ -31,6 +32,7 @@ values = {
         "pair_table",
         "status_table",
         "error_table",
+        "right_workers",
     )
 }
 publish_values = {
@@ -56,6 +58,7 @@ try:
         values["run_root"],
         lambda config: SparkTarget(spark, config),
         run_id=values["run_id"],
+        right_workers=int(values["right_workers"] or 8),
     )
     state = (
         "passed"

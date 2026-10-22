@@ -49,7 +49,7 @@ def test_counts(mode, counts):
     assert not store.exists("plan.json")
 
 
-def test_plan():
+def test_plan(caplog):
     pair = {
         "partition_mode": "all",
         "left": {"source": "oracle", "table": "L"},
@@ -60,13 +60,20 @@ def test_plan():
         "version": 2,
     }
     store = MemoryStore()
-    run_row_check(
-        {"version": 2, "pairs": {"p": pair}},
-        store,
-        run_id="run",
-        source_factory=lambda _value: Source({"all": 2}),
-    )
+    with caplog.at_level("INFO"):
+        run_row_check(
+            {"version": 2, "pairs": {"p": pair}},
+            store,
+            run_id="run",
+            source_factory=lambda _value: Source({"all": 2}),
+        )
     assert store.get_json("plan.json")["statistics"] == ["n_unique", "hash_sum"]
+    assert "plan released: memory://run/plan.json (1 windows, 1 columns, 1 units)" in caplog.text
+    assert "version=2" not in caplog.text
+    assert store.get_bytes("mapping.csv").decode().splitlines() == [
+        "left_column,right_column,usage,data_type",
+        "A,a,compare,",
+    ]
 
 
 def test_vintage_sampling_keeps_full_row_counts():

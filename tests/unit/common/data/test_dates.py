@@ -4,11 +4,6 @@ import duckdb
 import pytest
 
 
-def require_date_platform(common, dialect):
-    if common.side == "pair_recon_right" and dialect not in {"spark", "databricks"}:
-        pytest.skip("the Databricks package intentionally ships only its Spark adapter")
-
-
 @pytest.mark.parametrize(
     ("value", "expected", "error"),
     [
@@ -163,9 +158,8 @@ def test_sas(common):
     assert kind.normalize("01AUG2026:09:45:35") == "2026-08-01"
 
 
-def test_oracle(common):
-    require_date_platform(common, "oracle")
-    kind = common.dates.resolve_date_type({"type": "string", "format": "dash"})
+def test_oracle(left_common):
+    kind = left_common.dates.resolve_date_type({"type": "string", "format": "dash"})
     assert kind.normalize_sql("DT", "oracle") == (
         "COALESCE(TO_CHAR(TO_DATE(TRIM(TO_CHAR(DT)) DEFAULT NULL ON CONVERSION ERROR, "
         "'YYYY-MM-DD'), 'YYYY-MM-DD'), '')"
@@ -244,46 +238,50 @@ def test_bounds(common):
     )
 
 
+DAY_CASES = [
+    ("oracle", "date", "TRUNC(DT)"),
+    ("spark", "date", "to_date(`DT`)"),
+    ("duckdb", "date", 'try_cast("DT" AS DATE)'),
+    ("oracle", {"type": "string", "format": "dash"}, "DT"),
+    ("oracle", {"type": "string", "format": "compact"}, "DT"),
+    (
+        "oracle",
+        {"type": "sas", "format": "date9"},
+        (
+            "TO_DATE(REPLACE(TRIM(TO_CHAR(DT)), '-', '') DEFAULT NULL ON CONVERSION ERROR, "
+            "'DDMONYYYY', 'NLS_DATE_LANGUAGE=English')"
+        ),
+    ),
+    (
+        "athena",
+        {"type": "sas", "format": "date9"},
+        "CAST(date_parse(TRIM(CAST(\"DT\" AS VARCHAR)), '%d%b%Y') AS DATE)",
+    ),
+    (
+        "athena",
+        {"type": "sas", "format": "days"},
+        ("date_add('day', CAST(truncate(CAST(\"DT\" AS DOUBLE)) AS BIGINT), DATE '1960-01-01')"),
+    ),
+    (
+        "duckdb",
+        {"type": "sas", "format": "days"},
+        "DATE '1960-01-01' + CAST(trunc(CAST(\"DT\" AS DOUBLE)) AS INTEGER)",
+    ),
+    ("spark", "number", "`DT`"),
+]
+
+
+@pytest.mark.parametrize(("dialect", "date_type", "expected"), DAY_CASES)
+def test_day_left(left_common, dialect, date_type, expected):
+    assert left_common.dates.day_expr("DT", dialect, date_type) == expected
+
+
 @pytest.mark.parametrize(
     ("dialect", "date_type", "expected"),
-    [
-        ("oracle", "date", "TRUNC(DT)"),
-        ("spark", "date", "to_date(`DT`)"),
-        ("duckdb", "date", 'try_cast("DT" AS DATE)'),
-        ("oracle", {"type": "string", "format": "dash"}, "DT"),
-        ("oracle", {"type": "string", "format": "compact"}, "DT"),
-        (
-            "oracle",
-            {"type": "sas", "format": "date9"},
-            (
-                "TO_DATE(REPLACE(TRIM(TO_CHAR(DT)), '-', '') DEFAULT NULL ON CONVERSION ERROR, "
-                "'DDMONYYYY', 'NLS_DATE_LANGUAGE=English')"
-            ),
-        ),
-        (
-            "athena",
-            {"type": "sas", "format": "date9"},
-            "CAST(date_parse(TRIM(CAST(\"DT\" AS VARCHAR)), '%d%b%Y') AS DATE)",
-        ),
-        (
-            "athena",
-            {"type": "sas", "format": "days"},
-            (
-                "date_add('day', CAST(truncate(CAST(\"DT\" AS DOUBLE)) AS BIGINT), "
-                "DATE '1960-01-01')"
-            ),
-        ),
-        (
-            "duckdb",
-            {"type": "sas", "format": "days"},
-            "DATE '1960-01-01' + CAST(trunc(CAST(\"DT\" AS DOUBLE)) AS INTEGER)",
-        ),
-        ("spark", "number", "`DT`"),
-    ],
+    [case for case in DAY_CASES if case[0] in {"spark", "databricks"}],
 )
-def test_day(common, dialect, date_type, expected):
-    require_date_platform(common, dialect)
-    assert common.dates.day_expr("DT", dialect, date_type) == expected
+def test_day_right(right_common, dialect, date_type, expected):
+    assert right_common.dates.day_expr("DT", dialect, date_type) == expected
 
 
 def test_day2(common):
@@ -325,9 +323,8 @@ def test_compact(common):
     )
 
 
-def test_date9(common):
-    require_date_platform(common, "oracle")
-    where = common.dates.bounds_where(
+def test_date9(left_common):
+    where = left_common.dates.bounds_where(
         "dt",
         dialect="oracle",
         date_type={"type": "sas", "format": "date9"},
@@ -341,9 +338,8 @@ def test_date9(common):
     assert where == f"{parsed} >= DATE '2026-01-31' AND {parsed} < DATE '2026-02-02'"
 
 
-def test_sas2(common):
-    require_date_platform(common, "oracle")
-    where = common.dates.partition_where(
+def test_sas2(left_common):
+    where = left_common.dates.partition_where(
         "dt",
         ["2026-01-01", "2026-01-02"],
         dialect="oracle",
@@ -416,9 +412,8 @@ def test_sas3(common):
         ).endswith("< DATE '2026-01-03'))")
 
 
-def test_fractional(common):
-    require_date_platform(common, "duckdb")
-    dates = common.dates
+def test_fractional(left_common):
+    dates = left_common.dates
     kind = dates.resolve_date_type({"type": "sas", "format": "days"})
     values = ["24108.75", "24108.0", "-1.75", "-1.0"]
     expression = kind.normalize_sql("raw", "duckdb")

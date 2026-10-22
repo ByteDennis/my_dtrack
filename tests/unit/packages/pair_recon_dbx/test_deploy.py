@@ -23,34 +23,61 @@ def job_client(path):
     ), calls
 
 
-def test_right_target_requires_parent_and_uses_fixed_package(monkeypatch):
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ("", "pair_recon_right"),
+        ("pair_recon_right -> pair_recon", "pair_recon"),
+        ("pair_recon_right->pr", "pr"),
+    ],
+)
+def test_remote_package_parses_rename_spec(spec, expected):
+    assert deploy.remote_package(spec) == expected
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "pair_recon",
+        "other -> pair_recon",
+        "pair_recon_right -> pair-recon",
+        "pair_recon_right -> class",
+    ],
+)
+def test_remote_package_rejects_bad_specs(spec):
+    with pytest.raises(ValueError, match="DBX_PKG_RENAME"):
+        deploy.remote_package(spec)
+
+
+def test_right_target_requires_parent_and_uses_remote_package(monkeypatch):
     monkeypatch.setattr(
         deploy, "resolve_workspace_path", lambda _ws, path: PurePosixPath("/Users/me") / path
     )
+    monkeypatch.delenv("DBX_PKG_RENAME", raising=False)
     assert deploy.right_target(object(), "apps") == "/Users/me/apps/pair_recon_right"
-    assert deploy.right_notebook("/Users/me/apps/pair_recon_right") == (
-        "/Users/me/apps/pair_recon_right_job"
-    )
+    monkeypatch.setenv("DBX_PKG_RENAME", "pair_recon_right -> pair_recon")
+    assert deploy.right_target(object(), "apps") == "/Users/me/apps/pair_recon"
+    assert deploy.right_notebook("/Users/me/apps/pair_recon") == ("/Users/me/apps/pair_recon_job")
     with pytest.raises(ValueError, match="DBX_WORKSPACE_PDIR"):
         deploy.right_target(object(), "")
 
 
 def test_repoint_job_updates_only_when_path_differs():
-    client, calls = job_client("/Users/me/apps/pair_recon_right/notebook")
-    assert deploy.repoint_job(client, 7, "/Users/me/apps/pair_recon_right_job")
+    client, calls = job_client("/Users/me/apps/pair_recon/notebook")
+    assert deploy.repoint_job(client, 7, "/Users/me/apps/pair_recon_job")
     body = calls[0][1]["body"]
     assert body["job_id"] == 7
     assert body["new_settings"]["tasks"][0]["notebook_task"]["notebook_path"] == (
-        "/Users/me/apps/pair_recon_right_job"
+        "/Users/me/apps/pair_recon_job"
     )
-    client, calls = job_client("/Users/me/apps/pair_recon_right_job")
-    assert not deploy.repoint_job(client, 7, "/Users/me/apps/pair_recon_right_job")
+    client, calls = job_client("/Users/me/apps/pair_recon_job")
+    assert not deploy.repoint_job(client, 7, "/Users/me/apps/pair_recon_job")
     assert calls == []
 
 
 def test_sync_right_uploads_local_package_and_repoints(monkeypatch):
     seen = {}
-    monkeypatch.setattr(deploy, "right_target", lambda _ws, parent: f"/W/{parent}/pair_recon_right")
+    monkeypatch.setattr(deploy, "right_target", lambda _ws, parent: f"/W/{parent}/pair_recon")
     monkeypatch.setattr(
         deploy,
         "upload",
@@ -61,7 +88,34 @@ def test_sync_right_uploads_local_package_and_repoints(monkeypatch):
     )
     result = deploy.sync_right(object(), "apps", "7")
     assert seen["source"].name == "pair_recon_right"
-    assert seen["target"] == "/W/apps/pair_recon_right"
-    assert seen["job"] == (7, "/W/apps/pair_recon_right_job")
-    assert result["notebook"] == "/W/apps/pair_recon_right_job"
+    assert seen["target"] == "/W/apps/pair_recon"
+    assert seen["job"] == (7, "/W/apps/pair_recon_job")
+    assert result["notebook"] == "/W/apps/pair_recon_job"
     assert result["uploaded"] == 1 and result["deleted"] == ["b"]
+
+
+def test_notebook_body_rewrites_package_imports(tmp_path):
+    source = tmp_path / "notebook.py"
+    source.write_text(
+        "from pair_recon_right.catalog import publish\n"
+        "from pair_recon_right.engine.job import run\n"
+        "from pair_recon_left.backends import sources\n"
+        "name = 'pair_recon_rightmost'\n",
+        encoding="utf-8",
+    )
+    body = deploy.notebook_body(source, "pair_recon").decode("utf-8")
+    assert "from pair_recon.catalog import publish" in body
+    assert "from pair_recon.engine.job import run" in body
+    assert "pair_recon_left.backends" in body
+    assert "pair_recon_rightmost" in body
+    assert "pair_recon_right." not in body
+    assert deploy.notebook_body(source, "pair_recon_right") == source.read_bytes()
+
+
+def test_right_package_only_names_itself_in_the_notebook():
+    offenders = [
+        str(path.relative_to(deploy.right_source()))
+        for path in deploy.right_source().rglob("*.py")
+        if path.name != "notebook.py" and "pair_recon_right" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []

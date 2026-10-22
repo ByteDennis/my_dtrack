@@ -31,7 +31,7 @@ def calls(monkeypatch):
                 values.append((_name, args, kwargs)) or {"called": _name}
             ),
         )
-    for name in ("upload", "download", "delete"):
+    for name in ("upload", "download", "ls", "copy", "move", "rm"):
         monkeypatch.setattr(
             cli.workspace_ops,
             name,
@@ -81,17 +81,33 @@ def calls(monkeypatch):
             ),
         ),
         (
-            ["workspace", "delete", "old.py", "folder", "-rf", "--dry-run"],
+            ["workspace", "ls", "folder", "-R"],
             (
-                "delete",
-                ("client:corp", ["old.py", "folder"]),
-                {"recursive": True, "force": True, "dry_run": True},
+                "ls",
+                ("client:corp", "folder"),
+                {"recursive": True},
+            ),
+        ),
+        (
+            ["workspace", "cp", "old.py", "new.py", "-f", "--dry-run"],
+            (
+                "copy",
+                ("client:corp", "old.py", "new.py"),
+                {"recursive": False, "force": True, "dry_run": True},
+            ),
+        ),
+        (
+            ["workspace", "mv", "old.py", "new.py"],
+            (
+                "move",
+                ("client:corp", "old.py", "new.py"),
+                {"force": False, "dry_run": False},
             ),
         ),
         (
             ["workspace", "rm", "old.py"],
             (
-                "delete",
+                "rm",
                 ("client:corp", ["old.py"]),
                 {"recursive": False, "force": False, "dry_run": False},
             ),
@@ -127,6 +143,11 @@ def test_errors(calls, monkeypatch, capsys):
     monkeypatch.delenv("DBX_CLUSTER_ID", raising=False)
     assert cli.main(["compute"]) == 1
     assert json.loads(capsys.readouterr().out) == {"error": "ValueError: --cluster-id is required"}
+
+
+def test_workspace_delete_command_is_removed():
+    with pytest.raises(SystemExit):
+        cli.parser().parse_args(["workspace", "delete", "old.py"])
 
 
 def test_debug_reraises_errors(calls, monkeypatch):

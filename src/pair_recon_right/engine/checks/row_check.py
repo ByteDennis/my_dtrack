@@ -8,12 +8,14 @@ from collections import Counter
 from typing import Any
 
 from ..common.model.audit import SqlAudit, attach_sql_audit
-from ..common.model.manifest import build_manifest, key_family_specs, sample_plan
+from ..common.model.manifest import build_manifest, key_family_specs, mapping_csv_bytes, sample_plan
 from ..common.model.protocol import (
+    artifact_location,
     left_row_check_close_document,
     list_left_documents,
     list_plans,
     list_row_results,
+    mapping_path,
     plan_path,
     refresh_units_status,
     row_result_path,
@@ -149,7 +151,15 @@ def reconcile_pair(
     preflight_s: float | None = None,
 ) -> dict[str, Any]:
     pair = left_doc["pair"]
-    attach_sql_audit(target, SqlAudit(store, "right", pair=pair))
+    attach_sql_audit(
+        target,
+        SqlAudit(
+            store,
+            "right",
+            pair=pair,
+            enabled=bool(left_doc["pair_config"].get("audit")),
+        ),
+    )
     if preflight_health is None:
         started = time.monotonic()
         health = target.preflight()
@@ -243,15 +253,19 @@ def reconcile_pair(
         version == 2 and column_checks and not store.exists(plan_path(pair))
     ):
         manifest = build_manifest(left_doc["run_id"], pair, left_doc["pair_config"], document)
+        store.put_bytes(
+            mapping_path(pair),
+            mapping_csv_bytes(left_doc["pair_config"]),
+            content_type="text/csv; charset=utf-8",
+        )
         store.put_json(plan_path(pair), manifest)
         refresh_units_status(store)
         log.info(
-            "plan %s: %d windows x %d columns = %d units -> %s",
-            pair,
+            "plan released: %s (%d windows, %d columns, %d units)",
+            artifact_location(store, plan_path(pair)),
             len(manifest["windows"]),
             len(manifest["columns"]),
             manifest["expected_units"],
-            plan_path(pair),
         )
     store.put_json(row_result_path(pair), document)
     return document
@@ -309,6 +323,7 @@ def run_row_check(
 ) -> int:
     processed = 0
     pending = pending_left_documents(store)
+    audit_enabled = any(bool(document["pair_config"].get("audit")) for document in pending)
     pending_pairs = {document["pair"] for document in pending}
     if targets is not None:
         missing_targets = sorted(pending_pairs - set(targets))
@@ -347,6 +362,6 @@ def run_row_check(
             released = [pair for pair in pairs if store.exists(plan_path(pair))]
             log.info("row_check closed: %d/%d pairs released", len(released), len(pairs))
     if processed:
-        SqlAudit(store, "right").refresh()
+        SqlAudit(store, "right", enabled=audit_enabled).refresh()
     require_version2_exclusions(store)
     return processed

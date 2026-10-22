@@ -1,9 +1,31 @@
+import keyword
+import os
+import re
 from pathlib import Path, PurePosixPath
 
 from .workspace import resolve_workspace_path
 
 RIGHT_PACKAGE = "pair_recon_right"
 WORKSPACE_DIR_ENV = "DBX_WORKSPACE_PDIR"
+RENAME_ENV = "DBX_PKG_RENAME"
+_PACKAGE_NAME = re.compile(rb"\b" + RIGHT_PACKAGE.encode() + rb"\b")
+
+
+# >>> remote package name from DBX_PKG_RENAME="pair_recon_right -> pair_recon" <<< #
+def remote_package(spec: str | None = None) -> str:
+    value = (os.getenv(RENAME_ENV, "") if spec is None else spec).strip()
+    if not value:
+        return RIGHT_PACKAGE
+    local, arrow, remote = value.partition("->")
+    local, remote = local.strip(), remote.strip()
+    if (
+        not arrow
+        or local != RIGHT_PACKAGE
+        or not remote.isidentifier()
+        or keyword.iskeyword(remote)
+    ):
+        raise ValueError(f"{RENAME_ENV} must look like '{RIGHT_PACKAGE} -> new_package_name'")
+    return remote
 
 
 # >>> local pair_recon_right source folder <<< #
@@ -17,13 +39,18 @@ def right_source() -> Path:
 def right_target(workspace, parent: str | None) -> str:
     if not str(parent or "").strip():
         raise ValueError(f"{WORKSPACE_DIR_ENV} is required")
-    return str(resolve_workspace_path(workspace, str(parent)) / RIGHT_PACKAGE)
+    return str(resolve_workspace_path(workspace, str(parent)) / remote_package())
 
 
 # >>> job notebook sits beside the importable right package <<< #
 def right_notebook(target: str) -> str:
     root = PurePosixPath(target)
     return str(root.parent / f"{root.name}_job")
+
+
+# >>> notebook source with imports pointed at the remote package name <<< #
+def notebook_body(path: Path, remote: str) -> bytes:
+    return _PACKAGE_NAME.sub(remote.encode(), path.read_bytes())
 
 
 # >>> mirror a local folder to a workspace folder <<< #
@@ -38,16 +65,18 @@ def upload(workspace, source: Path, target: str):
         if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
             continue
         remote = root.joinpath(*path.relative_to(source).parts)
+        body = path.read_bytes()
         options = {"format": ImportFormat.AUTO, "overwrite": True}
         if path.name == "notebook.py":
             remote = PurePosixPath(right_notebook(str(root)))
+            body = notebook_body(path, root.name)
             options = {
                 "format": ImportFormat.SOURCE,
                 "language": Language.PYTHON,
                 "overwrite": True,
             }
         workspace.workspace.mkdirs(str(remote.parent))
-        workspace.workspace.upload(str(remote), path.read_bytes(), **options)
+        workspace.workspace.upload(str(remote), body, **options)
         uploaded.append(str(remote))
         expected.add(str(remote))
         parent = remote.parent
@@ -103,7 +132,7 @@ def repoint_job(workspace, job_id: int, notebook: str) -> bool:
     return changed
 
 
-# >>> sync local pair_recon_right to the workspace and the right job <<< #
+# >>> sync local pair_recon_right to the workspace (optionally renamed) and repoint the right job <<< #
 def sync_right(workspace, parent: str | None, job_id=None) -> dict:
     target = right_target(workspace, parent)
     uploaded, deleted = upload(workspace, right_source(), target)

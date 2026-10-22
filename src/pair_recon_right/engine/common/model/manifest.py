@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import re
 from collections import defaultdict
@@ -27,6 +29,45 @@ def statistics_plan(raw: Any) -> list[str] | None:
     if unknown:
         raise ValueError(f"unsupported statistics: {', '.join(unknown)}")
     return [name for name in DEFAULT_STATISTICS if name in raw]
+
+
+def mapping_csv_bytes(pair: dict[str, Any]) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        output,
+        fieldnames=["left_column", "right_column", "usage", "data_type"],
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    excluded = set(pair.get("excluded_columns") or [])
+    overrides = pair.get("col_type_overrides") or {}
+    column_types = pair.get("column_types") or {}
+    partition_mode = str(pair.get("partition_mode") or "date")
+    date_col = str((pair.get("left") or {}).get("date_col") or "").casefold()
+    for left_column, right_column in (pair.get("col_map") or {}).items():
+        if partition_mode == "date" and str(left_column).casefold() == date_col:
+            usage = "partition"
+        elif left_column in excluded:
+            usage = "excluded"
+        else:
+            usage = "compare"
+        data_type = overrides.get(left_column)
+        if data_type is None and left_column in column_types:
+            data_type = json.dumps(
+                resolve_column_type(column_types[left_column]).spec(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        writer.writerow(
+            {
+                "left_column": left_column,
+                "right_column": right_column,
+                "usage": usage,
+                "data_type": data_type or "",
+            }
+        )
+    return output.getvalue().encode("utf-8")
 
 
 def _slug(value: object) -> str:
@@ -309,6 +350,7 @@ def build_manifest(
         "right": dict(pair["right"]),
         "date_synonyms": dict(pair.get("date_synonyms") or {}),
         "strict": bool(pair.get("strict")),
+        "audit": bool(pair.get("audit", False)),
         "col_type_overrides": overrides,
         "column_types": column_types,
         "excluded_partitions": excluded_partitions,

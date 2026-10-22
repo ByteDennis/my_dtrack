@@ -108,6 +108,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         snapshot = pair.get("snapshot", False)
         if not isinstance(snapshot, bool):
             raise TypeError(f"{name}: snapshot must be true or false")
+        audit = pair.get("audit", False)
+        if not isinstance(audit, bool):
+            raise TypeError(f"{name}: audit must be true or false")
+        pair["audit"] = audit
         if snapshot and partition_mode == "all":
             raise ValueError(f"{name}: snapshot requires partition_mode date")
         if partition_mode == "date" and (

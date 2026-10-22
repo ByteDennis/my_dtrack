@@ -39,12 +39,29 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--overwrite", action="store_true")
         command.add_argument("--dry-run", action="store_true")
         add_profile(command)
-    delete = workspace_commands.add_parser("delete", aliases=("rm",))
-    delete.add_argument("source", nargs="+")
-    delete.add_argument("-r", "-R", "--recursive", action="store_true")
-    delete.add_argument("-f", "--force", action="store_true")
-    delete.add_argument("--dry-run", action="store_true")
-    add_profile(delete)
+    ls = workspace_commands.add_parser("ls")
+    ls.add_argument("source", nargs="?")
+    ls.add_argument("-r", "-R", "--recursive", action="store_true")
+    add_profile(ls)
+    cp = workspace_commands.add_parser("cp")
+    cp.add_argument("source")
+    cp.add_argument("target")
+    cp.add_argument("-r", "-R", "--recursive", action="store_true")
+    cp.add_argument("-f", "--force", action="store_true")
+    cp.add_argument("--dry-run", action="store_true")
+    add_profile(cp)
+    mv = workspace_commands.add_parser("mv")
+    mv.add_argument("source")
+    mv.add_argument("target")
+    mv.add_argument("-f", "--force", action="store_true")
+    mv.add_argument("--dry-run", action="store_true")
+    add_profile(mv)
+    rm = workspace_commands.add_parser("rm")
+    rm.add_argument("source", nargs="+")
+    rm.add_argument("-r", "-R", "--recursive", action="store_true")
+    rm.add_argument("-f", "--force", action="store_true")
+    rm.add_argument("--dry-run", action="store_true")
+    add_profile(rm)
     compute = commands.add_parser("compute")
     compute.add_argument("action", nargs="?", choices=("status", "start", "stop"), default="status")
     compute.add_argument("--cluster-id", default=env_value("DBX_CLUSTER_ID"))
@@ -89,8 +106,27 @@ def execute(args) -> dict:
     if args.command == "login":
         return runtime.login(workspace, open_browser=not args.no_open)
     if args.command == "workspace":
-        if args.workspace_command in {"delete", "rm"}:
-            return workspace_ops.delete(
+        if args.workspace_command == "ls":
+            return workspace_ops.ls(workspace, args.source, recursive=args.recursive)
+        if args.workspace_command == "cp":
+            return workspace_ops.copy(
+                workspace,
+                args.source,
+                args.target,
+                recursive=args.recursive,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+        if args.workspace_command == "mv":
+            return workspace_ops.move(
+                workspace,
+                args.source,
+                args.target,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+        if args.workspace_command == "rm":
+            return workspace_ops.rm(
                 workspace,
                 args.source,
                 recursive=args.recursive,

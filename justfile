@@ -29,5 +29,8 @@ gitlab *args:
 live *args:
     if [ "{{args}}" = "--debug attach" ]; then uv run --extra debug python -m debugpy --listen 5678 --wait-for-client -m pytest -x -s --run-live tests/live/sources/test_source_queries.py; elif [ "{{args}}" = "--debug" ] || [ "{{args}}" = "--debug console" ]; then uv run --extra debug pytest -v -s --pdb --pdbcls=IPython.terminal.debugger:TerminalPdb --run-live tests/live/sources/test_source_queries.py; elif [ -n "{{args}}" ]; then echo "usage: just live [--debug console|attach]" >&2; exit 2; else uv run pytest -v -s --run-live tests/live/sources/test_source_queries.py; fi
 
+live-right *args:
+    uv run pytest -v -s --run-live tests/live/sources/test_right_workspace.py {{args}}
+
 sas *args:
     uv run --extra debug python -m pair_recon.core.sas export {{args}}

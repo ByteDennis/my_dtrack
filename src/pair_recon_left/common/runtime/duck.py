@@ -76,7 +76,7 @@ def parse_size(text: str) -> int:
 
 
 def worker_count() -> int:
-    return max(1, int(os.getenv("PAIR_RECON_DUCKDB_WORKERS") or DEFAULT_WORKERS))
+    return max(1, int(os.getenv("STATS_WORKERS") or DEFAULT_WORKERS))
 
 
 def settings(workers: int | None = None) -> dict[str, str]:

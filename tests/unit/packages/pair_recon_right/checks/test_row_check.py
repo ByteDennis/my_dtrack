@@ -170,16 +170,22 @@ def test_pending():
     assert pending_left_documents(store) == []
 
 
-def test_reconcile():
+def test_reconcile(caplog):
     store = MemoryStore()
     store.put_json("row_check/left.json", left_document())
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
-    assert run_row_check(store, lambda _cfg: FakeTarget()) == 1
+    with caplog.at_level("INFO"):
+        assert run_row_check(store, lambda _cfg: FakeTarget()) == 1
     doc = store.get_json("row_check/result.json")
     assert doc["summary"] == {"match": 1, "count_diff": 1, "left_only": 1, "right_only": 0}
     assert doc["timing"]["left_count_s"] == 0.1
     manifest = store.get_json("plan.json")
     assert manifest["windows"][0]["partitions"] == ["2026-01-01"]
+    assert "plan released: memory://run/plan.json (1 windows, 1 columns, 1 units)" in caplog.text
+    assert store.get_bytes("mapping.csv").decode().splitlines() == [
+        "left_column,right_column,usage,data_type",
+        "amount,amount,compare,",
+    ]
     assert store.exists("_status/row_check.closed.json")
     assert store.exists("report/row_check.csv")
     assert store.exists("_status/units.csv")

@@ -192,7 +192,7 @@ def test_parallel(tmp_path, monkeypatch):
     path = tmp_path / "shards.csv"
     path.write_text("A,B,C,D\n1,x,10,p\n2,y,20,q\n", encoding="utf-8")
     monkeypatch.setenv("PAIR_RECON_STATS_BATCH", "2")
-    monkeypatch.setenv("PAIR_RECON_DUCKDB_WORKERS", "2")
+    monkeypatch.setenv("STATS_WORKERS", "2")
     batches = []
     statuses = []
 

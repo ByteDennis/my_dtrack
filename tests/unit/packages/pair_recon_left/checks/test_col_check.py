@@ -2,7 +2,11 @@ import pytest
 from support import MemoryStore
 
 from pair_recon_left.backends.sources import write_rows
-from pair_recon_left.common.checks.col_check import ColCheckPipeline, LeftRuntime
+from pair_recon_left.common.checks.col_check import (
+    ColCheckPipeline,
+    LeftRuntime,
+    wait_for_manifests,
+)
 from pair_recon_left.common.model.manifest import unit_id
 
 
@@ -60,6 +64,32 @@ def test_left_only_pipeline_does_not_wait_for_right(monkeypatch):
 
     assert pipeline.run([row]) == 1
     assert store.exists("_status/col_check.closed.json")
+
+
+def test_wait_for_manifests_honors_abort_signal():
+    def abort():
+        raise RuntimeError("Right failed")
+
+    with pytest.raises(RuntimeError, match="Right failed"):
+        wait_for_manifests(MemoryStore(), timeout=1800, abort_if=abort)
+
+
+def test_pipeline_honors_abort_signal_before_work():
+    pulled = []
+
+    def abort():
+        raise RuntimeError("Right failed")
+
+    pipeline = ColCheckPipeline(
+        MemoryStore(),
+        pull_window=lambda *_args: pulled.append(True),
+        compute_stats=lambda *_args: {},
+        abort_if=abort,
+    )
+
+    with pytest.raises(RuntimeError, match="Right failed"):
+        pipeline.run([manifest()])
+    assert pulled == []
 
 
 def test_cache(tmp_path):
