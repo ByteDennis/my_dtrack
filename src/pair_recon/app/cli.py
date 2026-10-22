@@ -136,6 +136,13 @@ def positive_int(label: str, default: int) -> int:
     return value
 
 
+def right_job_reference(value: object) -> str:
+    reference = str(value or "").strip()
+    if reference.casefold() in {"-", "clear"}:
+        return str(env_value(JOB_NAME_ENV, default=DEFAULT_JOB_NAME))
+    return reference
+
+
 def csv_defaults(path: str, pair: str, side: str) -> dict:
     request = Path(path).with_name("request.yaml")
     if not request.is_file():
@@ -274,7 +281,10 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         defaults.get("right_job_id") or env_value(JOB_NAME_ENV, default=DEFAULT_JOB_NAME)
     )
     if remote_right:
-        right_job_id = ask("Right job id or name", right_job_id)
+        entered = ask("Right job id or name ('-' or 'clear' resets it)", right_job_id)
+        right_job_id = right_job_reference(entered)
+        if entered != right_job_id:
+            console(f"Saved Right job id cleared; using {JOB_NAME_ENV}={right_job_id!r}.")
     provenances = [value for value in provenances if value]
     provenance = provenances[0] if provenances else {}
     for value in provenances[1:]:
@@ -370,9 +380,10 @@ def sync_right_package(settings: dict, client) -> dict:
     synced = sync_right(client, env_value(WORKSPACE_DIR_ENV))
     reference = str(settings.get("right_job_id") or "").strip()
     job_id = resolve_job_id(client, reference, required=False)
+    job_updated = False
     if job_id is not None:
         try:
-            client.jobs.get(job_id)
+            job_updated = repoint_job(client, job_id, synced["notebook"])
         except Exception as exc:
             if not resource_does_not_exist(exc):
                 raise
@@ -392,7 +403,7 @@ def sync_right_package(settings: dict, client) -> dict:
         synced.update(
             job_id=job_id,
             job_created=False,
-            job_updated=repoint_job(client, job_id, synced["notebook"]),
+            job_updated=job_updated,
         )
     settings["right_job_id"] = str(job_id)
     return synced

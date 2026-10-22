@@ -431,9 +431,10 @@ def failure(path, exc: Exception) -> dict:
 
 
 def resource_does_not_exist(exc: Exception) -> bool:
-    return getattr(exc, "error_code", None) == "RESOURCE_DOES_NOT_EXIST" or type(exc).__name__ == (
-        "NotFound"
-    )
+    return getattr(exc, "error_code", None) == "RESOURCE_DOES_NOT_EXIST" or type(exc).__name__ in {
+        "NotFound",
+        "ResourceDoesNotExist",
+    }
 
 
 def download_objects(workspace, root) -> tuple[list[Any], list[Any]]:
