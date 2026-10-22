@@ -26,7 +26,6 @@ from pair_recon.core.sas import export_bundle
 from pair_recon_left.common.model.protocol import (
     plan_path,
     result_path,
-    unit_path,
     write_run_status,
 )
 from pair_recon_left.common.runtime.run_logging import CONSOLE_LOG_FORMAT, ZonedFormatter
@@ -505,7 +504,7 @@ def test_retry():
     store = MemoryStore()
     store.put_json(
         "row_check/result.json",
-        {"partitions": {"all": {"verdict": "match"}}},
+        {"partitions": {"all": {"result": "match"}}},
     )
     store.put_json("col_check/results/good.json", {"verdict": "match"})
     store.put_json("col_check/results/bad.json", {"verdict": "diff"})
@@ -609,7 +608,10 @@ def test_progress():
     )
     store.put_json("row_check/left.json", {"counts": {"all": 2}})
     store.put_json(plan_path("p"), {"pair": "p", "expected_units": 2, "windows": [], "columns": []})
-    store.put_json(unit_path("p", 1, "u1"), {"pair": "p", "unit_id": "u1"})
+    store.commit_units(
+        1,
+        [{"pair": "p", "window": "all", "unit_id": "u1", "left_statistics": {}}],
+    )
     store.put_json(result_path("p", "u1"), {"pair": "p", "unit_id": "u1", "verdict": "match"})
     seen = []
     ready = threading.Event()
@@ -784,6 +786,66 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
     if right_source == "csv":
         assert config["pairs"]["orders"]["right"]["source"] == "csv"
         assert config["pairs"]["orders"]["right_pre_sampled"] is True
+
+
+def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_path):
+    metadata = {
+        "left": {"source": "oracle", "table": "L", "date_col": "ORDER_DT", "date_type": "date"},
+        "right": {"source": "databricks", "table": "R", "date_col": "order_dt"},
+        "col_map": {"A": "a"},
+        "_run_defaults": {
+            "from_date": "2026-03-01",
+            "to_date": "2026-03-31",
+            "vintage": "week",
+            "excluded_partitions": ["2026-03-05"],
+            "audit": True,
+            "sync_remote": False,
+            "left_workers": 3,
+            "right_workers": 12,
+        },
+    }
+
+    class Catalog:
+        def __init__(self, *_args):
+            pass
+
+        def pairs(self):
+            return [{"pair_name": "orders", "config_json": metadata}]
+
+        def run(self, _run_id):
+            return None
+
+    defaults = {
+        "owner": "me",
+        "profile": "corp",
+        "warehouse_id": "warehouse",
+        "pair_table": "main.recon.pair_recon_pair_meta",
+        "status_table": "main.recon.pair_recon_run_status",
+        "error_table": "main.recon.pair_recon_run_error",
+        "volume_root": "/Volumes/main/recon/artifacts/runs",
+        "right_job_id": "42",
+        "pair": "other",
+        "timezone": "America/New_York",
+        "from_date": "2025-01-01",
+        "to_date": "2025-01-31",
+    }
+    monkeypatch.setattr(cli, "Catalog", Catalog)
+    monkeypatch.setattr(cli, "make_run_id", lambda *_args: "r-new")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    monkeypatch.setenv("PAIR_RECON_OUTPUT_DIR", str(tmp_path / "artifacts"))
+
+    settings, _config, _action, _client, _catalog = cli.prompts(
+        defaults, workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object())
+    )
+
+    assert settings["from_date"] == "2026-03-01"
+    assert settings["to_date"] == "2026-03-31"
+    assert settings["vintage"] == "week"
+    assert settings["excluded_partitions"] == ["2026-03-05"]
+    assert settings["audit"] is True
+    assert settings["sync_remote"] is False
+    assert settings["left_workers"] == 3
+    assert settings["right_workers"] == 12
 
 
 def test_prompt_records_and_applies_date_columns_and_types(monkeypatch, tmp_path):
@@ -1176,6 +1238,9 @@ def test_launch_writes_early_failure_to_left_log(monkeypatch, tmp_path):
         def status(self, **values):
             states.append(values["state"])
 
+        def finish(self, _store, **values):
+            states.append(values["state"])
+
     monkeypatch.setattr(runner, "VolumeStore", Root)
     settings = {
         "run_id": "failed-1",
@@ -1250,6 +1315,9 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
         def status(self, **values):
             states.append(values["state"])
 
+        def finish(self, _store, **values):
+            states.append(f"finish:{values['state']}")
+
     class Remote:
         run_id = 91
 
@@ -1317,8 +1385,9 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
     assert "run page: https://example/runs/91" in content
     assert "task run 910: ModuleNotFoundError" in content
     assert "Traceback for 910\n  File notebook, line 6" in content
-    assert states == ["running", "failed"]
-    assert cancelled == [91]
+    assert states == ["running", "finish:failed", "finish:failed"]
+    assert store.exists("col_check/failures/right-job.json")
+    assert cancelled == []
 
 
 def test_right_job_monitor_reports_failed_task_traceback():
@@ -1350,6 +1419,118 @@ def test_right_job_monitor_reports_failed_task_traceback():
     assert "run page: https://example/runs/93" in message
     assert "task run 930: ValueError: boom" in message
     assert "Traceback 930\n  File job.py, line 55" in message
+
+
+def test_right_job_monitor_forwards_cancelled_state():
+    forwarded = []
+
+    class Remote:
+        run_id = 95
+
+        def result(self, *, timeout):
+            return SimpleNamespace(
+                run_id=95,
+                state=SimpleNamespace(result_state="CANCELED", state_message="Cancelled by user"),
+            )
+
+    monitor = runner.RightJobMonitor(
+        Remote(),
+        timedelta(minutes=1),
+        on_terminal=forwarded.append,
+    ).start()
+
+    with pytest.raises(RuntimeError, match="CANCELED: Cancelled by user"):
+        monitor.result()
+    assert monitor.final_state == "cancelled"
+    assert forwarded == ["cancelled"]
+
+
+def test_launch_forwards_cancelled_job_and_finalizes_catalog(monkeypatch, tmp_path):
+    store = MemoryStore()
+    states = []
+    cancelled = []
+
+    class Root:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def child(self, _run_id):
+            return store
+
+    class Sampler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self, **_kwargs):
+            return self
+
+        def stop(self, _state, **_kwargs):
+            pass
+
+    class Catalog:
+        progress = staticmethod(lambda _row: None)
+
+        def clear(self, _run_id):
+            pass
+
+        def status(self, **values):
+            states.append(values["state"])
+
+        def finish(self, _store, **values):
+            states.append(f"finish:{values['state']}")
+
+    class Remote:
+        run_id = 96
+
+        def result(self, *, timeout):
+            return SimpleNamespace(
+                run_id=96,
+                state=SimpleNamespace(result_state="CANCELED", state_message="Cancelled by user"),
+            )
+
+    def left(*_args, abort_if=None, **_kwargs):
+        for _ in range(100):
+            abort_if()
+            threading.Event().wait(0.01)
+        pytest.fail("Left did not observe cancellation")
+
+    monkeypatch.setattr(runner, "VolumeStore", Root)
+    monkeypatch.setattr(runner, "ProgressSampler", Sampler)
+    monkeypatch.setattr(runner, "run_left", left)
+    settings = {
+        "run_id": "cancelled-right-1",
+        "profile": "corp",
+        "volume_root": "/Volumes/c/s/v/runs",
+        "work_dir": str(tmp_path),
+        "timezone": "America/New_York",
+        "owner": "me",
+        "pair_table": "c.s.pairs",
+        "status_table": "c.s.status",
+        "error_table": "c.s.errors",
+        "right_job_id": "42",
+    }
+    jobs = SimpleNamespace(
+        run_now=lambda *_args, **_kwargs: Remote(),
+        cancel_run=lambda run_id: cancelled.append(run_id),
+        get_run_output=lambda _run_id: SimpleNamespace(
+            error=None,
+            error_trace=None,
+            notebook_output=None,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="CANCELED: Cancelled by user"):
+        runner.launch(
+            settings,
+            {"pairs": {"orders": {"right": {"source": "databricks"}}}},
+            action="new",
+            workspace_client=SimpleNamespace(files=object(), jobs=jobs),
+            catalog=Catalog(),
+        )
+
+    assert states == ["running", "finish:cancelled", "finish:cancelled"]
+    assert store.exists("col_check/failures/right-job.json")
+    assert cancelled == []
 
 
 def test_right_job_monitor_outcome_is_empty_without_notebook_exit():
@@ -1399,9 +1580,8 @@ def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
         def status(self, **values):
             calls.append(f"status:{values['state']}")
 
-        def run(self, run_id):
-            assert run_id == "success-right-1"
-            return {"state": "passed"}
+        def finish(self, _store, **values):
+            calls.append(f"finish:{values['state']}")
 
     class Remote:
         run_id = 92
@@ -1475,7 +1655,14 @@ def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
     }
     assert "workers:8" in calls
     assert calls.count("result:7200") == 1
-    assert calls == ["status:running", "workers:8", "result:7200", "output:920", "stop:passed"]
+    assert calls == [
+        "status:running",
+        "workers:8",
+        "result:7200",
+        "output:920",
+        "finish:passed",
+        "stop:passed",
+    ]
 
 
 def test_csvrun(tmp_path):
@@ -1546,8 +1733,9 @@ def test_left_only_csvrun_uploads_left_artifacts(tmp_path):
     assert left == {"row": "ready", "units": 2}
     assert store.get_json("row_check/left.json")["counts"] == {"all": 2}
     assert store.get_json("plan.json")["expected_units"] == 2
-    assert len(units) == 2
-    assert all("left_statistics" in value for _key, value in units)
+    assert len(units) == 1
+    assert len(units[0][1]["units"]) == 2
+    assert all("left_statistics" in value for value in units[0][1]["units"])
     assert store.exists("_status/col_check.closed.json")
     assert not store.list_keys("col_check/results/")
 

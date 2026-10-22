@@ -17,13 +17,43 @@ ERROR_COLUMNS = (
     "payload",
     "created_at",
 )
+STATUS_SUMMARY_COLUMNS = (
+    "row_total",
+    "row_matches",
+    "row_differences",
+    "column_total",
+    "column_matches",
+    "column_differences",
+    "runtime_failures",
+)
+
+
+def result_summary(store) -> dict[str, int]:
+    partitions = [
+        value
+        for _, document in list_row_results(store)
+        for value in (document.get("partitions") or {}).values()
+    ]
+    columns = [value for _, value in list_results(store)]
+    failures = [value for _, value in list_failures(store)]
+    row_matches = sum(value.get("result") == "match" for value in partitions)
+    column_matches = sum(value.get("verdict") == "match" for value in columns)
+    return {
+        "row_total": len(partitions),
+        "row_matches": row_matches,
+        "row_differences": len(partitions) - row_matches,
+        "column_total": len(columns),
+        "column_matches": column_matches,
+        "column_differences": len(columns) - column_matches,
+        "runtime_failures": len(failures),
+    }
 
 
 def error_rows(store, run_id, pair, now):
     rows = []
     for _, result in list_row_results(store):
         for partition, value in (result.get("partitions") or {}).items():
-            if value.get("verdict") == "match":
+            if value.get("result") == "match":
                 continue
             rows.append(
                 {
@@ -35,7 +65,7 @@ def error_rows(store, run_id, pair, now):
                     "partition_value": partition,
                     "left_value": str(value.get("left")),
                     "right_value": str(value.get("right")),
-                    "detail": value.get("verdict"),
+                    "detail": value.get("result"),
                     "payload": __import__("json").dumps(value, ensure_ascii=False, sort_keys=True),
                     "created_at": now,
                 }
@@ -94,6 +124,7 @@ def publish(
     spark.conf.set("spark.sql.session.timeZone", timezone)
     spark.conf.set("spark.sql.timestampType", "TIMESTAMP_NTZ")
     now = datetime.now(ZoneInfo(timezone)).replace(tzinfo=None)
+    summary = result_summary(store)
     status = spark.createDataFrame(
         [
             {
@@ -105,6 +136,7 @@ def publish(
                 "started_at": now,
                 "updated_at": now,
                 "ended_at": now,
+                **summary,
             }
         ]
     )
@@ -120,6 +152,7 @@ def publish(
                 "timezone": "s.timezone",
                 "updated_at": "s.updated_at",
                 "ended_at": "s.ended_at",
+                **{name: f"s.{name}" for name in STATUS_SUMMARY_COLUMNS},
             }
         )
         .whenNotMatchedInsertAll()

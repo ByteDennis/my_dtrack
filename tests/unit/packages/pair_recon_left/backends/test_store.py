@@ -43,7 +43,17 @@ def test_runid(value):
 
 def test_protocol():
     store = VolumeStore("/Volumes/c/s/v/runs", files=Files()).child("run-1")
-    store.commit_unit(1, "u1", {"hash_sum": "1"}, {"pair": "p"})
+    store.commit_units(
+        1,
+        [
+            {
+                "pair": "p",
+                "window": "2026-01",
+                "unit_id": "u1",
+                "left_statistics": {"hash_sum": "1"},
+            }
+        ],
+    )
     assert store.ready_unclaimed() == 1
     store.put_result("u1", {"pair": "p", "verdict": "match"})
     assert store.ready_unclaimed() == 0

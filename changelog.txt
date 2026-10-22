@@ -10,12 +10,17 @@ Changed
 - src/pair_recon/app/cli.py: prompts for excluded partitions, expands inclusive `YYYY-MM-DD->YYYY-MM-DD` ranges, and saves the normalized list.
 - Left/Right date SQL: supports numeric `YYYYMM` partitions through `{"type":"number","format":"month"}` and normalizes exclusions to month-start logical keys.
 - src/pair_recon_right/catalog.py: creates run-error DataFrames with the target table schema so row-count-only failures with all-null vintage/column fields publish reliably.
+- Left statistics publishing: stores one Volume JSON envelope per statistics shard instead of one file per column and uploads independent shards in parallel; Right expands each envelope back into column-level units and safely discovers out-of-order uploads.
+- Row-check output: renames the partition outcome field and CSV column from `verdict` to `result` without retaining the old field.
+- Progress snapshots: count logical units inside shard envelopes rather than counting files.
+- Remote terminal handling: the local launcher forwards Databricks `SUCCESS`, differences, failures, and manual cancellation into Catalog; failed/cancelled jobs create a runtime failure artifact and idempotently refresh `pair_recon_run_error` even when the notebook cannot publish.
+- `pair_recon_run_status`: adds row/column total, match, difference, and runtime-failure summary columns; `setup/migrate_run_status.sql` upgrades an existing status table once.
 - README.md and the operator prompt notes: document the new prompts, defaults, and saved setting names.
 
 Verification
-- 684 unit tests pass.
+- 692 unit tests pass.
 - Ruff check and format pass for the full source and unit/live-source test trees.
-- just publish creates a 68-file, 154749-byte ZIP; a clean extraction completes `uv sync` and `just run --help`.
+- just publish creates a 68-file, 157622-byte ZIP; a clean extraction completes `uv sync` and `just run --help`.
 - Source distribution and wheel builds pass.
 
 pair_recon Report Databricks wait progress (47f74e0) — 2026-10-21

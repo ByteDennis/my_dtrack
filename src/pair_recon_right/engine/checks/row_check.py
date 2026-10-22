@@ -39,26 +39,26 @@ def reconcile_partitions(
         left_value = left.get(partition)
         right_value = right.get(partition)
         if left_value is None:
-            verdict = "right_only"
+            partition_result = "right_only"
         elif right_value is None:
-            verdict = "left_only"
+            partition_result = "left_only"
         elif int(left_value) == int(right_value):
-            verdict = "match"
+            partition_result = "match"
         else:
-            verdict = "count_diff"
+            partition_result = "count_diff"
         row: dict[str, Any] = {
             "left": left_value,
             "right": right_value,
-            "verdict": verdict,
+            "result": partition_result,
         }
-        if verdict == "count_diff":
+        if partition_result == "count_diff":
             row["delta"] = int(right_value) - int(left_value)
         result[partition] = row
     return result
 
 
 def summarize_partitions(partitions: dict[str, dict[str, Any]]) -> dict[str, int]:
-    counts = Counter(row["verdict"] for row in partitions.values())
+    counts = Counter(row["result"] for row in partitions.values())
     return {name: counts[name] for name in ("match", "count_diff", "left_only", "right_only")}
 
 
@@ -67,14 +67,14 @@ def reconcile_snapshot(
 ) -> dict[str, dict[str, Any]]:
     left = sum(int(value) for value in left_counts.values())
     if not right_counts:
-        return {"snapshot": {"left": left, "right": None, "verdict": "left_only"}}
+        return {"snapshot": {"left": left, "right": None, "result": "left_only"}}
     matches = [key for key, value in right_counts.items() if int(value) == left]
     partition = max(matches or right_counts)
     right = int(right_counts[partition])
     row = {
         "left": left,
         "right": right,
-        "verdict": "match" if left == right else "count_diff",
+        "result": "match" if left == right else "count_diff",
     }
     if left != right:
         row["delta"] = right - left
@@ -84,7 +84,7 @@ def reconcile_snapshot(
 def evaluate_gate(partitions: dict[str, dict[str, Any]], policy: str = "auto") -> dict[str, Any]:
     policy = (policy or "auto").strip().lower()
     total = len(partitions)
-    matched = sum(row.get("verdict") == "match" for row in partitions.values())
+    matched = sum(row.get("result") == "match" for row in partitions.values())
     excluded_ratio = 0.0 if total == 0 else (total - matched) / total
     result = {
         "policy": policy,
@@ -116,7 +116,7 @@ FINDINGS_SHOWN = 10
 def row_check_csv_bytes(document: dict[str, Any]) -> bytes:
     output = io.StringIO(newline="")
     writer = csv.DictWriter(
-        output, fieldnames=["pair", "partition", "left", "right", "delta", "verdict"]
+        output, fieldnames=["pair", "partition", "left", "right", "delta", "result"]
     )
     writer.writeheader()
     for partition, row in sorted(document["partitions"].items()):
@@ -127,7 +127,7 @@ def row_check_csv_bytes(document: dict[str, Any]) -> bytes:
                 "left": row.get("left"),
                 "right": row.get("right"),
                 "delta": row.get("delta", ""),
-                "verdict": row["verdict"],
+                "result": row["result"],
             }
         )
     return output.getvalue().encode()
@@ -241,13 +241,13 @@ def reconcile_pair(
         },
     }
     log.info("reconcile %s: %s", pair, document["summary"])
-    findings = [(key, row) for key, row in sorted(partitions.items()) if row["verdict"] != "match"]
+    findings = [(key, row) for key, row in sorted(partitions.items()) if row["result"] != "match"]
     for partition, row in findings[:FINDINGS_SHOWN]:
         log.info(
             "  finding %s %s %s left=%s right=%s",
             pair,
             partition,
-            row["verdict"],
+            row["result"],
             row["left"],
             row["right"],
         )
@@ -305,7 +305,7 @@ def unresolved_version2_partitions(store) -> dict[str, list[str]]:
         mismatches = sorted(
             partition
             for partition, row in results[pair]["partitions"].items()
-            if row.get("verdict") != "match" and partition not in excluded
+            if row.get("result") != "match" and partition not in excluded
         )
         if mismatches:
             unresolved[pair] = mismatches

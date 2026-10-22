@@ -44,7 +44,14 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_run_status (
   timezone STRING NOT NULL,
   started_at TIMESTAMP_NTZ,
   updated_at TIMESTAMP_NTZ,
-  ended_at TIMESTAMP_NTZ
+  ended_at TIMESTAMP_NTZ,
+  row_total BIGINT,
+  row_matches BIGINT,
+  row_differences BIGINT,
+  column_total BIGINT,
+  column_matches BIGINT,
+  column_differences BIGINT,
+  runtime_failures BIGINT
 ) USING DELTA;
 
 CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_run_error (

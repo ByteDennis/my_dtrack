@@ -115,6 +115,64 @@ def test_pair_workbook_percentage_sample_requires_keys(tmp_path):
         read_pair_workbook(path)
 
 
+FULL_RUN_DEFAULTS = {
+    "run_mode": "full",
+    "partition_mode": "date",
+    "sample": 0.1,
+    "strict": False,
+    "checks": ["row_count", "hash_sum"],
+    "audit": True,
+    "sync_remote": False,
+    "left_workers": 4,
+    "right_workers": 16,
+    "vintage": "month",
+    "from_date": "2026-01-01",
+    "to_date": "2026-02-28",
+    "excluded_partitions": ["2026-01-02", "2026-02-01->2026-02-03"],
+    "vintage_sample_size": 3,
+}
+
+
+def _read_with_defaults(tmp_path, defaults):
+    path = create_pair_workbook(tmp_path / "pairs.xlsx")
+    workbook = load_workbook(path)
+    set_row(workbook["pairs"], valid_pair_row(defaults=json.dumps(defaults)))
+    set_row(workbook["pair_sql"], ["orders", None, None, "SELECT 1", None])
+    workbook.save(path)
+    return read_pair_workbook(path)
+
+
+def test_run_defaults_accept_every_prompt_default(tmp_path):
+    rows = _read_with_defaults(tmp_path, FULL_RUN_DEFAULTS)
+    assert json.loads(rows["pairs"][0]["run_defaults_json"]) == FULL_RUN_DEFAULTS
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"from_date": "2026/01/01"}, "from_date must be YYYY-MM-DD"),
+        ({"to_date": "2026-1-5"}, "to_date must be YYYY-MM-DD"),
+        ({"from_date": "2026-03-01"}, "from_date must not be after to_date"),
+        ({"vintage": "weekly"}, "vintage must be one of day, week, month, quarter, year"),
+        ({"audit": "yes"}, "audit must be true or false"),
+        ({"sync_remote": 1}, "sync_remote must be true or false"),
+        ({"left_workers": 0}, "left_workers must be a positive integer"),
+        ({"right_workers": True}, "right_workers must be a positive integer"),
+        ({"excluded_partitions": "2026-01-02"}, "excluded_partitions must be a string array"),
+        ({"cadence": "x"}, "run_defaults_json has unsupported fields: cadence"),
+    ],
+)
+def test_run_defaults_reject_bad_prompt_defaults(tmp_path, override, message):
+    with pytest.raises((ValueError, TypeError), match=message):
+        _read_with_defaults(tmp_path, {**FULL_RUN_DEFAULTS, **override})
+
+
+def test_run_defaults_all_mode_rejects_date_only_fields(tmp_path):
+    defaults = {"partition_mode": "all", "from_date": "2026-01-01", "vintage": "day"}
+    with pytest.raises(ValueError, match="all mode cannot set from_date, vintage"):
+        _read_with_defaults(tmp_path, defaults)
+
+
 def test_pair_sql_must_reference_a_pair(tmp_path):
     path = create_pair_workbook(tmp_path / "pairs.xlsx")
     workbook = load_workbook(path)

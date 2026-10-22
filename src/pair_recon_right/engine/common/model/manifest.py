@@ -277,7 +277,7 @@ def build_manifest(
         admitted = (
             row.get("left") is not None and partition not in excluded_partitions
             if version == 2
-            else row["verdict"] == "match"
+            else row["result"] == "match"
         )
         if admitted:
             bucket = "all" if partition_mode == "all" else bucket_date(partition, vintage)

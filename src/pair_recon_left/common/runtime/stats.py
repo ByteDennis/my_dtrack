@@ -234,6 +234,9 @@ def _parallel_statistics(
         shard_status(workers, 0, len(groups))
     phase_done = {phase: [0] * len(groups) for phase in ("infer", "aggregate", "finalize")}
     progress_lock = threading.Lock()
+    completion_lock = threading.Lock()
+    completed_groups = 0
+    completed_attributes = 0
 
     def group_progress(group_index):
         def update(phase, completed, total):
@@ -248,12 +251,13 @@ def _parallel_statistics(
         return update
 
     def calculate(group_index, group):
+        nonlocal completed_groups, completed_attributes
         with connect(
             str(workspace),
             read_only=True,
             resource_workers=workers,
         ) as connection:
-            return _statistics(
+            rows = _statistics(
                 connection,
                 group,
                 strict,
@@ -263,9 +267,30 @@ def _parallel_statistics(
                 statistics,
                 group_progress(group_index),
             )
+        with completion_lock:
+            completed_groups += 1
+            completed_attributes += len(rows)
+            groups_done = completed_groups
+            attributes_done = completed_attributes
+            if shard_status:
+                shard_status(
+                    min(workers, len(groups) - groups_done),
+                    groups_done,
+                    len(groups),
+                )
+        log.info(
+            "statistics shard calculated: shard=%d/%d, attributes=%d, attributes_calculated=%d/%d",
+            groups_done,
+            len(groups),
+            len(rows),
+            attributes_done,
+            len(columns),
+        )
+        if on_batch:
+            on_batch(rows)
+        return rows
 
     completed = {}
-    completed_groups = 0
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pair_recon-stats") as executor:
         jobs = {
             executor.submit(calculate, index, group): index for index, group in enumerate(groups)
@@ -274,24 +299,6 @@ def _parallel_statistics(
             for job in as_completed(jobs):
                 rows = job.result()
                 completed.update(rows)
-                completed_groups += 1
-                if shard_status:
-                    shard_status(
-                        min(workers, len(groups) - completed_groups),
-                        completed_groups,
-                        len(groups),
-                    )
-                log.info(
-                    "statistics shard calculated: shard=%d/%d, attributes=%d, "
-                    "attributes_calculated=%d/%d",
-                    completed_groups,
-                    len(groups),
-                    len(rows),
-                    len(completed),
-                    len(columns),
-                )
-                if on_batch:
-                    on_batch(rows)
         except Exception:
             for job in jobs:
                 job.cancel()

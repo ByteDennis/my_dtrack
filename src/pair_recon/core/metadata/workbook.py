@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -66,9 +67,21 @@ RUN_DEFAULT_FIELDS = {
     "sample",
     "strict",
     "checks",
+    "audit",
+    "sync_remote",
+    "left_workers",
+    "right_workers",
+    "vintage",
+    "from_date",
+    "to_date",
+    "excluded_partitions",
     "vintage_sample_size",
     "vintage_values",
 }
+RUN_DEFAULT_BOOLS = ("strict", "audit", "sync_remote")
+RUN_DEFAULT_WORKERS = ("left_workers", "right_workers")
+RUN_DEFAULT_DATE_ONLY = ("from_date", "to_date", "vintage", "excluded_partitions")
+VINTAGES = ("day", "week", "month", "quarter", "year")
 
 FIELD_GUIDE = (
     ("pairs", "pair_name", "always", "text", "Unique Pair name.", "orders"),
@@ -284,14 +297,51 @@ def _options(value: Any, *, row: int, field: str, allowed: set[str]) -> dict[str
     return parsed
 
 
+# >>> YYYY-MM-DD string or raise naming the field <<< #
+def _iso_day(value: Any, *, row: int, field: str) -> date:
+    try:
+        parsed = date.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.isoformat() != value:
+        raise ValueError(f"pairs.xlsx row {row}: {field} must be YYYY-MM-DD")
+    return parsed
+
+
 def _validate_run_defaults(value: dict[str, Any], *, row: int, keys: list[str]) -> None:
     if value.get("run_mode") not in (None, "full", "left-only"):
         raise ValueError(f"pairs.xlsx row {row}: run_mode must be full or left-only")
     mode = value.get("partition_mode", "date")
     if mode not in {"date", "all"}:
         raise ValueError(f"pairs.xlsx row {row}: partition_mode must be date or all")
-    if "strict" in value and not isinstance(value["strict"], bool):
-        raise TypeError(f"pairs.xlsx row {row}: strict must be true or false")
+    for field in RUN_DEFAULT_BOOLS:
+        if field in value and not isinstance(value[field], bool):
+            raise TypeError(f"pairs.xlsx row {row}: {field} must be true or false")
+    for field in RUN_DEFAULT_WORKERS:
+        count = value.get(field)
+        if count is not None and (
+            isinstance(count, bool) or not isinstance(count, int) or count <= 0
+        ):
+            raise ValueError(f"pairs.xlsx row {row}: {field} must be a positive integer")
+    if value.get("vintage") is not None and value["vintage"] not in VINTAGES:
+        raise ValueError(f"pairs.xlsx row {row}: vintage must be one of {', '.join(VINTAGES)}")
+    bounds = {
+        field: _iso_day(value[field], row=row, field=field)
+        for field in ("from_date", "to_date")
+        if value.get(field) is not None
+    }
+    if len(bounds) == 2 and bounds["from_date"] > bounds["to_date"]:
+        raise ValueError(f"pairs.xlsx row {row}: from_date must not be after to_date")
+    excluded = value.get("excluded_partitions")
+    if excluded is not None and (
+        not isinstance(excluded, list)
+        or not all(isinstance(item, str) and item.strip() for item in excluded)
+    ):
+        raise TypeError(f"pairs.xlsx row {row}: excluded_partitions must be a string array")
+    if mode == "all":
+        present = [field for field in RUN_DEFAULT_DATE_ONLY if value.get(field) not in (None, [])]
+        if present:
+            raise ValueError(f"pairs.xlsx row {row}: all mode cannot set {', '.join(present)}")
     if "checks" in value and (
         not isinstance(value["checks"], list)
         or not value["checks"]

@@ -23,6 +23,7 @@ from ..common.model.protocol import (
     refresh_units_status,
     right_ready_path,
     timestamp,
+    unit_batch_units,
     unit_prefix,
     unit_statistics,
 )
@@ -173,7 +174,7 @@ class ColCheck:
         self.detailed: set[tuple[str, str]] = set()
         self.targets = {}
         self.target_lock = threading.Lock()
-        self.unit_cursors = {}
+        self.unit_batches = set()
 
     def _target(self, manifest):
         pair = manifest["pair"]
@@ -228,18 +229,17 @@ class ColCheck:
                 manifest["expected_units"],
             )
             changed += 1
-        batches = [
-            (unit_prefix(pair), self.unit_cursors.get(pair))
-            for pair in sorted(self.scheduler.manifests)
-        ]
-        for prefix, cursor in batches:
-            for key, pointer in self.store.list_json(prefix, start_after=cursor):
-                self.unit_cursors[pointer["pair"]] = key
-                if pointer["unit_id"] not in self.active_ids or pointer["unit_id"] in self.seen:
+        for pair in sorted(self.scheduler.manifests):
+            for key, document in self.store.list_json(unit_prefix(pair)):
+                if key in self.unit_batches:
                     continue
-                self.seen.add(pointer["unit_id"])
-                self.scheduler.add_unit(pointer)
-                changed += 1
+                for pointer in unit_batch_units(document):
+                    if pointer["unit_id"] not in self.active_ids or pointer["unit_id"] in self.seen:
+                        continue
+                    self.seen.add(pointer["unit_id"])
+                    self.scheduler.add_unit(pointer)
+                    changed += 1
+                self.unit_batches.add(key)
         if changed:
             log.info("poll: %d new protocol object(s)", changed)
         return changed

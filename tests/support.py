@@ -10,7 +10,8 @@ from pair_recon_right.engine.common.model.protocol import (
     list_units,
     result_path,
     timestamp,
-    unit_path,
+    unit_batch_document,
+    unit_batch_path,
 )
 
 
@@ -83,16 +84,14 @@ class MemoryStore:
     def heartbeat_age(self, now=None):
         return 0
 
-    def commit_unit(self, sequence, unit_id, payload, pointer):
-        row = {
-            **pointer,
-            "unit_id": unit_id,
-            "sequence": sequence,
-            "left_ready_at": timestamp(self),
-            "left_statistics": payload,
-        }
-        self.put_json(unit_path(pointer["pair"], sequence, unit_id), row)
-        return row
+    def commit_units(self, sequence, units, *, timezone_name=None):
+        document = unit_batch_document(
+            sequence,
+            units,
+            left_ready_at=timestamp(timezone_name=timezone_name),
+        )
+        self.put_json(unit_batch_path(sequence, len(units)), document)
+        return document["units"]
 
     def ready_unclaimed(self):
         return max(0, len(list_units(self)) - len(list_results(self)) - len(list_failures(self)))

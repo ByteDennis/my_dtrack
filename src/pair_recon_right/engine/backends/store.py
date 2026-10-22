@@ -16,7 +16,8 @@ from ..common.model.protocol import (
     list_units,
     result_path,
     timestamp,
-    unit_path,
+    unit_batch_document,
+    unit_batch_path,
 )
 
 
@@ -106,16 +107,14 @@ class VolumeStore:
                     parent = parent.parent
         return deleted
 
-    def commit_unit(self, sequence, unit_id, payload, pointer):
-        document = {
-            **pointer,
-            "unit_id": unit_id,
-            "sequence": int(sequence),
-            "left_ready_at": timestamp(self),
-            "left_statistics": payload,
-        }
-        self.put_json(unit_path(document["pair"], sequence, unit_id), document)
-        return document
+    def commit_units(self, sequence, units, *, timezone_name=None):
+        document = unit_batch_document(
+            sequence,
+            units,
+            left_ready_at=timestamp(timezone_name=timezone_name),
+        )
+        self.put_json(unit_batch_path(sequence, len(units)), document)
+        return document["units"]
 
     def heartbeat(self, now=None):
         return self.put_json(

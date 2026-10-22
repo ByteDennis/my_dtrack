@@ -41,7 +41,8 @@ def test_pipeline():
         compute_stats=lambda *_args: stats,
     ).run([row])
     uid = unit_id("pair", "all", "amount")
-    assert count == 1 and store.exists(f"units/00000001-{uid}.json")
+    assert count == 1 and store.exists("units/00000001-0001.json")
+    assert store.get_json("units/00000001-0001.json")["units"][0]["unit_id"] == uid
 
 
 def test_left_only_pipeline_does_not_wait_for_right(monkeypatch):

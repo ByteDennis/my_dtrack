@@ -7,6 +7,7 @@ from support import MemoryStore
 from pair_recon_right.engine.common.model.manifest import unit_id
 from pair_recon_right.engine.common.model.protocol import (
     get_run_status,
+    list_units,
     refresh_units_status,
     right_ready_path,
     timestamp,
@@ -41,7 +42,10 @@ def test_unit():
         "column": "amount",
         "right_column": "amount",
     }
-    store.commit_unit(1, amount, {"n_total": 1}, pointer)
+    store.commit_units(
+        1,
+        [{**pointer, "unit_id": amount, "left_statistics": {"n_total": 1}}],
+    )
     assert _status_rows(store)["amount"]["state"] == "left_ready"
 
     store.put_json(
@@ -51,12 +55,40 @@ def test_unit():
     assert {row["state"] for row in _status_rows(store).values()} == {"right_ready"}
 
     store.put_result(amount, {"pair": "orders", "verdict": "match"})
-    store.commit_unit(2, status, {"n_total": 1}, {**pointer, "column": "status"})
+    store.commit_units(
+        2,
+        [
+            {
+                **pointer,
+                "column": "status",
+                "unit_id": status,
+                "left_statistics": {"n_total": 1},
+            }
+        ],
+    )
     store.put_dead(status, {"pair": "orders", "error": "boom"})
     rows = _status_rows(store)
     assert rows["amount"]["state"] == "complete" and rows["amount"]["verdict"] == "match"
     assert rows["status"]["state"] == "failed" and rows["status"]["error"] == "boom"
     assert rows["amount"]["completed_at"] and rows["status"]["completed_at"]
+
+
+def test_unit_batch_expands_to_logical_units():
+    store = MemoryStore()
+    units = [
+        {
+            "pair": "orders",
+            "window": "2026-01",
+            "column": column,
+            "unit_id": column,
+            "left_statistics": {"n_total": 1},
+        }
+        for column in ("amount", "status")
+    ]
+    store.commit_units(1, units)
+
+    assert store.list_keys("units/") == ["units/00000001-0002.json"]
+    assert [row["unit_id"] for _key, row in list_units(store)] == ["amount", "status"]
 
 
 def test_status():

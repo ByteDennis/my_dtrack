@@ -2,7 +2,7 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from pair_recon_right.catalog import error_rows
+from pair_recon_right.catalog import STATUS_SUMMARY_COLUMNS, error_rows, result_summary
 
 _TABLE = re.compile(r"^[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){2}$")
 
@@ -147,7 +147,16 @@ WHEN NOT MATCHED THEN INSERT ({fields}) VALUES ({values})""",
             {name: row[name] for name in columns},
         )
 
-    def status(self, *, run_id: str, pair: str, owner: str, state: str, timezone: str):
+    def status(
+        self,
+        *,
+        run_id: str,
+        pair: str,
+        owner: str,
+        state: str,
+        timezone: str,
+        summary: dict[str, int] | None = None,
+    ):
         now = (
             datetime.now(ZoneInfo(timezone)).replace(tzinfo=None).isoformat(timespec="microseconds")
         )
@@ -164,20 +173,35 @@ WHEN NOT MATCHED THEN INSERT ({fields}) VALUES ({values})""",
             "timezone": timezone,
             "now": now,
             "ended": ended,
+            **{name: int((summary or {}).get(name) or 0) for name in STATUS_SUMMARY_COLUMNS},
         }
+        summary_updates = ", ".join(
+            f"{name}=CAST(:{name} AS BIGINT)" for name in STATUS_SUMMARY_COLUMNS
+        )
+        summary_fields = ", ".join(STATUS_SUMMARY_COLUMNS)
+        summary_values = ", ".join(f"CAST(:{name} AS BIGINT)" for name in STATUS_SUMMARY_COLUMNS)
         self.sql.execute(
             f"""MERGE INTO {self.status_table} AS t
 USING (SELECT :run_id run_id) AS s ON t.run_id = s.run_id
 WHEN MATCHED THEN UPDATE SET pair_name=:pair, owner=:owner, state=:state, timezone=:timezone,
-updated_at=CAST(:now AS TIMESTAMP_NTZ), ended_at=CAST(:ended AS TIMESTAMP_NTZ)
-WHEN NOT MATCHED THEN INSERT (run_id, pair_name, owner, state, timezone, started_at, updated_at)
+updated_at=CAST(:now AS TIMESTAMP_NTZ), ended_at=CAST(:ended AS TIMESTAMP_NTZ), {summary_updates}
+WHEN NOT MATCHED THEN INSERT (run_id, pair_name, owner, state, timezone, started_at, updated_at,
+ended_at, {summary_fields})
 VALUES (:run_id, :pair, :owner, :state, :timezone,
-CAST(:now AS TIMESTAMP_NTZ), CAST(:now AS TIMESTAMP_NTZ))""",
+CAST(:now AS TIMESTAMP_NTZ), CAST(:now AS TIMESTAMP_NTZ), CAST(:ended AS TIMESTAMP_NTZ),
+{summary_values})""",
             values,
         )
 
     def finish(self, store, *, run_id: str, pair: str, owner: str, state: str, timezone: str):
-        self.status(run_id=run_id, pair=pair, owner=owner, state=state, timezone=timezone)
+        self.status(
+            run_id=run_id,
+            pair=pair,
+            owner=owner,
+            state=state,
+            timezone=timezone,
+            summary=result_summary(store),
+        )
         self.sql.execute(f"DELETE FROM {self.error_table} WHERE run_id=:run_id", {"run_id": run_id})
         now = datetime.now(ZoneInfo(timezone)).replace(tzinfo=None)
         rows = error_rows(store, run_id, pair, now)

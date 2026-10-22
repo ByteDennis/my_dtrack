@@ -29,6 +29,7 @@ from pair_recon_left.common.model.protocol import (
     write_run_status,
 )
 from pair_recon_left.common.runtime.run_logging import configure_left_logging, get_left_logger
+from pair_recon_right.catalog import result_summary
 from pair_recon_right.engine.backends.targets import CsvTarget
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
 from pair_recon_right.engine.job import run as run_right
@@ -84,14 +85,28 @@ def run_outcome(jobs, run) -> dict:
     return {}
 
 
+def record_runtime_failure(store, pair: str, source: str, error: BaseException | str) -> None:
+    message = str(error).strip() or type(error).__name__
+    store.put_json(
+        f"col_check/failures/{source}.json",
+        {
+            "pair": pair,
+            "source": source,
+            "error": message,
+        },
+    )
+
+
 class RightJobMonitor:
-    def __init__(self, remote, timeout: timedelta, jobs=None):
+    def __init__(self, remote, timeout: timedelta, jobs=None, on_terminal=None):
         self.remote = remote
         self.timeout = timeout
         self.jobs = jobs
+        self.on_terminal = on_terminal
         self.completed = None
         self.outcome: dict = {}
         self.error: Exception | None = None
+        self.final_state: str | None = None
         self.done = threading.Event()
         self.cancel_requested = threading.Event()
         self.thread = threading.Thread(
@@ -123,17 +138,45 @@ class RightJobMonitor:
             result = getattr(getattr(completed, "state", None), "result_state", None)
             result_name = getattr(result, "value", result)
             if result_name != "SUCCESS":
+                self.final_state = (
+                    "cancelled"
+                    if str(result_name or "").upper() in {"CANCELED", "CANCELLED"}
+                    else "failed"
+                )
                 message = getattr(getattr(completed, "state", None), "state_message", None)
                 detail = f": {message}" if message else ""
                 raise RuntimeError(f"Right job finished with {result_name}{detail}")
             self.completed = completed
+            self.final_state = "success"
             if self.jobs is not None:
                 self.outcome = run_outcome(self.jobs, completed)
             log.info("Right Databricks job completed: run_id=%s", self.run_id)
         except Exception as exc:  # noqa: BLE001
+            if completed is None and self.jobs is not None:
+                try:
+                    completed = self.jobs.get_run(self.run_id)
+                except (DatabricksError, OSError):
+                    completed = None
+            result = getattr(getattr(completed, "state", None), "result_state", None)
+            result_name = getattr(result, "value", result)
+            if self.final_state is None:
+                self.final_state = (
+                    "cancelled"
+                    if str(result_name or "").upper() in {"CANCELED", "CANCELLED"}
+                    else "failed"
+                )
             detail = self._describe(completed)
             self.error = RuntimeError(f"{exc}\n{detail}") if detail else exc
             if not self.cancel_requested.is_set():
+                if self.on_terminal is not None:
+                    try:
+                        self.on_terminal(self.final_state)
+                    except Exception:
+                        log.exception(
+                            "could not forward Right terminal state: run_id=%s state=%s",
+                            self.run_id,
+                            self.final_state,
+                        )
                 log.error(
                     "Right Databricks job failed: run_id=%s: %s",
                     self.run_id,
@@ -405,7 +448,7 @@ def retry_failed(store) -> int:
     keys = [key for key, _ in list_failures(store)]
     keys += [key for key, value in list_results(store) if value.get("verdict") != "match"]
     for key, value in list_row_results(store):
-        if any(row.get("verdict") != "match" for row in (value.get("partitions") or {}).values()):
+        if any(row.get("result") != "match" for row in (value.get("partitions") or {}).values()):
             keys.append(key)
             left = key.removesuffix("result.json") + "left.json"
             if store.exists(left):
@@ -493,11 +536,44 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 job_id,
             )
             remote = client.jobs.run_now(job_id, notebook_params=params)
+            on_right_terminal = None
+            if catalog:
+
+                def on_right_terminal(state):
+                    log.info(
+                        "forwarding Right terminal state: table=%s state=%s",
+                        settings["status_table"],
+                        state,
+                    )
+                    values = {
+                        "run_id": run_id,
+                        "pair": pair,
+                        "owner": settings["owner"],
+                        "state": state,
+                        "timezone": settings["timezone"],
+                    }
+                    try:
+                        record_runtime_failure(
+                            store,
+                            pair,
+                            "right-job",
+                            monitor.error or f"Right Databricks job {state}",
+                        )
+                        catalog.finish(store, **values)
+                    except Exception:
+                        log.exception(
+                            "could not publish Right artifacts; forwarding state only: state=%s",
+                            state,
+                        )
+                        catalog.status(**values)
+
             monitor = RightJobMonitor(
                 remote,
                 timedelta(minutes=float(settings.get("timeout", 120))),
                 jobs=client.jobs,
-            ).start()
+                on_terminal=on_right_terminal,
+            )
+            monitor.start()
         log.info("starting Left checks")
         left = run_left(
             config,
@@ -555,9 +631,30 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 )
         else:
             monitor.result()
-            status = catalog.run(run_id) if catalog else None
-            final_state = (status or {}).get("state", "finished")
-            right = {"run_id": int(remote.run_id), **monitor.outcome}
+            summary = result_summary(store)
+            final_state = (
+                "different"
+                if summary["row_differences"]
+                + summary["column_differences"]
+                + summary["runtime_failures"]
+                else "passed"
+            )
+            right = {
+                "run_id": int(remote.run_id),
+                **monitor.outcome,
+                "row_errors": summary["row_differences"],
+                "column_errors": summary["column_differences"],
+                "failures": summary["runtime_failures"],
+            }
+            if catalog:
+                catalog.finish(
+                    store,
+                    run_id=run_id,
+                    pair=pair,
+                    owner=settings["owner"],
+                    state=final_state,
+                    timezone=settings["timezone"],
+                )
         if sampler:
             sampler.stop(final_state, required=True)
             sampler = None
@@ -572,10 +669,32 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             "right": right,
             "volume_run_root": store.root_uri,
         }
-    except BaseException:
-        final_state = "failed"
-        log.exception("run failed")
-        if remote is not None and client is not None:
+    except BaseException as exc:
+        final_state = "cancelled" if monitor and monitor.final_state == "cancelled" else "failed"
+        log.exception("run %s", final_state)
+        if store is not None:
+            try:
+                failure_source = (
+                    "right-job" if monitor and monitor.error is not None else "launcher"
+                )
+                failure_path = f"col_check/failures/{failure_source}.json"
+                if not store.exists(failure_path):
+                    record_runtime_failure(store, pair, failure_source, exc)
+            except Exception:
+                log.exception("could not publish runtime failure artifact")
+            try:
+                write_run_status(
+                    store,
+                    {"state": final_state, "run_id": run_id, "role": "launcher"},
+                    timezone_name=settings["timezone"],
+                )
+            except Exception:
+                log.exception("could not update Volume run status: state=%s", final_state)
+        if (
+            remote is not None
+            and client is not None
+            and (monitor is None or monitor.final_state is None)
+        ):
             try:
                 if monitor:
                     monitor.request_cancel()
@@ -588,14 +707,18 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             if sampler:
                 sampler.stop(final_state)
         finally:
-            if catalog and final_state == "failed":
+            if catalog and final_state in {"failed", "cancelled"}:
                 try:
-                    catalog.status(
-                        run_id=run_id,
-                        pair=pair,
-                        owner=settings["owner"],
-                        state=final_state,
-                        timezone=settings["timezone"],
-                    )
+                    values = {
+                        "run_id": run_id,
+                        "pair": pair,
+                        "owner": settings["owner"],
+                        "state": final_state,
+                        "timezone": settings["timezone"],
+                    }
+                    if store is None:
+                        catalog.status(**values)
+                    else:
+                        catalog.finish(store, **values)
                 except Exception:
                     log.exception("could not update final run status: state=%s", final_state)

@@ -20,7 +20,7 @@ def summary(store):
     failures = [value for _, value in list_failures(store)]
     return {
         "row_errors": sum(
-            partition.get("verdict") != "match"
+            partition.get("result") != "match"
             for row in rows
             for partition in (row.get("partitions") or {}).values()
         ),

@@ -117,7 +117,14 @@ USING (
     'America/New_York' AS timezone,
     CAST('2026-10-21 12:00:00' AS TIMESTAMP_NTZ) AS started_at,
     CAST(current_timestamp() AS TIMESTAMP_NTZ) AS updated_at,
-    CAST(NULL AS TIMESTAMP_NTZ) AS ended_at
+    CAST(NULL AS TIMESTAMP_NTZ) AS ended_at,
+    0 AS row_total,
+    0 AS row_matches,
+    0 AS row_differences,
+    0 AS column_total,
+    0 AS column_matches,
+    0 AS column_differences,
+    0 AS runtime_failures
 ) AS s
 ON t.run_id = s.run_id
 WHEN MATCHED THEN UPDATE SET
@@ -127,12 +134,23 @@ WHEN MATCHED THEN UPDATE SET
   t.timezone = s.timezone,
   t.started_at = s.started_at,
   t.updated_at = s.updated_at,
-  t.ended_at = s.ended_at
+  t.ended_at = s.ended_at,
+  t.row_total = s.row_total,
+  t.row_matches = s.row_matches,
+  t.row_differences = s.row_differences,
+  t.column_total = s.column_total,
+  t.column_matches = s.column_matches,
+  t.column_differences = s.column_differences,
+  t.runtime_failures = s.runtime_failures
 WHEN NOT MATCHED THEN INSERT (
-  run_id, pair_name, owner, state, timezone, started_at, updated_at, ended_at
+  run_id, pair_name, owner, state, timezone, started_at, updated_at, ended_at,
+  row_total, row_matches, row_differences,
+  column_total, column_matches, column_differences, runtime_failures
 ) VALUES (
   s.run_id, s.pair_name, s.owner, s.state, s.timezone,
-  s.started_at, s.updated_at, s.ended_at
+  s.started_at, s.updated_at, s.ended_at,
+  s.row_total, s.row_matches, s.row_differences,
+  s.column_total, s.column_matches, s.column_differences, s.runtime_failures
 );
 
 -- # catalog.schema.pair_recon_run_error

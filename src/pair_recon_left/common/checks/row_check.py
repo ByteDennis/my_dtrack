@@ -143,7 +143,7 @@ def publish_row_check_results(
             baseline = {
                 "gate_decision": {"passed": True},
                 "partitions": {
-                    partition: {"left": count, "right": None, "verdict": "left_only"}
+                    partition: {"left": count, "right": None, "result": "left_only"}
                     for partition, count in values.items()
                 },
             }

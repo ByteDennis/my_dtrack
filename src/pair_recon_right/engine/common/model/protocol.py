@@ -33,6 +33,7 @@ UNIT_STATUS_FIELDS = (
     "verdict",
     "error",
 )
+UNIT_BATCH_FORMAT = "pair-recon-unit-batch-v1"
 
 
 def left_row_path(_pair: str) -> str:
@@ -69,8 +70,53 @@ def unit_prefix(_pair: str) -> str:
     return "units/"
 
 
-def unit_path(pair: str, sequence: int, unit_id: str) -> str:
-    return f"{unit_prefix(pair)}{int(sequence):08d}-{unit_id}.json"
+def unit_batch_path(sequence: int, count: int) -> str:
+    if int(sequence) < 1 or int(count) < 1:
+        raise ValueError("unit batch sequence and count must be positive")
+    return f"{unit_prefix('')}{int(sequence):08d}-{int(count):04d}.json"
+
+
+def unit_batch_units(document: dict[str, Any]) -> list[dict[str, Any]]:
+    if document.get("format") != UNIT_BATCH_FORMAT:
+        raise ValueError("unsupported unit batch format")
+    units = document.get("units")
+    if (
+        not isinstance(units, list)
+        or not units
+        or not all(isinstance(unit, dict) for unit in units)
+    ):
+        raise ValueError("unit batch must contain one or more unit objects")
+    return units
+
+
+def unit_batch_document(
+    sequence: int,
+    units: list[dict[str, Any]],
+    *,
+    left_ready_at: str,
+) -> dict[str, Any]:
+    if not units:
+        raise ValueError("unit batch must contain one or more units")
+    pairs = {unit.get("pair") for unit in units}
+    windows = {unit.get("window") for unit in units}
+    if len(pairs) != 1 or None in pairs or len(windows) != 1 or None in windows:
+        raise ValueError("unit batch must belong to one pair and window")
+    rows = [
+        {
+            **unit,
+            "sequence": int(sequence) + offset,
+            "left_ready_at": left_ready_at,
+        }
+        for offset, unit in enumerate(units)
+    ]
+    return {
+        "format": UNIT_BATCH_FORMAT,
+        "pair": rows[0]["pair"],
+        "window": rows[0]["window"],
+        "sequence_start": rows[0]["sequence"],
+        "sequence_end": rows[-1]["sequence"],
+        "units": rows,
+    }
 
 
 def result_path(_pair: str, unit_id: str) -> str:
@@ -116,7 +162,13 @@ def list_plans(store) -> list[tuple[str, dict[str, Any]]]:
 def list_units(store, pairs: list[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
     if pairs is not None and not pairs:
         return []
-    return _list_json(store, unit_prefix(""))
+    selected = set(pairs or [])
+    return [
+        (f"{key}#{int(unit['sequence']):08d}", unit)
+        for key, document in _list_json(store, unit_prefix(""))
+        for unit in unit_batch_units(document)
+        if not selected or unit.get("pair") in selected
+    ]
 
 
 def list_results(store) -> list[tuple[str, dict[str, Any]]]:

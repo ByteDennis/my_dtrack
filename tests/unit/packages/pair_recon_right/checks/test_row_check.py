@@ -19,7 +19,7 @@ def test_partition():
         {"2026-01-01": 10, "2026-01-02": 5, "20260104": 3},
         {"2026-01-01": 10, "2026-01-03": 5, "2026-01-04": 4},
     )
-    assert {day: row["verdict"] for day, row in rows.items()} == {
+    assert {day: row["result"] for day, row in rows.items()} == {
         "2026-01-01": "match",
         "2026-01-02": "left_only",
         "2026-01-03": "right_only",
@@ -38,13 +38,13 @@ def test_date():
     rows = reconcile_partitions(
         {"3000-01-01": 2}, {"2026-07-01": 2}, date_synonyms={"3000-01-01": "2026-07-01"}
     )
-    assert rows == {"2026-07-01": {"left": 2, "right": 2, "verdict": "match"}}
+    assert rows == {"2026-07-01": {"left": 2, "right": 2, "result": "match"}}
 
 
 def test_snapshot():
     counts = {"2026-01-01": 9, "2026-01-02": 10, "2026-01-03": 10}
     rows = reconcile_snapshot({"all": 10}, counts)
-    assert rows == {"2026-01-03": {"left": 10, "right": 10, "verdict": "match"}}
+    assert rows == {"2026-01-03": {"left": 10, "right": 10, "result": "match"}}
     store = MemoryStore()
     left = left_document(counts={"all": 10})
     left["left"] = {"source": "oracle", "table": "CURRENT"}
@@ -64,7 +64,7 @@ def test_snapshot():
 
 def test_all():
     rows = reconcile_partitions({"all": 9}, {"all": 9}, partition_mode="all")
-    assert rows == {"all": {"left": 9, "right": 9, "verdict": "match"}}
+    assert rows == {"all": {"left": 9, "right": 9, "result": "match"}}
 
 
 @pytest.mark.parametrize(
@@ -107,10 +107,10 @@ def test_sample(key, mode, family, right_pre_sampled):
 
 
 ROWS = {
-    "a": {"verdict": "match"},
-    "b": {"verdict": "match"},
-    "c": {"verdict": "count_diff"},
-    "d": {"verdict": "left_only"},
+    "a": {"result": "match"},
+    "b": {"result": "match"},
+    "c": {"result": "count_diff"},
+    "d": {"result": "left_only"},
 }
 
 
@@ -130,7 +130,7 @@ def test_gate(policy, passed):
 
 
 def test_gate2():
-    assert evaluate_gate({"a": {"verdict": "count_diff"}})["passed"] is False
+    assert evaluate_gate({"a": {"result": "count_diff"}})["passed"] is False
     assert evaluate_gate({}, None) == {
         "policy": "auto",
         "excluded_ratio": 0.0,
@@ -151,12 +151,12 @@ def test_csv():
     document = {
         "pair": "p",
         "partitions": {
-            "2026-01-02": {"left": 1, "right": 3, "verdict": "count_diff", "delta": 2},
-            "2026-01-01": {"left": 1, "right": 1, "verdict": "match"},
+            "2026-01-02": {"left": 1, "right": 3, "result": "count_diff", "delta": 2},
+            "2026-01-01": {"left": 1, "right": 1, "result": "match"},
         },
     }
     assert row_check_csv_bytes(document).decode().splitlines() == [
-        "pair,partition,left,right,delta,verdict",
+        "pair,partition,left,right,delta,result",
         "p,2026-01-01,1,1,,match",
         "p,2026-01-02,1,3,2,count_diff",
     ]
@@ -259,7 +259,7 @@ def test_v2():
     baseline = {
         "gate_decision": {"passed": True},
         "partitions": {
-            day: {"left": count, "right": None, "verdict": "left_only"}
+            day: {"left": count, "right": None, "result": "left_only"}
             for day, count in left["counts"].items()
         },
     }

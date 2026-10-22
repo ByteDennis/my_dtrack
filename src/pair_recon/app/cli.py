@@ -413,8 +413,14 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
     )
     if mode == "date":
         answers.update(
-            from_date=ask("From date", provenance.get("from_date", defaults.get("from_date"))),
-            to_date=ask("To date", provenance.get("to_date", defaults.get("to_date"))),
+            from_date=ask(
+                "From date",
+                provenance.get("from_date", run_default("from_date", defaults.get("from_date"))),
+            ),
+            to_date=ask(
+                "To date",
+                provenance.get("to_date", run_default("to_date", defaults.get("to_date"))),
+            ),
         )
         excluded_default = run_default(
             "excluded_partitions", metadata.get("excluded_partitions") or []

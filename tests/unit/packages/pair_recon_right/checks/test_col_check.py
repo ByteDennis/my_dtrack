@@ -114,7 +114,7 @@ def _drained_store(sample_mode="all"):
     manifest = store.get_json("plan.json")
     uid = unit_id("p", "2026-01-01", "amount")
     pointer = {"pair": "p", "window": "2026-01-01", "column": "amount", "right_column": "amount"}
-    store.commit_unit(1, uid, STATS, pointer)
+    store.commit_units(1, [{**pointer, "unit_id": uid, "left_statistics": STATS}])
     store.close_manifests(["p"], manifest["expected_units"])
     store.heartbeat()
     return store, uid
@@ -156,8 +156,8 @@ def test_right_worker_budget_runs_window_queries_in_parallel():
     row_check = {
         "gate_decision": {"passed": True},
         "partitions": {
-            "2026-01-01": {"left": 1, "right": 1, "verdict": "match"},
-            "2026-02-01": {"left": 1, "right": 1, "verdict": "match"},
+            "2026-01-01": {"left": 1, "right": 1, "result": "match"},
+            "2026-02-01": {"left": 1, "right": 1, "result": "match"},
         },
     }
     manifest = build_manifest("run", "p", pair, row_check)
@@ -165,11 +165,17 @@ def test_right_worker_budget_runs_window_queries_in_parallel():
     store.put_json("plan.json", manifest)
     for sequence, window in enumerate(manifest["windows"], 1):
         uid = unit_id_for(manifest, window, "amount")
-        store.commit_unit(
+        store.commit_units(
             sequence,
-            uid,
-            STATS,
-            {"pair": "p", "window": window["bucket"], "column": "amount"},
+            [
+                {
+                    "pair": "p",
+                    "window": window["bucket"],
+                    "column": "amount",
+                    "unit_id": uid,
+                    "left_statistics": STATS,
+                }
+            ],
         )
     store.close_manifests(["p"], manifest["expected_units"], plan_ids={"p": manifest["plan_id"]})
     store.heartbeat()
@@ -229,9 +235,9 @@ def test_v2():
     row_check = {
         "gate_decision": {"passed": True},
         "partitions": {
-            "2026-01-01": {"left": 1, "right": 1, "verdict": "match"},
-            "2026-01-02": {"left": 1, "right": 2, "verdict": "count_diff"},
-            "2026-02-01": {"left": 1, "right": 1, "verdict": "match"},
+            "2026-01-01": {"left": 1, "right": 1, "result": "match"},
+            "2026-01-02": {"left": 1, "right": 2, "result": "count_diff"},
+            "2026-02-01": {"left": 1, "right": 1, "result": "match"},
         },
     }
     store = MemoryStore()
@@ -239,11 +245,17 @@ def test_v2():
     store.put_json("plan.json", first)
     for sequence, window in enumerate(first["windows"], 1):
         uid = unit_id_for(first, window, "amount")
-        store.commit_unit(
+        store.commit_units(
             sequence,
-            uid,
-            STATS,
-            {"pair": "p", "window": window["bucket"], "column": "amount"},
+            [
+                {
+                    "pair": "p",
+                    "window": window["bucket"],
+                    "column": "amount",
+                    "unit_id": uid,
+                    "left_statistics": STATS,
+                }
+            ],
         )
     store.close_manifests(["p"], 2, plan_ids={"p": first["plan_id"]})
     ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0).run()
@@ -252,11 +264,17 @@ def test_v2():
     store.put_json("plan.json", second)
     january = second["windows"][0]
     changed_uid = unit_id_for(second, january, "amount")
-    store.commit_unit(
+    store.commit_units(
         3,
-        changed_uid,
-        STATS,
-        {"pair": "p", "window": january["bucket"], "column": "amount"},
+        [
+            {
+                "pair": "p",
+                "window": january["bucket"],
+                "column": "amount",
+                "unit_id": changed_uid,
+                "left_statistics": STATS,
+            }
+        ],
     )
     store.close_manifests(["p"], 2, plan_ids={"p": second["plan_id"]})
     target = FakeTarget()
@@ -281,9 +299,57 @@ def test_compare():
     store, uid = _drained_store()
     target = FakeTarget(stats={"amount": STATS})
     unit_key = next(key for key in store.objects if key.startswith("units/"))
-    store.objects[unit_key].pop("left_statistics")
+    store.objects[unit_key]["units"][0].pop("left_statistics")
     results = ColCheck(store, lambda _cfg: target, poll_interval=0, max_attempts=2).run()
     assert results == [] and store.exists(f"col_check/failures/{uid}.json")
+
+
+def test_poll_discovers_late_lower_sequence_batch():
+    pair = {
+        "version": 2,
+        "left": {"source": "oracle", "date_col": "dt"},
+        "right": {"source": "databricks", "date_col": "dt"},
+        "col_map": {"amount": "amount", "status": "status"},
+    }
+    row_check = {
+        "gate_decision": {"passed": True},
+        "partitions": {"2026-01-01": {"left": 1, "right": 1, "result": "match"}},
+    }
+    manifest = build_manifest("run", "p", pair, row_check)
+    window = manifest["windows"][0]
+    amount = unit_id_for(manifest, window, "amount")
+    status = unit_id_for(manifest, window, "status")
+    store = MemoryStore()
+    store.put_json("plan.json", manifest)
+    store.commit_units(
+        2,
+        [
+            {
+                "pair": "p",
+                "window": window["bucket"],
+                "column": "status",
+                "unit_id": status,
+                "left_statistics": STATS,
+            }
+        ],
+    )
+    checker = ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0)
+    checker.poll()
+    store.commit_units(
+        1,
+        [
+            {
+                "pair": "p",
+                "window": window["bucket"],
+                "column": "amount",
+                "unit_id": amount,
+                "left_statistics": STATS,
+            }
+        ],
+    )
+    checker.poll()
+
+    assert checker.seen == {amount, status}
 
 
 def test_idle():

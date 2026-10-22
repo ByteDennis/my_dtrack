@@ -31,6 +31,7 @@ from ..model.protocol import (
     list_units,
     refresh_units_status,
     row_check_is_closed,
+    unit_batch_path,
     write_run_status,
 )
 from ..runtime.duck import use_temp
@@ -224,6 +225,9 @@ class ColCheckPipeline:
         ready_ids = existing & active_ids
         sequence = max((row.get("sequence", 0) for _key, row in existing_rows), default=0) + 1
         first_sequence = sequence
+        run_timezone = get_run_status(self.store).get("timezone")
+        publication_lock = threading.Lock()
+        reserved_ids = set(existing)
         ready = deque()
         plan_rows = []
         for manifest, window in iter_windows_round_robin(manifests):
@@ -279,56 +283,79 @@ class ColCheckPipeline:
 
                 def publish(rows):
                     nonlocal sequence
-                    first = sequence
-                    for column in manifest["columns"]:
-                        self.abort_if()
-                        if column not in rows:
-                            continue
-                        uid = unit_id_for(manifest, window, column)
-                        published_columns.add(column)
-                        if uid in existing:
-                            continue
-                        if self.wait_for_right:
-                            self._wait_for_capacity(active_ids, version2)
-                        self.store.commit_unit(
-                            sequence,
-                            uid,
-                            rows[column],
-                            {
-                                "pair": manifest["pair"],
-                                "window": window["bucket"],
-                                "column": column,
-                                "right_column": manifest["col_map"][column],
-                                "plan_id": manifest.get("plan_id"),
-                                "window_id": window_id(manifest, window),
-                            },
+                    self.abort_if()
+                    with publication_lock:
+                        pending = []
+                        for column in manifest["columns"]:
+                            if column not in rows:
+                                continue
+                            uid = unit_id_for(manifest, window, column)
+                            if uid in reserved_ids:
+                                continue
+                            reserved_ids.add(uid)
+                            pending.append(
+                                {
+                                    "unit_id": uid,
+                                    "left_statistics": rows[column],
+                                    "pair": manifest["pair"],
+                                    "window": window["bucket"],
+                                    "column": column,
+                                    "right_column": manifest["col_map"][column],
+                                    "plan_id": manifest.get("plan_id"),
+                                    "window_id": window_id(manifest, window),
+                                }
+                            )
+                        first = sequence
+                        sequence += len(pending)
+                    if not pending:
+                        return
+                    if self.wait_for_right:
+                        self._wait_for_capacity(active_ids, version2)
+                    path = unit_batch_path(first, len(pending))
+                    log.info(
+                        "statistics shard upload %s %s: attributes=%d -> %s",
+                        manifest["pair"],
+                        window["bucket"],
+                        len(pending),
+                        path,
+                    )
+                    try:
+                        self.store.commit_units(
+                            first,
+                            pending,
+                            timezone_name=run_timezone,
                         )
-                        existing.add(uid)
-                        ready_ids.add(uid)
-                        sequence += 1
+                    except BaseException:
+                        with publication_lock:
+                            reserved_ids.difference_update(unit["unit_id"] for unit in pending)
+                        raise
+                    with publication_lock:
+                        for unit in pending:
+                            published_columns.add(unit["column"])
+                            existing.add(unit["unit_id"])
+                            ready_ids.add(unit["unit_id"])
+                        uploaded_for_vintage = len(published_columns)
+                        run_ready = len(ready_ids)
                     progress.update(
                         progress_key,
                         "publish",
-                        len(published_columns),
+                        uploaded_for_vintage,
                         len(manifest["columns"]),
                     )
-                    uploaded = sequence - first
-                    if uploaded:
-                        log.info(
-                            "statistics shard published %s %s: attributes_uploaded=%d, "
-                            "vintage_uploaded=%d/%d, run_ready=%d/%d, sequence=%08d..%08d",
-                            manifest["pair"],
-                            window["bucket"],
-                            uploaded,
-                            len(published_columns),
-                            len(manifest["columns"]),
-                            len(ready_ids),
-                            len(active_ids),
-                            first,
-                            sequence - 1,
-                        )
-                        refresh_units_status(self.store)
-                        self.store.heartbeat()
+                    log.info(
+                        "statistics shard published %s %s: attributes_uploaded=%d, "
+                        "vintage_uploaded=%d/%d, run_ready=%d/%d, sequence=%08d..%08d",
+                        manifest["pair"],
+                        window["bucket"],
+                        len(pending),
+                        uploaded_for_vintage,
+                        len(manifest["columns"]),
+                        run_ready,
+                        len(active_ids),
+                        first,
+                        first + len(pending) - 1,
+                    )
+                    self.store.heartbeat()
 
                 return publish
 
@@ -403,6 +430,7 @@ class ColCheckPipeline:
                     manifest, window, progress_key, publish_rows = stat_jobs.pop(job)
                     rows = job.result()
                     publish_rows(rows)
+                    refresh_units_status(self.store)
                     progress.complete(progress_key)
                     log.info(
                         "statistics vintage complete %s %s: attributes_uploaded=%d/%d, "

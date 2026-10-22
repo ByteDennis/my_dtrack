@@ -1,4 +1,5 @@
 import json
+import threading
 
 import pandas as pd
 import pytest
@@ -195,11 +196,16 @@ def test_parallel(tmp_path, monkeypatch):
     monkeypatch.setenv("STATS_WORKERS", "2")
     batches = []
     statuses = []
+    uploads = threading.Barrier(2)
+
+    def upload(rows):
+        uploads.wait(timeout=5)
+        batches.append(rows)
 
     result = stats.compute_csv_statistics(
         path,
         ["A", "B", "C", "D"],
-        on_batch=lambda rows: batches.append(rows),
+        on_batch=upload,
         shard_status=lambda active, done, total: statuses.append((active, done, total)),
     )
 

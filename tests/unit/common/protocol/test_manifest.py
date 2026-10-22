@@ -16,11 +16,11 @@ PAIR = {
 ROW_CHECK = {
     "gate_decision": {"passed": True},
     "partitions": {
-        "2026-01-01": {"left": 3, "right": 3, "verdict": "match"},
-        "2026-01-02": {"left": 1, "right": 2, "verdict": "count_diff"},
-        "2026-01-03": {"left": 4, "right": 4, "verdict": "match"},
-        "2026-02-01": {"left": 5, "right": 5, "verdict": "match"},
-        "2026-02-02": {"left": 5, "right": None, "verdict": "left_only"},
+        "2026-01-01": {"left": 3, "right": 3, "result": "match"},
+        "2026-01-02": {"left": 1, "right": 2, "result": "count_diff"},
+        "2026-01-03": {"left": 4, "right": 4, "result": "match"},
+        "2026-02-01": {"left": 5, "right": 5, "result": "match"},
+        "2026-02-02": {"left": 5, "right": None, "result": "left_only"},
     },
 }
 
@@ -211,7 +211,7 @@ def test_all(common):
     }
     row_check = {
         "gate_decision": {"passed": True},
-        "partitions": {"all": {"left": 9, "right": 9, "verdict": "match"}},
+        "partitions": {"all": {"left": 9, "right": 9, "result": "match"}},
     }
     manifest = common.manifest.build_manifest("run", "p", pair, row_check)
     assert manifest["partition_mode"] == "all"

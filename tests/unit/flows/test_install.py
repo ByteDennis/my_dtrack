@@ -165,9 +165,16 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "left_query_windows_json STRING" in pair_sql_schema
     assert "right_query_windows_json STRING" in pair_sql_schema
     assert "vintage_sample_size" not in pair_sql_schema
+    assert "row_differences BIGINT" in schema
+    assert "column_differences BIGINT" in schema
+    assert "runtime_failures BIGINT" in schema
     migration = (ROOT / "setup" / "migrate_pair_metadata.sql").read_text(encoding="utf-8")
     assert "left_conn STRING" in migration
     assert "right_query_windows_json STRING" in migration
+    status_migration = (ROOT / "setup" / "migrate_run_status.sql").read_text(encoding="utf-8")
+    assert "row_differences BIGINT" in status_migration
+    assert "column_differences BIGINT" in status_migration
+    assert "runtime_failures BIGINT" in status_migration
 
 
 def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):

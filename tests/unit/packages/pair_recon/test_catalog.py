@@ -4,7 +4,7 @@ import pytest
 from support import MemoryStore
 
 from pair_recon.app.catalog import Catalog
-from pair_recon_right.catalog import ERROR_COLUMNS, append_error_rows, error_rows
+from pair_recon_right.catalog import ERROR_COLUMNS, append_error_rows, error_rows, result_summary
 
 
 class Sql:
@@ -97,7 +97,10 @@ def test_pairs_reject_duplicate_metadata():
         Catalog(DuplicateSql(), "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress").pairs()
 
 
-@pytest.mark.parametrize("state", ["running", "complete", "left_complete", "failed"])
+@pytest.mark.parametrize(
+    "state",
+    ["running", "complete", "passed", "different", "left_complete", "failed", "cancelled"],
+)
 def test_status(state):
     sql = Sql()
     catalog = Catalog(
@@ -117,7 +120,12 @@ def test_status(state):
     statement, values = sql.calls[-1]
     assert "MERGE INTO main.recon.run_status" in statement
     assert values["run_id"] == "run-1" and values["state"] == state
-    assert (values["ended"] is not None) == (state in {"left_complete", "failed"})
+    assert (values["ended"] is not None) == (
+        state in {"passed", "different", "left_complete", "failed", "cancelled"}
+    )
+    assert "ended_at, row_total" in statement
+    assert "CAST(:ended AS TIMESTAMP_NTZ)" in statement
+    assert values["row_total"] == 0 and values["column_differences"] == 0
 
 
 def test_clear_removes_all_rows_for_daily_run_id():
@@ -162,7 +170,7 @@ def test_finish():
     store = MemoryStore()
     store.put_json(
         "row_check/result.json",
-        {"partitions": {"all": {"left": 2, "right": 1, "verdict": "count_diff"}}},
+        {"partitions": {"all": {"left": 2, "right": 1, "result": "count_diff"}}},
     )
     catalog = Catalog(sql, "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress")
     result = catalog.finish(
@@ -175,8 +183,39 @@ def test_finish():
     )
     statements = [statement for statement, _values in sql.calls]
     assert result == {"status": "different", "errors": 1}
+    status_values = next(
+        values for statement, values in sql.calls if "MERGE INTO c.s.status" in statement
+    )
+    assert status_values["row_total"] == 1
+    assert status_values["row_differences"] == 1
     assert any("INSERT INTO c.s.errors" in statement for statement in statements)
     assert any("UPDATE c.s.pairs" in statement for statement in statements)
+
+
+def test_result_summary_counts_row_column_and_runtime_outcomes():
+    store = MemoryStore()
+    store.put_json(
+        "row_check/result.json",
+        {
+            "partitions": {
+                "2026-01-01": {"result": "match"},
+                "2026-01-02": {"result": "count_diff"},
+            }
+        },
+    )
+    store.put_json("col_check/results/a.json", {"verdict": "match"})
+    store.put_json("col_check/results/b.json", {"verdict": "diff"})
+    store.put_json("col_check/failures/c.json", {"error": "boom"})
+
+    assert result_summary(store) == {
+        "row_total": 2,
+        "row_matches": 1,
+        "row_differences": 1,
+        "column_total": 2,
+        "column_matches": 1,
+        "column_differences": 1,
+        "runtime_failures": 1,
+    }
 
 
 def test_error_rows_use_attribute_registry():
