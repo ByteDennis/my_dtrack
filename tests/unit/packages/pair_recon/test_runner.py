@@ -15,6 +15,7 @@ from pair_recon.app.runner import (
     StatementSql,
     local_run_directory,
     make_run_id,
+    mismatched_partitions,
     pair_config,
     resolve_job_id,
     retry_failed,
@@ -83,6 +84,41 @@ def test_excluded_partition_ranges_and_month_numbers():
         "2025-04-02->2025-04-05, 2025-05-10",
         {"type": "number", "format": "month"},
     ) == ["2025-04-01", "2025-05-01"]
+
+
+def test_mismatched_partitions_parses_only_the_selected_pair():
+    error = RuntimeError(
+        "version 2 row-check found unexcluded mismatched partitions; "
+        "add them to excluded_partitions (other: 2026-09-01; "
+        "orders: 2026-10-02, 2026-10-05, 2026-10-02)"
+    )
+
+    assert mismatched_partitions(error, "orders") == ["2026-10-02", "2026-10-05"]
+    assert mismatched_partitions(RuntimeError("another failure"), "orders") == []
+
+
+def test_add_mismatched_partitions_normalizes_month_date_type():
+    settings = {
+        "pair": "orders",
+        "left_date_type": {"type": "number", "format": "month"},
+        "excluded_partitions": ["2026-08-01"],
+    }
+    config = {"pairs": {"orders": {}}}
+    error = RuntimeError(
+        "version 2 row-check found unexcluded mismatched partitions "
+        "(orders: 2026-09-03, 2026-09-18, 2026-10-02)"
+    )
+
+    assert cli.add_mismatched_partitions(settings, config, error) == [
+        "2026-09-01",
+        "2026-10-01",
+    ]
+    assert settings["excluded_partitions"] == [
+        "2026-08-01",
+        "2026-09-01",
+        "2026-10-01",
+    ]
+    assert config["pairs"]["orders"]["excluded_partitions"] == settings["excluded_partitions"]
 
 
 @pytest.mark.parametrize("value", ["20250402", "2025-04-05->2025-04-02", "2025/04/02"])
@@ -267,6 +303,117 @@ def test_execute_saves_created_job_id_in_yaml(monkeypatch, tmp_path):
 
     assert cli.execute(args, raise_errors=True) == 0
     assert yaml.safe_load(defaults.read_text(encoding="utf-8"))["right_job_id"] == "314"
+
+
+def test_execute_defaults_mode_skips_all_interaction(monkeypatch, tmp_path):
+    defaults = tmp_path / "run.yaml"
+    defaults.write_text("pair: orders\n", encoding="utf-8")
+    settings = {
+        "pair": "orders",
+        "run_id": "orders-me-20261022",
+        "timezone": "America/New_York",
+        "sync_remote": False,
+        "email_to": "",
+    }
+    config = {"pairs": {"orders": {}}}
+    seen = {}
+    monkeypatch.setattr(cli, "load_environment", lambda: None)
+
+    def prompt(values, *, interactive=True):
+        seen["defaults"] = values
+        seen["interactive"] = interactive
+        return settings, config, "new", object(), object()
+
+    monkeypatch.setattr(cli, "prompts", prompt)
+    monkeypatch.setattr(cli, "configure_console_logging", lambda *_args: None)
+    monkeypatch.setattr(cli, "yes_no", lambda *_args: pytest.fail("must not prompt"))
+    monkeypatch.setattr(cli, "write_request_snapshot", lambda *_args: tmp_path / "request.json")
+    monkeypatch.setattr(cli, "launch", lambda *_args, **_kwargs: {"state": "passed"})
+    args = SimpleNamespace(
+        config=None,
+        defaults_path=defaults,
+        autorun=False,
+        force=False,
+        log_level="INFO",
+    )
+
+    assert cli.execute(args, raise_errors=True) == 0
+    assert seen == {"defaults": {"pair": "orders"}, "interactive": False}
+
+
+def test_execute_autorun_adds_exclusions_and_restarts_same_run(monkeypatch, tmp_path):
+    defaults = tmp_path / "run.yaml"
+    defaults.write_text("pair: orders\n", encoding="utf-8")
+    settings = {
+        "pair": "orders",
+        "run_id": "orders-me-20261022",
+        "timezone": "America/New_York",
+        "sync_remote": False,
+        "email_to": "",
+        "excluded_partitions": ["2026-10-01"],
+    }
+    config = {"pairs": {"orders": {"excluded_partitions": ["2026-10-01"]}}}
+    calls = []
+    snapshots = []
+    monkeypatch.setattr(cli, "load_environment", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "prompts",
+        lambda _defaults, *, interactive: (settings, config, "new", object(), object()),
+    )
+    monkeypatch.setattr(cli, "configure_console_logging", lambda *_args: None)
+
+    def snapshot(values, effective):
+        snapshots.append(list(effective["pairs"]["orders"]["excluded_partitions"]))
+        return tmp_path / "request.json"
+
+    def launch(_settings, _config, *, action, **_kwargs):
+        calls.append((action, _settings["run_id"]))
+        if len(calls) == 1:
+            raise RuntimeError(
+                "version 2 row-check found unexcluded mismatched partitions; "
+                "add them to excluded_partitions (orders: 2026-10-02, 2026-10-05)"
+            )
+        return {"state": "passed"}
+
+    monkeypatch.setattr(cli, "write_request_snapshot", snapshot)
+    monkeypatch.setattr(cli, "launch", launch)
+    args = SimpleNamespace(
+        config=None,
+        defaults_path=defaults,
+        autorun=True,
+        force=False,
+        log_level="INFO",
+    )
+
+    assert cli.execute(args, raise_errors=True) == 0
+    assert calls == [
+        ("new", "orders-me-20261022"),
+        ("restart", "orders-me-20261022"),
+    ]
+    assert snapshots == [
+        ["2026-10-01"],
+        ["2026-10-01", "2026-10-02", "2026-10-05"],
+    ]
+    saved = yaml.safe_load(defaults.read_text(encoding="utf-8"))
+    assert saved["excluded_partitions"] == ["2026-10-01", "2026-10-02", "2026-10-05"]
+    assert "autorun" not in saved and "force" not in saved
+
+
+def test_main_program_parses_default_alias_autorun_and_force(monkeypatch, tmp_path):
+    seen = {}
+    defaults = tmp_path / "run.yaml"
+    monkeypatch.setattr(
+        cli,
+        "execute",
+        lambda args, **_kwargs: seen.update(vars(args)) or 0,
+    )
+    monkeypatch.setattr(cli, "run_debugger", lambda _mode, callback: callback())
+
+    assert cli.main_program(["--default", str(defaults), "--autorun", "--force"]) == 0
+    assert seen["defaults_path"] == defaults
+    assert seen["autorun"] is True
+    assert seen["force"] is True
 
 
 def test_timezone_default(monkeypatch):
@@ -789,20 +936,29 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
 
 
 def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_path):
-    metadata = {
-        "left": {"source": "oracle", "table": "L", "date_col": "ORDER_DT", "date_type": "date"},
-        "right": {"source": "databricks", "table": "R", "date_col": "order_dt"},
-        "col_map": {"A": "a"},
-        "_run_defaults": {
-            "from_date": "2026-03-01",
-            "to_date": "2026-03-31",
-            "vintage": "week",
-            "excluded_partitions": ["2026-03-05"],
-            "audit": True,
-            "sync_remote": False,
-            "left_workers": 3,
-            "right_workers": 12,
-        },
+    row = {
+        "pair_name": "orders",
+        "left_source": "oracle",
+        "left_conn": "PCDS",
+        "left_table": "L",
+        "left_date_col": "ORDER_DT",
+        "right_source": "databricks_table",
+        "right_conn": "main.sales",
+        "right_table": "R",
+        "right_date_col": "order_dt",
+        "run_defaults_json": json.dumps(
+            {
+                "from_date": "2026-03-01",
+                "to_date": "2026-03-31",
+                "vintage": "week",
+                "excluded_partitions": ["2026-03-05"],
+                "audit": True,
+                "sync_remote": False,
+                "left_workers": 3,
+                "right_workers": 12,
+            }
+        ),
+        "column_map_rows": [{"left_column": "A", "right_column": "a"}],
     }
 
     class Catalog:
@@ -810,7 +966,7 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_
             pass
 
         def pairs(self):
-            return [{"pair_name": "orders", "config_json": metadata}]
+            return [row]
 
         def run(self, _run_id):
             return None
@@ -1132,6 +1288,34 @@ def test_local(monkeypatch, tmp_path):
     assert events == ["running", "start", "row", "finish:passed", "passed"]
 
 
+def test_run_left_force_bypasses_cached_row_check(monkeypatch, tmp_path):
+    events = []
+    config = {"pairs": {"orders": {"checks": ["row_count"]}}}
+    monkeypatch.setattr(runner, "validate_config", lambda value: value)
+    monkeypatch.setattr(
+        runner,
+        "reuse_row_check",
+        lambda *_args, **_kwargs: pytest.fail("force must not read row-check cache"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_row_check",
+        lambda *_args, **_kwargs: events.append("fresh-row-check"),
+    )
+
+    result = runner.run_left(
+        config,
+        MemoryStore(),
+        "orders-me-20261022",
+        "orders",
+        tmp_path,
+        force=True,
+    )
+
+    assert result == {"row": "ready", "units": 0}
+    assert events == ["fresh-row-check"]
+
+
 def test_left_only_does_not_start_or_run_right(monkeypatch, tmp_path):
     store = MemoryStore()
     events = []
@@ -1241,6 +1425,9 @@ def test_launch_writes_early_failure_to_left_log(monkeypatch, tmp_path):
         def finish(self, _store, **values):
             states.append(values["state"])
 
+        def fail(self, **values):
+            states.append(values["state"])
+
     monkeypatch.setattr(runner, "VolumeStore", Root)
     settings = {
         "run_id": "failed-1",
@@ -1318,6 +1505,9 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
         def finish(self, _store, **values):
             states.append(f"finish:{values['state']}")
 
+        def fail(self, **values):
+            states.append(f"fail:{values['state']}")
+
     class Remote:
         run_id = 91
 
@@ -1385,8 +1575,8 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
     assert "run page: https://example/runs/91" in content
     assert "task run 910: ModuleNotFoundError" in content
     assert "Traceback for 910\n  File notebook, line 6" in content
-    assert states == ["running", "finish:failed", "finish:failed"]
-    assert store.exists("col_check/failures/right-job.json")
+    assert states == ["running", "fail:failed"]
+    assert not store.exists("col_check/failures/right-job.json")
     assert cancelled == []
 
 
@@ -1479,6 +1669,9 @@ def test_launch_forwards_cancelled_job_and_finalizes_catalog(monkeypatch, tmp_pa
         def finish(self, _store, **values):
             states.append(f"finish:{values['state']}")
 
+        def fail(self, **values):
+            states.append(f"fail:{values['state']}")
+
     class Remote:
         run_id = 96
 
@@ -1528,8 +1721,8 @@ def test_launch_forwards_cancelled_job_and_finalizes_catalog(monkeypatch, tmp_pa
             catalog=Catalog(),
         )
 
-    assert states == ["running", "finish:cancelled", "finish:cancelled"]
-    assert store.exists("col_check/failures/right-job.json")
+    assert states == ["running", "fail:cancelled"]
+    assert not store.exists("col_check/failures/right-job.json")
     assert cancelled == []
 
 
@@ -1569,7 +1762,7 @@ def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
             return self
 
         def stop(self, state, **_kwargs):
-            calls.append(f"stop:{state}")
+            calls.append(f"stop:{state}:capture={_kwargs.get('capture')}")
 
     class Catalog:
         progress = staticmethod(lambda _row: None)
@@ -1582,6 +1775,9 @@ def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
 
         def finish(self, _store, **values):
             calls.append(f"finish:{values['state']}")
+
+        def run(self, _run_id):
+            pytest.fail("notebook outcome should avoid a Catalog read")
 
     class Remote:
         run_id = 92
@@ -1660,8 +1856,7 @@ def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
         "workers:8",
         "result:7200",
         "output:920",
-        "finish:passed",
-        "stop:passed",
+        "stop:passed:capture=False",
     ]
 
 

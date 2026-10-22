@@ -144,7 +144,7 @@ def _read_with_defaults(tmp_path, defaults):
 
 def test_run_defaults_accept_every_prompt_default(tmp_path):
     rows = _read_with_defaults(tmp_path, FULL_RUN_DEFAULTS)
-    assert json.loads(rows["pairs"][0]["run_defaults_json"]) == FULL_RUN_DEFAULTS
+    assert json.loads(rows[0]["run_defaults_json"]) == FULL_RUN_DEFAULTS
 
 
 @pytest.mark.parametrize(

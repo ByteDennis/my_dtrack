@@ -38,6 +38,8 @@ Install
 
 Run
 just run
+just run --defaults
+just run --defaults --autorun --force
 
 Without just
 uv run python -m pair_recon

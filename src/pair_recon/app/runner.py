@@ -29,7 +29,6 @@ from pair_recon_left.common.model.protocol import (
     write_run_status,
 )
 from pair_recon_left.common.runtime.run_logging import configure_left_logging, get_left_logger
-from pair_recon_right.catalog import result_summary
 from pair_recon_right.engine.backends.targets import CsvTarget
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
 from pair_recon_right.engine.job import run as run_right
@@ -37,6 +36,7 @@ from pair_recon_right.engine.job import run as run_right
 _SENSITIVE_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
 _SENSITIVE_WORDS = ("password", "secret", "token", "credential")
 _RUN_DATE = re.compile(r"-(\d{4})(\d{2})(\d{2})$")
+_UNEXCLUDED_PARTITIONS = "version 2 row-check found unexcluded mismatched partitions"
 log = get_left_logger("runner")
 
 
@@ -95,6 +95,17 @@ def record_runtime_failure(store, pair: str, source: str, error: BaseException |
             "error": message,
         },
     )
+
+
+def mismatched_partitions(error: BaseException | str, pair: str) -> list[str]:
+    text = str(error)
+    if _UNEXCLUDED_PARTITIONS not in text:
+        return []
+    match = re.search(
+        rf"{re.escape(pair)}:\s*((?:\d{{4}}-\d{{2}}-\d{{2}}(?:,\s*)?)+)",
+        text,
+    )
+    return sorted(set(re.findall(r"\d{4}-\d{2}-\d{2}", match.group(1)))) if match else []
 
 
 class RightJobMonitor:
@@ -403,6 +414,7 @@ def run_left(
     release=None,
     left_only: bool = False,
     abort_if=None,
+    force: bool = False,
 ):
     abort_if = abort_if or (lambda: None)
     abort_if()
@@ -410,7 +422,7 @@ def run_left(
     pair_config = config["pairs"][pair]
     if left_only and pair_config.get("snapshot"):
         raise ValueError("left-only mode does not support snapshot pairs that require Right")
-    reused = reuse_row_check(config, store, run_id=run_id, pair_names=[pair])
+    reused = None if force else reuse_row_check(config, store, run_id=run_id, pair_names=[pair])
     if reused is None:
         run_row_check(config, store, run_id=run_id, pair_names=[pair], pair_workers=1)
     abort_if()
@@ -432,7 +444,7 @@ def run_left(
         abort_if()
         publish_fixed_keys(store, manifest, work_dir)
     abort_if()
-    runtime = LeftRuntime(work_dir, store)
+    runtime = LeftRuntime(work_dir, store, force=force)
     units = ColCheckPipeline(
         store,
         pull_window=runtime.pull_window,
@@ -466,6 +478,9 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
     run_dir = local_run_directory(settings["work_dir"], run_id, settings["timezone"])
     run_dir.mkdir(parents=True, exist_ok=True)
     left_log = run_dir / "left.log"
+    force = bool(settings.get("force", False))
+    if force:
+        left_log.unlink(missing_ok=True)
     configure_left_logging(left_log, settings["timezone"])
     log.info(
         "run started: run_id=%s pair=%s mode=%s action=%s",
@@ -474,6 +489,8 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         run_mode,
         action,
     )
+    if force:
+        log.info("force enabled: PairRecon caches and existing run results will not be reused")
     client = None
     store = None
     sampler = None
@@ -492,7 +509,10 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
     monitor = None
     right = None
     final_state = "failed"
+    failure_error = None
+    failure_forwarded = False
     local_right = not left_only and config["pairs"][pair]["right"].get("source") == "csv"
+    remote_right = not left_only and not local_right
     try:
         client = workspace_client or workspace(settings["profile"])
         log.info(
@@ -540,32 +560,21 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             if catalog:
 
                 def on_right_terminal(state):
+                    nonlocal failure_forwarded
                     log.info(
                         "forwarding Right terminal state: table=%s state=%s",
                         settings["status_table"],
                         state,
                     )
-                    values = {
-                        "run_id": run_id,
-                        "pair": pair,
-                        "owner": settings["owner"],
-                        "state": state,
-                        "timezone": settings["timezone"],
-                    }
-                    try:
-                        record_runtime_failure(
-                            store,
-                            pair,
-                            "right-job",
-                            monitor.error or f"Right Databricks job {state}",
-                        )
-                        catalog.finish(store, **values)
-                    except Exception:
-                        log.exception(
-                            "could not publish Right artifacts; forwarding state only: state=%s",
-                            state,
-                        )
-                        catalog.status(**values)
+                    catalog.fail(
+                        run_id=run_id,
+                        pair=pair,
+                        owner=settings["owner"],
+                        state=state,
+                        timezone=settings["timezone"],
+                        detail=str(monitor.error or f"Right Databricks job {state}"),
+                    )
+                    failure_forwarded = True
 
             monitor = RightJobMonitor(
                 remote,
@@ -586,6 +595,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             (lambda: run_right_row_check(store, target_factory)) if local_right else None,
             left_only=left_only,
             abort_if=monitor.raise_if_failed if monitor else None,
+            force=force,
         )
         log.info("Left checks completed: %s", left)
         if left_only:
@@ -631,32 +641,22 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 )
         else:
             monitor.result()
-            summary = result_summary(store)
-            final_state = (
-                "different"
-                if summary["row_differences"]
-                + summary["column_differences"]
-                + summary["runtime_failures"]
-                else "passed"
-            )
             right = {
                 "run_id": int(remote.run_id),
                 **monitor.outcome,
-                "row_errors": summary["row_differences"],
-                "column_errors": summary["column_differences"],
-                "failures": summary["runtime_failures"],
             }
-            if catalog:
-                catalog.finish(
-                    store,
-                    run_id=run_id,
-                    pair=pair,
-                    owner=settings["owner"],
-                    state=final_state,
-                    timezone=settings["timezone"],
+            outcome_fields = ("row_errors", "column_errors", "failures")
+            if all(name in monitor.outcome for name in outcome_fields):
+                final_state = (
+                    "different"
+                    if sum(int(monitor.outcome[name]) for name in outcome_fields)
+                    else "passed"
                 )
+            else:
+                published = catalog.run(run_id) if catalog else None
+                final_state = (published or {}).get("state") or "finished"
         if sampler:
-            sampler.stop(final_state, required=True)
+            sampler.stop(final_state, required=not remote_right, capture=not remote_right)
             sampler = None
         log.info("run completed: state=%s", final_state)
         return {
@@ -670,9 +670,10 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             "volume_run_root": store.root_uri,
         }
     except BaseException as exc:
+        failure_error = exc
         final_state = "cancelled" if monitor and monitor.final_state == "cancelled" else "failed"
         log.exception("run %s", final_state)
-        if store is not None:
+        if store is not None and not remote_right:
             try:
                 failure_source = (
                     "right-job" if monitor and monitor.error is not None else "launcher"
@@ -705,7 +706,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
     finally:
         try:
             if sampler:
-                sampler.stop(final_state)
+                sampler.stop(final_state, capture=not remote_right)
         finally:
             if catalog and final_state in {"failed", "cancelled"}:
                 try:
@@ -716,7 +717,17 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                         "state": final_state,
                         "timezone": settings["timezone"],
                     }
-                    if store is None:
+                    if remote_right:
+                        if not failure_forwarded:
+                            catalog.fail(
+                                **values,
+                                detail=str(
+                                    failure_error
+                                    or (monitor.error if monitor else None)
+                                    or f"Right Databricks job {final_state}"
+                                ),
+                            )
+                    elif store is None:
                         catalog.status(**values)
                     else:
                         catalog.finish(store, **values)

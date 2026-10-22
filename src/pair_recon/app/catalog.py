@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -156,6 +157,7 @@ WHEN NOT MATCHED THEN INSERT ({fields}) VALUES ({values})""",
         state: str,
         timezone: str,
         summary: dict[str, int] | None = None,
+        update_summary: bool = True,
     ):
         now = (
             datetime.now(ZoneInfo(timezone)).replace(tzinfo=None).isoformat(timespec="microseconds")
@@ -173,25 +175,89 @@ WHEN NOT MATCHED THEN INSERT ({fields}) VALUES ({values})""",
             "timezone": timezone,
             "now": now,
             "ended": ended,
-            **{name: int((summary or {}).get(name) or 0) for name in STATUS_SUMMARY_COLUMNS},
         }
-        summary_updates = ", ".join(
-            f"{name}=CAST(:{name} AS BIGINT)" for name in STATUS_SUMMARY_COLUMNS
+        if update_summary:
+            values.update(
+                {name: int((summary or {}).get(name) or 0) for name in STATUS_SUMMARY_COLUMNS}
+            )
+        summary_updates = (
+            ", " + ", ".join(f"{name}=CAST(:{name} AS BIGINT)" for name in STATUS_SUMMARY_COLUMNS)
+            if update_summary
+            else ""
         )
-        summary_fields = ", ".join(STATUS_SUMMARY_COLUMNS)
-        summary_values = ", ".join(f"CAST(:{name} AS BIGINT)" for name in STATUS_SUMMARY_COLUMNS)
+        summary_fields = ", " + ", ".join(STATUS_SUMMARY_COLUMNS) if update_summary else ""
+        summary_values = (
+            ", " + ", ".join(f"CAST(:{name} AS BIGINT)" for name in STATUS_SUMMARY_COLUMNS)
+            if update_summary
+            else ""
+        )
         self.sql.execute(
             f"""MERGE INTO {self.status_table} AS t
 USING (SELECT :run_id run_id) AS s ON t.run_id = s.run_id
 WHEN MATCHED THEN UPDATE SET pair_name=:pair, owner=:owner, state=:state, timezone=:timezone,
-updated_at=CAST(:now AS TIMESTAMP_NTZ), ended_at=CAST(:ended AS TIMESTAMP_NTZ), {summary_updates}
+updated_at=CAST(:now AS TIMESTAMP_NTZ), ended_at=CAST(:ended AS TIMESTAMP_NTZ){summary_updates}
 WHEN NOT MATCHED THEN INSERT (run_id, pair_name, owner, state, timezone, started_at, updated_at,
-ended_at, {summary_fields})
+ended_at{summary_fields})
 VALUES (:run_id, :pair, :owner, :state, :timezone,
-CAST(:now AS TIMESTAMP_NTZ), CAST(:now AS TIMESTAMP_NTZ), CAST(:ended AS TIMESTAMP_NTZ),
+CAST(:now AS TIMESTAMP_NTZ), CAST(:now AS TIMESTAMP_NTZ), CAST(:ended AS TIMESTAMP_NTZ)
 {summary_values})""",
             values,
         )
+
+    def fail(
+        self,
+        *,
+        run_id: str,
+        pair: str,
+        owner: str,
+        state: str,
+        timezone: str,
+        detail: str,
+    ):
+        if state not in {"failed", "cancelled"}:
+            raise ValueError("failure state must be failed or cancelled")
+        self.status(
+            run_id=run_id,
+            pair=pair,
+            owner=owner,
+            state=state,
+            timezone=timezone,
+            update_summary=False,
+        )
+        now = datetime.now(ZoneInfo(timezone)).replace(tzinfo=None)
+        values = {
+            "run_id": run_id,
+            "pair": pair,
+            "detail": detail,
+            "payload": json.dumps(
+                {"pair": pair, "source": "local-job-monitor", "error": detail},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            "created_at": now.isoformat(timespec="microseconds"),
+            "state": state,
+        }
+        self.sql.execute(
+            f"DELETE FROM {self.error_table} WHERE run_id=:run_id AND check_name='runtime' "
+            "AND column_name IS NULL AND partition_value IS NULL",
+            {"run_id": run_id},
+        )
+        self.sql.execute(
+            f"""INSERT INTO {self.error_table} (
+run_id, check_name, pair_name, vintage, column_name, partition_value,
+left_value, right_value, detail, payload, created_at
+) VALUES (
+:run_id, 'runtime', :pair, NULL, NULL, NULL, NULL, NULL, :detail, :payload,
+CAST(:created_at AS TIMESTAMP_NTZ)
+)""",
+            values,
+        )
+        self.sql.execute(
+            f"UPDATE {self.pair_table} SET latest_run_id=:run_id, latest_status=:state, "
+            "updated_at=CAST(:created_at AS TIMESTAMP_NTZ) WHERE pair_name=:pair",
+            values,
+        )
+        return {"status": state, "errors": 1}
 
     def finish(self, store, *, run_id: str, pair: str, owner: str, state: str, timezone: str):
         self.status(

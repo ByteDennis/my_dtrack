@@ -4,7 +4,13 @@ import pytest
 from support import MemoryStore
 
 from pair_recon.app.catalog import Catalog
-from pair_recon_right.catalog import ERROR_COLUMNS, append_error_rows, error_rows, result_summary
+from pair_recon_right.catalog import (
+    ERROR_COLUMNS,
+    STATUS_SUMMARY_COLUMNS,
+    append_error_rows,
+    error_rows,
+    result_summary,
+)
 
 
 class Sql:
@@ -126,6 +132,31 @@ def test_status(state):
     assert "ended_at, row_total" in statement
     assert "CAST(:ended AS TIMESTAMP_NTZ)" in statement
     assert values["row_total"] == 0 and values["column_differences"] == 0
+
+
+def test_fail_updates_terminal_metadata_without_result_summary():
+    sql = Sql()
+    catalog = Catalog(sql, "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress")
+
+    result = catalog.fail(
+        run_id="r1",
+        pair="orders",
+        owner="me",
+        state="failed",
+        timezone="America/New_York",
+        detail="Right task failed",
+    )
+
+    statements = [statement for statement, _values in sql.calls]
+    status_statement, status_values = sql.calls[0]
+    assert result == {"status": "failed", "errors": 1}
+    assert "MERGE INTO c.s.status" in status_statement
+    assert "row_total" not in status_statement
+    assert not set(STATUS_SUMMARY_COLUMNS) & status_values.keys()
+    assert "DELETE FROM c.s.errors" in statements[1]
+    assert "INSERT INTO c.s.errors" in statements[2]
+    assert "UPDATE c.s.pairs" in statements[3]
+    assert sql.calls[2][1]["detail"] == "Right task failed"
 
 
 def test_clear_removes_all_rows_for_daily_run_id():

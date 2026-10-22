@@ -43,6 +43,7 @@ from .runner import (
     launch,
     local_run_directory,
     make_run_id,
+    mismatched_partitions,
     pair_config,
     resolve_job_id,
     workspace,
@@ -53,6 +54,7 @@ log = get_logger("cli")
 DEFAULTS = Path(".pair_recon.yaml")
 PAIR_WORKBOOK = Path(__file__).resolve().parents[3] / "setup" / "pairs.xlsx"
 PAIR_WORKBOOK_ENV = "DBX_PAIR_WORKBOOK"
+AUTO_EXCLUDE_RETRIES = 3
 
 
 def console(message: str):
@@ -195,6 +197,50 @@ def positive_int(label: str, default: int) -> int:
     return value
 
 
+def default_answer(label: str, default=None, *, required=True) -> str:
+    if default not in (None, ""):
+        return str(default)
+    if required:
+        raise ValueError(f"{label} is required in --defaults mode")
+    return ""
+
+
+def default_choice(label: str, values: list[str], default=None) -> str:
+    if default in (None, ""):
+        raise ValueError(f"{label} is required in --defaults mode")
+    selected = str(default)
+    if selected not in values:
+        raise ValueError(f"{label} must be one of: {', '.join(values)}")
+    return selected
+
+
+def default_choices(label: str, values: list[str], default) -> list[str]:
+    raw = default if isinstance(default, list | tuple) else str(default).split(",")
+    selected = {str(value).strip() for value in raw if str(value).strip()}
+    unknown = selected - set(values)
+    if unknown:
+        raise ValueError(f"unknown {label} choices: {', '.join(sorted(unknown))}")
+    if not selected:
+        raise ValueError(f"{label} requires one or more of: {', '.join(values)}")
+    return [value for value in values if value in selected]
+
+
+def default_positive_int(label: str, default: int) -> int:
+    try:
+        value = int(default)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a positive integer") from None
+    if value < 1 or isinstance(default, float) and not default.is_integer():
+        raise ValueError(f"{label} must be a positive integer")
+    return value
+
+
+def default_boolean(label: str, default=False) -> bool:
+    if not isinstance(default, bool):
+        raise TypeError(f"{label} must be true or false in --defaults mode")
+    return default
+
+
 def right_job_reference(value: object) -> str:
     reference = str(value or "").strip()
     if reference.casefold() in {"-", "clear"}:
@@ -241,37 +287,43 @@ def synchronize_pair_workbook(sql, catalog, pair_table: str, workbook_path: str 
     return rows, {**result, "source": str(source)}
 
 
-def prompts(defaults: dict, *, workspace_factory=workspace):
-    owner = ask("Run owner", os.getenv("USERNAME") or defaults.get("owner"))
-    profile = ask(
+def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = True):
+    answer = ask if interactive else default_answer
+    select = choose if interactive else default_choice
+    select_many = choose_many if interactive else default_choices
+    confirm = yes_no if interactive else default_boolean
+    worker_budget = positive_int if interactive else default_positive_int
+
+    owner = answer("Run owner", os.getenv("USERNAME") or defaults.get("owner"))
+    profile = answer(
         "Databricks profile",
         env_value("DBX_PROFILE", default=defaults.get("profile", "corp")),
     )
-    warehouse = ask(
+    warehouse = answer(
         "SQL warehouse id",
         env_value("DBX_WAREHOUSE_ID", default=defaults.get("warehouse_id")),
     )
-    pair_table = ask(
+    pair_table = answer(
         "Pair metadata table",
         env_value("DBX_PAIR_TABLE", default=defaults.get("pair_table")),
     )
-    status_table = ask(
+    status_table = answer(
         "Run status table",
         env_value("DBX_STATUS_TABLE", default=defaults.get("status_table")),
     )
-    error_table = ask(
+    error_table = answer(
         "Run error table",
         env_value("DBX_ERROR_TABLE", default=defaults.get("error_table")),
     )
     progress_default = defaults.get("progress_table")
     if not progress_default and status_table.count(".") == 2:
         progress_default = status_table.rsplit(".", 1)[0] + ".pair_recon_progress_snapshot"
-    progress_table = ask("Progress snapshot table", progress_default)
-    volume_root = ask(
+    progress_table = answer("Progress snapshot table", progress_default)
+    volume_root = answer(
         "Volume runs path",
         env_value("DBX_RUN_PATH", default=defaults.get("volume_root")),
     )
-    email_to = ask("Outlook recipients", defaults.get("email_to"), required=False)
+    email_to = answer("Outlook recipients", defaults.get("email_to"), required=False)
     workbook_path = pair_workbook_path(defaults)
     console(f"Initializing Databricks client for profile {profile!r}...")
     client = workspace_factory(profile)
@@ -303,7 +355,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
     if not pair_names:
         raise RuntimeError(f"Catalog and {workbook_path} have no enabled pair")
     saved_pair = defaults.get("pair")
-    pair = choose(
+    pair = select(
         "Table pair",
         pair_names,
         saved_pair if saved_pair in pair_names else None,
@@ -317,7 +369,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
             return defaults[name]
         return run_defaults.get(name, fallback)
 
-    run_mode = choose("Run mode", ["full", "left-only"], run_default("run_mode", "full"))
+    run_mode = select("Run mode", ["full", "left-only"], run_default("run_mode", "full"))
     left_source = str(metadata["left"].get("source") or "").casefold()
     right_source = str(metadata["right"].get("source") or "").casefold()
     provenances = []
@@ -340,7 +392,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         defaults.get("right_job_id") or env_value(JOB_NAME_ENV, default=DEFAULT_JOB_NAME)
     )
     if remote_right:
-        entered = ask("Right job id or name ('-' or 'clear' resets it)", right_job_id)
+        entered = answer("Right job id or name ('-' or 'clear' resets it)", right_job_id)
         right_job_id = right_job_reference(entered)
         if entered != right_job_id:
             console(f"Saved Right job id cleared; using {JOB_NAME_ENV}={right_job_id!r}.")
@@ -350,8 +402,8 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         fields = ("partition_mode", "from_date", "to_date", "vintage", "sample")
         if any(value.get(field) != provenance.get(field) for field in fields):
             raise ValueError("Left and Right CSV provenance does not match")
-    timezone = ask("IANA timezone", defaults.get("timezone", timezone_default()))
-    mode = choose(
+    timezone = answer("IANA timezone", defaults.get("timezone", timezone_default()))
+    mode = select(
         "Partition mode",
         ["date", "all"],
         provenance.get(
@@ -362,7 +414,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
     date_answers = {}
     if mode == "date":
         snapshot = bool(metadata.get("snapshot", False))
-        left_date_col = ask(
+        left_date_col = answer(
             "Left date column",
             run_default("left_date_col", metadata["left"].get("date_col")),
             required=not snapshot,
@@ -370,24 +422,24 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         date_answers["left_date_col"] = left_date_col
         if left_date_col:
             date_answers["left_date_type"] = date_type_value(
-                ask(
+                answer(
                     "Left date type (date/string/number/sas or JSON)",
                     date_type_text(
                         run_default("left_date_type", metadata["left"].get("date_type"))
                     ),
                 )
             )
-        date_answers["right_date_col"] = ask(
+        date_answers["right_date_col"] = answer(
             "Right date column",
             run_default("right_date_col", metadata["right"].get("date_col")),
         )
         date_answers["right_date_type"] = date_type_value(
-            ask(
+            answer(
                 "Right date type (date/string/number/sas or JSON)",
                 date_type_text(run_default("right_date_type", metadata["right"].get("date_type"))),
             )
         )
-    selected = choose_many(
+    selected = select_many(
         "Checks",
         ["row_count", *attribute_check_names()],
         run_default("checks", "row_count,hash_sum,n_unique"),
@@ -396,28 +448,28 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "partition_mode": mode,
         "checks": selected,
         "sample": sample_value(
-            ask("Sample", provenance.get("sample", run_default("sample", "all")))
+            answer("Sample", provenance.get("sample", run_default("sample", "all")))
         ),
-        "strict": yes_no("Strict normalization", bool(run_default("strict", False))),
-        "audit": yes_no("Audit SQL", bool(run_default("audit", False))),
+        "strict": confirm("Strict normalization", run_default("strict", False)),
+        "audit": confirm("Audit SQL", run_default("audit", False)),
         **date_answers,
     }
-    left_workers = positive_int("Left source worker budget", run_default("left_workers", 2))
+    left_workers = worker_budget("Left source worker budget", run_default("left_workers", 2))
     right_workers = (
-        positive_int("Databricks query worker budget", run_default("right_workers", 8))
+        worker_budget("Databricks query worker budget", run_default("right_workers", 8))
         if remote_right
         else 1
     )
     sync_remote = (
-        yes_no("Sync remote", bool(run_default("sync_remote", True))) if remote_right else False
+        confirm("Sync remote", run_default("sync_remote", True)) if remote_right else False
     )
     if mode == "date":
         answers.update(
-            from_date=ask(
+            from_date=answer(
                 "From date",
                 provenance.get("from_date", run_default("from_date", defaults.get("from_date"))),
             ),
-            to_date=ask(
+            to_date=answer(
                 "To date",
                 provenance.get("to_date", run_default("to_date", defaults.get("to_date"))),
             ),
@@ -426,14 +478,14 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
             "excluded_partitions", metadata.get("excluded_partitions") or []
         )
         answers["excluded_partitions"] = excluded_partition_values(
-            ask(
+            answer(
                 "Excluded partitions (YYYY-MM-DD or start->end, comma-separated)",
                 excluded_partitions_text(excluded_default, answers.get("left_date_type")),
                 required=False,
             ),
             answers.get("left_date_type"),
         )
-        answers["vintage"] = choose(
+        answers["vintage"] = select(
             "Vintage",
             ["day", "week", "month", "quarter", "year"],
             provenance.get("vintage", run_default("vintage", metadata.get("vintage", "day"))),
@@ -523,12 +575,47 @@ def sync_right_package(settings: dict, client) -> dict:
     return synced
 
 
+def persistent_settings(settings: dict) -> dict:
+    transient = {"run_id", "autorun", "force"}
+    return {
+        key: value
+        for key, value in settings.items()
+        if key not in transient and not key.startswith("_")
+    }
+
+
+def add_mismatched_partitions(settings: dict, config: dict, error: BaseException) -> list[str]:
+    pair = settings["pair"]
+    detected = mismatched_partitions(error, pair)
+    if not detected:
+        return []
+    normalized = excluded_partition_values(detected, settings.get("left_date_type"))
+    existing = set(settings.get("excluded_partitions") or [])
+    added = sorted(set(normalized) - existing)
+    if not added:
+        return []
+    merged = sorted(existing | set(normalized))
+    settings["excluded_partitions"] = merged
+    config["pairs"][pair]["excluded_partitions"] = merged
+    return added
+
+
 def execute(args, *, raise_errors: bool = False) -> int:
     load_environment()
     settings = None
     try:
-        defaults = load_config(args.config) if args.config else load_defaults(DEFAULTS)
-        settings, config, action, client, catalog = prompts(defaults)
+        config_path = getattr(args, "config", None)
+        defaults_path = getattr(args, "defaults_path", None)
+        selected_defaults = defaults_path or DEFAULTS
+        defaults = load_config(config_path) if config_path else load_defaults(selected_defaults)
+        prompt_result = (
+            prompts(defaults) if defaults_path is None else prompts(defaults, interactive=False)
+        )
+        settings, config, action, client, catalog = prompt_result
+        settings["autorun"] = bool(getattr(args, "autorun", False))
+        settings["force"] = bool(getattr(args, "force", False))
+        if settings["force"]:
+            action = "restart"
         configure_console_logging(args.log_level, settings["timezone"])
         print(
             json.dumps(
@@ -542,7 +629,7 @@ def execute(args, *, raise_errors: bool = False) -> int:
                 indent=2,
             )
         )
-        if not yes_no("Run now", True):
+        if defaults_path is None and not yes_no("Run now", True):
             return 0
         if settings["sync_remote"]:
             if not env_value(WORKSPACE_DIR_ENV):
@@ -552,17 +639,41 @@ def execute(args, *, raise_errors: bool = False) -> int:
             log.info("Right package sync completed: %s", json.dumps(synced, ensure_ascii=False))
         else:
             log.info("Right package sync skipped by run option")
-        save_defaults(
-            DEFAULTS,
-            {
-                key: value
-                for key, value in settings.items()
-                if key != "run_id" and not key.startswith("_")
-            },
-        )
+        save_defaults(selected_defaults, persistent_settings(settings))
         snapshot = write_request_snapshot(settings, config)
         log.info("request snapshot: %s", snapshot)
-        result = launch(settings, config, action=action, workspace_client=client, catalog=catalog)
+        attempts = 0
+        while True:
+            try:
+                result = launch(
+                    settings,
+                    config,
+                    action=action,
+                    workspace_client=client,
+                    catalog=catalog,
+                )
+                break
+            except Exception as exc:
+                added = (
+                    add_mismatched_partitions(settings, config, exc)
+                    if settings["autorun"] and attempts < AUTO_EXCLUDE_RETRIES
+                    else []
+                )
+                if not added:
+                    raise
+                attempts += 1
+                action = "restart"
+                save_defaults(selected_defaults, persistent_settings(settings))
+                snapshot = write_request_snapshot(settings, config)
+                log.warning(
+                    "autorun retry %d/%d: added %d excluded partition(s) and restarting "
+                    "with the same run_id=%s: %s",
+                    attempts,
+                    AUTO_EXCLUDE_RETRIES,
+                    len(added),
+                    settings["run_id"],
+                    ", ".join(added),
+                )
         result["request_snapshot"] = str(snapshot)
         if settings.get("email_to"):
             try:
@@ -611,7 +722,27 @@ def execute(args, *, raise_errors: bool = False) -> int:
 def main_program(argv=None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="pair_recon")
-    parser.add_argument("--config", type=Path)
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--config", type=Path)
+    inputs.add_argument(
+        "--defaults",
+        "--default",
+        dest="defaults_path",
+        nargs="?",
+        const=DEFAULTS,
+        type=Path,
+        help="run without prompts using YAML (default: .pair_recon.yaml)",
+    )
+    parser.add_argument(
+        "--autorun",
+        action="store_true",
+        help="exclude reported mismatched partitions and automatically restart",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="ignore PairRecon caches and overwrite this run's existing results",
+    )
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))
     args = parser.parse_args(values)

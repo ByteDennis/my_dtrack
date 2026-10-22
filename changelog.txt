@@ -5,6 +5,9 @@ Added
 - just publish: packages the four main runtime packages, launchers, environment template, workbook, minimal pyproject/justfile, and concise English readme.txt; it does not build an executable.
 
 Changed
+- src/pair_recon/app/cli.py: restores `--defaults [yaml]` (`--default` alias) as a zero-interaction run, adds bounded `--autorun` mismatch-partition exclusion/restart, and adds `--force` PairRecon cache bypass plus result replacement.
+- src/pair_recon/app/runner.py: detects Right mismatch-partition errors, forwards force into row/pull cache control, and no longer downloads remote-success result JSON after the Databricks notebook has published Catalog results.
+- src/pair_recon/app/catalog.py: forwards remote failed/cancelled status and one runtime error directly from Jobs API details without reading Volume artifacts or replacing an existing result summary.
 - src/pair_recon/app/cli.py: date-mode runs prompt for Left/Right date columns and date types, accept registered names or JSON specifications, and retain the effective values in public settings.
 - src/pair_recon/app/config.py: applies the prompted date fields to the effective runtime config.
 - src/pair_recon/app/cli.py: prompts for excluded partitions, expands inclusive `YYYY-MM-DD->YYYY-MM-DD` ranges, and saves the normalized list.
@@ -13,14 +16,14 @@ Changed
 - Left statistics publishing: stores one Volume JSON envelope per statistics shard instead of one file per column and uploads independent shards in parallel; Right expands each envelope back into column-level units and safely discovers out-of-order uploads.
 - Row-check output: renames the partition outcome field and CSV column from `verdict` to `result` without retaining the old field.
 - Progress snapshots: count logical units inside shard envelopes rather than counting files.
-- Remote terminal handling: the local launcher forwards Databricks `SUCCESS`, differences, failures, and manual cancellation into Catalog; failed/cancelled jobs create a runtime failure artifact and idempotently refresh `pair_recon_run_error` even when the notebook cannot publish.
+- Remote terminal handling: the Right notebook owns successful/different Catalog publication; the local launcher forwards failed/cancelled Jobs API details without downloading Volume result JSON.
 - `pair_recon_run_status`: adds row/column total, match, difference, and runtime-failure summary columns; `setup/migrate_run_status.sql` upgrades an existing status table once.
 - README.md and the operator prompt notes: document the new prompts, defaults, and saved setting names.
 
 Verification
-- 692 unit tests pass.
+- 712 unit tests pass.
 - Ruff check and format pass for the full source and unit/live-source test trees.
-- just publish creates a 68-file, 157622-byte ZIP; a clean extraction completes `uv sync` and `just run --help`.
+- just publish creates a 68-file, 159302-byte ZIP; a clean extraction completes `uv sync` and `pair_recon --help`.
 - Source distribution and wheel builds pass.
 
 pair_recon Report Databricks wait progress (47f74e0) — 2026-10-21

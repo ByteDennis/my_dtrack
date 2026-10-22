@@ -85,7 +85,7 @@ class ProgressSampler:
         self.thread.start()
         return self
 
-    def stop(self, state=None, *, required=False):
+    def stop(self, state=None, *, required=False, capture=True):
         self.stopped.set()
         self.thread.join(timeout=max(1, self.interval * 2))
-        return self.capture(state, required=required)
+        return self.capture(state, required=required) if capture else None
