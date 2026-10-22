@@ -105,6 +105,33 @@ def test_runtime():
     assert ("stop-wait", 1200.0) in workspace.calls
 
 
+def test_sql_statement_and_console_table():
+    assert runtime.sql_statement("main.sales.orders", "unity", 5) == (
+        "SELECT * FROM `main`.`sales`.`orders` LIMIT 5"
+    )
+    assert runtime.sql_statement("sales.orders", "glue", 2) == (
+        "SELECT * FROM `hive_metastore`.`sales`.`orders` LIMIT 2"
+    )
+    assert runtime.sql_statement("SELECT count(*) FROM main.sales.orders", "unity", 5) == (
+        "SELECT count(*) FROM main.sales.orders"
+    )
+    with pytest.raises(ValueError, match="catalog.schema.table"):
+        runtime.sql_statement("sales.orders", "unity", 5)
+
+    output = runtime.format_sql_result(
+        {
+            "statement_id": "statement-1",
+            "source": "glue",
+            "columns": ["id", "note"],
+            "rows": [[1, "line 1\nline 2"], [2, None]],
+            "total_rows": 2,
+        }
+    )
+    assert "line 1\\nline 2" in output
+    assert "NULL" in output
+    assert output.endswith("2 row(s) | glue | statement-1")
+
+
 def test_runs():
     state = NS(life_cycle_state=State.RUNNING, result_state=None, state_message="")
     task = NS(task_key="right", state=state, execution_duration=1000)

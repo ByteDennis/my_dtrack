@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
+import yaml
 from support import MemoryStore
 
 from pair_recon.app import cli, runner
@@ -137,6 +138,110 @@ def test_resolve_job_id_rejects_missing_or_duplicate_name(rows, message):
 
     with pytest.raises(ValueError, match=message):
         resolve_job_id(client, "test-run")
+
+    if not rows:
+        assert resolve_job_id(client, "test-run", required=False) is None
+
+
+def test_sync_right_package_repoints_existing_job(monkeypatch):
+    settings = {"right_job_id": "test-run"}
+    client = SimpleNamespace(
+        jobs=SimpleNamespace(
+            list=lambda **_options: [
+                SimpleNamespace(job_id=42, settings=SimpleNamespace(name="test-run"))
+            ],
+            get=lambda _job_id: SimpleNamespace(),
+        )
+    )
+    monkeypatch.setattr(
+        cli,
+        "sync_right",
+        lambda _client, _parent: {"notebook": "/Users/me/pair_recon_right_job"},
+    )
+    monkeypatch.setattr(cli, "repoint_job", lambda *_args: True)
+    monkeypatch.setattr(cli, "create_job", lambda *_args: pytest.fail("must not create job"))
+
+    result = cli.sync_right_package(settings, client)
+
+    assert result == {
+        "notebook": "/Users/me/pair_recon_right_job",
+        "job_id": 42,
+        "job_created": False,
+        "job_updated": True,
+    }
+    assert settings["right_job_id"] == "42"
+
+
+def test_sync_right_package_creates_missing_job_with_environment_name(monkeypatch):
+    class MissingJob(Exception):
+        error_code = "RESOURCE_DOES_NOT_EXIST"
+
+    settings = {"right_job_id": "999"}
+    client = SimpleNamespace(
+        jobs=SimpleNamespace(get=lambda _job_id: (_ for _ in ()).throw(MissingJob()))
+    )
+    seen = {}
+    monkeypatch.setenv("DBX_CLUSTER_ID", "cluster-1")
+    monkeypatch.setenv("DBX_JOB_NAME", "daily-reconciliation")
+    monkeypatch.setattr(
+        cli,
+        "sync_right",
+        lambda _client, _parent: {"notebook": "/Users/me/pair_recon_right_job"},
+    )
+    monkeypatch.setattr(
+        cli,
+        "create_job",
+        lambda _client, name, notebook, cluster: (
+            seen.update(name=name, notebook=notebook, cluster=cluster) or 314
+        ),
+    )
+
+    result = cli.sync_right_package(settings, client)
+
+    assert seen == {
+        "name": "daily-reconciliation",
+        "notebook": "/Users/me/pair_recon_right_job",
+        "cluster": "cluster-1",
+    }
+    assert result["job_id"] == 314 and result["job_created"] is True
+    assert settings["right_job_id"] == "314"
+
+
+def test_execute_saves_created_job_id_in_yaml(monkeypatch, tmp_path):
+    defaults = tmp_path / ".pair_recon.yaml"
+    settings = {
+        "pair": "orders",
+        "run_id": "orders-me-20261021",
+        "timezone": "America/New_York",
+        "sync_remote": True,
+        "right_job_id": "missing-job",
+        "email_to": "",
+    }
+    config = {"pairs": {"orders": {}}}
+    monkeypatch.setattr(cli, "DEFAULTS", defaults)
+    monkeypatch.setattr(cli, "load_environment", lambda: None)
+    monkeypatch.setattr(
+        cli, "prompts", lambda _defaults: (settings, config, "new", object(), object())
+    )
+    monkeypatch.setattr(cli, "configure_console_logging", lambda *_args: None)
+    monkeypatch.setattr(cli, "yes_no", lambda *_args: True)
+    monkeypatch.setenv("DBX_WORKSPACE_PDIR", "apps")
+
+    def sync(values, _client):
+        values["right_job_id"] = "314"
+        return {"job_id": 314, "job_created": True}
+
+    def snapshot(*_args):
+        assert yaml.safe_load(defaults.read_text(encoding="utf-8"))["right_job_id"] == "314"
+        return tmp_path / "request.json"
+
+    monkeypatch.setattr(cli, "sync_right_package", sync)
+    monkeypatch.setattr(cli, "write_request_snapshot", snapshot)
+    monkeypatch.setattr(cli, "launch", lambda *_args, **_kwargs: {"state": "passed"})
+    args = SimpleNamespace(config=None, log_level="INFO")
+
+    assert cli.execute(args, raise_errors=True) == 0
+    assert yaml.safe_load(defaults.read_text(encoding="utf-8"))["right_job_id"] == "314"
 
 
 def test_timezone_default(monkeypatch):
@@ -559,19 +664,27 @@ def test_sas_default_bundle_uses_output_root(monkeypatch, tmp_path, capsys):
 
 
 @pytest.mark.parametrize(
-    ("run_mode", "left_input", "right_input", "existing"),
+    ("run_mode", "left_source", "right_source", "existing"),
     [
-        ("full", "database", "database", True),
-        ("full", "csv", "database", False),
-        ("full", "database", "csv", False),
+        ("full", "oracle", "databricks", True),
+        ("full", "csv", "databricks", False),
+        ("full", "oracle", "csv", False),
         ("full", "csv", "csv", False),
-        ("left-only", "database", "database", False),
+        ("left-only", "oracle", "databricks", False),
     ],
 )
-def test_prompt(monkeypatch, run_mode, left_input, right_input, existing, tmp_path):
+def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_path):
     metadata = {
-        "left": {"source": "oracle", "table": "L", "dsn": "hive"},
-        "right": {"source": "databricks", "table": "R"},
+        "left": {
+            "source": left_source,
+            "table": "L",
+            "path": str(tmp_path / "left_sample.csv"),
+        },
+        "right": {
+            "source": right_source,
+            "table": "R",
+            "path": str(tmp_path / "right_sample.csv"),
+        },
         "partition_mode": "all",
         "col_map": {"A": "a"},
     }
@@ -597,10 +710,6 @@ def test_prompt(monkeypatch, run_mode, left_input, right_input, existing, tmp_pa
         "right_job_id": "42",
         "pair": "orders",
         "run_mode": run_mode,
-        "left_input": left_input,
-        "right_input": right_input,
-        "left_csv": str(tmp_path / "left_sample.csv"),
-        "right_csv": str(tmp_path / "right_sample.csv"),
         "timezone": "America/New_York",
         "partition_mode": "all",
         "checks": "row_count,hash_sum",
@@ -624,29 +733,29 @@ def test_prompt(monkeypatch, run_mode, left_input, right_input, existing, tmp_pa
     assert settings["run_id"] == "r-new"
     assert action == ("restart" if existing else "new")
     assert not any("Run id" in prompt or "Existing run action" in prompt for prompt in prompts)
+    assert not any(
+        label in prompt
+        for prompt in prompts
+        for label in ("Left input", "Right input", "Left CSV path", "Right CSV path")
+    )
     assert settings["run_mode"] == run_mode
-    assert settings["left_input"] == left_input
-    assert settings["sync_remote"] is True
+    assert "left_input" not in settings and "right_input" not in settings
+    remote_right = run_mode == "full" and right_source == "databricks"
+    assert settings["sync_remote"] is remote_right
     assert settings["audit"] is False
     assert settings["left_workers"] == 2
-    assert settings["right_workers"] == (
-        8 if run_mode == "full" and right_input == "database" else 1
-    )
+    assert settings["right_workers"] == (8 if remote_right else 1)
     assert settings["work_dir"] == str(tmp_path / "artifacts")
     assert (tmp_path / "artifacts").is_dir()
     assert config["pairs"]["orders"]["statistics"] == ["hash_sum"]
     assert config["pairs"]["orders"]["audit"] is False
-    expected = {"database": "oracle", "csv": "csv"}[left_input]
-    assert config["pairs"]["orders"]["left"]["source"] == expected
-    if left_input == "csv":
+    assert config["pairs"]["orders"]["left"]["source"] == left_source
+    if left_source == "csv":
         assert config["pairs"]["orders"]["sample"] == 0.1
         assert config["pairs"]["orders"]["pre_sampled"] is True
     if run_mode == "left-only":
-        assert settings["right_input"] == "none"
         assert config["pairs"]["orders"]["right"]["source"] == "databricks"
-    else:
-        assert settings["right_input"] == right_input
-    if right_input == "csv":
+    if right_source == "csv":
         assert config["pairs"]["orders"]["right"]["source"] == "csv"
         assert config["pairs"]["orders"]["right_pre_sampled"] is True
 

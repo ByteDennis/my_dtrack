@@ -214,10 +214,12 @@ def pair_config(row: dict) -> dict:
     return build_pair_config(row)
 
 
-def resolve_job_id(client, reference: object) -> int:
+def resolve_job_id(client, reference: object, *, required: bool = True) -> int | None:
     value = str(reference or "").strip()
     if not value:
-        raise ValueError("Right job id or name is required")
+        if required:
+            raise ValueError("Right job id or name is required")
+        return None
     try:
         return int(value)
     except ValueError:
@@ -230,7 +232,9 @@ def resolve_job_id(client, reference: object) -> int:
         and getattr(job, "job_id", None) is not None
     ]
     if not matches:
-        raise ValueError(f"Right Databricks job not found by name: {value}")
+        if required:
+            raise ValueError(f"Right Databricks job not found by name: {value}")
+        return None
     if len(matches) > 1:
         ids = ", ".join(str(job.job_id) for job in matches)
         raise ValueError(f"Right Databricks job name is not unique: {value} ({ids})")

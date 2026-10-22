@@ -75,6 +75,18 @@ def test_repoint_job_updates_only_when_path_differs():
     assert calls == []
 
 
+def test_create_job_returns_databricks_assigned_id():
+    calls = []
+    workspace = NS(
+        api_client=NS(do=lambda *args, **kwargs: calls.append((args, kwargs)) or {"job_id": 314})
+    )
+
+    assert deploy.create_job(workspace, "daily", "/Users/me/right_job", "cluster-1") == 314
+    args, kwargs = calls[0]
+    assert args == ("POST", "/api/2.2/jobs/create")
+    assert kwargs["body"] == deploy.job_spec("daily", "/Users/me/right_job", "cluster-1")
+
+
 def test_sync_right_uploads_local_package_and_repoints(monkeypatch):
     seen = {}
     monkeypatch.setattr(deploy, "right_target", lambda _ws, parent: f"/W/{parent}/pair_recon")

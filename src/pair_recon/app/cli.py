@@ -13,7 +13,15 @@ from pair_recon.core.metadata.workbook import (
     upsert_pair_configuration,
 )
 from pair_recon.mail import send_outlook
-from pair_recon_dbx.deploy import WORKSPACE_DIR_ENV, sync_right
+from pair_recon_dbx.deploy import (
+    DEFAULT_JOB_NAME,
+    JOB_NAME_ENV,
+    WORKSPACE_DIR_ENV,
+    create_job,
+    repoint_job,
+    sync_right,
+)
+from pair_recon_dbx.workspace import resource_does_not_exist
 from pair_recon_left.common.model.attribute_checks import attribute_check_names
 from pair_recon_left.common.model.protocol import local_timezone_name
 from pair_recon_left.common.runtime.run_logging import configure_console_logging, get_logger
@@ -244,57 +252,29 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         return run_defaults.get(name, fallback)
 
     run_mode = choose("Run mode", ["full", "left-only"], run_default("run_mode", "full"))
-    saved_left_input = str(defaults.get("left_input") or "database")
-    if saved_left_input not in {"database", "csv"}:
-        raise ValueError("saved left_input must be database or csv")
-    left_input = choose("Left input", ["database", "csv"], saved_left_input)
-    left_csv = str(defaults.get("left_csv") or "")
-    right_csv = str(defaults.get("right_csv") or "")
+    left_source = str(metadata["left"].get("source") or "").casefold()
+    right_source = str(metadata["right"].get("source") or "").casefold()
     provenances = []
-    if left_input == "csv":
-        left_csv = ask("Left CSV path", left_csv)
-        provenances.append(csv_defaults(left_csv, pair, "left"))
-        inherited = metadata["left"]
-        metadata = {
-            **metadata,
-            "pre_sampled": True,
-            "left": {
-                "source": "csv",
-                "path": left_csv,
-                **{
-                    name: inherited[name] for name in ("date_col", "date_type") if name in inherited
-                },
-            },
-        }
-    saved_right_input = str(defaults.get("right_input") or "database")
-    if saved_right_input not in {"database", "csv"}:
-        raise ValueError("saved right_input must be database or csv")
-    right_input = "none"
-    right_job_id = str(defaults.get("right_job_id") or "")
-    if run_mode == "full":
-        right_input = choose("Right input", ["database", "csv"], saved_right_input)
-        if right_input == "csv":
-            if not right_csv and left_csv:
-                right_csv = str(Path(left_csv).with_name("right_sample.csv"))
-            right_csv = ask("Right CSV path", right_csv)
-            provenances.append(csv_defaults(right_csv, pair, "right"))
-            inherited = metadata["right"]
+    if left_source == "csv":
+        provenance = csv_defaults(metadata["left"]["path"], pair, "left")
+        provenances.append(provenance)
+        if provenance:
+            metadata = {**metadata, "pre_sampled": True}
+    if run_mode == "full" and right_source == "csv":
+        provenance = csv_defaults(metadata["right"]["path"], pair, "right")
+        provenances.append(provenance)
+        if provenance:
             metadata = {
                 **metadata,
                 "right_pre_sampled": True,
-                "right": {
-                    "source": "csv",
-                    "path": right_csv,
-                    "pre_sampled": True,
-                    **{
-                        name: inherited[name]
-                        for name in ("date_col", "date_type")
-                        if name in inherited
-                    },
-                },
+                "right": {**metadata["right"], "pre_sampled": True},
             }
-        else:
-            right_job_id = ask("Right job id or name", right_job_id)
+    remote_right = run_mode == "full" and right_source == "databricks"
+    right_job_id = str(
+        defaults.get("right_job_id") or env_value(JOB_NAME_ENV, default=DEFAULT_JOB_NAME)
+    )
+    if remote_right:
+        right_job_id = ask("Right job id or name", right_job_id)
     provenances = [value for value in provenances if value]
     provenance = provenances[0] if provenances else {}
     for value in provenances[1:]:
@@ -327,10 +307,12 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
     left_workers = positive_int("Left source worker budget", run_default("left_workers", 2))
     right_workers = (
         positive_int("Databricks query worker budget", run_default("right_workers", 8))
-        if run_mode == "full" and right_input == "database"
+        if remote_right
         else 1
     )
-    sync_remote = yes_no("Sync remote", bool(run_default("sync_remote", True)))
+    sync_remote = (
+        yes_no("Sync remote", bool(run_default("sync_remote", True))) if remote_right else False
+    )
     if mode == "date":
         answers.update(
             from_date=ask("From date", provenance.get("from_date", defaults.get("from_date"))),
@@ -361,10 +343,6 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
         "email_to": email_to,
         "pair": pair,
         "run_mode": run_mode,
-        "left_input": left_input,
-        "right_input": right_input,
-        "left_csv": left_csv,
-        "right_csv": right_csv,
         "run_id": run_id,
         "timezone": timezone,
         "partition_mode": mode,
@@ -389,12 +367,35 @@ def prompts(defaults: dict, *, workspace_factory=workspace):
 
 # >>> mirror pair_recon_right to the workspace and repoint the right job <<< #
 def sync_right_package(settings: dict, client) -> dict:
-    job = settings.get("right_job_id") if settings.get("right_input") == "database" else None
-    return sync_right(
-        client,
-        env_value(WORKSPACE_DIR_ENV),
-        resolve_job_id(client, job) if job else None,
-    )
+    synced = sync_right(client, env_value(WORKSPACE_DIR_ENV))
+    reference = str(settings.get("right_job_id") or "").strip()
+    job_id = resolve_job_id(client, reference, required=False)
+    if job_id is not None:
+        try:
+            client.jobs.get(job_id)
+        except Exception as exc:
+            if not resource_does_not_exist(exc):
+                raise
+            job_id = None
+    if job_id is None:
+        cluster_id = env_value("DBX_CLUSTER_ID")
+        if not cluster_id:
+            raise ValueError("DBX_CLUSTER_ID is required to create the Right job")
+        job_name = (
+            reference
+            if reference and not reference.isdigit()
+            else env_value(JOB_NAME_ENV, default=DEFAULT_JOB_NAME)
+        )
+        job_id = create_job(client, job_name, synced["notebook"], cluster_id)
+        synced.update(job_id=job_id, job_created=True, job_updated=False)
+    else:
+        synced.update(
+            job_id=job_id,
+            job_created=False,
+            job_updated=repoint_job(client, job_id, synced["notebook"]),
+        )
+    settings["right_job_id"] = str(job_id)
+    return synced
 
 
 def execute(args, *, raise_errors: bool = False) -> int:
@@ -426,8 +427,6 @@ def execute(args, *, raise_errors: bool = False) -> int:
             log.info("Right package sync completed: %s", json.dumps(synced, ensure_ascii=False))
         else:
             log.info("Right package sync skipped by run option")
-        snapshot = write_request_snapshot(settings, config)
-        log.info("request snapshot: %s", snapshot)
         save_defaults(
             DEFAULTS,
             {
@@ -436,6 +435,8 @@ def execute(args, *, raise_errors: bool = False) -> int:
                 if key != "run_id" and not key.startswith("_")
             },
         )
+        snapshot = write_request_snapshot(settings, config)
+        log.info("request snapshot: %s", snapshot)
         result = launch(settings, config, action=action, workspace_client=client, catalog=catalog)
         result["request_snapshot"] = str(snapshot)
         if settings.get("email_to"):

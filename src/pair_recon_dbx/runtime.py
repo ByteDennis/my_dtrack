@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 import webbrowser
 from datetime import UTC, datetime, timedelta
@@ -8,6 +9,7 @@ from typing import Any
 
 DEFAULT_PROFILE = "corp"
 RUNNING_STATEMENT = {"PENDING", "RUNNING"}
+SQL_PREFIX = re.compile(r"^\s*(SELECT|WITH|SHOW|DESCRIBE|DESC|EXPLAIN|VALUES)\b", re.IGNORECASE)
 
 
 def client(profile: str):
@@ -127,9 +129,45 @@ def warehouse_stop(workspace, warehouse_id: str, *, wait=False, timeout_minutes=
     return {"action": "stopping", **warehouse_status(workspace, warehouse_id)}
 
 
-def run_sql(workspace, statement: str, warehouse_id: str, *, limit=20, poll=2.0) -> dict:
+def sql_statement(value_: str, source: str, limit: int) -> str:
+    text = str(value_ or "").strip()
+    if not text:
+        raise ValueError(f"--{source} requires a table name or SQL statement")
+    if SQL_PREFIX.match(text):
+        return text
+    parts = [part.strip().strip("`") for part in text.split(".")]
+    if any(not part for part in parts):
+        raise ValueError(f"invalid table name: {text!r}")
+    if source == "unity":
+        if len(parts) != 3:
+            raise ValueError("--unity table names must be catalog.schema.table")
+    elif source == "glue":
+        if len(parts) == 2:
+            parts.insert(0, "hive_metastore")
+        elif len(parts) != 3:
+            raise ValueError("--glue table names must be database.table or catalog.database.table")
+    else:
+        raise ValueError(f"unsupported SQL source: {source}")
+    relation = ".".join(f"`{part.replace('`', '``')}`" for part in parts)
+    return f"SELECT * FROM {relation} LIMIT {limit}"
+
+
+def run_sql(
+    workspace,
+    statement: str,
+    warehouse_id: str,
+    *,
+    limit=5,
+    catalog=None,
+    source="unity",
+    poll=2.0,
+) -> dict:
     response = workspace.statement_execution.execute_statement(
-        statement=statement, warehouse_id=warehouse_id, wait_timeout="30s"
+        statement=statement,
+        warehouse_id=warehouse_id,
+        catalog=catalog,
+        row_limit=limit,
+        wait_timeout="30s",
     )
     while value(response.status.state) in RUNNING_STATEMENT:
         time.sleep(poll)
@@ -139,12 +177,64 @@ def run_sql(workspace, statement: str, warehouse_id: str, *, limit=20, poll=2.0)
         error = response.status.error.message if response.status.error else state
         raise RuntimeError(f"statement {state}: {error}")
     rows = (response.result.data_array if response.result else None) or []
+    manifest = response.manifest
+    schema = getattr(manifest, "schema", None)
     return {
         "statement_id": response.statement_id,
-        "columns": [column.name for column in response.manifest.schema.columns],
+        "source": source,
+        "columns": [column.name for column in (getattr(schema, "columns", None) or [])],
         "rows": rows[:limit],
-        "total_rows": response.manifest.total_row_count,
+        "total_rows": getattr(manifest, "total_row_count", len(rows)),
     }
+
+
+def format_sql_result(result: dict) -> str:
+    columns = [str(column) for column in result.get("columns") or []]
+    rows = [[sql_cell(value_) for value_ in row] for row in result.get("rows") or []]
+    if not columns:
+        table = "(statement completed; no tabular result)"
+    else:
+        widths = [
+            min(48, max(len(column), *(len(row[index]) for row in rows), 1))
+            for index, column in enumerate(columns)
+        ]
+
+        def line(left: str, middle: str, right: str, fill: str) -> str:
+            return left + middle.join(fill * (width + 2) for width in widths) + right
+
+        def values(row) -> str:
+            return (
+                "| "
+                + " | ".join(
+                    clipped(value_, width).ljust(width) for value_, width in zip(row, widths)
+                )
+                + " |"
+            )
+
+        table_rows = [
+            line("+", "+", "+", "-"),
+            values(columns),
+            line("+", "+", "+", "="),
+            *(values(row) for row in rows),
+            line("+", "+", "+", "-"),
+        ]
+        table = "\n".join(table_rows)
+    shown = len(rows)
+    total = result.get("total_rows")
+    count = f"{shown} row(s)"
+    if total not in (None, shown):
+        count += f" shown; statement reported {total}"
+    return f"{table}\n{count} | {result.get('source', 'unity')} | {result['statement_id']}"
+
+
+def sql_cell(value_: Any) -> str:
+    if value_ is None:
+        return "NULL"
+    return str(value_).replace("\r", "").replace("\n", "\\n").replace("\t", "\\t")
+
+
+def clipped(value_: str, width: int) -> str:
+    return value_ if len(value_) <= width else value_[: max(0, width - 3)] + "..."
 
 
 def run_row(run) -> dict:

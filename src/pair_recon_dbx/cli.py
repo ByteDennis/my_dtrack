@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from pair_recon.app.config import env_value, load_environment
@@ -78,14 +79,22 @@ def parser() -> argparse.ArgumentParser:
     add_wait(warehouse)
     add_profile(warehouse)
     sql = commands.add_parser("sql")
-    sql.add_argument("statement", nargs="?")
-    sql.add_argument("--file", type=Path)
-    sql.add_argument(
-        "--warehouse-id",
-        default=env_value("DBX_WAREHOUSE_ID"),
+    source = sql.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--unity",
+        metavar="TABLE_OR_SQL",
+        help="peek at catalog.schema.table or execute Unity Catalog SQL",
     )
-    sql.add_argument("--limit", type=int, default=20)
-    add_profile(sql)
+    source.add_argument(
+        "--glue",
+        metavar="TABLE_OR_SQL",
+        help="peek at database.table or execute Hive metastore SQL",
+    )
+    sql.add_argument("--limit", type=positive_limit, default=5, help="maximum rows (default: 5)")
+    sql.set_defaults(
+        profile=env_value("DBX_PROFILE", default=runtime.DEFAULT_PROFILE),
+        warehouse_id=env_value("DBX_WAREHOUSE_ID"),
+    )
     runs = commands.add_parser("runs")
     runs.add_argument("--run-id", type=int)
     runs.add_argument("--job-id", type=int)
@@ -99,6 +108,13 @@ def require(value, name: str):
     if value in (None, ""):
         raise ValueError(f"{name} is required")
     return value
+
+
+def positive_limit(value: str) -> int:
+    limit = int(value)
+    if limit < 1:
+        raise argparse.ArgumentTypeError("limit must be a positive integer")
+    return limit
 
 
 def execute(args) -> dict:
@@ -156,10 +172,16 @@ def execute(args) -> dict:
         operation = runtime.warehouse_start if args.action == "start" else runtime.warehouse_stop
         return operation(workspace, warehouse_id, wait=args.wait, timeout_minutes=args.timeout)
     if args.command == "sql":
-        warehouse_id = require(args.warehouse_id, "--warehouse-id")
-        statement = args.file.read_text(encoding="utf-8") if args.file else args.statement
+        warehouse_id = require(args.warehouse_id, "DBX_WAREHOUSE_ID")
+        source = "unity" if args.unity is not None else "glue"
+        statement = runtime.sql_statement(getattr(args, source), source, args.limit)
         return runtime.run_sql(
-            workspace, require(statement, "STATEMENT or --file"), warehouse_id, limit=args.limit
+            workspace,
+            statement,
+            warehouse_id,
+            limit=args.limit,
+            catalog="hive_metastore" if source == "glue" else None,
+            source=source,
         )
     if args.run_id is not None:
         return runtime.run_detail(workspace, args.run_id)
@@ -179,7 +201,12 @@ def main(argv=None) -> int:
             if raise_errors:
                 raise
             result, exit_code = {"error": f"{type(exc).__name__}: {exc}"}, 1
-        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        if args.command == "sql" and not exit_code:
+            print(runtime.format_sql_result(result))
+        elif args.command == "sql":
+            print(result["error"], file=sys.stderr)
+        else:
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return exit_code
 
     return run_debugger(args.debug, command)

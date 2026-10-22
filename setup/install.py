@@ -8,7 +8,10 @@ from pair_recon.app.config import env_value, load_environment
 from pair_recon.app.runner import StatementSql
 from pair_recon.core.metadata.workbook import read_pair_workbook, upsert_pair_configuration
 from pair_recon_dbx.deploy import (
+    DEFAULT_JOB_NAME,
+    JOB_NAME_ENV,
     WORKSPACE_DIR_ENV,
+    job_spec,
     right_notebook,
     right_source,
     right_target,
@@ -16,22 +19,6 @@ from pair_recon_dbx.deploy import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def job_spec(name: str, notebook: str, cluster_id: str):
-    return {
-        "name": name,
-        "max_concurrent_runs": 10,
-        "queue": {"enabled": True},
-        "timeout_seconds": 0,
-        "tasks": [
-            {
-                "task_key": "right",
-                "existing_cluster_id": cluster_id,
-                "notebook_task": {"notebook_path": notebook, "base_parameters": {}},
-            }
-        ],
-    }
 
 
 def upsert(workspace, spec):
@@ -60,7 +47,10 @@ def main(argv=None):
     parser.add_argument("--profile", default=env_value("DBX_PROFILE", default="corp"))
     parser.add_argument("--workspace-dir", default=env_value(WORKSPACE_DIR_ENV))
     parser.add_argument("--cluster-id", default=env_value("DBX_CLUSTER_ID"))
-    parser.add_argument("--job-name", default="pair_recon_right")
+    parser.add_argument(
+        "--job-name",
+        default=env_value(JOB_NAME_ENV, default=DEFAULT_JOB_NAME),
+    )
     parser.add_argument(
         "--warehouse-id",
         default=env_value("DBX_WAREHOUSE_ID"),

@@ -8,6 +8,8 @@ from .workspace import resolve_workspace_path
 RIGHT_PACKAGE = "pair_recon_right"
 WORKSPACE_DIR_ENV = "DBX_WORKSPACE_PDIR"
 RENAME_ENV = "DBX_PKG_RENAME"
+JOB_NAME_ENV = "DBX_JOB_NAME"
+DEFAULT_JOB_NAME = "pair_recon_right"
 _PACKAGE_NAME = re.compile(rb"\b" + RIGHT_PACKAGE.encode() + rb"\b")
 
 
@@ -130,6 +132,33 @@ def repoint_job(workspace, job_id: int, notebook: str) -> bool:
             body={"job_id": int(job_id), "new_settings": {"tasks": tasks}},
         )
     return changed
+
+
+# >>> Databricks Jobs API payload for the single Right notebook task <<< #
+def job_spec(name: str, notebook: str, cluster_id: str) -> dict:
+    return {
+        "name": name,
+        "max_concurrent_runs": 10,
+        "queue": {"enabled": True},
+        "timeout_seconds": 0,
+        "tasks": [
+            {
+                "task_key": "right",
+                "existing_cluster_id": cluster_id,
+                "notebook_task": {"notebook_path": notebook, "base_parameters": {}},
+            }
+        ],
+    }
+
+
+# >>> create a Right job and return the Databricks-assigned numeric id <<< #
+def create_job(workspace, name: str, notebook: str, cluster_id: str) -> int:
+    response = workspace.api_client.do(
+        "POST",
+        "/api/2.2/jobs/create",
+        body=job_spec(name, notebook, cluster_id),
+    )
+    return int(response["job_id"])
 
 
 # >>> sync local pair_recon_right to the workspace (optionally renamed) and repoint the right job <<< #

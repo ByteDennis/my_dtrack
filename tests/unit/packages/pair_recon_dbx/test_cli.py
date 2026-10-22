@@ -56,10 +56,6 @@ def calls(monkeypatch):
             ("warehouse_stop", ("client:corp", "w1"), {"wait": False, "timeout_minutes": 20}),
         ),
         (
-            ["sql", "SELECT 1", "--warehouse-id", "w1", "--limit", "2"],
-            ("run_sql", ("client:corp", "SELECT 1", "w1"), {"limit": 2}),
-        ),
-        (
             ["runs", "--job-id", "7", "--active"],
             ("list_runs", ("client:corp",), {"limit": 10, "job_id": 7, "active": True}),
         ),
@@ -148,6 +144,61 @@ def test_errors(calls, monkeypatch, capsys):
 def test_workspace_delete_command_is_removed():
     with pytest.raises(SystemExit):
         cli.parser().parse_args(["workspace", "delete", "old.py"])
+
+
+def test_sql_unity_uses_environment_and_prints_table(calls, monkeypatch, capsys):
+    seen = {}
+    monkeypatch.setenv("DBX_PROFILE", "team")
+    monkeypatch.setenv("DBX_WAREHOUSE_ID", "warehouse-1")
+
+    def run_sql(*args, **kwargs):
+        seen.update(args=args, kwargs=kwargs)
+        return {
+            "statement_id": "statement-1",
+            "source": "unity",
+            "columns": ["id", "name"],
+            "rows": [["1", "order"]],
+            "total_rows": 1,
+        }
+
+    monkeypatch.setattr(cli.runtime, "run_sql", run_sql)
+
+    assert cli.main(["sql", "--unity", "main.sales.orders"]) == 0
+    assert seen == {
+        "args": (
+            "client:team",
+            "SELECT * FROM `main`.`sales`.`orders` LIMIT 5",
+            "warehouse-1",
+        ),
+        "kwargs": {"limit": 5, "catalog": None, "source": "unity"},
+    }
+    output = capsys.readouterr().out
+    assert "| id | name  |" in output
+    assert "1 row(s) | unity | statement-1" in output
+    assert not output.lstrip().startswith("{")
+
+
+def test_sql_glue_prefixes_hive_metastore(calls, monkeypatch):
+    monkeypatch.setenv("DBX_WAREHOUSE_ID", "warehouse-1")
+    args = cli.parser().parse_args(["sql", "--glue", "sales.orders", "--limit", "2"])
+
+    cli.execute(args)
+
+    assert calls[-1] == (
+        "run_sql",
+        (
+            "client:corp",
+            "SELECT * FROM `hive_metastore`.`sales`.`orders` LIMIT 2",
+            "warehouse-1",
+        ),
+        {"limit": 2, "catalog": "hive_metastore", "source": "glue"},
+    )
+
+
+@pytest.mark.parametrize("removed", ["--profile", "--file", "--warehouse-id"])
+def test_sql_removed_options_are_rejected(removed):
+    with pytest.raises(SystemExit):
+        cli.parser().parse_args(["sql", "--unity", "main.sales.orders", removed, "value"])
 
 
 def test_debug_reraises_errors(calls, monkeypatch):
