@@ -385,7 +385,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     missing = sorted(required - manifest.keys())
     if missing:
         raise ValueError(f"manifest missing fields: {', '.join(missing)}")
-    if manifest["protocol_version"] != PROTOCOL_VERSION:
+    if manifest["protocol_version"] not in {2, PROTOCOL_VERSION}:
         raise ValueError("unsupported protocol version")
     version = int(manifest.get("version") or 1)
     if version not in {1, 2}:

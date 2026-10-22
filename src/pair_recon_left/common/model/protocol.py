@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import os
 import re
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
@@ -18,6 +20,8 @@ LEFT_ROW_CHECK_CLOSED = "_status/left_row_check.closed.json"
 ROW_CHECK_CLOSED = "_status/row_check.closed.json"
 COL_CHECK_CLOSED = "_status/col_check.closed.json"
 AUDIT_SUMMARY = "_status/audit.txt"
+LEFT_STATE = "_state/left.json"
+RIGHT_STATE = "_state/right.json"
 
 UNIT_STATUS_FIELDS = (
     "pair",
@@ -34,6 +38,8 @@ UNIT_STATUS_FIELDS = (
     "error",
 )
 UNIT_BATCH_FORMAT = "pair-recon-unit-batch-v1"
+RESULT_BATCH_FORMAT = "pair-recon-result-batch-v1"
+RESULT_BATCH_PREFIX = "col_check/result_batches/"
 
 
 def left_row_path(_pair: str) -> str:
@@ -119,6 +125,53 @@ def unit_batch_document(
     }
 
 
+def result_batch_path(results: list[dict[str, Any]]) -> str:
+    unit_ids = sorted(str(result.get("unit_id") or "") for result in results)
+    if not unit_ids or any(not unit_id for unit_id in unit_ids):
+        raise ValueError("result batch unit ids must be non-empty")
+    digest = hashlib.sha256("\n".join(unit_ids).encode()).hexdigest()[:20]
+    return f"{RESULT_BATCH_PREFIX}{digest}.json"
+
+
+def result_batch_results(document: dict[str, Any]) -> list[dict[str, Any]]:
+    if document.get("format") != RESULT_BATCH_FORMAT:
+        raise ValueError("unsupported result batch format")
+    results = document.get("results")
+    if (
+        not isinstance(results, list)
+        or not results
+        or not all(isinstance(result, dict) for result in results)
+    ):
+        raise ValueError("result batch must contain one or more result objects")
+    if any(result.get("verdict") != "match" for result in results):
+        raise ValueError("result batches may contain only matching results")
+    unit_ids = [result.get("unit_id") for result in results]
+    if any(not unit_id for unit_id in unit_ids) or len(set(unit_ids)) != len(unit_ids):
+        raise ValueError("result batch unit ids must be non-empty and unique")
+    return results
+
+
+def result_batch_document(
+    results: list[dict[str, Any]],
+    *,
+    committed_at: str,
+) -> dict[str, Any]:
+    if not results:
+        raise ValueError("result batch must contain one or more results")
+    rows = [
+        {**result, "completed_at": result.get("completed_at") or committed_at} for result in results
+    ]
+    document = {
+        "format": RESULT_BATCH_FORMAT,
+        "protocol_version": PROTOCOL_VERSION,
+        "batch_id": result_batch_path(rows).rsplit("/", 1)[-1].removesuffix(".json"),
+        "committed_at": committed_at,
+        "results": rows,
+    }
+    result_batch_results(document)
+    return document
+
+
 def result_path(_pair: str, unit_id: str) -> str:
     return f"col_check/results/{unit_id}.json"
 
@@ -171,12 +224,46 @@ def list_units(store, pairs: list[str] | None = None) -> list[tuple[str, dict[st
     ]
 
 
+def list_result_batches(store) -> list[tuple[str, dict[str, Any]]]:
+    return _list_json(store, RESULT_BATCH_PREFIX)
+
+
+def _outcome_records(store) -> list[tuple[str, str, dict[str, Any]]]:
+    records: dict[str, tuple[str, str, dict[str, Any]]] = {}
+
+    def add(kind: str, key: str, value: dict[str, Any]) -> None:
+        unit_id = value.get("unit_id") or key.rsplit("/", 1)[-1].removesuffix(".json")
+        row = {"unit_id": unit_id, **value}
+        existing = records.get(unit_id)
+        if existing is not None:
+            previous_kind, previous_key, previous = existing
+            comparable = lambda item: {
+                name: field
+                for name, field in item.items()
+                if name not in {"completed_at", "failed_at"}
+            }
+            if previous_kind != kind or comparable(previous) != comparable(row):
+                raise RuntimeError(
+                    f"conflicting outcomes for unit {unit_id}: {previous_key} and {key}"
+                )
+            return
+        records[unit_id] = (kind, key, row)
+
+    for kind, prefix in (("result", "col_check/results/"), ("failure", "col_check/failures/")):
+        for key, value in _list_json(store, prefix):
+            add(kind, key, value)
+    for key, document in list_result_batches(store):
+        for value in result_batch_results(document):
+            add("result", key, value)
+    return [records[unit_id] for unit_id in sorted(records)]
+
+
 def list_results(store) -> list[tuple[str, dict[str, Any]]]:
-    return _list_json(store, "col_check/results/")
+    return [(key, value) for kind, key, value in _outcome_records(store) if kind == "result"]
 
 
 def list_failures(store) -> list[tuple[str, dict[str, Any]]]:
-    return _list_json(store, "col_check/failures/")
+    return [(key, value) for kind, key, value in _outcome_records(store) if kind == "failure"]
 
 
 def list_right_ready(store) -> list[tuple[str, dict[str, Any]]]:
@@ -202,15 +289,43 @@ def get_run_status(store) -> dict[str, Any]:
     return store.get_json(RUN_STATUS) if exists is not None and exists(RUN_STATUS) else {}
 
 
+def _get_role_state(store, path: str) -> dict[str, Any]:
+    return store.get_json(path) if store.exists(path) else {}
+
+
+def get_left_state(store) -> dict[str, Any]:
+    return _get_role_state(store, LEFT_STATE)
+
+
+def get_right_state(store) -> dict[str, Any]:
+    return _get_role_state(store, RIGHT_STATE)
+
+
 def row_check_is_closed(store) -> bool:
+    state = get_right_state(store)
+    if "row_check_closed_at" in state:
+        return bool(state.get("row_check_closed_at"))
     return store.exists(ROW_CHECK_CLOSED)
 
 
 def left_row_check_close_document(store) -> dict[str, Any] | None:
+    state = get_left_state(store)
+    if "row_check_closed_at" in state:
+        return state if state.get("row_check_closed_at") else None
     return store.get_json(LEFT_ROW_CHECK_CLOSED) if store.exists(LEFT_ROW_CHECK_CLOSED) else None
 
 
 def col_check_close_document(store) -> dict[str, Any] | None:
+    state = get_left_state(store)
+    if "col_check_closed_at" in state:
+        if not state.get("col_check_closed_at"):
+            return None
+        return {
+            "pairs": state.get("pairs") or [],
+            "expected_units": int(state.get("expected_units") or 0),
+            "plan_ids": state.get("plan_ids") or {},
+            "closed_at": state["col_check_closed_at"],
+        }
     return store.get_json(COL_CHECK_CLOSED) if store.exists(COL_CHECK_CLOSED) else None
 
 
@@ -266,6 +381,37 @@ def write_run_status(
         "updated_at": timestamp(timezone_name=zone),
     }
     return store.put_json(RUN_STATUS, value)
+
+
+def _write_role_state(
+    store,
+    path: str,
+    role: str,
+    document: dict[str, Any],
+    *,
+    timezone_name: str | None = None,
+) -> str:
+    lock = getattr(store, "_state_lock", None)
+    with lock if lock is not None else nullcontext():
+        previous = _get_role_state(store, path)
+        zone = timezone_name or get_run_status(store).get("timezone") or local_timezone_name()
+        value = {
+            **previous,
+            **document,
+            "role": role,
+            "protocol_version": PROTOCOL_VERSION,
+            "revision": int(previous.get("revision") or 0) + 1,
+            "updated_at": timestamp(timezone_name=zone),
+        }
+        return store.put_json(path, value)
+
+
+def write_left_state(store, document: dict[str, Any], *, timezone_name: str | None = None) -> str:
+    return _write_role_state(store, LEFT_STATE, "left", document, timezone_name=timezone_name)
+
+
+def write_right_state(store, document: dict[str, Any], *, timezone_name: str | None = None) -> str:
+    return _write_role_state(store, RIGHT_STATE, "right", document, timezone_name=timezone_name)
 
 
 def refresh_units_status(store) -> str:

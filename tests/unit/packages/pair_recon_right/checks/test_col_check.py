@@ -8,6 +8,7 @@ from pair_recon_right.engine.checks import col_check
 from pair_recon_right.engine.checks.col_check import ColCheck, DrainScheduler, compare_statistics
 from pair_recon_right.engine.checks.row_check import run_row_check
 from pair_recon_right.engine.common.model.manifest import build_manifest, unit_id, unit_id_for
+from pair_recon_right.engine.common.model.protocol import list_results
 
 
 def test_identical():
@@ -126,7 +127,8 @@ def test_unit(caplog):
     with caplog.at_level("INFO", logger="pair_recon.right.col_check"):
         results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert results[0]["verdict"] == "match" and results[0]["right_col"] == "amount"
-    assert store.exists(f"col_check/results/{uid}.json")
+    assert [value["unit_id"] for _key, value in list_results(store)] == [uid]
+    assert len(store.list_keys("col_check/result_batches/")) == 1
     assert target.calls == [("p", "2026-01-01", None)]
     assert f"B right stats p 2026-01-01: 1 column(s); first amount = {STATS}" in caplog.text
     assert (
@@ -354,6 +356,7 @@ def test_poll_discovers_late_lower_sequence_batch():
 
 def test_idle():
     store, _uid = _drained_store()
+    store.objects["_state/left.json"].pop("col_check_closed_at")
     store.objects.pop("_status/col_check.closed.json")
     calls = []
 
@@ -369,6 +372,7 @@ def test_idle():
 
 def test_stale(monkeypatch):
     store, _uid = _drained_store()
+    store.objects["_state/left.json"].pop("col_check_closed_at")
     store.objects.pop("_status/col_check.closed.json")
     monkeypatch.setattr(store, "heartbeat_age", lambda now=None: 999.0)
     monkeypatch.setattr(col_check.time, "sleep", lambda _s: None)

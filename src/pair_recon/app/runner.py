@@ -23,9 +23,19 @@ from pair_recon_left.common.checks.col_check import (
 )
 from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
 from pair_recon_left.common.model.protocol import (
+    COL_CHECK_CLOSED,
+    ROW_CHECK_CLOSED,
+    active_unit_ids,
+    current_plan_ids,
+    fixed_keys_path,
     list_failures,
     list_results,
     list_row_results,
+    mapping_path,
+    plan_path,
+    refresh_units_status,
+    row_result_path,
+    write_right_state,
     write_run_status,
 )
 from pair_recon_left.common.runtime.run_logging import configure_left_logging, get_left_logger
@@ -424,6 +434,16 @@ def run_left(
         raise ValueError("left-only mode does not support snapshot pairs that require Right")
     reused = None if force else reuse_row_check(config, store, run_id=run_id, pair_names=[pair])
     if reused is None:
+        store.delete_keys(
+            [
+                row_result_path(pair),
+                plan_path(pair),
+                mapping_path(pair),
+                fixed_keys_path(pair),
+                ROW_CHECK_CLOSED,
+                COL_CHECK_CLOSED,
+            ]
+        )
         run_row_check(config, store, run_id=run_id, pair_names=[pair], pair_workers=1)
     abort_if()
     if release:
@@ -465,7 +485,24 @@ def retry_failed(store) -> int:
             left = key.removesuffix("result.json") + "left.json"
             if store.exists(left):
                 keys.append(left)
-    return store.delete_keys(sorted(set(keys)))
+    deleted = store.delete_keys(sorted(set(keys)))
+    active = active_unit_ids(store)
+    results = [value for _key, value in list_results(store) if value.get("unit_id") in active]
+    failures = [value for _key, value in list_failures(store) if value.get("unit_id") in active]
+    matched = sum(value.get("verdict") == "match" for value in results)
+    write_right_state(
+        store,
+        {
+            "phase": "retry_pending",
+            "plan_ids": current_plan_ids(store),
+            "expected_units": len(active),
+            "completed_units": len(results) + len(failures),
+            "matched_units": matched,
+            "different_units": len(results) - matched,
+            "failed_units": len(failures),
+        },
+    )
+    return deleted
 
 
 def launch(settings: dict, config: dict, *, action: str, workspace_client=None, catalog=None):
@@ -547,7 +584,12 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 interval=float(settings.get("progress_interval", 10)),
             ).start(required=True)
         target_factory = lambda values: CsvTarget(values)
-        if not left_only and not local_right:
+        remote_right_started = False
+
+        def start_remote_right():
+            nonlocal failure_forwarded, monitor, remote, remote_right_started
+            if remote_right_started:
+                return
             job_reference = settings["right_job_id"]
             job_id = resolve_job_id(client, job_reference)
             log.info(
@@ -583,6 +625,15 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 on_terminal=on_right_terminal,
             )
             monitor.start()
+            remote_right_started = True
+
+        if remote_right and action != "resume":
+            start_remote_right()
+        release = None
+        if local_right:
+            release = lambda: run_right_row_check(store, target_factory)
+        elif remote_right and action == "resume":
+            release = start_remote_right
         log.info("starting Left checks")
         left = run_left(
             config,
@@ -592,9 +643,9 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             run_dir,
             float(settings.get("timeout", 120)) * 60,
             int(settings.get("left_workers", 2)),
-            (lambda: run_right_row_check(store, target_factory)) if local_right else None,
+            release=release,
             left_only=left_only,
-            abort_if=monitor.raise_if_failed if monitor else None,
+            abort_if=lambda: monitor.raise_if_failed() if monitor else None,
             force=force,
         )
         log.info("Left checks completed: %s", left)
@@ -606,6 +657,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 {"state": final_state, "run_id": run_id, "role": "left", "mode": run_mode},
                 timezone_name=settings["timezone"],
             )
+            refresh_units_status(store)
             if catalog:
                 catalog.finish(
                     store,
@@ -694,7 +746,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         if (
             remote is not None
             and client is not None
-            and (monitor is None or monitor.final_state is None)
+            and (monitor is None or monitor.final_state not in {"success", "cancelled"})
         ):
             try:
                 if monitor:

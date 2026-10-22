@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -9,15 +10,20 @@ from ..common.model.protocol import (
     HEARTBEAT,
     ROW_CHECK_CLOSED,
     failure_path,
+    get_left_state,
     get_run_status,
     list_failures,
     list_left_documents,
     list_results,
     list_units,
+    result_batch_document,
+    result_batch_path,
     result_path,
     timestamp,
     unit_batch_document,
     unit_batch_path,
+    write_left_state,
+    write_right_state,
 )
 
 
@@ -32,6 +38,7 @@ class VolumeStore:
     def __init__(self, root):
         self.root = Path(root)
         self.root_uri = str(self.root)
+        self._state_lock = threading.RLock()
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, relative):
@@ -117,32 +124,61 @@ class VolumeStore:
         return document["units"]
 
     def heartbeat(self, now=None):
-        return self.put_json(
-            HEARTBEAT,
-            {"epoch_s": time.time() if now is None else now, "updated_at": timestamp(self)},
+        epoch = time.time() if now is None else now
+        path = write_left_state(
+            self,
+            {"heartbeat_epoch_s": epoch, "heartbeat_at": timestamp(self)},
         )
+        self.put_json(HEARTBEAT, {"epoch_s": epoch, "updated_at": timestamp(self)})
+        return path
 
     def heartbeat_age(self, now=None):
+        state = get_left_state(self)
+        if state.get("heartbeat_epoch_s") is not None:
+            current = time.time() if now is None else now
+            return max(0.0, current - float(state["heartbeat_epoch_s"]))
         if not self.exists(HEARTBEAT):
             return None
         current = time.time() if now is None else now
         return max(0.0, current - float(self.get_json(HEARTBEAT)["epoch_s"]))
 
     def close_manifests(self, pairs, expected_units, plan_ids=None):
-        return self.put_json(
-            COL_CHECK_CLOSED,
+        document = {
+            "pairs": sorted(pairs),
+            "expected_units": expected_units,
+            "plan_ids": plan_ids or {},
+            "closed_at": timestamp(self),
+        }
+        path = write_left_state(
+            self,
             {
-                "pairs": sorted(pairs),
-                "expected_units": expected_units,
-                "plan_ids": plan_ids or {},
-                "closed_at": timestamp(self),
+                "phase": "col_check_closed",
+                **document,
+                "published_units": expected_units,
+                "col_check_closed_at": document["closed_at"],
             },
         )
+        self.put_json(COL_CHECK_CLOSED, document)
+        return path
 
     def close_row_check(self, pairs):
-        return self.put_json(
-            ROW_CHECK_CLOSED, {"pairs": sorted(pairs), "closed_at": timestamp(self)}
+        closed_at = timestamp(self)
+        path = write_right_state(
+            self,
+            {
+                "phase": "row_check_closed",
+                "pairs": sorted(pairs),
+                "row_check_closed_at": closed_at,
+            },
         )
+        self.put_json(ROW_CHECK_CLOSED, {"pairs": sorted(pairs), "closed_at": closed_at})
+        return path
+
+    def commit_results(self, results):
+        committed_at = timestamp(self)
+        document = result_batch_document(results, committed_at=committed_at)
+        self.put_json(result_batch_path(document["results"]), document)
+        return document["results"]
 
     def put_result(self, unit_id, result):
         pair = result["pair"]

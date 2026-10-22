@@ -341,7 +341,7 @@ def test_execute_defaults_mode_skips_all_interaction(monkeypatch, tmp_path):
     assert seen == {"defaults": {"pair": "orders"}, "interactive": False}
 
 
-def test_execute_autorun_adds_exclusions_and_restarts_same_run(monkeypatch, tmp_path):
+def test_execute_autorun_adds_exclusions_and_resumes_same_run(monkeypatch, tmp_path):
     defaults = tmp_path / "run.yaml"
     defaults.write_text("pair: orders\n", encoding="utf-8")
     settings = {
@@ -389,7 +389,7 @@ def test_execute_autorun_adds_exclusions_and_restarts_same_run(monkeypatch, tmp_
     assert cli.execute(args, raise_errors=True) == 0
     assert calls == [
         ("new", "orders-me-20261022"),
-        ("restart", "orders-me-20261022"),
+        ("resume", "orders-me-20261022"),
     ]
     assert snapshots == [
         ["2026-10-01"],
@@ -398,6 +398,44 @@ def test_execute_autorun_adds_exclusions_and_restarts_same_run(monkeypatch, tmp_
     saved = yaml.safe_load(defaults.read_text(encoding="utf-8"))
     assert saved["excluded_partitions"] == ["2026-10-01", "2026-10-02", "2026-10-05"]
     assert "autorun" not in saved and "force" not in saved
+
+
+def test_execute_force_overrides_resume_with_restart(monkeypatch, tmp_path):
+    settings = {
+        "pair": "orders",
+        "run_id": "orders-me-20261022",
+        "timezone": "America/New_York",
+        "sync_remote": False,
+        "email_to": "",
+    }
+    config = {"pairs": {"orders": {}}}
+    actions = []
+    monkeypatch.setattr(cli, "load_environment", lambda: None)
+    monkeypatch.setattr(cli, "load_defaults", lambda _path: {})
+    monkeypatch.setattr(
+        cli,
+        "prompts",
+        lambda _defaults: (settings, config, "resume", object(), object()),
+    )
+    monkeypatch.setattr(cli, "configure_console_logging", lambda *_args: None)
+    monkeypatch.setattr(cli, "yes_no", lambda *_args: True)
+    monkeypatch.setattr(cli, "save_defaults", lambda *_args: None)
+    monkeypatch.setattr(cli, "write_request_snapshot", lambda *_args: tmp_path / "request.json")
+    monkeypatch.setattr(
+        cli,
+        "launch",
+        lambda *_args, action, **_kwargs: actions.append(action) or {"state": "passed"},
+    )
+    args = SimpleNamespace(
+        config=None,
+        defaults_path=None,
+        autorun=False,
+        force=True,
+        log_level="INFO",
+    )
+
+    assert cli.execute(args, raise_errors=True) == 0
+    assert actions == ["restart"]
 
 
 def test_main_program_parses_default_alias_autorun_and_force(monkeypatch, tmp_path):
@@ -848,7 +886,7 @@ def test_sas_default_bundle_uses_output_root(monkeypatch, tmp_path, capsys):
         ("left-only", "oracle", "databricks", False),
     ],
 )
-def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_path):
+def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_path, capsys):
     metadata = {
         "left": {
             "source": left_source,
@@ -890,6 +928,7 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
         "checks": "row_count,hash_sum",
         "sample": "all",
         "strict": False,
+        "pair_workbook": str(tmp_path / "missing.xlsx"),
     }
     (tmp_path / "request.yaml").write_text(
         "format: pair-recon-sas-v1\npair: orders\npartition_mode: all\n"
@@ -906,7 +945,7 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
         defaults, workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object())
     )
     assert settings["run_id"] == "r-new"
-    assert action == ("restart" if existing else "new")
+    assert action == ("resume" if existing else "new")
     assert not any("Run id" in prompt or "Existing run action" in prompt for prompt in prompts)
     assert not any(
         label in prompt
@@ -925,6 +964,7 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
     assert config["pairs"]["orders"]["statistics"] == ["hash_sum"]
     assert config["pairs"]["orders"]["audit"] is False
     assert config["pairs"]["orders"]["left"]["source"] == left_source
+    assert "skipping workbook synchronization" in capsys.readouterr().out
     if left_source == "csv":
         assert config["pairs"]["orders"]["sample"] == 0.1
         assert config["pairs"]["orders"]["pre_sampled"] is True
@@ -1211,9 +1251,34 @@ def test_synchronize_pair_workbook_upserts_only_changes(monkeypatch, tmp_path):
     assert seen["rows"] == changed
 
 
-def test_pair_workbook_path_uses_environment(monkeypatch, tmp_path):
+def test_synchronize_pair_workbook_skips_missing(monkeypatch, tmp_path):
+    workbook = tmp_path / "missing.xlsx"
+
+    class Catalog:
+        def configuration_rows(self):
+            pytest.fail("missing workbook must not query catalog rows for synchronization")
+
+    monkeypatch.setattr(
+        cli,
+        "read_pair_workbook",
+        lambda _path: pytest.fail("missing workbook must not be read"),
+    )
+
+    rows, result = cli.synchronize_pair_workbook(
+        "sql", Catalog(), "main.recon.pair_recon_pair_meta", workbook
+    )
+
+    assert rows == []
+    assert result == {
+        "rows": 0,
+        "pairs": [],
+        "source": str(workbook),
+        "skipped": "missing",
+    }
+
+
+def test_pair_workbook_path_uses_environment_even_when_missing(monkeypatch, tmp_path):
     workbook = tmp_path / "pairs.xlsx"
-    workbook.touch()
     monkeypatch.setenv("DBX_PAIR_WORKBOOK", str(workbook))
 
     assert cli.pair_workbook_path({"pair_workbook": "ignored.xlsx"}) == workbook
@@ -1314,6 +1379,123 @@ def test_run_left_force_bypasses_cached_row_check(monkeypatch, tmp_path):
 
     assert result == {"row": "ready", "units": 0}
     assert events == ["fresh-row-check"]
+
+
+def test_run_left_fresh_row_check_invalidates_downstream_checkpoints(monkeypatch, tmp_path):
+    store = MemoryStore()
+    for key in (
+        "row_check/result.json",
+        "plan.json",
+        "mapping.csv",
+        "fixed_keys.json",
+        "_status/row_check.closed.json",
+        "_status/col_check.closed.json",
+    ):
+        store.put_json(key, {})
+    config = {"pairs": {"orders": {"checks": ["row_count"]}}}
+    monkeypatch.setattr(runner, "validate_config", lambda value: value)
+    monkeypatch.setattr(runner, "reuse_row_check", lambda *_args, **_kwargs: None)
+
+    def fresh_row_check(*_args, **_kwargs):
+        assert not any(
+            store.exists(key)
+            for key in (
+                "row_check/result.json",
+                "plan.json",
+                "mapping.csv",
+                "fixed_keys.json",
+                "_status/row_check.closed.json",
+                "_status/col_check.closed.json",
+            )
+        )
+
+    monkeypatch.setattr(runner, "run_row_check", fresh_row_check)
+
+    assert runner.run_left(config, store, "run", "orders", tmp_path) == {
+        "row": "ready",
+        "units": 0,
+    }
+
+
+def test_remote_resume_starts_right_after_left_row_release(monkeypatch, tmp_path):
+    store = MemoryStore()
+    events = []
+
+    class Root:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def child(self, _run_id):
+            return store
+
+    class Remote:
+        run_id = 91
+
+    class Monitor:
+        final_state = "success"
+        error = None
+
+        def __init__(self, *_args, **_kwargs):
+            self.outcome = {"row_errors": 0, "column_errors": 0, "failures": 0}
+
+        def start(self):
+            events.append("monitor-start")
+
+        def raise_if_failed(self):
+            events.append("health-check")
+
+        def result(self):
+            events.append("monitor-result")
+
+    def run_now(*_args, **_kwargs):
+        events.append("right-start")
+        return Remote()
+
+    def left(*_args, release=None, abort_if=None, **_kwargs):
+        events.append("left-row-ready")
+        assert "right-start" not in events
+        release()
+        abort_if()
+        return {"row": "ready", "units": 0}
+
+    monkeypatch.setattr(runner, "VolumeStore", Root)
+    monkeypatch.setattr(runner, "RightJobMonitor", Monitor)
+    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args: None)
+    monkeypatch.setattr(runner, "run_left", left)
+    settings = {
+        "run_id": "resume-1",
+        "profile": "corp",
+        "volume_root": "/Volumes/c/s/v/runs",
+        "work_dir": str(tmp_path),
+        "timezone": "America/New_York",
+        "owner": "me",
+        "pair_table": "c.s.pairs",
+        "status_table": "c.s.status",
+        "error_table": "c.s.errors",
+        "right_job_id": "42",
+    }
+    client = SimpleNamespace(
+        files=object(),
+        jobs=SimpleNamespace(run_now=run_now, cancel_run=lambda _run_id: None),
+    )
+    config = {"pairs": {"orders": {"right": {"source": "databricks"}}}}
+
+    result = runner.launch(
+        settings,
+        config,
+        action="resume",
+        workspace_client=client,
+        catalog=None,
+    )
+
+    assert result["state"] == "passed"
+    assert events == [
+        "left-row-ready",
+        "right-start",
+        "monitor-start",
+        "health-check",
+        "monitor-result",
+    ]
 
 
 def test_left_only_does_not_start_or_run_right(monkeypatch, tmp_path):
@@ -1577,7 +1759,7 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
     assert "Traceback for 910\n  File notebook, line 6" in content
     assert states == ["running", "fail:failed"]
     assert not store.exists("col_check/failures/right-job.json")
-    assert cancelled == []
+    assert cancelled == [91]
 
 
 def test_right_job_monitor_reports_failed_task_traceback():
@@ -1931,7 +2113,7 @@ def test_left_only_csvrun_uploads_left_artifacts(tmp_path):
     assert len(units) == 1
     assert len(units[0][1]["units"]) == 2
     assert all("left_statistics" in value for value in units[0][1]["units"])
-    assert store.exists("_status/col_check.closed.json")
+    assert store.get_json("_state/left.json")["phase"] == "col_check_closed"
     assert not store.list_keys("col_check/results/")
 
 

@@ -267,14 +267,20 @@ def pair_workbook_path(defaults: dict | None = None) -> Path:
         PAIR_WORKBOOK_ENV,
         default=str((defaults or {}).get("pair_workbook") or PAIR_WORKBOOK),
     )
-    source = Path(str(configured)).expanduser()
-    if not source.is_file():
-        raise FileNotFoundError(f"Pair workbook not found: {source}")
-    return source
+    return Path(str(configured)).expanduser()
 
 
 def synchronize_pair_workbook(sql, catalog, pair_table: str, workbook_path: str | Path):
     source = Path(workbook_path)
+    if not source.exists():
+        return [], {
+            "rows": 0,
+            "pairs": [],
+            "source": str(source),
+            "skipped": "missing",
+        }
+    if not source.is_file():
+        raise FileNotFoundError(f"Pair workbook is not a file: {source}")
     rows = read_pair_workbook(source)
     if not rows:
         return rows, {"rows": 0, "pairs": [], "source": str(source)}
@@ -327,7 +333,10 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     workbook_path = pair_workbook_path(defaults)
     console(f"Initializing Databricks client for profile {profile!r}...")
     client = workspace_factory(profile)
-    console(f"Checking {workbook_path} against {pair_table} through SQL warehouse {warehouse!r}.")
+    if workbook_path.exists():
+        console(
+            f"Checking {workbook_path} against {pair_table} through SQL warehouse {warehouse!r}."
+        )
     statement_sql = StatementSql(client, warehouse, reporter=console)
     catalog = Catalog(
         statement_sql,
@@ -339,7 +348,12 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     workbook_rows, sync = synchronize_pair_workbook(
         statement_sql, catalog, pair_table, workbook_path
     )
-    if sync["rows"]:
+    if sync.get("skipped") == "missing":
+        console(
+            f"Pair workbook not found at {workbook_path}; skipping workbook synchronization "
+            "and reading existing metadata from Databricks."
+        )
+    elif sync["rows"]:
         console(
             f"Updated {sync['rows']} Pair(s) from {workbook_path} in "
             f"{sync['pair_meta_table']}: {', '.join(sync['pairs'])}"
@@ -493,9 +507,9 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     run_id = make_run_id(pair, owner, timezone)
     existing = catalog.run(run_id)
     statement_sql.reporter = None
-    action = "restart" if existing else "new"
+    action = "resume" if existing else "new"
     if existing:
-        print(f"Replacing today's run: {run_id}")
+        print(f"Resuming today's run: {run_id}")
     settings = {
         "owner": owner,
         "profile": profile,
@@ -662,15 +676,16 @@ def execute(args, *, raise_errors: bool = False) -> int:
                 if not added:
                     raise
                 attempts += 1
-                action = "restart"
+                action = "restart" if settings["force"] else "resume"
                 save_defaults(selected_defaults, persistent_settings(settings))
                 snapshot = write_request_snapshot(settings, config)
                 log.warning(
-                    "autorun retry %d/%d: added %d excluded partition(s) and restarting "
-                    "with the same run_id=%s: %s",
+                    "autorun retry %d/%d: added %d excluded partition(s) and %s "
+                    "the same run_id=%s: %s",
                     attempts,
                     AUTO_EXCLUDE_RETRIES,
                     len(added),
+                    "restarting" if settings["force"] else "resuming",
                     settings["run_id"],
                     ", ".join(added),
                 )
@@ -736,7 +751,7 @@ def main_program(argv=None) -> int:
     parser.add_argument(
         "--autorun",
         action="store_true",
-        help="exclude reported mismatched partitions and automatically restart",
+        help="exclude reported mismatched partitions and automatically resume",
     )
     parser.add_argument(
         "--force",

@@ -1,6 +1,7 @@
 import io
 import json
 import posixpath
+import threading
 from typing import Any
 
 from databricks.sdk.errors import NotFound
@@ -23,6 +24,7 @@ class ApiVolumeStore:
         self.root = root.rstrip("/")
         self.root_uri = self.root
         self.files = files
+        self._state_lock = threading.RLock()
 
     def _path(self, relative: str) -> str:
         value = posixpath.normpath(relative.replace("\\", "/")).lstrip("/")

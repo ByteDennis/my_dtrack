@@ -1,7 +1,8 @@
 import pytest
 from support import MemoryStore
 
-from pair_recon_left.common.checks.row_check import run_row_check
+from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
+from pair_recon_left.common.model.protocol import COL_CHECK_CLOSED, get_left_state
 
 
 class Source:
@@ -74,6 +75,60 @@ def test_plan(caplog):
         "left_column,right_column,usage,data_type",
         "A,a,compare,",
     ]
+
+
+def test_reused_row_check_reopens_column_stage():
+    pair = {
+        "partition_mode": "all",
+        "left": {"source": "oracle", "table": "L"},
+        "right": {"source": "databricks", "table": "R"},
+        "col_map": {"A": "a"},
+        "checks": ["hash_sum"],
+        "version": 2,
+    }
+    config = {"version": 2, "pairs": {"p": pair}}
+    store = MemoryStore()
+    run_row_check(
+        config,
+        store,
+        run_id="run",
+        source_factory=lambda _value: Source({"all": 2}),
+    )
+    store.close_manifests(["p"], 1, {"p": store.get_json("plan.json")["plan_id"]})
+
+    assert reuse_row_check(config, store, run_id="run", pair_names=["p"])
+
+    assert not store.exists(COL_CHECK_CLOSED)
+    assert get_left_state(store)["col_check_closed_at"] is None
+
+
+def test_reused_left_counts_invalidate_right_when_effective_config_changes():
+    pair = {
+        "partition_mode": "all",
+        "left": {"source": "oracle", "table": "L"},
+        "right": {"source": "databricks", "table": "R"},
+        "col_map": {"A": "a"},
+        "checks": ["hash_sum"],
+        "version": 2,
+    }
+    config = {"version": 2, "pairs": {"p": pair}}
+    store = MemoryStore()
+    run_row_check(
+        config,
+        store,
+        run_id="run",
+        source_factory=lambda _value: Source({"all": 2}),
+    )
+    store.put_json("row_check/result.json", {"pair": "p", "partitions": {}})
+    store.close_row_check(["p"])
+    pair["strict"] = True
+
+    assert reuse_row_check(config, store, run_id="run", pair_names=["p"])
+
+    assert not store.exists("row_check/result.json")
+    assert not store.exists("_status/row_check.closed.json")
+    assert store.get_json("row_check/left.json")["counts"] == {"all": 2}
+    assert store.get_json("plan.json")["strict"] is True
 
 
 def test_vintage_sampling_keeps_full_row_counts():

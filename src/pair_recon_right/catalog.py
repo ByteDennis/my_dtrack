@@ -2,7 +2,13 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .engine.common.model.attribute_checks import ATTRIBUTE_CHECKS
-from .engine.common.model.protocol import list_failures, list_results, list_row_results
+from .engine.common.model.protocol import (
+    active_unit_ids,
+    list_failures,
+    list_plans,
+    list_results,
+    list_row_results,
+)
 
 ERROR_COLUMNS = (
     "run_id",
@@ -29,13 +35,21 @@ STATUS_SUMMARY_COLUMNS = (
 
 
 def result_summary(store) -> dict[str, int]:
+    active = active_unit_ids(store)
+    scoped = bool(list_plans(store))
     partitions = [
         value
         for _, document in list_row_results(store)
         for value in (document.get("partitions") or {}).values()
     ]
-    columns = [value for _, value in list_results(store)]
-    failures = [value for _, value in list_failures(store)]
+    columns = [
+        value for _, value in list_results(store) if not scoped or value.get("unit_id") in active
+    ]
+    failures = [
+        value
+        for _, value in list_failures(store)
+        if not scoped or value.get("unit_id") in active or value.get("source")
+    ]
     row_matches = sum(value.get("result") == "match" for value in partitions)
     column_matches = sum(value.get("verdict") == "match" for value in columns)
     return {
@@ -50,6 +64,8 @@ def result_summary(store) -> dict[str, int]:
 
 
 def error_rows(store, run_id, pair, now):
+    active = active_unit_ids(store)
+    scoped = bool(list_plans(store))
     rows = []
     for _, result in list_row_results(store):
         for partition, value in (result.get("partitions") or {}).items():
@@ -71,6 +87,8 @@ def error_rows(store, run_id, pair, now):
                 }
             )
     for _, result in list_results(store):
+        if scoped and result.get("unit_id") not in active:
+            continue
         for name, check in ATTRIBUTE_CHECKS.items():
             if check.result_match(result) is not False:
                 continue
@@ -90,6 +108,8 @@ def error_rows(store, run_id, pair, now):
                 }
             )
     for _, failure in list_failures(store):
+        if scoped and failure.get("unit_id") not in active and not failure.get("source"):
+            continue
         rows.append(
             {
                 "run_id": run_id,

@@ -5,8 +5,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from pair_recon_right.engine.common.model.protocol import (
+    get_left_state,
+    get_right_state,
     get_run_status,
     left_row_path,
+    list_failures,
+    list_results,
     list_units,
     plan_path,
     row_result_path,
@@ -17,18 +21,30 @@ log = logging.getLogger("pair_recon.progress")
 
 def progress_snapshot(store, run_id: str, pair: str, timezone: str, state: str | None = None):
     status = get_run_status(store)
-    keys = store.list_keys("")
     plan_key = plan_path(pair)
     row_key = row_result_path(pair)
     left_key = left_row_path(pair)
-    plan = store.get_json(plan_key) if plan_key in keys else {}
-    row = store.get_json(row_key) if row_key in keys else {}
-    left = store.get_json(left_key) if left_key in keys else {}
+    plan = store.get_json(plan_key) if store.exists(plan_key) else {}
+    row = store.get_json(row_key) if store.exists(row_key) else {}
+    left = store.get_json(left_key) if store.exists(left_key) else {}
     partitions = row.get("partitions") or {}
     left_counts = left.get("counts") or {}
-    units = len(list_units(store))
-    results = sum(key.startswith("col_check/results/") and key.endswith(".json") for key in keys)
-    failures = sum(key.startswith("col_check/failures/") and key.endswith(".json") for key in keys)
+    plan_ids = {pair: plan.get("plan_id")} if plan else {}
+    left_state = get_left_state(store)
+    right_state = get_right_state(store)
+    units = (
+        int(left_state.get("published_units") or 0)
+        if left_state.get("plan_ids") == plan_ids
+        else len(list_units(store))
+    )
+    if right_state.get("plan_ids") == plan_ids:
+        results = int(right_state.get("matched_units") or 0) + int(
+            right_state.get("different_units") or 0
+        )
+        failures = int(right_state.get("failed_units") or 0)
+    else:
+        results = len(list_results(store))
+        failures = len(list_failures(store))
     threads = sorted(
         item.name for item in threading.enumerate() if item.name.startswith("pair_recon")
     )

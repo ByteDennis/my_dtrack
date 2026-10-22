@@ -10,6 +10,7 @@ from typing import Any
 from ..common.model.audit import SqlAudit, attach_sql_audit
 from ..common.model.manifest import build_manifest, key_family_specs, mapping_csv_bytes, sample_plan
 from ..common.model.protocol import (
+    ROW_CHECK_CLOSED,
     artifact_location,
     left_row_check_close_document,
     list_left_documents,
@@ -17,8 +18,9 @@ from ..common.model.protocol import (
     list_row_results,
     mapping_path,
     plan_path,
-    refresh_units_status,
+    row_check_is_closed,
     row_result_path,
+    write_right_state,
 )
 from ..common.sql.dates import apply_synonyms
 
@@ -280,7 +282,6 @@ def reconcile_pair(
             content_type="text/csv; charset=utf-8",
         )
         store.put_json(plan_path(pair), manifest)
-        refresh_units_status(store)
         log.info(
             "plan released: %s (%d windows, %d columns, %d units)",
             artifact_location(store, plan_path(pair)),
@@ -342,6 +343,11 @@ def run_row_check(
     preflight_health: dict[str, dict[str, Any]] | None = None,
     preflight_seconds: dict[str, float] | None = None,
 ) -> int:
+    store.delete_keys([ROW_CHECK_CLOSED])
+    write_right_state(
+        store,
+        {"phase": "row_check", "row_check_closed_at": None},
+    )
     processed = 0
     pending = pending_left_documents(store)
     audit_enabled = any(bool(document["pair_config"].get("audit")) for document in pending)
@@ -376,7 +382,7 @@ def run_row_check(
         )
         processed += 1
     closed = left_row_check_close_document(store)
-    if closed and not store.exists("_status/row_check.closed.json"):
+    if closed and not row_check_is_closed(store):
         pairs = closed["pairs"]
         if all(store.exists(row_result_path(pair)) for pair in pairs):
             store.close_row_check(pairs)

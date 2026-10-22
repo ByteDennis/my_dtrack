@@ -64,7 +64,7 @@ def test_left_only_pipeline_does_not_wait_for_right(monkeypatch):
     )
 
     assert pipeline.run([row]) == 1
-    assert store.exists("_status/col_check.closed.json")
+    assert store.get_json("_state/left.json")["phase"] == "col_check_closed"
 
 
 def test_wait_for_manifests_honors_abort_signal():

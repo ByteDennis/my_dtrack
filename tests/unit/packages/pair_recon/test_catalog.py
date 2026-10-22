@@ -249,6 +249,23 @@ def test_result_summary_counts_row_column_and_runtime_outcomes():
     }
 
 
+def test_result_summary_excludes_stale_outcomes_when_current_plan_has_no_units():
+    store = MemoryStore()
+    store.put_json("plan.json", {"pair": "p", "windows": [], "columns": []})
+    store.put_json(
+        "col_check/results/stale.json",
+        {"unit_id": "stale", "pair": "p", "verdict": "diff", "mean_match": False},
+    )
+    store.put_json(
+        "col_check/failures/stale.json",
+        {"unit_id": "stale-failure", "pair": "p", "error": "old"},
+    )
+
+    assert result_summary(store)["column_total"] == 0
+    assert result_summary(store)["runtime_failures"] == 0
+    assert error_rows(store, "r1", "p", datetime(2026, 1, 1, tzinfo=UTC)) == []
+
+
 def test_error_rows_use_attribute_registry():
     store = MemoryStore()
     store.put_json(

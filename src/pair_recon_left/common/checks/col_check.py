@@ -21,17 +21,22 @@ from ...backends.store import replace_local_file
 from ..model.audit import SqlAudit, attach_sql_audit
 from ..model.manifest import planned_unit_ids, unit_id_for, validate_manifest, window_id
 from ..model.protocol import (
+    COL_CHECK_CLOSED,
+    current_plan_ids,
     fixed_keys_document,
     fixed_keys_path,
+    get_left_state,
+    get_right_state,
     get_run_status,
     left_row_check_close_document,
     list_failures,
     list_plans,
     list_results,
     list_units,
-    refresh_units_status,
     row_check_is_closed,
+    timestamp,
     unit_batch_path,
+    write_left_state,
     write_run_status,
 )
 from ..runtime.duck import use_temp
@@ -228,6 +233,8 @@ class ColCheckPipeline:
         run_timezone = get_run_status(self.store).get("timezone")
         publication_lock = threading.Lock()
         reserved_ids = set(existing)
+        plan_ids = {manifest["pair"]: manifest.get("plan_id") for manifest in manifests}
+        published_batches = len(self.store.list_keys("units/"))
         ready = deque()
         plan_rows = []
         for manifest, window in iter_windows_round_robin(manifests):
@@ -243,8 +250,22 @@ class ColCheckPipeline:
             plan_rows.append((manifest, window))
         plans = iter(plan_rows)
         exhausted = False
+        self.store.delete_keys([COL_CHECK_CLOSED])
         write_run_status(self.store, {"state": "left_col_check", "role": "left"})
-        self.store.heartbeat()
+        write_left_state(
+            self.store,
+            {
+                "phase": "col_check",
+                "pairs": sorted(pair_names),
+                "plan_ids": plan_ids,
+                "expected_units": len(active_ids),
+                "published_units": len(ready_ids),
+                "published_batches": published_batches,
+                "col_check_closed_at": None,
+                "heartbeat_epoch_s": time.time(),
+                "heartbeat_at": timestamp(self.store),
+            },
+        )
         log.info(
             "col_check start: %d plan(s), %d vintage(s), %d attribute unit(s) already ready, "
             "next sequence=%d, wip=%s, active_vintages=1",
@@ -282,7 +303,7 @@ class ColCheckPipeline:
                     )
 
                 def publish(rows):
-                    nonlocal sequence
+                    nonlocal published_batches, sequence
                     self.abort_if()
                     with publication_lock:
                         pending = []
@@ -336,6 +357,7 @@ class ColCheckPipeline:
                             ready_ids.add(unit["unit_id"])
                         uploaded_for_vintage = len(published_columns)
                         run_ready = len(ready_ids)
+                        published_batches += 1
                     progress.update(
                         progress_key,
                         "publish",
@@ -355,7 +377,18 @@ class ColCheckPipeline:
                         first,
                         first + len(pending) - 1,
                     )
-                    self.store.heartbeat()
+                    write_left_state(
+                        self.store,
+                        {
+                            "phase": "col_check",
+                            "plan_ids": plan_ids,
+                            "expected_units": len(active_ids),
+                            "published_units": run_ready,
+                            "published_batches": published_batches,
+                            "heartbeat_epoch_s": time.time(),
+                            "heartbeat_at": timestamp(self.store),
+                        },
+                    )
 
                 return publish
 
@@ -430,7 +463,6 @@ class ColCheckPipeline:
                     manifest, window, progress_key, publish_rows = stat_jobs.pop(job)
                     rows = job.result()
                     publish_rows(rows)
-                    refresh_units_status(self.store)
                     progress.complete(progress_key)
                     log.info(
                         "statistics vintage complete %s %s: attributes_uploaded=%d/%d, "
@@ -481,7 +513,6 @@ class ColCheckPipeline:
                 "indexed_units": indexed,
             },
         )
-        refresh_units_status(self.store)
         SqlAudit(
             self.store,
             "left",
@@ -490,6 +521,13 @@ class ColCheckPipeline:
         return sequence - first_sequence
 
     def _unit_progress(self, active_ids: set[str]) -> tuple[int, int, int]:
+        plan_ids = current_plan_ids(self.store)
+        left_state = get_left_state(self.store)
+        right_state = get_right_state(self.store)
+        if left_state.get("plan_ids") == plan_ids and right_state.get("plan_ids") == plan_ids:
+            left_ready = min(len(active_ids), int(left_state.get("published_units") or 0))
+            right_finished = min(len(active_ids), int(right_state.get("completed_units") or 0))
+            return left_ready, right_finished, max(0, left_ready - right_finished)
         units = {
             value["unit_id"]
             for _key, value in list_units(self.store)

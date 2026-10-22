@@ -202,9 +202,9 @@ def test_reconcile_caps_logged_findings(caplog):
         "left_column,right_column,usage,data_type",
         "amount,amount,compare,",
     ]
-    assert store.exists("_status/row_check.closed.json")
+    assert store.get_json("_state/right.json")["phase"] == "row_check_closed"
     assert store.exists("report/row_check.csv")
-    assert store.exists("_status/units.csv")
+    assert not store.exists("_status/units.csv")
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 0
 
 
@@ -226,7 +226,7 @@ def test_restart():
     assert not store.exists("row_check/result.json")
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 1
     assert store.exists("plan.json")
-    assert store.exists("_status/row_check.closed.json")
+    assert store.get_json("_state/right.json")["phase"] == "row_check_closed"
 
 
 def test_open():

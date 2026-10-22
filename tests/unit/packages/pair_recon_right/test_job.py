@@ -1,8 +1,8 @@
 import pytest
-from support import FakeTarget
+from support import FakeTarget, MemoryStore
 
 from pair_recon_right.engine.backends.store import VolumeStore
-from pair_recon_right.engine.job import run
+from pair_recon_right.engine.job import run, summary
 
 
 def document(checks):
@@ -41,8 +41,29 @@ def test_rowonly(tmp_path):
         wait_timeout=1,
     )
     assert result == {"row_errors": 0, "column_errors": 0, "failures": 0}
+    assert {
+        "report/index.html",
+        "report/report.xlsx",
+        "report/row_check.csv",
+        "report/summary.json",
+    } <= set(store.list_keys("report/"))
 
 
 def test_timeout(tmp_path):
     with pytest.raises(TimeoutError):
         run(tmp_path, None, poll_interval=0, wait_timeout=0)
+
+
+def test_summary_excludes_stale_outcomes_from_an_empty_current_plan():
+    store = MemoryStore()
+    store.put_json("plan.json", {"pair": "p", "windows": [], "columns": []})
+    store.put_json(
+        "col_check/results/stale.json",
+        {"unit_id": "stale", "pair": "p", "verdict": "diff"},
+    )
+    store.put_json(
+        "col_check/failures/stale.json",
+        {"unit_id": "stale-failure", "pair": "p", "error": "old"},
+    )
+
+    assert summary(store) == {"row_errors": 0, "column_errors": 0, "failures": 0}

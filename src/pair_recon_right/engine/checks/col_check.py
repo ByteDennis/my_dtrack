@@ -19,13 +19,13 @@ from ..common.model.protocol import (
     fixed_keys_document,
     list_failures,
     list_plans,
+    list_result_batches,
     list_results,
     refresh_units_status,
-    right_ready_path,
-    timestamp,
     unit_batch_units,
     unit_prefix,
     unit_statistics,
+    write_right_state,
 )
 
 
@@ -139,6 +139,15 @@ class DrainScheduler:
 
 
 log = logging.getLogger("pair_recon.right.col_check")
+DEFAULT_RESULT_BATCH_SIZE = 64
+
+
+class PlanChangedError(RuntimeError):
+    pass
+
+
+class ResultBatchCommitError(RuntimeError):
+    pass
 
 
 class ColCheck:
@@ -154,6 +163,7 @@ class ColCheck:
         poll_interval=2,
         on_idle=None,
         right_workers=1,
+        result_batch_size=DEFAULT_RESULT_BATCH_SIZE,
     ):
         self.store = store
         self.target_factory = target_factory
@@ -165,8 +175,15 @@ class ColCheck:
         self.poll_interval = poll_interval
         self.on_idle = on_idle
         self.manifests = set()
-        self.completed_ids = {value["unit_id"] for _key, value in list_results(store)}
-        self.completed_ids |= {value["unit_id"] for _key, value in list_failures(store)}
+        stored_results = [value for _key, value in list_results(store)]
+        stored_failures = [value for _key, value in list_failures(store)]
+        self.result_ids = {value["unit_id"] for value in stored_results}
+        self.matched_ids = {
+            value["unit_id"] for value in stored_results if value.get("verdict") == "match"
+        }
+        self.different_ids = self.result_ids - self.matched_ids
+        self.failure_ids = {value["unit_id"] for value in stored_failures}
+        self.completed_ids = self.result_ids | self.failure_ids
         self.seen = set(self.completed_ids)
         self.active_ids = set()
         self.attempts = defaultdict(int)
@@ -175,6 +192,88 @@ class ColCheck:
         self.targets = {}
         self.target_lock = threading.Lock()
         self.unit_batches = set()
+        self.ready_windows: set[tuple[str, str]] = set()
+        self.result_batch_size = max(1, int(result_batch_size))
+        self.pending_matches: list[dict[str, Any]] = []
+        self.completed_batches = len(list_result_batches(store))
+        self.legacy_result_mode = False
+
+    def _validated_plan_ids(self):
+        current = current_plan_ids(self.store)
+        loaded = {
+            pair: manifest.get("plan_id") for pair, manifest in self.scheduler.manifests.items()
+        }
+        if loaded and current != loaded:
+            raise PlanChangedError("plan changed while Right was running; restart the Right job")
+        return current
+
+    def _write_progress(self, phase="running"):
+        active = self.active_ids
+        write_right_state(
+            self.store,
+            {
+                "phase": phase,
+                "plan_ids": self._validated_plan_ids(),
+                "expected_units": len(active),
+                "completed_units": len(self.completed_ids & active),
+                "matched_units": len(self.matched_ids & active),
+                "different_units": len(self.different_ids & active),
+                "failed_units": len(self.failure_ids & active),
+                "completed_batches": self.completed_batches,
+                "ready_windows": [
+                    f"{pair}:{window}" for pair, window in sorted(self.ready_windows)
+                ],
+            },
+        )
+
+    def _flush_matches(self, *, force=False):
+        while len(self.pending_matches) >= self.result_batch_size or (
+            force and self.pending_matches
+        ):
+            count = min(self.result_batch_size, len(self.pending_matches))
+            rows = self.pending_matches[:count]
+            unit_ids = {row["unit_id"] for row in rows}
+            for attempt in range(1, self.max_attempts + 1):
+                try:
+                    self.store.commit_results(rows)
+                    break
+                except Exception as exc:
+                    self._reconcile_durable_outcomes()
+                    if unit_ids <= self.result_ids:
+                        self._write_progress()
+                        break
+                    if attempt >= self.max_attempts:
+                        raise ResultBatchCommitError(
+                            f"could not commit result batch after {attempt} attempts"
+                        ) from exc
+                    log.warning("retry result batch commit attempt %d: %s", attempt, exc)
+                    time.sleep(min(1.0, max(0.0, self.poll_interval)))
+            if unit_ids <= self.result_ids:
+                continue
+            del self.pending_matches[:count]
+            self.result_ids.update(unit_ids)
+            self.matched_ids.update(unit_ids)
+            self.completed_ids.update(unit_ids)
+            self.completed_batches += 1
+            self._write_progress()
+
+    def _reconcile_durable_outcomes(self):
+        stored_results = [value for _key, value in list_results(self.store)]
+        stored_failures = [value for _key, value in list_failures(self.store)]
+        result_ids = {value["unit_id"] for value in stored_results}
+        matched_ids = {
+            value["unit_id"] for value in stored_results if value.get("verdict") == "match"
+        }
+        failure_ids = {value["unit_id"] for value in stored_failures}
+        self.result_ids.update(result_ids)
+        self.matched_ids.update(matched_ids)
+        self.different_ids.update(result_ids - matched_ids)
+        self.failure_ids.update(failure_ids)
+        self.completed_ids.update(result_ids | failure_ids)
+        self.pending_matches = [
+            row for row in self.pending_matches if row["unit_id"] not in result_ids
+        ]
+        self.completed_batches = len(list_result_batches(self.store))
 
     def _target(self, manifest):
         pair = manifest["pair"]
@@ -202,6 +301,10 @@ class ColCheck:
             identity = (key, manifest.get("plan_id"))
             if identity in self.manifests:
                 continue
+            if any(known_key == key for known_key, _plan_id in self.manifests):
+                raise PlanChangedError(
+                    "plan changed while Right was running; restart the Right job"
+                )
             if manifest["sample"]["mode"] == "fixed":
                 keys_document = fixed_keys_document(self.store, manifest["pair"])
                 if keys_document is None:
@@ -219,6 +322,7 @@ class ColCheck:
                 for window in manifest["windows"]:
                     window["key_tuples"] = key_tuples.get(window["bucket"], [])
             self.scheduler.add_manifest(manifest, self.completed_ids)
+            self.legacy_result_mode |= int(manifest.get("protocol_version") or 2) < 3
             self.active_ids.update(planned_unit_ids(manifest))
             self.manifests.add(identity)
             log.info(
@@ -230,9 +334,10 @@ class ColCheck:
             )
             changed += 1
         for pair in sorted(self.scheduler.manifests):
-            for key, document in self.store.list_json(unit_prefix(pair)):
+            for key in self.store.list_keys(unit_prefix(pair)):
                 if key in self.unit_batches:
                     continue
+                document = self.store.get_json(key)
                 for pointer in unit_batch_units(document):
                     if pointer["unit_id"] not in self.active_ids or pointer["unit_id"] in self.seen:
                         continue
@@ -241,11 +346,17 @@ class ColCheck:
                     changed += 1
                 self.unit_batches.add(key)
         if changed:
+            self._write_progress()
             log.info("poll: %d new protocol object(s)", changed)
         return changed
 
     def _failure(self, task, exc):
         uid = task.payload.get("unit_id") or f"right--{task.pair}--{task.window}"
+        self._reconcile_durable_outcomes()
+        if uid in self.completed_ids:
+            log.warning("recovered durable outcome for %s after: %s", uid, exc)
+            self._write_progress()
+            return
         details = "".join(traceback.format_exception(exc))
         self.attempts[uid] += 1
         if self.attempts[uid] >= self.max_attempts:
@@ -270,9 +381,12 @@ class ColCheck:
                         "window": task.window,
                         "error": str(exc),
                         "traceback": details,
+                        "plan_id": self.scheduler.manifests[task.pair].get("plan_id"),
                     },
                 )
-            refresh_units_status(self.store)
+                self.failure_ids.add(failed_uid)
+                self.completed_ids.add(failed_uid)
+            self._write_progress()
             return
         log.warning("retry %s attempt %d: %s", uid, self.attempts[uid], exc)
         if task.kind == "prefetch":
@@ -306,17 +420,8 @@ class ColCheck:
         manifest = self.scheduler.manifests[task.pair]
         mapped = {left: stats[right] for left, right in manifest["col_map"].items()}
         self.scheduler.mark_right_ready(task.pair, task.window, mapped)
-        self.store.put_json(
-            right_ready_path(task.pair, task.window),
-            {
-                "pair": task.pair,
-                "window": task.window,
-                "plan_id": manifest.get("plan_id"),
-                "window_id": window_id(manifest, task.payload),
-                "right_ready_at": timestamp(self.store),
-            },
-        )
-        refresh_units_status(self.store)
+        self.ready_windows.add((task.pair, task.window))
+        self._write_progress()
         log.info(
             "B right stats ready %s %s (%.3fs) -> %d unit(s) promoted to A-queue",
             task.pair,
@@ -345,8 +450,20 @@ class ColCheck:
             )
             result["unit_id"] = pointer["unit_id"]
             result["right_col"] = pointer.get("right_column") or pointer["column"]
-            self.store.put_result(pointer["unit_id"], result)
-            refresh_units_status(self.store)
+            result["plan_id"] = manifest.get("plan_id")
+            result["window_id"] = pointer.get("window_id")
+            if result["verdict"] == "match" and not self.legacy_result_mode:
+                self.pending_matches.append(result)
+                self._flush_matches()
+            else:
+                self.store.put_result(pointer["unit_id"], result)
+                self.result_ids.add(pointer["unit_id"])
+                if result["verdict"] == "match":
+                    self.matched_ids.add(pointer["unit_id"])
+                else:
+                    self.different_ids.add(pointer["unit_id"])
+                self.completed_ids.add(pointer["unit_id"])
+                self._write_progress()
             self.results.append(result)
             first = (task.pair, task.window) not in self.detailed
             self.detailed.add((task.pair, task.window))
@@ -359,6 +476,8 @@ class ColCheck:
                 result["verdict"].upper(),
                 f" [{result['col_type']}] {detail}" if detail else "",
             )
+        except (PlanChangedError, ResultBatchCommitError):
+            raise
         except Exception as exc:
             self._failure(task, exc)
 
@@ -371,10 +490,7 @@ class ColCheck:
             "plan_ids"
         ) != current_plan_ids(self.store):
             return False
-        active = active_unit_ids(self.store)
-        finished = {value["unit_id"] for _key, value in list_results(self.store)}
-        finished |= {value["unit_id"] for _key, value in list_failures(self.store)}
-        return active <= finished
+        return active_unit_ids(self.store) <= self.completed_ids
 
     def run(self):
         last_progress = time.monotonic()
@@ -392,6 +508,8 @@ class ColCheck:
                     try:
                         stats, elapsed = future.result()
                         self._complete_prefetch(task, stats, elapsed)
+                    except PlanChangedError:
+                        raise
                     except Exception as exc:
                         self._failure(task, exc)
                     last_progress = time.monotonic()
@@ -415,19 +533,31 @@ class ColCheck:
                         return_when=FIRST_COMPLETED,
                     )
                     continue
+                if self.pending_matches and not self.scheduler.ready:
+                    self._flush_matches(force=True)
                 if self.complete():
                     plans = [plan for _key, plan in list_plans(self.store)]
+                    active = active_unit_ids(self.store)
+                    durable_results = {value["unit_id"] for _key, value in list_results(self.store)}
+                    durable_failures = {
+                        value["unit_id"] for _key, value in list_failures(self.store)
+                    }
+                    if not active <= durable_results | durable_failures:
+                        raise RuntimeError(
+                            "Right completion checkpoint is missing durable outcomes"
+                        )
+                    refresh_units_status(self.store)
                     SqlAudit(
                         self.store,
                         "right",
                         enabled=any(bool(plan.get("audit")) for plan in plans),
                     ).refresh()
+                    self._write_progress("complete")
                     log.info(
                         "col_check complete: %d result(s), %d dead",
                         len(self.results),
                         sum(
-                            value["unit_id"] in active_unit_ids(self.store)
-                            for _key, value in list_failures(self.store)
+                            value["unit_id"] in active for _key, value in list_failures(self.store)
                         ),
                     )
                     return self.results
