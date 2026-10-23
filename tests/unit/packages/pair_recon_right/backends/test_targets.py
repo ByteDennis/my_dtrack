@@ -98,7 +98,7 @@ def test_csv(tmp_path):
     target = CsvTarget(
         {"source": "csv", "path": str(path), "partition_mode": "all", "pre_sampled": True}
     )
-    assert target.preflight()["ok"]
+    assert target.health_check()["ok"]
     assert target.partition_counts() == {"all": 2}
     manifest = _manifest({"mode": "all"})
     manifest["partition_mode"] = "all"
@@ -108,25 +108,27 @@ def test_csv(tmp_path):
     assert set(stats["amount"]) == {"col_type", "n_unique", "hash_sum"}
 
 
-def test_preflight():
+def test_health_check():
     spark = FakeSpark(lambda sql: DESCRIBE)
     target = SparkTarget(spark, ORDERS)
-    health = target.preflight()
+    health = target.health_check()
     assert health["ok"] and health["columns"] == ["amount", "business_date", "order_id", "status"]
     assert spark.statements == ["DESCRIBE QUERY SELECT * FROM `main`.`sales`.`orders`"]
     assert target.column_types["amount"] == "decimal(10,2)"
-    missing = SparkTarget(FakeSpark(lambda sql: DESCRIBE), {**ORDERS, "date_col": "dt"}).preflight()
+    missing = SparkTarget(
+        FakeSpark(lambda sql: DESCRIBE), {**ORDERS, "date_col": "dt"}
+    ).health_check()
     assert missing["ok"] is False and "'dt'" in missing["error"]
     assert missing["error"].startswith("ValueError: ")
     assert missing["relation"] == "`main`.`sales`.`orders`"
 
 
-def test_preflight_logs_sql_and_spark_failure(caplog):
+def test_health_check_logs_sql_and_spark_failure(caplog):
     def explode(sql):
         raise RuntimeError("Unable to fetch tables of db sales")
 
     caplog.set_level("INFO", logger="pair_recon.right.target")
-    health = SparkTarget(FakeSpark(explode), {**ORDERS, "catalog": None}).preflight()
+    health = SparkTarget(FakeSpark(explode), {**ORDERS, "catalog": None}).health_check()
     assert health == {
         "ok": False,
         "source": "databricks",
@@ -134,9 +136,9 @@ def test_preflight_logs_sql_and_spark_failure(caplog):
         "error": "RuntimeError: Unable to fetch tables of db sales",
     }
     messages = [record.getMessage() for record in caplog.records]
-    assert any(m.startswith("preflight relation=`sales`.`orders` kind=table") for m in messages)
-    assert "spark.sql preflight: DESCRIBE QUERY SELECT * FROM `sales`.`orders`" in messages
-    assert any(m.startswith("spark.sql preflight failed after") for m in messages)
+    assert any(m.startswith("health check relation=`sales`.`orders` kind=table") for m in messages)
+    assert "spark.sql health_check: DESCRIBE QUERY SELECT * FROM `sales`.`orders`" in messages
+    assert any(m.startswith("spark.sql health_check failed after") for m in messages)
     assert any("Unable to fetch tables" in (record.exc_text or "") for record in caplog.records)
     assert targets.sql_summary("SELECT  1\n  FROM   t") == "SELECT 1 FROM t"
     assert len(targets.sql_summary("x" * 5000)) == targets.SQL_LOG_WIDTH
@@ -152,7 +154,7 @@ def test_sas():
 
     spark = FakeSpark(respond)
     target = SparkTarget(spark, {**ORDERS, "date_type": "sas"})
-    assert target.preflight()["ok"]
+    assert target.health_check()["ok"]
     assert target.config["date_type"] == {"type": "sas", "format": "datetime"}
     assert target.partition_counts() == {"2026-08-01": 1}
     assert len([sql for sql in spark.statements if "LIMIT 16" in sql]) == 1
@@ -194,7 +196,7 @@ def test_all():
         "partition_mode": "all",
     }
     target = SparkTarget(spark, config)
-    assert target.preflight()["ok"]
+    assert target.health_check()["ok"]
     assert target.partition_counts() == {"all": 7}
     count_sql = spark.statements[-1]
     target.partition_counts(

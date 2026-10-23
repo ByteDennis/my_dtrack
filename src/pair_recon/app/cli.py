@@ -210,6 +210,31 @@ def sample_value(value: str):
     return int(number) if number.is_integer() and number > 1 else number
 
 
+def vintage_sample_value(value: str) -> dict:
+    text = str(value or "").strip()
+    if text.casefold() in {"", "all", "none"}:
+        return {"vintage_sample_size": None, "vintage_values": None}
+    if text.isdigit():
+        size = int(text)
+        if size < 1:
+            raise ValueError("Vintage sample count must be positive")
+        return {"vintage_sample_size": size, "vintage_values": None}
+    values = [item.strip() for item in text.split(",") if item.strip()]
+    try:
+        valid = values and all(date.fromisoformat(item).isoformat() == item for item in values)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("Vintage sample must be all, a positive count, or YYYY-MM-DD dates")
+    return {"vintage_sample_size": None, "vintage_values": list(dict.fromkeys(values))}
+
+
+def vintage_sample_text(size=None, values=None) -> str:
+    if values:
+        return ", ".join(str(value) for value in values)
+    return str(size) if size not in (None, "") else "all"
+
+
 def date_type_text(value) -> str:
     selected = "string" if value in (None, "") else value
     if isinstance(selected, dict):
@@ -620,6 +645,20 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
             ["day", "week", "month", "quarter", "year"],
             provenance.get("vintage", run_default("vintage", metadata.get("vintage", "day"))),
         )
+        saved_vintage_sample = run_default("vintage_sample")
+        if saved_vintage_sample in (None, ""):
+            saved_vintage_sample = vintage_sample_text(
+                run_default("vintage_sample_size", metadata.get("vintage_sample_size")),
+                run_default("vintage_values", metadata.get("vintage_values")),
+            )
+        answers.update(
+            vintage_sample_value(
+                answer(
+                    "Vintage sample (all, count, or YYYY-MM-DD dates)",
+                    saved_vintage_sample,
+                )
+            )
+        )
     run_id = make_run_id(pair, owner, timezone)
     existing = catalog.run(run_id)
     statement_sql.reporter = None
@@ -667,6 +706,10 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     ):
         if key in answers:
             settings[key] = answers[key]
+    if mode == "date":
+        settings["vintage_sample"] = vintage_sample_text(
+            answers.get("vintage_sample_size"), answers.get("vintage_values")
+        )
     config = run_config(pair, metadata, answers, timezone=timezone)
     return settings, config, action, client, catalog
 
@@ -706,7 +749,7 @@ def sync_right_package(settings: dict, client) -> dict:
 
 
 def persistent_settings(settings: dict) -> dict:
-    transient = {"run_id", "autorun", "force"}
+    transient = {"run_id", "earlystop", "force"}
     return {
         key: value
         for key, value in settings.items()
@@ -751,7 +794,7 @@ def execute(args, *, raise_errors: bool = False) -> int:
                         prompts(defaults) if interactive else prompts(defaults, interactive=False)
                     )
                     settings, config, action, client, catalog = prompt_result
-                    settings["autorun"] = bool(getattr(args, "autorun", False))
+                    settings["earlystop"] = bool(getattr(args, "earlystop", False))
                     settings["force"] = bool(getattr(args, "force", False))
                     if settings["force"]:
                         action = "restart"
@@ -804,7 +847,7 @@ def execute(args, *, raise_errors: bool = False) -> int:
             except Exception as exc:
                 added = (
                     add_mismatched_partitions(settings, config, exc)
-                    if settings["autorun"] and attempts < AUTO_EXCLUDE_RETRIES
+                    if not settings["earlystop"] and attempts < AUTO_EXCLUDE_RETRIES
                     else []
                 )
                 if not added:
@@ -814,7 +857,7 @@ def execute(args, *, raise_errors: bool = False) -> int:
                 save_defaults(selected_defaults, persistent_settings(settings))
                 snapshot = write_request_snapshot(settings, config)
                 log.warning(
-                    "autorun retry %d/%d: added %d excluded partition(s) and %s "
+                    "automatic mismatch recovery %d/%d: added %d excluded partition(s) and %s "
                     "the same run_id=%s: %s",
                     attempts,
                     AUTO_EXCLUDE_RETRIES,
@@ -883,9 +926,9 @@ def main_program(argv=None) -> int:
         help="run without prompts using YAML (default: .pair_recon.yaml)",
     )
     parser.add_argument(
-        "--autorun",
+        "--earlystop",
         action="store_true",
-        help="exclude reported mismatched partitions and automatically resume",
+        help="fail immediately instead of automatically excluding mismatched partitions and resuming",
     )
     parser.add_argument(
         "--force",

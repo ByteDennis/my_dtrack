@@ -40,6 +40,7 @@ from pair_recon_left.common.model.protocol import (
     write_run_status,
 )
 from pair_recon_left.common.runtime.run_logging import configure_left_logging, get_left_logger
+from pair_recon_right.catalog import status_run_values
 from pair_recon_right.engine.backends.targets import CsvTarget
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
 from pair_recon_right.engine.job import run as run_right
@@ -520,6 +521,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
     if run_mode not in {"full", "left-only"}:
         raise ValueError("run_mode must be full or left-only")
     left_only = run_mode == "left-only"
+    run_values = status_run_values(config["pairs"][pair])
     run_dir = local_run_directory(settings["work_dir"], run_id, settings["timezone"])
     run_dir.mkdir(parents=True, exist_ok=True)
     left_log = run_dir / "left.log"
@@ -549,6 +551,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         "status_table": settings["status_table"],
         "error_table": settings["error_table"],
         "right_workers": str(max(1, int(settings.get("right_workers", 8)))),
+        **{name: "" if value is None else str(value) for name, value in run_values.items()},
     }
     remote = None
     monitor = None
@@ -582,6 +585,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 owner=settings["owner"],
                 state="running",
                 timezone=settings["timezone"],
+                **run_values,
             )
         if catalog:
             sampler = ProgressSampler(
@@ -623,6 +627,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                         owner=settings["owner"],
                         state=state,
                         timezone=settings["timezone"],
+                        **run_values,
                         detail=str(monitor.error or f"Right Databricks job {state}"),
                     )
                     failure_forwarded = True
@@ -675,6 +680,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                     owner=settings["owner"],
                     state=final_state,
                     timezone=settings["timezone"],
+                    **run_values,
                 )
         elif local_right:
             right = run_right(
@@ -699,6 +705,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                     owner=settings["owner"],
                     state=final_state,
                     timezone=settings["timezone"],
+                    **run_values,
                 )
         else:
             monitor.result()
@@ -777,6 +784,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                         "owner": settings["owner"],
                         "state": final_state,
                         "timezone": settings["timezone"],
+                        **run_values,
                     }
                     if remote_right:
                         if not failure_forwarded:

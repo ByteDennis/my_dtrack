@@ -43,7 +43,7 @@ def test_csv(tmp_path):
     path = tmp_path / "rows.csv"
     path.write_text("ID,VALUE\n1,文字\n2,✓\n", encoding="utf-8")
     source = CsvSource({"source": "csv", "path": str(path), "partition_mode": "all"})
-    assert source.preflight()["ok"]
+    assert source.health_check()["ok"]
     assert source.partition_counts() == {"all": 2}
     columns, rows = source.query(f"SELECT * FROM {source.relation()}")
     assert columns == ["ID", "VALUE"] and rows == [("1", "文字"), ("2", "✓")]

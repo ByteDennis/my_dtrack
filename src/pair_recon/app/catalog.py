@@ -3,7 +3,12 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from pair_recon_right.catalog import STATUS_SUMMARY_COLUMNS, error_rows, result_summary
+from pair_recon_right.catalog import (
+    STATUS_RUN_COLUMNS,
+    STATUS_SUMMARY_COLUMNS,
+    error_rows,
+    result_summary,
+)
 
 _TABLE = re.compile(r"^[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){2}$")
 
@@ -118,7 +123,7 @@ class Catalog:
             "units_complete",
             "units_failed",
             "worker_threads",
-            "detail",
+            "payload",
         )
         numeric = {
             "units_expected",
@@ -158,6 +163,11 @@ WHEN NOT MATCHED THEN INSERT ({fields}) VALUES ({values})""",
         timezone: str,
         summary: dict[str, int] | None = None,
         update_summary: bool = True,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        vintage: str | None = None,
+        sample_rate: float | None = None,
+        vintage_sample: str = "all",
     ):
         now = (
             datetime.now(ZoneInfo(timezone)).replace(tzinfo=None).isoformat(timespec="microseconds")
@@ -175,6 +185,11 @@ WHEN NOT MATCHED THEN INSERT ({fields}) VALUES ({values})""",
             "timezone": timezone,
             "now": now,
             "ended": ended,
+            "from_date": from_date,
+            "to_date": to_date,
+            "vintage": vintage,
+            "sample_rate": sample_rate,
+            "vintage_sample": vintage_sample,
         }
         if update_summary:
             values.update(
@@ -191,14 +206,35 @@ WHEN NOT MATCHED THEN INSERT ({fields}) VALUES ({values})""",
             if update_summary
             else ""
         )
+        run_updates = ", " + ", ".join(
+            (
+                f"{name}=CAST(:{name} AS DATE)"
+                if name in {"from_date", "to_date"}
+                else f"{name}=CAST(:{name} AS DOUBLE)"
+                if name == "sample_rate"
+                else f"{name}=:{name}"
+            )
+            for name in STATUS_RUN_COLUMNS
+        )
+        run_fields = ", " + ", ".join(STATUS_RUN_COLUMNS)
+        run_values = ", " + ", ".join(
+            (
+                f"CAST(:{name} AS DATE)"
+                if name in {"from_date", "to_date"}
+                else f"CAST(:{name} AS DOUBLE)"
+                if name == "sample_rate"
+                else f":{name}"
+            )
+            for name in STATUS_RUN_COLUMNS
+        )
         self.sql.execute(
             f"""MERGE INTO {self.status_table} AS t
 USING (SELECT :run_id run_id) AS s ON t.run_id = s.run_id
 WHEN MATCHED THEN UPDATE SET pair_name=:pair, owner=:owner, state=:state, timezone=:timezone,
-updated_at=CAST(:now AS TIMESTAMP_NTZ), ended_at=CAST(:ended AS TIMESTAMP_NTZ){summary_updates}
-WHEN NOT MATCHED THEN INSERT (run_id, pair_name, owner, state, timezone, started_at, updated_at,
+updated_at=CAST(:now AS TIMESTAMP_NTZ), ended_at=CAST(:ended AS TIMESTAMP_NTZ){run_updates}{summary_updates}
+WHEN NOT MATCHED THEN INSERT (run_id, pair_name, owner, state, timezone{run_fields}, started_at, updated_at,
 ended_at{summary_fields})
-VALUES (:run_id, :pair, :owner, :state, :timezone,
+VALUES (:run_id, :pair, :owner, :state, :timezone{run_values},
 CAST(:now AS TIMESTAMP_NTZ), CAST(:now AS TIMESTAMP_NTZ), CAST(:ended AS TIMESTAMP_NTZ)
 {summary_values})""",
             values,
@@ -213,6 +249,7 @@ CAST(:now AS TIMESTAMP_NTZ), CAST(:now AS TIMESTAMP_NTZ), CAST(:ended AS TIMESTA
         state: str,
         timezone: str,
         detail: str,
+        **run_values,
     ):
         if state not in {"failed", "cancelled"}:
             raise ValueError("failure state must be failed or cancelled")
@@ -223,6 +260,7 @@ CAST(:now AS TIMESTAMP_NTZ), CAST(:now AS TIMESTAMP_NTZ), CAST(:ended AS TIMESTA
             state=state,
             timezone=timezone,
             update_summary=False,
+            **run_values,
         )
         now = datetime.now(ZoneInfo(timezone)).replace(tzinfo=None)
         values = {
@@ -259,7 +297,17 @@ CAST(:created_at AS TIMESTAMP_NTZ)
         )
         return {"status": state, "errors": 1}
 
-    def finish(self, store, *, run_id: str, pair: str, owner: str, state: str, timezone: str):
+    def finish(
+        self,
+        store,
+        *,
+        run_id: str,
+        pair: str,
+        owner: str,
+        state: str,
+        timezone: str,
+        **run_values,
+    ):
         self.status(
             run_id=run_id,
             pair=pair,
@@ -267,6 +315,7 @@ CAST(:created_at AS TIMESTAMP_NTZ)
             state=state,
             timezone=timezone,
             summary=result_summary(store),
+            **run_values,
         )
         self.sql.execute(f"DELETE FROM {self.error_table} WHERE run_id=:run_id", {"run_id": run_id})
         now = datetime.now(ZoneInfo(timezone)).replace(tzinfo=None)

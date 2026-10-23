@@ -227,7 +227,7 @@ def test_manual():
     assert not store.exists("plan.json")
 
 
-def test_preflight():
+def test_health_check():
     store = MemoryStore()
     with pytest.raises(RuntimeError, match="TABLE_OR_VIEW_NOT_FOUND"):
         reconcile_pair(store, left_document(), FakeTarget(healthy=False))

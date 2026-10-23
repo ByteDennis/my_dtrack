@@ -1,7 +1,9 @@
-from datetime import datetime
+import json
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from .engine.common.model.attribute_checks import ATTRIBUTE_CHECKS
+from .engine.common.model.manifest import sample_plan
 from .engine.common.model.protocol import (
     active_unit_ids,
     list_failures,
@@ -32,6 +34,51 @@ STATUS_SUMMARY_COLUMNS = (
     "column_differences",
     "runtime_failures",
 )
+STATUS_RUN_COLUMNS = (
+    "from_date",
+    "to_date",
+    "vintage",
+    "sample_rate",
+    "vintage_sample",
+)
+STATUS_COLUMNS = (
+    "run_id",
+    "pair_name",
+    "owner",
+    "state",
+    "timezone",
+    *STATUS_RUN_COLUMNS,
+    "started_at",
+    "updated_at",
+    "ended_at",
+    *STATUS_SUMMARY_COLUMNS,
+)
+
+
+def status_run_values(pair: dict) -> dict:
+    sample = sample_plan(pair.get("sample"))
+    sample_rate = (
+        float(sample["rate"])
+        if sample["mode"] == "fraction"
+        else 1.0
+        if sample["mode"] == "all"
+        else None
+    )
+    vintage_values = pair.get("vintage_values") or []
+    vintage_size = pair.get("vintage_sample_size")
+    if vintage_values:
+        vintage_sample = json.dumps(list(vintage_values), ensure_ascii=False, separators=(",", ":"))
+    elif vintage_size not in (None, ""):
+        vintage_sample = str(int(vintage_size))
+    else:
+        vintage_sample = "all"
+    return {
+        "from_date": pair.get("fromDate"),
+        "to_date": pair.get("toDate"),
+        "vintage": pair.get("vintage"),
+        "sample_rate": sample_rate,
+        "vintage_sample": vintage_sample,
+    }
 
 
 def result_summary(store) -> dict[str, int]:
@@ -136,7 +183,22 @@ def append_error_rows(spark, error_table, rows) -> None:
 
 
 def publish(
-    spark, store, *, run_id, pair, owner, timezone, pair_table, status_table, error_table, state
+    spark,
+    store,
+    *,
+    run_id,
+    pair,
+    owner,
+    timezone,
+    pair_table,
+    status_table,
+    error_table,
+    state,
+    from_date=None,
+    to_date=None,
+    vintage=None,
+    sample_rate=None,
+    vintage_sample="all",
 ):
     from delta.tables import DeltaTable
     from pyspark.sql import functions as F
@@ -145,20 +207,28 @@ def publish(
     spark.conf.set("spark.sql.timestampType", "TIMESTAMP_NTZ")
     now = datetime.now(ZoneInfo(timezone)).replace(tzinfo=None)
     summary = result_summary(store)
+    status_row = {
+        "run_id": run_id,
+        "pair_name": pair,
+        "owner": owner,
+        "state": state,
+        "timezone": timezone,
+        "from_date": date.fromisoformat(from_date) if from_date else None,
+        "to_date": date.fromisoformat(to_date) if to_date else None,
+        "vintage": vintage or None,
+        "sample_rate": float(sample_rate) if sample_rate not in (None, "") else None,
+        "vintage_sample": vintage_sample or "all",
+        "started_at": now,
+        "updated_at": now,
+        "ended_at": now,
+        **summary,
+    }
+    status_schema = spark.table(status_table).select(*STATUS_COLUMNS).schema
     status = spark.createDataFrame(
         [
-            {
-                "run_id": run_id,
-                "pair_name": pair,
-                "owner": owner,
-                "state": state,
-                "timezone": timezone,
-                "started_at": now,
-                "updated_at": now,
-                "ended_at": now,
-                **summary,
-            }
-        ]
+            status_row,
+        ],
+        schema=status_schema,
     )
     target = DeltaTable.forName(spark, status_table)
     (
@@ -170,6 +240,7 @@ def publish(
                 "owner": "s.owner",
                 "state": "s.state",
                 "timezone": "s.timezone",
+                **{name: f"s.{name}" for name in STATUS_RUN_COLUMNS},
                 "updated_at": "s.updated_at",
                 "ended_at": "s.ended_at",
                 **{name: f"s.{name}" for name in STATUS_SUMMARY_COLUMNS},

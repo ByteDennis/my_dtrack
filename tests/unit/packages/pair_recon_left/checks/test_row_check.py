@@ -1,6 +1,9 @@
+import time
+
 import pytest
 from support import MemoryStore
 
+from pair_recon_left.common.checks import row_check
 from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
 from pair_recon_left.common.model.protocol import COL_CHECK_CLOSED, get_left_state
 
@@ -9,7 +12,7 @@ class Source:
     def __init__(self, counts):
         self.counts = counts
 
-    def preflight(self):
+    def health_check(self):
         return {"ok": True}
 
     def partition_counts(self, *_args):
@@ -48,6 +51,44 @@ def test_counts(mode, counts):
     )
     assert store.get_json("row_check/left.json")["counts"] == counts
     assert not store.exists("plan.json")
+
+
+def test_row_count_query_logs_start_heartbeat_and_completion(monkeypatch, caplog):
+    class SlowSource(Source):
+        def partition_counts(self, *_args):
+            time.sleep(0.03)
+            return self.counts
+
+    pair = {
+        "partition_mode": "date",
+        "fromDate": "2026-01-01",
+        "toDate": "2026-01-31",
+        "left": {"source": "oracle", "table": "L", "date_col": "D", "date_type": "date"},
+        "right": {
+            "source": "databricks",
+            "table": "R",
+            "date_col": "D",
+            "date_type": "date",
+        },
+        "col_map": {"A": "a"},
+        "checks": ["row_count"],
+        "version": 2,
+    }
+    monkeypatch.setattr(row_check, "ROW_COUNT_LOG_INTERVAL", 0.005)
+
+    with caplog.at_level("INFO"):
+        run_row_check(
+            {"version": 2, "pairs": {"p": pair}},
+            MemoryStore(),
+            run_id="run",
+            source_factory=lambda _value: SlowSource({"2026-01-01": 2}),
+        )
+
+    assert (
+        "left row count query started: pair=p range=2026-01-01..2026-01-31 partition_mode=date"
+    ) in caplog.text
+    assert "left row count query still running: pairs=['p']" in caplog.text
+    assert "left row count query completed: pair=p partitions=1 rows=2" in caplog.text
 
 
 def test_plan(caplog):

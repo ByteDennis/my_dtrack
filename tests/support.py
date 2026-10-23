@@ -271,7 +271,7 @@ class FakeTarget:
         self.healthy = healthy
         self.calls = []
 
-    def preflight(self):
+    def health_check(self):
         return {"ok": True} if self.healthy else {"ok": False, "error": "TABLE_OR_VIEW_NOT_FOUND"}
 
     def partition_counts(self, *_args):

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -175,6 +176,11 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "row_differences BIGINT" in schema
     assert "column_differences BIGINT" in schema
     assert "runtime_failures BIGINT" in schema
+    assert "from_date DATE" in schema
+    assert "sample_rate DOUBLE" in schema
+    assert "vintage_sample STRING NOT NULL" in schema
+    assert "payload STRING" in schema
+    assert "pair_recon_reference" in schema
     migration = (ROOT / "setup" / "migrate_pair_metadata.sql").read_text(encoding="utf-8")
     assert "left_conn STRING" in migration
     assert "right_query_windows_json STRING" in migration
@@ -182,6 +188,27 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "row_differences BIGINT" in status_migration
     assert "column_differences BIGINT" in status_migration
     assert "runtime_failures BIGINT" in status_migration
+    observability_migration = (ROOT / "setup" / "migrate_observability.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "from_date DATE" in observability_migration
+    assert "SET payload = detail" in observability_migration
+    assert "pair_recon_reference" in observability_migration
+    reference = (ROOT / "setup" / "reference.sql").read_text(encoding="utf-8")
+    assert "pair_recon_progress_snapshot', 'state', 'left_col_check'" in reference
+    assert "pair_recon_run_error', 'check_name', 'hash_sum'" in reference
+    for table in (
+        "pair_recon_run_status",
+        "pair_recon_run_error",
+        "pair_recon_progress_snapshot",
+    ):
+        body = schema.split(f"{table} (", 1)[1].split(") USING DELTA", 1)[0]
+        columns = re.findall(r"^  ([a-z_]+) ", body, flags=re.MULTILINE)
+        assert all(f"('{table}', '{column}', NULL," in reference for column in columns)
+    uc_notebook = json.loads((ROOT / "setup" / "uc_tables.ipynb").read_text(encoding="utf-8"))
+    uc_source = "\n".join(line for cell in uc_notebook["cells"] for line in cell.get("source", []))
+    assert '"pair_recon_reference"' in uc_source
+    assert "reference_statements()" in uc_source
 
 
 def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):

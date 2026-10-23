@@ -82,10 +82,12 @@ def wait_for_manifests(
         if state != last_state:
             log.info("waiting for the Right side: status=%s", state)
             last_state = state
-        if store.exists("_PREFLIGHT.json") and not store.get_json("_PREFLIGHT.json").get(
+        if store.exists("_HEALTH_CHECK.json") and not store.get_json("_HEALTH_CHECK.json").get(
             "ok", True
         ):
-            raise RuntimeError(f"Right side preflight failed: {store.get_json('_PREFLIGHT.json')}")
+            raise RuntimeError(
+                f"Right side health check failed: {store.get_json('_HEALTH_CHECK.json')}"
+            )
         if time.monotonic() - started > timeout:
             raise TimeoutError("Right side did not close the row check before timeout")
         time.sleep(poll_interval)
@@ -402,7 +404,7 @@ class ColCheckPipeline:
                         exhausted = True
                         break
                     log.info(
-                        "pull %s %s: %d partition(s), %d column(s)",
+                        "left data pull started: pair=%s vintage=%s partitions=%d columns=%d",
                         manifest["pair"],
                         window["bucket"],
                         len(window["partitions"]),
@@ -454,7 +456,7 @@ class ColCheckPipeline:
                     if job in pull_jobs:
                         manifest, window = pull_jobs.pop(job)
                         log.info(
-                            "pulled %s %s -> stat queue",
+                            "left data ready for statistics: pair=%s vintage=%s",
                             manifest["pair"],
                             window["bucket"],
                         )
@@ -698,7 +700,7 @@ class LeftRuntime:
         finally:
             temporary.unlink(missing_ok=True)
         log.info(
-            "left %s %s: %d sampled row(s) pulled (%s)",
+            "left data pull completed: pair=%s vintage=%s sampled_rows=%d path=%s",
             manifest["pair"],
             window["bucket"],
             _row_count(path),

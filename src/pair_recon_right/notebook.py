@@ -28,6 +28,11 @@ for name in (
     "status_table",
     "error_table",
     "right_workers",
+    "from_date",
+    "to_date",
+    "vintage",
+    "sample_rate",
+    "vintage_sample",
 ):
     dbutils.widgets.text(name, "")
 
@@ -43,6 +48,11 @@ values = {
         "status_table",
         "error_table",
         "right_workers",
+        "from_date",
+        "to_date",
+        "vintage",
+        "sample_rate",
+        "vintage_sample",
     )
 }
 publish_values = {
@@ -55,6 +65,11 @@ publish_values = {
         "pair_table",
         "status_table",
         "error_table",
+        "from_date",
+        "to_date",
+        "vintage",
+        "sample_rate",
+        "vintage_sample",
     )
 }
 logging.Formatter.converter = staticmethod(

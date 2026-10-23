@@ -97,6 +97,67 @@ def test_mismatched_partitions_parses_only_the_selected_pair():
     assert mismatched_partitions(RuntimeError("another failure"), "orders") == []
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("all", {"vintage_sample_size": None, "vintage_values": None}),
+        ("5", {"vintage_sample_size": 5, "vintage_values": None}),
+        (
+            "2026-01-01, 2026-03-01",
+            {
+                "vintage_sample_size": None,
+                "vintage_values": ["2026-01-01", "2026-03-01"],
+            },
+        ),
+    ],
+)
+def test_vintage_sample_prompt_value(raw, expected):
+    assert cli.vintage_sample_value(raw) == expected
+
+
+def test_run_config_applies_prompted_vintage_sample():
+    runtime = cli.run_config(
+        "orders",
+        {
+            "left": {},
+            "right": {},
+            "vintage_sample_size": 2,
+            "vintage_values": None,
+        },
+        {
+            "partition_mode": "date",
+            "checks": ["row_count"],
+            "sample": 0.1,
+            "strict": False,
+            "audit": False,
+            "from_date": "2026-01-01",
+            "to_date": "2026-03-31",
+            "vintage": "month",
+            "vintage_sample_size": 5,
+            "vintage_values": None,
+        },
+        timezone="America/New_York",
+    )
+
+    assert runtime["pairs"]["orders"]["vintage_sample_size"] == 5
+    assert "vintage_values" not in runtime["pairs"]["orders"]
+
+    all_mode = cli.run_config(
+        "orders",
+        runtime["pairs"]["orders"],
+        {
+            "partition_mode": "all",
+            "checks": ["row_count"],
+            "sample": False,
+            "strict": False,
+            "audit": False,
+        },
+        timezone="America/New_York",
+    )["pairs"]["orders"]
+    assert "vintage_sample_size" not in all_mode
+    assert "vintage_values" not in all_mode
+
+
 def test_add_mismatched_partitions_normalizes_month_date_type():
     settings = {
         "pair": "orders",
@@ -397,7 +458,7 @@ def test_execute_defaults_mode_skips_all_interaction(monkeypatch, tmp_path):
     args = SimpleNamespace(
         config=None,
         defaults_path=defaults,
-        autorun=False,
+        earlystop=False,
         force=False,
         log_level="INFO",
     )
@@ -406,7 +467,7 @@ def test_execute_defaults_mode_skips_all_interaction(monkeypatch, tmp_path):
     assert seen == {"defaults": {"pair": "orders"}, "interactive": False}
 
 
-def test_execute_autorun_adds_exclusions_and_resumes_same_run(monkeypatch, tmp_path):
+def test_execute_automatically_adds_exclusions_and_resumes_same_run(monkeypatch, tmp_path):
     defaults = tmp_path / "run.yaml"
     defaults.write_text("pair: orders\n", encoding="utf-8")
     settings = {
@@ -446,7 +507,7 @@ def test_execute_autorun_adds_exclusions_and_resumes_same_run(monkeypatch, tmp_p
     args = SimpleNamespace(
         config=None,
         defaults_path=defaults,
-        autorun=True,
+        earlystop=False,
         force=False,
         log_level="INFO",
     )
@@ -462,7 +523,53 @@ def test_execute_autorun_adds_exclusions_and_resumes_same_run(monkeypatch, tmp_p
     ]
     saved = yaml.safe_load(defaults.read_text(encoding="utf-8"))
     assert saved["excluded_partitions"] == ["2026-10-01", "2026-10-02", "2026-10-05"]
-    assert "autorun" not in saved and "force" not in saved
+    assert "earlystop" not in saved and "force" not in saved
+
+
+def test_execute_earlystop_reports_mismatch_without_retry(monkeypatch, tmp_path):
+    defaults = tmp_path / "run.yaml"
+    defaults.write_text("pair: orders\n", encoding="utf-8")
+    settings = {
+        "pair": "orders",
+        "run_id": "orders-me-20261022",
+        "timezone": "America/New_York",
+        "sync_remote": False,
+        "email_to": "",
+        "excluded_partitions": ["2026-10-01"],
+    }
+    config = {"pairs": {"orders": {"excluded_partitions": ["2026-10-01"]}}}
+    calls = []
+    monkeypatch.setattr(cli, "load_environment", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "prompts",
+        lambda _defaults, *, interactive: (settings, config, "new", object(), object()),
+    )
+    monkeypatch.setattr(cli, "configure_console_logging", lambda *_args: None)
+    monkeypatch.setattr(cli, "write_request_snapshot", lambda *_args: tmp_path / "request.json")
+
+    def launch(*_args, action, **_kwargs):
+        calls.append(action)
+        raise RuntimeError(
+            "version 2 row-check found unexcluded mismatched partitions; "
+            "add them to excluded_partitions (orders: 2026-10-02)"
+        )
+
+    monkeypatch.setattr(cli, "launch", launch)
+    args = SimpleNamespace(
+        config=None,
+        defaults_path=defaults,
+        earlystop=True,
+        force=False,
+        log_level="INFO",
+    )
+
+    with pytest.raises(RuntimeError, match="unexcluded mismatched partitions"):
+        cli.execute(args, raise_errors=True)
+
+    assert calls == ["new"]
+    assert settings["excluded_partitions"] == ["2026-10-01"]
+    assert config["pairs"]["orders"]["excluded_partitions"] == ["2026-10-01"]
 
 
 def test_execute_force_overrides_resume_with_restart(monkeypatch, tmp_path):
@@ -494,7 +601,7 @@ def test_execute_force_overrides_resume_with_restart(monkeypatch, tmp_path):
     args = SimpleNamespace(
         config=None,
         defaults_path=None,
-        autorun=False,
+        earlystop=False,
         force=True,
         log_level="INFO",
     )
@@ -503,7 +610,7 @@ def test_execute_force_overrides_resume_with_restart(monkeypatch, tmp_path):
     assert actions == ["restart"]
 
 
-def test_main_program_parses_default_alias_autorun_and_force(monkeypatch, tmp_path):
+def test_main_program_parses_default_alias_earlystop_and_force(monkeypatch, tmp_path):
     seen = {}
     defaults = tmp_path / "run.yaml"
     monkeypatch.setattr(
@@ -513,9 +620,9 @@ def test_main_program_parses_default_alias_autorun_and_force(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(cli, "run_debugger", lambda _mode, callback: callback())
 
-    assert cli.main_program(["--default", str(defaults), "--autorun", "--force"]) == 0
+    assert cli.main_program(["--default", str(defaults), "--earlystop", "--force"]) == 0
     assert seen["defaults_path"] == defaults
-    assert seen["autorun"] is True
+    assert seen["earlystop"] is True
     assert seen["force"] is True
 
 
@@ -912,7 +1019,9 @@ def test_progress():
     sampler.stop("passed")
     row = progress_snapshot(store, "r", "p", "America/New_York")
     assert row["units_expected"] == 2 and row["units_complete"] == 1
-    assert json.loads(row["detail"])["left_rows"] == 2
+    payload = json.loads(row["payload"])
+    assert payload["row"]["left_rows"] == 2
+    assert payload["run_status"]["state"] == "left_col_check"
     assert any(name == "pair_recon-progress" for name, _row in seen)
     assert seen[-1][1]["state"] == "passed"
 
@@ -1844,7 +1953,7 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
 
         def result(self, *, timeout):
             assert timeout.total_seconds() == 7200
-            raise RuntimeError("preflight exploded")
+            raise RuntimeError("health check exploded")
 
     def left(*_args, abort_if=None, **_kwargs):
         assert abort_if is not None
@@ -1889,7 +1998,7 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
 
     with pytest.raises(
         RuntimeError,
-        match="Right Databricks job failed: run_id=91: preflight exploded",
+        match="Right Databricks job failed: run_id=91: health check exploded",
     ):
         runner.launch(
             settings,
@@ -1902,7 +2011,7 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
     content = (
         local_run_directory(tmp_path, "failed-right-1", settings["timezone"]) / "left.log"
     ).read_text(encoding="utf-8")
-    assert "Right Databricks job failed: run_id=91: preflight exploded" in content
+    assert "Right Databricks job failed: run_id=91: health check exploded" in content
     assert "run page: https://example/runs/91" in content
     assert "task run 910: ModuleNotFoundError" in content
     assert "Traceback for 910\n  File notebook, line 6" in content

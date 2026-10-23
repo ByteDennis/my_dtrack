@@ -108,7 +108,14 @@ def run_config(
     else:
         selected.pop("statistics", None)
     if mode == "all":
-        for key in ("fromDate", "toDate", "vintage", "excluded_partitions"):
+        for key in (
+            "fromDate",
+            "toDate",
+            "vintage",
+            "excluded_partitions",
+            "vintage_sample_size",
+            "vintage_values",
+        ):
             selected.pop(key, None)
     else:
         for side in ("left", "right"):
@@ -128,4 +135,9 @@ def run_config(
         ):
             if source in answers:
                 selected[target] = answers[source]
+        for field in ("vintage_sample_size", "vintage_values"):
+            if answers.get(field) not in (None, "", []):
+                selected[field] = answers[field]
+            elif field in answers:
+                selected.pop(field, None)
     return {"version": 2, "timezone": timezone, "pairs": {name: selected}}

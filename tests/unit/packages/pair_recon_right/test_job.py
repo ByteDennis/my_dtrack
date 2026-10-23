@@ -24,7 +24,7 @@ def document(checks):
             "col_map": {"A": "a"},
             "checks": checks,
         },
-        "preflight": {"ok": True},
+        "health_check": {"ok": True},
         "timing": {},
     }
 

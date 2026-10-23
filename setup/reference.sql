@@ -1,0 +1,91 @@
+-- Maintained PairRecon observability data dictionary.
+MERGE INTO ${catalog}.${schema}.pair_recon_reference AS t
+USING (
+  SELECT * FROM VALUES
+    ('pair_recon_run_status', 'run_id', NULL, 'Daily Pair and owner run identifier.'),
+    ('pair_recon_run_status', 'pair_name', NULL, 'Pair evaluated by the run.'),
+    ('pair_recon_run_status', 'owner', NULL, 'Operator that owns the run.'),
+    ('pair_recon_run_status', 'state', NULL, 'Current lifecycle state or terminal result.'),
+    ('pair_recon_run_status', 'state', 'running', 'Left and Right work is active.'),
+    ('pair_recon_run_status', 'state', 'passed', 'All completed row and column checks matched.'),
+    ('pair_recon_run_status', 'state', 'different', 'At least one completed row or column check differed.'),
+    ('pair_recon_run_status', 'state', 'left_complete', 'Left-only artifacts completed; Right was not evaluated.'),
+    ('pair_recon_run_status', 'state', 'failed', 'The run ended with an execution failure.'),
+    ('pair_recon_run_status', 'state', 'cancelled', 'The run was cancelled before completion.'),
+    ('pair_recon_run_status', 'timezone', NULL, 'IANA timezone used for run timestamps and daily identity.'),
+    ('pair_recon_run_status', 'from_date', NULL, 'Inclusive effective lower date bound; null for all mode.'),
+    ('pair_recon_run_status', 'to_date', NULL, 'Inclusive effective upper date bound; null for all mode.'),
+    ('pair_recon_run_status', 'vintage', NULL, 'Effective date grouping: day, week, month, quarter, or year.'),
+    ('pair_recon_run_status', 'sample_rate', NULL, 'Effective row sample fraction; 1.0 means all rows and null means fixed-count sampling.'),
+    ('pair_recon_run_status', 'vintage_sample', NULL, 'Vintage selection: all, a requested count such as 5, or a JSON list of explicit vintages.'),
+    ('pair_recon_run_status', 'started_at', NULL, 'Timestamp when this daily run record was first created.'),
+    ('pair_recon_run_status', 'updated_at', NULL, 'Timestamp of the latest status update.'),
+    ('pair_recon_run_status', 'ended_at', NULL, 'Timestamp of the terminal status update.'),
+    ('pair_recon_run_status', 'row_total', NULL, 'Number of row-count partition results.'),
+    ('pair_recon_run_status', 'row_matches', NULL, 'Number of matching row-count partition results.'),
+    ('pair_recon_run_status', 'row_differences', NULL, 'Number of differing row-count partition results.'),
+    ('pair_recon_run_status', 'column_total', NULL, 'Number of column-statistic results.'),
+    ('pair_recon_run_status', 'column_matches', NULL, 'Number of matching column-statistic results.'),
+    ('pair_recon_run_status', 'column_differences', NULL, 'Number of differing column-statistic results.'),
+    ('pair_recon_run_status', 'runtime_failures', NULL, 'Number of runtime failure results.'),
+    ('pair_recon_run_error', 'run_id', NULL, 'Run that produced the finding.'),
+    ('pair_recon_run_error', 'check_name', NULL, 'Row, statistic, or runtime check that failed.'),
+    ('pair_recon_run_error', 'check_name', 'row_count', 'Partition row counts differed.'),
+    ('pair_recon_run_error', 'check_name', 'runtime', 'A Left, Right, launcher, or monitor operation failed.'),
+    ('pair_recon_run_error', 'check_name', 'n_total', 'Compared total non-filtered values.'),
+    ('pair_recon_run_error', 'check_name', 'n_missing', 'Compared missing-value counts.'),
+    ('pair_recon_run_error', 'check_name', 'n_unique', 'Compared distinct-value counts.'),
+    ('pair_recon_run_error', 'check_name', 'mean', 'Compared numeric means.'),
+    ('pair_recon_run_error', 'check_name', 'std', 'Compared numeric standard deviations.'),
+    ('pair_recon_run_error', 'check_name', 'min', 'Compared minimum values.'),
+    ('pair_recon_run_error', 'check_name', 'max', 'Compared maximum values.'),
+    ('pair_recon_run_error', 'check_name', 'length_avg', 'Compared average text lengths.'),
+    ('pair_recon_run_error', 'check_name', 'length_max', 'Compared maximum text lengths.'),
+    ('pair_recon_run_error', 'check_name', 'hash_sum', 'Compared deterministic aggregate hashes.'),
+    ('pair_recon_run_error', 'pair_name', NULL, 'Pair that produced the finding.'),
+    ('pair_recon_run_error', 'vintage', NULL, 'Vintage bucket for a column or runtime finding.'),
+    ('pair_recon_run_error', 'column_name', NULL, 'Left column associated with the finding.'),
+    ('pair_recon_run_error', 'partition_value', NULL, 'Partition associated with a row-count finding.'),
+    ('pair_recon_run_error', 'left_value', NULL, 'Left value rendered for comparison.'),
+    ('pair_recon_run_error', 'right_value', NULL, 'Right value rendered for comparison.'),
+    ('pair_recon_run_error', 'detail', NULL, 'Short human-readable result or failure message.'),
+    ('pair_recon_run_error', 'payload', NULL, 'Complete JSON finding for expansion and diagnosis.'),
+    ('pair_recon_run_error', 'created_at', NULL, 'Timestamp when the finding was published.'),
+    ('pair_recon_progress_snapshot', 'snapshot_ts', NULL, 'Timestamp of the latest captured progress.'),
+    ('pair_recon_progress_snapshot', 'run_id', NULL, 'Run represented by the current snapshot.'),
+    ('pair_recon_progress_snapshot', 'pair_name', NULL, 'Pair represented by the current snapshot.'),
+    ('pair_recon_progress_snapshot', 'state', NULL, 'Current pipeline lifecycle state.'),
+    ('pair_recon_progress_snapshot', 'state', 'starting', 'The snapshot was captured before a pipeline state was published.'),
+    ('pair_recon_progress_snapshot', 'state', 'left_row_check', 'Left row counts are being evaluated.'),
+    ('pair_recon_progress_snapshot', 'state', 'left_row_check_closed', 'Left row counts and plans were published.'),
+    ('pair_recon_progress_snapshot', 'state', 'left_col_check', 'Left column statistics are being prepared.'),
+    ('pair_recon_progress_snapshot', 'state', 'left_col_check_closed', 'All planned Left column statistics were published.'),
+    ('pair_recon_progress_snapshot', 'state', 'left_col_check_partial', 'Only part of the planned Left column statistics was published.'),
+    ('pair_recon_progress_snapshot', 'state', 'right_row_check', 'Right row counts are being evaluated.'),
+    ('pair_recon_progress_snapshot', 'state', 'right_col_check', 'Right statistics are being compared with Left units.'),
+    ('pair_recon_progress_snapshot', 'state', 'complete', 'The distributed protocol completed.'),
+    ('pair_recon_progress_snapshot', 'state', 'passed', 'The completed run matched.'),
+    ('pair_recon_progress_snapshot', 'state', 'different', 'The completed run contained differences.'),
+    ('pair_recon_progress_snapshot', 'state', 'left_complete', 'The Left-only run completed.'),
+    ('pair_recon_progress_snapshot', 'state', 'failed', 'The run failed.'),
+    ('pair_recon_progress_snapshot', 'state', 'cancelled', 'The run was cancelled.'),
+    ('pair_recon_progress_snapshot', 'units_expected', NULL, 'Logical column units planned for the run.'),
+    ('pair_recon_progress_snapshot', 'units_ready', NULL, 'Logical Left units published and ready for Right.'),
+    ('pair_recon_progress_snapshot', 'units_complete', NULL, 'Logical Right comparisons completed.'),
+    ('pair_recon_progress_snapshot', 'units_failed', NULL, 'Logical units ending in runtime failure.'),
+    ('pair_recon_progress_snapshot', 'worker_threads', NULL, 'Active local PairRecon worker-thread count.'),
+    ('pair_recon_progress_snapshot', 'payload', NULL, 'Complete expandable JSON snapshot including run, Left, Right, row, unit, and thread state.')
+  AS v(table_name, column_name, keyword, definition)
+) AS s
+ON t.table_name = s.table_name
+ AND t.column_name = s.column_name
+ AND t.keyword <=> s.keyword
+WHEN MATCHED THEN UPDATE SET
+  t.definition = s.definition,
+  t.updated_at = CAST(current_timestamp() AS TIMESTAMP_NTZ)
+WHEN NOT MATCHED THEN INSERT (
+  table_name, column_name, keyword, definition, updated_at
+) VALUES (
+  s.table_name, s.column_name, s.keyword, s.definition,
+  CAST(current_timestamp() AS TIMESTAMP_NTZ)
+);

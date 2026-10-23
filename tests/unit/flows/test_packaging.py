@@ -115,6 +115,7 @@ def test_setup_example_has_an_upsert_for_every_catalog_table():
         "pair_recon_run_status",
         "pair_recon_run_error",
         "pair_recon_progress_snapshot",
+        "pair_recon_reference",
     )
     for table in tables:
         assert f"-- # catalog.schema.{table}" in sql

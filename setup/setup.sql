@@ -1,7 +1,7 @@
 -- PairRecon Databricks SQL / Unity Catalog example upserts.
 -- Run setup/schema.sql first, then replace catalog, schema, object names, and example values.
--- The first three tables are user-maintained configuration. The last three are normally
--- maintained by PairRecon and are included only as complete, repeatable examples.
+-- The first three tables are user-maintained configuration. The next three are normally
+-- maintained by PairRecon. The reference table is maintained by setup/reference.sql.
 
 -- # catalog.schema.pair_recon_pair_meta
 MERGE INTO catalog.schema.pair_recon_pair_meta AS t
@@ -115,6 +115,11 @@ USING (
     'example.owner' AS owner,
     'running' AS state,
     'America/New_York' AS timezone,
+    CAST('2026-10-01' AS DATE) AS from_date,
+    CAST('2026-10-21' AS DATE) AS to_date,
+    'month' AS vintage,
+    CAST(0.1 AS DOUBLE) AS sample_rate,
+    '5' AS vintage_sample,
     CAST('2026-10-21 12:00:00' AS TIMESTAMP_NTZ) AS started_at,
     CAST(current_timestamp() AS TIMESTAMP_NTZ) AS updated_at,
     CAST(NULL AS TIMESTAMP_NTZ) AS ended_at,
@@ -132,6 +137,11 @@ WHEN MATCHED THEN UPDATE SET
   t.owner = s.owner,
   t.state = s.state,
   t.timezone = s.timezone,
+  t.from_date = s.from_date,
+  t.to_date = s.to_date,
+  t.vintage = s.vintage,
+  t.sample_rate = s.sample_rate,
+  t.vintage_sample = s.vintage_sample,
   t.started_at = s.started_at,
   t.updated_at = s.updated_at,
   t.ended_at = s.ended_at,
@@ -143,11 +153,14 @@ WHEN MATCHED THEN UPDATE SET
   t.column_differences = s.column_differences,
   t.runtime_failures = s.runtime_failures
 WHEN NOT MATCHED THEN INSERT (
-  run_id, pair_name, owner, state, timezone, started_at, updated_at, ended_at,
+  run_id, pair_name, owner, state, timezone,
+  from_date, to_date, vintage, sample_rate, vintage_sample,
+  started_at, updated_at, ended_at,
   row_total, row_matches, row_differences,
   column_total, column_matches, column_differences, runtime_failures
 ) VALUES (
   s.run_id, s.pair_name, s.owner, s.state, s.timezone,
+  s.from_date, s.to_date, s.vintage, s.sample_rate, s.vintage_sample,
   s.started_at, s.updated_at, s.ended_at,
   s.row_total, s.row_matches, s.row_differences,
   s.column_total, s.column_matches, s.column_differences, s.runtime_failures
@@ -204,7 +217,7 @@ USING (
     CAST(12 AS BIGINT) AS units_complete,
     CAST(0 AS BIGINT) AS units_failed,
     CAST(4 AS BIGINT) AS worker_threads,
-    'Example progress snapshot' AS detail
+    '{"row":{"matches":12,"partitions":30},"threads":["pair_recon-progress"]}' AS payload
 ) AS s
 ON t.run_id = s.run_id
 WHEN MATCHED THEN UPDATE SET
@@ -216,11 +229,39 @@ WHEN MATCHED THEN UPDATE SET
   t.units_complete = s.units_complete,
   t.units_failed = s.units_failed,
   t.worker_threads = s.worker_threads,
-  t.detail = s.detail
+  t.payload = s.payload
 WHEN NOT MATCHED THEN INSERT (
   snapshot_ts, run_id, pair_name, state, units_expected, units_ready,
-  units_complete, units_failed, worker_threads, detail
+  units_complete, units_failed, worker_threads, payload
 ) VALUES (
   s.snapshot_ts, s.run_id, s.pair_name, s.state, s.units_expected, s.units_ready,
-  s.units_complete, s.units_failed, s.worker_threads, s.detail
+  s.units_complete, s.units_failed, s.worker_threads, s.payload
+);
+
+-- # catalog.schema.pair_recon_reference
+-- setup/reference.sql contains the complete maintained data dictionary.
+MERGE INTO catalog.schema.pair_recon_reference AS t
+USING (
+  SELECT 'pair_recon_run_status' AS table_name, 'state' AS column_name,
+         'running' AS keyword, 'Left and Right work is active.' AS definition,
+         CAST(current_timestamp() AS TIMESTAMP_NTZ) AS updated_at
+  UNION ALL
+  SELECT 'pair_recon_progress_snapshot', 'state', 'left_col_check',
+         'Left column statistics are being prepared.',
+         CAST(current_timestamp() AS TIMESTAMP_NTZ)
+  UNION ALL
+  SELECT 'pair_recon_run_error', 'payload', CAST(NULL AS STRING),
+         'Complete JSON finding for expansion and diagnosis.',
+         CAST(current_timestamp() AS TIMESTAMP_NTZ)
+) AS s
+ON t.table_name = s.table_name
+ AND t.column_name = s.column_name
+ AND t.keyword <=> s.keyword
+WHEN MATCHED THEN UPDATE SET
+  t.definition = s.definition,
+  t.updated_at = s.updated_at
+WHEN NOT MATCHED THEN INSERT (
+  table_name, column_name, keyword, definition, updated_at
+) VALUES (
+  s.table_name, s.column_name, s.keyword, s.definition, s.updated_at
 );

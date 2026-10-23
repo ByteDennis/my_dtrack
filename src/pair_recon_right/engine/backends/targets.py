@@ -54,8 +54,8 @@ class CsvTarget:
         self.source.set_sql_audit(audit)
         return self
 
-    def preflight(self):
-        health = self.source.preflight()
+    def health_check(self):
+        health = self.source.health_check()
         self.config.update(self.source.config)
         return health
 
@@ -206,10 +206,10 @@ class SparkTarget:
             self.config["date_type"] = resolved.spec(portable=True)
             return resolved
 
-    def preflight(self) -> dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         relation = self.relation()
         log.info(
-            "preflight relation=%s kind=%s partition_mode=%s date_col=%s date_type=%s where=%s",
+            "health check relation=%s kind=%s partition_mode=%s date_col=%s date_type=%s where=%s",
             relation,
             self.config.get("kind") or "table",
             self.partition_mode,
@@ -220,15 +220,17 @@ class SparkTarget:
         try:
             columns = {
                 row[0]: str(row[1]).lower()
-                for row in self._rows(f"DESCRIBE QUERY SELECT * FROM {relation}", "preflight")
+                for row in self._rows(f"DESCRIBE QUERY SELECT * FROM {relation}", "health_check")
                 if row[0] and not str(row[0]).startswith("#")
             }
-            log.info("preflight columns: %s", columns)
+            log.info("health check columns: %s", columns)
             if self.partition_mode == "date" and self.config["date_col"] not in columns:
                 raise ValueError(f"date_col {self.config['date_col']!r} not in {sorted(columns)}")
             self.column_types = columns
             if self.partition_mode == "date":
-                log.info("preflight date_type resolved: %s", self.date_type().spec(portable=True))
+                log.info(
+                    "health check date_type resolved: %s", self.date_type().spec(portable=True)
+                )
             return {
                 "ok": True,
                 "source": "databricks",
@@ -236,7 +238,7 @@ class SparkTarget:
                 "columns": sorted(columns),
             }
         except Exception as exc:
-            log.exception("preflight failed for relation %s", relation)
+            log.exception("health check failed for relation %s", relation)
             return {
                 "ok": False,
                 "source": "databricks",
@@ -303,7 +305,7 @@ class SparkTarget:
         self, manifest: dict[str, Any], window: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
         if not hasattr(self, "column_types"):
-            self.preflight()
+            self.health_check()
         if self.partition_mode == "date":
             self.date_type()
         strict = bool(manifest.get("strict"))

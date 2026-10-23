@@ -128,8 +128,8 @@ def reconcile_pair(
     target,
     *,
     gate: str = "auto",
-    preflight_health: dict[str, Any] | None = None,
-    preflight_s: float | None = None,
+    health_check: dict[str, Any] | None = None,
+    health_check_s: float | None = None,
 ) -> dict[str, Any]:
     pair = left_doc["pair"]
     attach_sql_audit(
@@ -141,25 +141,25 @@ def reconcile_pair(
             enabled=bool(left_doc["pair_config"].get("audit")),
         ),
     )
-    if preflight_health is None:
+    if health_check is None:
         started = time.monotonic()
-        health = target.preflight()
-        preflight_s = round(time.monotonic() - started, 6)
+        health = target.health_check()
+        health_check_s = round(time.monotonic() - started, 6)
     else:
-        health = dict(preflight_health)
-        preflight_s = float(preflight_s or 0.0)
+        health = dict(health_check)
+        health_check_s = float(health_check_s or 0.0)
     if not health.get("ok"):
-        log.error("preflight %s failed: %s", pair, health)
+        log.error("health check %s failed: %s", pair, health)
         raise RuntimeError(
-            f"Right-side preflight failed for {pair} "
+            f"Right-side health check failed for {pair} "
             f"(relation {health.get('relation')}): {health.get('error')}"
         )
     log.info(
-        "preflight %s ok: relation=%s %d columns (%.3fs)",
+        "health check %s ok: relation=%s %d columns (%.3fs)",
         pair,
         health.get("relation"),
         len(health.get("columns") or ()),
-        preflight_s,
+        health_check_s,
     )
     right_date_type = getattr(target, "config", {}).get("date_type")
     if right_date_type is not None:
@@ -213,9 +213,9 @@ def reconcile_pair(
         "partitions": partitions,
         "summary": summarize_partitions(partitions),
         "gate_decision": evaluate_gate(partitions, gate),
-        "preflight": health,
+        "health_check": health,
         "timing": {
-            "preflight_s": preflight_s,
+            "health_check_s": health_check_s,
             "left_count_s": left_doc.get("timing", {}).get("left_count_s"),
             "right_count_s": right_s,
         },
@@ -313,8 +313,8 @@ def run_row_check(
     *,
     gate: str = "auto",
     targets: dict[str, Any] | None = None,
-    preflight_health: dict[str, dict[str, Any]] | None = None,
-    preflight_seconds: dict[str, float] | None = None,
+    health_checks: dict[str, dict[str, Any]] | None = None,
+    health_check_seconds: dict[str, float] | None = None,
 ) -> int:
     store.delete_keys([ROW_CHECK_CLOSED])
     write_right_state(
@@ -328,11 +328,11 @@ def run_row_check(
     if targets is not None:
         missing_targets = sorted(pending_pairs - set(targets))
         if missing_targets:
-            raise ValueError(f"preflight targets missing pair(s): {', '.join(missing_targets)}")
-    if preflight_health is not None:
-        missing_health = sorted(pending_pairs - set(preflight_health))
+            raise ValueError(f"health check targets missing pair(s): {', '.join(missing_targets)}")
+    if health_checks is not None:
+        missing_health = sorted(pending_pairs - set(health_checks))
         if missing_health:
-            raise ValueError(f"preflight health missing pair(s): {', '.join(missing_health)}")
+            raise ValueError(f"health check results missing pair(s): {', '.join(missing_health)}")
     for left_doc in pending:
         pair = left_doc["pair"]
         target = (
@@ -350,8 +350,8 @@ def run_row_check(
             left_doc,
             target,
             gate=gate,
-            preflight_health=preflight_health[pair] if preflight_health is not None else None,
-            preflight_s=(preflight_seconds or {}).get(pair),
+            health_check=health_checks[pair] if health_checks is not None else None,
+            health_check_s=(health_check_seconds or {}).get(pair),
         )
         processed += 1
     closed = left_row_check_close_document(store)

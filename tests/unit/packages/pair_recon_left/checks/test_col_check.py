@@ -30,19 +30,22 @@ def manifest():
     }
 
 
-def test_pipeline():
+def test_pipeline(caplog):
     store = MemoryStore()
     row = manifest()
     store.put_json("plan.json", row)
     stats = {"amount": {"col_type": "numeric", "n_unique": 2, "hash_sum": "3"}}
-    count = ColCheckPipeline(
-        store,
-        pull_window=lambda *_args: "pulled",
-        compute_stats=lambda *_args: stats,
-    ).run([row])
+    with caplog.at_level("INFO"):
+        count = ColCheckPipeline(
+            store,
+            pull_window=lambda *_args: "pulled",
+            compute_stats=lambda *_args: stats,
+        ).run([row])
     uid = unit_id("pair", "all", "amount")
     assert count == 1 and store.exists("units/00000001-0001.json")
     assert store.get_json("units/00000001-0001.json")["units"][0]["unit_id"] == uid
+    assert "left data pull started: pair=pair vintage=all partitions=1 columns=1" in caplog.text
+    assert "left data ready for statistics: pair=pair vintage=all" in caplog.text
 
 
 def test_left_only_pipeline_does_not_wait_for_right(monkeypatch):
@@ -93,7 +96,7 @@ def test_pipeline_honors_abort_signal_before_work():
     assert pulled == []
 
 
-def test_cache(tmp_path):
+def test_cache(tmp_path, caplog):
     row = {**manifest(), "version": 2, "plan_id": "one"}
     calls = []
 
@@ -105,6 +108,8 @@ def test_cache(tmp_path):
     runtime = LeftRuntime(tmp_path)
     runtime.sources["pair"] = Source()
     window = row["windows"][0]
-    runtime.pull_window(row, window)
+    with caplog.at_level("INFO"):
+        runtime.pull_window(row, window)
     runtime.pull_window(row, window)
     assert calls == [["amount"]]
+    assert "left data pull completed: pair=pair vintage=all sampled_rows=1 path=" in caplog.text

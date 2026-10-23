@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_run_status (
   owner STRING NOT NULL,
   state STRING NOT NULL,
   timezone STRING NOT NULL,
+  from_date DATE,
+  to_date DATE,
+  vintage STRING,
+  sample_rate DOUBLE,
+  vintage_sample STRING NOT NULL,
   started_at TIMESTAMP_NTZ,
   updated_at TIMESTAMP_NTZ,
   ended_at TIMESTAMP_NTZ,
@@ -78,5 +83,13 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_progress_snapshot (
   units_complete BIGINT NOT NULL,
   units_failed BIGINT NOT NULL,
   worker_threads BIGINT NOT NULL,
-  detail STRING
+  payload STRING
+) USING DELTA;
+
+CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_reference (
+  table_name STRING NOT NULL,
+  column_name STRING NOT NULL,
+  keyword STRING,
+  definition STRING NOT NULL,
+  updated_at TIMESTAMP_NTZ NOT NULL
 ) USING DELTA;

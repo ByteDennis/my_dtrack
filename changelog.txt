@@ -9,7 +9,7 @@ Added
 Changed
 - Missing `DBX_PAIR_WORKBOOK` files now skip workbook synchronization and read existing pair metadata directly from Unity Catalog without downloading or creating a workbook.
 - Re-running the same pair/owner daily `run_id` now resumes compatible checkpoints instead of clearing the run; successful units and local pulls are reused, while failures and differences are retried. `--force` retains full replacement behavior.
-- Autorun mismatch-partition retries resume the same run unless force is enabled.
+- Automatic mismatch-partition recovery resumes the same run unless force is enabled; `--earlystop` disables recovery.
 - Resume publishes or refreshes the Left row/plan boundary before starting the remote Right job; incompatible effective config invalidates downstream Right row and plan artifacts before reuse.
 - Resume removes only derived `report/*` and `_status/units.csv` outputs before execution; durable units, successful results, role state, audit events, and compatible local pulls remain reusable after interruption or failure. `--force` remains the only full-run cleanup path.
 - Left/Right progress and backpressure use role-state counters instead of repeatedly scanning every unit/result object, and `units.csv` is generated at terminal boundaries instead of after every result.
@@ -20,7 +20,7 @@ Changed
 
 Verification
 - 180 focused protocol, Left/Right check, report, and Right-job tests pass.
-- 15 final same-run resume, force, autorun, checkpoint invalidation, and batch-retry tests pass.
+- 15 final same-run resume, force, automatic-recovery, checkpoint invalidation, and batch-retry tests pass.
 - 40 focused report-sheet, stale-output cleanup, partial-failure report, row-check, and resume tests pass.
 - Ruff check, Ruff format check, mirrored protocol comparison, and git diff check pass.
 - No live Databricks/Volume performance benchmark was run.
@@ -32,7 +32,7 @@ Added
 - just publish: packages the four main runtime packages, launchers, environment template, workbook, minimal pyproject/justfile, and concise English readme.txt; it does not build an executable.
 
 Changed
-- src/pair_recon/app/cli.py: restores `--defaults [yaml]` (`--default` alias) as a zero-interaction run, adds bounded `--autorun` mismatch-partition exclusion/restart, and adds `--force` PairRecon cache bypass plus result replacement.
+- src/pair_recon/app/cli.py: restores `--defaults [yaml]` (`--default` alias) as a zero-interaction run, enables bounded mismatch-partition exclusion/restart by default with `--earlystop` as the opt-out, and adds `--force` PairRecon cache bypass plus result replacement.
 - src/pair_recon/app/runner.py: detects Right mismatch-partition errors, forwards force into row/pull cache control, and no longer downloads remote-success result JSON after the Databricks notebook has published Catalog results.
 - src/pair_recon/app/catalog.py: forwards remote failed/cancelled status and one runtime error directly from Jobs API details without reading Volume artifacts or replacing an existing result summary.
 - src/pair_recon/app/cli.py: date-mode runs prompt for Left/Right date columns and date types, accept registered names or JSON specifications, and retain the effective values in public settings.

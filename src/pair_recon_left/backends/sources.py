@@ -179,9 +179,9 @@ class SqlSource(ABC):
             self.config["date_type"] = resolved.spec(portable=True)
             return resolved
 
-    def preflight(self) -> dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         try:
-            self.query(f"SELECT * FROM {self.relation()} WHERE 1=0", operation="preflight")
+            self.query(f"SELECT * FROM {self.relation()} WHERE 1=0", operation="health_check")
             if self.partition_mode == "date":
                 self.date_type()
             return {"ok": True, "source": self.config.get("source")}
@@ -402,10 +402,10 @@ class CsvSource(SqlSource):
         finally:
             connection.close()
 
-    def preflight(self) -> dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         try:
             columns, _rows = self.query(
-                f"SELECT * FROM {self.relation()} WHERE 1=0", operation="preflight"
+                f"SELECT * FROM {self.relation()} WHERE 1=0", operation="health_check"
             )
             if self.partition_mode == "date":
                 self.config["date_col"] = _resolve_column_name(

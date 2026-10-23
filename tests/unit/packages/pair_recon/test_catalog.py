@@ -6,10 +6,12 @@ from support import MemoryStore
 from pair_recon.app.catalog import Catalog
 from pair_recon_right.catalog import (
     ERROR_COLUMNS,
+    STATUS_RUN_COLUMNS,
     STATUS_SUMMARY_COLUMNS,
     append_error_rows,
     error_rows,
     result_summary,
+    status_run_values,
 )
 
 
@@ -122,6 +124,11 @@ def test_status(state):
         owner="me",
         state=state,
         timezone="America/New_York",
+        from_date="2026-10-01",
+        to_date="2026-10-21",
+        vintage="month",
+        sample_rate=0.1,
+        vintage_sample="5",
     )
     statement, values = sql.calls[-1]
     assert "MERGE INTO main.recon.run_status" in statement
@@ -131,6 +138,8 @@ def test_status(state):
     )
     assert "ended_at, row_total" in statement
     assert "CAST(:ended AS TIMESTAMP_NTZ)" in statement
+    assert set(STATUS_RUN_COLUMNS) <= values.keys()
+    assert values["sample_rate"] == 0.1 and values["vintage_sample"] == "5"
     assert values["row_total"] == 0 and values["column_differences"] == 0
 
 
@@ -187,13 +196,38 @@ def test_progress():
             "units_complete": 1,
             "units_failed": 0,
             "worker_threads": 3,
-            "detail": "{}",
+            "payload": "{}",
         }
     )
     statement, values = sql.calls[-1]
     assert "MERGE INTO c.s.progress" in statement
     assert "ON t.run_id = s.run_id" in statement
     assert values["worker_threads"] == 3
+
+
+def test_status_run_values_exposes_effective_selection():
+    assert status_run_values(
+        {
+            "fromDate": "2026-01-01",
+            "toDate": "2026-03-31",
+            "vintage": "month",
+            "sample": 0.1,
+            "vintage_sample_size": 5,
+        }
+    ) == {
+        "from_date": "2026-01-01",
+        "to_date": "2026-03-31",
+        "vintage": "month",
+        "sample_rate": 0.1,
+        "vintage_sample": "5",
+    }
+    assert status_run_values({"sample": False, "vintage_values": ["2026-01-01"]}) == {
+        "from_date": None,
+        "to_date": None,
+        "vintage": None,
+        "sample_rate": 1.0,
+        "vintage_sample": '["2026-01-01"]',
+    }
 
 
 def test_finish():

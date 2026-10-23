@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any
 
 from ...backends.sources import source_from_config
@@ -26,6 +26,7 @@ from ..runtime.run_logging import get_left_logger
 from ..sql.dates import resolve_date_type
 
 log = get_left_logger("row_check")
+ROW_COUNT_LOG_INTERVAL = 30.0
 SECRET_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
 STAGE_ONE_FIELDS = (
     "left",
@@ -114,7 +115,7 @@ def reuse_row_check(
             )
         cached[name] = {
             "counts": document["counts"],
-            "preflight": document.get("preflight") or {"ok": True, "reused": True},
+            "health_check": document.get("health_check") or {"ok": True, "reused": True},
             "timing": document.get("timing") or {"left_count_s": None},
         }
     log.info("reuse Left row check for run_id=%s pairs=%s", run_id, list(pairs))
@@ -147,7 +148,7 @@ def publish_row_check_results(
             "partition_mode": public.get("partition_mode", "date"),
             "counts": values,
             "pair_config": public,
-            "preflight": result["preflight"],
+            "health_check": result["health_check"],
             "timing": {"left_count_s": took},
         }
         store.put_json(left_row_path(name), document)
@@ -208,7 +209,7 @@ def run_row_check(
     source_factory: Callable[[dict[str, Any]], Any] = source_from_config,
     pair_workers: int = 4,
     sources: dict[str, Any] | None = None,
-    preflight_health: dict[str, dict[str, Any]] | None = None,
+    health_checks: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     pairs = active_pairs(config, pair_names)
     log.info("run_id=%s work=%s pairs=%s", run_id, store.root_uri, list(pairs))
@@ -244,7 +245,7 @@ def run_row_check(
         }
     missing_sources = sorted(set(pairs) - set(sources))
     if missing_sources:
-        raise ValueError(f"preflight sources missing pair(s): {', '.join(missing_sources)}")
+        raise ValueError(f"health check sources missing pair(s): {', '.join(missing_sources)}")
     sources = {
         name: attach_sql_audit(
             sources[name],
@@ -252,20 +253,22 @@ def run_row_check(
         )
         for name in pairs
     }
-    if preflight_health is None:
-        health = {name: source.preflight() for name, source in sources.items()}
+    if health_checks is None:
+        health = {name: source.health_check() for name, source in sources.items()}
     else:
-        missing_health = sorted(set(pairs) - set(preflight_health))
+        missing_health = sorted(set(pairs) - set(health_checks))
         if missing_health:
-            raise ValueError(f"preflight health missing pair(s): {', '.join(missing_health)}")
-        health = {name: dict(preflight_health[name]) for name in pairs}
+            raise ValueError(f"health check results missing pair(s): {', '.join(missing_health)}")
+        health = {name: dict(health_checks[name]) for name in pairs}
     for name, row in health.items():
         log.info(
-            "left preflight %s: %s", name, "OK" if row.get("ok") else f"FAIL {row.get('error')}"
+            "left health check %s: %s",
+            name,
+            "OK" if row.get("ok") else f"FAIL {row.get('error')}",
         )
     failed = [name for name, row in health.items() if not row.get("ok")]
     if failed:
-        raise RuntimeError(f"left preflight failed: {', '.join(failed)}")
+        raise RuntimeError(f"left health check failed: {', '.join(failed)}")
     for name, source in sources.items():
         detected = getattr(source, "config", {}).get("date_type")
         if detected is not None:
@@ -274,6 +277,18 @@ def run_row_check(
     def count(name: str):
         pair = pairs[name]
         begun = time.monotonic()
+        partition_mode = pair.get("partition_mode", "date")
+        date_range = (
+            "all"
+            if partition_mode == "all"
+            else f"{pair.get('fromDate') or '*'}..{pair.get('toDate') or '*'}"
+        )
+        log.info(
+            "left row count query started: pair=%s range=%s partition_mode=%s",
+            name,
+            date_range,
+            partition_mode,
+        )
         options = {}
         if pair.get("right_pre_sampled") and not pair.get("pre_sampled"):
             keys = [
@@ -289,12 +304,27 @@ def run_row_check(
 
     with ThreadPoolExecutor(max_workers=max(1, pair_workers)) as pool:
         counted = {name: pool.submit(count, name) for name in pairs}
+        pending = set(counted.values())
+        count_started = time.monotonic()
+        while pending:
+            _done, pending = wait(
+                pending,
+                timeout=ROW_COUNT_LOG_INTERVAL,
+                return_when=FIRST_COMPLETED,
+            )
+            if pending and not _done:
+                active = sorted(name for name, future in counted.items() if future in pending)
+                log.info(
+                    "left row count query still running: pairs=%s elapsed=%.1fs",
+                    active,
+                    time.monotonic() - count_started,
+                )
         counts = {name: future.result() for name, future in counted.items()}
     results = {}
     for name in pairs:
         values, took = counts[name]
         log.info(
-            "left count %s: %d partitions, %d rows (%.3fs)",
+            "left row count query completed: pair=%s partitions=%d rows=%d elapsed=%.3fs",
             name,
             len(values),
             sum(values.values()),
@@ -302,7 +332,7 @@ def run_row_check(
         )
         results[name] = {
             "counts": values,
-            "preflight": health[name],
+            "health_check": health[name],
             "timing": {"left_count_s": took},
         }
     documents = publish_row_check_results(store, run_id, pairs, results)

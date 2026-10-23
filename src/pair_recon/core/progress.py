@@ -48,14 +48,7 @@ def progress_snapshot(store, run_id: str, pair: str, timezone: str, state: str |
     threads = sorted(
         item.name for item in threading.enumerate() if item.name.startswith("pair_recon")
     )
-    detail = {
-        "row_matches": sum(value.get("result") == "match" for value in partitions.values()),
-        "row_partitions": len(partitions),
-        "left_partitions": len(left_counts),
-        "left_rows": sum(int(value) for value in left_counts.values()),
-        "threads": threads,
-    }
-    return {
+    snapshot = {
         "snapshot_ts": datetime.now(ZoneInfo(timezone))
         .replace(tzinfo=None)
         .isoformat(timespec="microseconds"),
@@ -67,8 +60,26 @@ def progress_snapshot(store, run_id: str, pair: str, timezone: str, state: str |
         "units_complete": results,
         "units_failed": failures,
         "worker_threads": len(threads),
-        "detail": json.dumps(detail, ensure_ascii=False, separators=(",", ":")),
     }
+    snapshot["payload"] = json.dumps(
+        {
+            **snapshot,
+            "row": {
+                "matches": sum(value.get("result") == "match" for value in partitions.values()),
+                "partitions": len(partitions),
+                "left_partitions": len(left_counts),
+                "left_rows": sum(int(value) for value in left_counts.values()),
+            },
+            "run_status": status,
+            "left_state": left_state,
+            "right_state": right_state,
+            "threads": threads,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return snapshot
 
 
 class ProgressSampler:
