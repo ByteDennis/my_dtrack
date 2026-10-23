@@ -144,6 +144,13 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "APPLY = False" in source
 
     right_notebook = (ROOT / "src/pair_recon_right/notebook.py").read_text(encoding="utf-8")
+    cells = right_notebook.split("# COMMAND ----------")
+    assert '%pip install -r "__PAIR_RECON_RIGHT_REQUIREMENTS__"' in cells[0]
+    assert "dbutils.library.restartPython()" in cells[1]
+    assert "from pair_recon_right.catalog import publish" in cells[2]
+    assert (ROOT / "src/pair_recon_right/requirements.txt").read_text(
+        encoding="utf-8"
+    ).splitlines() == ["openpyxl>=3.1"]
     assert right_notebook.count("**publish_values") == 2
     assert "publish(spark, store, **values" not in right_notebook
     assert "from pair_recon_right.catalog import publish" in right_notebook

@@ -26,6 +26,7 @@ RUNTIME_EXCLUDES = {
     "src/pair_recon/core/sas.py",
     "src/pair_recon_dbx/cli.py",
 }
+RUNTIME_FILES = ("src/pair_recon_right/requirements.txt",)
 README = """PairRecon
 
 Requirements: Python 3.11+, uv, and just.
@@ -121,6 +122,9 @@ def stage_release(root: Path, target: Path) -> list[Path]:
             if "__pycache__" in source.parts or relative.as_posix() in RUNTIME_EXCLUDES:
                 continue
             _copy_file(source, target / relative)
+
+    for name in RUNTIME_FILES:
+        _copy_file(root / name, target / name)
 
     (target / "pyproject.toml").write_text(
         release_project_text((root / "pyproject.toml").read_text(encoding="utf-8")),

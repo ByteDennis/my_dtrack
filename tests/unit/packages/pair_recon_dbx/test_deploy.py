@@ -109,19 +109,20 @@ def test_sync_right_uploads_local_package_and_repoints(monkeypatch):
 def test_notebook_body_rewrites_package_imports(tmp_path):
     source = tmp_path / "notebook.py"
     source.write_text(
+        '# MAGIC %pip install -r "__PAIR_RECON_RIGHT_REQUIREMENTS__"\n'
         "from pair_recon_right.catalog import publish\n"
         "from pair_recon_right.engine.job import run\n"
         "from pair_recon_left.backends import sources\n"
         "name = 'pair_recon_rightmost'\n",
         encoding="utf-8",
     )
-    body = deploy.notebook_body(source, "pair_recon").decode("utf-8")
+    body = deploy.notebook_body(source, "pair_recon", "/Users/me/apps/pair_recon").decode("utf-8")
+    assert '%pip install -r "/Workspace/Users/me/apps/pair_recon/requirements.txt"' in body
     assert "from pair_recon.catalog import publish" in body
     assert "from pair_recon.engine.job import run" in body
     assert "pair_recon_left.backends" in body
     assert "pair_recon_rightmost" in body
     assert "pair_recon_right." not in body
-    assert deploy.notebook_body(source, "pair_recon_right") == source.read_bytes()
 
 
 def test_right_package_only_names_itself_in_the_notebook():

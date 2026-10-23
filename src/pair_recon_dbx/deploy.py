@@ -11,6 +11,7 @@ RENAME_ENV = "DBX_PKG_RENAME"
 JOB_NAME_ENV = "DBX_JOB_NAME"
 DEFAULT_JOB_NAME = "pair_recon_right"
 _PACKAGE_NAME = re.compile(rb"\b" + RIGHT_PACKAGE.encode() + rb"\b")
+_REQUIREMENTS_PATH = b"__PAIR_RECON_RIGHT_REQUIREMENTS__"
 
 
 # >>> remote package name from DBX_PKG_RENAME="pair_recon_right -> pair_recon" <<< #
@@ -51,8 +52,11 @@ def right_notebook(target: str) -> str:
 
 
 # >>> notebook source with imports pointed at the remote package name <<< #
-def notebook_body(path: Path, remote: str) -> bytes:
-    return _PACKAGE_NAME.sub(remote.encode(), path.read_bytes())
+def notebook_body(path: Path, remote: str, target: str) -> bytes:
+    workspace_target = target if target.startswith("/Workspace/") else f"/Workspace{target}"
+    requirements = f"{workspace_target}/requirements.txt".encode()
+    body = _PACKAGE_NAME.sub(remote.encode(), path.read_bytes())
+    return body.replace(_REQUIREMENTS_PATH, requirements)
 
 
 # >>> mirror a local folder to a workspace folder <<< #
@@ -71,7 +75,7 @@ def upload(workspace, source: Path, target: str):
         options = {"format": ImportFormat.AUTO, "overwrite": True}
         if path.name == "notebook.py":
             remote = PurePosixPath(right_notebook(str(root)))
-            body = notebook_body(path, root.name)
+            body = notebook_body(path, root.name, str(root))
             options = {
                 "format": ImportFormat.SOURCE,
                 "language": Language.PYTHON,

@@ -166,20 +166,29 @@ def choose_many(label: str, values: list[str], default) -> list[str]:
     unknown = selected - set(values)
     if unknown:
         raise ValueError(f"unknown default choices: {', '.join(sorted(unknown))}")
-    print(label)
-    for index, value in enumerate(values, 1):
-        print(f"  [{'x' if value in selected else ' '}] {index}. {value}")
-    answer = ask(
-        "Selections (comma-separated names or numbers)",
-        ",".join(value for value in values if value in selected),
-    )
-    chosen = set()
-    for item in (value.strip() for value in answer.split(",")):
-        choice = values[int(item) - 1] if item.isdigit() and 1 <= int(item) <= len(values) else item
-        if choice not in values:
-            raise ValueError(f"choose one or more of: {', '.join(values)}")
-        chosen.add(choice)
-    return [value for value in values if value in chosen]
+    while True:
+        print(label)
+        for index, value in enumerate(values, 1):
+            print(f"  [{'x' if value in selected else ' '}] {index}. {value}")
+        answer, _editable = _read_prompt(
+            "Toggle by number/name, comma-separated; Enter confirms: ", ""
+        )
+        answer = answer.strip()
+        if answer.casefold() == "undo":
+            raise UndoPrompt
+        if not answer:
+            if not selected:
+                raise ValueError(f"choose one or more of: {', '.join(values)}")
+            return [value for value in values if value in selected]
+        toggles = set()
+        for item in (value.strip() for value in answer.split(",")):
+            choice = (
+                values[int(item) - 1] if item.isdigit() and 1 <= int(item) <= len(values) else item
+            )
+            if choice not in values:
+                raise ValueError(f"choose one or more of: {', '.join(values)}")
+            toggles.add(choice)
+        selected.symmetric_difference_update(toggles)
 
 
 def yes_no(label: str, default=False) -> bool:

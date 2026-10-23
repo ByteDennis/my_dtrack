@@ -1,4 +1,12 @@
 # Databricks notebook source
+# MAGIC %pip install -r "__PAIR_RECON_RIGHT_REQUIREMENTS__"
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 import json
 import logging
 import sys
