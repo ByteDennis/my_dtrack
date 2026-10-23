@@ -4,12 +4,16 @@ from types import SimpleNamespace
 import pytest
 from support import FakeConnection
 
+from pair_recon_left.backends import sources
 from pair_recon_left.backends.sources import (
     CsvSource,
     HadoopSource,
     OracleSource,
     source_from_config,
 )
+
+LDAP = "ldap://ldap.corp:389/PRODSVC,cn=OracleContext,dc=corp,dc=com"
+ORACLE_ENV = ("ORACLE_SVC", "ORACLE_DSN", "LDAP_DSN")
 
 
 @pytest.mark.parametrize(
@@ -57,15 +61,123 @@ def test_credentials(monkeypatch):
     assert (source.user, source.password, source.resolve_dsn()) == ("reader", "secret", "svc30")
 
 
-def test_legacy_oracle_service_alias(monkeypatch):
-    monkeypatch.delenv("ORACLE_SVC", raising=False)
+def test_credentials_ignore_retired_fallbacks(monkeypatch):
+    for name in ORACLE_ENV + ("ORACLE_USER", "ORACLE_PASSWORD", "pb30_USR", "pb30_PWD"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("PAIR_RECON_ORACLE_MACROS", "pb30:svc30")
+    monkeypatch.setenv("PCDS_USR", "old-user")
+    monkeypatch.setenv("pb30_pwd", "old-secret")
+    source = OracleSource({"source": "oracle", "conn_macro": "pb30", "table": "T"})
+    assert (source.user, source.password, source.service, source.resolve_dsn()) == (
+        None,
+        None,
+        None,
+        None,
+    )
 
+
+def test_ldap_dsn_resolves_once_without_a_service(monkeypatch):
+    for name in ORACLE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LDAP_DSN", LDAP)
+    lookups = []
+    monkeypatch.setattr(
+        sources, "solve_ldap", lambda value: lookups.append(value) or "(DESCRIPTION=x)"
+    )
+    connects = []
+    monkeypatch.setitem(
+        sys.modules,
+        "oracledb",
+        SimpleNamespace(connect=lambda **options: connects.append(options) or object()),
+    )
     source = OracleSource(
         {"source": "oracle", "conn_macro": "pb30", "user": "reader", "password": "secret"}
     )
+    assert source.service is None and source.dsn is None
+    assert source.resolve_dsn() == "(DESCRIPTION=x)"
+    source.connect()
+    assert connects == [{"user": "reader", "password": "secret", "dsn": "(DESCRIPTION=x)"}]
+    assert lookups == [LDAP]
 
-    assert source.resolve_dsn() == "svc30"
+
+def test_ldap_dsn_template_takes_service_from_macro(monkeypatch):
+    for name in ORACLE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ORACLE_SVC", "pb30:svc30")
+    monkeypatch.setenv("pb30_LDAP_DSN", "ldap://h/{service},cn=OracleContext,dc=x")
+    monkeypatch.setattr(sources, "solve_ldap", lambda value: f"resolved:{value}")
+    source = OracleSource({"source": "oracle", "conn_macro": "pb30", "user": "u", "password": "p"})
+    assert source.resolve_dsn() == "resolved:ldap://h/svc30,cn=OracleContext,dc=x"
+    bare = OracleSource(
+        {
+            "source": "oracle",
+            "conn_macro": "other",
+            "user": "u",
+            "password": "p",
+            "ldap_dsn": "ldap://h/{service},cn=OracleContext,dc=x",
+        }
+    )
+    with pytest.raises(ValueError, match="no Oracle service"):
+        bare.resolve_dsn()
+
+
+def test_explicit_dsn_wins_over_ldap(monkeypatch):
+    for name in ORACLE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LDAP_DSN", LDAP)
+    monkeypatch.setattr(
+        sources, "solve_ldap", lambda _value: pytest.fail("explicit dsn must skip LDAP")
+    )
+    source = OracleSource({"source": "oracle", "dsn": "db:1521/svc", "user": "u", "password": "p"})
+    assert source.resolve_dsn() == "db:1521/svc"
+    monkeypatch.delenv("LDAP_DSN")
+    missing = OracleSource({"source": "oracle", "user": "u", "password": "p"})
+    with pytest.raises(ValueError, match="dsn, service, or LDAP_DSN"):
+        missing.connect()
+
+
+def test_solve_ldap_reads_the_tns_descriptor(monkeypatch):
+    searches = []
+    directory = {
+        "bound": True,
+        "entries": [SimpleNamespace(orclNetDescString=SimpleNamespace(value="(DESCRIPTION=d)"))],
+    }
+
+    class Server:
+        def __init__(self, host, get_info=None):
+            self.host = host
+
+    class Connection:
+        result = "invalidCredentials"
+
+        def __init__(self, server):
+            self.server = server
+
+        def bind(self):
+            return directory["bound"]
+
+        @property
+        def entries(self):
+            return directory["entries"]
+
+        def search(self, base, query, attributes):
+            searches.append((self.server.host, base, query, attributes))
+
+    monkeypatch.setitem(
+        sys.modules, "ldap3", SimpleNamespace(ALL="ALL", Connection=Connection, Server=Server)
+    )
+    assert sources.solve_ldap(LDAP) == "(DESCRIPTION=d)"
+    assert searches == [
+        ("ldap.corp:389", "cn=OracleContext,dc=corp,dc=com", "(cn=PRODSVC)", ["orclNetDescString"])
+    ]
+    directory["entries"] = []
+    with pytest.raises(RuntimeError, match="no orclNetDescString for service 'PRODSVC'"):
+        sources.solve_ldap(LDAP)
+    directory["bound"] = False
+    with pytest.raises(RuntimeError, match="LDAP bind to ldap.corp:389 failed"):
+        sources.solve_ldap(LDAP)
+    with pytest.raises(ValueError, match="unsupported LDAP_DSN"):
+        sources.solve_ldap("ldaps://host/svc")
 
 
 def test_query(tmp_path):

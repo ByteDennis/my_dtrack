@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
@@ -417,21 +418,47 @@ class CsvSource(SqlSource):
 
 
 def oracle_macro_services() -> dict[str, str]:
-    configured = os.getenv("ORACLE_SVC") or os.getenv("PAIR_RECON_ORACLE_MACROS", "")
+    configured = os.getenv("ORACLE_SVC", "")
     pairs = (item.split(":", 1) for item in configured.split(","))
     return {key.strip(): value.strip() for key, value in (p for p in pairs if len(p) == 2)}
 
 
+LDAP_DSN_PATTERN = re.compile(r"^ldap://([^/]+)/([^,]+),(cn=OracleContext.*)$")
+
+
+# >>> ldap://host/service,cn=OracleContext,... -> TNS descriptor through ldap3 <<< #
+def solve_ldap(ldap_dsn: str) -> str:
+    match = LDAP_DSN_PATTERN.match(ldap_dsn.strip())
+    if not match:
+        raise ValueError(f"unsupported LDAP_DSN: {ldap_dsn!r}")
+    host, service, context = match.groups()
+    from ldap3 import ALL, Connection, Server
+
+    connection = Connection(Server(host, get_info=ALL))
+    if not connection.bind():
+        raise RuntimeError(f"LDAP bind to {host} failed: {connection.result!r}")
+    connection.search(context, f"(cn={service})", attributes=["orclNetDescString"])
+    entry = connection.entries[0] if connection.entries else None
+    descriptor = getattr(getattr(entry, "orclNetDescString", None), "value", None)
+    if not descriptor:
+        raise RuntimeError(f"LDAP has no orclNetDescString for service {service!r} on {host}")
+    return str(descriptor)
+
+
+# >>> credentials by name: explicit field, *_env, <macro>_USR/_PWD/_DSN/_LDAP_DSN, then ORACLE_*/LDAP_DSN <<< #
 class OracleSource(SqlSource):
     dialect = "oracle"
 
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.macro = str(config.get("conn_macro") or "")
-        self.user = self._pick("user", "USR") or os.getenv("ORACLE_USER") or os.getenv("PCDS_USR")
-        self.password = self._pick("password", "PWD", "pwd") or os.getenv("ORACLE_PASSWORD")
+        self.user = self._pick("user", "USR") or os.getenv("ORACLE_USER")
+        self.password = self._pick("password", "PWD") or os.getenv("ORACLE_PASSWORD")
         self.service = config.get("service") or oracle_macro_services().get(self.macro)
         self.dsn = self._pick("dsn", "DSN") or (None if self.service else os.getenv("ORACLE_DSN"))
+        self.ldap_dsn = self._pick("ldap_dsn", "LDAP_DSN") or os.getenv("LDAP_DSN")
+        self._resolved_dsn: str | None = None
+        self._resolve_lock = threading.Lock()
         self._key_types: dict[tuple[str, ...], list[str | None]] = {}
         self._key_types_lock = threading.Lock()
 
@@ -441,14 +468,27 @@ class OracleSource(SqlSource):
         found = (os.getenv(name) for name in names if name)
         return self.config.get(field) or next((value for value in found if value), None)
 
+    # >>> explicit dsn, else LDAP lookup (cached, {service} filled from the macro), else service <<< #
     def resolve_dsn(self) -> str | None:
-        return self.dsn or self.service
+        if self.dsn or not self.ldap_dsn:
+            return self.dsn or self.service
+        with self._resolve_lock:
+            if self._resolved_dsn is None:
+                target = self.ldap_dsn
+                if "{service}" in target:
+                    if not self.service:
+                        raise ValueError(
+                            "LDAP_DSN uses {service} but no Oracle service is configured"
+                        )
+                    target = target.replace("{service}", self.service)
+                self._resolved_dsn = solve_ldap(target)
+            return self._resolved_dsn
 
     def connect(self):
         import oracledb
 
-        if not (self.user and self.password and (self.dsn or self.service)):
-            raise ValueError("Oracle requires user, password, and dsn")
+        if not (self.user and self.password and (self.dsn or self.service or self.ldap_dsn)):
+            raise ValueError("Oracle requires user, password, and dsn, service, or LDAP_DSN")
         return oracledb.connect(user=self.user, password=self.password, dsn=self.resolve_dsn())
 
     def key_types(self, key_columns: list[str]) -> list[str | None]:

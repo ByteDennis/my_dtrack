@@ -897,6 +897,18 @@ wheels = [
 ]
 
 [[package]]
+name = "ldap3"
+version = "2.9.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyasn1" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/ac/96bd5464e3edbc61595d0d69989f5d9969ae411866427b2500a8e5b812c0/ldap3-2.9.1.tar.gz", hash = "sha256:f3e7fc4718e3f09dda568b57100095e0ce58633bcabbed8667ce3f8fbaa4229f", size = 398830 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/f6/71d6ec9f18da0b2201287ce9db6afb1a1f637dedb3f0703409558981c723/ldap3-2.9.1-py2.py3-none-any.whl", hash = "sha256:5869596fc4948797020d3f03b7939da938778a0f9e2009f7a072ccf92b8e8d70", size = 432192 },
+]
+
+[[package]]
 name = "matplotlib-inline"
 version = "0.2.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1188,9 +1200,11 @@ source = { editable = "." }
 dependencies = [
     { name = "databricks-sdk" },
     { name = "duckdb" },
+    { name = "ldap3" },
     { name = "openpyxl" },
     { name = "oracledb" },
     { name = "pandas" },
+    { name = "prompt-toolkit" },
     { name = "python-dotenv" },
     { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'group-10-pair-recon-live' and extra == 'group-10-pair-recon-spark')" },
     { name = "pyyaml" },
@@ -1230,9 +1244,11 @@ requires-dist = [
     { name = "debugpy", marker = "extra == 'debug'", specifier = ">=1.8" },
     { name = "duckdb", specifier = ">=1.1" },
     { name = "ipdb", marker = "extra == 'debug'", specifier = ">=0.13" },
+    { name = "ldap3", specifier = ">=2.9" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "oracledb", specifier = ">=3.0" },
     { name = "pandas", specifier = ">=2.0" },
+    { name = "prompt-toolkit", specifier = ">=3.0" },
     { name = "pyodbc", marker = "extra == 'hadoop'", specifier = ">=5.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=312" },

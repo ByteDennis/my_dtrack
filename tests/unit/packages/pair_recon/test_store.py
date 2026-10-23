@@ -59,3 +59,18 @@ def test_sdk_not_found_means_remote_object_is_missing():
     assert not store.exists("new-run/_status/run.json")
     assert store.list_keys("new-run") == []
     assert store.list_prefixes("new-run") == []
+
+
+def test_delete_keys_ignores_remote_objects_that_are_already_missing():
+    class StrictFiles(Files):
+        def delete(self, path):
+            if path not in self.values:
+                raise NotFound(path)
+            super().delete(path)
+
+    files = StrictFiles()
+    store = ApiVolumeStore("/Volumes/main/recon/artifacts/runs/run-1", files=files)
+    store.put_json("row_check/left.json", {"counts": {"all": 1}})
+
+    assert store.delete_keys(["row_check/left.json", "_status/col_check.closed.json"]) == 1
+    assert not store.exists("row_check/left.json")

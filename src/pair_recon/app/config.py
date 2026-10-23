@@ -31,6 +31,18 @@ def env_value(*names: str, default: str | None = None) -> str | None:
     return default
 
 
+def env_boolean(name: str, *, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
 def local_output_root(defaults: dict[str, Any] | None = None) -> Path:
     configured = os.getenv(OUTPUT_DIR_ENV, "").strip()
     selected = configured or (defaults or {}).get("work_dir") or DEFAULT_OUTPUT_DIR

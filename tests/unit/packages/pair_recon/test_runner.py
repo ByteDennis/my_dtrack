@@ -305,6 +305,71 @@ def test_execute_saves_created_job_id_in_yaml(monkeypatch, tmp_path):
     assert yaml.safe_load(defaults.read_text(encoding="utf-8"))["right_job_id"] == "314"
 
 
+def test_execute_saves_yaml_when_run_now_is_no(monkeypatch, tmp_path):
+    defaults = tmp_path / ".pair_recon.yaml"
+    settings = {
+        "owner": "me",
+        "pair": "orders",
+        "run_id": "orders-me-20261021",
+        "timezone": "America/New_York",
+        "sync_remote": False,
+        "email_to": "",
+    }
+    config = {"pairs": {"orders": {}}}
+    monkeypatch.setattr(cli, "DEFAULTS", defaults)
+    monkeypatch.setattr(cli, "load_environment", lambda: None)
+    monkeypatch.setattr(
+        cli, "prompts", lambda _defaults: (settings, config, "new", object(), object())
+    )
+    monkeypatch.setattr(cli, "configure_console_logging", lambda *_args: None)
+    monkeypatch.setattr(cli, "yes_no", lambda label, _default: label != "Run now")
+    monkeypatch.setattr(
+        cli,
+        "write_request_snapshot",
+        lambda *_args: pytest.fail("a declined run must not create a request snapshot"),
+    )
+    monkeypatch.setattr(cli, "launch", lambda *_args, **_kwargs: pytest.fail("must not run"))
+    args = SimpleNamespace(config=None, log_level="INFO")
+
+    assert cli.execute(args, raise_errors=True) == 0
+    saved = yaml.safe_load(defaults.read_text(encoding="utf-8"))
+    assert saved["owner"] == "me" and saved["pair"] == "orders"
+    assert "run_id" not in saved
+
+
+def test_execute_undo_from_run_now_reopens_previous_question(monkeypatch, tmp_path):
+    defaults = tmp_path / ".pair_recon.yaml"
+    responses = iter(("first-owner", "undo", "final-owner", "no"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(responses))
+    monkeypatch.setattr(cli, "DEFAULTS", defaults)
+    monkeypatch.setattr(cli, "load_environment", lambda: None)
+
+    def prompt(_defaults):
+        owner = cli._PROMPT_SESSION.get().answer("Run owner", "saved-owner")
+        return (
+            {
+                "owner": owner,
+                "pair": "orders",
+                "run_id": "orders-me-20261021",
+                "timezone": "America/New_York",
+                "sync_remote": False,
+                "email_to": "",
+            },
+            {"pairs": {"orders": {}}},
+            "new",
+            object(),
+            object(),
+        )
+
+    monkeypatch.setattr(cli, "prompts", prompt)
+    monkeypatch.setattr(cli, "configure_console_logging", lambda *_args: None)
+    monkeypatch.setattr(cli, "launch", lambda *_args, **_kwargs: pytest.fail("must not run"))
+    args = SimpleNamespace(config=None, log_level="INFO")
+
+    assert cli.execute(args, raise_errors=True) == 0
+    assert yaml.safe_load(defaults.read_text(encoding="utf-8"))["owner"] == "final-owner"
+
+
 def test_execute_defaults_mode_skips_all_interaction(monkeypatch, tmp_path):
     defaults = tmp_path / "run.yaml"
     defaults.write_text("pair: orders\n", encoding="utf-8")
@@ -683,6 +748,41 @@ def test_attribute_check_registry_and_multiselect(monkeypatch):
         "row_count",
         "n_missing",
     ]
+
+
+def test_editable_prompt_prefills_default_and_allows_clearing(monkeypatch):
+    seen = {}
+
+    def read(message, default):
+        seen.update(message=message, default=default)
+        return "", True
+
+    monkeypatch.setattr(cli, "_read_prompt", read)
+
+    assert cli.ask("Outlook recipients", "a@example.com", required=False) == ""
+    assert seen == {
+        "message": "Outlook recipients [a@example.com]: ",
+        "default": "a@example.com",
+    }
+
+
+def test_prompt_session_undo_returns_to_previous_question(monkeypatch):
+    answers = iter(("first", "second", "undo", "changed", "third"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    session = cli.PromptSession()
+
+    while True:
+        session.begin()
+        try:
+            first = session.answer("First")
+            second = session.answer("Second")
+            third = session.answer("Third")
+            break
+        except cli.RestartPrompts:
+            continue
+
+    assert (first, second, third) == ("first", "changed", "third")
+    assert session.answers == ["first", "changed", "third"]
 
 
 def test_retry():
@@ -1284,6 +1384,48 @@ def test_pair_workbook_path_uses_environment_even_when_missing(monkeypatch, tmp_
     assert cli.pair_workbook_path({"pair_workbook": "ignored.xlsx"}) == workbook
 
 
+def test_prompt_can_use_databricks_metadata_without_syncing_local_workbook(
+    monkeypatch, tmp_path, capsys
+):
+    defaults = {
+        "owner": "me",
+        "profile": "corp",
+        "warehouse_id": "warehouse",
+        "pair_table": "main.recon.pair_recon_pair_meta",
+        "status_table": "main.recon.pair_recon_run_status",
+        "error_table": "main.recon.pair_recon_run_error",
+        "volume_root": "/Volumes/main/recon/artifacts/runs",
+        "pair_workbook": str(tmp_path / "pairs.xlsx"),
+    }
+
+    class Catalog:
+        def __init__(self, *_args):
+            pass
+
+        def pairs(self):
+            return []
+
+    (tmp_path / "pairs.xlsx").touch()
+    monkeypatch.setenv("DBX_SYNC_PAIR_METADATA", "false")
+    monkeypatch.setattr(cli, "Catalog", Catalog)
+    monkeypatch.setattr(
+        cli,
+        "synchronize_pair_workbook",
+        lambda *_args: pytest.fail("disabled metadata synchronization must not read the workbook"),
+    )
+
+    with pytest.raises(RuntimeError, match="have no enabled pair"):
+        cli.prompts(
+            defaults,
+            workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object()),
+            interactive=False,
+        )
+
+    output = capsys.readouterr().out
+    assert "DBX_SYNC_PAIR_METADATA=false" in output
+    assert "using Databricks metadata as the source of truth" in output
+
+
 def test_local(monkeypatch, tmp_path):
     store = MemoryStore()
     events = []
@@ -1318,8 +1460,8 @@ def test_local(monkeypatch, tmp_path):
         def finish(self, _store, **values):
             events.append(f"finish:{values['state']}")
 
-    def left(*_args, **_kwargs):
-        _args[-1]()
+    def left(*_args, release=None, **_kwargs):
+        release()
         return {"row": "ready", "units": 2}
 
     monkeypatch.setattr(runner, "VolumeStore", Root)

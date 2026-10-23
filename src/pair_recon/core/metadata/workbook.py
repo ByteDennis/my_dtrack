@@ -54,6 +54,8 @@ LEFT_OPTION_FIELDS = {
     "user_env",
     "password_env",
     "dsn_env",
+    "ldap_dsn",
+    "ldap_dsn_env",
     "autocommit",
     "nullstr",
     "date_format",

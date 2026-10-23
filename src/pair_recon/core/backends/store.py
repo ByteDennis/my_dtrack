@@ -94,9 +94,16 @@ class ApiVolumeStore:
             raise
 
     def delete_keys(self, keys: list[str]) -> int:
+        deleted = 0
         for key in keys:
-            self.files.delete(self._path(key))
-        return len(keys)
+            try:
+                self.files.delete(self._path(key))
+            except Exception as exc:
+                if _is_not_found(exc):
+                    continue
+                raise
+            deleted += 1
+        return deleted
 
     def clear(self) -> int:
         keys = self.list_keys("")

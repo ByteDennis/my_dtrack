@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+from contextvars import ContextVar
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from pair_recon_left.common.sql.dates import contiguous_runs, resolve_date_type
 
 from .catalog import Catalog
 from .config import (
+    env_boolean,
     env_value,
     load_config,
     load_defaults,
@@ -54,18 +56,92 @@ log = get_logger("cli")
 DEFAULTS = Path(".pair_recon.yaml")
 PAIR_WORKBOOK = Path(__file__).resolve().parents[3] / "setup" / "pairs.xlsx"
 PAIR_WORKBOOK_ENV = "DBX_PAIR_WORKBOOK"
+SYNC_PAIR_METADATA_ENV = "DBX_SYNC_PAIR_METADATA"
 AUTO_EXCLUDE_RETRIES = 3
+
+
+class UndoPrompt(Exception):
+    pass
+
+
+class RestartPrompts(Exception):
+    pass
+
+
+class PromptSession:
+    def __init__(self):
+        self.answers = []
+        self.cache = {}
+        self.cursor = 0
+        self.replay_target = None
+
+    def begin(self):
+        self.cursor = 0
+
+    def _step(self, default, prompt):
+        index = self.cursor
+        self.cursor += 1
+        if self.replay_target is not None and index < self.replay_target:
+            return self.answers[index]
+        selected_default = self.answers[index] if index < len(self.answers) else default
+        try:
+            value = prompt(selected_default)
+        except UndoPrompt:
+            self.replay_target = max(0, index - 1)
+            raise RestartPrompts from None
+        if index < len(self.answers):
+            self.answers[index] = value
+            del self.answers[index + 1 :]
+        else:
+            self.answers.append(value)
+        if self.replay_target == index:
+            self.replay_target = None
+        return value
+
+    def answer(self, label, default=None, *, required=True):
+        return self._step(default, lambda value: ask(label, value, required=required))
+
+    def select(self, label, values, default=None):
+        return self._step(default, lambda value: choose(label, values, value))
+
+    def select_many(self, label, values, default):
+        return self._step(default, lambda value: choose_many(label, values, value))
+
+    def confirm(self, label, default=False):
+        return self._step(default, lambda value: yes_no(label, value))
+
+    def worker_budget(self, label, default):
+        return self._step(default, lambda value: positive_int(label, value))
+
+
+_PROMPT_SESSION = ContextVar("pair_recon_prompt_session", default=None)
 
 
 def console(message: str):
     print(message, flush=True)
 
 
+def _read_prompt(message: str, default: str) -> tuple[str, bool]:
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        from prompt_toolkit import prompt
+
+        return prompt(message, default=default), True
+    return input(message), False
+
+
 def ask(label: str, default=None, *, required=True) -> str:
     shown = "" if default in (None, "") else f" [{default}]"
-    value = input(f"{label}{shown}: ").strip()
+    initial = "" if default in (None, "") else str(default)
+    value, editable = _read_prompt(f"{label}{shown}: ", initial)
+    value = value.strip()
+    if value.casefold() == "undo":
+        raise UndoPrompt
     if value:
         return value
+    if editable:
+        if required:
+            raise ValueError(f"{label} is required")
+        return ""
     if default not in (None, ""):
         return str(default)
     if required:
@@ -90,24 +166,20 @@ def choose_many(label: str, values: list[str], default) -> list[str]:
     unknown = selected - set(values)
     if unknown:
         raise ValueError(f"unknown default choices: {', '.join(sorted(unknown))}")
-    while True:
-        print(label)
-        for index, value in enumerate(values, 1):
-            print(f"  [{'x' if value in selected else ' '}] {index}. {value}")
-        answer = input("Toggle by number/name, comma-separated; Enter confirms: ").strip()
-        if not answer:
-            if not selected:
-                raise ValueError(f"choose one or more of: {', '.join(values)}")
-            return [value for value in values if value in selected]
-        toggles = set()
-        for item in (value.strip() for value in answer.split(",")):
-            choice = (
-                values[int(item) - 1] if item.isdigit() and 1 <= int(item) <= len(values) else item
-            )
-            if choice not in values:
-                raise ValueError(f"choose one or more of: {', '.join(values)}")
-            toggles.add(choice)
-        selected.symmetric_difference_update(toggles)
+    print(label)
+    for index, value in enumerate(values, 1):
+        print(f"  [{'x' if value in selected else ' '}] {index}. {value}")
+    answer = ask(
+        "Selections (comma-separated names or numbers)",
+        ",".join(value for value in values if value in selected),
+    )
+    chosen = set()
+    for item in (value.strip() for value in answer.split(",")):
+        choice = values[int(item) - 1] if item.isdigit() and 1 <= int(item) <= len(values) else item
+        if choice not in values:
+            raise ValueError(f"choose one or more of: {', '.join(values)}")
+        chosen.add(choice)
+    return [value for value in values if value in chosen]
 
 
 def yes_no(label: str, default=False) -> bool:
@@ -243,7 +315,7 @@ def default_boolean(label: str, default=False) -> bool:
 
 def right_job_reference(value: object) -> str:
     reference = str(value or "").strip()
-    if reference.casefold() in {"-", "clear"}:
+    if not reference or reference.casefold() in {"-", "clear"}:
         return str(env_value(JOB_NAME_ENV, default=DEFAULT_JOB_NAME))
     return reference
 
@@ -294,11 +366,20 @@ def synchronize_pair_workbook(sql, catalog, pair_table: str, workbook_path: str 
 
 
 def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = True):
-    answer = ask if interactive else default_answer
-    select = choose if interactive else default_choice
-    select_many = choose_many if interactive else default_choices
-    confirm = yes_no if interactive else default_boolean
-    worker_budget = positive_int if interactive else default_positive_int
+    session = _PROMPT_SESSION.get() if interactive else None
+    if interactive:
+        session = session or PromptSession()
+        answer = session.answer
+        select = session.select
+        select_many = session.select_many
+        confirm = session.confirm
+        worker_budget = session.worker_budget
+    else:
+        answer = default_answer
+        select = default_choice
+        select_many = default_choices
+        confirm = default_boolean
+        worker_budget = default_positive_int
 
     owner = answer("Run owner", os.getenv("USERNAME") or defaults.get("owner"))
     profile = answer(
@@ -331,40 +412,66 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     )
     email_to = answer("Outlook recipients", defaults.get("email_to"), required=False)
     workbook_path = pair_workbook_path(defaults)
-    console(f"Initializing Databricks client for profile {profile!r}...")
-    client = workspace_factory(profile)
-    if workbook_path.exists():
-        console(
-            f"Checking {workbook_path} against {pair_table} through SQL warehouse {warehouse!r}."
-        )
-    statement_sql = StatementSql(client, warehouse, reporter=console)
-    catalog = Catalog(
-        statement_sql,
+    sync_pair_metadata = env_boolean(SYNC_PAIR_METADATA_ENV, default=True)
+    metadata_key = (
+        profile,
+        warehouse,
         pair_table,
         status_table,
         error_table,
         progress_table,
+        str(workbook_path),
+        sync_pair_metadata,
     )
-    workbook_rows, sync = synchronize_pair_workbook(
-        statement_sql, catalog, pair_table, workbook_path
-    )
-    if sync.get("skipped") == "missing":
-        console(
-            f"Pair workbook not found at {workbook_path}; skipping workbook synchronization "
-            "and reading existing metadata from Databricks."
-        )
-    elif sync["rows"]:
-        console(
-            f"Updated {sync['rows']} Pair(s) from {workbook_path} in "
-            f"{sync['pair_meta_table']}: {', '.join(sync['pairs'])}"
-        )
-    elif workbook_rows:
-        console("Pair workbook metadata is already current; no remote upsert was needed.")
+    cached = session.cache.get("metadata") if session else None
+    if cached and cached[0] == metadata_key:
+        client, statement_sql, catalog, by_name = cached[1:]
+        statement_sql.reporter = console
     else:
-        console("Pair workbook has no configuration rows; remote metadata was not changed.")
-    console("Loading enabled pairs, column mappings, and pair SQL from Databricks...")
-    by_name = {row["pair_name"]: row for row in catalog.pairs()}
-    console(f"Loaded {len(by_name)} enabled pair(s).")
+        console(f"Initializing Databricks client for profile {profile!r}...")
+        client = workspace_factory(profile)
+        if sync_pair_metadata and workbook_path.exists():
+            console(
+                f"Checking {workbook_path} against {pair_table} through SQL warehouse {warehouse!r}."
+            )
+        statement_sql = StatementSql(client, warehouse, reporter=console)
+        catalog = Catalog(
+            statement_sql,
+            pair_table,
+            status_table,
+            error_table,
+            progress_table,
+        )
+        workbook_rows = []
+        sync = {"rows": 0, "pairs": [], "source": str(workbook_path)}
+        if sync_pair_metadata:
+            workbook_rows, sync = synchronize_pair_workbook(
+                statement_sql, catalog, pair_table, workbook_path
+            )
+        if not sync_pair_metadata:
+            console(
+                f"{SYNC_PAIR_METADATA_ENV}=false; skipping local workbook synchronization "
+                "and using Databricks metadata as the source of truth."
+            )
+        elif sync.get("skipped") == "missing":
+            console(
+                f"Pair workbook not found at {workbook_path}; skipping workbook synchronization "
+                "and reading existing metadata from Databricks."
+            )
+        elif sync["rows"]:
+            console(
+                f"Updated {sync['rows']} Pair(s) from {workbook_path} in "
+                f"{sync['pair_meta_table']}: {', '.join(sync['pairs'])}"
+            )
+        elif workbook_rows:
+            console("Pair workbook metadata is already current; no remote upsert was needed.")
+        else:
+            console("Pair workbook has no configuration rows; remote metadata was not changed.")
+        console("Loading enabled pairs, column mappings, and pair SQL from Databricks...")
+        by_name = {row["pair_name"]: row for row in catalog.pairs()}
+        console(f"Loaded {len(by_name)} enabled pair(s).")
+        if session:
+            session.cache["metadata"] = (metadata_key, client, statement_sql, catalog, by_name)
     pair_names = list(by_name)
     if not pair_names:
         raise RuntimeError(f"Catalog and {workbook_path} have no enabled pair")
@@ -406,7 +513,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         defaults.get("right_job_id") or env_value(JOB_NAME_ENV, default=DEFAULT_JOB_NAME)
     )
     if remote_right:
-        entered = answer("Right job id or name ('-' or 'clear' resets it)", right_job_id)
+        entered = answer("Right job id or name", right_job_id, required=False)
         right_job_id = right_job_reference(entered)
         if entered != right_job_id:
             console(f"Saved Right job id cleared; using {JOB_NAME_ENV}={right_job_id!r}.")
@@ -622,38 +729,56 @@ def execute(args, *, raise_errors: bool = False) -> int:
         defaults_path = getattr(args, "defaults_path", None)
         selected_defaults = defaults_path or DEFAULTS
         defaults = load_config(config_path) if config_path else load_defaults(selected_defaults)
-        prompt_result = (
-            prompts(defaults) if defaults_path is None else prompts(defaults, interactive=False)
-        )
-        settings, config, action, client, catalog = prompt_result
-        settings["autorun"] = bool(getattr(args, "autorun", False))
-        settings["force"] = bool(getattr(args, "force", False))
-        if settings["force"]:
-            action = "restart"
-        configure_console_logging(args.log_level, settings["timezone"])
-        print(
-            json.dumps(
-                {
-                    "settings": {
-                        key: value for key, value in settings.items() if not key.startswith("_")
-                    },
-                    "pair": next(iter(config["pairs"])),
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-        if defaults_path is None and not yes_no("Run now", True):
-            return 0
+        interactive = defaults_path is None
+        prompt_session = PromptSession() if interactive else None
+        token = _PROMPT_SESSION.set(prompt_session)
+        try:
+            while True:
+                settings = None
+                if prompt_session:
+                    prompt_session.begin()
+                try:
+                    prompt_result = (
+                        prompts(defaults) if interactive else prompts(defaults, interactive=False)
+                    )
+                    settings, config, action, client, catalog = prompt_result
+                    settings["autorun"] = bool(getattr(args, "autorun", False))
+                    settings["force"] = bool(getattr(args, "force", False))
+                    if settings["force"]:
+                        action = "restart"
+                    configure_console_logging(args.log_level, settings["timezone"])
+                    print(
+                        json.dumps(
+                            {
+                                "settings": {
+                                    key: value
+                                    for key, value in settings.items()
+                                    if not key.startswith("_")
+                                },
+                                "pair": next(iter(config["pairs"])),
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                    run_now = prompt_session.confirm("Run now", True) if prompt_session else True
+                    save_defaults(selected_defaults, persistent_settings(settings))
+                    if not run_now:
+                        return 0
+                    break
+                except RestartPrompts:
+                    console("Returning to the previous question...")
+        finally:
+            _PROMPT_SESSION.reset(token)
         if settings["sync_remote"]:
             if not env_value(WORKSPACE_DIR_ENV):
                 raise ValueError(f"Sync remote requires {WORKSPACE_DIR_ENV} in .pair_recon.env")
             log.info("syncing Right package files to Databricks Workspace")
             synced = sync_right_package(settings, client)
             log.info("Right package sync completed: %s", json.dumps(synced, ensure_ascii=False))
+            save_defaults(selected_defaults, persistent_settings(settings))
         else:
             log.info("Right package sync skipped by run option")
-        save_defaults(selected_defaults, persistent_settings(settings))
         snapshot = write_request_snapshot(settings, config)
         log.info("request snapshot: %s", snapshot)
         attempts = 0

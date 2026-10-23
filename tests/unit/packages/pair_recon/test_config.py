@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from pair_recon.app.config import (
+    env_boolean,
     env_value,
     load_config,
     load_defaults,
@@ -12,6 +13,24 @@ from pair_recon.app.config import (
     run_config,
     save_defaults,
 )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("true", True), ("YES", True), ("1", True), ("false", False), ("off", False), ("0", False)],
+)
+def test_env_boolean(monkeypatch, value, expected):
+    monkeypatch.setenv("DBX_SYNC_PAIR_METADATA", value)
+
+    assert env_boolean("DBX_SYNC_PAIR_METADATA", default=not expected) is expected
+
+
+def test_env_boolean_uses_default_and_rejects_invalid(monkeypatch):
+    monkeypatch.delenv("DBX_SYNC_PAIR_METADATA", raising=False)
+    assert env_boolean("DBX_SYNC_PAIR_METADATA", default=True) is True
+    monkeypatch.setenv("DBX_SYNC_PAIR_METADATA", "sometimes")
+    with pytest.raises(ValueError, match="DBX_SYNC_PAIR_METADATA must be true or false"):
+        env_boolean("DBX_SYNC_PAIR_METADATA")
 
 
 def test_load_environment_reads_only_pair_recon_file(monkeypatch, tmp_path: Path):
