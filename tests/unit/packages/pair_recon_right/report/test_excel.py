@@ -32,9 +32,9 @@ def test_cell_values_and_relation_names():
 
 def test_row_sheet_uses_current_result_field():
     workbook = excel.build_workbook([DOCUMENT], {})
-    sheet = workbook["a_rather_long_pair_name_over_31"[:31]]
+    sheet = workbook["Row Check"]
 
-    assert workbook.sheetnames == ["a_rather_long_pair_name_over_31"[:31]]
+    assert workbook.sheetnames == ["Row Check"]
     assert sheet["A1"].value == "ORACLE:" and sheet["A2"].value == "DATABRICKS:"
     dates = [sheet.cell(row=row, column=1).value for row in range(12, 15)]
     assert dates == ["2026-01-02", "2026-01-03", "2026-01-01"]
@@ -48,7 +48,7 @@ def test_col_sheet_preserves_diff_styling():
     same = compare_statistics(pair="p", window="2026-01-01", column="Y", left=STATS, right=STATS)
     diff["right_col"] = "x_r"
     workbook = excel.build_workbook([{**DOCUMENT, "pair": "p"}], {"p": [diff, same]})
-    sheet = workbook["p_col"]
+    sheet = workbook["Column Check"]
     values = [[cell.value for cell in row] for row in sheet.iter_rows()]
 
     assert values[0][:2] == ["Vintage: 2026-01-01", "PASS"]

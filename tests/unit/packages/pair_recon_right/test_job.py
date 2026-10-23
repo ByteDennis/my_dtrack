@@ -33,6 +33,8 @@ def test_rowonly(tmp_path):
     store = VolumeStore(tmp_path / "runs" / "r1")
     store.put_json("row_check/left.json", document(["row_count"]))
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    store.put_bytes("report/row_check.csv", b"old")
+    store.put_bytes("report/col_check.csv", b"old")
     result = run(
         tmp_path / "runs",
         lambda _config: FakeTarget(counts={"all": 2}),
@@ -41,17 +43,43 @@ def test_rowonly(tmp_path):
         wait_timeout=1,
     )
     assert result == {"row_errors": 0, "column_errors": 0, "failures": 0}
-    assert {
+    assert set(store.list_keys("report/")) == {
         "report/index.html",
         "report/report.xlsx",
-        "report/row_check.csv",
         "report/summary.json",
-    } <= set(store.list_keys("report/"))
+    }
 
 
 def test_timeout(tmp_path):
     with pytest.raises(TimeoutError):
         run(tmp_path, None, poll_interval=0, wait_timeout=0)
+
+
+def test_row_check_failure_publishes_partial_workbook_without_csv(tmp_path):
+    store = VolumeStore(tmp_path / "runs" / "r1")
+    store.put_json("row_check/left.json", document(["hash_sum"]))
+    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+
+    with pytest.raises(RuntimeError, match="partition_mode all row counts differ"):
+        run(
+            None,
+            lambda _config: FakeTarget(counts={"all": 3}),
+            run_id="r1",
+            poll_interval=0,
+            store=store,
+        )
+
+    assert set(store.list_keys("report/")) == {
+        "report/index.html",
+        "report/report.xlsx",
+        "report/summary.json",
+    }
+
+    from openpyxl import load_workbook
+
+    assert load_workbook(tmp_path / "runs" / "r1" / "report" / "report.xlsx").sheetnames == [
+        "Row Check"
+    ]
 
 
 def test_summary_excludes_stale_outcomes_from_an_empty_current_plan():

@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import csv
-import io
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
-from ..checks.row_check import row_check_csv_bytes
 from ..common.model.protocol import (
     active_unit_ids,
     col_check_close_document,
@@ -29,15 +26,6 @@ from .html import (
 )
 
 log = logging.getLogger("pair_recon.right.report")
-
-
-def compare_col_csv_bytes(rows: list[dict[str, Any]]) -> bytes:
-    fields = sorted({key for row in rows for key in row})
-    output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=fields)
-    writer.writeheader()
-    writer.writerows(sorted(rows, key=lambda row: (row["vintage"], row["column"])))
-    return output.getvalue().encode()
 
 
 def collect(store) -> dict[str, Any]:
@@ -119,11 +107,7 @@ def build_report(
     results_by_pair = {document["pair"]: rows} if rows else {}
     summary = _summary(run_id, state, timestamp(store))
 
-    files: dict[str, Path] = {"row_check.csv": out / "row_check.csv"}
-    files["row_check.csv"].write_bytes(row_check_csv_bytes(document))
-    if rows:
-        files["col_check.csv"] = out / "col_check.csv"
-        files["col_check.csv"].write_bytes(compare_col_csv_bytes(rows))
+    files: dict[str, Path] = {}
 
     left_label = str(document["left"].get("source") or "left")
     right_label = str(document["right"].get("source") or "databricks")
@@ -171,7 +155,6 @@ def build_report(
 
 CONTENT_TYPES = {
     ".json": "application/json",
-    ".csv": "text/csv",
     ".html": "text/html; charset=utf-8",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }

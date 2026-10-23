@@ -55,7 +55,7 @@ def write_row_sheet(workbook, document: dict[str, Any]) -> None:
     right_label = str(right.get("source") or "databricks").upper()
     summary = document.get("summary") or {}
     all_rows = document.get("partition_mode") == "all"
-    sheet = workbook.create_sheet(title=f"{document['pair']}_row"[:31])
+    sheet = workbook.create_sheet(title="Row Check")
     header = [
         (f"{left_label}:", _relation(left)),
         (f"{right_label}:", _relation(right)),
@@ -105,14 +105,14 @@ def _relation(side: dict[str, Any]) -> str:
 
 
 def write_col_sheet(
-    workbook, pair: str, rows: list[dict[str, Any]], left_label: str, right_label: str
+    workbook, rows: list[dict[str, Any]], left_label: str, right_label: str
 ) -> None:
     from openpyxl.styles import Font, PatternFill
 
     green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
     red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     bold = Font(bold=True)
-    sheet = workbook.create_sheet(title=f"{pair}_col"[:31])
+    sheet = workbook.create_sheet(title="Column Check")
     row_num = 1
     by_vintage: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -176,7 +176,6 @@ def build_workbook(
         if rows:
             write_col_sheet(
                 workbook,
-                document["pair"],
                 rows,
                 str(document["left"].get("source") or "left"),
                 str(document["right"].get("source") or "databricks"),

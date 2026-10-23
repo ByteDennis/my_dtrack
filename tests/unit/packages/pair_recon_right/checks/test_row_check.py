@@ -7,7 +7,6 @@ from pair_recon_right.engine.checks.row_check import (
     reconcile_pair,
     reconcile_partitions,
     reconcile_snapshot,
-    row_check_csv_bytes,
     run_row_check,
     summarize_partitions,
 )
@@ -147,21 +146,6 @@ def test_gate3(policy):
         evaluate_gate(ROWS, policy)
 
 
-def test_csv():
-    document = {
-        "pair": "p",
-        "partitions": {
-            "2026-01-02": {"left": 1, "right": 3, "result": "count_diff", "delta": 2},
-            "2026-01-01": {"left": 1, "right": 1, "result": "match"},
-        },
-    }
-    assert row_check_csv_bytes(document).decode().splitlines() == [
-        "pair,partition,left,right,delta,result",
-        "p,2026-01-01,1,1,,match",
-        "p,2026-01-02,1,3,2,count_diff",
-    ]
-
-
 def test_pending():
     store = MemoryStore()
     store.put_json("row_check/left.json", left_document())
@@ -197,13 +181,12 @@ def test_reconcile_caps_logged_findings(caplog):
     with caplog.at_level("INFO", logger="pair_recon.right.row_check"):
         run_row_check(store, lambda _cfg: FakeTarget(counts={"2026-01-01": 1}))
     assert caplog.text.count("  finding p ") == 10
-    assert "  ... 4 more finding(s) in report/row_check.csv" in caplog.text
+    assert "  ... 4 more finding(s) omitted from the log" in caplog.text
     assert store.get_bytes("mapping.csv").decode().splitlines() == [
         "left_column,right_column,usage,data_type",
         "amount,amount,compare,",
     ]
     assert store.get_json("_state/right.json")["phase"] == "row_check_closed"
-    assert store.exists("report/row_check.csv")
     assert not store.exists("_status/units.csv")
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 0
 
@@ -269,7 +252,6 @@ def test_v2():
     with pytest.raises(RuntimeError, match=r"p: 2026-01-02, 2026-01-03"):
         run_row_check(store, lambda _cfg: FakeTarget())
     assert store.exists("row_check/result.json")
-    assert store.exists("report/row_check.csv")
     assert store.get_json("plan.json")["version"] == 2
 
     updated = build_manifest(

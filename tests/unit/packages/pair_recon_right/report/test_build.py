@@ -6,7 +6,7 @@ from support import STATS, MemoryStore
 from pair_recon_right.engine.checks.col_check import compare_statistics
 from pair_recon_right.engine.common.model.manifest import build_manifest, unit_id_for
 from pair_recon_right.engine.report import build_report
-from pair_recon_right.engine.report.build import collect, compare_col_csv_bytes
+from pair_recon_right.engine.report.build import collect
 
 
 def _store():
@@ -67,8 +67,6 @@ def test_report_builds_flat_files_from_batch_and_per_unit_results(tmp_path):
     files = build_report(_store(), tmp_path / "out", title="T")
 
     assert set(files) == {
-        "row_check.csv",
-        "col_check.csv",
         "index.html",
         "report.xlsx",
         "summary.json",
@@ -80,16 +78,15 @@ def test_report_builds_flat_files_from_batch_and_per_unit_results(tmp_path):
         "partition_missing": 1,
         "col_stat_diff": 1,
     }
-    assert summary["files"] == ["col_check.csv", "index.html", "report.xlsx", "row_check.csv"]
-    assert files["row_check.csv"].read_text().splitlines()[0].endswith("result")
+    assert summary["files"] == ["index.html", "report.xlsx"]
     page = files["index.html"].read_text()
     assert "days mismatch: 1" in page and "y → y_r" in page and "mean (1.5000→9)" in page
 
     from openpyxl import load_workbook
 
     workbook = load_workbook(files["report.xlsx"])
-    assert workbook.sheetnames == ["p_row", "p_col"]
-    assert workbook["p_col"]["B1"].value == "FAIL"
+    assert workbook.sheetnames == ["Row Check", "Column Check"]
+    assert workbook["Column Check"]["B1"].value == "FAIL"
 
 
 def test_collect_filters_stale_outcomes_against_active_plan():
@@ -113,19 +110,7 @@ def test_collect_filters_stale_outcomes_against_active_plan():
     assert {row["unit_id"] for row in state["dead"]} == {"source"}
 
 
-def test_compare_csv_has_stable_order():
-    rows = [
-        {"vintage": "2026-02-01", "column": "a", "verdict": "match"},
-        {"vintage": "2026-01-01", "column": "b", "extra": 1},
-    ]
-    assert compare_col_csv_bytes(rows).decode().splitlines() == [
-        "column,extra,verdict,vintage",
-        "b,1,,2026-01-01",
-        "a,,match,2026-02-01",
-    ]
-
-
-def test_rows_only_is_complete_and_omits_col_csv(tmp_path):
+def test_rows_only_is_complete_and_omits_column_sheet(tmp_path):
     store = _store()
     store.objects.pop("plan.json")
     store.objects.pop("_state/left.json")
@@ -137,8 +122,11 @@ def test_rows_only_is_complete_and_omits_col_csv(tmp_path):
     summary = json.loads(files["summary.json"].read_text())
 
     assert summary["status"] == "DONE"
-    assert "col_check.csv" not in files
     assert "Stage 2" not in files["index.html"].read_text()
+
+    from openpyxl import load_workbook
+
+    assert load_workbook(files["report.xlsx"]).sheetnames == ["Row Check"]
 
 
 def test_rows_required(tmp_path):

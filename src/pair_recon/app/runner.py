@@ -25,6 +25,7 @@ from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_che
 from pair_recon_left.common.model.protocol import (
     COL_CHECK_CLOSED,
     ROW_CHECK_CLOSED,
+    UNITS_STATUS,
     active_unit_ids,
     current_plan_ids,
     fixed_keys_path,
@@ -505,6 +506,13 @@ def retry_failed(store) -> int:
     return deleted
 
 
+def clear_resume_outputs(store) -> int:
+    keys = store.list_keys("report/")
+    if store.exists(UNITS_STATUS):
+        keys.append(UNITS_STATUS)
+    return store.delete_keys(sorted(set(keys)))
+
+
 def launch(settings: dict, config: dict, *, action: str, workspace_client=None, catalog=None):
     pair = next(iter(config["pairs"]))
     run_id = validate_run_id(settings["run_id"])
@@ -564,6 +572,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             if catalog:
                 catalog.clear(run_id)
         elif action == "resume":
+            clear_resume_outputs(store)
             retry_failed(store)
         if catalog:
             log.info("updating run status: table=%s state=running", settings["status_table"])

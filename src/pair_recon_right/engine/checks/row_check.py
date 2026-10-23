@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import csv
-import io
 import logging
 import time
 from collections import Counter
@@ -113,26 +111,6 @@ def evaluate_gate(partitions: dict[str, dict[str, Any]], policy: str = "auto") -
 
 log = logging.getLogger("pair_recon.right.row_check")
 FINDINGS_SHOWN = 10
-
-
-def row_check_csv_bytes(document: dict[str, Any]) -> bytes:
-    output = io.StringIO(newline="")
-    writer = csv.DictWriter(
-        output, fieldnames=["pair", "partition", "left", "right", "delta", "result"]
-    )
-    writer.writeheader()
-    for partition, row in sorted(document["partitions"].items()):
-        writer.writerow(
-            {
-                "pair": document["pair"],
-                "partition": partition,
-                "left": row.get("left"),
-                "right": row.get("right"),
-                "delta": row.get("delta", ""),
-                "result": row["result"],
-            }
-        )
-    return output.getvalue().encode()
 
 
 def pending_left_documents(store) -> list[dict[str, Any]]:
@@ -254,7 +232,7 @@ def reconcile_pair(
             row["right"],
         )
     if len(findings) > FINDINGS_SHOWN:
-        log.info("  ... %d more finding(s) in report/row_check.csv", len(findings) - FINDINGS_SHOWN)
+        log.info("  ... %d more finding(s) omitted from the log", len(findings) - FINDINGS_SHOWN)
     decision = document["gate_decision"]
     log.info(
         "gate %s: policy=%s passed=%s excluded_ratio=%.4f",
@@ -262,11 +240,6 @@ def reconcile_pair(
         decision["policy"],
         decision["passed"],
         decision["excluded_ratio"],
-    )
-    store.put_bytes(
-        "report/row_check.csv",
-        row_check_csv_bytes(document),
-        content_type="text/csv",
     )
     version = int(left_doc["pair_config"].get("version") or 1)
     column_checks = any(

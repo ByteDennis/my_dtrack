@@ -109,10 +109,10 @@ directory. A completed full run has this logical shape (optional and exceptional
 ├── audit_errors/*.json              optional pair audit-write failures
 ├── report/
 │   ├── summary.json                  terminal report summary
-│   ├── row_check.csv
-│   ├── col_check.csv                 present when column checks ran
 │   ├── index.html
 │   └── report.xlsx
+│       ├── Row Check
+│       └── Column Check              present when column checks ran
 ├── plan.json                        machine-readable execution contract
 ├── mapping.csv                     concise operator mapping view
 └── fixed_keys.json                 fixed-N sampling only
@@ -126,7 +126,7 @@ individually addressable so `retry-failed` can delete only the work that must be
 keeps four small protocol-2 markers during the rolling upgrade; they can be removed after every
 deployed Right package has moved to protocol 3.
 
-A successful `left-only` run ends as `left_complete`, not `passed`, because no reconciliation verdict exists. It uploads the full-range Left row counts to `row_check/left.json`; sampling affects attribute statistics, not those counts. When column checks are selected, it also uploads the selected vintage/sample/mapping plan to `plan.json`, fixed sample keys when applicable, and shard-batched `left_statistics` units under `units/`; each logical unit still represents one vintage and mapped Left column. `_state/left.json` then records `phase=col_check_closed` after all planned Left statistics are ready. In `pair_recon_progress_snapshot`, `units_ready` counts logical Left units while `units_complete` remains the count of completed Right comparisons. Snapshot pairs are excluded from left-only mode because choosing their historical comparison vintage requires Right row counts. Row-check partition objects and `report/row_check.csv` expose the outcome as `result` (`match`, `count_diff`, `left_only`, or `right_only`).
+A successful `left-only` run ends as `left_complete`, not `passed`, because no reconciliation verdict exists. It uploads the full-range Left row counts to `row_check/left.json`; sampling affects attribute statistics, not those counts. When column checks are selected, it also uploads the selected vintage/sample/mapping plan to `plan.json`, fixed sample keys when applicable, and shard-batched `left_statistics` units under `units/`; each logical unit still represents one vintage and mapped Left column. `_state/left.json` then records `phase=col_check_closed` after all planned Left statistics are ready. In `pair_recon_progress_snapshot`, `units_ready` counts logical Left units while `units_complete` remains the count of completed Right comparisons. Snapshot pairs are excluded from left-only mode because choosing their historical comparison vintage requires Right row counts. Row-check partition objects and the `Row Check` sheet in `report/report.xlsx` expose the outcome as `result` (`match`, `count_diff`, `left_only`, or `right_only`). A resume removes the previous derived `report/*` files and `_status/units.csv`, then regenerates them at a successful terminal boundary; durable units, successful result batches, role state, raw audit artifacts, and compatible local pulls remain available for recovery. An interrupted or failed resume therefore leaves the old report absent rather than displaying stale results, while preserving computation checkpoints. Only `--force` clears the entire run.
 
 Registered attribute checks are `n_total`, `n_missing`, `n_unique`, `mean`, `std`, `min`, `max`, `length_avg`, `length_max`, and `hash_sum`; `row_count` remains the pair-level check. `partition_mode=all` treats the complete relation as the pair-level `all` partition and does not require a date column.
 

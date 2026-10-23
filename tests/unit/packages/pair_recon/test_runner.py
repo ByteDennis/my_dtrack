@@ -1419,6 +1419,10 @@ def test_run_left_fresh_row_check_invalidates_downstream_checkpoints(monkeypatch
 
 def test_remote_resume_starts_right_after_left_row_release(monkeypatch, tmp_path):
     store = MemoryStore()
+    store.put_bytes("report/index.html", b"old")
+    store.put_bytes("report/row_check.csv", b"old")
+    store.put_bytes("_status/units.csv", b"old")
+    store.put_bytes("audit/keep.sql", b"select 1")
     events = []
 
     class Root:
@@ -1454,6 +1458,9 @@ def test_remote_resume_starts_right_after_left_row_release(monkeypatch, tmp_path
     def left(*_args, release=None, abort_if=None, **_kwargs):
         events.append("left-row-ready")
         assert "right-start" not in events
+        assert store.list_keys("report/") == []
+        assert not store.exists("_status/units.csv")
+        assert store.exists("audit/keep.sql")
         release()
         abort_if()
         return {"row": "ready", "units": 0}

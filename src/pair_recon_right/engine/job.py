@@ -1,3 +1,4 @@
+import logging
 import tempfile
 import time
 from pathlib import Path
@@ -16,10 +17,14 @@ from .common.model.protocol import (
 )
 from .report import CONTENT_TYPES, build_report
 
+log = logging.getLogger("pair_recon.right.job")
+
 
 def publish_report(store) -> None:
     with tempfile.TemporaryDirectory(prefix="pair-recon-report-") as folder:
-        for name, path in build_report(store, folder).items():
+        files = build_report(store, folder)
+        store.delete_keys(store.list_keys("report/"))
+        for name, path in files.items():
             path = Path(path)
             store.put_bytes(
                 f"report/{name}",
@@ -83,7 +88,15 @@ def run(
     def reconcile():
         return run_row_check(store, target_factory, gate=gate) > 0
 
-    reconcile()
+    try:
+        reconcile()
+    except Exception:
+        if list_row_results(store):
+            try:
+                publish_report(store)
+            except Exception:
+                log.exception("could not publish partial row-check report")
+        raise
     if not list_plans(store):
         result = summary(store)
         publish_report(store)

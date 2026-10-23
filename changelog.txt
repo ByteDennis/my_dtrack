@@ -3,7 +3,7 @@ pair_recon Resumable protocol, batched results, and reports — 2026-10-22
 Added
 - Protocol 3 role checkpoints in `_state/left.json` and `_state/right.json`, with protocol-2 closure and heartbeat markers retained for rolling compatibility.
 - Immutable `col_check/result_batches/<hash>.json` uploads for matching Right outcomes, using deterministic batches of 64 by default while keeping differences and failures individually retryable.
-- Right terminal reports under `report/`: summary JSON, row/column CSV, standalone HTML, and Excel workbook.
+- Right terminal reports under `report/`: summary JSON, standalone HTML, and an Excel workbook with `Row Check` and `Column Check` sheets.
 - Conflict detection and recovery tests for duplicate outcomes, interrupted batch commits, plan changes, stale outcomes, and state-based WIP accounting.
 
 Changed
@@ -11,6 +11,7 @@ Changed
 - Re-running the same pair/owner daily `run_id` now resumes compatible checkpoints instead of clearing the run; successful units and local pulls are reused, while failures and differences are retried. `--force` retains full replacement behavior.
 - Autorun mismatch-partition retries resume the same run unless force is enabled.
 - Resume publishes or refreshes the Left row/plan boundary before starting the remote Right job; incompatible effective config invalidates downstream Right row and plan artifacts before reuse.
+- Resume removes only derived `report/*` and `_status/units.csv` outputs before execution; durable units, successful results, role state, audit events, and compatible local pulls remain reusable after interruption or failure. `--force` remains the only full-run cleanup path.
 - Left/Right progress and backpressure use role-state counters instead of repeatedly scanning every unit/result object, and `units.csv` is generated at terminal boundaries instead of after every result.
 - Matching results upload in bounded batches; Right polls only unseen unit/result batches and skips completed deterministic unit IDs on restart.
 - Result persistence retries are separated from comparison failures, ambiguous uploads recover from durable batches, and conflicting duplicate outcomes fail explicitly.
@@ -20,6 +21,7 @@ Changed
 Verification
 - 180 focused protocol, Left/Right check, report, and Right-job tests pass.
 - 15 final same-run resume, force, autorun, checkpoint invalidation, and batch-retry tests pass.
+- 40 focused report-sheet, stale-output cleanup, partial-failure report, row-check, and resume tests pass.
 - Ruff check, Ruff format check, mirrored protocol comparison, and git diff check pass.
 - No live Databricks/Volume performance benchmark was run.
 
