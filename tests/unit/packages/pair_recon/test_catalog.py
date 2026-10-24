@@ -8,11 +8,15 @@ from pair_recon_right.catalog import (
     ERROR_COLUMNS,
     STATUS_RUN_COLUMNS,
     STATUS_SUMMARY_COLUMNS,
-    append_error_rows,
+    WINDOW_COLUMNS,
+    append_rows,
     error_rows,
     result_summary,
+    run_state,
     status_run_values,
+    window_rows,
 )
+from pair_recon_right.engine.common.model.manifest import unit_id_for
 
 
 class Sql:
@@ -176,6 +180,7 @@ def test_clear_removes_all_rows_for_daily_run_id():
 
     assert [statement for statement, _values in sql.calls] == [
         "DELETE FROM c.s.run_error WHERE run_id=:run_id",
+        "DELETE FROM c.s.pair_recon_window_history WHERE run_id=:run_id",
         "DELETE FROM c.s.progress WHERE run_id=:run_id",
         "DELETE FROM c.s.run_status WHERE run_id=:run_id",
     ]
@@ -247,14 +252,171 @@ def test_finish():
         timezone="America/New_York",
     )
     statements = [statement for statement, _values in sql.calls]
-    assert result == {"status": "different", "errors": 1}
+    assert result == {"status": "different", "errors": 1, "windows": 0}
     status_values = next(
         values for statement, values in sql.calls if "MERGE INTO c.s.status" in statement
     )
     assert status_values["row_total"] == 1
     assert status_values["row_differences"] == 1
     assert any("INSERT INTO c.s.errors" in statement for statement in statements)
+    assert "DELETE FROM c.s.pair_recon_window_history WHERE run_id=:run_id" in statements
+    assert not any("INSERT INTO c.s.pair_recon_window_history" in s for s in statements)
     assert any("UPDATE c.s.pairs" in statement for statement in statements)
+
+
+def _completed_window_store(*, fail_column=None, diff_column=None, count_diff=False):
+    store = MemoryStore()
+    plan = {
+        "pair": "orders",
+        "run_id": "r1",
+        "version": 2,
+        "vintage": "month",
+        "partition_mode": "date",
+        "left": {"source": "oracle"},
+        "right": {"source": "databricks"},
+        "sample": {"mode": "fraction", "rate": 0.1},
+        "columns": ["AMOUNT", "QTY"],
+        "col_map": {"AMOUNT": "amount", "QTY": "qty"},
+        "excluded_partitions": ["2026-01-09", "2026-01-10"],
+        "windows": [
+            {"bucket": "2026-01-01", "partitions": ["2026-01-02", "2026-01-03"], "n_left": 5},
+            {"bucket": "2026-02-01", "partitions": ["2026-02-01"], "n_left": 3},
+        ],
+        "expected_units": 4,
+    }
+    store.put_json("plan.json", plan)
+    partitions = {
+        "2026-01-02": {"result": "match"},
+        "2026-01-03": {"result": "count_diff" if count_diff else "match"},
+        "2026-02-01": {"result": "match"},
+    }
+    store.put_json(
+        "row_check/result.json",
+        {"pair": "orders", "partitions": partitions, "date_synonyms": {}},
+    )
+    for window in plan["windows"]:
+        for column in plan["columns"]:
+            uid = unit_id_for(plan, window, column)
+            if window["bucket"] == "2026-01-01" and column == fail_column:
+                store.put_json(f"col_check/failures/{uid}.json", {"unit_id": uid, "error": "x"})
+                continue
+            verdict = (
+                "diff" if window["bucket"] == "2026-01-01" and column == diff_column else "match"
+            )
+            store.put_json(
+                f"col_check/results/{uid}.json",
+                {"unit_id": uid, "pair": "orders", "verdict": verdict},
+            )
+    return store
+
+
+def test_window_rows_record_only_fully_compared_windows():
+    now = datetime(2026, 1, 31, 12, 0, tzinfo=UTC)
+    rows = window_rows(_completed_window_store(), "r1", "orders", "me", now)
+    assert [(row["window_value"], row["result"]) for row in rows] == [
+        ("2026-01-01", "match"),
+        ("2026-02-01", "match"),
+    ]
+    first = rows[0]
+    assert tuple(first) == WINDOW_COLUMNS
+    assert (first["partitions"], first["excluded_partitions"], first["columns"]) == (2, 2, 2)
+    assert (first["units"], first["matches"], first["differences"]) == (2, 2, 0)
+    assert first["sample_rate"] == 0.1 and first["checked_at"] == now
+    assert (first["vintage"], first["run_id"], first["owner"]) == ("month", "r1", "me")
+
+    different = window_rows(_completed_window_store(diff_column="QTY"), "r1", "orders", "me", now)
+    assert [(row["window_value"], row["result"], row["differences"]) for row in different] == [
+        ("2026-01-01", "different", 1),
+        ("2026-02-01", "match", 0),
+    ]
+    failed = window_rows(_completed_window_store(fail_column="QTY"), "r1", "orders", "me", now)
+    assert [row["window_value"] for row in failed] == ["2026-02-01"]
+    unmatched = window_rows(_completed_window_store(count_diff=True), "r1", "orders", "me", now)
+    assert [row["window_value"] for row in unmatched] == ["2026-02-01"]
+
+
+def test_finish_inserts_window_history_rows():
+    sql = Sql()
+    store = _completed_window_store()
+    catalog = Catalog(sql, "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress")
+    result = catalog.finish(
+        store,
+        run_id="r1",
+        pair="orders",
+        owner="me",
+        state="passed",
+        timezone="America/New_York",
+    )
+    assert result == {"status": "passed", "errors": 0, "windows": 2}
+    statement, values = next(
+        (statement, values)
+        for statement, values in sql.calls
+        if "INSERT INTO c.s.pair_recon_window_history" in statement
+    )
+    assert "CAST(:r0_checked_at AS TIMESTAMP_NTZ)" in statement
+    assert values["r0_window_value"] == "2026-01-01" and values["r1_window_value"] == "2026-02-01"
+    assert values["r0_result"] == "match" and values["r0_pair_name"] == "orders"
+
+
+def test_finish_and_clear_survive_a_missing_window_history_table(caplog):
+    class NoHistorySql(Sql):
+        def execute(self, statement, parameters=None):
+            super().execute(statement, parameters)
+            if "pair_recon_window_history" in statement:
+                raise RuntimeError("[TABLE_OR_VIEW_NOT_FOUND] c.s.pair_recon_window_history")
+            return []
+
+    sql = NoHistorySql()
+    catalog = Catalog(sql, "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress")
+    with caplog.at_level("ERROR"):
+        result = catalog.finish(
+            _completed_window_store(),
+            run_id="r1",
+            pair="orders",
+            owner="me",
+            state="passed",
+            timezone="America/New_York",
+        )
+        catalog.clear("r1")
+    assert result == {"status": "passed", "errors": 0, "windows": 0}
+    statements = [statement for statement, _values in sql.calls]
+    assert any("UPDATE c.s.pairs" in statement for statement in statements)
+    assert statements[-1] == "DELETE FROM c.s.status WHERE run_id=:run_id"
+    assert caplog.text.count("window history not written") == 2
+
+
+def test_checked_windows_skip_the_current_run():
+    class HistorySql(Sql):
+        def execute(self, statement, parameters=None):
+            super().execute(statement, parameters)
+            return [{"window_value": "2026-02-01"}, {"window_value": "2026-01-01"}]
+
+    sql = HistorySql()
+    catalog = Catalog(sql, "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress")
+    assert catalog.checked_windows("orders", "month", exclude_run_id="orders-me-20261024") == [
+        "2026-01-01",
+        "2026-02-01",
+    ]
+    statement, values = sql.calls[-1]
+    assert statement == (
+        "SELECT DISTINCT window_value FROM c.s.pair_recon_window_history "
+        "WHERE pair_name=:pair AND vintage=:vintage AND run_id<>:run_id"
+    )
+    assert values == {"pair": "orders", "vintage": "month", "run_id": "orders-me-20261024"}
+
+
+@pytest.mark.parametrize(
+    ("outcome", "state"),
+    [
+        ({"row_errors": 0, "column_errors": 0, "failures": 0}, "passed"),
+        ({"row_errors": 0, "column_errors": 2, "failures": 0}, "different"),
+        ({"row_errors": 1, "column_errors": 0, "failures": 0}, "different"),
+        ({"row_errors": 0, "column_errors": 2, "failures": 1}, "incomplete"),
+        ({}, "passed"),
+    ],
+)
+def test_run_state_marks_runtime_failures_incomplete(outcome, state):
+    assert run_state(outcome) == state
 
 
 def test_result_summary_counts_row_column_and_runtime_outcomes():
@@ -322,7 +484,7 @@ def test_error_rows_use_attribute_registry():
     ]
 
 
-def test_append_error_rows_uses_target_schema_for_all_null_columns():
+def test_append_rows_uses_target_schema_for_all_null_columns():
     class Writer:
         def __init__(self):
             self.saved = None
@@ -375,6 +537,6 @@ def test_append_error_rows_uses_target_schema_for_all_null_columns():
     ]
     spark = Spark()
 
-    append_error_rows(spark, "c.s.errors", rows)
+    append_rows(spark, "c.s.errors", ERROR_COLUMNS, rows)
 
     assert spark.created.write.saved == "c.s.errors"

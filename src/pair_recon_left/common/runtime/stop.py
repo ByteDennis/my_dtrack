@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -8,10 +9,36 @@ from contextlib import contextmanager
 from .run_logging import get_left_logger
 
 log = get_left_logger("stop")
+HEARTBEAT_INTERVAL = 60.0
 
 
 class StopRequested(RuntimeError):
     pass
+
+
+# >>> writes the Left heartbeat; a transient Volume error only logs so long waits survive it <<< #
+def beat(store) -> bool:
+    try:
+        store.heartbeat()
+    except Exception:
+        log.warning("left heartbeat write failed; the next tick retries", exc_info=True)
+        return False
+    return True
+
+
+# >>> rate-limited heartbeat for polling loops: beats at most once per interval <<< #
+class Heartbeat:
+    def __init__(self, store, interval: float = HEARTBEAT_INTERVAL):
+        self.store = store
+        self.interval = interval
+        self.last = None
+
+    def tick(self) -> bool:
+        now = time.monotonic()
+        if self.last is not None and now - self.last < self.interval:
+            return False
+        self.last = now
+        return beat(self.store)
 
 
 # >>> executor that joins its workers on success but abandons them when the body raises <<< #

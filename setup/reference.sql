@@ -10,6 +10,7 @@ USING (
     ('pair_recon_run_status', 'state', 'passed', 'All completed row and column checks matched.'),
     ('pair_recon_run_status', 'state', 'different', 'At least one completed row or column check differed.'),
     ('pair_recon_run_status', 'state', 'left_complete', 'Left-only artifacts completed; Right was not evaluated.'),
+    ('pair_recon_run_status', 'state', 'incomplete', 'The Right finished but at least one planned unit ended in a runtime failure, so the table was not fully checked.'),
     ('pair_recon_run_status', 'state', 'failed', 'The run ended with an execution failure.'),
     ('pair_recon_run_status', 'state', 'cancelled', 'The run was cancelled before completion.'),
     ('pair_recon_run_status', 'timezone', NULL, 'IANA timezone used for run timestamps and daily identity.'),
@@ -74,7 +75,23 @@ USING (
     ('pair_recon_progress_snapshot', 'units_complete', NULL, 'Logical Right comparisons completed.'),
     ('pair_recon_progress_snapshot', 'units_failed', NULL, 'Logical units ending in runtime failure.'),
     ('pair_recon_progress_snapshot', 'worker_threads', NULL, 'Active local PairRecon worker-thread count.'),
-    ('pair_recon_progress_snapshot', 'payload', NULL, 'Complete expandable JSON snapshot including run, Left, Right, row, unit, and thread state.')
+    ('pair_recon_progress_snapshot', 'payload', NULL, 'Complete expandable JSON snapshot including run, Left, Right, row, unit, and thread state.'),
+    ('pair_recon_window_history', 'pair_name', NULL, 'Pair whose vintage window finished a complete comparison.'),
+    ('pair_recon_window_history', 'vintage', NULL, 'Vintage grain of the window: day, week, month, quarter, or year.'),
+    ('pair_recon_window_history', 'window_value', NULL, 'First date of the vintage bucket, as written in plan.json.'),
+    ('pair_recon_window_history', 'run_id', NULL, 'Run that completed the window; rows of a run are replaced when it republishes.'),
+    ('pair_recon_window_history', 'owner', NULL, 'Operator that owned the completing run.'),
+    ('pair_recon_window_history', 'result', NULL, 'Outcome of the completed window.'),
+    ('pair_recon_window_history', 'result', 'match', 'Every column statistic of the window matched.'),
+    ('pair_recon_window_history', 'result', 'different', 'At least one column statistic of the window differed.'),
+    ('pair_recon_window_history', 'partitions', NULL, 'Partitions compared inside the window.'),
+    ('pair_recon_window_history', 'excluded_partitions', NULL, 'Partitions of the same bucket that were excluded and therefore not checked.'),
+    ('pair_recon_window_history', 'columns', NULL, 'Mapped columns compared for the window.'),
+    ('pair_recon_window_history', 'sample_rate', NULL, 'Row sample fraction used; 1.0 means all rows and null means fixed-count sampling.'),
+    ('pair_recon_window_history', 'units', NULL, 'Column units with a durable Right result.'),
+    ('pair_recon_window_history', 'matches', NULL, 'Column units whose statistics matched.'),
+    ('pair_recon_window_history', 'differences', NULL, 'Column units whose statistics differed.'),
+    ('pair_recon_window_history', 'checked_at', NULL, 'Timestamp when the completing run published its results.')
   AS v(table_name, column_name, keyword, definition)
 ) AS s
 ON t.table_name = s.table_name

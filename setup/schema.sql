@@ -73,6 +73,23 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_run_error (
   created_at TIMESTAMP_NTZ
 ) USING DELTA;
 
+CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_window_history (
+  pair_name STRING NOT NULL,
+  vintage STRING NOT NULL,
+  window_value STRING NOT NULL,
+  run_id STRING NOT NULL,
+  owner STRING,
+  result STRING NOT NULL,
+  partitions BIGINT,
+  excluded_partitions BIGINT,
+  columns BIGINT,
+  sample_rate DOUBLE,
+  units BIGINT,
+  matches BIGINT,
+  differences BIGINT,
+  checked_at TIMESTAMP_NTZ
+) USING DELTA;
+
 CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_progress_snapshot (
   snapshot_ts TIMESTAMP_NTZ NOT NULL,
   run_id STRING NOT NULL,

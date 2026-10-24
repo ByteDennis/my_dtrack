@@ -140,10 +140,24 @@ class DrainScheduler:
 
 log = logging.getLogger("pair_recon.right.col_check")
 DEFAULT_RESULT_BATCH_SIZE = 64
+DEFAULT_HEARTBEAT_TIMEOUT = 600.0
 
 
 class PlanChangedError(RuntimeError):
     pass
+
+
+# >>> fails once the Left heartbeat is older than the timeout; an unreadable heartbeat only logs <<< #
+def require_left_heartbeat(store, timeout: float) -> float | None:
+    try:
+        age = store.heartbeat_age()
+    except Exception:
+        log.warning("left heartbeat unreadable; checking again next poll", exc_info=True)
+        return None
+    if age is not None and age > timeout:
+        log.error("left heartbeat stale: %.1fs > %.1fs", age, timeout)
+        raise RuntimeError(f"left heartbeat is stale ({age:.1f}s)")
+    return age
 
 
 class ResultBatchCommitError(RuntimeError):
@@ -158,8 +172,7 @@ class ColCheck:
         *,
         prefetch_depth=3,
         max_attempts=3,
-        idle_timeout=900,
-        heartbeat_timeout=180,
+        heartbeat_timeout=DEFAULT_HEARTBEAT_TIMEOUT,
         poll_interval=2,
         on_idle=None,
         right_workers=1,
@@ -170,7 +183,6 @@ class ColCheck:
         self.right_workers = max(1, int(right_workers))
         self.scheduler = DrainScheduler(prefetch_depth=max(int(prefetch_depth), self.right_workers))
         self.max_attempts = max_attempts
-        self.idle_timeout = idle_timeout
         self.heartbeat_timeout = heartbeat_timeout
         self.poll_interval = poll_interval
         self.on_idle = on_idle
@@ -493,7 +505,6 @@ class ColCheck:
         return active_unit_ids(self.store) <= self.completed_ids
 
     def run(self):
-        last_progress = time.monotonic()
         jobs = {}
         log.info("Databricks query worker budget=%d", self.right_workers)
         with ThreadPoolExecutor(
@@ -501,8 +512,7 @@ class ColCheck:
             thread_name_prefix="pair_recon-right",
         ) as executor:
             while True:
-                if self.poll():
-                    last_progress = time.monotonic()
+                self.poll()
                 for future in [future for future in jobs if future.done()]:
                     task = jobs.pop(future)
                     try:
@@ -512,7 +522,6 @@ class ColCheck:
                         raise
                     except Exception as exc:
                         self._failure(task, exc)
-                    last_progress = time.monotonic()
                 while len(jobs) < self.right_workers:
                     task = (
                         None
@@ -525,7 +534,6 @@ class ColCheck:
                         jobs[executor.submit(self._fetch_right, task)] = task
                     else:
                         self.run_task(task)
-                    last_progress = time.monotonic()
                 if jobs:
                     wait(
                         tuple(jobs),
@@ -562,12 +570,6 @@ class ColCheck:
                     )
                     return self.results
                 if self.on_idle and self.on_idle():
-                    last_progress = time.monotonic()
                     continue
-                age = self.store.heartbeat_age()
-                if age is not None and age > self.heartbeat_timeout:
-                    log.error("left heartbeat stale: %.1fs > %.1fs", age, self.heartbeat_timeout)
-                    raise RuntimeError(f"left heartbeat is stale ({age:.1f}s)")
-                if time.monotonic() - last_progress > self.idle_timeout:
-                    raise TimeoutError("right idle timeout expired")
+                require_left_heartbeat(self.store, self.heartbeat_timeout)
                 time.sleep(self.poll_interval)

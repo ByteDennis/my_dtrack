@@ -1,20 +1,24 @@
 import json
+import logging
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from pair_recon_right.catalog import (
+    ERROR_COLUMNS,
     STATUS_RUN_COLUMNS,
     STATUS_SUMMARY_COLUMNS,
+    WINDOW_COLUMNS,
+    WINDOW_HISTORY_TABLE,
+    companion_table,
     error_rows,
     result_summary,
+    window_rows,
 )
 
+log = logging.getLogger("pair_recon.catalog")
 _TABLE = re.compile(r"^[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){2}$")
-
-
-def _companion_table(pair_table: str, name: str) -> str:
-    return f"{pair_table.rsplit('.', 1)[0]}.{name}"
+_TIMESTAMP_COLUMNS = {"created_at", "checked_at"}
 
 
 class Catalog:
@@ -27,9 +31,11 @@ class Catalog:
         progress_table: str,
         column_map_table: str | None = None,
         pair_sql_table: str | None = None,
+        window_table: str | None = None,
     ):
-        column_map_table = column_map_table or _companion_table(pair_table, "pair_recon_column_map")
-        pair_sql_table = pair_sql_table or _companion_table(pair_table, "pair_recon_pair_sql")
+        column_map_table = column_map_table or companion_table(pair_table, "pair_recon_column_map")
+        pair_sql_table = pair_sql_table or companion_table(pair_table, "pair_recon_pair_sql")
+        window_table = window_table or companion_table(pair_table, WINDOW_HISTORY_TABLE)
         for table in (
             pair_table,
             status_table,
@@ -37,6 +43,7 @@ class Catalog:
             progress_table,
             column_map_table,
             pair_sql_table,
+            window_table,
         ):
             if not _TABLE.fullmatch(table):
                 raise ValueError(f"invalid table name: {table}")
@@ -47,6 +54,7 @@ class Catalog:
         self.progress_table = progress_table
         self.column_map_table = column_map_table
         self.pair_sql_table = pair_sql_table
+        self.window_table = window_table
 
     def configuration_rows(self):
         pairs = self.sql.execute(f"SELECT * FROM {self.pair_table} ORDER BY pair_name")
@@ -109,8 +117,54 @@ class Catalog:
     def clear(self, run_id: str):
         values = {"run_id": run_id}
         self.sql.execute(f"DELETE FROM {self.error_table} WHERE run_id=:run_id", values)
+        self._replace_windows(run_id, [])
         self.sql.execute(f"DELETE FROM {self.progress_table} WHERE run_id=:run_id", values)
         self.sql.execute(f"DELETE FROM {self.status_table} WHERE run_id=:run_id", values)
+
+    # >>> replaces the run's window-history rows; a missing table only logs so the run still ends <<< #
+    def _replace_windows(self, run_id: str, rows: list[dict]) -> int:
+        try:
+            self.sql.execute(
+                f"DELETE FROM {self.window_table} WHERE run_id=:run_id", {"run_id": run_id}
+            )
+            self._insert_rows(self.window_table, WINDOW_COLUMNS, rows)
+        except Exception:
+            log.exception(
+                "window history not written: table=%s rows=%d; create it with setup/schema.sql",
+                self.window_table,
+                len(rows),
+            )
+            return 0
+        return len(rows)
+
+    # >>> vintage buckets other runs already finished for this pair at the same vintage grain <<< #
+    def checked_windows(self, pair: str, vintage: str, *, exclude_run_id: str) -> list[str]:
+        rows = self.sql.execute(
+            f"SELECT DISTINCT window_value FROM {self.window_table} "
+            "WHERE pair_name=:pair AND vintage=:vintage AND run_id<>:run_id",
+            {"pair": pair, "vintage": vintage, "run_id": exclude_run_id},
+        )
+        return sorted(str(row["window_value"]) for row in rows)
+
+    def _insert_rows(self, table: str, columns: tuple, rows: list[dict]) -> None:
+        for start in range(0, len(rows), 100):
+            parameters = {}
+            values = []
+            for index, row in enumerate(rows[start : start + 100]):
+                names = []
+                for column in columns:
+                    name = f"r{index}_{column}"
+                    parameters[name] = row[column]
+                    names.append(
+                        f"CAST(:{name} AS TIMESTAMP_NTZ)"
+                        if column in _TIMESTAMP_COLUMNS
+                        else f":{name}"
+                    )
+                values.append(f"({', '.join(names)})")
+            self.sql.execute(
+                f"INSERT INTO {table} ({', '.join(columns)}) VALUES " + ", ".join(values),
+                parameters,
+            )
 
     def progress(self, row: dict):
         columns = (
@@ -174,7 +228,8 @@ WHEN NOT MATCHED THEN INSERT ({fields}) VALUES ({values})""",
         )
         ended = (
             now
-            if state in {"passed", "different", "left_complete", "failed", "cancelled"}
+            if state
+            in {"passed", "different", "incomplete", "left_complete", "failed", "cancelled"}
             else None
         )
         values = {
@@ -320,36 +375,8 @@ CAST(:created_at AS TIMESTAMP_NTZ)
         self.sql.execute(f"DELETE FROM {self.error_table} WHERE run_id=:run_id", {"run_id": run_id})
         now = datetime.now(ZoneInfo(timezone)).replace(tzinfo=None)
         rows = error_rows(store, run_id, pair, now)
-        columns = (
-            "run_id",
-            "check_name",
-            "pair_name",
-            "vintage",
-            "column_name",
-            "partition_value",
-            "left_value",
-            "right_value",
-            "detail",
-            "payload",
-            "created_at",
-        )
-        for start in range(0, len(rows), 100):
-            parameters = {}
-            values = []
-            for index, row in enumerate(rows[start : start + 100]):
-                names = []
-                for column in columns:
-                    name = f"r{index}_{column}"
-                    parameters[name] = row[column]
-                    names.append(
-                        f"CAST(:{name} AS TIMESTAMP_NTZ)" if column == "created_at" else f":{name}"
-                    )
-                values.append(f"({', '.join(names)})")
-            self.sql.execute(
-                f"INSERT INTO {self.error_table} ({', '.join(columns)}) VALUES "
-                + ", ".join(values),
-                parameters,
-            )
+        self._insert_rows(self.error_table, ERROR_COLUMNS, rows)
+        windows = self._replace_windows(run_id, window_rows(store, run_id, pair, owner, now))
         self.sql.execute(
             f"UPDATE {self.pair_table} SET latest_run_id=:run_id, latest_status=:state, "
             "updated_at=CAST(:now AS TIMESTAMP_NTZ) WHERE pair_name=:pair",
@@ -360,4 +387,4 @@ CAST(:created_at AS TIMESTAMP_NTZ)
                 "pair": pair,
             },
         )
-        return {"status": state, "errors": len(rows)}
+        return {"status": state, "errors": len(rows), "windows": windows}

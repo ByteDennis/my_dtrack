@@ -1,3 +1,19 @@
+pair_recon Heartbeat-only waits, window history, and strict completion — 2026-10-24
+
+Added
+- setup/schema.sql, setup/reference.sql, setup/setup.sql: `pair_recon_window_history` records one row per vintage window whose every column unit has a durable Right result and whose partitions matched on row count; `pair_recon_run_status.state` gains `incomplete`.
+- src/pair_recon_right/catalog.py: `window_rows`, `run_state`, `companion_table`; `publish` replaces the run's history rows and reports `incomplete` when any unit failed.
+- src/pair_recon/app/catalog.py: `checked_windows` reads finished windows of other runs; `finish` and `clear` maintain the history table.
+- src/pair_recon_left/common/model/manifest.py (mirrored to Right): random vintage selection skips `checked_vintages`, records `checked_before`, and fails with `coverage N/N` once every bucket is covered.
+- src/pair_recon/app/cli.py: `--recheck` ignores the window history.
+- src/pair_recon_left/common/runtime/stop.py: `beat` and `Heartbeat` write the Left heartbeat tolerantly during the row count and every wait loop.
+
+Changed
+- src/pair_recon/app/runner.py: the Right Databricks job starts only after the Left row count is published, also for new runs; `RightJobMonitor` follows the job in one-hour chunks without a cap; `run_left` has no manifest timeout; the launcher injects `checked_vintages` from the history and logs `vintage coverage`; final states come from `run_state`.
+- src/pair_recon_right/engine/job.py and checks/col_check.py: no `wait_timeout` or `idle_timeout`; the Right waits for Left row data and units for as long as the Left heartbeat is fresh (`heartbeat_timeout` 600 s), tolerates unreadable heartbeats, and refuses a plan without units.
+- src/pair_recon_left/common/checks/col_check.py: `wait_for_row_check_result` and `wait_for_manifests` wait until the result arrives or `abort_if` raises, heartbeating every 60 seconds.
+- The `timeout` setting is no longer read; existing YAML keys are ignored.
+
 pair_recon Fast abort on Right failure and row-check gated pulls — 2026-10-23
 
 Added

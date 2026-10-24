@@ -207,12 +207,15 @@ def test_right_worker_budget_runs_window_queries_in_parallel():
     assert peak == 2
 
 
-def test_fixed():
+def test_fixed(monkeypatch):
     store, _uid = _drained_store(sample_mode="fixed")
     target = FakeTarget()
-    with pytest.raises(TimeoutError):
-        ColCheck(store, lambda _cfg: target, poll_interval=0, idle_timeout=0).run()
+    monkeypatch.setattr(store, "heartbeat_age", lambda now=None: 999.0)
+    monkeypatch.setattr(col_check.time, "sleep", lambda _s: None)
+    with pytest.raises(RuntimeError, match="heartbeat is stale"):
+        ColCheck(store, lambda _cfg: target, poll_interval=0, heartbeat_timeout=10).run()
     assert target.calls == []
+    monkeypatch.setattr(store, "heartbeat_age", lambda now=None: 0.0)
     store.put_json("fixed_keys.json", {"pair": "p", "windows": {"2026-01-01": [["7"]]}})
     results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert results and target.calls[-1] == ("p", "2026-01-01", [["7"]])
@@ -378,3 +381,24 @@ def test_stale(monkeypatch):
     monkeypatch.setattr(col_check.time, "sleep", lambda _s: None)
     with pytest.raises(RuntimeError, match="heartbeat is stale"):
         ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0, heartbeat_timeout=10).run()
+
+
+def test_unreadable_heartbeat_does_not_fail_the_right(monkeypatch, caplog):
+    store, _uid = _drained_store()
+    store.objects["_state/left.json"].pop("col_check_closed_at")
+    store.objects.pop("_status/col_check.closed.json")
+    reads = []
+
+    def flaky(now=None):
+        reads.append(1)
+        if len(reads) == 1:
+            raise OSError("IncompleteRead(0 bytes read, 481 more expected)")
+        store.close_manifests(["p"], 1)
+        return 0.0
+
+    monkeypatch.setattr(store, "heartbeat_age", flaky)
+    monkeypatch.setattr(col_check.time, "sleep", lambda _s: None)
+    with caplog.at_level("WARNING", logger="pair_recon.right.col_check"):
+        results = ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0).run()
+    assert len(results) == 1 and len(reads) >= 2
+    assert "left heartbeat unreadable" in caplog.text

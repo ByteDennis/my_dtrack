@@ -43,8 +43,8 @@ from pair_recon_left.common.model.protocol import (
     write_run_status,
 )
 from pair_recon_left.common.runtime.run_logging import configure_left_logging, get_left_logger
-from pair_recon_left.common.runtime.stop import StopSignal
-from pair_recon_right.catalog import status_run_values
+from pair_recon_left.common.runtime.stop import StopSignal, beat
+from pair_recon_right.catalog import run_state, status_run_values
 from pair_recon_right.engine.backends.targets import CsvTarget
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
 from pair_recon_right.engine.job import run as run_right
@@ -52,6 +52,7 @@ from pair_recon_right.engine.job import run as run_right
 _SENSITIVE_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
 _SENSITIVE_WORDS = ("password", "secret", "token", "credential")
 _RUN_DATE = re.compile(r"-(\d{4})(\d{2})(\d{2})$")
+RIGHT_WAIT_CHUNK = timedelta(hours=1)
 log = get_left_logger("runner")
 
 
@@ -123,11 +124,10 @@ def mismatched_partitions(error: BaseException | str, pair: str) -> list[str]:
     return sorted(set(re.findall(r"\d{4}-\d{2}-\d{2}", match.group(1)))) if match else []
 
 
-# >>> watches the Right run; a failure fires the stop signal so local statements get cancelled <<< #
+# >>> watches the Right run with no deadline; a failure fires the stop signal so local statements get cancelled <<< #
 class RightJobMonitor:
-    def __init__(self, remote, timeout: timedelta, jobs=None, on_terminal=None, stop=None):
+    def __init__(self, remote, jobs=None, on_terminal=None, stop=None):
         self.remote = remote
-        self.timeout = timeout
         self.jobs = jobs
         self.on_terminal = on_terminal
         self.stop = stop
@@ -159,10 +159,22 @@ class RightJobMonitor:
         except (DatabricksError, OSError) as exc:
             return f"run details unavailable ({exc})"
 
+    def _wait(self):
+        started = time.monotonic()
+        while True:
+            try:
+                return self.remote.result(timeout=RIGHT_WAIT_CHUNK)
+            except TimeoutError:
+                log.info(
+                    "Right Databricks job still running: run_id=%s elapsed=%.0fs",
+                    self.run_id,
+                    time.monotonic() - started,
+                )
+
     def _watch(self):
         completed = None
         try:
-            completed = self.remote.result(timeout=self.timeout)
+            completed = self._wait()
             result = getattr(getattr(completed, "state", None), "result_state", None)
             result_name = getattr(result, "value", result)
             if result_name != "SUCCESS":
@@ -442,13 +454,47 @@ def require_plan_windows(store, pair: str, pair_config: dict) -> None:
     )
 
 
+# >>> logs how many available vintages earlier runs already checked and what this run picks <<< #
+def log_vintage_coverage(store, pair: str) -> None:
+    if not store.exists(plan_path(pair)):
+        return
+    selection = store.get_json(plan_path(pair)).get("vintage_selection") or {}
+    if selection.get("mode") != "random":
+        return
+    checked = len(selection.get("checked_before") or [])
+    available = int(selection.get("available") or 0)
+    selected = selection.get("selected") or []
+    log.info(
+        "vintage coverage: pair=%s checked_before=%d/%d selected=%d remaining_after=%d (%s)",
+        pair,
+        checked,
+        available,
+        len(selected),
+        max(0, available - checked - len(selected)),
+        ", ".join(selected),
+    )
+
+
+# >>> vintages earlier runs finished for this pair; the plan skips them unless --recheck <<< #
+def checked_vintages(catalog, settings: dict, pair: str, pair_config: dict, run_id: str):
+    if catalog is None or settings.get("recheck"):
+        return []
+    if pair_config.get("vintage_sample_size") in (None, ""):
+        return []
+    if str(pair_config.get("partition_mode") or "date") != "date":
+        return []
+    vintage = str(pair_config.get("vintage") or "day")
+    checked = catalog.checked_windows(pair, vintage, exclude_run_id=run_id)
+    log.info("vintage history: pair=%s vintage=%s checked_before=%d", pair, vintage, len(checked))
+    return checked
+
+
 def run_left(
     config: dict,
     store,
     run_id: str,
     pair: str,
     work_dir: str | Path,
-    manifest_timeout: float = 1800,
     left_workers: int = 2,
     release=None,
     left_only: bool = False,
@@ -486,22 +532,21 @@ def run_left(
         )
     abort_if()
     require_plan_windows(store, pair, pair_config)
+    log_vintage_coverage(store, pair)
     if release:
         release()
     abort_if()
     checks = pair_config.get("checks") or []
     if not any(check != "row_count" for check in checks):
         return {"row": "ready", "units": 0}
-    timeout = manifest_timeout if pair_config.get("snapshot") else 0
     manifests = wait_for_manifests(
         store,
-        timeout=timeout,
         poll_interval=2,
         pair_names=[pair],
         abort_if=abort_if,
     )
     if not left_only:
-        wait_for_row_check_result(store, pair, timeout=manifest_timeout, abort_if=abort_if)
+        wait_for_row_check_result(store, pair, abort_if=abort_if)
     for manifest in manifests:
         abort_if()
         publish_fixed_keys(store, manifest, work_dir, stop=stop)
@@ -615,6 +660,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         elif action == "resume":
             clear_resume_outputs(store)
             retry_failed(store)
+        beat(store)
         if catalog:
             log.info("updating run status: table=%s state=running", settings["status_table"])
             catalog.status(
@@ -672,7 +718,6 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
 
             monitor = RightJobMonitor(
                 remote,
-                timedelta(minutes=float(settings.get("timeout", 120))),
                 jobs=client.jobs,
                 on_terminal=on_right_terminal,
                 stop=stop,
@@ -680,13 +725,16 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             monitor.start()
             remote_right_started = True
 
-        if remote_right and action != "resume":
-            start_remote_right()
         release = None
         if local_right:
             release = lambda: run_right_row_check(store, target_factory)
-        elif remote_right and action == "resume":
+        elif remote_right:
             release = start_remote_right
+        checked = checked_vintages(catalog, settings, pair, config["pairs"][pair], run_id)
+        if checked:
+            config["pairs"][pair]["checked_vintages"] = checked
+        else:
+            config["pairs"][pair].pop("checked_vintages", None)
         log.info("starting Left checks")
         left = run_left(
             config,
@@ -694,7 +742,6 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             run_id,
             pair,
             run_dir,
-            float(settings.get("timeout", 120)) * 60,
             int(settings.get("left_workers", 2)),
             release=release,
             left_only=left_only,
@@ -729,14 +776,9 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 run_id=run_id,
                 store=store,
                 poll_interval=0.1,
-                wait_timeout=float(settings.get("timeout", 120)) * 60,
                 right_workers=1,
             )
-            final_state = (
-                "different"
-                if sum(right.get(name, 0) for name in ("row_errors", "column_errors", "failures"))
-                else "passed"
-            )
+            final_state = run_state(right)
             if catalog:
                 catalog.finish(
                     store,
@@ -755,11 +797,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             }
             outcome_fields = ("row_errors", "column_errors", "failures")
             if all(name in monitor.outcome for name in outcome_fields):
-                final_state = (
-                    "different"
-                    if sum(int(monitor.outcome[name]) for name in outcome_fields)
-                    else "passed"
-                )
+                final_state = run_state(monitor.outcome)
             else:
                 published = catalog.run(run_id) if catalog else None
                 final_state = (published or {}).get("state") or "finished"

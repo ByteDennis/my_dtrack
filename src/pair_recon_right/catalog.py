@@ -1,9 +1,11 @@
 import json
+import logging
+from collections import Counter
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from .engine.common.model.attribute_checks import ATTRIBUTE_CHECKS
-from .engine.common.model.manifest import sample_plan
+from .engine.common.model.manifest import sample_plan, unit_id_for
 from .engine.common.model.protocol import (
     active_unit_ids,
     list_failures,
@@ -11,7 +13,26 @@ from .engine.common.model.protocol import (
     list_results,
     list_row_results,
 )
+from .engine.common.sql.dates import bucket_date
 
+log = logging.getLogger("pair_recon.right.catalog")
+WINDOW_HISTORY_TABLE = "pair_recon_window_history"
+WINDOW_COLUMNS = (
+    "pair_name",
+    "vintage",
+    "window_value",
+    "run_id",
+    "owner",
+    "result",
+    "partitions",
+    "excluded_partitions",
+    "columns",
+    "sample_rate",
+    "units",
+    "matches",
+    "differences",
+    "checked_at",
+)
 ERROR_COLUMNS = (
     "run_id",
     "check_name",
@@ -55,15 +76,28 @@ STATUS_COLUMNS = (
 )
 
 
+# >>> sibling table in the same catalog.schema as the pair table <<< #
+def companion_table(pair_table: str, name: str) -> str:
+    return f"{pair_table.rsplit('.', 1)[0]}.{name}"
+
+
+# >>> terminal state from a Right summary: any runtime failure means the check did not finish <<< #
+def run_state(outcome: dict) -> str:
+    if int(outcome.get("failures") or 0):
+        return "incomplete"
+    if int(outcome.get("row_errors") or 0) or int(outcome.get("column_errors") or 0):
+        return "different"
+    return "passed"
+
+
+def sample_rate_value(sample: dict) -> float | None:
+    if sample.get("mode") == "fraction":
+        return float(sample["rate"])
+    return 1.0 if sample.get("mode") == "all" else None
+
+
 def status_run_values(pair: dict) -> dict:
-    sample = sample_plan(pair.get("sample"))
-    sample_rate = (
-        float(sample["rate"])
-        if sample["mode"] == "fraction"
-        else 1.0
-        if sample["mode"] == "all"
-        else None
-    )
+    sample_rate = sample_rate_value(sample_plan(pair.get("sample")))
     vintage_values = pair.get("vintage_values") or []
     vintage_size = pair.get("vintage_sample_size")
     if vintage_values:
@@ -175,11 +209,60 @@ def error_rows(store, run_id, pair, now):
     return rows
 
 
-def append_error_rows(spark, error_table, rows) -> None:
+# >>> one row per plan window whose every column unit has a durable match/diff and whose row counts matched <<< #
+def window_rows(store, run_id, pair, owner, now):
+    results = {value["unit_id"]: value for _, value in list_results(store)}
+    failures = {value["unit_id"] for _, value in list_failures(store)}
+    row_results = {value.get("pair"): value for _, value in list_row_results(store)}
+    rows = []
+    for _, plan in list_plans(store):
+        if plan.get("pair") != pair or plan.get("partition_mode", "date") != "date":
+            continue
+        reconciled = row_results.get(pair) or {}
+        synonyms = reconciled.get("date_synonyms") or {}
+        partitions = reconciled.get("partitions") or {}
+        vintage = str(plan.get("vintage") or "day")
+        excluded_by_bucket = Counter(
+            bucket_date(value, vintage) for value in plan.get("excluded_partitions") or []
+        )
+        rate = sample_rate_value(plan.get("sample") or {})
+        for window in plan.get("windows") or []:
+            ids = [unit_id_for(plan, window, column) for column in plan["columns"]]
+            if any(uid in failures or uid not in results for uid in ids):
+                continue
+            counted = all(
+                (partitions.get(synonyms.get(value, value)) or {}).get("result") == "match"
+                for value in window["partitions"]
+            )
+            if not counted:
+                continue
+            matched = sum(results[uid].get("verdict") == "match" for uid in ids)
+            rows.append(
+                {
+                    "pair_name": pair,
+                    "vintage": vintage,
+                    "window_value": window["bucket"],
+                    "run_id": run_id,
+                    "owner": owner,
+                    "result": "match" if matched == len(ids) else "different",
+                    "partitions": len(window["partitions"]),
+                    "excluded_partitions": excluded_by_bucket.get(window["bucket"], 0),
+                    "columns": len(plan["columns"]),
+                    "sample_rate": rate,
+                    "units": len(ids),
+                    "matches": matched,
+                    "differences": len(ids) - matched,
+                    "checked_at": now,
+                }
+            )
+    return rows
+
+
+def append_rows(spark, table, columns, rows) -> None:
     if not rows:
         return
-    schema = spark.table(error_table).select(*ERROR_COLUMNS).schema
-    spark.createDataFrame(rows, schema=schema).write.mode("append").saveAsTable(error_table)
+    schema = spark.table(table).select(*columns).schema
+    spark.createDataFrame(rows, schema=schema).write.mode("append").saveAsTable(table)
 
 
 def publish(
@@ -252,7 +335,19 @@ def publish(
     errors = DeltaTable.forName(spark, error_table)
     errors.delete(F.col("run_id") == F.lit(run_id))
     rows = error_rows(store, run_id, pair, now)
-    append_error_rows(spark, error_table, rows)
+    append_rows(spark, error_table, ERROR_COLUMNS, rows)
+    window_table = companion_table(pair_table, WINDOW_HISTORY_TABLE)
+    windows = window_rows(store, run_id, pair, owner, now)
+    try:
+        DeltaTable.forName(spark, window_table).delete(F.col("run_id") == F.lit(run_id))
+        append_rows(spark, window_table, WINDOW_COLUMNS, windows)
+    except Exception:
+        log.exception(
+            "window history not written: table=%s rows=%d; create it with setup/schema.sql",
+            window_table,
+            len(windows),
+        )
+        windows = []
     DeltaTable.forName(spark, pair_table).update(
         condition=F.col("pair_name") == F.lit(pair),
         set={
@@ -261,4 +356,4 @@ def publish(
             "updated_at": F.lit(now),
         },
     )
-    return {"status": state, "errors": len(rows)}
+    return {"status": state, "errors": len(rows), "windows": len(windows)}

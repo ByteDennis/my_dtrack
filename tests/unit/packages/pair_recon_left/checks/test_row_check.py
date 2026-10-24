@@ -251,12 +251,13 @@ def test_run_row_check_aborts_while_the_count_is_running(monkeypatch):
     }
     monkeypatch.setattr(row_check, "ROW_COUNT_LOG_INTERVAL", 0.01)
     outcome = {}
+    store = MemoryStore()
 
     def run():
         try:
             run_row_check(
                 {"version": 2, "pairs": {"p": pair}},
-                MemoryStore(),
+                store,
                 run_id="run",
                 source_factory=lambda _value: BlockedSource({"all": 2}),
                 abort_if=abort,
@@ -270,3 +271,40 @@ def test_run_row_check_aborts_while_the_count_is_running(monkeypatch):
     assert not worker.is_alive() and outcome["error"] == "Right failed"
     assert not release.is_set()
     release.set()
+
+
+def test_run_row_check_heartbeats_while_the_count_is_running(monkeypatch):
+    ticks = threading.Semaphore(0)
+
+    class SlowSource(Source):
+        def partition_counts(self, *_args, **_kwargs):
+            for _ in range(3):
+                ticks.acquire(timeout=5)
+            return self.counts
+
+    monkeypatch.setattr(row_check, "ROW_COUNT_LOG_INTERVAL", 0.01)
+    store = MemoryStore()
+    beats = []
+    original = store.heartbeat
+
+    def heartbeat(now=None):
+        beats.append(1)
+        ticks.release()
+        return original(now)
+
+    monkeypatch.setattr(store, "heartbeat", heartbeat)
+    pair = {
+        "partition_mode": "all",
+        "left": {"source": "oracle", "table": "L"},
+        "right": {"source": "databricks", "table": "R"},
+        "col_map": {"A": "a"},
+        "checks": ["row_count"],
+        "version": 2,
+    }
+    run_row_check(
+        {"version": 2, "pairs": {"p": pair}},
+        store,
+        run_id="run",
+        source_factory=lambda _value: SlowSource({"all": 2}),
+    )
+    assert len(beats) >= 3 and store.exists("_status/heartbeat.json")

@@ -1,7 +1,7 @@
 import json
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -24,6 +24,7 @@ from pair_recon.app.runner import (
 from pair_recon.core import debug, sas
 from pair_recon.core.progress import ProgressSampler, progress_snapshot
 from pair_recon.core.sas import export_bundle
+from pair_recon_left.common.checks import col_check as left_col_check
 from pair_recon_left.common.model.protocol import (
     plan_path,
     result_path,
@@ -1790,6 +1791,175 @@ def test_remote_resume_starts_right_after_left_row_release(monkeypatch, tmp_path
     ]
 
 
+def test_new_run_starts_right_only_after_left_row_release(monkeypatch, tmp_path):
+    store = MemoryStore()
+    events = []
+
+    class Root:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def child(self, _run_id):
+            return store
+
+    class Remote:
+        run_id = 98
+
+    class Monitor:
+        final_state = "success"
+        error = None
+
+        def __init__(self, *_args, **_kwargs):
+            self.outcome = {"row_errors": 0, "column_errors": 0, "failures": 0}
+
+        def start(self):
+            events.append("monitor-start")
+
+        def raise_if_failed(self):
+            events.append("health-check")
+
+        def result(self):
+            events.append("monitor-result")
+
+    def run_now(*_args, **_kwargs):
+        events.append("right-start")
+        return Remote()
+
+    def left(*_args, release=None, abort_if=None, **_kwargs):
+        events.append("left-row-ready")
+        assert "right-start" not in events
+        assert store.exists("_status/heartbeat.json")
+        release()
+        abort_if()
+        return {"row": "ready", "units": 0}
+
+    monkeypatch.setattr(runner, "VolumeStore", Root)
+    monkeypatch.setattr(runner, "RightJobMonitor", Monitor)
+    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args: None)
+    monkeypatch.setattr(runner, "run_left", left)
+    settings = {
+        "run_id": "new-1",
+        "profile": "corp",
+        "volume_root": "/Volumes/c/s/v/runs",
+        "work_dir": str(tmp_path),
+        "timezone": "America/New_York",
+        "owner": "me",
+        "pair_table": "c.s.pairs",
+        "status_table": "c.s.status",
+        "error_table": "c.s.errors",
+        "right_job_id": "42",
+    }
+    client = SimpleNamespace(
+        files=object(),
+        jobs=SimpleNamespace(run_now=run_now, cancel_run=lambda _run_id: None),
+    )
+    config = {"pairs": {"orders": {"right": {"source": "databricks"}}}}
+
+    result = runner.launch(settings, config, action="new", workspace_client=client, catalog=None)
+
+    assert result["state"] == "passed"
+    assert events == [
+        "left-row-ready",
+        "right-start",
+        "monitor-start",
+        "health-check",
+        "monitor-result",
+    ]
+
+
+def test_launch_injects_checked_vintages_from_window_history(monkeypatch, tmp_path):
+    seen = {}
+
+    class Root:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def child(self, _run_id):
+            return MemoryStore()
+
+    class Sampler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self, **_kwargs):
+            return self
+
+        def stop(self, *_args, **_kwargs):
+            pass
+
+    class Catalog:
+        progress = staticmethod(lambda _row: None)
+
+        def clear(self, _run_id):
+            pass
+
+        def status(self, **_values):
+            pass
+
+        def finish(self, _store, **_values):
+            pass
+
+        def checked_windows(self, pair, vintage, *, exclude_run_id):
+            seen["query"] = (pair, vintage, exclude_run_id)
+            return ["2026-01-01", "2026-03-01"]
+
+    def left(config, *_args, release=None, **_kwargs):
+        seen["checked"] = config["pairs"]["orders"].get("checked_vintages")
+        release()
+        return {"row": "ready", "units": 0}
+
+    monkeypatch.setattr(runner, "VolumeStore", Root)
+    monkeypatch.setattr(runner, "ProgressSampler", Sampler)
+    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args: None)
+    monkeypatch.setattr(runner, "run_left", left)
+    monkeypatch.setattr(runner, "run_right_row_check", lambda *_args: None)
+    monkeypatch.setattr(
+        runner,
+        "run_right",
+        lambda *_args, **_kwargs: {"row_errors": 0, "column_errors": 0, "failures": 0},
+    )
+    settings = {
+        "run_id": "orders-me-20261024",
+        "profile": "corp",
+        "volume_root": "/Volumes/c/s/v/runs",
+        "work_dir": str(tmp_path),
+        "timezone": "America/New_York",
+        "owner": "me",
+        "pair_table": "c.s.pairs",
+        "status_table": "c.s.status",
+        "error_table": "c.s.errors",
+    }
+    client = SimpleNamespace(files=object(), jobs=SimpleNamespace())
+    pair = {
+        "right": {"source": "csv"},
+        "partition_mode": "date",
+        "vintage": "month",
+        "vintage_sample_size": 4,
+    }
+
+    runner.launch(
+        settings,
+        {"pairs": {"orders": dict(pair)}},
+        action="new",
+        workspace_client=client,
+        catalog=Catalog(),
+    )
+    assert seen == {
+        "query": ("orders", "month", "orders-me-20261024"),
+        "checked": ["2026-01-01", "2026-03-01"],
+    }
+
+    seen.clear()
+    runner.launch(
+        {**settings, "recheck": True},
+        {"pairs": {"orders": {**pair, "checked_vintages": ["stale"]}}},
+        action="new",
+        workspace_client=client,
+        catalog=Catalog(),
+    )
+    assert seen == {"checked": None}
+
+
 def test_left_only_does_not_start_or_run_right(monkeypatch, tmp_path):
     store = MemoryStore()
     events = []
@@ -1903,6 +2073,7 @@ def test_launch_writes_early_failure_to_left_log(monkeypatch, tmp_path):
             states.append(values["state"])
 
     monkeypatch.setattr(runner, "VolumeStore", Root)
+    monkeypatch.setattr(runner, "run_left", lambda *_args, release=None, **_kwargs: release())
     settings = {
         "run_id": "failed-1",
         "profile": "corp",
@@ -1986,11 +2157,11 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
         run_id = 91
 
         def result(self, *, timeout):
-            assert timeout.total_seconds() == 7200
             raise RuntimeError("health check exploded")
 
-    def left(*_args, abort_if=None, **_kwargs):
+    def left(*_args, release=None, abort_if=None, **_kwargs):
         assert abort_if is not None
+        release()
         for _ in range(100):
             abort_if()
             threading.Event().wait(0.01)
@@ -2073,7 +2244,7 @@ def test_right_job_monitor_reports_failed_task_traceback():
             error_trace=f"Traceback {run_id}\n  File job.py, line 55\n",
         ),
     )
-    monitor = runner.RightJobMonitor(Remote(), timedelta(minutes=1), jobs=jobs).start()
+    monitor = runner.RightJobMonitor(Remote(), jobs=jobs).start()
     with pytest.raises(RuntimeError) as failure:
         monitor.result()
     message = str(failure.value)
@@ -2097,11 +2268,7 @@ def test_right_job_monitor_forwards_cancelled_state():
                 state=SimpleNamespace(result_state="CANCELED", state_message="Cancelled by user"),
             )
 
-    monitor = runner.RightJobMonitor(
-        Remote(),
-        timedelta(minutes=1),
-        on_terminal=forwarded.append,
-    ).start()
+    monitor = runner.RightJobMonitor(Remote(), on_terminal=forwarded.append).start()
 
     with pytest.raises(RuntimeError, match="CANCELED: Cancelled by user"):
         monitor.result()
@@ -2155,7 +2322,8 @@ def test_launch_forwards_cancelled_job_and_finalizes_catalog(monkeypatch, tmp_pa
                 state=SimpleNamespace(result_state="CANCELED", state_message="Cancelled by user"),
             )
 
-    def left(*_args, abort_if=None, **_kwargs):
+    def left(*_args, release=None, abort_if=None, **_kwargs):
+        release()
         for _ in range(100):
             abort_if()
             threading.Event().wait(0.01)
@@ -2212,9 +2380,29 @@ def test_right_job_monitor_outcome_is_empty_without_notebook_exit():
             notebook_output=SimpleNamespace(result="not json")
         )
     )
-    monitor = runner.RightJobMonitor(Remote(), timedelta(minutes=1), jobs=jobs).start()
+    monitor = runner.RightJobMonitor(Remote(), jobs=jobs).start()
     monitor.result()
     assert monitor.outcome == {}
+
+
+def test_right_job_monitor_keeps_waiting_past_each_wait_chunk(caplog):
+    attempts = []
+
+    class Remote:
+        run_id = 97
+
+        def result(self, *, timeout):
+            attempts.append(timeout)
+            if len(attempts) < 3:
+                raise TimeoutError("timed out after 1:00:00: RUNNING")
+            return SimpleNamespace(run_id=97, state=SimpleNamespace(result_state="SUCCESS"))
+
+    with caplog.at_level("INFO"):
+        monitor = runner.RightJobMonitor(Remote()).start()
+        monitor.result()
+    assert monitor.final_state == "success" and len(attempts) == 3
+    assert all(value == runner.RIGHT_WAIT_CHUNK for value in attempts)
+    assert caplog.text.count("Right Databricks job still running: run_id=97") == 2
 
 
 def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
@@ -2278,13 +2466,13 @@ def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
             )
         )
 
+    def left(*_args, release=None, **_kwargs):
+        release()
+        return {"row": "ready", "units": 3}
+
     monkeypatch.setattr(runner, "VolumeStore", Root)
     monkeypatch.setattr(runner, "ProgressSampler", Sampler)
-    monkeypatch.setattr(
-        runner,
-        "run_left",
-        lambda *_args, **_kwargs: {"row": "ready", "units": 3},
-    )
+    monkeypatch.setattr(runner, "run_left", left)
     settings = {
         "run_id": "success-right-1",
         "profile": "corp",
@@ -2324,11 +2512,11 @@ def test_launch_uses_background_right_result_for_success(monkeypatch, tmp_path):
         "results": 3,
     }
     assert "workers:8" in calls
-    assert calls.count("result:7200") == 1
+    assert calls.count("result:3600") == 1
     assert calls == [
         "status:running",
         "workers:8",
-        "result:7200",
+        "result:3600",
         "output:920",
         "stop:passed:capture=False",
     ]
@@ -2484,8 +2672,17 @@ def test_run_left_pulls_only_after_the_right_row_check_result(monkeypatch, tmp_p
 
     result = runner.run_left(config, store, "run", "orders", tmp_path, release=release)
     assert result == {"row": "ready", "units": 3} and seen == [True]
-    with pytest.raises(TimeoutError, match="row check result"):
-        runner.run_left(config, MemoryStore(), "run", "orders", tmp_path, 0)
+    polls = []
+
+    def abort():
+        polls.append(True)
+        if len(polls) == 3:
+            raise RuntimeError("Right failed")
+
+    monkeypatch.setattr(left_col_check.time, "sleep", lambda _seconds: None)
+    with pytest.raises(RuntimeError, match="Right failed"):
+        runner.run_left(config, MemoryStore(), "run", "orders", tmp_path, abort_if=abort)
+    assert len(polls) == 3 and seen == [True]
 
 
 def test_run_left_reports_unexcluded_mismatches_before_pulling(monkeypatch, tmp_path):

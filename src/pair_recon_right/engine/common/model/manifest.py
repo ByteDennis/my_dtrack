@@ -160,6 +160,7 @@ def select_vintage_windows(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw_values = pair.get("vintage_values") or []
     raw_size = pair.get("vintage_sample_size")
+    checked = {str(value) for value in pair.get("checked_vintages") or []}
     if raw_values and raw_size not in (None, ""):
         raise ValueError(f"{pair_name}: use vintage_values or vintage_sample_size, not both")
     available = {window["bucket"]: window for window in windows}
@@ -198,19 +199,30 @@ def select_vintage_windows(
             or (isinstance(raw_size, str) and not raw_size.strip().isdigit())
         ):
             raise ValueError(f"{pair_name}: vintage_sample_size must be a positive integer")
+        checked_before = sorted(bucket for bucket in available if bucket in checked)
+        candidates = [window for window in windows if window["bucket"] not in checked]
+        if windows and not candidates:
+            raise ValueError(
+                f"{pair_name}: all {len(windows)} vintages were already checked by earlier runs "
+                f"(coverage {len(windows)}/{len(windows)}); rerun with --recheck to ignore "
+                "pair_recon_window_history or set vintage_values to recheck specific vintages"
+            )
         ranked = sorted(
-            windows,
+            candidates,
             key=lambda window: hashlib.sha256(
                 f"{run_id}\0{pair_name}\0{window['bucket']}".encode()
             ).hexdigest(),
         )
         selected = sorted(ranked[:size], key=lambda window: window["bucket"])
-        return selected, {
+        selection = {
             "mode": "random",
             "requested": size,
             "available": len(windows),
             "selected": [window["bucket"] for window in selected],
         }
+        if checked_before:
+            selection["checked_before"] = checked_before
+        return selected, selection
     return windows, {
         "mode": "all",
         "available": len(windows),

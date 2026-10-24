@@ -3,9 +3,11 @@ import threading
 import pytest
 
 from pair_recon_left.common.runtime.stop import (
+    Heartbeat,
     StopRequested,
     StopSignal,
     abandoning_executor,
+    beat,
     canceller,
 )
 
@@ -81,3 +83,32 @@ def test_abandoning_executor_joins_workers_on_success():
     with abandoning_executor(2, "test") as pool:
         pool.submit(seen.append, 1)
     assert seen == [1]
+
+
+class FlakyStore:
+    def __init__(self, failures=0):
+        self.failures = failures
+        self.beats = 0
+
+    def heartbeat(self):
+        if self.failures:
+            self.failures -= 1
+            raise OSError("IncompleteRead")
+        self.beats += 1
+
+
+def test_beat_survives_a_failed_heartbeat_write(caplog):
+    store = FlakyStore(failures=1)
+    with caplog.at_level("WARNING"):
+        assert beat(store) is False
+    assert "left heartbeat write failed" in caplog.text
+    assert beat(store) is True and store.beats == 1
+
+
+def test_heartbeat_ticks_at_most_once_per_interval():
+    store = FlakyStore()
+    heartbeat = Heartbeat(store, interval=3600)
+    assert heartbeat.tick() is True
+    assert heartbeat.tick() is False and store.beats == 1
+    heartbeat.last -= 3600
+    assert heartbeat.tick() is True and store.beats == 2

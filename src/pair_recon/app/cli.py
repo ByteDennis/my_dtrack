@@ -688,7 +688,6 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "audit": answers["audit"],
         "sync_remote": sync_remote,
         "work_dir": str(local_output_root(defaults)),
-        "timeout": defaults.get("timeout", 120),
         "progress_interval": defaults.get("progress_interval", 10),
         "left_workers": left_workers,
         "right_workers": right_workers,
@@ -749,7 +748,7 @@ def sync_right_package(settings: dict, client) -> dict:
 
 
 def persistent_settings(settings: dict) -> dict:
-    transient = {"run_id", "earlystop", "force"}
+    transient = {"run_id", "earlystop", "force", "recheck"}
     return {
         key: value
         for key, value in settings.items()
@@ -796,6 +795,7 @@ def execute(args, *, raise_errors: bool = False) -> int:
                     settings, config, action, client, catalog = prompt_result
                     settings["earlystop"] = bool(getattr(args, "earlystop", False))
                     settings["force"] = bool(getattr(args, "force", False))
+                    settings["recheck"] = bool(getattr(args, "recheck", False))
                     if settings["force"]:
                         action = "restart"
                     configure_console_logging(args.log_level, settings["timezone"])
@@ -933,6 +933,11 @@ def main_program(argv=None) -> int:
         "--force",
         action="store_true",
         help="ignore PairRecon caches and overwrite this run's existing results",
+    )
+    parser.add_argument(
+        "--recheck",
+        action="store_true",
+        help="ignore pair_recon_window_history so random vintage sampling may repeat checked vintages",
     )
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))

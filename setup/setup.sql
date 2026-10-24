@@ -203,6 +203,51 @@ WHEN NOT MATCHED THEN INSERT (
   s.left_value, s.right_value, s.detail, s.payload, s.created_at
 );
 
+-- # catalog.schema.pair_recon_window_history
+-- Normally appended by PairRecon for every window whose comparison completed. This example is for repair/testing only.
+MERGE INTO catalog.schema.pair_recon_window_history AS t
+USING (
+  SELECT
+    'orders' AS pair_name,
+    'month' AS vintage,
+    '2026-10-01' AS window_value,
+    'example-orders-owner-20261021' AS run_id,
+    'example.owner' AS owner,
+    'match' AS result,
+    CAST(21 AS BIGINT) AS partitions,
+    CAST(0 AS BIGINT) AS excluded_partitions,
+    CAST(2 AS BIGINT) AS columns,
+    CAST(0.1 AS DOUBLE) AS sample_rate,
+    CAST(2 AS BIGINT) AS units,
+    CAST(2 AS BIGINT) AS matches,
+    CAST(0 AS BIGINT) AS differences,
+    CAST('2026-10-21 12:30:00' AS TIMESTAMP_NTZ) AS checked_at
+) AS s
+ON t.run_id = s.run_id
+ AND t.pair_name = s.pair_name
+ AND t.vintage = s.vintage
+ AND t.window_value = s.window_value
+WHEN MATCHED THEN UPDATE SET
+  t.owner = s.owner,
+  t.result = s.result,
+  t.partitions = s.partitions,
+  t.excluded_partitions = s.excluded_partitions,
+  t.columns = s.columns,
+  t.sample_rate = s.sample_rate,
+  t.units = s.units,
+  t.matches = s.matches,
+  t.differences = s.differences,
+  t.checked_at = s.checked_at
+WHEN NOT MATCHED THEN INSERT (
+  pair_name, vintage, window_value, run_id, owner, result,
+  partitions, excluded_partitions, columns, sample_rate,
+  units, matches, differences, checked_at
+) VALUES (
+  s.pair_name, s.vintage, s.window_value, s.run_id, s.owner, s.result,
+  s.partitions, s.excluded_partitions, s.columns, s.sample_rate,
+  s.units, s.matches, s.differences, s.checked_at
+);
+
 -- # catalog.schema.pair_recon_progress_snapshot
 -- PairRecon keeps one current progress row per daily run_id. This example is for repair/testing only.
 MERGE INTO catalog.schema.pair_recon_progress_snapshot AS t

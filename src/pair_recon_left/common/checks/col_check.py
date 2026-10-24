@@ -46,7 +46,7 @@ from ..runtime.duck import use_temp
 from ..runtime.progress import StatisticsProgress
 from ..runtime.run_logging import get_left_logger
 from ..runtime.stats import compute_csv_statistics
-from ..runtime.stop import abandoning_executor
+from ..runtime.stop import Heartbeat, abandoning_executor, beat
 
 log = get_left_logger("col_check")
 
@@ -74,16 +74,17 @@ def wait_for_row_check_result(
     store,
     pair: str,
     *,
-    timeout: float = 1800,
     poll_interval: float = 5,
     abort_if=None,
 ) -> dict[str, Any]:
     abort_if = abort_if or (lambda: None)
     started = time.monotonic()
     last_log = None
+    heartbeat = Heartbeat(store)
     path = row_result_path(pair)
     while not store.exists(path):
         abort_if()
+        heartbeat.tick()
         now = time.monotonic()
         if last_log is None or now - last_log >= ROW_RESULT_LOG_INTERVAL:
             log.info(
@@ -92,8 +93,6 @@ def wait_for_row_check_result(
                 now - started,
             )
             last_log = now
-        if now - started > timeout:
-            raise TimeoutError("Right side did not publish the row check result before timeout")
         time.sleep(poll_interval)
     result = store.get_json(path)
     plan = store.get_json(plan_path(pair)) if store.exists(plan_path(pair)) else {}
@@ -115,14 +114,13 @@ def wait_for_row_check_result(
 def wait_for_manifests(
     store,
     *,
-    timeout: float = 1800,
     poll_interval: float = 3,
     pair_names=None,
     abort_if=None,
 ):
     abort_if = abort_if or (lambda: None)
-    started = time.monotonic()
     last_state = None
+    heartbeat = Heartbeat(store)
     while True:
         abort_if()
         plans = [
@@ -150,8 +148,7 @@ def wait_for_manifests(
             raise RuntimeError(
                 f"Right side health check failed: {store.get_json('_HEALTH_CHECK.json')}"
             )
-        if time.monotonic() - started > timeout:
-            raise TimeoutError("Right side did not close the row check before timeout")
+        heartbeat.tick()
         time.sleep(poll_interval)
 
 
@@ -512,7 +509,7 @@ class ColCheckPipeline:
                 if not complete:
                     self.abort_if()
                     progress.report()
-                    self.store.heartbeat()
+                    beat(self.store)
                     continue
                 for job in complete:
                     self.abort_if()
@@ -609,8 +606,10 @@ class ColCheckPipeline:
     def _wait_for_capacity(self, active_ids: set[str], version2: bool) -> None:
         waiting_started = None
         last_wait_log = None
+        heartbeat = Heartbeat(self.store)
         while True:
             self.abort_if()
+            heartbeat.tick()
             left_ready, right_finished, active_ready_unclaimed = self._unit_progress(active_ids)
             ready_unclaimed = active_ready_unclaimed if version2 else self.store.ready_unclaimed()
             if ready_unclaimed < self.wip:

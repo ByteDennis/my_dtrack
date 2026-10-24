@@ -197,10 +197,12 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     reference = (ROOT / "setup" / "reference.sql").read_text(encoding="utf-8")
     assert "pair_recon_progress_snapshot', 'state', 'left_col_check'" in reference
     assert "pair_recon_run_error', 'check_name', 'hash_sum'" in reference
+    assert "pair_recon_run_status', 'state', 'incomplete'" in reference
     for table in (
         "pair_recon_run_status",
         "pair_recon_run_error",
         "pair_recon_progress_snapshot",
+        "pair_recon_window_history",
     ):
         body = schema.split(f"{table} (", 1)[1].split(") USING DELTA", 1)[0]
         columns = re.findall(r"^  ([a-z_]+) ", body, flags=re.MULTILINE)

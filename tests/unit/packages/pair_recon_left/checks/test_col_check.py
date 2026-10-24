@@ -78,7 +78,7 @@ def test_wait_for_manifests_honors_abort_signal():
         raise RuntimeError("Right failed")
 
     with pytest.raises(RuntimeError, match="Right failed"):
-        wait_for_manifests(MemoryStore(), timeout=1800, abort_if=abort)
+        wait_for_manifests(MemoryStore(), abort_if=abort)
 
 
 def test_pipeline_honors_abort_signal_before_work():
@@ -159,7 +159,7 @@ def test_wait_for_row_check_result_raises_on_unexcluded_mismatches():
         RuntimeError,
         match=r"unexcluded mismatched partitions.*\(pair: 2026-01-01\)",
     ):
-        wait_for_row_check_result(store, "pair", timeout=0)
+        wait_for_row_check_result(store, "pair")
 
 
 def test_wait_for_row_check_result_waits_for_the_right_then_accepts_matches(caplog):
@@ -180,17 +180,24 @@ def test_wait_for_row_check_result_waits_for_the_right_then_accepts_matches(capl
             )
 
     with caplog.at_level("INFO"):
-        result = wait_for_row_check_result(
-            store, "pair", timeout=5, poll_interval=0.01, abort_if=abort
-        )
+        result = wait_for_row_check_result(store, "pair", poll_interval=0.01, abort_if=abort)
     assert result["summary"] == {"match": 1} and len(polls) == 2
+    assert store.exists("_status/heartbeat.json")
     assert "waiting for the Right row check before pulling Left data: pair=pair" in caplog.text
     assert "Right row check accepted: pair=pair partitions=1" in caplog.text
 
 
-def test_wait_for_row_check_result_times_out_without_the_right():
-    with pytest.raises(TimeoutError, match="row check result"):
-        wait_for_row_check_result(MemoryStore(), "pair", timeout=0)
+def test_wait_for_row_check_result_waits_until_aborted():
+    polls = []
+
+    def abort():
+        polls.append(True)
+        if len(polls) == 3:
+            raise RuntimeError("Right failed")
+
+    with pytest.raises(RuntimeError, match="Right failed"):
+        wait_for_row_check_result(MemoryStore(), "pair", poll_interval=0.001, abort_if=abort)
+    assert len(polls) == 3
 
 
 def test_cache(tmp_path, caplog):

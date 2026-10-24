@@ -23,7 +23,7 @@ from ..model.protocol import (
     write_run_status,
 )
 from ..runtime.run_logging import get_left_logger
-from ..runtime.stop import abandoning_executor
+from ..runtime.stop import abandoning_executor, beat
 from ..sql.dates import resolve_date_type
 
 log = get_left_logger("row_check")
@@ -318,6 +318,7 @@ def run_row_check(
             )
             abort_if()
             if pending and not _done:
+                beat(store)
                 active = sorted(name for name, future in counted.items() if future in pending)
                 log.info(
                     "left row count query still running: pairs=%s elapsed=%.1fs",

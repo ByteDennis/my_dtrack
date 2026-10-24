@@ -183,6 +183,37 @@ def test_vintage_selection(common):
     assert len(first["windows"]) == 1 and first["expected_units"] == 2
 
 
+def test_vintage_selection_skips_vintages_earlier_runs_checked(common):
+    chosen = common.manifest.build_manifest(
+        "run",
+        "p",
+        _variant(vintage_sample_size=1, checked_vintages=["2026-01-01"]),
+        ROW_CHECK,
+    )
+    assert [window["bucket"] for window in chosen["windows"]] == ["2026-02-01"]
+    assert chosen["vintage_selection"] == {
+        "mode": "random",
+        "requested": 1,
+        "available": 2,
+        "selected": ["2026-02-01"],
+        "checked_before": ["2026-01-01"],
+    }
+    with pytest.raises(ValueError, match=r"all 2 vintages were already checked.*coverage 2/2"):
+        common.manifest.build_manifest(
+            "run",
+            "p",
+            _variant(vintage_sample_size=1, checked_vintages=["2026-01-01", "2026-02-01"]),
+            ROW_CHECK,
+        )
+    explicit = common.manifest.build_manifest(
+        "run",
+        "p",
+        _variant(vintage_values=["2026-01-01"], checked_vintages=["2026-01-01"]),
+        ROW_CHECK,
+    )
+    assert [window["bucket"] for window in explicit["windows"]] == ["2026-01-01"]
+
+
 def test_vintage_selection_rejects_missing_or_conflicting_values(common):
     with pytest.raises(ValueError, match="not available"):
         common.manifest.build_manifest(
