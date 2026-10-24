@@ -76,7 +76,6 @@ def write_row_sheet(workbook, document: dict[str, Any]) -> None:
         ("Mismatch:", summary.get("count_diff", 0)),
         (f"{left_label} Only:", summary.get("left_only", 0)),
         (f"{right_label} Only:", summary.get("right_only", 0)),
-        ("Gate:", str(document.get("gate_decision"))),
     ]
     for index, (label, value) in enumerate(header, start=1):
         sheet.cell(row=index, column=1, value=label).font = bold
@@ -117,7 +116,7 @@ def write_col_sheet(
     by_vintage: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         by_vintage.setdefault(row["vintage"], []).append(row)
-    for vintage in sorted(by_vintage):
+    for vintage in sorted(by_vintage, reverse=True):
         comps = sorted(
             by_vintage[vintage], key=lambda row: (row.get("verdict") != "diff", row["column"])
         )

@@ -1,3 +1,4 @@
+import threading
 import time
 
 import pytest
@@ -225,3 +226,47 @@ def test_snapshot():
     )
     assert seen[0]["partition_mode"] == "all"
     assert not store.exists("plan.json")
+
+
+def test_run_row_check_aborts_while_the_count_is_running(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+
+    class BlockedSource(Source):
+        def partition_counts(self, *_args, **_kwargs):
+            started.set()
+            release.wait(5)
+            return self.counts
+
+    def abort():
+        if started.is_set():
+            raise RuntimeError("Right failed")
+
+    pair = {
+        "partition_mode": "all",
+        "left": {"source": "oracle", "table": "L"},
+        "right": {"source": "databricks", "table": "R"},
+        "col_map": {"A": "a"},
+        "checks": ["row_count"],
+        "version": 2,
+    }
+    monkeypatch.setattr(row_check, "ROW_COUNT_LOG_INTERVAL", 0.01)
+    outcome = {}
+
+    def run():
+        try:
+            run_row_check(
+                {"version": 2, "pairs": {"p": pair}},
+                MemoryStore(),
+                run_id="run",
+                source_factory=lambda _value: BlockedSource({"all": 2}),
+                abort_if=abort,
+            )
+        except RuntimeError as exc:
+            outcome["error"] = str(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive() and outcome["error"] == "Right failed"
+    assert not release.is_set()
+    release.set()

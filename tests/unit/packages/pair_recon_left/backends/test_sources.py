@@ -1,4 +1,5 @@
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ from pair_recon_left.backends.sources import (
     OracleSource,
     source_from_config,
 )
+from pair_recon_left.common.runtime.stop import StopRequested, StopSignal
 
 LDAP = "ldap://ldap.corp:389/PRODSVC,cn=OracleContext,dc=corp,dc=com"
 ORACLE_ENV = ("ORACLE_SVC", "ORACLE_DSN", "LDAP_DSN")
@@ -213,3 +215,58 @@ def test_counts(config, expected):
         key_families=["string"],
     )
     assert "STANDARD_HASH" in connection.statements[-1]
+
+
+def test_query_to_csv_cancels_the_running_statement_on_stop(tmp_path):
+    started, release = threading.Event(), threading.Event()
+
+    class BlockedCursor:
+        def __init__(self):
+            self.description = [("ID",)]
+
+        def execute(self, _sql):
+            pass
+
+        def fetchmany(self, _size):
+            started.set()
+            release.wait(5)
+            raise RuntimeError("ORA-01013: user requested cancel of current operation")
+
+        def close(self):
+            pass
+
+    class BlockedConnection:
+        def __init__(self):
+            self.cancels = 0
+
+        def cursor(self):
+            return BlockedCursor()
+
+        def cancel(self):
+            self.cancels += 1
+            release.set()
+
+        def close(self):
+            pass
+
+    connection = BlockedConnection()
+    source = OracleSource({"source": "oracle", "table": "T"})
+    source.connect = lambda: connection
+    stop = StopSignal()
+    source.set_stop(stop)
+    outcome = {}
+
+    def run():
+        try:
+            source.query_to_csv("SELECT ID FROM T", tmp_path / "rows.csv", ["ID"])
+        except StopRequested as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert started.wait(2)
+    stop.trigger("Right failed")
+    worker.join(2)
+    assert not worker.is_alive() and connection.cancels == 1
+    assert "Right failed" in str(outcome["error"])
+    assert not (tmp_path / "rows.csv.part").exists()

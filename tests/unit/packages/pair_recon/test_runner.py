@@ -610,7 +610,7 @@ def test_execute_force_overrides_resume_with_restart(monkeypatch, tmp_path):
     assert actions == ["restart"]
 
 
-def test_main_program_parses_default_alias_earlystop_and_force(monkeypatch, tmp_path):
+def test_main_program_parses_defaults_earlystop_and_force(monkeypatch, tmp_path):
     seen = {}
     defaults = tmp_path / "run.yaml"
     monkeypatch.setattr(
@@ -620,10 +620,15 @@ def test_main_program_parses_default_alias_earlystop_and_force(monkeypatch, tmp_
     )
     monkeypatch.setattr(cli, "run_debugger", lambda _mode, callback: callback())
 
-    assert cli.main_program(["--default", str(defaults), "--earlystop", "--force"]) == 0
+    assert cli.main_program(["--defaults", str(defaults), "--earlystop", "--force"]) == 0
     assert seen["defaults_path"] == defaults
     assert seen["earlystop"] is True
     assert seen["force"] is True
+
+
+def test_main_program_rejects_removed_default_alias():
+    with pytest.raises(SystemExit):
+        cli.main_program(["--default"])
 
 
 def test_timezone_default(monkeypatch):
@@ -905,6 +910,35 @@ def test_retry():
     assert store.exists("col_check/results/good.json")
     assert not store.exists("col_check/results/bad.json")
     assert not store.exists("col_check/failures/error.json")
+
+
+def test_retry_keeps_left_counts_when_the_row_check_mismatched():
+    store = MemoryStore()
+    store.put_json("row_check/left.json", {"counts": {"2026-01-01": 2}})
+    store.put_json(
+        "row_check/result.json",
+        {"partitions": {"2026-01-01": {"result": "count_diff"}}},
+    )
+    assert retry_failed(store) == 1
+    assert store.exists("row_check/left.json")
+    assert not store.exists("row_check/result.json")
+
+
+def test_require_plan_windows_rejects_an_empty_plan():
+    store = MemoryStore()
+    pair_config = {"fromDate": "2023-09-01", "toDate": "2026-09-30"}
+    runner.require_plan_windows(store, "orders", pair_config)
+    store.put_json("plan.json", {"pair": "orders", "windows": [{"bucket": "2024-01-01"}]})
+    runner.require_plan_windows(store, "orders", pair_config)
+    store.put_json(
+        "plan.json",
+        {"pair": "orders", "windows": [], "excluded_partitions": ["2026-09-30"] * 36},
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=r"plan for orders has no windows: .*2023-09-01 and 2026-09-30.*\(36 excluded\)",
+    ):
+        runner.require_plan_windows(store, "orders", pair_config)
 
 
 def test_logging():
@@ -2404,3 +2438,110 @@ def test_left_only_rejects_snapshot_pair(tmp_path):
             tmp_path / "work",
             left_only=True,
         )
+
+
+def _stub_column_checks(monkeypatch, store, seen):
+    plan = {
+        "pair": "orders",
+        "version": 2,
+        "windows": [{"bucket": "all", "partitions": ["all"]}],
+        "excluded_partitions": [],
+    }
+    store.put_json("plan.json", plan)
+
+    class Runtime:
+        def __init__(self, *_args, **_kwargs):
+            self.pull_window = None
+            self.compute_stats = None
+
+    class Pipeline:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, _manifests):
+            seen.append(store.exists("row_check/result.json"))
+            return 3
+
+    monkeypatch.setattr(runner, "validate_config", lambda value: value)
+    monkeypatch.setattr(runner, "reuse_row_check", lambda *_args, **_kwargs: ("run", []))
+    monkeypatch.setattr(runner, "wait_for_manifests", lambda *_args, **_kwargs: [plan])
+    monkeypatch.setattr(runner, "publish_fixed_keys", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "LeftRuntime", Runtime)
+    monkeypatch.setattr(runner, "ColCheckPipeline", Pipeline)
+    return {"pairs": {"orders": {"checks": ["row_count", "hash_sum"], "version": 2}}}
+
+
+def test_run_left_pulls_only_after_the_right_row_check_result(monkeypatch, tmp_path):
+    store = MemoryStore()
+    seen = []
+    config = _stub_column_checks(monkeypatch, store, seen)
+
+    def release():
+        store.put_json(
+            "row_check/result.json",
+            {"pair": "orders", "partitions": {"all": {"result": "match"}}},
+        )
+
+    result = runner.run_left(config, store, "run", "orders", tmp_path, release=release)
+    assert result == {"row": "ready", "units": 3} and seen == [True]
+    with pytest.raises(TimeoutError, match="row check result"):
+        runner.run_left(config, MemoryStore(), "run", "orders", tmp_path, 0)
+
+
+def test_run_left_reports_unexcluded_mismatches_before_pulling(monkeypatch, tmp_path):
+    store = MemoryStore()
+    seen = []
+    config = _stub_column_checks(monkeypatch, store, seen)
+    store.put_json(
+        "row_check/result.json",
+        {"pair": "orders", "partitions": {"2026-01-05": {"result": "count_diff"}}},
+    )
+    with pytest.raises(RuntimeError, match="unexcluded mismatched partitions") as info:
+        runner.run_left(config, store, "run", "orders", tmp_path)
+    assert mismatched_partitions(info.value, "orders") == ["2026-01-05"]
+    assert seen == []
+
+
+def test_run_left_fails_before_release_when_the_plan_has_no_windows(monkeypatch, tmp_path):
+    store = MemoryStore()
+    config = _stub_column_checks(monkeypatch, store, [])
+    store.put_json("plan.json", {"pair": "orders", "windows": [], "excluded_partitions": ["x"]})
+    released = []
+    with pytest.raises(RuntimeError, match="plan for orders has no windows"):
+        runner.run_left(
+            config, store, "run", "orders", tmp_path, release=lambda: released.append(True)
+        )
+    assert released == []
+
+
+def test_progress_sampler_survives_transient_snapshot_errors(monkeypatch):
+    from pair_recon.core import progress
+
+    calls = []
+    published = []
+    enough = threading.Event()
+
+    def flaky(*_args, **_kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            raise ConnectionError("IncompleteRead(0 bytes read, 481 more expected)")
+        return {"state": "ok"}
+
+    def publish(row):
+        published.append(row)
+        if len(published) >= 3:
+            enough.set()
+
+    monkeypatch.setattr(progress, "progress_snapshot", flaky)
+    sampler = ProgressSampler(MemoryStore(), "r", "p", "America/New_York", publish, interval=0.01)
+    sampler.start(required=True)
+    assert enough.wait(2)
+    sampler.stop()
+    assert sampler.thread.is_alive() is False and len(calls) >= 4
+
+    def broken(*_args, **_kwargs):
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(progress, "progress_snapshot", broken)
+    with pytest.raises(ConnectionError, match="down"):
+        ProgressSampler(MemoryStore(), "r", "p", "America/New_York", publish).start(required=True)

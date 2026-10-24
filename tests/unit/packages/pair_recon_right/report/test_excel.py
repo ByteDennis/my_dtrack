@@ -36,9 +36,11 @@ def test_row_sheet_uses_current_result_field():
 
     assert workbook.sheetnames == ["Row Check"]
     assert sheet["A1"].value == "ORACLE:" and sheet["A2"].value == "DATABRICKS:"
-    dates = [sheet.cell(row=row, column=1).value for row in range(12, 15)]
+    labels = [sheet.cell(row=row, column=1).value for row in range(1, 10)]
+    assert "Gate:" not in labels and labels[8] is None
+    dates = [sheet.cell(row=row, column=1).value for row in range(11, 14)]
     assert dates == ["2026-01-02", "2026-01-03", "2026-01-01"]
-    assert sheet.cell(row=12, column=1).fill.start_color.rgb.endswith("FFC7CE")
+    assert sheet.cell(row=11, column=1).fill.start_color.rgb.endswith("FFC7CE")
 
 
 def test_col_sheet_preserves_diff_styling():
@@ -51,10 +53,11 @@ def test_col_sheet_preserves_diff_styling():
     sheet = workbook["Column Check"]
     values = [[cell.value for cell in row] for row in sheet.iter_rows()]
 
-    assert values[0][:2] == ["Vintage: 2026-01-01", "PASS"]
+    assert values[0][:2] == ["Vintage: 2026-02-01", "FAIL"]
     fail_row = next(i for i, row in enumerate(values) if row[0] == "Vintage: 2026-02-01")
     assert values[fail_row][1] == "FAIL" and any("x_r" in row for row in values[fail_row:])
     mean_row = next(
         i for i in range(fail_row, len(values)) if values[i][0] == "Mean" and values[i][1] == 1.5
     )
     assert sheet.cell(row=mean_row + 1, column=2).fill.start_color.rgb.endswith("FFC7CE")
+    assert next(i for i, row in enumerate(values) if row[0] == "Vintage: 2026-01-01") > fail_row

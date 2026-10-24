@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 from support import MemoryStore
 
@@ -6,6 +8,7 @@ from pair_recon_left.common.checks.col_check import (
     ColCheckPipeline,
     LeftRuntime,
     wait_for_manifests,
+    wait_for_row_check_result,
 )
 from pair_recon_left.common.model.manifest import unit_id
 
@@ -94,6 +97,100 @@ def test_pipeline_honors_abort_signal_before_work():
     with pytest.raises(RuntimeError, match="Right failed"):
         pipeline.run([manifest()])
     assert pulled == []
+
+
+def test_pipeline_abort_does_not_wait_for_a_running_pull():
+    store = MemoryStore()
+    row = manifest()
+    store.put_json("plan.json", row)
+    started, release = threading.Event(), threading.Event()
+
+    def pull(*_args):
+        started.set()
+        release.wait(5)
+        return "pulled"
+
+    def abort():
+        if started.is_set():
+            raise RuntimeError("Right failed")
+
+    pipeline = ColCheckPipeline(
+        store,
+        pull_window=pull,
+        compute_stats=lambda *_args: {},
+        abort_if=abort,
+        progress_interval=0.01,
+    )
+    outcome = {}
+
+    def run():
+        try:
+            pipeline.run([row])
+        except RuntimeError as exc:
+            outcome["error"] = str(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive() and outcome["error"] == "Right failed"
+    assert not release.is_set()
+    release.set()
+
+
+def test_wait_for_row_check_result_raises_on_unexcluded_mismatches():
+    store = MemoryStore()
+    store.put_json(
+        "plan.json",
+        {"pair": "pair", "version": 2, "excluded_partitions": ["2026-01-02"]},
+    )
+    store.put_json(
+        "row_check/result.json",
+        {
+            "pair": "pair",
+            "date_synonyms": {},
+            "partitions": {
+                "2026-01-01": {"result": "count_diff"},
+                "2026-01-02": {"result": "count_diff"},
+                "2026-01-03": {"result": "match"},
+            },
+        },
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=r"unexcluded mismatched partitions.*\(pair: 2026-01-01\)",
+    ):
+        wait_for_row_check_result(store, "pair", timeout=0)
+
+
+def test_wait_for_row_check_result_waits_for_the_right_then_accepts_matches(caplog):
+    store = MemoryStore()
+    store.put_json("plan.json", {"pair": "pair", "version": 2})
+    polls = []
+
+    def abort():
+        polls.append(True)
+        if len(polls) == 2:
+            store.put_json(
+                "row_check/result.json",
+                {
+                    "pair": "pair",
+                    "partitions": {"all": {"result": "match"}},
+                    "summary": {"match": 1},
+                },
+            )
+
+    with caplog.at_level("INFO"):
+        result = wait_for_row_check_result(
+            store, "pair", timeout=5, poll_interval=0.01, abort_if=abort
+        )
+    assert result["summary"] == {"match": 1} and len(polls) == 2
+    assert "waiting for the Right row check before pulling Left data: pair=pair" in caplog.text
+    assert "Right row check accepted: pair=pair partitions=1" in caplog.text
+
+
+def test_wait_for_row_check_result_times_out_without_the_right():
+    with pytest.raises(TimeoutError, match="row check result"):
+        wait_for_row_check_result(MemoryStore(), "pair", timeout=0)
 
 
 def test_cache(tmp_path, caplog):

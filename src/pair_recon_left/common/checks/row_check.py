@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, wait
 from typing import Any
 
 from ...backends.sources import source_from_config
@@ -23,10 +23,11 @@ from ..model.protocol import (
     write_run_status,
 )
 from ..runtime.run_logging import get_left_logger
+from ..runtime.stop import abandoning_executor
 from ..sql.dates import resolve_date_type
 
 log = get_left_logger("row_check")
-ROW_COUNT_LOG_INTERVAL = 30.0
+ROW_COUNT_LOG_INTERVAL = 60.0
 SECRET_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
 STAGE_ONE_FIELDS = (
     "left",
@@ -210,7 +211,9 @@ def run_row_check(
     pair_workers: int = 4,
     sources: dict[str, Any] | None = None,
     health_checks: dict[str, dict[str, Any]] | None = None,
+    abort_if: Callable[[], None] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
+    abort_if = abort_if or (lambda: None)
     pairs = active_pairs(config, pair_names)
     log.info("run_id=%s work=%s pairs=%s", run_id, store.root_uri, list(pairs))
     store.delete_keys([LEFT_ROW_CHECK_CLOSED, COL_CHECK_CLOSED])
@@ -302,7 +305,8 @@ def run_row_check(
         values = sources[name].partition_counts(pair.get("fromDate"), pair.get("toDate"), **options)
         return values, round(time.monotonic() - begun, 6)
 
-    with ThreadPoolExecutor(max_workers=max(1, pair_workers)) as pool:
+    abort_if()
+    with abandoning_executor(pair_workers, "pair_recon-count") as pool:
         counted = {name: pool.submit(count, name) for name in pairs}
         pending = set(counted.values())
         count_started = time.monotonic()
@@ -312,6 +316,7 @@ def run_row_check(
                 timeout=ROW_COUNT_LOG_INTERVAL,
                 return_when=FIRST_COMPLETED,
             )
+            abort_if()
             if pending and not _done:
                 active = sorted(name for name, future in counted.items() if future in pending)
                 log.info(

@@ -913,12 +913,11 @@ def execute(args, *, raise_errors: bool = False) -> int:
 
 def main_program(argv=None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
-    parser = argparse.ArgumentParser(prog="pair_recon")
+    parser = argparse.ArgumentParser(prog="pair_recon", allow_abbrev=False)
     inputs = parser.add_mutually_exclusive_group()
     inputs.add_argument("--config", type=Path)
     inputs.add_argument(
         "--defaults",
-        "--default",
         dest="defaults_path",
         nargs="?",
         const=DEFAULTS,

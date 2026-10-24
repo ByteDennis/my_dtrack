@@ -10,7 +10,8 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterable
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, wait
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,9 @@ from ..model.protocol import (
     list_plans,
     list_results,
     list_units,
+    plan_path,
     row_check_is_closed,
+    row_result_path,
     timestamp,
     unit_batch_path,
     write_left_state,
@@ -43,11 +46,70 @@ from ..runtime.duck import use_temp
 from ..runtime.progress import StatisticsProgress
 from ..runtime.run_logging import get_left_logger
 from ..runtime.stats import compute_csv_statistics
+from ..runtime.stop import abandoning_executor
 
 log = get_left_logger("col_check")
 
 BACKPRESSURE_LOG_INTERVAL = 30.0
 DEFAULT_PROGRESS_INTERVAL = 10.0
+ROW_RESULT_LOG_INTERVAL = 60.0
+UNEXCLUDED_PARTITIONS = "version 2 row-check found unexcluded mismatched partitions"
+
+
+# >>> version 2 partitions the Right reported as not matching and the plan does not exclude <<< #
+def unexcluded_mismatches(result: dict[str, Any], plan: dict[str, Any]) -> list[str]:
+    if int(plan.get("version") or 1) != 2:
+        return []
+    synonyms = result.get("date_synonyms") or {}
+    excluded = {synonyms.get(value, value) for value in plan.get("excluded_partitions") or []}
+    return sorted(
+        partition
+        for partition, row in (result.get("partitions") or {}).items()
+        if row.get("result") != "match" and partition not in excluded
+    )
+
+
+# >>> block until the Right published row_check/result.json; raise on unexcluded mismatches <<< #
+def wait_for_row_check_result(
+    store,
+    pair: str,
+    *,
+    timeout: float = 1800,
+    poll_interval: float = 5,
+    abort_if=None,
+) -> dict[str, Any]:
+    abort_if = abort_if or (lambda: None)
+    started = time.monotonic()
+    last_log = None
+    path = row_result_path(pair)
+    while not store.exists(path):
+        abort_if()
+        now = time.monotonic()
+        if last_log is None or now - last_log >= ROW_RESULT_LOG_INTERVAL:
+            log.info(
+                "waiting for the Right row check before pulling Left data: pair=%s elapsed=%.0fs",
+                pair,
+                now - started,
+            )
+            last_log = now
+        if now - started > timeout:
+            raise TimeoutError("Right side did not publish the row check result before timeout")
+        time.sleep(poll_interval)
+    result = store.get_json(path)
+    plan = store.get_json(plan_path(pair)) if store.exists(plan_path(pair)) else {}
+    mismatches = unexcluded_mismatches(result, plan)
+    if mismatches:
+        raise RuntimeError(
+            f"{UNEXCLUDED_PARTITIONS}; add them to excluded_partitions, rerun the Left job "
+            f"with the same run-id, then restart Right ({pair}: {', '.join(mismatches)})"
+        )
+    log.info(
+        "Right row check accepted: pair=%s partitions=%d summary=%s",
+        pair,
+        len(result.get("partitions") or {}),
+        result.get("summary"),
+    )
+    return result
 
 
 def wait_for_manifests(
@@ -93,7 +155,7 @@ def wait_for_manifests(
         time.sleep(poll_interval)
 
 
-def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
+def publish_fixed_keys(store, manifest, work_dir: str | Path, *, stop=None) -> dict | None:
     key_path = fixed_keys_path(manifest["pair"])
     if manifest["sample"]["mode"] != "fixed":
         return None
@@ -110,7 +172,7 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path) -> dict | None:
                 if manifest.get("left_snapshot")
                 else manifest.get("partition_mode", "date"),
             }
-        ),
+        ).set_stop(stop),
         SqlAudit(
             store,
             "left",
@@ -279,15 +341,16 @@ class ColCheckPipeline:
         )
         total_attributes = sum(len(manifest["columns"]) for manifest, _ in plan_rows)
         progress_steps = sum(1 + 4 * len(manifest["columns"]) for manifest, _ in plan_rows)
-        with (
-            StatisticsProgress(
-                progress_steps,
-                total_attributes=total_attributes,
-                total_vintages=len(plan_rows),
-            ) as progress,
-            ThreadPoolExecutor(self.pull_workers, thread_name_prefix="pair_recon-pull") as pulls,
-            ThreadPoolExecutor(1, thread_name_prefix="pair_recon-vintage") as stats,
-        ):
+        with ExitStack() as scope:
+            progress = scope.enter_context(
+                StatisticsProgress(
+                    progress_steps,
+                    total_attributes=total_attributes,
+                    total_vintages=len(plan_rows),
+                )
+            )
+            pulls = scope.enter_context(abandoning_executor(self.pull_workers, "pair_recon-pull"))
+            stats = scope.enter_context(abandoning_executor(1, "pair_recon-vintage"))
             pull_jobs, stat_jobs = {}, {}
 
             def publisher_for(manifest, window, progress_key):
@@ -597,12 +660,14 @@ class LeftRuntime:
         *,
         reuse_pulled: bool = True,
         force: bool = False,
+        stop=None,
     ):
         self.work_dir = Path(work_dir)
         use_temp(self.work_dir / "duckdb")
         self.store = store
         self.reuse_pulled = reuse_pulled
         self.force = force
+        self.stop = stop
         self.sources = {}
         self.sources_lock = threading.Lock()
 
@@ -618,7 +683,7 @@ class LeftRuntime:
                             if manifest.get("left_snapshot")
                             else manifest.get("partition_mode", "date"),
                         }
-                    ),
+                    ).set_stop(self.stop),
                     SqlAudit(
                         self.store,
                         "left",

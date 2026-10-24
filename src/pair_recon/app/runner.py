@@ -13,13 +13,16 @@ from databricks.sdk.service.sql import StatementParameterListItem
 
 from pair_recon.core.metadata.configuration import build_pair_config
 from pair_recon.core.progress import ProgressSampler
+from pair_recon_left.backends.sources import source_from_config
 from pair_recon_left.backends.store import VolumeStore, validate_run_id
 from pair_recon_left.cli.config import validate_config
 from pair_recon_left.common.checks.col_check import (
+    UNEXCLUDED_PARTITIONS,
     ColCheckPipeline,
     LeftRuntime,
     publish_fixed_keys,
     wait_for_manifests,
+    wait_for_row_check_result,
 )
 from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
 from pair_recon_left.common.model.protocol import (
@@ -40,6 +43,7 @@ from pair_recon_left.common.model.protocol import (
     write_run_status,
 )
 from pair_recon_left.common.runtime.run_logging import configure_left_logging, get_left_logger
+from pair_recon_left.common.runtime.stop import StopSignal
 from pair_recon_right.catalog import status_run_values
 from pair_recon_right.engine.backends.targets import CsvTarget
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
@@ -48,7 +52,6 @@ from pair_recon_right.engine.job import run as run_right
 _SENSITIVE_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
 _SENSITIVE_WORDS = ("password", "secret", "token", "credential")
 _RUN_DATE = re.compile(r"-(\d{4})(\d{2})(\d{2})$")
-_UNEXCLUDED_PARTITIONS = "version 2 row-check found unexcluded mismatched partitions"
 log = get_left_logger("runner")
 
 
@@ -111,7 +114,7 @@ def record_runtime_failure(store, pair: str, source: str, error: BaseException |
 
 def mismatched_partitions(error: BaseException | str, pair: str) -> list[str]:
     text = str(error)
-    if _UNEXCLUDED_PARTITIONS not in text:
+    if UNEXCLUDED_PARTITIONS not in text:
         return []
     match = re.search(
         rf"{re.escape(pair)}:\s*((?:\d{{4}}-\d{{2}}-\d{{2}}(?:,\s*)?)+)",
@@ -120,12 +123,14 @@ def mismatched_partitions(error: BaseException | str, pair: str) -> list[str]:
     return sorted(set(re.findall(r"\d{4}-\d{2}-\d{2}", match.group(1)))) if match else []
 
 
+# >>> watches the Right run; a failure fires the stop signal so local statements get cancelled <<< #
 class RightJobMonitor:
-    def __init__(self, remote, timeout: timedelta, jobs=None, on_terminal=None):
+    def __init__(self, remote, timeout: timedelta, jobs=None, on_terminal=None, stop=None):
         self.remote = remote
         self.timeout = timeout
         self.jobs = jobs
         self.on_terminal = on_terminal
+        self.stop = stop
         self.completed = None
         self.outcome: dict = {}
         self.error: Exception | None = None
@@ -190,6 +195,8 @@ class RightJobMonitor:
                 )
             detail = self._describe(completed)
             self.error = RuntimeError(f"{exc}\n{detail}") if detail else exc
+            if self.stop is not None and not self.cancel_requested.is_set():
+                self.stop.trigger(self.failure())
             if not self.cancel_requested.is_set():
                 if self.on_terminal is not None:
                     try:
@@ -211,11 +218,15 @@ class RightJobMonitor:
     def request_cancel(self):
         self.cancel_requested.set()
 
+    def failure(self) -> RuntimeError | None:
+        if self.error is None:
+            return None
+        return RuntimeError(f"Right Databricks job failed: run_id={self.run_id}: {self.error}")
+
     def raise_if_failed(self):
-        if self.done.is_set() and self.error is not None:
-            raise RuntimeError(
-                f"Right Databricks job failed: run_id={self.run_id}: {self.error}"
-            ) from self.error
+        failure = self.failure()
+        if failure is not None:
+            raise failure from self.error
 
     def result(self):
         self.done.wait()
@@ -415,6 +426,22 @@ def write_request_snapshot(settings: dict, config: dict) -> Path:
     return target
 
 
+# >>> a Left-built plan with no windows means nothing to compare; stop before the Right starts <<< #
+def require_plan_windows(store, pair: str, pair_config: dict) -> None:
+    if not store.exists(plan_path(pair)):
+        return
+    plan = store.get_json(plan_path(pair))
+    if plan.get("windows"):
+        return
+    excluded = plan.get("excluded_partitions") or []
+    raise RuntimeError(
+        f"plan for {pair} has no windows: every partition between "
+        f"{pair_config.get('fromDate') or '*'} and {pair_config.get('toDate') or '*'} is "
+        f"excluded or empty ({len(excluded)} excluded); fix the date mapping or sampling "
+        "instead of excluding more partitions"
+    )
+
+
 def run_left(
     config: dict,
     store,
@@ -427,8 +454,10 @@ def run_left(
     left_only: bool = False,
     abort_if=None,
     force: bool = False,
+    stop=None,
 ):
     abort_if = abort_if or (lambda: None)
+    stop = stop or StopSignal()
     abort_if()
     config = validate_config(config)
     pair_config = config["pairs"][pair]
@@ -446,8 +475,17 @@ def run_left(
                 COL_CHECK_CLOSED,
             ]
         )
-        run_row_check(config, store, run_id=run_id, pair_names=[pair], pair_workers=1)
+        run_row_check(
+            config,
+            store,
+            run_id=run_id,
+            pair_names=[pair],
+            source_factory=lambda values: source_from_config(values).set_stop(stop),
+            pair_workers=1,
+            abort_if=abort_if,
+        )
     abort_if()
+    require_plan_windows(store, pair, pair_config)
     if release:
         release()
     abort_if()
@@ -462,11 +500,13 @@ def run_left(
         pair_names=[pair],
         abort_if=abort_if,
     )
+    if not left_only:
+        wait_for_row_check_result(store, pair, timeout=manifest_timeout, abort_if=abort_if)
     for manifest in manifests:
         abort_if()
-        publish_fixed_keys(store, manifest, work_dir)
+        publish_fixed_keys(store, manifest, work_dir, stop=stop)
     abort_if()
-    runtime = LeftRuntime(work_dir, store, force=force)
+    runtime = LeftRuntime(work_dir, store, force=force, stop=stop)
     units = ColCheckPipeline(
         store,
         pull_window=runtime.pull_window,
@@ -484,9 +524,6 @@ def retry_failed(store) -> int:
     for key, value in list_row_results(store):
         if any(row.get("result") != "match" for row in (value.get("partitions") or {}).values()):
             keys.append(key)
-            left = key.removesuffix("result.json") + "left.json"
-            if store.exists(left):
-                keys.append(left)
     deleted = store.delete_keys(sorted(set(keys)))
     active = active_unit_ids(store)
     results = [value for _key, value in list_results(store) if value.get("unit_id") in active]
@@ -556,6 +593,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
     remote = None
     monitor = None
     right = None
+    stop = StopSignal()
     final_state = "failed"
     failure_error = None
     failure_forwarded = False
@@ -637,6 +675,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 timedelta(minutes=float(settings.get("timeout", 120))),
                 jobs=client.jobs,
                 on_terminal=on_right_terminal,
+                stop=stop,
             )
             monitor.start()
             remote_right_started = True
@@ -661,6 +700,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             left_only=left_only,
             abort_if=lambda: monitor.raise_if_failed() if monitor else None,
             force=force,
+            stop=stop,
         )
         log.info("Left checks completed: %s", left)
         if left_only:
@@ -739,6 +779,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         }
     except BaseException as exc:
         failure_error = exc
+        stop.trigger(exc)
         final_state = "cancelled" if monitor and monitor.final_state == "cancelled" else "failed"
         log.exception("run %s", final_state)
         if store is not None and not remote_right:

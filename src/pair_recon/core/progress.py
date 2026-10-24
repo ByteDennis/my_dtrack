@@ -93,14 +93,16 @@ class ProgressSampler:
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name="pair_recon-progress", daemon=True)
 
+    # >>> one snapshot read plus publish; transient Volume or SQL errors only log unless required <<< #
     def capture(self, state=None, *, required=False):
-        row = progress_snapshot(self.store, self.run_id, self.pair, self.timezone, state=state)
         try:
+            row = progress_snapshot(self.store, self.run_id, self.pair, self.timezone, state=state)
             self.publish(row)
         except Exception:
             log.exception("progress snapshot failed")
             if required:
                 raise
+            return None
         return row
 
     def _run(self):

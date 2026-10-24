@@ -1,3 +1,15 @@
+pair_recon Fast abort on Right failure and row-check gated pulls — 2026-10-23
+
+Added
+- src/pair_recon_left/common/runtime/stop.py: `StopSignal` cancels guarded Oracle/Hadoop/DuckDB statements (`connection.cancel()`, `cursor.cancel()`, `interrupt()`) and `abandoning_executor` stops joining running workers once the loop raises.
+
+Changed
+- src/pair_recon/app/runner.py: `RightJobMonitor` fires the stop signal on failure, so a failed Right stops the Left within seconds regardless of `--earlystop`; `run_left` waits for `row_check/result.json` before any column pull and reports unexcluded mismatches itself; a Left plan without windows fails before the Right job starts; resume keeps `row_check/left.json` and only rebuilds the plan.
+- src/pair_recon_left/backends/sources.py: query and pull loops register their statement with the stop signal and check it between fetch batches.
+- src/pair_recon_left/common/checks/row_check.py: the count loop honours `abort_if` and logs progress every 60 seconds instead of 30.
+- src/pair_recon/core/progress.py: a transient Volume download error no longer kills the progress sampler thread.
+- src/pair_recon_right/engine/report/excel.py: the Row Check sheet no longer prints the gate decision row.
+
 pair_recon Resumable protocol, batched results, and reports — 2026-10-22
 
 Added
@@ -32,7 +44,7 @@ Added
 - just publish: packages the four main runtime packages, launchers, environment template, workbook, minimal pyproject/justfile, and concise English readme.txt; it does not build an executable.
 
 Changed
-- src/pair_recon/app/cli.py: restores `--defaults [yaml]` (`--default` alias) as a zero-interaction run, enables bounded mismatch-partition exclusion/restart by default with `--earlystop` as the opt-out, and adds `--force` PairRecon cache bypass plus result replacement.
+- src/pair_recon/app/cli.py: restores `--defaults [yaml]` as a zero-interaction run, enables bounded mismatch-partition exclusion/restart by default with `--earlystop` as the opt-out, and adds `--force` PairRecon cache bypass plus result replacement.
 - src/pair_recon/app/runner.py: detects Right mismatch-partition errors, forwards force into row/pull cache control, and no longer downloads remote-success result JSON after the Databricks notebook has published Catalog results.
 - src/pair_recon/app/catalog.py: forwards remote failed/cancelled status and one runtime error directly from Jobs API details without reading Volume artifacts or replacing an existing result summary.
 - src/pair_recon/app/cli.py: date-mode runs prompt for Left/Right date columns and date types, accept registered names or JSON specifications, and retain the effective values in public settings.

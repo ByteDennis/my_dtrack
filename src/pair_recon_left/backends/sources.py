@@ -6,6 +6,7 @@ import re
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -72,12 +73,25 @@ class SqlSource(ABC):
         else:
             self.config.pop("query_windows", None)
         self.sql_audit = None
+        self.stop = None
         self._date_type = None
         self._date_type_lock = threading.Lock()
 
     def set_sql_audit(self, audit):
         self.sql_audit = audit
         return self
+
+    def set_stop(self, stop):
+        self.stop = stop
+        return self
+
+    # >>> registers the live statement for cancellation while it runs; no-op without a stop signal <<< #
+    def _guard(self, *handles):
+        return self.stop.guard(*handles) if self.stop is not None else nullcontext()
+
+    def _check_stop(self) -> None:
+        if self.stop is not None:
+            self.stop.check()
 
     @property
     def partition_mode(self) -> str:
@@ -124,9 +138,10 @@ class SqlSource(ABC):
         cursor = connection.cursor()
         try:
             self._audit(sql, operation)
-            cursor.execute(sql)
-            columns = [str(item[0]) for item in (cursor.description or [])]
-            rows = cursor.fetchall() or [] if cursor.description else []
+            with self._guard(cursor, connection):
+                cursor.execute(sql)
+                columns = [str(item[0]) for item in (cursor.description or [])]
+                rows = cursor.fetchall() or [] if cursor.description else []
             return columns, rows
         finally:
             cursor.close()
@@ -142,12 +157,14 @@ class SqlSource(ABC):
         cursor = connection.cursor()
         try:
             self._audit(sql, operation)
-            cursor.execute(sql)
-            with part.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.writer(handle, lineterminator="\n")
-                writer.writerow(columns)
-                while rows := cursor.fetchmany(10_000):
-                    writer.writerows(rows)
+            with self._guard(cursor, connection):
+                cursor.execute(sql)
+                with part.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.writer(handle, lineterminator="\n")
+                    writer.writerow(columns)
+                    while rows := cursor.fetchmany(10_000):
+                        self._check_stop()
+                        writer.writerows(rows)
             os.replace(part, target)
             return target
         except Exception:
@@ -388,12 +405,14 @@ class CsvSource(SqlSource):
         connection = self.connect()
         try:
             self._audit(sql, operation)
-            cursor = connection.execute(sql)
-            with part.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.writer(handle, lineterminator="\n")
-                writer.writerow(columns)
-                while rows := cursor.fetchmany(10_000):
-                    writer.writerows(rows)
+            with self._guard(connection):
+                cursor = connection.execute(sql)
+                with part.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.writer(handle, lineterminator="\n")
+                    writer.writerow(columns)
+                    while rows := cursor.fetchmany(10_000):
+                        self._check_stop()
+                        writer.writerows(rows)
             os.replace(part, target)
             return target
         except Exception:
@@ -506,7 +525,8 @@ class OracleSource(SqlSource):
                     relation = self.relation()
                     sql = f"SELECT {selected} FROM {relation} WHERE {self._where('1=0')}"
                     self._audit(sql, "describe_keys")
-                    cursor.execute(sql)
+                    with self._guard(cursor, connection):
+                        cursor.execute(sql)
                     found = {}
                     for item in cursor.description or []:
                         name = str(item[0]).lower()
