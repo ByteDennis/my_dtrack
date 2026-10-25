@@ -481,7 +481,7 @@ def checked_vintages(catalog, settings: dict, pair: str, pair_config: dict, run_
         return []
     if pair_config.get("vintage_sample_size") in (None, ""):
         return []
-    if str(pair_config.get("partition_mode") or "date") != "date":
+    if str(pair_config.get("partition") or "day") == "all":
         return []
     vintage = str(pair_config.get("vintage") or "day")
     checked = catalog.checked_windows(pair, vintage, exclude_run_id=run_id)

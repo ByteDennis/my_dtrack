@@ -31,12 +31,12 @@ def test_run_requires_exactly_one_pair():
 
 @pytest.mark.parametrize(
     ("mode", "counts"),
-    [("date", {"2026-01-01": 2}), ("all", {"all": 2})],
+    [("day", {"2026-01-01": 2}), ("all", {"all": 2})],
 )
 def test_counts(mode, counts):
     dates = {} if mode == "all" else {"date_col": "D", "date_type": "date"}
     pair = {
-        "partition_mode": mode,
+        "partition": mode,
         "left": {"source": "oracle", "table": "L", **dates},
         "right": {"source": "databricks", "table": "R", **dates},
         "col_map": {"A": "a"},
@@ -61,7 +61,7 @@ def test_row_count_query_logs_start_heartbeat_and_completion(monkeypatch, caplog
             return self.counts
 
     pair = {
-        "partition_mode": "date",
+        "partition": "day",
         "fromDate": "2026-01-01",
         "toDate": "2026-01-31",
         "left": {"source": "oracle", "table": "L", "date_col": "D", "date_type": "date"},
@@ -86,7 +86,7 @@ def test_row_count_query_logs_start_heartbeat_and_completion(monkeypatch, caplog
         )
 
     assert (
-        "left row count query started: pair=p range=2026-01-01..2026-01-31 partition_mode=date"
+        "left row count query started: pair=p range=2026-01-01..2026-01-31 partition=day"
     ) in caplog.text
     assert "left row count query still running: pairs=['p']" in caplog.text
     assert "left row count query completed: pair=p partitions=1 rows=2" in caplog.text
@@ -94,7 +94,7 @@ def test_row_count_query_logs_start_heartbeat_and_completion(monkeypatch, caplog
 
 def test_plan(caplog):
     pair = {
-        "partition_mode": "all",
+        "partition": "all",
         "left": {"source": "oracle", "table": "L"},
         "right": {"source": "databricks", "table": "R"},
         "col_map": {"A": "a"},
@@ -121,7 +121,7 @@ def test_plan(caplog):
 
 def test_reused_row_check_reopens_column_stage():
     pair = {
-        "partition_mode": "all",
+        "partition": "all",
         "left": {"source": "oracle", "table": "L"},
         "right": {"source": "databricks", "table": "R"},
         "col_map": {"A": "a"},
@@ -146,7 +146,7 @@ def test_reused_row_check_reopens_column_stage():
 
 def test_reused_left_counts_invalidate_right_when_effective_config_changes():
     pair = {
-        "partition_mode": "all",
+        "partition": "all",
         "left": {"source": "oracle", "table": "L"},
         "right": {"source": "databricks", "table": "R"},
         "col_map": {"A": "a"},
@@ -224,7 +224,7 @@ def test_snapshot():
         run_id="run",
         source_factory=factory,
     )
-    assert seen[0]["partition_mode"] == "all"
+    assert seen[0]["partition"] == "all"
     assert not store.exists("plan.json")
 
 
@@ -242,7 +242,7 @@ def test_run_row_check_aborts_while_the_count_is_running(monkeypatch):
             raise RuntimeError("Right failed")
 
     pair = {
-        "partition_mode": "all",
+        "partition": "all",
         "left": {"source": "oracle", "table": "L"},
         "right": {"source": "databricks", "table": "R"},
         "col_map": {"A": "a"},
@@ -294,7 +294,7 @@ def test_run_row_check_heartbeats_while_the_count_is_running(monkeypatch):
 
     monkeypatch.setattr(store, "heartbeat", heartbeat)
     pair = {
-        "partition_mode": "all",
+        "partition": "all",
         "left": {"source": "oracle", "table": "L"},
         "right": {"source": "databricks", "table": "R"},
         "col_map": {"A": "a"},

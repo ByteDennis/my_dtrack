@@ -16,6 +16,7 @@ PAIR_WORKBOOK_COLUMNS = (
     "enabled",
     "key_columns",
     "vintage",
+    "partition",
     "left_source",
     "left_conn",
     "left_table",
@@ -65,7 +66,6 @@ LEFT_OPTION_FIELDS = {
 RIGHT_OPTION_FIELDS = {"where", "date_type", "format", "schema_hints", "options"}
 RUN_DEFAULT_FIELDS = {
     "run_mode",
-    "partition_mode",
     "sample",
     "strict",
     "checks",
@@ -84,12 +84,21 @@ RUN_DEFAULT_BOOLS = ("strict", "audit", "sync_remote")
 RUN_DEFAULT_WORKERS = ("left_workers", "right_workers")
 RUN_DEFAULT_DATE_ONLY = ("from_date", "to_date", "vintage", "excluded_partitions")
 VINTAGES = ("day", "week", "month", "quarter", "year")
+PARTITIONS = ("day", "month", "all")
 
 FIELD_GUIDE = (
     ("pairs", "pair_name", "always", "text", "Unique Pair name.", "orders"),
     ("pairs", "enabled", "always", "boolean", "Show Pair in runs.", "TRUE"),
     ("pairs", "key_columns", "when sampled", "comma list", "Stable sample keys.", "ORDER_ID"),
     ("pairs", "vintage", "always", "day|week|month|quarter|year", "Stats bucket.", "month"),
+    (
+        "pairs",
+        "partition",
+        "always",
+        "day|month|all",
+        "Row-count partition grain; all scans the whole relation.",
+        "month",
+    ),
     ("pairs", "left_source", "always", "oracle|hadoop|csv", "Left source type.", "oracle"),
     ("pairs", "left_conn", "always", "text", "Macro, schema, or CSV path.", "PCDS"),
     ("pairs", "left_table", "unless SQL/CSV", "text", "Left table.", "SALES.ORDERS"),
@@ -310,12 +319,11 @@ def _iso_day(value: Any, *, row: int, field: str) -> date:
     return parsed
 
 
-def _validate_run_defaults(value: dict[str, Any], *, row: int, keys: list[str]) -> None:
+def _validate_run_defaults(
+    value: dict[str, Any], *, row: int, keys: list[str], partition: str
+) -> None:
     if value.get("run_mode") not in (None, "full", "left-only"):
         raise ValueError(f"pairs.xlsx row {row}: run_mode must be full or left-only")
-    mode = value.get("partition_mode", "date")
-    if mode not in {"date", "all"}:
-        raise ValueError(f"pairs.xlsx row {row}: partition_mode must be date or all")
     for field in RUN_DEFAULT_BOOLS:
         if field in value and not isinstance(value[field], bool):
             raise TypeError(f"pairs.xlsx row {row}: {field} must be true or false")
@@ -340,7 +348,7 @@ def _validate_run_defaults(value: dict[str, Any], *, row: int, keys: list[str]) 
         or not all(isinstance(item, str) and item.strip() for item in excluded)
     ):
         raise TypeError(f"pairs.xlsx row {row}: excluded_partitions must be a string array")
-    if mode == "all":
+    if partition == "all":
         present = [field for field in RUN_DEFAULT_DATE_ONLY if value.get(field) not in (None, [])]
         if present:
             raise ValueError(f"pairs.xlsx row {row}: all mode cannot set {', '.join(present)}")
@@ -368,7 +376,7 @@ def _validate_run_defaults(value: dict[str, Any], *, row: int, keys: list[str]) 
         raise ValueError(
             f"pairs.xlsx row {row}: use vintage_sample_size or vintage_values, not both"
         )
-    if mode == "all" and (size not in (None, "") or vintages not in (None, [])):
+    if partition == "all" and (size not in (None, "") or vintages not in (None, [])):
         raise ValueError(f"pairs.xlsx row {row}: all mode cannot select vintages")
 
 
@@ -399,6 +407,11 @@ def _read_pair_rows(sheet) -> tuple[list[dict[str, Any]], dict[str, int]]:
             raise ValueError(
                 f"pairs.xlsx row {number}: vintage must be one of {', '.join(sorted(VINTAGES))}"
             )
+        partition = str(raw["partition"] or "").strip().casefold()
+        if partition not in PARTITIONS:
+            raise ValueError(
+                f"pairs.xlsx row {number}: partition must be one of {', '.join(PARTITIONS)}"
+            )
         left_source = str(raw["left_source"] or "").strip().casefold()
         right_source = str(raw["right_source"] or "").strip().casefold()
         if left_source not in LEFT_SOURCES:
@@ -424,7 +437,7 @@ def _read_pair_rows(sheet) -> tuple[list[dict[str, Any]], dict[str, int]]:
             field="run_defaults_json",
             allowed=RUN_DEFAULT_FIELDS,
         )
-        _validate_run_defaults(defaults, row=number, keys=keys)
+        _validate_run_defaults(defaults, row=number, keys=keys, partition=partition)
         if "snapshot" in left_options and not isinstance(left_options["snapshot"], bool):
             raise TypeError(f"pairs.xlsx row {number}: snapshot must be true or false")
         result.append(
@@ -433,6 +446,7 @@ def _read_pair_rows(sheet) -> tuple[list[dict[str, Any]], dict[str, int]]:
                 "enabled": _boolean(raw["enabled"], row=number),
                 "key_columns": keys,
                 "vintage": vintage,
+                "partition": partition,
                 "left_source": left_source,
                 "left_conn": _text(raw["left_conn"]),
                 "left_table": _text(raw["left_table"]),
@@ -517,9 +531,8 @@ def _validate_pair(row: dict[str, Any], sql_row: dict[str, Any] | None, *, numbe
             raise ValueError(f"{prefix}: {row['right_source']} leaves right_table blank")
         if row["right_source"] == "csv" and right_sql:
             raise ValueError(f"{prefix}: CSV Right cannot use right_sql")
-    defaults = _json_object(row["run_defaults_json"], row=number, field="run_defaults_json")
     left_options = _json_object(row["left_options_json"], row=number, field="left_options_json")
-    mode = defaults.get("partition_mode", "date")
+    mode = "all" if row["partition"] == "all" else "date"
     snapshot = left_options.get("snapshot", False)
     if mode == "date" and (
         not row["right_date_col"] or (not snapshot and not row["left_date_col"])
@@ -657,6 +670,7 @@ WHEN MATCHED THEN UPDATE SET
   t.enabled = CAST(:enabled AS BOOLEAN),
   t.key_columns = from_json(:key_columns, 'ARRAY<STRING>'),
   t.vintage = :vintage,
+  t.partition = :partition,
   t.left_source = :left_source,
   t.left_conn = :left_conn,
   t.left_table = :left_table,
@@ -671,12 +685,13 @@ WHEN MATCHED THEN UPDATE SET
   t.config_json = :config_json,
   t.updated_at = CAST(current_timestamp() AS TIMESTAMP_NTZ)
 WHEN NOT MATCHED THEN INSERT (
-  pair_name, enabled, key_columns, vintage,
+  pair_name, enabled, key_columns, vintage, partition,
   left_source, left_conn, left_table, left_date_col, left_options_json,
   right_source, right_conn, right_table, right_date_col, right_options_json,
   run_defaults_json, config_json, latest_run_id, latest_status, updated_at
 ) VALUES (
   :pair_name, CAST(:enabled AS BOOLEAN), from_json(:key_columns, 'ARRAY<STRING>'), :vintage,
+  :partition,
   :left_source, :left_conn, :left_table, :left_date_col, :left_options_json,
   :right_source, :right_conn, :right_table, :right_date_col, :right_options_json,
   :run_defaults_json, :config_json, NULL, NULL, CAST(current_timestamp() AS TIMESTAMP_NTZ)

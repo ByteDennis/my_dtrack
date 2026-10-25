@@ -67,6 +67,7 @@ def render_query_windows(
     *,
     dialect: str,
     partitions: list[str] | None = None,
+    partition: str = "day",
     from_date: str | None = None,
     to_date: str | None = None,
 ) -> str:
@@ -78,6 +79,7 @@ def render_query_windows(
                 partitions,
                 dialect=dialect,
                 date_type=spec["date_type"],
+                grain=partition,
             )
         if from_date or to_date:
             return (

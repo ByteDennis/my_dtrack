@@ -1,5 +1,5 @@
 -- Run once before importing the new three-worksheet setup/pairs.xlsx.
--- Existing config_json and vintage columns remain available for legacy fallback.
+-- Existing config_json and vintage columns remain available during this metadata migration.
 
 ALTER TABLE ${catalog}.${schema}.pair_recon_pair_meta ADD COLUMNS (
   key_columns ARRAY<STRING>,

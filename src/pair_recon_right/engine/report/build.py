@@ -128,7 +128,7 @@ def build_report(
                         left_label,
                         right_label,
                         (document["left"].get("date_col"), document["right"].get("date_col")),
-                        document.get("partition_mode", "date"),
+                        document.get("partition", "day"),
                     )
                 ],
                 vintage=vintage,

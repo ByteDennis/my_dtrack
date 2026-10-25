@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_pair_meta (
   enabled BOOLEAN NOT NULL,
   key_columns ARRAY<STRING>,
   vintage STRING NOT NULL,
+  partition STRING NOT NULL,
   left_source STRING NOT NULL,
   left_conn STRING NOT NULL,
   left_table STRING,

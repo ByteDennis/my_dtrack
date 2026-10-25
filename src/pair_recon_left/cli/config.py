@@ -99,12 +99,13 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(f"{name}: Right kind {kind!r} requires {', '.join(needed)}")
             if "{src}" in str(right.get("query") or "") and kind != "files":
                 raise ValueError(f"{name}: {{src}} in a Right query needs kind 'files'")
-        raw_partition_mode = pair.get("partition_mode", "date")
-        if not isinstance(raw_partition_mode, str):
-            raise TypeError(f"{name}: partition_mode must be date or all")
-        partition_mode = raw_partition_mode.strip().lower()
-        if partition_mode not in {"date", "all"}:
-            raise ValueError(f"{name}: partition_mode must be date or all")
+        raw_partition = pair.get("partition", "day")
+        if not isinstance(raw_partition, str):
+            raise TypeError(f"{name}: partition must be day, month or all")
+        partition = raw_partition.strip().lower()
+        if partition not in {"day", "month", "all"}:
+            raise ValueError(f"{name}: partition must be day, month or all")
+        pair["partition"] = partition
         snapshot = pair.get("snapshot", False)
         if not isinstance(snapshot, bool):
             raise TypeError(f"{name}: snapshot must be true or false")
@@ -112,14 +113,13 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(audit, bool):
             raise TypeError(f"{name}: audit must be true or false")
         pair["audit"] = audit
-        if snapshot and partition_mode == "all":
-            raise ValueError(f"{name}: snapshot requires partition_mode date")
-        if partition_mode == "date" and (
+        if snapshot and partition == "all":
+            raise ValueError(f"{name}: snapshot requires a date partition")
+        if partition != "all" and (
             not right.get("date_col") or (not snapshot and not left.get("date_col"))
         ):
             raise ValueError(f"{name}: date mode requires Right date_col and Left date_col")
-        if partition_mode == "all":
-            pair["partition_mode"] = "all"
+        if partition == "all":
             date_only = [
                 field
                 for field in (
@@ -132,11 +132,15 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 if pair.get(field)
             ]
             if date_only:
-                raise ValueError(f"{name}: partition_mode all cannot use {', '.join(date_only)}")
+                raise ValueError(f"{name}: partition all cannot use {', '.join(date_only)}")
             if pair.get("vintage_values") or pair.get("vintage_sample_size") not in (None, ""):
-                raise ValueError(f"{name}: partition_mode all cannot select vintages")
-        else:
-            pair.pop("partition_mode", None)
+                raise ValueError(f"{name}: partition all cannot select vintages")
+        elif partition == "month" and pair.get("vintage", "month") not in {
+            "month",
+            "quarter",
+            "year",
+        }:
+            raise ValueError(f"{name}: monthly partitions require month, quarter, or year vintage")
         vintage_values = pair.get("vintage_values") or []
         vintage_sample_size = pair.get("vintage_sample_size")
         if not isinstance(vintage_values, list) or not all(
@@ -170,8 +174,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{name}: invalid Left query_windows: {exc}") from None
-        if partition_mode == "all" and left["query_windows"]:
-            raise ValueError(f"{name}: partition_mode all cannot use Left query_windows")
+        if partition == "all" and left["query_windows"]:
+            raise ValueError(f"{name}: partition all cannot use Left query_windows")
         if not left["query_windows"]:
             left.pop("query_windows", None)
         try:
@@ -180,12 +184,12 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{name}: invalid Right query_windows: {exc}") from None
-        if partition_mode == "all" and right["query_windows"]:
-            raise ValueError(f"{name}: partition_mode all cannot use Right query_windows")
+        if partition == "all" and right["query_windows"]:
+            raise ValueError(f"{name}: partition all cannot use Right query_windows")
         if not right["query_windows"]:
             right.pop("query_windows", None)
         for side_name, side in (("Left", left), ("Right", right)):
-            if (partition_mode == "date" and (side_name == "Right" or not snapshot)) or (
+            if (partition != "all" and (side_name == "Right" or not snapshot)) or (
                 "date_type" in side
             ):
                 try:
@@ -215,7 +219,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             isinstance(value, str) for value in excluded_columns
         ):
             raise TypeError(f"{name}: excluded_columns must be a list of Left column names")
-        if partition_mode == "date":
+        if partition != "all":
             try:
                 partition_type = resolve_date_type(left.get("date_type"))
                 pair["excluded_partitions"] = sorted(
@@ -232,7 +236,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 f"{', '.join(unknown_excluded)}"
             )
         date_col = str(left.get("date_col") or "").casefold()
-        if partition_mode == "date" and any(
+        if partition != "all" and any(
             str(column).casefold() == date_col for column in excluded_columns
         ):
             raise ValueError(f"{name}: excluded_columns cannot include the Left date_col")

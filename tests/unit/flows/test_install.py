@@ -169,6 +169,7 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     schema = (ROOT / "setup" / "schema.sql").read_text(encoding="utf-8")
     pair_sql_schema = schema.split("pair_recon_pair_sql", 1)[1].split(");", 1)[0]
     assert "left_source STRING NOT NULL" in schema
+    assert "partition STRING NOT NULL" in schema
     assert "run_defaults_json STRING" in schema
     assert "left_query_windows_json STRING" in pair_sql_schema
     assert "right_query_windows_json STRING" in pair_sql_schema
@@ -184,6 +185,11 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "pair_recon_cache_index" in schema
     migration = (ROOT / "setup" / "migrate_pair_metadata.sql").read_text(encoding="utf-8")
     assert "left_conn STRING" in migration
+    partition_migration = (ROOT / "setup" / "migrate_partition.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "partition STRING" in partition_migration
+    assert "partition_grain" in partition_migration
     assert "right_query_windows_json STRING" in migration
     status_migration = (ROOT / "setup" / "migrate_run_status.sql").read_text(encoding="utf-8")
     assert "row_differences BIGINT" in status_migration

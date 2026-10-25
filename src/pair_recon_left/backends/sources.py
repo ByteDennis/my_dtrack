@@ -15,6 +15,7 @@ from typing import Any
 
 from ..common.model.hashing import HASH_BUCKET_SPACE, key_family
 from ..common.sql.dates import (
+    aggregate_partition_counts,
     bounds_where,
     canonical_date,
     day_expr,
@@ -148,8 +149,8 @@ class SqlSource(ABC):
             self.stop.check()
 
     @property
-    def partition_mode(self) -> str:
-        return str(self.config.get("partition_mode") or "date")
+    def partition(self) -> str:
+        return str(self.config.get("partition") or "day")
 
     def _audit(self, sql: str, operation: str = "query") -> None:
         if self.sql_audit is not None:
@@ -171,6 +172,7 @@ class SqlSource(ABC):
                 self.config.get("query_windows") or {},
                 dialect=self.dialect,
                 partitions=partitions,
+                partition=self.partition,
                 from_date=from_date,
                 to_date=to_date,
             )
@@ -253,7 +255,7 @@ class SqlSource(ABC):
     def health_check(self) -> dict[str, Any]:
         try:
             self.query(f"SELECT * FROM {self.relation()} WHERE 1=0", operation="health_check")
-            if self.partition_mode == "date":
+            if self.partition != "all":
                 self.date_type()
             return {"ok": True, "source": self.config.get("source")}
         except Exception as exc:
@@ -279,7 +281,7 @@ class SqlSource(ABC):
             "left",
             key_types=self.key_types(key_columns or []),
         )
-        if self.partition_mode == "all":
+        if self.partition == "all":
             sql = (
                 f"SELECT COUNT(*) AS pair_recon_count FROM {self.relation()} "
                 f"WHERE {self._where(sampled)}"
@@ -307,7 +309,9 @@ class SqlSource(ABC):
         for value, count in rows:
             day = canonical_date(value)
             counts[day] = counts.get(day, 0) + int(count)
-        return counts
+        return aggregate_partition_counts(
+            counts, self.partition
+        )
 
     def pull_window(
         self,
@@ -321,7 +325,7 @@ class SqlSource(ABC):
         side: str = "left",
         key_tuples: list[list[object]] | None = None,
     ) -> Path:
-        if self.partition_mode == "date":
+        if self.partition != "all":
             self.date_type()
             selected = list(
                 dict.fromkeys([self.config["date_col"], *(key_columns or []), *columns])
@@ -331,6 +335,7 @@ class SqlSource(ABC):
                 partitions,
                 dialect=self.dialect,
                 date_type=self.config.get("date_type"),
+                grain=self.partition,
             )
         else:
             selected = list(dict.fromkeys([*(key_columns or []), *columns]))
@@ -367,7 +372,7 @@ class SqlSource(ABC):
         predicate = " AND ".join(f"({item})" for item in (predicate, sample) if item)
         sql = (
             f"SELECT {', '.join(quote_ident(column, self.dialect) for column in selected)} "
-            f"FROM {self.relation(partitions=partitions if self.partition_mode == 'date' else None)} "
+            f"FROM {self.relation(partitions=partitions if self.partition != 'all' else None)} "
             f"WHERE {self._where(predicate)}"
         )
         return self.query_to_csv(sql, output, selected, operation="pull_window")
@@ -381,18 +386,19 @@ class SqlSource(ABC):
         count: int,
         key_families: list[Any] | None = None,
     ) -> Path:
-        if self.partition_mode == "date":
+        if self.partition != "all":
             self.date_type()
             predicate = partition_where(
                 self.config["date_col"],
                 partitions,
                 dialect=self.dialect,
                 date_type=self.config.get("date_type"),
+                grain=self.partition,
             )
         else:
             predicate = None
         sql = fixed_keys_sql(
-            self.relation(partitions=partitions if self.partition_mode == "date" else None),
+            self.relation(partitions=partitions if self.partition != "all" else None),
             self._where(predicate),
             [quote_ident(column, self.dialect) for column in key_columns],
             key_families or [],
@@ -438,7 +444,7 @@ class CsvSource(SqlSource):
         source = self.reader()
         if self.config.get("query"):
             source = f"({self.config['query'].replace('{src}', source)})"
-        date_format = self.config.get("date_format") if self.partition_mode == "date" else None
+        date_format = self.config.get("date_format") if self.partition != "all" else None
         if not date_format:
             return f"{source} pair_recon_source"
         column = quote_ident(self.config["date_col"], self.dialect)
@@ -480,7 +486,7 @@ class CsvSource(SqlSource):
             columns, _rows = self.query(
                 f"SELECT * FROM {self.relation()} WHERE 1=0", operation="health_check"
             )
-            if self.partition_mode == "date":
+            if self.partition != "all":
                 self.config["date_col"] = _resolve_column_name(
                     columns, str(self.config["date_col"])
                 )

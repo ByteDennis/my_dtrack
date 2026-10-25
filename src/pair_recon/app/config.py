@@ -97,8 +97,8 @@ def run_config(
     selected = deepcopy(pair)
     selected.pop("_run_defaults", None)
     selected.pop("run_mode", None)
-    mode = answers.get("partition_mode", selected.get("partition_mode", "date"))
-    selected["partition_mode"] = mode
+    partition = answers.get("partition", selected.get("partition", "day"))
+    selected["partition"] = partition
     selected.update({key: answers[key] for key in ("sample", "strict", "audit") if key in answers})
     checks = list(answers.get("checks", ()))
     selected["checks"] = checks
@@ -107,7 +107,7 @@ def run_config(
         selected["statistics"] = statistics
     else:
         selected.pop("statistics", None)
-    if mode == "all":
+    if partition == "all":
         for key in (
             "fromDate",
             "toDate",

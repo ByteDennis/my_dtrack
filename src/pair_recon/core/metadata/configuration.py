@@ -103,6 +103,13 @@ def _explicit_config(row: dict[str, Any], pair: str) -> dict[str, Any]:
     left, pair_options = _source_side(row, "left", pair)
     right, right_pair_options = _source_side(row, "right", pair)
     value = _object(row.get("run_defaults_json"), "run_defaults_json", pair)
+    value.pop("partition_mode", None)
+    value.pop("partition_grain", None)
+    run_defaults = deepcopy(value)
+    partition = str(row.get("partition") or "").strip().casefold()
+    if partition not in {"day", "month", "all"}:
+        raise ValueError(f"{pair}: partition must be day, month or all")
+    value["partition"] = partition
     value.update(pair_options)
     value.update(right_pair_options)
     value["left"] = left
@@ -111,9 +118,10 @@ def _explicit_config(row: dict[str, Any], pair: str) -> dict[str, Any]:
     if keys:
         value["key"] = ",".join(keys)
     vintage = str(row.get("vintage") or "").strip().casefold()
-    if vintage:
+    if vintage and partition != "all":
         value["vintage"] = vintage
-    value["_run_defaults"] = _object(row.get("run_defaults_json"), "run_defaults_json", pair)
+    value["_run_defaults"] = run_defaults
+    value["_run_defaults"]["partition"] = partition
     return value
 
 

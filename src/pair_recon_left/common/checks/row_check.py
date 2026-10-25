@@ -32,7 +32,7 @@ SECRET_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "
 STAGE_ONE_FIELDS = (
     "left",
     "right",
-    "partition_mode",
+    "partition",
     "fromDate",
     "toDate",
     "date_synonyms",
@@ -148,7 +148,7 @@ def publish_row_check_results(
             "right": public["right"],
             "bounds": {"from": pair.get("fromDate"), "to": pair.get("toDate")},
             "date_synonyms": dict(pair.get("date_synonyms") or {}),
-            "partition_mode": public.get("partition_mode", "date"),
+            "partition": public.get("partition", "day"),
             "counts": values,
             "pair_config": public,
             "health_check": result["health_check"],
@@ -241,9 +241,7 @@ def run_row_check(
             name: source_factory(
                 {
                     **pair["left"],
-                    "partition_mode": "all"
-                    if pair.get("snapshot")
-                    else pair.get("partition_mode", "date"),
+                    "partition": "all" if pair.get("snapshot") else pair.get("partition", "day"),
                 }
             )
             for name, pair in pairs.items()
@@ -282,17 +280,17 @@ def run_row_check(
     def count(name: str):
         pair = pairs[name]
         begun = time.monotonic()
-        partition_mode = pair.get("partition_mode", "date")
+        partition = pair.get("partition", "day")
         date_range = (
             "all"
-            if partition_mode == "all"
+            if partition == "all"
             else f"{pair.get('fromDate') or '*'}..{pair.get('toDate') or '*'}"
         )
         log.info(
-            "left row count query started: pair=%s range=%s partition_mode=%s",
+            "left row count query started: pair=%s range=%s partition=%s",
             name,
             date_range,
-            partition_mode,
+            partition,
         )
         options = {}
         if pair.get("right_pre_sampled") and not pair.get("pre_sampled"):

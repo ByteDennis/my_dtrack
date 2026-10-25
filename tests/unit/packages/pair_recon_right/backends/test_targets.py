@@ -73,6 +73,12 @@ def test_query_windows():
     assert "r.business_date >= DATE '2026-01-03'" in exact
     assert "r.business_date < DATE '2026-01-04'" in exact
     assert "{{" not in bounded + exact
+    monthly = SparkTarget(
+        None,
+        {**target.config, "partition": "month"},
+    ).relation(partitions=["2026-01-01"])
+    assert "r.business_date >= DATE '2026-01-01'" in monthly
+    assert "r.business_date < DATE '2026-02-01'" in monthly
 
 
 def test_file():
@@ -97,12 +103,12 @@ def test_csv(tmp_path):
     path = tmp_path / "right.csv"
     path.write_text("order_id,amount,status\n1,2.5,好\n2,7.0,✓\n", encoding="utf-8")
     target = CsvTarget(
-        {"source": "csv", "path": str(path), "partition_mode": "all", "pre_sampled": True}
+        {"source": "csv", "path": str(path), "partition": "all", "pre_sampled": True}
     )
     assert target.health_check()["ok"]
     assert target.partition_counts() == {"all": 2}
     manifest = _manifest({"mode": "all"})
-    manifest["partition_mode"] = "all"
+    manifest["partition"] = "all"
     manifest["statistics"] = ["n_unique", "hash_sum"]
     stats = target.window_statistics(manifest, {"partitions": ["all"]})
     assert stats["status"]["n_unique"] == 2
@@ -168,7 +174,7 @@ def test_auto_date_type_probe_skips_the_column_check():
 
 def test_key_family_date_type_fits_column():
     spark = FakeSpark(lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [(7,)])
-    target = SparkTarget(spark, {**ORDERS, "partition_mode": "all"})
+    target = SparkTarget(spark, {**ORDERS, "partition": "all"})
     assert target.health_check()["ok"]
     compact = {"type": "date", "left_date_type": "date", "right_date_type": COMPACT}
     native = {"type": "date", "left_date_type": COMPACT, "right_date_type": "date"}
@@ -238,6 +244,15 @@ def test_partition():
     ]
 
 
+def test_month_partition_aggregates_daily_query_results():
+    spark = FakeSpark(
+        lambda sql: [("2026-01-01", 3), ("2026-01-31", 4), ("2026-02-01", 5)]
+    )
+    target = SparkTarget(spark, {**ORDERS, "partition": "month"})
+    assert target.partition_counts() == {"2026-01-01": 7, "2026-02-01": 5}
+    assert "GROUP BY to_date(`business_date`)" in spark.statements[0]
+
+
 def test_all():
     describe = [row for row in DESCRIBE if row[0] != "business_date"]
 
@@ -254,7 +269,7 @@ def test_all():
         "catalog": "main",
         "schema": "sales",
         "table": "orders",
-        "partition_mode": "all",
+        "partition": "all",
     }
     target = SparkTarget(spark, config)
     assert target.health_check()["ok"]
@@ -267,7 +282,7 @@ def test_all():
     )
     assert "< 1000" in spark.statements[-1]
     manifest = _manifest({"mode": "fraction", "threshold": 1000})
-    manifest["partition_mode"] = "all"
+    manifest["partition"] = "all"
     target.window_statistics(manifest, {"bucket": "all", "partitions": ["all"]})
     stats_sql = spark.statements[-1]
     assert count_sql == "SELECT COUNT(*) FROM `main`.`sales`.`orders` WHERE 1=1"

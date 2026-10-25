@@ -77,7 +77,7 @@ def row_count_section(document: dict[str, Any]) -> str:
     right_label = str(right.get("source") or "databricks")
     partitions = document["partitions"]
     timing = document.get("timing") or {}
-    all_rows = document.get("partition_mode") == "all"
+    all_rows = document.get("partition") == "all"
     by_result: dict[str, list] = {"match": [], "count_diff": [], "left_only": [], "right_only": []}
     for dt in sorted(partitions):
         row = partitions[dt]
@@ -181,7 +181,7 @@ def column_stats_section(
     left_label: str,
     right_label: str,
     date_cols: tuple[str | None, str | None],
-    partition_mode: str = "date",
+    partition: str = "day",
 ) -> str:
     vintages = sorted({row["vintage"] for row in rows}, reverse=True)
     columns = sorted({row["column"] for row in rows})
@@ -190,7 +190,7 @@ def column_stats_section(
     n_cols, n_diff = len(columns), len(cols_with_diffs)
     shown = ", ".join(cols_with_diffs[:4]) + (", ..." if n_diff > 4 else "") if n_diff else "None"
     out = _pair_header(pair, 7)
-    all_rows = partition_mode == "all"
+    all_rows = partition == "all"
     for label, date_col in ((left_label, date_cols[0]), (right_label, date_cols[1])):
         partition_basis = "all rows" if all_rows else date_col
         out += (

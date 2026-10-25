@@ -271,7 +271,7 @@ def _completed_window_store(*, fail_column=None, diff_column=None, count_diff=Fa
         "run_id": "r1",
         "version": 2,
         "vintage": "month",
-        "partition_mode": "date",
+        "partition": "day",
         "left": {"source": "oracle"},
         "right": {"source": "databricks"},
         "sample": {"mode": "fraction", "rate": 0.1},

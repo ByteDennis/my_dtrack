@@ -250,7 +250,7 @@ def date_type_value(value):
     return resolve_date_type(selected).spec(portable=True)
 
 
-def excluded_partition_values(value, date_type=None) -> list[str]:
+def excluded_partition_values(value, date_type=None, partition: str = "day") -> list[str]:
     if value in (None, ""):
         return []
     raw_items = value if isinstance(value, list | tuple) else [value]
@@ -282,11 +282,18 @@ def excluded_partition_values(value, date_type=None) -> list[str]:
             (start + timedelta(days=offset)).isoformat() for offset in range((end - start).days + 1)
         )
     partition_type = resolve_date_type(date_type)
-    return sorted({partition_type.partition_key(value) for value in expanded})
+    values = {partition_type.partition_key(value) for value in expanded}
+    if partition == "month":
+        values = {f"{value[:7]}-01" for value in values}
+    elif partition != "day":
+        raise ValueError("Partition must be day or month")
+    return sorted(values)
 
 
-def excluded_partitions_text(value, date_type=None) -> str:
-    values = excluded_partition_values(value, date_type)
+def excluded_partitions_text(value, date_type=None, partition: str = "day") -> str:
+    values = excluded_partition_values(value, date_type, partition)
+    if partition == "month":
+        return ", ".join(values)
     return ", ".join(
         start if start == end else f"{start}->{end}" for start, end in contiguous_runs(values)
     )
@@ -554,20 +561,23 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     provenances = [value for value in provenances if value]
     provenance = provenances[0] if provenances else {}
     for value in provenances[1:]:
-        fields = ("partition_mode", "from_date", "to_date", "vintage", "sample")
+        fields = (
+            "partition",
+            "from_date",
+            "to_date",
+            "vintage",
+            "sample",
+        )
         if any(value.get(field) != provenance.get(field) for field in fields):
             raise ValueError("Left and Right CSV provenance does not match")
     timezone = answer("IANA timezone", defaults.get("timezone", timezone_default()))
-    mode = select(
-        "Partition mode",
-        ["date", "all"],
-        provenance.get(
-            "partition_mode",
-            run_default("partition_mode", metadata.get("partition_mode", "date")),
-        ),
+    partition = select(
+        "Partition",
+        ["day", "month", "all"],
+        provenance.get("partition", run_default("partition", metadata.get("partition", "day"))),
     )
     date_answers = {}
-    if mode == "date":
+    if partition != "all":
         snapshot = bool(metadata.get("snapshot", False))
         left_date_col = answer(
             "Left date column",
@@ -600,7 +610,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         run_default("checks", "row_count,hash_sum,n_unique"),
     )
     answers = {
-        "partition_mode": mode,
+        "partition": partition,
         "checks": selected,
         "sample": sample_value(
             answer("Sample", provenance.get("sample", run_default("sample", "all")))
@@ -618,7 +628,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     sync_remote = (
         confirm("Sync remote", run_default("sync_remote", True)) if remote_right else False
     )
-    if mode == "date":
+    if partition != "all":
         answers.update(
             from_date=answer(
                 "From date",
@@ -635,15 +645,30 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         answers["excluded_partitions"] = excluded_partition_values(
             answer(
                 "Excluded partitions (YYYY-MM-DD or start->end, comma-separated)",
-                excluded_partitions_text(excluded_default, answers.get("left_date_type")),
+                excluded_partitions_text(
+                    excluded_default,
+                    answers.get("left_date_type"),
+                    answers["partition"],
+                ),
                 required=False,
             ),
             answers.get("left_date_type"),
+            answers["partition"],
         )
+        vintage_choices = (
+            ["month", "quarter", "year"]
+            if answers["partition"] == "month"
+            else ["day", "week", "month", "quarter", "year"]
+        )
+        vintage_default = provenance.get(
+            "vintage", run_default("vintage", metadata.get("vintage", "day"))
+        )
+        if vintage_default not in vintage_choices:
+            vintage_default = vintage_choices[0]
         answers["vintage"] = select(
             "Vintage",
-            ["day", "week", "month", "quarter", "year"],
-            provenance.get("vintage", run_default("vintage", metadata.get("vintage", "day"))),
+            vintage_choices,
+            vintage_default,
         )
         saved_vintage_sample = run_default("vintage_sample")
         if saved_vintage_sample in (None, ""):
@@ -681,7 +706,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "run_mode": run_mode,
         "run_id": run_id,
         "timezone": timezone,
-        "partition_mode": mode,
+        "partition": partition,
         "checks": ",".join(selected),
         "sample": answers["sample"],
         "strict": answers["strict"],
@@ -705,7 +730,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     ):
         if key in answers:
             settings[key] = answers[key]
-    if mode == "date":
+    if partition != "all":
         settings["vintage_sample"] = vintage_sample_text(
             answers.get("vintage_sample_size"), answers.get("vintage_values")
         )

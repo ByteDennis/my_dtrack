@@ -47,7 +47,7 @@ def _sql(pair, side, rate):
     side_keys = keys if side == "left" else [mapping.get(key, key) for key in keys]
     values = list(mapping if side == "left" else mapping.values())
     columns = list(dict.fromkeys([*side_keys, *values]))
-    if pair.get("partition_mode", "date") == "date" and config.get("date_col"):
+    if pair.get("partition", "day") != "all" and config.get("date_col"):
         columns = list(dict.fromkeys([config["date_col"], *columns]))
     plan = sample_plan(float(rate))
     sample = sample_predicate_sql(
@@ -58,7 +58,7 @@ def _sql(pair, side, rate):
         side,
     )
     clauses = [config.get("where"), sample]
-    if pair.get("partition_mode", "date") == "date" and config.get("date_col"):
+    if pair.get("partition", "day") != "all" and config.get("date_col"):
         clauses.append(
             bounds_where(
                 config["date_col"],
@@ -119,7 +119,7 @@ def export_bundle(pair_name, pair, bundle, rate=0.01, sides=("left",)):
         "format": "pair-recon-sas-v1",
         "pair": pair_name,
         "rate": float(rate),
-        "partition_mode": pair.get("partition_mode", "date"),
+        "partition": pair.get("partition", "day"),
         "from_date": pair.get("fromDate"),
         "to_date": pair.get("toDate"),
         "vintage": pair.get("vintage", "day"),

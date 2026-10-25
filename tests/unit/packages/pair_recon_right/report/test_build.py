@@ -29,7 +29,7 @@ def _store():
         "left": pair["left"],
         "right": pair["right"],
         "bounds": {"from": "2026-01-01", "to": "2026-01-03"},
-        "partition_mode": "date",
+        "partition": "day",
         "partitions": {
             "2026-01-01": {"left": 1, "right": 1, "result": "match"},
             "2026-01-02": {"left": 1, "right": 2, "result": "count_diff", "delta": 1},

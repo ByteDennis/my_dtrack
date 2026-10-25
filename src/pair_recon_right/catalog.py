@@ -216,7 +216,7 @@ def window_rows(store, run_id, pair, owner, now):
     row_results = {value.get("pair"): value for _, value in list_row_results(store)}
     rows = []
     for _, plan in list_plans(store):
-        if plan.get("pair") != pair or plan.get("partition_mode", "date") != "date":
+        if plan.get("pair") != pair or plan.get("partition", "day") == "all":
             continue
         reconciled = row_results.get(pair) or {}
         synonyms = reconciled.get("date_synonyms") or {}

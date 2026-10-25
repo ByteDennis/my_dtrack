@@ -168,6 +168,9 @@ def step_sql(expr: str, name: str, arg: str | None, dialect: str) -> str:
         return _regex_replace(expr, "[^0-9A-Za-z]", "", dialect)
     if name == "date":
         return dialect_date_sql(expr, dialect)
+    if name == "month":
+        day = dialect_date_sql(expr, dialect)
+        return f"replace(substr({day}, 1, 7), '-', '')"
     if name == "lpad":
         size = int(arg or "0")
         return f"CASE WHEN length({expr}) >= {size} THEN {expr} ELSE lpad({expr}, {size}, '0') END"
@@ -217,6 +220,16 @@ def _date_sql(text: str) -> str:
         f"ELSE try_cast({text} as date) END"
     )
     return f"coalesce(date_format({day}, 'yyyy-MM-dd'), '')"
+
+
+def _month(text: str) -> str:
+    day = _date(text)
+    return day[:7].replace("-", "") if day else ""
+
+
+def _month_sql(text: str) -> str:
+    day = _date_sql(text)
+    return f"replace(substring({day}, 1, 7), '-', '')"
 
 
 def _lpad(text: str, width: str) -> str:
@@ -282,6 +295,7 @@ register_step(
     lambda t: f"regexp_replace({t}, '[^0-9A-Za-z]', '')",
 )
 register_step("date", _date, _date_sql)
+register_step("month", _month, _month_sql)
 register_step("lpad", _lpad, _lpad_sql, takes_arg=True)
 register_step("strip_prefix", lambda t, p: t.removeprefix(p), _strip_prefix_sql, takes_arg=True)
 register_step("strip_suffix", lambda t, s: t.removesuffix(s), _strip_suffix_sql, takes_arg=True)
@@ -513,6 +527,7 @@ register_family("string", ["trim", "lower"])
 register_family("exact", ["trim"])
 register_family("numeric", ["trim", "strip_leading_zeros", "collapse_decimal"])
 register_family("date", ["trim", "date"])
+register_family("month", ["trim", "month"])
 register_family("digits", ["digits"])
 FAMILIES["date_type"] = DateKeyFamily()
 

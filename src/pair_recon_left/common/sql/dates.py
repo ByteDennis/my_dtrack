@@ -43,6 +43,20 @@ def bucket_date(value: str, vintage: str) -> str:
     raise ValueError(f"unsupported vintage: {vintage}")
 
 
+def partition_key(value: object, grain: str = "day") -> str:
+    if grain not in {"day", "month"}:
+        raise ValueError(f"unsupported partition grain: {grain}")
+    day = canonical_date(value)
+    return day if grain == "day" else f"{day[:7]}-01"
+
+
+def aggregate_partition_counts(counts: Mapping[object, int], grain: str = "day") -> dict[str, int]:
+    result: dict[str, int] = defaultdict(int)
+    for value, count in counts.items():
+        result[partition_key(value, grain)] += int(count)
+    return dict(result)
+
+
 def apply_synonyms(
     counts: dict[str, int], synonyms: dict[str, str] | None = None
 ) -> dict[str, int]:
@@ -573,12 +587,14 @@ def partition_where(
     *,
     dialect: str,
     date_type: Any = None,
+    grain: str = "day",
 ) -> str:
     return _partition_where(
         _predicate_expr(date_col, dialect, date_type),
         partitions,
         dialect=dialect,
         date_type=date_type,
+        grain=grain,
     )
 
 
@@ -588,9 +604,12 @@ def partition_expression_where(
     *,
     dialect: str,
     date_type: Any = None,
+    grain: str = "day",
 ) -> str:
     column = resolve_date_type(date_type).predicate(expression, dialect)
-    return _partition_where(column, partitions, dialect=dialect, date_type=date_type)
+    return _partition_where(
+        column, partitions, dialect=dialect, date_type=date_type, grain=grain
+    )
 
 
 def _partition_where(
@@ -599,8 +618,20 @@ def _partition_where(
     *,
     dialect: str,
     date_type: Any,
+    grain: str = "day",
 ) -> str:
     resolved = resolve_date_type(date_type)
+    if grain == "month":
+        clauses = []
+        for value in sorted({partition_key(item, "month") for item in partitions}):
+            start = date.fromisoformat(value)
+            after = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            lo = date_literal(start.isoformat(), dialect, date_type)
+            hi = date_literal(after.isoformat(), dialect, date_type)
+            clauses.append(f"{column} >= {lo} AND {column} < {hi}")
+        return "1=0" if not clauses else "(" + " OR ".join(f"({item})" for item in clauses) + ")"
+    if grain != "day":
+        raise ValueError(f"unsupported partition grain: {grain}")
     clauses = []
     for start, end in contiguous_runs(partitions):
         lo = date_literal(start, dialect, date_type)

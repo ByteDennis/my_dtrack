@@ -165,9 +165,9 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path, *, stop=None) -> d
         source_from_config(
             {
                 **manifest["left"],
-                "partition_mode": "all"
+                "partition": "all"
                 if manifest.get("left_snapshot")
-                else manifest.get("partition_mode", "date"),
+                else manifest.get("partition", "day"),
             }
         ).set_stop(stop),
         SqlAudit(
@@ -682,9 +682,9 @@ class LeftRuntime:
                     source_from_config(
                         {
                             **manifest["left"],
-                            "partition_mode": "all"
+                            "partition": "all"
                             if manifest.get("left_snapshot")
-                            else manifest.get("partition_mode", "date"),
+                            else manifest.get("partition", "day"),
                         }
                     ).set_stop(self.stop),
                     SqlAudit(
@@ -707,7 +707,7 @@ class LeftRuntime:
                 [
                     *(
                         [manifest["left"]["date_col"]]
-                        if manifest.get("partition_mode", "date") == "date"
+                        if manifest.get("partition", "day") != "all"
                         and not manifest.get("left_snapshot")
                         else []
                     ),

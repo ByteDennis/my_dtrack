@@ -11,6 +11,7 @@ USING (
     true AS enabled,
     array('ORDER_ID') AS key_columns,
     'month' AS vintage,
+    'month' AS partition,
     'oracle' AS left_source,
     'PCDS' AS left_conn,
     'SALES.LEFT_ORDERS' AS left_table,
@@ -21,8 +22,8 @@ USING (
     CAST(NULL AS STRING) AS right_table,
     'business_dt' AS right_date_col,
     CAST(NULL AS STRING) AS right_options_json,
-    '{"partition_mode":"date","sample":0.1,"checks":["row_count","hash_sum"]}' AS run_defaults_json,
-    '{"key":"ORDER_ID","vintage":"month","left":{"source":"oracle","conn_macro":"PCDS","schema":"SALES","table":"LEFT_ORDERS","date_col":"BUSINESS_DT"},"right":{"source":"databricks","kind":"query","date_col":"business_dt"}}' AS config_json,
+    '{"sample":0.1,"checks":["row_count","hash_sum"]}' AS run_defaults_json,
+    '{"key":"ORDER_ID","vintage":"month","partition":"month","left":{"source":"oracle","conn_macro":"PCDS","schema":"SALES","table":"LEFT_ORDERS","date_col":"BUSINESS_DT"},"right":{"source":"databricks","kind":"query","date_col":"business_dt"}}' AS config_json,
     CAST(current_timestamp() AS TIMESTAMP_NTZ) AS updated_at
 ) AS s
 ON t.pair_name = s.pair_name
@@ -30,6 +31,7 @@ WHEN MATCHED THEN UPDATE SET
   t.enabled = s.enabled,
   t.key_columns = s.key_columns,
   t.vintage = s.vintage,
+  t.partition = s.partition,
   t.left_source = s.left_source,
   t.left_conn = s.left_conn,
   t.left_table = s.left_table,
@@ -44,12 +46,12 @@ WHEN MATCHED THEN UPDATE SET
   t.config_json = s.config_json,
   t.updated_at = s.updated_at
 WHEN NOT MATCHED THEN INSERT (
-  pair_name, enabled, key_columns, vintage,
+  pair_name, enabled, key_columns, vintage, partition,
   left_source, left_conn, left_table, left_date_col, left_options_json,
   right_source, right_conn, right_table, right_date_col, right_options_json,
   run_defaults_json, config_json, latest_run_id, latest_status, updated_at
 ) VALUES (
-  s.pair_name, s.enabled, s.key_columns, s.vintage,
+  s.pair_name, s.enabled, s.key_columns, s.vintage, s.partition,
   s.left_source, s.left_conn, s.left_table, s.left_date_col, s.left_options_json,
   s.right_source, s.right_conn, s.right_table, s.right_date_col, s.right_options_json,
   s.run_defaults_json, s.config_json, NULL, NULL, s.updated_at

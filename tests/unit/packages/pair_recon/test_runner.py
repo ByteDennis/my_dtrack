@@ -126,7 +126,7 @@ def test_run_config_applies_prompted_vintage_sample():
             "vintage_values": None,
         },
         {
-            "partition_mode": "date",
+            "partition": "day",
             "checks": ["row_count"],
             "sample": 0.1,
             "strict": False,
@@ -147,7 +147,7 @@ def test_run_config_applies_prompted_vintage_sample():
         "orders",
         runtime["pairs"]["orders"],
         {
-            "partition_mode": "all",
+            "partition": "all",
             "checks": ["row_count"],
             "sample": False,
             "strict": False,
@@ -723,6 +723,7 @@ def test_pair_metadata_builds_config_from_explicit_columns():
             "pair_name": "orders",
             "key_columns": ["ORDER_ID", "LINE_ID"],
             "vintage": "month",
+            "partition": "day",
             "left_source": "oracle",
             "left_conn": "PCDS",
             "left_table": "SALES.ORDERS",
@@ -771,6 +772,7 @@ def test_pair_metadata_builds_config_from_explicit_columns():
     }
     assert config["_run_defaults"] == {
         "checks": ["row_count", "hash_sum"],
+        "partition": "day",
         "run_mode": "left-only",
         "sample": 0.1,
     }
@@ -778,7 +780,7 @@ def test_pair_metadata_builds_config_from_explicit_columns():
         "orders",
         config,
         {
-            "partition_mode": "date",
+            "partition": "day",
             "sample": 0.1,
             "strict": False,
             "audit": True,
@@ -1077,7 +1079,7 @@ def test_progress():
 
 def test_sas(tmp_path):
     pair = {
-        "partition_mode": "all",
+        "partition": "all",
         "left": {"source": "oracle", "table": "LEFT_TABLE"},
         "right": {"source": "databricks", "table": "RIGHT_TABLE"},
         "key": "ID",
@@ -1143,7 +1145,7 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
             "table": "R",
             "path": str(tmp_path / "right_sample.csv"),
         },
-        "partition_mode": "all",
+        "partition": "all",
         "col_map": {"A": "a"},
     }
 
@@ -1169,14 +1171,14 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
         "pair": "orders",
         "run_mode": run_mode,
         "timezone": "America/New_York",
-        "partition_mode": "all",
+        "partition": "all",
         "checks": "row_count,hash_sum",
         "sample": "all",
         "strict": False,
         "pair_workbook": str(tmp_path / "missing.xlsx"),
     }
     (tmp_path / "request.yaml").write_text(
-        "format: pair-recon-sas-v1\npair: orders\npartition_mode: all\n"
+        "format: pair-recon-sas-v1\npair: orders\npartition: all\n"
         "generated:\n  left:\n    rate: 0.1\n  right:\n    rate: 0.1\n"
         "outputs:\n  left: left_sample.csv\n  right: right_sample.csv\n",
         encoding="utf-8",
@@ -1223,6 +1225,7 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
 def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_path):
     row = {
         "pair_name": "orders",
+        "partition": "day",
         "left_source": "oracle",
         "left_conn": "PCDS",
         "left_table": "L",
@@ -1328,7 +1331,7 @@ def test_prompt_records_and_applies_date_columns_and_types(monkeypatch, tmp_path
         "pair": "orders",
         "run_mode": "full",
         "timezone": "America/New_York",
-        "partition_mode": "date",
+        "partition": "day",
         "checks": "row_count,hash_sum",
         "sample": "all",
         "strict": False,
@@ -1933,7 +1936,7 @@ def test_launch_injects_checked_vintages_from_window_history(monkeypatch, tmp_pa
     client = SimpleNamespace(files=object(), jobs=SimpleNamespace())
     pair = {
         "right": {"source": "csv"},
-        "partition_mode": "date",
+        "partition": "day",
         "vintage": "month",
         "vintage_sample_size": 4,
     }
@@ -2530,7 +2533,7 @@ def test_csvrun(tmp_path):
     right_path.write_text("id,value\n1,文字\n2,✓\n", encoding="utf-8")
     pair = {
         "version": 2,
-        "partition_mode": "all",
+        "partition": "all",
         "left": {"source": "csv", "path": str(left_path)},
         "right": {"source": "csv", "path": str(right_path), "pre_sampled": True},
         "pre_sampled": True,
@@ -2567,7 +2570,7 @@ def test_left_only_csvrun_uploads_left_artifacts(tmp_path):
     left_path.write_text("ID,VALUE\n1,文字\n2,✓\n", encoding="utf-8")
     pair = {
         "version": 2,
-        "partition_mode": "all",
+        "partition": "all",
         "left": {"source": "csv", "path": str(left_path)},
         "right": {"source": "databricks", "table": "orders"},
         "sample": False,
@@ -2775,6 +2778,7 @@ def test_mapping_data_type_accepts_names_step_lists_and_objects():
         "right_date_col": "dw_bus_dt",
         "key_columns": ["EFF_DT", "ACCT_ID"],
         "vintage": "month",
+        "partition": "day",
         "column_map_rows": [
             {"left_column": "EFF_DT", "right_column": "dw_bus_dt", "data_type": None},
             {"left_column": "ACCT_ID", "right_column": "acct_id", "data_type": "numeric"},

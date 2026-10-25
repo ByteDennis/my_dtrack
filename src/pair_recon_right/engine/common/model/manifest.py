@@ -42,10 +42,10 @@ def mapping_csv_bytes(pair: dict[str, Any]) -> bytes:
     excluded = set(pair.get("excluded_columns") or [])
     overrides = pair.get("col_type_overrides") or {}
     column_types = pair.get("column_types") or {}
-    partition_mode = str(pair.get("partition_mode") or "date")
+    partition = str(pair.get("partition") or "day")
     date_col = str((pair.get("left") or {}).get("date_col") or "").casefold()
     for left_column, right_column in (pair.get("col_map") or {}).items():
-        if partition_mode == "date" and str(left_column).casefold() == date_col:
+        if partition != "all" and str(left_column).casefold() == date_col:
             usage = "partition"
         elif left_column in excluded:
             usage = "excluded"
@@ -244,7 +244,7 @@ def key_family_specs(pair: dict[str, Any], keys: list[str]) -> list[dict[str, An
         if value is None and overrides.get(key) == "numeric":
             value = "numeric"
         if (
-            pair.get("partition_mode", "date") == "date"
+            pair.get("partition", "day") != "all"
             and value is None
             and key.casefold() == date_col
         ):
@@ -266,7 +266,7 @@ def right_key_columns(
     pair_name: str,
     pair: dict[str, Any],
     keys: list[str],
-    partition_mode: str,
+    partition: str,
     date_col: str,
 ) -> list[str]:
     col_map = pair.get("col_map") or {}
@@ -274,7 +274,7 @@ def right_key_columns(
     result = []
     for key in keys:
         mapped = col_map.get(key)
-        if partition_mode == "date" and key.lower() == date_col:
+        if partition != "all" and key.lower() == date_col:
             if mapped and mapped.casefold() != right_date_col.casefold():
                 raise ValueError(
                     f"{pair_name}: key {key} is the Left date column, which right_date_col maps "
@@ -298,22 +298,22 @@ def build_manifest(
         raise ValueError(f"{pair_name}: unsupported Right source")
     if version == 1 and not row_check["gate_decision"].get("passed"):
         raise ValueError(f"{pair_name}: row check has not passed")
-    partition_mode = str(pair.get("partition_mode") or "date")
-    if partition_mode not in {"date", "all"}:
-        raise ValueError(f"{pair_name}: partition_mode must be date or all")
+    partition_kind = str(pair.get("partition") or "day")
+    if partition_kind not in {"day", "month", "all"}:
+        raise ValueError(f"{pair_name}: partition must be day, month or all")
     excluded_partitions = sorted(set(pair.get("excluded_partitions") or []))
     excluded_columns = set(pair.get("excluded_columns") or [])
     mapped_columns = list((pair.get("col_map") or {}).keys())
     date_col = str(pair["left"].get("date_col") or "").lower()
     value_columns = (
         mapped_columns
-        if partition_mode == "all"
+        if partition_kind == "all"
         else [column for column in mapped_columns if column.lower() != date_col]
     )
     columns = [column for column in value_columns if column not in excluded_columns]
     if not columns:
         raise ValueError(f"{pair_name}: no mapped value columns")
-    vintage = "all" if partition_mode == "all" else pair.get("vintage") or "day"
+    vintage = "all" if partition_kind == "all" else pair.get("vintage") or "day"
     grouped: dict[str, list[str]] = defaultdict(list)
     counts: dict[str, int] = {}
     for partition, row in sorted(row_check["partitions"].items()):
@@ -323,7 +323,7 @@ def build_manifest(
             else row["result"] == "match"
         )
         if admitted:
-            bucket = "all" if partition_mode == "all" else bucket_date(partition, vintage)
+            bucket = "all" if partition_kind == "all" else bucket_date(partition, vintage)
             grouped[bucket].append(partition)
             counts[partition] = int(row["left"])
     windows = [
@@ -347,7 +347,7 @@ def build_manifest(
         key_families = key_family_specs(pair, keys)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{pair_name}: unsupported key families: {exc}") from None
-    right_keys = right_key_columns(pair_name, pair, keys, partition_mode, date_col)
+    right_keys = right_key_columns(pair_name, pair, keys, partition_kind, date_col)
     raw_overrides = pair.get("col_type_overrides") or {}
     unknown = sorted(set(raw_overrides) - set(mapped_columns))
     invalid = sorted(set(raw_overrides.values()) - {"numeric", "categorical"})
@@ -383,6 +383,7 @@ def build_manifest(
         "pair": pair_name,
         "sample": sampling,
         "vintage": vintage,
+        "partition": partition_kind,
         "vintage_selection": vintage_selection,
         "key_cols": keys,
         "right_key_cols": right_keys,
@@ -406,8 +407,6 @@ def build_manifest(
     statistics = statistics_plan(pair.get("statistics"))
     if statistics is not None:
         manifest["statistics"] = statistics
-    if partition_mode == "all":
-        manifest["partition_mode"] = "all"
     manifest["plan_id"] = _digest(manifest)
     validate_manifest(manifest)
     return manifest
@@ -438,10 +437,10 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("version 2 manifest requires plan_id")
     if str(manifest["right"].get("source", "")).lower() not in {"databricks", "csv"}:
         raise ValueError("manifest has unsupported Right source")
-    partition_mode = str(manifest.get("partition_mode") or "date")
-    if partition_mode not in {"date", "all"}:
-        raise ValueError("manifest partition_mode must be date or all")
-    if partition_mode == "all" and manifest["vintage"] != "all":
+    partition_kind = str(manifest.get("partition") or "day")
+    if partition_kind not in {"day", "month", "all"}:
+        raise ValueError("manifest partition must be day, month or all")
+    if partition_kind == "all" and manifest["vintage"] != "all":
         raise ValueError("all-partition manifest vintage must be all")
     statistics = statistics_plan(manifest.get("statistics"))
     if statistics is not None and manifest["statistics"] != statistics:
@@ -458,7 +457,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     for spec in column_types.values():
         resolve_column_type(spec)
     for window in manifest["windows"]:
-        if partition_mode == "all" and (
+        if partition_kind == "all" and (
             window.get("bucket") != "all" or window.get("partitions") != ["all"]
         ):
             raise ValueError("all-partition manifest must contain only the all window")

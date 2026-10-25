@@ -27,17 +27,17 @@ def reconcile_partitions(
     left_counts: dict[str, int],
     right_counts: dict[str, int],
     date_synonyms: dict[str, str] | None = None,
-    partition_mode: str = "date",
+    partition: str = "day",
 ) -> dict[str, dict[str, Any]]:
-    if partition_mode == "all":
+    if partition == "all":
         left, right = dict(left_counts), dict(right_counts)
     else:
         left = apply_synonyms(left_counts, date_synonyms)
         right = apply_synonyms(right_counts, date_synonyms)
     result: dict[str, dict[str, Any]] = {}
-    for partition in sorted(set(left) | set(right)):
-        left_value = left.get(partition)
-        right_value = right.get(partition)
+    for partition_value in sorted(set(left) | set(right)):
+        left_value = left.get(partition_value)
+        right_value = right.get(partition_value)
         if left_value is None:
             partition_result = "right_only"
         elif right_value is None:
@@ -53,7 +53,7 @@ def reconcile_partitions(
         }
         if partition_result == "count_diff":
             row["delta"] = int(right_value) - int(left_value)
-        result[partition] = row
+        result[partition_value] = row
     return result
 
 
@@ -199,7 +199,7 @@ def reconcile_pair(
             left_doc["counts"],
             right_counts,
             left_doc.get("date_synonyms"),
-            left_doc.get("partition_mode", "date"),
+            left_doc.get("partition", "day"),
         )
     )
     document = {
@@ -209,7 +209,7 @@ def reconcile_pair(
         "right": left_doc["right"],
         "bounds": left_doc["bounds"],
         "date_synonyms": dict(left_doc.get("date_synonyms") or {}),
-        "partition_mode": left_doc.get("partition_mode", "date"),
+        "partition": left_doc.get("partition", "day"),
         "partitions": partitions,
         "summary": summarize_partitions(partitions),
         "gate_decision": evaluate_gate(partitions, gate),
@@ -292,11 +292,11 @@ def require_version2_exclusions(store) -> None:
         return
     plans = {plan["pair"]: plan for _key, plan in list_plans(store)}
     all_mode = sorted(
-        pair for pair in unresolved if (plans.get(pair) or {}).get("partition_mode") == "all"
+        pair for pair in unresolved if (plans.get(pair) or {}).get("partition") == "all"
     )
     if all_mode:
         raise RuntimeError(
-            "partition_mode all row counts differ; align the complete Left and Right relations "
+            "partition all row counts differ; align the complete Left and Right relations "
             f"before continuing ({', '.join(all_mode)})"
         )
     details = "; ".join(f"{pair}: {', '.join(values)}" for pair, values in unresolved.items())
@@ -341,7 +341,7 @@ def run_row_check(
             else target_factory(
                 {
                     **left_doc["right"],
-                    "partition_mode": left_doc.get("partition_mode", "date"),
+                    "partition": left_doc.get("partition", "day"),
                 }
             )
         )

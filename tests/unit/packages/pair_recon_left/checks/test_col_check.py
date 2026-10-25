@@ -20,7 +20,7 @@ def manifest():
         "pair": "pair",
         "sample": {"mode": "all"},
         "vintage": "all",
-        "partition_mode": "all",
+        "partition": "all",
         "key_cols": [],
         "right_key_cols": [],
         "key_families": [],

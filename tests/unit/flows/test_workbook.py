@@ -4,6 +4,7 @@ from copy import deepcopy
 import pytest
 from openpyxl import load_workbook
 
+from pair_recon.core.metadata.configuration import build_pair_config
 from pair_recon.core.metadata.workbook import (
     FIELD_GUIDE_COLUMNS,
     PAIR_SQL_WORKBOOK_COLUMNS,
@@ -30,12 +31,13 @@ def set_row(sheet, values):
         sheet.cell(2, column, value)
 
 
-def valid_pair_row(*, keys="ORDER_ID", defaults='{"sample":0.1}'):
+def valid_pair_row(*, keys="ORDER_ID", partition="day", defaults='{"sample":0.1}'):
     return [
         "orders",
         True,
         keys,
         "month",
+        partition,
         "oracle",
         "PCDS",
         "SALES.ORDERS",
@@ -83,6 +85,7 @@ def test_create_and_read_pair_workbook(tmp_path):
             "enabled": True,
             "key_columns": ["ORDER_ID"],
             "vintage": "month",
+            "partition": "day",
             "left_source": "oracle",
             "left_conn": "PCDS",
             "left_table": "SALES.ORDERS",
@@ -117,7 +120,6 @@ def test_pair_workbook_percentage_sample_requires_keys(tmp_path):
 
 FULL_RUN_DEFAULTS = {
     "run_mode": "full",
-    "partition_mode": "date",
     "sample": 0.1,
     "strict": False,
     "checks": ["row_count", "hash_sum"],
@@ -148,6 +150,23 @@ def test_run_defaults_accept_every_prompt_default(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "partition",
+    ["day", "month", "all"],
+)
+def test_partition_column_builds_internal_config(tmp_path, partition):
+    path = create_pair_workbook(tmp_path / "pairs.xlsx")
+    workbook = load_workbook(path)
+    set_row(workbook["pairs"], valid_pair_row(partition=partition, defaults='{"sample":0.1}'))
+    set_row(workbook["pair_sql"], ["orders", None, None, "SELECT 1", None])
+    workbook.save(path)
+
+    row = read_pair_workbook(path)[0]
+    config = build_pair_config(row)
+
+    assert config["partition"] == partition
+
+
+@pytest.mark.parametrize(
     ("override", "message"),
     [
         ({"from_date": "2026/01/01"}, "from_date must be YYYY-MM-DD"),
@@ -168,15 +187,20 @@ def test_run_defaults_reject_bad_prompt_defaults(tmp_path, override, message):
 
 
 def test_run_defaults_all_mode_rejects_date_only_fields(tmp_path):
-    defaults = {"partition_mode": "all", "from_date": "2026-01-01", "vintage": "day"}
+    defaults = {"from_date": "2026-01-01", "vintage": "day"}
     with pytest.raises(ValueError, match="all mode cannot set from_date, vintage"):
-        _read_with_defaults(tmp_path, defaults)
+        path = create_pair_workbook(tmp_path / "pairs.xlsx")
+        workbook = load_workbook(path)
+        set_row(workbook["pairs"], valid_pair_row(partition="all", defaults=json.dumps(defaults)))
+        set_row(workbook["pair_sql"], ["orders", None, None, "SELECT 1", None])
+        workbook.save(path)
+        read_pair_workbook(path)
 
 
 def test_pair_sql_must_reference_a_pair(tmp_path):
     path = create_pair_workbook(tmp_path / "pairs.xlsx")
     workbook = load_workbook(path)
-    set_row(workbook["pairs"], valid_pair_row(defaults='{"partition_mode":"all"}'))
+    set_row(workbook["pairs"], valid_pair_row(partition="all"))
     set_row(workbook["pair_sql"], ["missing", None, None, "SELECT 1", None])
     workbook.save(path)
 
@@ -192,6 +216,7 @@ def test_upsert_pair_configuration_preserves_runtime_columns():
             "enabled": True,
             "key_columns": ["ORDER_ID"],
             "vintage": "month",
+            "partition": "day",
             "left_source": "oracle",
             "left_conn": "PCDS",
             "left_table": "SALES.ORDERS",
@@ -226,6 +251,7 @@ def test_upsert_pair_configuration_preserves_runtime_columns():
     assert meta_values["enabled"] == "true"
     assert json.loads(meta_values["key_columns"]) == ["ORDER_ID"]
     assert json.loads(meta_values["config_json"])["left"]["conn_macro"] == "PCDS"
+    assert json.loads(meta_values["config_json"])["partition"] == "day"
     assert pair_values["right_sql"] == "SELECT 1"
 
 
@@ -235,6 +261,7 @@ def test_pair_configuration_comparison_is_semantic_and_detects_changes():
         "enabled": True,
         "key_columns": ["ORDER_ID"],
         "vintage": "month",
+        "partition": "day",
         "left_source": "oracle",
         "left_conn": "PCDS",
         "left_table": "SALES.ORDERS",
@@ -279,6 +306,7 @@ def test_pair_workbook_columns_are_stable():
         "enabled",
         "key_columns",
         "vintage",
+        "partition",
         "left_source",
         "left_conn",
         "left_table",

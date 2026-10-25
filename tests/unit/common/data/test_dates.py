@@ -46,6 +46,20 @@ def test_bucket(common, vintage, expected, error):
             common.dates.bucket_date("2026-05-14", vintage)
 
 
+def test_month_partition_aggregates_after_daily_results(common):
+    assert common.dates.aggregate_partition_counts(
+        {"2013-07-10": 4, "20130711": 6, "2013-08-01": 2}, "month"
+    ) == {"2013-07-01": 10, "2013-08-01": 2}
+
+
+def test_month_partition_predicate_scans_whole_month(common):
+    sql = common.dates.partition_where(
+        "DT", ["2013-07-01"], dialect="oracle", date_type="date", grain="month"
+    )
+    assert "DT >= DATE '2013-07-01'" in sql
+    assert "DT < DATE '2013-08-01'" in sql
+
+
 def test_apply(common):
     counts = {"20260101": 2, "2026-01-01": 3, "3000-01-01": 4}
     folded = common.dates.apply_synonyms(counts, {"3000-01-01": "2026-07-01"})

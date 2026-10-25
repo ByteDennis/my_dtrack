@@ -57,14 +57,15 @@ def test_load_environment_does_not_override_process_environment(monkeypatch, tmp
 
 
 @pytest.mark.parametrize(
-    ("mode", "answers", "expected"),
+    ("partition", "answers", "expected"),
     [
         (
-            "date",
+            "month",
             {
                 "from_date": "2026-01-01",
                 "to_date": "2026-01-31",
                 "vintage": "month",
+                "partition": "month",
                 "left_date_col": "BUSINESS_DT",
                 "left_date_type": {"type": "string", "format": "compact"},
                 "right_date_col": "business_dt",
@@ -74,7 +75,11 @@ def test_load_environment_does_not_override_process_environment(monkeypatch, tmp
                 "strict": True,
                 "checks": ["row_count", "hash_sum"],
             },
-            {"vintage": "month", "statistics": ["hash_sum"]},
+            {
+                "vintage": "month",
+                "partition": "month",
+                "statistics": ["hash_sum"],
+            },
         ),
         (
             "all",
@@ -83,20 +88,20 @@ def test_load_environment_does_not_override_process_environment(monkeypatch, tmp
                 "strict": False,
                 "checks": ["row_count", "n_unique"],
             },
-            {"partition_mode": "all", "statistics": ["n_unique"]},
+            {"partition": "all", "statistics": ["n_unique"]},
         ),
         (
             "all",
             {"sample": False, "strict": False, "checks": ["row_count"]},
-            {"partition_mode": "all", "checks": ["row_count"]},
+            {"partition": "all", "checks": ["row_count"]},
         ),
     ],
 )
-def test_config(mode, answers, expected):
+def test_config(partition, answers, expected):
     pair = {
         "left": {"source": "oracle", "query": "select * from l", "date_col": "DT"},
         "right": {"source": "databricks", "query": "select * from r", "date_col": "dt"},
-        "partition_mode": mode,
+        "partition": partition,
         "key": "ID",
         "col_map": {"ID": "id", "VALUE": "value"},
     }
@@ -105,7 +110,7 @@ def test_config(mode, answers, expected):
     assert value["version"] == 2 and value["timezone"] == "America/New_York"
     for key, item in expected.items():
         assert value["pairs"]["订单"][key] == item
-    if mode == "all":
+    if partition == "all":
         assert "fromDate" not in value["pairs"]["订单"]
     else:
         assert value["pairs"]["订单"]["left"]["date_col"] == "BUSINESS_DT"

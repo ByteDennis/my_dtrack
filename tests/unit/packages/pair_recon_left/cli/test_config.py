@@ -3,10 +3,10 @@ import pytest
 from pair_recon_left.cli.config import validate_config
 
 
-def pair(mode="all"):
-    dates = {} if mode == "all" else {"date_col": "D"}
+def pair(partition="all"):
+    dates = {} if partition == "all" else {"date_col": "D"}
     return {
-        "partition_mode": mode,
+        "partition": partition,
         "left": {"source": "oracle", "table": "L", **dates},
         "right": {"source": "databricks", "table": "R", **dates},
         "col_map": {"A": "a"},
@@ -14,9 +14,9 @@ def pair(mode="all"):
     }
 
 
-@pytest.mark.parametrize("mode", ["all", "date"])
-def test_valid(mode):
-    value = validate_config({"version": 2, "pairs": {"p": pair(mode)}})
+@pytest.mark.parametrize("partition", ["all", "day", "month"])
+def test_valid(partition):
+    value = validate_config({"version": 2, "pairs": {"p": pair(partition)}})
     assert value["pairs"]["p"]["statistics"] == ["n_unique", "hash_sum"]
     assert value["pairs"]["p"]["audit"] is False
 
@@ -62,14 +62,14 @@ def test_right(source):
 
 
 def test_snapshot():
-    value = pair("date")
+    value = pair("day")
     value["snapshot"] = True
     value["left"].pop("date_col")
     assert validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]["snapshot"]
 
 
 def test_query_windows_on_both_sides():
-    value = pair("date")
+    value = pair("day")
     value["left"] |= {
         "query": "SELECT * FROM L l WHERE {{query_windows:driver}}",
         "query_windows": {"driver": {"expression": "l.D", "date_type": "date"}},
@@ -90,24 +90,24 @@ def test_query_windows_require_date_mode_and_declarations():
         validate_config({"version": 2, "pairs": {"p": value}})
 
     value["right"]["query_windows"] = {"driver": {"expression": "D"}}
-    with pytest.raises(ValueError, match="partition_mode all"):
+    with pytest.raises(ValueError, match="partition all"):
         validate_config({"version": 2, "pairs": {"p": value}})
 
 
 def test_vintage_selection_config():
-    value = pair("date")
+    value = pair("day")
     value["vintage_values"] = ["2026-01-01", "2026-01-01"]
     configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
     assert configured["vintage_values"] == ["2026-01-01"]
 
-    value = pair("date")
+    value = pair("day")
     value["vintage_sample_size"] = "3"
     configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
     assert configured["vintage_sample_size"] == 3
 
 
 def test_month_number_date_type_normalizes_excluded_partitions():
-    value = pair("date")
+    value = pair("day")
     value["left"]["date_type"] = {"type": "number", "format": "month"}
     value["right"]["date_type"] = {"type": "number", "format": "month"}
     value["excluded_partitions"] = ["2026-01-15", "2026-01-31", "2026-02-01"]
@@ -118,7 +118,7 @@ def test_month_number_date_type_normalizes_excluded_partitions():
 
 
 def test_vintage_selection_config_rejects_ambiguity_and_all_mode():
-    value = pair("date")
+    value = pair("day")
     value.update(vintage_sample_size=2, vintage_values=["2026-01-01"])
     with pytest.raises(ValueError, match="not both"):
         validate_config({"version": 2, "pairs": {"p": value}})
@@ -128,7 +128,7 @@ def test_vintage_selection_config_rejects_ambiguity_and_all_mode():
     with pytest.raises(ValueError, match="cannot select vintages"):
         validate_config({"version": 2, "pairs": {"p": value}})
 
-    value = pair("date")
+    value = pair("day")
     value["vintage_sample_size"] = 1.5
     with pytest.raises(TypeError, match="positive integer"):
         validate_config({"version": 2, "pairs": {"p": value}})

@@ -16,11 +16,11 @@ def document(checks):
         "pair": "p",
         **side,
         "bounds": {"from": None, "to": None},
-        "partition_mode": "all",
+        "partition": "all",
         "counts": {"all": 2},
         "pair_config": {
             "version": 2,
-            "partition_mode": "all",
+            "partition": "all",
             **side,
             "col_map": {"A": "a"},
             "checks": checks,
@@ -100,7 +100,7 @@ def test_row_check_failure_publishes_partial_workbook_without_csv(tmp_path):
     store.put_json("row_check/left.json", document(["hash_sum"]))
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
 
-    with pytest.raises(RuntimeError, match="partition_mode all row counts differ"):
+    with pytest.raises(RuntimeError, match="partition all row counts differ"):
         run(
             None,
             lambda _config: FakeTarget(counts={"all": 3}),

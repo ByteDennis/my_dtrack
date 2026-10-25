@@ -232,7 +232,7 @@ def test_vintage_selection_rejects_missing_or_conflicting_values(common):
 
 def test_all(common):
     pair = {
-        "partition_mode": "all",
+        "partition": "all",
         "left": {"source": "oracle", "table": "A"},
         "right": {"source": "databricks", "table": "a"},
         "col_map": {"ID": "id", "AMOUNT": "amount"},
@@ -245,7 +245,7 @@ def test_all(common):
         "partitions": {"all": {"left": 9, "right": 9, "result": "match"}},
     }
     manifest = common.manifest.build_manifest("run", "p", pair, row_check)
-    assert manifest["partition_mode"] == "all"
+    assert manifest["partition"] == "all"
     assert manifest["vintage"] == "all"
     assert manifest["columns"] == ["ID", "AMOUNT"]
     assert manifest["windows"] == [{"bucket": "all", "partitions": ["all"], "n_left": 9}]

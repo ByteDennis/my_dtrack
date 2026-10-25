@@ -54,7 +54,7 @@ def write_row_sheet(workbook, document: dict[str, Any]) -> None:
     left_label = str(left.get("source") or "left").upper()
     right_label = str(right.get("source") or "databricks").upper()
     summary = document.get("summary") or {}
-    all_rows = document.get("partition_mode") == "all"
+    all_rows = document.get("partition") == "all"
     sheet = workbook.create_sheet(title="Row Check")
     header = [
         (f"{left_label}:", _relation(left)),

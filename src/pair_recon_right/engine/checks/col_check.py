@@ -295,7 +295,7 @@ class ColCheck:
                     self.target_factory(
                         {
                             **manifest["right"],
-                            "partition_mode": manifest.get("partition_mode", "date"),
+                            "partition": manifest.get("partition", "day"),
                         }
                     ),
                     SqlAudit(

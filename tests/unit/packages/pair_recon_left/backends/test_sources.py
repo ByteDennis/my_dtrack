@@ -44,7 +44,7 @@ def test_hadoop(monkeypatch):
 def test_csv(tmp_path):
     path = tmp_path / "rows.csv"
     path.write_text("ID,VALUE\n1,文字\n2,✓\n", encoding="utf-8")
-    source = CsvSource({"source": "csv", "path": str(path), "partition_mode": "all"})
+    source = CsvSource({"source": "csv", "path": str(path), "partition": "all"})
     assert source.health_check()["ok"]
     assert source.partition_counts() == {"all": 2}
     columns, rows = source.query(f"SELECT * FROM {source.relation()}")
@@ -279,8 +279,12 @@ def test_oracle_query_to_csv_does_not_retry_non_connection_errors(monkeypatch, t
 @pytest.mark.parametrize(
     ("config", "expected"),
     [
-        ({"partition_mode": "all"}, {"all": 7}),
+        ({"partition": "all"}, {"all": 7}),
         ({"date_col": "D", "date_type": "date"}, {"2026-01-01": 7}),
+        (
+            {"date_col": "D", "date_type": "date", "partition": "month"},
+            {"2026-01-01": 7},
+        ),
     ],
 )
 def test_counts(config, expected):

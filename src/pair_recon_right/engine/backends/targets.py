@@ -17,6 +17,7 @@ from ..common.sql.dates import (
     NumericDateType,
     SasDateType,
     StringDateType,
+    aggregate_partition_counts,
     bounds_where,
     canonical_date,
     day_expr,
@@ -152,8 +153,8 @@ class SparkTarget:
         return self
 
     @property
-    def partition_mode(self) -> str:
-        return str(self.config.get("partition_mode") or "date")
+    def partition(self) -> str:
+        return str(self.config.get("partition") or "day")
 
     def _audit(self, sql: str, operation: str = "query") -> None:
         if self.sql_audit is not None:
@@ -190,6 +191,7 @@ class SparkTarget:
                 self.config.get("query_windows") or {},
                 dialect="spark",
                 partitions=partitions,
+                partition=self.partition,
                 from_date=from_date,
                 to_date=to_date,
             )
@@ -247,10 +249,10 @@ class SparkTarget:
     def health_check(self) -> dict[str, Any]:
         relation = self.relation()
         log.info(
-            "health check relation=%s kind=%s partition_mode=%s date_col=%s date_type=%s where=%s",
+            "health check relation=%s kind=%s partition=%s date_col=%s date_type=%s where=%s",
             relation,
             self.config.get("kind") or "table",
-            self.partition_mode,
+            self.partition,
             self.config.get("date_col"),
             self.config.get("date_type"),
             self.config.get("where"),
@@ -262,10 +264,10 @@ class SparkTarget:
                 if row[0] and not str(row[0]).startswith("#")
             }
             log.info("health check columns: %s", columns)
-            if self.partition_mode == "date" and self.config["date_col"] not in columns:
+            if self.partition != "all" and self.config["date_col"] not in columns:
                 raise ValueError(f"date_col {self.config['date_col']!r} not in {sorted(columns)}")
             self.column_types = columns
-            if self.partition_mode == "date":
+            if self.partition != "all":
                 log.info(
                     "health check date_type resolved: %s", self.date_type().spec(portable=True)
                 )
@@ -301,7 +303,7 @@ class SparkTarget:
             "spark",
             "right",
         )
-        if self.partition_mode == "all":
+        if self.partition == "all":
             rows = self._rows(
                 f"SELECT COUNT(*) FROM {self.relation()} WHERE {self._where(sampled)}",
                 "partition_counts",
@@ -327,7 +329,9 @@ class SparkTarget:
         for value, count in rows:
             day = canonical_date(value)
             counts[day] = counts.get(day, 0) + int(count)
-        return counts
+        return aggregate_partition_counts(
+            counts, self.partition
+        )
 
     def _sample_predicate(self, manifest: dict[str, Any], window: dict[str, Any]) -> str | None:
         keys, families = manifest["right_key_cols"], manifest["key_families"]
@@ -346,7 +350,7 @@ class SparkTarget:
     ) -> dict[str, dict[str, Any]]:
         if not hasattr(self, "column_types"):
             self.health_check()
-        if self.partition_mode == "date":
+        if self.partition != "all":
             self.date_type()
         strict = bool(manifest.get("strict"))
         predicate = (
@@ -355,8 +359,9 @@ class SparkTarget:
                 window["partitions"],
                 dialect="spark",
                 date_type=self.config.get("date_type"),
+                grain=self.partition,
             )
-            if self.partition_mode == "date"
+            if self.partition != "all"
             else None
         )
         sample = self._sample_predicate(manifest, window)

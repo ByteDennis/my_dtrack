@@ -62,13 +62,13 @@ def test_snapshot():
 
 
 def test_all():
-    rows = reconcile_partitions({"all": 9}, {"all": 9}, partition_mode="all")
+    rows = reconcile_partitions({"all": 9}, {"all": 9}, partition="all")
     assert rows == {"all": {"left": 9, "right": 9, "result": "match"}}
 
 
 @pytest.mark.parametrize(
     ("key", "mode", "family", "right_pre_sampled"),
-    [("id", "all", "string", False), ("dt", "date", "date", False), ("id", "all", None, True)],
+    [("id", "all", "string", False), ("dt", "day", "date", False), ("id", "all", None, True)],
 )
 def test_sample(key, mode, family, right_pre_sampled):
     seen = {}
@@ -80,19 +80,19 @@ def test_sample(key, mode, family, right_pre_sampled):
 
     counts = {"all": 5} if mode == "all" else {"2026-01-01": 5}
     left = left_document(counts=counts, sample=0.1)
-    left["partition_mode"] = mode
+    left["partition"] = mode
     left["bounds"] = (
         {"from": None, "to": None} if mode == "all" else {"from": "2026-01-01", "to": "2026-01-01"}
     )
     left["pair_config"].update(
         version=2,
         checks=["row_count"],
-        partition_mode=mode,
+        partition=mode,
         pre_sampled=True,
         right_pre_sampled=right_pre_sampled,
         key=key,
     )
-    if mode == "date":
+    if mode == "day":
         left["pair_config"]["left"]["date_type"] = "date"
         left["pair_config"]["right"]["date_type"] = "date"
     reconcile_pair(MemoryStore(), left, Target(counts=counts))
@@ -267,19 +267,19 @@ def test_v2():
 def test_all2():
     store = MemoryStore()
     left = left_document(counts={"all": 5})
-    left["partition_mode"] = "all"
+    left["partition"] = "all"
     left["bounds"] = {"from": None, "to": None}
     left["left"] = {"source": "oracle", "table": "A"}
     left["right"] = {"source": "databricks", "table": "a"}
     left["pair_config"] = {
         "version": 2,
         "checks": ["hash_sum"],
-        "partition_mode": "all",
+        "partition": "all",
         "left": left["left"],
         "right": left["right"],
         "col_map": {"amount": "amount"},
     }
     store.put_json("row_check/left.json", left)
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
-    with pytest.raises(RuntimeError, match="partition_mode all row counts differ"):
+    with pytest.raises(RuntimeError, match="partition all row counts differ"):
         run_row_check(store, lambda _cfg: FakeTarget(counts={"all": 6}))

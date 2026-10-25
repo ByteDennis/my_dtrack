@@ -2,6 +2,10 @@
 MERGE INTO ${catalog}.${schema}.pair_recon_reference AS t
 USING (
   SELECT * FROM VALUES
+    ('pair_recon_pair_meta', 'partition', NULL, 'Row-count partition strategy configured per Pair: day, month, or all.'),
+    ('pair_recon_pair_meta', 'partition', 'day', 'Compare row counts by normalized calendar day.'),
+    ('pair_recon_pair_meta', 'partition', 'month', 'Group by source date first, then normalize and aggregate row counts by calendar month.'),
+    ('pair_recon_pair_meta', 'partition', 'all', 'Compare one whole-relation row count without date partitions.'),
     ('pair_recon_run_status', 'run_id', NULL, 'Daily Pair and owner run identifier.'),
     ('pair_recon_run_status', 'pair_name', NULL, 'Pair evaluated by the run.'),
     ('pair_recon_run_status', 'owner', NULL, 'Operator that owns the run.'),
