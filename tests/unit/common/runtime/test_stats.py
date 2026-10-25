@@ -1,5 +1,7 @@
 import json
 import threading
+import time
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -228,3 +230,91 @@ def test_invalid(tmp_path):
     right_stats = stats.compute_csv_statistics(right, ["D"], column_types={"D": spec}, side="right")
     assert right_stats["D"]["n_missing"] == 0 and right_stats["D"]["n_unique"] == 2
     assert left_stats["D"]["hash_sum"] != right_stats["D"]["hash_sum"]
+
+
+class Connection:
+    def __init__(self, values, delay=0.1):
+        self.values = iter(values)
+        self.delay = delay
+        self.executed = []
+
+    def query_progress(self):
+        value = next(self.values, 99.0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def execute(self, sql):
+        self.executed.append(sql)
+        time.sleep(self.delay)
+        return self
+
+
+def test_execute_reporting_reports_known_percentages_then_clears():
+    connection = Connection([-1.0, 12.5, 80.0])
+    reports = []
+
+    result = stats.execute_reporting(connection, "SELECT 1", reports.append, interval=0.01)
+
+    assert result is connection and connection.executed == ["SELECT 1"]
+    assert reports[-1] is None and -1.0 not in reports
+    assert reports[:2] == [12.5, 80.0]
+
+
+def test_execute_reporting_accepts_query_progress_objects():
+    connection = Connection([SimpleNamespace(percentage=40.0)])
+    reports = []
+
+    stats.execute_reporting(connection, "SELECT 1", reports.append, interval=0.01)
+
+    assert reports[0] == 40.0 and reports[-1] is None
+
+
+def test_execute_reporting_survives_query_progress_errors(caplog):
+    connection = Connection([RuntimeError("no progress")])
+    reports = []
+
+    with caplog.at_level("WARNING", logger="pair_recon.left.stats"):
+        stats.execute_reporting(connection, "SELECT 1", reports.append, interval=0.01)
+
+    assert reports == [None] and "query_progress failed" in caplog.text
+
+
+def test_execute_reporting_without_listener_runs_directly():
+    connection = Connection([], delay=0)
+    before = threading.active_count()
+
+    assert stats.execute_reporting(connection, "SELECT 1") is connection
+    assert connection.executed == ["SELECT 1"] and threading.active_count() == before
+
+
+def test_query_status_is_cleared_after_every_statement(tmp_path, monkeypatch):
+    path = tmp_path / "q.csv"
+    path.write_text("A,B\n1,x\n2,y\n", encoding="utf-8")
+    monkeypatch.setenv("STATS_WORKERS", "1")
+    events = []
+
+    stats.compute_csv_statistics(
+        path,
+        ["A", "B"],
+        statistics=["n_unique"],
+        query_status=lambda phase, shard, percent: events.append((phase, shard, percent)),
+    )
+
+    assert events.count(("load", 0, None)) == 1
+    assert events.count(("infer", 0, None)) == 1
+    assert events.count(("aggregate", 0, None)) == 1
+    assert all(percent is None or percent >= 0 for _phase, _shard, percent in events)
+
+
+def test_step_family_column_type_normalizes_statistics(tmp_path):
+    path = tmp_path / "ids.csv"
+    path.write_text("K\n007\n7\n0007\n", encoding="utf-8")
+
+    plain = stats.compute_csv_statistics(path, ["K"], statistics=["n_unique", "hash_sum"])
+    typed = stats.compute_csv_statistics(
+        path, ["K"], statistics=["n_unique", "hash_sum"], column_types={"K": "numeric"}
+    )
+
+    assert plain["K"]["n_unique"] == 3 and typed["K"]["n_unique"] == 1
+    assert typed["K"]["col_type"] == "categorical"

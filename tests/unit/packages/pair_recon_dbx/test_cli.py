@@ -22,6 +22,7 @@ def calls(monkeypatch):
         "run_sql",
         "list_runs",
         "run_detail",
+        "resolve_job_id",
     )
     for name in names:
         monkeypatch.setattr(
@@ -58,6 +59,10 @@ def calls(monkeypatch):
         (
             ["runs", "--job-id", "7", "--active"],
             ("list_runs", ("client:corp",), {"limit": 10, "job_id": 7, "active": True}),
+        ),
+        (
+            ["runs", "named-job"],
+            ("list_runs", ("client:corp",), {"limit": 10, "job_id": 42, "active": False}),
         ),
         (["runs", "--run-id", "9"], ("run_detail", ("client:corp", 9), {})),
         (
@@ -110,7 +115,9 @@ def calls(monkeypatch):
         ),
     ],
 )
-def test_commands(calls, capsys, argv, expected):
+def test_commands(calls, capsys, monkeypatch, argv, expected):
+    if argv == ["runs", "named-job"]:
+        monkeypatch.setattr(cli.runtime, "resolve_job_id", lambda _workspace, _reference: 42)
     assert cli.main(argv) == 0
     assert calls == [expected]
     assert json.loads(capsys.readouterr().out) == {"called": expected[0]}
@@ -132,6 +139,82 @@ def test_defaults(calls, monkeypatch, tmp_path, capsys):
     ]
     assert cli.parser().parse_args(["--debug", "attach", "runs"]).debug == "attach"
     assert cli.parser().parse_args(["--debug", "console", "runs"]).debug == "console"
+    capsys.readouterr()
+
+
+def test_runs_uses_saved_right_job_id(calls, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".pair_recon.yaml").write_text("right_job_id: '314'\n", encoding="utf-8")
+    monkeypatch.setattr(cli.runtime, "resolve_job_id", lambda _workspace, value: int(value))
+
+    assert cli.main(["runs"]) == 0
+
+    assert calls == [("list_runs", ("client:corp",), {"limit": 10, "job_id": 314, "active": False})]
+    capsys.readouterr()
+
+
+def test_runs_explicit_job_id_wins_over_saved_default(calls, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".pair_recon.yaml").write_text("right_job_id: '314'\n", encoding="utf-8")
+
+    assert cli.main(["runs", "--job-id", "7"]) == 0
+
+    assert calls == [("list_runs", ("client:corp",), {"limit": 10, "job_id": 7, "active": False})]
+    capsys.readouterr()
+
+
+def test_cache_pair_shorthand_and_yaml_default(calls, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DBX_WAREHOUSE_ID", "w1")
+    monkeypatch.setenv("DBX_PAIR_TABLE", "main.recon.pair_recon_pair_meta")
+    (tmp_path / ".pair_recon.yaml").write_text("pair: YAML_PAIR\n", encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(
+        cli.cache_ops,
+        "explain",
+        lambda *args: seen.append(args) or {"pair": args[-1]},
+    )
+
+    assert cli.main(["cache", "ORDERS"]) == 0
+    assert cli.main(["cache"]) == 0
+
+    assert [call[-1] for call in seen] == ["ORDERS", "YAML_PAIR"]
+    assert all(call[1:3] == ("w1", "main.recon.pair_recon_cache_index") for call in seen)
+    capsys.readouterr()
+
+
+def test_cache_show_and_peek(calls, monkeypatch, capsys):
+    monkeypatch.setenv("DBX_WAREHOUSE_ID", "w1")
+    monkeypatch.setenv("DBX_PAIR_TABLE", "main.recon.pair_recon_pair_meta")
+    seen = []
+    monkeypatch.setattr(
+        cli.cache_ops,
+        "show",
+        lambda *args: seen.append(("show", args)) or {"cache_key": args[-1]},
+    )
+    monkeypatch.setattr(
+        cli.cache_ops,
+        "peek",
+        lambda *args, **kwargs: (
+            seen.append(("peek", args, kwargs))
+            or {
+                "cache": {
+                    "cache_key": args[-1],
+                    "cache_type": "statistics",
+                    "format": "json",
+                    "uri": "/Volumes/cache.json",
+                },
+                "preview": {"ok": True},
+            }
+        ),
+    )
+
+    assert cli.main(["cache", "show", "abc"]) == 0
+    assert cli.main(["cache", "peek", "def", "--limit", "3"]) == 0
+
+    assert seen[0][0] == "show" and seen[0][1][-1] == "abc"
+    assert seen[1][0] == "peek" and seen[1][1][-1] == "def"
+    assert seen[1][2] == {"limit": 3}
     capsys.readouterr()
 
 

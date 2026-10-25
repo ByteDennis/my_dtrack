@@ -135,7 +135,7 @@ def _apply_mappings(value: dict[str, Any], row: dict[str, Any], pair: str) -> No
             continue
         if data_type in {"numeric", "categorical"}:
             overrides[left] = data_type
-        elif data_type.startswith("{"):
+        elif data_type[:1] in "{[":
             try:
                 column_types[left] = json.loads(data_type)
             except json.JSONDecodeError as exc:

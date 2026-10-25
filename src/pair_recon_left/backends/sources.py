@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import csv
+import logging
 import os
+import random
 import re
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from contextlib import nullcontext
@@ -21,6 +24,57 @@ from ..common.sql.dates import (
 )
 from ..common.sql.query_windows import normalize_query_windows, render_query_windows
 from ..common.sql.sampling import fixed_keys_sql, sample_predicate_sql
+
+log = logging.getLogger("pair_recon.left.sources")
+_ORACLE_PULLS_LOCK = threading.Lock()
+_ORACLE_PULLS_ACTIVE = 0
+
+
+def _configured_int(config: dict[str, Any], name: str, default: int, *, minimum: int) -> int:
+    try:
+        value = int(config.get(name, default))
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer") from None
+    if value < minimum:
+        qualifier = "positive" if minimum == 1 else "non-negative"
+        raise ValueError(f"{name} must be a {qualifier} integer")
+    return value
+
+
+def _transient_oracle_error(exc: BaseException) -> bool:
+    transient = (
+        "DPY-4011",
+        "DPY-6005",
+        "ORA-03113",
+        "ORA-03114",
+        "ORA-03135",
+        "ORA-12537",
+        "ORA-12547",
+        "ORA-12570",
+        "ORA-12571",
+        "WINERROR 10054",
+    )
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        details = current.args[0] if current.args else current
+        if getattr(details, "isrecoverable", False):
+            return True
+        text = str(current).upper()
+        if any(code in text for code in transient):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _close_quietly(value) -> None:
+    if value is None:
+        return
+    try:
+        value.close()
+    except Exception:
+        log.debug("could not close failed Oracle resource", exc_info=True)
 
 
 def write_rows(path: str | Path, columns: list[str], rows: Iterable[Iterable[object]]) -> Path:
@@ -480,6 +534,10 @@ class OracleSource(SqlSource):
         self._resolve_lock = threading.Lock()
         self._key_types: dict[tuple[str, ...], list[str | None]] = {}
         self._key_types_lock = threading.Lock()
+        self.arraysize = _configured_int(config, "arraysize", 1_000, minimum=1)
+        self.prefetchrows = _configured_int(config, "prefetchrows", 1_000, minimum=0)
+        self.fetch_batch_size = _configured_int(config, "fetch_batch_size", 10_000, minimum=1)
+        self.fetch_retries = _configured_int(config, "fetch_retries", 3, minimum=0)
 
     def _pick(self, field: str, *suffixes: str) -> str | None:
         names = [self.config.get(f"{field}_env")]
@@ -509,6 +567,106 @@ class OracleSource(SqlSource):
         if not (self.user and self.password and (self.dsn or self.service or self.ldap_dsn)):
             raise ValueError("Oracle requires user, password, and dsn, service, or LDAP_DSN")
         return oracledb.connect(user=self.user, password=self.password, dsn=self.resolve_dsn())
+
+    def query_to_csv(
+        self, sql: str, output: Path, columns: list[str], *, operation: str = "query"
+    ) -> Path:
+        global _ORACLE_PULLS_ACTIVE
+
+        target = Path(output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        part = target.with_name(target.name + ".part")
+        self._audit(sql, operation)
+        with _ORACLE_PULLS_LOCK:
+            _ORACLE_PULLS_ACTIVE += 1
+            active = _ORACLE_PULLS_ACTIVE
+        log.info(
+            "Oracle fetch started: output=%s active=%d arraysize=%d prefetchrows=%d batch_size=%d",
+            target,
+            active,
+            self.arraysize,
+            self.prefetchrows,
+            self.fetch_batch_size,
+        )
+        try:
+            for attempt in range(self.fetch_retries + 1):
+                connection = cursor = None
+                started = time.perf_counter()
+                execute_seconds = fetch_seconds = write_seconds = 0.0
+                first_batch_seconds = None
+                row_count = 0
+                try:
+                    connection = self.connect()
+                    cursor = connection.cursor()
+                    cursor.arraysize = self.arraysize
+                    cursor.prefetchrows = self.prefetchrows
+                    with self._guard(cursor, connection):
+                        mark = time.perf_counter()
+                        cursor.execute(sql)
+                        execute_seconds = time.perf_counter() - mark
+                        with part.open("w", newline="", encoding="utf-8") as handle:
+                            writer = csv.writer(handle, lineterminator="\n")
+                            writer.writerow(columns)
+                            while True:
+                                mark = time.perf_counter()
+                                rows = cursor.fetchmany(self.fetch_batch_size)
+                                batch_seconds = time.perf_counter() - mark
+                                fetch_seconds += batch_seconds
+                                if first_batch_seconds is None:
+                                    first_batch_seconds = batch_seconds
+                                if not rows:
+                                    break
+                                self._check_stop()
+                                mark = time.perf_counter()
+                                writer.writerows(rows)
+                                write_seconds += time.perf_counter() - mark
+                                row_count += len(rows)
+                    os.replace(part, target)
+                    elapsed = time.perf_counter() - started
+                    size_mb = target.stat().st_size / (1024 * 1024)
+                    log.info(
+                        "Oracle fetch completed: output=%s rows=%d size=%.2fMiB "
+                        "elapsed=%.3fs execute=%.3fs first_batch=%.3fs fetch=%.3fs "
+                        "csv_write=%.3fs "
+                        "throughput=%.2fMiB/s rows_per_second=%.1f attempt=%d/%d",
+                        target,
+                        row_count,
+                        size_mb,
+                        elapsed,
+                        execute_seconds,
+                        first_batch_seconds or 0.0,
+                        fetch_seconds,
+                        write_seconds,
+                        size_mb / elapsed if elapsed else 0.0,
+                        row_count / elapsed if elapsed else 0.0,
+                        attempt + 1,
+                        self.fetch_retries + 1,
+                    )
+                    return target
+                except Exception as exc:
+                    part.unlink(missing_ok=True)
+                    if attempt >= self.fetch_retries or not _transient_oracle_error(exc):
+                        raise
+                    delay = (5 * (3**attempt)) + random.uniform(0, 1)
+                    _close_quietly(cursor)
+                    _close_quietly(connection)
+                    cursor = connection = None
+                    log.warning(
+                        "Oracle fetch connection lost: output=%s attempt=%d/%d; "
+                        "retrying from the beginning with a new connection in %.1fs: %s",
+                        target,
+                        attempt + 1,
+                        self.fetch_retries + 1,
+                        delay,
+                        exc,
+                    )
+                    time.sleep(delay)
+                finally:
+                    _close_quietly(cursor)
+                    _close_quietly(connection)
+        finally:
+            with _ORACLE_PULLS_LOCK:
+                _ORACLE_PULLS_ACTIVE -= 1
 
     def key_types(self, key_columns: list[str]) -> list[str | None]:
         if not key_columns:

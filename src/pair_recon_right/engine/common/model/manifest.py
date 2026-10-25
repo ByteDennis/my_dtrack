@@ -53,11 +53,11 @@ def mapping_csv_bytes(pair: dict[str, Any]) -> bytes:
             usage = "compare"
         data_type = overrides.get(left_column)
         if data_type is None and left_column in column_types:
-            data_type = json.dumps(
-                resolve_column_type(column_types[left_column]).spec(),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
+            spec = resolve_column_type(column_types[left_column]).spec()
+            data_type = (
+                spec
+                if isinstance(spec, str)
+                else json.dumps(spec, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             )
         writer.writerow(
             {
@@ -230,19 +230,26 @@ def select_vintage_windows(
     }
 
 
+# >>> normalizer per key: explicit key_families, else the column's data_type, else partition date types <<< #
 def key_family_specs(pair: dict[str, Any], keys: list[str]) -> list[dict[str, Any]]:
     configured = pair.get("key_families") or {}
+    column_types = pair.get("column_types") or {}
+    overrides = pair.get("col_type_overrides") or {}
     date_col = str(pair["left"].get("date_col") or "").casefold()
     specs = []
     for key in keys:
         value = configured.get(key)
+        if value is None:
+            value = column_types.get(key)
+        if value is None and overrides.get(key) == "numeric":
+            value = "numeric"
         if (
             pair.get("partition_mode", "date") == "date"
             and value is None
             and key.casefold() == date_col
         ):
             value = {
-                "family": "date_type",
+                "type": "date",
                 "left_date_type": resolve_date_type(pair["left"].get("date_type")).spec(
                     portable=True
                 ),
@@ -252,6 +259,30 @@ def key_family_specs(pair: dict[str, Any], keys: list[str]) -> list[dict[str, An
             }
         specs.append(key_family(value).spec())
     return specs
+
+
+# >>> Right names for the Left keys: the mapping row, right_date_col for the partition key, else the same name <<< #
+def right_key_columns(
+    pair_name: str,
+    pair: dict[str, Any],
+    keys: list[str],
+    partition_mode: str,
+    date_col: str,
+) -> list[str]:
+    col_map = pair.get("col_map") or {}
+    right_date_col = str((pair.get("right") or {}).get("date_col") or "")
+    result = []
+    for key in keys:
+        mapped = col_map.get(key)
+        if partition_mode == "date" and key.lower() == date_col:
+            if mapped and mapped.casefold() != right_date_col.casefold():
+                raise ValueError(
+                    f"{pair_name}: key {key} is the Left date column, which right_date_col maps "
+                    f"to {right_date_col!r}, but its mapping row names {mapped!r}; make them agree"
+                )
+            mapped = mapped or right_date_col
+        result.append(mapped or key)
+    return result
 
 
 def build_manifest(
@@ -316,8 +347,9 @@ def build_manifest(
         key_families = key_family_specs(pair, keys)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{pair_name}: unsupported key families: {exc}") from None
+    right_keys = right_key_columns(pair_name, pair, keys, partition_mode, date_col)
     raw_overrides = pair.get("col_type_overrides") or {}
-    unknown = sorted(set(raw_overrides) - set(value_columns))
+    unknown = sorted(set(raw_overrides) - set(mapped_columns))
     invalid = sorted(set(raw_overrides.values()) - {"numeric", "categorical"})
     overrides = {column: kind for column, kind in raw_overrides.items() if column in columns}
     if unknown or invalid:
@@ -326,7 +358,7 @@ def build_manifest(
             f"got {', '.join(unknown + invalid)}"
         )
     raw_column_types = pair.get("column_types") or {}
-    unknown_column_types = sorted(set(raw_column_types) - set(value_columns))
+    unknown_column_types = sorted(set(raw_column_types) - set(mapped_columns))
     configured_column_types = {
         column: spec for column, spec in raw_column_types.items() if column in columns
     }
@@ -353,7 +385,7 @@ def build_manifest(
         "vintage": vintage,
         "vintage_selection": vintage_selection,
         "key_cols": keys,
-        "right_key_cols": [(pair["col_map"]).get(key, key) for key in keys],
+        "right_key_cols": right_keys,
         "key_families": key_families,
         "columns": columns,
         "col_map": {column: pair["col_map"][column] for column in columns},

@@ -1,4 +1,5 @@
 import re
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -123,6 +124,66 @@ def test_health_check():
     assert missing["relation"] == "`main`.`sales`.`orders`"
 
 
+COMPACT = {"type": "string", "format": "compact"}
+
+
+@pytest.mark.parametrize(
+    ("date_type", "column_type", "error"),
+    [
+        (COMPACT, "string", None),
+        (COMPACT, "bigint", None),
+        ("date", "timestamp", None),
+        ("date", "date", None),
+        ({"type": "number", "format": "month"}, "int", None),
+        (COMPACT, "timestamp", "date_col 'business_date' is timestamp"),
+        ({"type": "sas", "format": "datetime"}, "timestamp", "needs a text or numeric column"),
+        ("date", "string", "date_col 'business_date' is string"),
+        ("date", "int", "needs a date or timestamp column"),
+    ],
+)
+def test_date_type_fits_column(date_type, column_type, error):
+    describe = [("business_date", column_type, None)] + DESCRIBE[1:]
+    target = SparkTarget(FakeSpark(lambda sql: describe), {**ORDERS, "date_type": date_type})
+    health = target.health_check()
+    if error is None:
+        assert health["ok"]
+        return
+    assert health["ok"] is False
+    assert error in health["error"] and "date type" in health["error"]
+    assert "LIMIT 16" not in "".join(target.spark.statements)
+
+
+def test_auto_date_type_probe_skips_the_column_check():
+    describe = [("business_date", "timestamp", None)] + DESCRIBE[1:]
+
+    def respond(sql):
+        if sql.startswith("DESCRIBE"):
+            return describe
+        return [(date(2026, 8, 1),)] if "LIMIT 16" in sql else []
+
+    target = SparkTarget(FakeSpark(respond), {**ORDERS, "date_type": None})
+    assert target.health_check()["ok"]
+    assert target.config["date_type"] == "date"
+
+
+def test_key_family_date_type_fits_column():
+    spark = FakeSpark(lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [(7,)])
+    target = SparkTarget(spark, {**ORDERS, "partition_mode": "all"})
+    assert target.health_check()["ok"]
+    compact = {"type": "date", "left_date_type": "date", "right_date_type": COMPACT}
+    native = {"type": "date", "left_date_type": COMPACT, "right_date_type": "date"}
+    sample = {"mode": "fraction", "threshold": 1000}
+    assert target.partition_counts(sample=sample, key_columns=["status"], key_families=[compact])
+    with pytest.raises(ValueError, match="key column 'status' is string"):
+        target.partition_counts(sample=sample, key_columns=["status"], key_families=[native])
+    manifest = _manifest(sample, keys=("business_date",), families=(compact,))
+    with pytest.raises(ValueError, match="key column 'business_date' is date"):
+        target._sample_predicate(manifest, {})
+    manifest = _manifest(sample, keys=("business_date",), families=(native,))
+    assert "`business_date`" in target._sample_predicate(manifest, {})
+    assert SparkTarget(None, ORDERS)._sample_predicate(_manifest(sample, families=(native,)), {})
+
+
 def test_health_check_logs_sql_and_spark_failure(caplog):
     def explode(sql):
         raise RuntimeError("Unable to fetch tables of db sales")
@@ -147,7 +208,7 @@ def test_health_check_logs_sql_and_spark_failure(caplog):
 def test_sas():
     def respond(sql):
         if sql.startswith("DESCRIBE"):
-            return DESCRIBE
+            return [("business_date", "string", None)] + DESCRIBE[1:]
         if "LIMIT 16" in sql:
             return [("01AUG2026:09:45:35",), ("02AUG2026:00:00:00",)]
         return [("2026-08-01", 1)]
@@ -362,8 +423,9 @@ def test_overrides(overrides, fragments, types):
 
 
 def test_date():
+    describe = [row if row[0] != "status" else ("status", "timestamp", None) for row in DESCRIBE]
     spark = FakeSpark(
-        lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]
+        lambda sql: describe if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]
     )
     manifest = _manifest({"mode": "all"})
     manifest["column_types"] = {
@@ -377,6 +439,9 @@ def test_date():
     query = spark.statements[1]
     assert "date_format(to_date(`status`), 'yyyy-MM-dd')" in query
     assert "NULL AS mean_2" in query
+    text_spark = FakeSpark(lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [])
+    with pytest.raises(ValueError, match="column 'status' is string; date type 'date'"):
+        SparkTarget(text_spark, ORDERS).window_statistics(manifest, {"partitions": ["2026-01-01"]})
 
 
 def test_strict():

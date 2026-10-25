@@ -8,6 +8,7 @@ from pair_recon.core.backends.store import ApiVolumeStore
 class Files:
     def __init__(self):
         self.values = {}
+        self.downloads = []
 
     def create_directory(self, path):
         return path
@@ -16,6 +17,7 @@ class Files:
         self.values[path] = contents.read()
 
     def download(self, path):
+        self.downloads.append(path)
         return type("Download", (), {"contents": io.BytesIO(self.values[path])})()
 
     def get_metadata(self, path):
@@ -74,3 +76,22 @@ def test_delete_keys_ignores_remote_objects_that_are_already_missing():
 
     assert store.delete_keys(["row_check/left.json", "_status/col_check.closed.json"]) == 1
     assert not store.exists("row_check/left.json")
+
+
+def test_immutable_json_is_downloaded_once_and_invalidated_by_write_or_delete():
+    files = Files()
+    path = "/Volumes/main/recon/runs/run-1/units/00000001-0001.json"
+    files.values[path] = b'{"value":1}'
+    store = ApiVolumeStore("/Volumes/main/recon/runs/run-1", files=files)
+
+    assert store.get_json("units/00000001-0001.json") == {"value": 1}
+    first = store.get_json("units/00000001-0001.json")
+    first["value"] = 99
+    assert store.get_json("units/00000001-0001.json") == {"value": 1}
+    assert files.downloads == [path]
+
+    store.put_json("units/00000001-0001.json", {"value": 2})
+    assert store.get_json("units/00000001-0001.json") == {"value": 2}
+    assert files.downloads == [path]
+    store.delete_keys(["units/00000001-0001.json"])
+    assert path not in store._json_cache

@@ -131,6 +131,51 @@ def column_statistics(
 
 
 DEFAULT_BATCH = 64
+QUERY_PROGRESS_INTERVAL = 1.0
+
+
+# >>> percentage of the statement running on a DuckDB connection; None while DuckDB does not know <<< #
+def query_percent(connection) -> float | None:
+    progress = connection.query_progress()
+    percent = float(getattr(progress, "percentage", progress))
+    return percent if percent >= 0 else None
+
+
+# >>> binds a query_status(phase, shard, percent) listener to one phase and shard; None when nobody listens <<< #
+def query_reporter(query_status, phase: str, shard: int):
+    if query_status is None:
+        return None
+    return lambda percent: query_status(phase, shard, percent)
+
+
+# >>> execute one statement while a side thread reports query_progress() about once per interval <<< #
+def execute_reporting(
+    connection, sql: str, report=None, *, interval: float = QUERY_PROGRESS_INTERVAL
+):
+    if report is None:
+        return connection.execute(sql)
+    finished = threading.Event()
+
+    def poll():
+        while not finished.wait(interval):
+            try:
+                percent = query_percent(connection)
+            except Exception:
+                log.warning(
+                    "duckdb query_progress failed; no percentage for this statement", exc_info=True
+                )
+                return
+            if percent is not None:
+                report(percent)
+
+    poller = threading.Thread(target=poll, name="pair_recon-query_progress", daemon=True)
+    poller.start()
+    try:
+        return connection.execute(sql)
+    finally:
+        finished.set()
+        poller.join()
+        report(None)
 
 
 def stats_batch() -> int:
@@ -169,6 +214,7 @@ def compute_csv_statistics(
     progress: Callable[[str, int, int], None] | None = None,
     on_batch: Callable[[dict[str, dict[str, Any]]], None] | None = None,
     shard_status: Callable[[int, int, int], None] | None = None,
+    query_status: Callable[[str, int, float | None], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     from .duck import connect, temp_directory
 
@@ -185,7 +231,11 @@ def compute_csv_statistics(
         with connect(str(workspace), resource_workers=1) as connection:
             projection = ", ".join(_quote(column) for column in dict.fromkeys(columns))
             connection.execute("SET threads = 1")
-            connection.execute(f"CREATE TABLE scanned AS SELECT {projection} FROM {scan}")
+            execute_reporting(
+                connection,
+                f"CREATE TABLE scanned AS SELECT {projection} FROM {scan}",
+                query_reporter(query_status, "load", 0),
+            )
             if progress:
                 progress("load", 1, 1)
         return _parallel_statistics(
@@ -199,6 +249,7 @@ def compute_csv_statistics(
             progress,
             on_batch,
             shard_status,
+            query_status,
         )
     finally:
         for suffix in ("", ".wal"):
@@ -216,6 +267,7 @@ def _parallel_statistics(
     progress,
     on_batch,
     shard_status,
+    query_status=None,
 ):
     from .duck import connect, worker_count
 
@@ -266,6 +318,9 @@ def _parallel_statistics(
                 side,
                 statistics,
                 group_progress(group_index),
+                query_status=None
+                if query_status is None
+                else lambda phase, percent: query_status(phase, group_index, percent),
             )
         with completion_lock:
             completed_groups += 1
@@ -315,10 +370,16 @@ def _statistics(
     side,
     statistics,
     progress=None,
+    query_status=None,
 ):
     batch = stats_batch()
     selected = statistics_plan(statistics) or list(DEFAULT_STATISTICS)
     include_top = statistics is None
+
+    def run_sql(phase, sql):
+        report = None if query_status is None else (lambda percent: query_status(phase, percent))
+        return execute_reporting(connection, sql, report)
+
     base = {}
     integral_values = {}
     for column in columns:
@@ -348,8 +409,8 @@ def _statistics(
                     f"AS integral_{index}"
                 ),
             ]
-        inferred_row = connection.execute(
-            f"SELECT {', '.join(infer_selects)} FROM scanned"
+        inferred_row = run_sql(
+            "infer", f"SELECT {', '.join(infer_selects)} FROM scanned"
         ).fetchone()
         for offset, (index, _column) in enumerate(group):
             inferred[index] = inferred_row[offset * 3 : offset * 3 + 3]
@@ -424,7 +485,7 @@ def _statistics(
                     if numeric[column]
                     else f"max(length({value})) AS length_max_{index}"
                 )
-        cursor = connection.execute(f"SELECT {', '.join(selects)} FROM scanned")
+        cursor = run_sql("aggregate", f"SELECT {', '.join(selects)} FROM scanned")
         row.update(zip([item[0] for item in cursor.description], cursor.fetchone()))
         completed += len(group)
         if progress:
@@ -435,11 +496,12 @@ def _statistics(
         is_numeric = numeric[column]
         top = ""
         if include_top and not is_numeric and not integral[column]:
-            top_rows = connection.execute(
+            top_rows = run_sql(
+                "finalize",
                 "WITH counts AS (SELECT value, count(*) AS n, min(position) AS position "
                 f"FROM (SELECT {values[column]} AS value, rowid AS position FROM scanned) "
                 "WHERE value IS NOT NULL GROUP BY value) "
-                "SELECT value, n FROM counts ORDER BY n DESC, position LIMIT 10"
+                "SELECT value, n FROM counts ORDER BY n DESC, position LIMIT 10",
             ).fetchall()
             top = json.dumps(
                 [{"value": value, "count": int(count)} for value, count in top_rows],

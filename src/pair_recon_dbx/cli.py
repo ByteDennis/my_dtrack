@@ -5,11 +5,14 @@ import json
 import sys
 from pathlib import Path
 
-from pair_recon.app.config import env_value, load_environment
+from pair_recon.app.config import env_value, load_defaults, load_environment
 from pair_recon.core.debug import debugging, run_debugger
 
+from . import cache as cache_ops
 from . import runtime
 from . import workspace as workspace_ops
+
+DEFAULTS = Path(".pair_recon.yaml")
 
 
 def add_profile(parser) -> None:
@@ -96,11 +99,26 @@ def parser() -> argparse.ArgumentParser:
         warehouse_id=env_value("DBX_WAREHOUSE_ID"),
     )
     runs = commands.add_parser("runs")
+    runs.add_argument("job", nargs="?")
     runs.add_argument("--run-id", type=int)
     runs.add_argument("--job-id", type=int)
     runs.add_argument("--active", action="store_true")
     runs.add_argument("--limit", type=int, default=10)
     add_profile(runs)
+    cache = commands.add_parser("cache")
+    cache_commands = cache.add_subparsers(dest="cache_command")
+    explain = cache_commands.add_parser("explain")
+    explain.add_argument("--pair")
+    show = cache_commands.add_parser("show")
+    show.add_argument("cache_key")
+    peek = cache_commands.add_parser("peek")
+    peek.add_argument("cache_key")
+    peek.add_argument("--limit", type=positive_limit, default=5)
+    cache.set_defaults(
+        profile=env_value("DBX_PROFILE", default=runtime.DEFAULT_PROFILE),
+        warehouse_id=env_value("DBX_WAREHOUSE_ID"),
+        pair_table=env_value("DBX_PAIR_TABLE"),
+    )
     return root
 
 
@@ -108,6 +126,20 @@ def require(value, name: str):
     if value in (None, ""):
         raise ValueError(f"{name} is required")
     return value
+
+
+def saved_right_job_reference(path: Path = DEFAULTS) -> str | None:
+    values = load_defaults(path)
+    settings = values.get("settings") if isinstance(values.get("settings"), dict) else values
+    reference = str(settings.get("right_job_id") or "").strip()
+    return reference or None
+
+
+def saved_pair(path: Path = DEFAULTS) -> str | None:
+    values = load_defaults(path)
+    settings = values.get("settings") if isinstance(values.get("settings"), dict) else values
+    value = str(settings.get("pair") or settings.get("pair_name") or "").strip()
+    return value or None
 
 
 def positive_limit(value: str) -> int:
@@ -183,13 +215,45 @@ def execute(args) -> dict:
             catalog="hive_metastore" if source == "glue" else None,
             source=source,
         )
+    if args.command == "cache":
+        warehouse_id = require(args.warehouse_id, "DBX_WAREHOUSE_ID")
+        table = cache_ops.cache_table(require(args.pair_table, "DBX_PAIR_TABLE"))
+        if args.cache_command == "show":
+            return cache_ops.show(workspace, warehouse_id, table, args.cache_key)
+        if args.cache_command == "peek":
+            return cache_ops.peek(
+                workspace,
+                warehouse_id,
+                table,
+                args.cache_key,
+                limit=args.limit,
+            )
+        pair = args.pair or saved_pair()
+        return cache_ops.explain(workspace, warehouse_id, table, require(pair, "PAIR"))
     if args.run_id is not None:
         return runtime.run_detail(workspace, args.run_id)
-    return runtime.list_runs(workspace, limit=args.limit, job_id=args.job_id, active=args.active)
+    job_id = args.job_id
+    if args.job:
+        job_id = runtime.resolve_job_id(workspace, args.job)
+    if job_id is None:
+        reference = saved_right_job_reference()
+        job_id = runtime.resolve_job_id(workspace, reference) if reference else None
+    return runtime.list_runs(workspace, limit=args.limit, job_id=job_id, active=args.active)
 
 
 def main(argv=None) -> int:
     load_environment()
+    argv = list(argv) if argv is not None else sys.argv[1:]
+    if "cache" in argv:
+        index = argv.index("cache")
+        tail = argv[index + 1 :]
+        if not tail or tail[0] not in {"explain", "show", "peek"}:
+            pair = tail[0] if tail else None
+            argv = [
+                *argv[: index + 1],
+                "explain",
+                *(["--pair", pair] if pair else []),
+            ]
     args = parser().parse_args(argv)
     raise_errors = debugging(args.debug)
 
@@ -205,6 +269,10 @@ def main(argv=None) -> int:
             print(runtime.format_sql_result(result))
         elif args.command == "sql":
             print(result["error"], file=sys.stderr)
+        elif args.command == "cache" and not exit_code and args.cache_command == "explain":
+            print(cache_ops.format_explain(result))
+        elif args.command == "cache" and not exit_code and args.cache_command == "peek":
+            print(cache_ops.format_peek(result))
         else:
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return exit_code

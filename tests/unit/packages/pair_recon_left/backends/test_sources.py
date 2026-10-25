@@ -192,6 +192,90 @@ def test_query(tmp_path):
     assert "文字" in path.read_text(encoding="utf-8")
 
 
+def test_oracle_query_to_csv_tunes_fetch_and_retries_connection_loss(monkeypatch, tmp_path, caplog):
+    connections = []
+
+    class Cursor:
+        def __init__(self, fail):
+            self.fail = fail
+            self.rows = [(1,), (2,)]
+            self.arraysize = None
+            self.prefetchrows = None
+
+        def execute(self, _sql):
+            pass
+
+        def fetchmany(self, size):
+            assert size == 500
+            if self.fail:
+                self.fail = False
+                raise RuntimeError("DPY-4011: database or network closed the connection")
+            rows, self.rows = self.rows[:size], self.rows[size:]
+            return rows
+
+        def close(self):
+            pass
+
+    class Connection:
+        def __init__(self, fail):
+            self.cursor_value = Cursor(fail)
+            self.closed = False
+
+        def cursor(self):
+            return self.cursor_value
+
+        def close(self):
+            self.closed = True
+
+    def connect():
+        connection = Connection(fail=not connections)
+        connections.append(connection)
+        return connection
+
+    sleeps = []
+    monkeypatch.setattr(sources.time, "sleep", sleeps.append)
+    monkeypatch.setattr(sources.random, "uniform", lambda _start, _end: 0)
+    source = OracleSource(
+        {
+            "source": "oracle",
+            "table": "T",
+            "arraysize": 500,
+            "prefetchrows": 250,
+            "fetch_batch_size": 500,
+            "fetch_retries": 1,
+        }
+    )
+    source.connect = connect
+
+    with caplog.at_level("INFO", logger="pair_recon.left.sources"):
+        path = source.query_to_csv("SELECT ID FROM T", tmp_path / "rows.csv", ["ID"])
+
+    assert path.read_text(encoding="utf-8") == "ID\n1\n2\n"
+    assert len(connections) == 2 and all(connection.closed for connection in connections)
+    assert connections[1].cursor_value.arraysize == 500
+    assert connections[1].cursor_value.prefetchrows == 250
+    assert sleeps == [5]
+    assert "retrying from the beginning" in caplog.text
+    assert "throughput=" in caplog.text and "first_batch=" in caplog.text
+
+
+def test_oracle_query_to_csv_does_not_retry_non_connection_errors(monkeypatch, tmp_path):
+    source = OracleSource({"source": "oracle", "table": "T"})
+    calls = []
+
+    def connect():
+        calls.append(True)
+        raise RuntimeError("ORA-00942: table or view does not exist")
+
+    source.connect = connect
+    monkeypatch.setattr(
+        sources.time, "sleep", lambda _delay: pytest.fail("non-transient errors must not retry")
+    )
+    with pytest.raises(RuntimeError, match="ORA-00942"):
+        source.query_to_csv("SELECT * FROM T", tmp_path / "rows.csv", ["ID"])
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize(
     ("config", "expected"),
     [

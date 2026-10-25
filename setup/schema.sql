@@ -110,3 +110,28 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_reference (
   definition STRING NOT NULL,
   updated_at TIMESTAMP_NTZ NOT NULL
 ) USING DELTA;
+
+CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_cache_index (
+  cache_key STRING NOT NULL,
+  cache_type STRING NOT NULL,
+  pair_name STRING NOT NULL,
+  side STRING,
+  vintage STRING,
+  window_value STRING,
+  column_name STRING,
+  statistic_name STRING,
+  definition_key STRING NOT NULL,
+  source_snapshot_key STRING,
+  parent_key STRING,
+  producer_run_id STRING NOT NULL,
+  uri STRING NOT NULL,
+  format STRING NOT NULL,
+  checksum STRING NOT NULL,
+  size_bytes BIGINT NOT NULL,
+  row_count BIGINT,
+  state STRING NOT NULL,
+  created_at TIMESTAMP_NTZ NOT NULL,
+  last_accessed_at TIMESTAMP_NTZ,
+  expires_at TIMESTAMP_NTZ,
+  metadata_json STRING
+) USING DELTA;

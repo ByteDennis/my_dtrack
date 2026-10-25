@@ -94,8 +94,52 @@ def test_date(common):
     assert family.normalize("24108.0", "left") == "2026-01-02"
     assert family.normalize("2026-01-02", "right") == "2026-01-02"
     assert family.spec() == {
-        "family": "date_type",
+        "type": "date",
         "left_date_type": {"type": "sas", "format": "days"},
         "right_date_type": {"type": "string", "format": "dash"},
     }
     assert common.hashing.key_family(family.spec()) == family
+
+
+def test_type_and_family_keys_resolve_to_the_same_date_normalizer(common):
+    keys = common.hashing
+    by_type = keys.key_family(
+        {"type": "date", "right_date_type": {"type": "string", "format": "compact"}}
+    )
+    by_family = keys.key_family(
+        {"family": "date_type", "right_date_type": {"type": "string", "format": "compact"}}
+    )
+    assert by_type == by_family and by_type.spec()["type"] == "date"
+    assert by_type.normalize("20260102", "right") == "2026-01-02"
+    assert by_type.normalize("2026-01-02 00:00:00", "left") == "2026-01-02"
+    with pytest.raises(ValueError, match="family or type, not both"):
+        keys.key_family({"family": "date_type", "type": "date"})
+
+
+def test_registered_date_class_is_a_shared_normalizer(common):
+    keys = common.hashing
+    sas = keys.key_family("sas_datetime_date")
+    assert isinstance(sas, keys.DateKeyFamily) and sas.spec() == "sas_datetime_date"
+    assert sas.normalize("31JAN2026:04:52:00", "left") == "2026-01-31"
+    assert sas.normalize("2026-01-31", "right") == "2026-01-31"
+    compact = keys.key_family(
+        {"type": "sas_datetime_date", "right_date_type": {"type": "string", "format": "compact"}}
+    )
+    assert compact.spec() == {
+        "type": "date",
+        "left_date_type": {"type": "sas", "format": "datetime"},
+        "right_date_type": {"type": "string", "format": "compact"},
+    }
+    with pytest.raises(ValueError, match="does not take transform steps"):
+        keys.key_family({"type": "sas_datetime_date", "transform": ["trim"]})
+    with pytest.raises(ValueError, match="does not take date types"):
+        keys.key_family({"type": "numeric", "right_date_type": "date"})
+
+
+def test_normalize_sql_keeps_null_while_sql_dialect_uses_the_sentinel(common):
+    family = common.hashing.key_family("numeric")
+    raw = family.normalize_sql("x", "duckdb", "left")
+    keyed = family.sql_dialect("x", "duckdb", "left")
+    assert "<<NULL>>" not in raw and "<<NULL>>" in keyed and raw in keyed
+    assert family.normalize_sql("x", "spark", "right").startswith("CASE WHEN")
+    assert "<<NULL>>" not in family.normalize_sql("x", "spark", "right")

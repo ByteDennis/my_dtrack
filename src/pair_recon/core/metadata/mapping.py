@@ -127,14 +127,6 @@ def upsert_column_mappings(sql, table: str, pair_name: str, mappings: Iterable[d
     pair = str(pair_name or "").strip()
     if not pair:
         raise ValueError("pair_name is required")
-    statement = f"""MERGE INTO {table} AS t
-USING (SELECT :pair_name AS pair_name, :left_column AS left_column) AS s
-ON t.pair_name = s.pair_name AND t.left_column = s.left_column
-WHEN MATCHED THEN UPDATE SET
-  t.right_column = :right_column,
-  t.data_type = :data_type
-WHEN NOT MATCHED THEN INSERT (pair_name, left_column, right_column, data_type)
-VALUES (:pair_name, :left_column, :right_column, :data_type)"""
     rows = []
     seen = set()
     for raw in mappings:
@@ -151,6 +143,29 @@ VALUES (:pair_name, :left_column, :right_column, :data_type)"""
             "right_column": right,
             "data_type": str(raw.get("data_type") or "").strip() or None,
         }
-        sql.execute(statement, row)
         rows.append(row)
+    for start in range(0, len(rows), 250):
+        batch = rows[start : start + 250]
+        parameters = {}
+        values = []
+        for index, row in enumerate(batch):
+            names = []
+            for column in ("pair_name", "left_column", "right_column", "data_type"):
+                name = f"r{index}_{column}"
+                parameters[name] = row[column]
+                names.append(f":{name}")
+            values.append(f"({', '.join(names)})")
+        statement = f"""MERGE INTO {table} AS t
+USING (
+  SELECT * FROM VALUES
+  {", ".join(values)}
+  AS v(pair_name, left_column, right_column, data_type)
+) AS s
+ON t.pair_name = s.pair_name AND t.left_column = s.left_column
+WHEN MATCHED THEN UPDATE SET
+  t.right_column = s.right_column,
+  t.data_type = s.data_type
+WHEN NOT MATCHED THEN INSERT (pair_name, left_column, right_column, data_type)
+VALUES (s.pair_name, s.left_column, s.right_column, s.data_type)"""
+        sql.execute(statement, parameters)
     return {"table": table, "pair_name": pair, "rows": len(rows), "mappings": rows}

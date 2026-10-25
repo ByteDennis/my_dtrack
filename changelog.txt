@@ -1,3 +1,8 @@
+pair_recon Right date type must fit the physical column — 2026-10-25
+
+Added
+- src/pair_recon_right/engine/backends/targets.py: `check_date_column` compares an explicit date type with the `DESCRIBE QUERY` column type; `string`/`number`/`sas` on a `date` or `timestamp` column and `date` on a text column fail the health check (partition `date_col`), `partition_counts`/`_sample_predicate` (`right_key_cols` date families), and `window_statistics` (date `column_types`) with a message naming the column, its type, and the declared date type. Before, Databricks ANSI mode raised `CAST_INVALID_INPUT ... cannot be cast to "TIMESTAMP"` from `col >= '20230901'` and the key normalization silently produced `<<NULL>>`.
+
 pair_recon Heartbeat-only waits, window history, and strict completion — 2026-10-24
 
 Added
@@ -7,8 +12,15 @@ Added
 - src/pair_recon_left/common/model/manifest.py (mirrored to Right): random vintage selection skips `checked_vintages`, records `checked_before`, and fails with `coverage N/N` once every bucket is covered.
 - src/pair_recon/app/cli.py: `--recheck` ignores the window history.
 - src/pair_recon_left/common/runtime/stop.py: `beat` and `Heartbeat` write the Left heartbeat tolerantly during the row count and every wait loop.
+- src/pair_recon_left/common/runtime/stats.py: `execute_reporting` polls DuckDB `query_progress()` once a second while the load, infer, and aggregate statements run and reports the percentage through the new `query_status` callback; `duck.connect` enables `enable_progress_bar` without DuckDB's own console output.
+- src/pair_recon_left/common/runtime/progress.py: the Left statistics bar shows `phase=<phase> <pct>%` per running shard (and `phase=` in the 10-second log line), sets the postfix before each `bar.update`, and redraws percentage-only changes at most once a second.
+- src/pair_recon_left/common/model/hashing.py (mirrored to Right): one normalizer registry for key families and column types; `sas_datetime_date` is registered there; every family offers `normalize_sql` (statistics, NULL preserved) and `sql_dialect` (sampling, NULL sentinel) for oracle/hadoop/athena/duckdb/spark; specs accept `type` or `family`, a registered name with date overrides, and emit date objects as `{"type":"date",...}`.
+- src/pair_recon_left/common/sql/column_types.py (now mirrored to Right): aliases onto the shared registry; `register_column_type` is `register_family`.
 
 Changed
+- src/pair_recon_left/common/model/manifest.py (mirrored): a key without an explicit `key_families` entry takes its normalizer from the column's `column_types` entry, then `numeric` from `col_type_overrides`, then the partition date types; `column_types`/`col_type_overrides` may name the partition date column and keys; the partition key's Right name is `right_date_col`, a mapping row naming another Right column fails with a clear error, and unmapped non-partition keys keep the Left name; `mapping.csv` prints string types unquoted.
+- src/pair_recon_left/common/sql/sampling.py: dialect helpers (`cast_text_sql`, `step_sql`, literals, regex helpers) moved into hashing.py; `normalize_sql` delegates to `family.sql_dialect`.
+- src/pair_recon_left/common/checks/row_check.py: `column_types` and `col_type_overrides` join the stage-one fields that trigger a recount on resume.
 - src/pair_recon/app/runner.py: the Right Databricks job starts only after the Left row count is published, also for new runs; `RightJobMonitor` follows the job in one-hour chunks without a cap; `run_left` has no manifest timeout; the launcher injects `checked_vintages` from the history and logs `vintage coverage`; final states come from `run_state`.
 - src/pair_recon_right/engine/job.py and checks/col_check.py: no `wait_timeout` or `idle_timeout`; the Right waits for Left row data and units for as long as the Left heartbeat is fresh (`heartbeat_timeout` 600 s), tolerates unreadable heartbeats, and refuses a plan without units.
 - src/pair_recon_left/common/checks/col_check.py: `wait_for_row_check_result` and `wait_for_manifests` wait until the result arrives or `abort_if` raises, heartbeating every 60 seconds.

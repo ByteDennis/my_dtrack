@@ -42,6 +42,8 @@ STAGE_ONE_FIELDS = (
     "audit",
     "key",
     "key_families",
+    "column_types",
+    "col_type_overrides",
 )
 
 

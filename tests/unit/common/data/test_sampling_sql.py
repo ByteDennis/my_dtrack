@@ -135,3 +135,11 @@ def test_date():
     right = normalize_sql("`dt`", family, "spark", "right")
     assert "1960-01-01" in left and "YYYY-MM-DD" in left
     assert "date_format" in right and "yyyy-MM-dd" in right
+
+
+def test_column_type_sql_keeps_null_and_normalizes_values():
+    family = key_family("numeric")
+    expression = family.normalize_sql("value", "duckdb", "left")
+    rows = duckdb.sql("SELECT unnest(?) AS value", params=[[None, "007", "2.50", ""]])
+    got = [row[0] for row in rows.query("rows", f"SELECT {expression} FROM rows").fetchall()]
+    assert got == [None, "7", "2.5", ""]

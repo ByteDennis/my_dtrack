@@ -181,6 +181,7 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "vintage_sample STRING NOT NULL" in schema
     assert "payload STRING" in schema
     assert "pair_recon_reference" in schema
+    assert "pair_recon_cache_index" in schema
     migration = (ROOT / "setup" / "migrate_pair_metadata.sql").read_text(encoding="utf-8")
     assert "left_conn STRING" in migration
     assert "right_query_windows_json STRING" in migration
@@ -194,6 +195,9 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "from_date DATE" in observability_migration
     assert "SET payload = detail" in observability_migration
     assert "pair_recon_reference" in observability_migration
+    cache_migration = (ROOT / "setup" / "migrate_cache.sql").read_text(encoding="utf-8")
+    assert "pair_recon_cache_index" in cache_migration
+    assert "statistic_name STRING" in cache_migration
     reference = (ROOT / "setup" / "reference.sql").read_text(encoding="utf-8")
     assert "pair_recon_progress_snapshot', 'state', 'left_col_check'" in reference
     assert "pair_recon_run_error', 'check_name', 'hash_sum'" in reference

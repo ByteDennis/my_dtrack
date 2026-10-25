@@ -30,7 +30,7 @@ Put one row per mapped Left attribute in pair_recon_column_map:
     ('orders', 'SAS_DT',    'event_date', 'sas_datetime_date'),
     ('orders', 'POSTED_AT', 'posted_at',  '{"type":"date","left_date_type":"date","right_date_type":"date"}');
 
-data_type may be blank, numeric, categorical, a registered type name, or a custom JSON type. Mapping rows define the effective column map and type overrides. config_json is only a generated snapshot; explicit pair_meta columns are authoritative.
+data_type may be blank, numeric, categorical, a registered normalizer name (string, exact, date, digits, date_type, sas_datetime_date), a JSON step list, or a JSON object with type/left_date_type/right_date_type or transform/left_transform/right_transform. Key columns reuse the same data_type for sampling normalization; the partition date key uses right_date_col and the pair-level date types when its row has no data_type. An explicit Right date_type (and the right_date_type of a date data_type) must fit the physical column: string/number/sas on a date or timestamp column, or date on a text column, fails the Right health check instead of raising a Databricks CAST_INVALID_INPUT or parsing to NULL. Mapping rows define the effective column map and type overrides. config_json is only a generated snapshot; explicit pair_meta columns are authoritative.
 
 Put at most one row per pair in pair_recon_pair_sql:
 

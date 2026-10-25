@@ -33,9 +33,10 @@ def test_module(name):
     assert left == right
 
 
-def test_query_windows_module():
-    left = (SRC / "pair_recon_left/common/sql/query_windows.py").read_bytes()
-    right = (SRC / "pair_recon_right/engine/common/sql/query_windows.py").read_bytes()
+@pytest.mark.parametrize("name", ["query_windows.py", "column_types.py"])
+def test_sql_module(name):
+    left = (SRC / "pair_recon_left/common/sql" / name).read_bytes()
+    right = (SRC / "pair_recon_right/engine/common/sql" / name).read_bytes()
     assert left == right
 
 

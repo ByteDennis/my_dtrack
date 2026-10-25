@@ -31,6 +31,163 @@ def spark_literal(text: str) -> str:
     return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
+class SamplingSqlNotSupported(ValueError):
+    pass
+
+
+def dialect_name(value: str) -> str:
+    return {
+        "aws": "athena",
+        "trino": "athena",
+        "databricks": "spark",
+        "hive": "hadoop",
+    }.get(value.lower(), value.lower())
+
+
+def sql_literal(value: object, dialect: str) -> str:
+    if value is None:
+        return "NULL"
+    text = str(value)
+    if dialect_name(dialect) in {"spark", "hadoop"}:
+        return spark_literal(text)
+    return "'" + text.replace("'", "''") + "'"
+
+
+# >>> text form of a key expression; Oracle DATE/TIMESTAMP/NUMBER get explicit TO_CHAR formats <<< #
+def cast_text_sql(expr: str, dialect: str, data_type: str | None = None) -> str:
+    dialect = dialect_name(dialect)
+    if dialect == "oracle":
+        kind = str(data_type or "").upper()
+        if "TIMESTAMP" in kind:
+            rendered = f"TO_CHAR({expr}, 'YYYY-MM-DD HH24:MI:SS.FF6')"
+            return f"REGEXP_REPLACE({rendered}, '\\.000000$', '')"
+        if "DATE" in kind:
+            return f"TO_CHAR({expr}, 'YYYY-MM-DD HH24:MI:SS')"
+        if any(
+            name in kind for name in ("NUMBER", "FLOAT", "DOUBLE", "INTEGER", "DECIMAL", "NUMERIC")
+        ):
+            return f"TO_CHAR({expr}, 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,''')"
+        return f"TO_CHAR({expr})"
+    kind = "STRING" if dialect in {"spark", "hadoop"} else "VARCHAR"
+    return f"CAST({expr} AS {kind})"
+
+
+def _regex_replace(expr: str, pattern: str, replacement: str, dialect: str) -> str:
+    dialect = dialect_name(dialect)
+    args = f"{expr}, {sql_literal(pattern, dialect)}, {sql_literal(replacement, dialect)}"
+    if dialect == "duckdb":
+        return f"regexp_replace({args}, 'g')"
+    name = "REGEXP_REPLACE" if dialect == "oracle" else "regexp_replace"
+    return f"{name}({args})"
+
+
+def _regex_matches(expr: str, pattern: str, dialect: str) -> str:
+    dialect = dialect_name(dialect)
+    literal = sql_literal(pattern, dialect)
+    if dialect == "duckdb":
+        return f"regexp_full_match({expr}, {literal})"
+    if dialect == "oracle":
+        return f"REGEXP_LIKE({expr}, {literal})"
+    if dialect == "athena":
+        return f"regexp_like({expr}, {literal})"
+    return f"{expr} rlike {literal}"
+
+
+def dialect_date_sql(expr: str, dialect: str) -> str:
+    dialect = dialect_name(dialect)
+    if dialect in {"spark", "hadoop"}:
+        undashed = f"replace({expr}, '-', '')"
+        day = (
+            f"CASE WHEN {expr} rlike '^[0-9]{{8}}$' "
+            f"THEN cast(try_to_timestamp({expr}, 'yyyyMMdd') as date) "
+            f"WHEN {expr} rlike '^[0-9]{{1,2}}/[0-9]{{1,2}}/[0-9]{{4}}$' "
+            f"THEN cast(try_to_timestamp({expr}, 'M/d/yyyy') as date) "
+            f"WHEN {expr} rlike '^[0-9]{{1,2}}-?[A-Za-z]{{3}}-?[0-9]{{4}}$' "
+            f"THEN cast(try_to_timestamp({undashed}, 'dMMMyyyy') as date) "
+            f"ELSE try_cast({expr} as date) END"
+        )
+        return f"coalesce(date_format({day}, 'yyyy-MM-dd'), '')"
+    if dialect == "duckdb":
+        parsed = (
+            f"coalesce(try_strptime({expr}, '%Y%m%d'), try_strptime({expr}, '%m/%d/%Y'), "
+            f"try_strptime(replace({expr}, '-', ''), '%d%b%Y'), try_cast({expr} as timestamp))"
+        )
+        return f"coalesce(strftime({parsed}, '%Y-%m-%d'), '')"
+    if dialect == "athena":
+        parsed = (
+            f"coalesce(try(date_parse({expr}, '%Y%m%d')), try(date_parse({expr}, '%m/%d/%Y')), "
+            f"try(date_parse(replace({expr}, '-', ''), '%d%b%Y')), try(cast({expr} as timestamp)))"
+        )
+        return f"coalesce(date_format({parsed}, '%Y-%m-%d'), '')"
+    if dialect == "oracle":
+        parsed = (
+            f"COALESCE(TO_DATE({expr} DEFAULT NULL ON CONVERSION ERROR, 'YYYYMMDD'), "
+            f"TO_DATE({expr} DEFAULT NULL ON CONVERSION ERROR, 'MM/DD/YYYY'), "
+            f"TO_DATE(REPLACE({expr}, '-', '') DEFAULT NULL ON CONVERSION ERROR, "
+            f"'DDMONYYYY', 'NLS_DATE_LANGUAGE=English'), "
+            f"TO_DATE({expr} DEFAULT NULL ON CONVERSION ERROR, 'YYYY-MM-DD'), "
+            f"CAST(TO_TIMESTAMP({expr} DEFAULT NULL ON CONVERSION ERROR, "
+            f"'YYYY-MM-DD HH24:MI:SS.FF') AS DATE), "
+            f"CAST(TO_TIMESTAMP({expr} DEFAULT NULL ON CONVERSION ERROR, "
+            f"'YYYY-MM-DD HH24:MI:SS') AS DATE), "
+            f"CAST(TO_TIMESTAMP({expr} DEFAULT NULL ON CONVERSION ERROR, "
+            f"'YYYY-MM-DD\"T\"HH24:MI:SS.FF') AS DATE), "
+            f"CAST(TO_TIMESTAMP({expr} DEFAULT NULL ON CONVERSION ERROR, "
+            f"'YYYY-MM-DD\"T\"HH24:MI:SS') AS DATE))"
+        )
+        return f"COALESCE(TO_CHAR({parsed}, 'YYYY-MM-DD'), '')"
+    raise SamplingSqlNotSupported(f"sampling SQL does not support dialect {dialect!r}")
+
+
+# >>> one built-in step rendered for a non-Spark dialect; Spark uses the registered step lambdas <<< #
+def step_sql(expr: str, name: str, arg: str | None, dialect: str) -> str:
+    dialect = dialect_name(dialect)
+    if name == "trim":
+        return _regex_replace(expr, r"^\s+|\s+$", "", dialect)
+    if name == "lower":
+        return f"lower({expr})"
+    if name == "upper":
+        return f"upper({expr})"
+    if name == "collapse_decimal":
+        replacement = r"\1" if dialect in {"duckdb", "oracle"} else "$1"
+        collapsed = _regex_replace(expr, r"(\.[0-9]*[1-9])0+$", replacement, dialect)
+        collapsed = _regex_replace(collapsed, r"\.0+$", "", dialect)
+        decimal_pattern = r"^-?[0-9]+\.[0-9]+$"
+        return (
+            f"CASE WHEN {_regex_matches(expr, decimal_pattern, dialect)} "
+            f"THEN {collapsed} ELSE {expr} END"
+        )
+    if name == "strip_leading_zeros":
+        replacement = r"\1" if dialect in {"duckdb", "oracle"} else "$1"
+        text = _regex_replace(expr, r"^\+", "", dialect)
+        text = _regex_replace(text, r"^-0+([0-9])", "-" + replacement, dialect)
+        return _regex_replace(text, r"^0+([0-9])", replacement, dialect)
+    if name == "digits":
+        return _regex_replace(expr, "[^0-9]", "", dialect)
+    if name == "alnum":
+        return _regex_replace(expr, "[^0-9A-Za-z]", "", dialect)
+    if name == "date":
+        return dialect_date_sql(expr, dialect)
+    if name == "lpad":
+        size = int(arg or "0")
+        return f"CASE WHEN length({expr}) >= {size} THEN {expr} ELSE lpad({expr}, {size}, '0') END"
+    if name == "strip_prefix":
+        prefix = sql_literal(arg or "", dialect)
+        size = len(arg or "")
+        return (
+            f"CASE WHEN substr({expr}, 1, {size}) = {prefix} "
+            f"THEN substr({expr}, {size + 1}) ELSE {expr} END"
+        )
+    if name == "strip_suffix":
+        suffix = sql_literal(arg or "", dialect)
+        size = len(arg or "")
+        return (
+            f"CASE WHEN length({expr}) >= {size} AND substr({expr}, -{size}) = {suffix} "
+            f"THEN substr({expr}, 1, length({expr}) - {size}) ELSE {expr} END"
+        )
+    raise SamplingSqlNotSupported(f"sampling SQL does not support key step {name!r} for {dialect}")
+
+
 def _strip_zeros(text: str) -> str:
     return re.sub(r"^(-?)0+(?=[0-9])", r"\1", re.sub(r"^\+(?=[0-9.])", "", text))
 
@@ -205,6 +362,45 @@ class KeyFamily:
         body = self.left_transform_sql(text) if side == "left" else self.right_transform_sql(text)
         return f"coalesce(nullif({body}, ''), '{NULL}')"
 
+    # >>> parsed steps for a non-Spark dialect; subclasses with Python/Spark overrides cannot be rendered <<< #
+    def _portable_steps(self, side: str, dialect: str):
+        methods = ("transform", "transform_sql", f"{side}_transform", f"{side}_transform_sql")
+        overridden = [
+            method
+            for method in methods
+            if getattr(type(self), method) is not getattr(KeyFamily, method)
+        ]
+        if overridden:
+            raise SamplingSqlNotSupported(
+                f"custom key family {self.name!r} needs {dialect} SQL for {', '.join(overridden)}"
+            )
+        steps = self.left_steps if side == "left" else self.right_steps
+        return self._parsed if steps is None else self._left if side == "left" else self._right
+
+    # >>> value normalization for statistics: NULL stays NULL, no sentinel <<< #
+    def normalize_sql(self, expr: str, dialect: str, side: str = "left") -> str:
+        dialect = dialect_name(dialect)
+        text = cast_text_sql(expr, dialect)
+        if dialect == "spark":
+            return (
+                self.left_transform_sql(text) if side == "left" else self.right_transform_sql(text)
+            )
+        for step, arg in self._portable_steps(side, dialect):
+            text = step_sql(text, step.name, arg, dialect)
+        return text
+
+    # >>> key normalization for sampling: empty and NULL both become the NULL sentinel <<< #
+    def sql_dialect(
+        self, expr: str, dialect: str, side: str = "right", data_type: str | None = None
+    ) -> str:
+        dialect = dialect_name(dialect)
+        if dialect == "spark":
+            return self.sql(expr, side)
+        text = cast_text_sql(expr, dialect, data_type)
+        for step, arg in self._portable_steps(side, dialect):
+            text = step_sql(text, step.name, arg, dialect)
+        return f"CASE WHEN ({text}) IS NULL OR ({text}) = '' THEN '{NULL}' ELSE ({text}) END"
+
     def spec(self) -> str | dict[str, Any]:
         registered = FAMILIES.get(self.name)
         if registered is not None and type(registered) is type(self) and self == registered:
@@ -230,51 +426,77 @@ class KeyFamily:
         return f"KeyFamily({self.name!r}, {self.spec()!r})"
 
 
+# >>> date normalizer with its own date type per side; subclasses set the class defaults <<< #
 class DateKeyFamily(KeyFamily):
     name = "date_type"
+    date_type: ClassVar[Any] = None
+    left_date_type: ClassVar[Any] = None
+    right_date_type: ClassVar[Any] = None
 
     def __init__(self, date_type=None, left_date_type=None, right_date_type=None):
-        base = date_type or DateType("date_key")
-        self.left_date_type = resolve_date_type(left_date_type or base)
-        self.right_date_type = resolve_date_type(right_date_type or base)
+        defaults = type(self)
+        base = resolve_date_type(date_type or defaults.date_type or DateType("date_key"))
+        self.left_date_type = resolve_date_type(left_date_type or defaults.left_date_type or base)
+        self.right_date_type = resolve_date_type(
+            right_date_type or defaults.right_date_type or base
+        )
         self.steps = ()
         self.left_steps = self.right_steps = None
         self._parsed = self._left = self._right = ()
 
+    def _kind(self, side: str) -> DateType:
+        if side not in {"left", "right"}:
+            raise ValueError("date normalization side must be left or right")
+        return self.left_date_type if side == "left" else self.right_date_type
+
     def normalize(self, value: object, side: str = "left") -> str:
         if value is None or (isinstance(value, float) and math.isnan(value)):
             return NULL
-        kind = self.left_date_type if side == "left" else self.right_date_type
         try:
-            return kind.normalize(value)
+            return self._kind(side).normalize(value)
         except (TypeError, ValueError, OverflowError):
             return NULL
 
-    def sql_dialect(self, expr: str, dialect: str, side: str) -> str:
-        kind = self.left_date_type if side == "left" else self.right_date_type
-        body = kind.normalize_sql(expr, dialect)
+    def normalize_sql(self, expr: str, dialect: str, side: str = "left") -> str:
+        return self._kind(side).normalize_sql(expr, dialect_name(dialect))
+
+    def sql_dialect(
+        self, expr: str, dialect: str, side: str = "right", data_type: str | None = None
+    ) -> str:
+        body = self.normalize_sql(expr, dialect, side)
         return f"coalesce(nullif({body}, ''), '{NULL}')"
 
     def sql(self, expr: str, side: str = "right") -> str:
         return self.sql_dialect(expr, "spark", side)
 
-    def spec(self) -> dict[str, Any]:
-        return {
-            "family": self.name,
-            "left_date_type": self.left_date_type.spec(portable=True),
-            "right_date_type": self.right_date_type.spec(portable=True),
-        }
+    def sides(self) -> tuple[Any, Any]:
+        return (
+            self.left_date_type.spec(portable=True),
+            self.right_date_type.spec(portable=True),
+        )
+
+    def spec(self) -> str | dict[str, Any]:
+        registered = FAMILIES.get(self.name)
+        if registered is not None and type(registered) is type(self) and self == registered:
+            return self.name
+        left, right = self.sides()
+        return {"type": "date", "left_date_type": left, "right_date_type": right}
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, DateKeyFamily) and self.spec() == other.spec()
+        return isinstance(other, DateKeyFamily) and self.sides() == other.sides()
+
+    def __hash__(self) -> int:
+        return hash((type(self), repr(self.sides())))
 
     def __repr__(self) -> str:
         return f"DateKeyFamily({self.spec()!r})"
 
 
 FAMILIES: dict[str, KeyFamily] = {}
+DATE_SPEC_FIELDS = {"date_type", "left_date_type", "right_date_type"}
 
 
+# >>> registers a normalizer: a step list under a name, or a KeyFamily subclass via decorator <<< #
 def register_family(name: str, steps=None, left_steps=None, right_steps=None):
     def add(cls: type[KeyFamily]) -> type[KeyFamily]:
         cls.name = name
@@ -295,6 +517,13 @@ register_family("digits", ["digits"])
 FAMILIES["date_type"] = DateKeyFamily()
 
 
+@register_family("sas_datetime_date")
+class SasDatetimeDate(DateKeyFamily):
+    left_date_type: ClassVar[Any] = {"type": "sas", "format": "datetime"}
+    right_date_type: ClassVar[Any] = "date"
+
+
+# >>> resolves a normalizer spec: a registered name, a step list, or an object keyed by family/type <<< #
 def key_family(spec: Any = "string") -> KeyFamily:
     if isinstance(spec, KeyFamily):
         return spec
@@ -308,22 +537,32 @@ def key_family(spec: Any = "string") -> KeyFamily:
     if isinstance(spec, list | tuple):
         return KeyFamily(spec)
     if isinstance(spec, Mapping):
-        date_fields = {"date_type", "left_date_type", "right_date_type"}
-        if spec.get("family") == "date_type" or set(spec) & date_fields:
-            unknown = set(spec) - {"family", *date_fields}
+        if "family" in spec and "type" in spec:
+            raise ValueError("key family object takes family or type, not both")
+        kind = spec.get("family", spec.get("type"))
+        base = FAMILIES.get(kind) if isinstance(kind, str) else None
+        if kind in {"date_type", "date"} or set(spec) & DATE_SPEC_FIELDS:
+            unknown = set(spec) - {"family", "type", *DATE_SPEC_FIELDS}
             if unknown:
                 raise ValueError(
                     f"unsupported date key family fields: {', '.join(sorted(unknown))}"
                 )
+            if kind not in {None, "date_type", "date"} and not isinstance(base, DateKeyFamily):
+                raise ValueError(f"key family {kind!r} does not take date types")
+            defaults = base if isinstance(base, DateKeyFamily) else None
             return DateKeyFamily(
                 spec.get("date_type"),
-                spec.get("left_date_type"),
-                spec.get("right_date_type"),
+                spec.get("left_date_type") or (defaults and defaults.left_date_type),
+                spec.get("right_date_type") or (defaults and defaults.right_date_type),
             )
-        unknown = set(spec) - {"family", "transform", "left_transform", "right_transform"}
+        unknown = set(spec) - {"family", "type", "transform", "left_transform", "right_transform"}
         if unknown:
             raise ValueError(f"unsupported key family fields: {', '.join(sorted(unknown))}")
-        base = key_family(spec.get("family") or "string")
+        base = key_family(kind or "string")
+        if isinstance(base, DateKeyFamily):
+            if set(spec) - {"family", "type"}:
+                raise ValueError(f"key family {kind!r} does not take transform steps")
+            return base
         return KeyFamily(
             spec.get("transform", base.steps),
             spec.get("left_transform", base.left_steps),

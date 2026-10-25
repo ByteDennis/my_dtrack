@@ -64,9 +64,10 @@ def upload(workspace, source: Path, target: str):
     from databricks.sdk.service.workspace import ImportFormat, Language
 
     root = PurePosixPath(target)
-    workspace.workspace.mkdirs(str(root))
     uploaded = []
     expected = {str(root)}
+    files = []
+    directories = {root}
     for path in sorted(source.rglob("*")):
         if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
             continue
@@ -81,16 +82,21 @@ def upload(workspace, source: Path, target: str):
                 "language": Language.PYTHON,
                 "overwrite": True,
             }
-        workspace.workspace.mkdirs(str(remote.parent))
-        workspace.workspace.upload(str(remote), body, **options)
-        uploaded.append(str(remote))
+        directories.add(remote.parent)
+        files.append((remote, body, options))
         expected.add(str(remote))
         parent = remote.parent
         while parent != root.parent:
+            directories.add(parent)
             expected.add(str(parent))
             if parent == root:
                 break
             parent = parent.parent
+    for directory in sorted(directories, key=lambda value: (len(value.parts), str(value))):
+        workspace.workspace.mkdirs(str(directory))
+    for remote, body, options in files:
+        workspace.workspace.upload(str(remote), body, **options)
+        uploaded.append(str(remote))
     stale = [item for item in workspace_objects(workspace, root) if item.path not in expected]
     deleted = []
     for item in sorted(

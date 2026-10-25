@@ -678,7 +678,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 pair,
                 settings["timezone"],
                 catalog.progress,
-                interval=float(settings.get("progress_interval", 10)),
+                interval=float(settings.get("progress_interval", 30)),
             ).start(required=True)
         target_factory = lambda values: CsvTarget(values)
         remote_right_started = False

@@ -110,7 +110,29 @@ def test_upsert_column_mappings():
 
     assert result["rows"] == 1
     assert "MERGE INTO main.recon.pair_recon_column_map" in calls[0][0]
-    assert calls[0][1]["data_type"] == "numeric"
+    assert calls[0][1]["r0_data_type"] == "numeric"
 
     with pytest.raises(ValueError, match="invalid table name"):
         upsert_column_mappings(sql, "bad", "orders", [])
+
+
+def test_upsert_column_mappings_batches_rows_in_one_merge():
+    calls = []
+    sql = NS(execute=lambda statement, parameters: calls.append((statement, parameters)))
+
+    result = upsert_column_mappings(
+        sql,
+        "main.recon.pair_recon_column_map",
+        "orders",
+        [
+            {"left_column": "ID", "right_column": "id", "data_type": "numeric"},
+            {"left_column": "NAME", "right_column": "name", "data_type": "categorical"},
+        ],
+    )
+
+    assert result["rows"] == 2
+    assert len(calls) == 1
+    statement, parameters = calls[0]
+    assert "SELECT * FROM VALUES" in statement
+    assert parameters["r0_left_column"] == "ID"
+    assert parameters["r1_left_column"] == "NAME"

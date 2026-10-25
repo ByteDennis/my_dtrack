@@ -1069,6 +1069,7 @@ def test_progress():
         "p",
         "America/New_York",
         fail,
+        retry_delays=(),
     )
     with pytest.raises(ConnectionError, match="offline"):
         failed.start(required=True)
@@ -2730,7 +2731,15 @@ def test_progress_sampler_survives_transient_snapshot_errors(monkeypatch):
             enough.set()
 
     monkeypatch.setattr(progress, "progress_snapshot", flaky)
-    sampler = ProgressSampler(MemoryStore(), "r", "p", "America/New_York", publish, interval=0.01)
+    sampler = ProgressSampler(
+        MemoryStore(),
+        "r",
+        "p",
+        "America/New_York",
+        publish,
+        interval=0.01,
+        retry_delays=(0,),
+    )
     sampler.start(required=True)
     assert enough.wait(2)
     sampler.stop()
@@ -2741,4 +2750,50 @@ def test_progress_sampler_survives_transient_snapshot_errors(monkeypatch):
 
     monkeypatch.setattr(progress, "progress_snapshot", broken)
     with pytest.raises(ConnectionError, match="down"):
-        ProgressSampler(MemoryStore(), "r", "p", "America/New_York", publish).start(required=True)
+        ProgressSampler(
+            MemoryStore(),
+            "r",
+            "p",
+            "America/New_York",
+            publish,
+            retry_delays=(),
+        ).start(required=True)
+
+
+def test_mapping_data_type_accepts_names_step_lists_and_objects():
+    from pair_recon.core.metadata.configuration import build_pair_config
+
+    row = {
+        "pair_name": "orders",
+        "left_source": "oracle",
+        "left_conn": "PCDS",
+        "left_table": "S.ORDERS",
+        "left_date_col": "EFF_DT",
+        "right_source": "databricks_table",
+        "right_conn": "main.sales",
+        "right_table": "orders",
+        "right_date_col": "dw_bus_dt",
+        "key_columns": ["EFF_DT", "ACCT_ID"],
+        "vintage": "month",
+        "column_map_rows": [
+            {"left_column": "EFF_DT", "right_column": "dw_bus_dt", "data_type": None},
+            {"left_column": "ACCT_ID", "right_column": "acct_id", "data_type": "numeric"},
+            {"left_column": "ZIP", "right_column": "zip", "data_type": "digits"},
+            {"left_column": "REF", "right_column": "ref", "data_type": '["trim","lpad:10"]'},
+            {
+                "left_column": "OPEN_DT",
+                "right_column": "open_dt",
+                "data_type": '{"type":"date","right_date_type":{"type":"string","format":"compact"}}',
+            },
+        ],
+    }
+
+    config = build_pair_config(row)
+
+    assert config["col_type_overrides"] == {"ACCT_ID": "numeric"}
+    assert config["column_types"] == {
+        "ZIP": "digits",
+        "REF": ["trim", "lpad:10"],
+        "OPEN_DT": {"type": "date", "right_date_type": {"type": "string", "format": "compact"}},
+    }
+    assert config["key"] == "EFF_DT,ACCT_ID" and config["col_map"]["EFF_DT"] == "dw_bus_dt"

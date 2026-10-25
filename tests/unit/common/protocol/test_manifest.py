@@ -309,11 +309,66 @@ def test_date(common):
     manifest = common.manifest.build_manifest("run", "p", pair, ROW_CHECK)
     assert manifest["key_families"] == [
         {
-            "family": "date_type",
+            "type": "date",
             "left_date_type": {"type": "sas", "format": "days"},
             "right_date_type": {"type": "string", "format": "dash"},
         }
     ]
+
+
+def test_key_family_comes_from_the_column_type_when_not_configured(common):
+    spec = {
+        "type": "date",
+        "left_date_type": "date",
+        "right_date_type": {"type": "string", "format": "compact"},
+    }
+    typed = common.manifest.build_manifest(
+        "run", "p", _variant(key_families={}, column_types={"ID": spec}), ROW_CHECK
+    )
+    assert typed["key_families"] == [spec] and typed["column_types"] == {"ID": spec}
+    numeric = common.manifest.build_manifest(
+        "run", "p", _variant(key_families={}, col_type_overrides={"ID": "numeric"}), ROW_CHECK
+    )
+    assert numeric["key_families"] == ["numeric"]
+    explicit = common.manifest.build_manifest(
+        "run", "p", _variant(key_families={"ID": "exact"}, column_types={"ID": spec}), ROW_CHECK
+    )
+    assert explicit["key_families"] == ["exact"]
+    step_family = common.manifest.build_manifest(
+        "run", "p", _variant(key_families={}, column_types={"ID": "digits"}), ROW_CHECK
+    )
+    assert step_family["key_families"] == ["digits"] and step_family["column_types"] == {
+        "ID": "digits"
+    }
+
+
+def test_partition_date_key_accepts_a_column_type_and_uses_right_date_col(common):
+    spec = {
+        "type": "date",
+        "left_date_type": "date",
+        "right_date_type": {"type": "string", "format": "compact"},
+    }
+    typed = common.manifest.build_manifest(
+        "run", "p", _variant(key="DT", key_families={}, column_types={"DT": spec}), ROW_CHECK
+    )
+    assert typed["key_families"] == [spec] and "DT" not in typed["column_types"]
+    assert typed["right_key_cols"] == ["dt"]
+    unmapped = common.manifest.build_manifest(
+        "run",
+        "p",
+        _variant(key="DT", key_families={}, col_map={"ID": "id", "AMOUNT": "amount"}),
+        ROW_CHECK,
+    )
+    assert unmapped["right_key_cols"] == ["dt"]
+    with pytest.raises(ValueError, match="right_date_col maps to 'dt'.*names 'eff_dt'"):
+        common.manifest.build_manifest(
+            "run",
+            "p",
+            _variant(
+                key="DT", key_families={}, col_map={"DT": "eff_dt", "ID": "id", "AMOUNT": "amount"}
+            ),
+            ROW_CHECK,
+        )
 
 
 @pytest.mark.parametrize(

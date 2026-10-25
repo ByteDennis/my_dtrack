@@ -37,6 +37,8 @@ def test_connect(monkeypatch, tmp_path):
         assert setting("memory_limit").replace(" ", "") == "1.0GiB"
         assert setting("temp_directory") == str(tmp_path / "spill")
         assert setting("preserve_insertion_order") is False
+        assert setting("enable_progress_bar") is True
+        assert setting("enable_progress_bar_print") is False
     assert (tmp_path / "spill").is_dir()
 
 

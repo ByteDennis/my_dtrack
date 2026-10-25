@@ -12,6 +12,7 @@ from .run_logging import get_left_logger, get_logger
 
 log = get_left_logger("progress")
 PHASES = ("load", "infer", "aggregate", "finalize", "publish")
+RENDER_INTERVAL = 1.0
 
 
 def _interactive_terminal() -> bool:
@@ -34,6 +35,7 @@ class StatisticsProgress:
         self.shards_done = 0
         self.shards_total = 0
         self.started = time.monotonic()
+        self.rendered = 0.0
         self.lock = threading.Lock()
         self.jobs: dict[Hashable, dict] = {}
         self.interactive = _interactive_terminal()
@@ -68,8 +70,9 @@ class StatisticsProgress:
                 "done": {phase: 0 for phase in PHASES},
                 "phase": "load",
                 "shards": {"active": 0, "done": 0, "total": 0},
+                "queries": {},
             }
-            self._refresh_locked()
+            self._render_locked()
 
     def callback(self, key: Hashable):
         def update(phase: str, completed: int, total: int) -> None:
@@ -91,7 +94,23 @@ class StatisticsProgress:
                     "done": max(0, completed),
                     "total": max(0, total),
                 }
-                self._refresh_locked()
+                self._render_locked()
+
+        return update
+
+    # >>> per-shard DuckDB query_progress() percentages; None clears the shard when its statement ends <<< #
+    def query_callback(self, key: Hashable):
+        def update(phase: str, shard: int, percent: float | None) -> None:
+            with self.lock:
+                job = self.jobs.get(key)
+                if job is None:
+                    return
+                if percent is None:
+                    job["queries"].pop(shard, None)
+                else:
+                    job["queries"][shard] = (phase, percent)
+                    job["phase"] = phase
+                self._render_locked()
 
         return update
 
@@ -115,8 +134,9 @@ class StatisticsProgress:
             if delta:
                 self.completed_steps += delta
                 self.phase_completed[phase] += delta
-                self.bar.update(delta)
             self._refresh_locked()
+            if delta:
+                self.bar.update(delta)
 
     def complete(self, key: Hashable) -> None:
         with self.lock:
@@ -128,10 +148,10 @@ class StatisticsProgress:
             self.completed_steps += delta
             for phase, amount in remaining.items():
                 self.phase_completed[phase] += amount
-            if delta:
-                self.bar.update(delta)
             del self.jobs[key]
             self._refresh_locked()
+            if delta:
+                self.bar.update(delta)
 
     def report(self) -> None:
         with self.lock:
@@ -141,12 +161,13 @@ class StatisticsProgress:
             eta = remaining / rate if rate else None
             shard_active = sum(job["shards"]["active"] for job in self.jobs.values())
             log.info(
-                "statistics progress: vintages_active=%d/%d, shards_running=%d, "
+                "statistics progress: vintages_active=%d/%d, phase=%s, shards_running=%d, "
                 "shards_done=%d/%d, attributes_calculated=%d/%d, "
                 "attributes_uploaded=%d/%d, phase_steps=%d/%d (%.1f%%), "
                 "elapsed=%.1fs, eta=%s",
                 len(self.jobs),
                 self.total_vintages,
+                self._phase_locked(),
                 shard_active,
                 self.shards_done,
                 self.shards_total,
@@ -167,12 +188,31 @@ class StatisticsProgress:
         with self.lock:
             self.bar.close()
 
+    # >>> running statements as "phase pct%" per shard, else the vintage's last reported phase <<< #
+    def _phase_locked(self) -> str:
+        parts = []
+        for job in self.jobs.values():
+            running = [
+                f"{phase} {percent:.0f}%"
+                for _shard, (phase, percent) in sorted(job["queries"].items())
+            ]
+            parts.append("|".join(running) or job["phase"])
+        return ",".join(parts) or "-"
+
     def _refresh_locked(self) -> None:
         shard_active = sum(job["shards"]["active"] for job in self.jobs.values())
         self.bar.set_postfix_str(
-            f"vintages={len(self.jobs)} shards={shard_active} running/{self.shards_done} done/"
-            f"{self.shards_total} total calc={self.phase_completed['finalize']}/"
-            f"{self.total_attributes} upload={self.phase_completed['publish']}/"
-            f"{self.total_attributes}",
+            f"vintages={len(self.jobs)} phase={self._phase_locked()} shards={shard_active} "
+            f"running/{self.shards_done} done/{self.shards_total} total "
+            f"calc={self.phase_completed['finalize']}/{self.total_attributes} "
+            f"upload={self.phase_completed['publish']}/{self.total_attributes}",
             refresh=False,
         )
+
+    # >>> postfix refresh for events without a step delta, redrawn at most once per RENDER_INTERVAL <<< #
+    def _render_locked(self) -> None:
+        self._refresh_locked()
+        now = time.monotonic()
+        if now - self.rendered >= RENDER_INTERVAL:
+            self.rendered = now
+            self.bar.refresh()

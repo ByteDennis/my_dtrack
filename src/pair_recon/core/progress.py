@@ -83,27 +83,51 @@ def progress_snapshot(store, run_id: str, pair: str, timezone: str, state: str |
 
 
 class ProgressSampler:
-    def __init__(self, store, run_id, pair, timezone, publish, *, interval=10):
+    def __init__(
+        self,
+        store,
+        run_id,
+        pair,
+        timezone,
+        publish,
+        *,
+        interval=30,
+        retry_delays=(1, 2, 4),
+    ):
         self.store = store
         self.run_id = run_id
         self.pair = pair
         self.timezone = timezone
         self.publish = publish
         self.interval = max(0.01, float(interval))
+        self.retry_delays = tuple(max(0, float(value)) for value in retry_delays)
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name="pair_recon-progress", daemon=True)
 
     # >>> one snapshot read plus publish; transient Volume or SQL errors only log unless required <<< #
     def capture(self, state=None, *, required=False):
-        try:
-            row = progress_snapshot(self.store, self.run_id, self.pair, self.timezone, state=state)
-            self.publish(row)
-        except Exception:
-            log.exception("progress snapshot failed")
-            if required:
-                raise
-            return None
-        return row
+        for attempt in range(len(self.retry_delays) + 1):
+            try:
+                row = progress_snapshot(
+                    self.store, self.run_id, self.pair, self.timezone, state=state
+                )
+                self.publish(row)
+                return row
+            except Exception as exc:
+                if attempt >= len(self.retry_delays):
+                    log.exception("progress snapshot failed after %d attempt(s)", attempt + 1)
+                    if required:
+                        raise
+                    return None
+                delay = self.retry_delays[attempt]
+                log.warning(
+                    "progress snapshot attempt %d/%d failed; retrying in %.1fs: %s",
+                    attempt + 1,
+                    len(self.retry_delays) + 1,
+                    delay,
+                    exc,
+                )
+                self.stopped.wait(delay)
 
     def _run(self):
         while not self.stopped.wait(self.interval):

@@ -81,6 +81,27 @@ def test_wait_for_manifests_honors_abort_signal():
         wait_for_manifests(MemoryStore(), abort_if=abort)
 
 
+def test_pipeline_passes_query_status_to_compute_stats():
+    store = MemoryStore()
+    row = manifest()
+    store.put_json("plan.json", row)
+    seen = []
+
+    def compute(_manifest, _window, _value, *, query_status):
+        query_status("aggregate", 0, 42.0)
+        query_status("aggregate", 0, None)
+        seen.append(query_status)
+        return {"amount": {"col_type": "numeric", "n_unique": 2, "hash_sum": "3"}}
+
+    assert (
+        ColCheckPipeline(store, pull_window=lambda *_args: "pulled", compute_stats=compute).run(
+            [row]
+        )
+        == 1
+    )
+    assert len(seen) == 1 and callable(seen[0])
+
+
 def test_pipeline_honors_abort_signal_before_work():
     pulled = []
 

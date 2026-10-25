@@ -131,6 +131,8 @@ def connect(
         )
     for key, value in applied.items():
         connection.execute(f"SET {key} = '{value}'")
+    connection.execute("SET enable_progress_bar = true")
+    connection.execute("SET enable_progress_bar_print = false")
     if not ordered:
         connection.execute("SET preserve_insertion_order = false")
     return connection

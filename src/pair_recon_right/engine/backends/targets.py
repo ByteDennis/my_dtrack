@@ -7,10 +7,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from ..common.model.hashing import DateKeyFamily, key_family
 from ..common.model.hashing import collapse_decimal_sql as _collapse_decimal_sql
 from ..common.model.manifest import DEFAULT_STATISTICS
 from ..common.sql.column_types import resolve_column_type
 from ..common.sql.dates import (
+    DateType,
+    NativeDateType,
+    NumericDateType,
+    SasDateType,
+    StringDateType,
     bounds_where,
     canonical_date,
     day_expr,
@@ -34,6 +40,8 @@ NUMERIC_TYPES = (
     "short",
 )
 INTEGRAL_TYPES = ("int", "bigint", "smallint", "tinyint", "long", "short")
+TEMPORAL_TYPES = ("date", "timestamp")
+TEXT_DATE_TYPES = (StringDateType, NumericDateType, SasDateType)
 SQL_LOG_WIDTH = 4000
 
 
@@ -41,6 +49,25 @@ SQL_LOG_WIDTH = 4000
 def sql_summary(sql: str) -> str:
     text = " ".join(sql.split())
     return text if len(text) <= SQL_LOG_WIDTH else text[: SQL_LOG_WIDTH - 3] + "..."
+
+
+# >>> an explicit date type must fit the physical Spark column, otherwise ANSI casts fail or parse to NULL <<< #
+def check_date_column(column: str, column_type: str | None, date_type: DateType, role: str) -> None:
+    if not column_type or date_type.requires_probe:
+        return
+    kind = column_type.lower()
+    temporal = kind.startswith(TEMPORAL_TYPES)
+    spec = date_type.spec(portable=True)
+    if isinstance(date_type, NativeDateType) and not temporal:
+        raise ValueError(
+            f"{role} {column!r} is {kind}; date type {spec!r} needs a date or timestamp column, "
+            "declare a string or number date type for it"
+        )
+    if temporal and isinstance(date_type, TEXT_DATE_TYPES):
+        raise ValueError(
+            f"{role} {column!r} is {kind}; date type {spec!r} needs a text or numeric column, "
+            "declare 'date' for it or use the text column instead"
+        )
 
 
 class CsvTarget:
@@ -202,9 +229,20 @@ class SparkTarget:
                     "date_type_probe",
                 )
                 resolved = resolved.detect([row[0] for row in rows])
+            self._check_date_column(self.config["date_col"], resolved, "date_col")
             self._date_type = resolved
             self.config["date_type"] = resolved.spec(portable=True)
             return resolved
+
+    def _check_date_column(self, column: str, date_type: DateType, role: str) -> None:
+        types = getattr(self, "column_types", None) or {}
+        check_date_column(column, types.get(column), date_type, role)
+
+    def _check_key_families(self, keys: list[str], families: list[Any]) -> None:
+        for column, spec in zip(keys, families):
+            family = key_family(spec)
+            if isinstance(family, DateKeyFamily):
+                self._check_date_column(column, family.right_date_type, "key column")
 
     def health_check(self) -> dict[str, Any]:
         relation = self.relation()
@@ -255,6 +293,7 @@ class SparkTarget:
         key_columns: list[str] | None = None,
         key_families: list[Any] | None = None,
     ) -> dict[str, int]:
+        self._check_key_families(key_columns or [], key_families or [])
         sampled = sample_predicate_sql(
             sample,
             [quote_ident(key, "spark") for key in key_columns or []],
@@ -292,6 +331,7 @@ class SparkTarget:
 
     def _sample_predicate(self, manifest: dict[str, Any], window: dict[str, Any]) -> str | None:
         keys, families = manifest["right_key_cols"], manifest["key_families"]
+        self._check_key_families(keys, families)
         return sample_predicate_sql(
             manifest["sample"],
             [quote_ident(key, "spark") for key in keys],
@@ -340,11 +380,12 @@ class SparkTarget:
                 requested == "numeric" or (requested is None and native and not integral)
             )
             kinds[column] = numeric
-            text = (
-                resolve_column_type(comparison).normalize_sql(ref, "spark", "right")
-                if comparison
-                else f"trim(cast({ref} as string))"
-            )
+            text = f"trim(cast({ref} as string))"
+            if comparison:
+                normalizer = resolve_column_type(comparison)
+                if isinstance(normalizer, DateKeyFamily):
+                    self._check_date_column(column, normalizer.right_date_type, "column")
+                text = normalizer.normalize_sql(ref, "spark", "right")
             if numeric:
                 text = _collapse_decimal_sql(text)
             if strict:

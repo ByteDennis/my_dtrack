@@ -267,8 +267,9 @@ class ColCheckPipeline:
         self.compute_reports_progress = "progress" in parameters
         self.compute_reports_batches = "on_batch" in parameters
         self.compute_reports_shards = "shard_status" in parameters
+        self.compute_reports_queries = "query_status" in parameters
 
-    def _compute(self, manifest, window, value, progress, on_batch, shard_status):
+    def _compute(self, manifest, window, value, progress, on_batch, shard_status, query_status):
         options = {}
         if self.compute_reports_progress:
             options["progress"] = progress
@@ -276,6 +277,8 @@ class ColCheckPipeline:
             options["on_batch"] = on_batch
         if self.compute_reports_shards:
             options["shard_status"] = shard_status
+        if self.compute_reports_queries:
+            options["query_status"] = query_status
         return self.compute_stats(manifest, window, value, **options)
 
     def run(self, manifests: Iterable[dict[str, Any]]) -> int:
@@ -496,6 +499,7 @@ class ColCheckPipeline:
                         progress.callback(key),
                         publish_rows,
                         progress.shard_callback(key),
+                        progress.query_callback(key),
                     )
                     stat_jobs[job] = (manifest, window, key, publish_rows)
                 active = set(pull_jobs) | set(stat_jobs)
@@ -781,6 +785,7 @@ class LeftRuntime:
         progress=None,
         on_batch=None,
         shard_status=None,
+        query_status=None,
     ):
         return compute_csv_statistics(
             path,
@@ -793,4 +798,5 @@ class LeftRuntime:
             progress=progress,
             on_batch=on_batch,
             shard_status=shard_status,
+            query_status=query_status,
         )

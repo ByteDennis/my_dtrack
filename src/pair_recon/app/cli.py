@@ -688,7 +688,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "audit": answers["audit"],
         "sync_remote": sync_remote,
         "work_dir": str(local_output_root(defaults)),
-        "progress_interval": defaults.get("progress_interval", 10),
+        "progress_interval": defaults.get("progress_interval", 30),
         "left_workers": left_workers,
         "right_workers": right_workers,
         "_catalog_row": by_name[pair],

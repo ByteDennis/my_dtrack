@@ -3,11 +3,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from ..model.hashing import HASH_BUCKET_SPACE, KeyFamily, key_families, spark_literal
-
-
-class SamplingSqlNotSupported(ValueError):
-    pass
+from ..model.hashing import (
+    HASH_BUCKET_SPACE,
+    KeyFamily,
+    SamplingSqlNotSupported,
+    key_families,
+    spark_literal,
+)
 
 
 def _spark_dialect(dialect: str) -> str:
@@ -30,11 +32,7 @@ def normalize_sql(
     side: str,
     data_type: str | None = None,
 ) -> str:
-    del data_type
-    dialect = _spark_dialect(dialect)
-    if hasattr(family, "sql_dialect"):
-        return family.sql_dialect(expr, dialect, side)
-    return family.sql(expr, side)
+    return family.sql_dialect(expr, _spark_dialect(dialect), side, data_type)
 
 
 def composite_sql(

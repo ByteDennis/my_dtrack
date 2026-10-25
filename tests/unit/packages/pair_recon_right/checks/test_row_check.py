@@ -68,7 +68,7 @@ def test_all():
 
 @pytest.mark.parametrize(
     ("key", "mode", "family", "right_pre_sampled"),
-    [("id", "all", "string", False), ("dt", "date", "date_type", False), ("id", "all", None, True)],
+    [("id", "all", "string", False), ("dt", "date", "date", False), ("id", "all", None, True)],
 )
 def test_sample(key, mode, family, right_pre_sampled):
     seen = {}
@@ -102,7 +102,7 @@ def test_sample(key, mode, family, right_pre_sampled):
         assert seen["sample"]["mode"] == "fraction"
         assert seen["key_columns"] == [key]
         resolved = seen["key_families"][0]
-        assert (resolved if isinstance(resolved, str) else resolved["family"]) == family
+        assert (resolved if isinstance(resolved, str) else resolved["type"]) == family
 
 
 ROWS = {

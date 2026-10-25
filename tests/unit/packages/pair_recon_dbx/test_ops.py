@@ -153,6 +153,16 @@ def test_runs():
     assert runtime.login(workspace, open_browser=False)["user"] == "me@example.com"
 
 
+def test_resolve_job_id_accepts_id_or_exact_name():
+    jobs = [NS(job_id=42, settings=NS(name="pair-recon-right"))]
+    workspace = NS(jobs=NS(list=lambda **_kwargs: iter(jobs)))
+
+    assert runtime.resolve_job_id(workspace, "42") == 42
+    assert runtime.resolve_job_id(workspace, "pair-recon-right") == 42
+    with pytest.raises(ValueError, match="does not exist"):
+        runtime.resolve_job_id(workspace, "missing")
+
+
 class Files:
     def __init__(self, objects=(), content=None):
         self.objects = {item.path: item for item in objects}

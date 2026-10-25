@@ -125,6 +125,28 @@ def test_notebook_body_rewrites_package_imports(tmp_path):
     assert "pair_recon_right." not in body
 
 
+def test_upload_creates_each_workspace_directory_once(monkeypatch, tmp_path):
+    source = tmp_path / "package"
+    (source / "nested").mkdir(parents=True)
+    (source / "a.py").write_text("a = 1\n", encoding="utf-8")
+    (source / "nested" / "b.py").write_text("b = 2\n", encoding="utf-8")
+    calls = []
+    workspace = NS(
+        workspace=NS(
+            mkdirs=lambda path: calls.append(("mkdirs", path)),
+            upload=lambda path, _body, **_kwargs: calls.append(("upload", path)),
+        )
+    )
+    monkeypatch.setattr(deploy, "workspace_objects", lambda *_args: [])
+
+    uploaded, deleted = deploy.upload(workspace, source, "/Users/me/package")
+
+    directories = [path for operation, path in calls if operation == "mkdirs"]
+    assert directories == ["/Users/me/package", "/Users/me/package/nested"]
+    assert len(uploaded) == 2
+    assert deleted == []
+
+
 def test_right_package_only_names_itself_in_the_notebook():
     offenders = [
         str(path.relative_to(deploy.right_source()))

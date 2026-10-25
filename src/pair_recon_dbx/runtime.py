@@ -256,6 +256,20 @@ def list_runs(workspace, *, limit=10, job_id=None, active=False) -> dict:
     return {"runs": [run_row(run) for run in islice(runs, limit)]}
 
 
+def resolve_job_id(workspace, reference: str) -> int:
+    try:
+        return int(reference)
+    except ValueError:
+        matches = [
+            job
+            for job in workspace.jobs.list(name=reference)
+            if getattr(getattr(job, "settings", None), "name", None) == reference
+        ]
+        if not matches:
+            raise ValueError(f"Databricks job does not exist: {reference}")
+        return int(matches[0].job_id)
+
+
 def run_detail(workspace, run_id: int) -> dict:
     run = workspace.jobs.get_run(run_id)
     tasks = [

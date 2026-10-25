@@ -2,6 +2,7 @@ import io
 import json
 import posixpath
 import threading
+from copy import deepcopy
 from typing import Any
 
 from databricks.sdk.errors import NotFound
@@ -16,7 +17,18 @@ def _is_not_found(exc: Exception) -> bool:
 
 
 class ApiVolumeStore:
-    def __init__(self, root: str, *, files=None):
+    _IMMUTABLE_JSON = (
+        "units/",
+        "col_check/result_batches/",
+        "col_check/results/",
+        "col_check/failures/",
+        "col_check/right_ready/",
+        "row_check/left.json",
+        "plan.json",
+        "fixed_keys.json",
+    )
+
+    def __init__(self, root: str, *, files=None, _json_cache=None):
         if files is None:
             from databricks.sdk import WorkspaceClient
 
@@ -25,6 +37,7 @@ class ApiVolumeStore:
         self.root_uri = self.root
         self.files = files
         self._state_lock = threading.RLock()
+        self._json_cache = {} if _json_cache is None else _json_cache
 
     def _path(self, relative: str) -> str:
         value = posixpath.normpath(relative.replace("\\", "/")).lstrip("/")
@@ -33,7 +46,12 @@ class ApiVolumeStore:
         return f"{self.root}/{value}"
 
     def child(self, name: str):
-        return type(self)(self._path(name), files=self.files)
+        return type(self)(self._path(name), files=self.files, _json_cache=self._json_cache)
+
+    @classmethod
+    def _cacheable_json(cls, relative: str) -> bool:
+        value = relative.replace("\\", "/").lstrip("/")
+        return any(value == prefix or value.startswith(prefix) for prefix in cls._IMMUTABLE_JSON)
 
     def put_bytes(self, relative: str, value: bytes, *, content_type: str = "") -> str:
         path = self._path(relative)
@@ -45,13 +63,29 @@ class ApiVolumeStore:
         body = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
-        return self.put_bytes(relative, body, content_type="application/json")
+        result = self.put_bytes(relative, body, content_type="application/json")
+        path = self._path(relative)
+        with self._state_lock:
+            if self._cacheable_json(relative):
+                self._json_cache[path] = deepcopy(value)
+            else:
+                self._json_cache.pop(path, None)
+        return result
 
     def get_bytes(self, relative: str) -> bytes:
         return self.files.download(self._path(relative)).contents.read()
 
     def get_json(self, relative: str) -> Any:
-        return json.loads(self.get_bytes(relative).decode("utf-8"))
+        path = self._path(relative)
+        if self._cacheable_json(relative):
+            with self._state_lock:
+                if path in self._json_cache:
+                    return deepcopy(self._json_cache[path])
+        value = json.loads(self.get_bytes(relative).decode("utf-8"))
+        if self._cacheable_json(relative):
+            with self._state_lock:
+                self._json_cache[path] = deepcopy(value)
+        return deepcopy(value) if self._cacheable_json(relative) else value
 
     def exists(self, relative: str) -> bool:
         try:
@@ -96,12 +130,17 @@ class ApiVolumeStore:
     def delete_keys(self, keys: list[str]) -> int:
         deleted = 0
         for key in keys:
+            path = self._path(key)
             try:
-                self.files.delete(self._path(key))
+                self.files.delete(path)
             except Exception as exc:
                 if _is_not_found(exc):
+                    with self._state_lock:
+                        self._json_cache.pop(path, None)
                     continue
                 raise
+            with self._state_lock:
+                self._json_cache.pop(path, None)
             deleted += 1
         return deleted
 
