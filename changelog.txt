@@ -1,3 +1,17 @@
+pair_recon Typed keys, sample-count gate, and Files API retries — 2026-10-26
+
+Added
+- src/pair_recon/core/metadata/configuration.py: `parse_key_columns` reads `NAME[type]` key entries; the type (numeric, categorical, or a registry name) becomes that key's `col_type_overrides`/`column_types` entry and wins over the column map; a key without a mapping row gets `right_date_col` (partition key) or its own name.
+- src/pair_recon/core/metadata/workbook.py: `key_columns` entries must be `NAME[type]`; the field guide lists every accepted type.
+- src/pair_recon/app/cli.py: `synchronize_key_types` writes the key types into `pair_recon_column_map.data_type` after each pair upsert; `catalog.column_mappings` reads one pair's rows.
+- src/pair_recon_right/engine/checks/col_check.py: `require_same_total` fails the Right (`SampleCountMismatch`) as soon as a window's Left and Right `n_total` differ, after recording that unit as diff; the message names the window, both counts, and the key columns to check.
+- src/pair_recon/core/backends/store.py: `retry_transient` repeats Files API download, metadata, upload, list, and delete calls up to five times after broken connections or timeouts (`ChunkedEncodingError`, `ConnectionError`, urllib3 protocol errors), with 2s linear backoff.
+- src/pair_recon_left/common/model/hashing.py (mirrored): `cast_text_sql` renders Spark/Hive decimal keys without trailing zeros and double/float keys through `DECIMAL(38,15)`, matching Oracle `TM9`; `SparkTarget` passes the DESCRIBE column types as `key_types`.
+- src/pair_recon_right/notebook.py: `SET spark.sql.legacy.timeParserPolicy = CORRECTED`, so dirty date strings parse to NULL instead of failing the statement.
+
+Changed
+- src/pair_recon/app/runner.py, src/pair_recon_dbx/runtime.py, setup/install.py: `WorkspaceClient` uses `auth_type=external-browser` unless `DATABRICKS_AUTH_TYPE` is set.
+
 pair_recon Right date type must fit the physical column — 2026-10-25
 
 Added

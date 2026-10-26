@@ -172,6 +172,26 @@ def test_auto_date_type_probe_skips_the_column_check():
     assert target.config["date_type"] == "date"
 
 
+def test_numeric_keys_hash_as_plain_decimal_text():
+    spark = FakeSpark(lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [(7,)])
+    target = SparkTarget(spark, {**ORDERS, "partition": "all"})
+    assert target.health_check()["ok"]
+    sample = {"mode": "fraction", "threshold": 1000}
+    target.partition_counts(
+        sample=sample, key_columns=["amount", "order_id"], key_families=["string", "string"]
+    )
+    sql = spark.statements[-1]
+    assert "regexp_replace(regexp_replace(CAST(`amount` AS STRING)" in sql
+    assert "CAST(`order_id` AS STRING)" in sql and "DECIMAL(38,15)" not in sql
+    manifest = _manifest(sample, keys=("amount",), families=("string",))
+    assert "regexp_replace(regexp_replace(CAST(`amount` AS STRING)" in target._sample_predicate(
+        manifest, {}
+    )
+    assert "regexp_replace(regexp_replace(CAST(`amount`" not in SparkTarget(
+        None, ORDERS
+    )._sample_predicate(manifest, {})
+
+
 def test_key_family_date_type_fits_column():
     spark = FakeSpark(lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [(7,)])
     target = SparkTarget(spark, {**ORDERS, "partition": "all"})
@@ -190,7 +210,7 @@ def test_key_family_date_type_fits_column():
     assert SparkTarget(None, ORDERS)._sample_predicate(_manifest(sample, families=(native,)), {})
 
 
-def test_health_check_logs_sql_and_spark_failure(caplog):
+def test_health_check_logs_context_and_spark_failure(caplog):
     def explode(sql):
         raise RuntimeError("Unable to fetch tables of db sales")
 
@@ -204,11 +224,8 @@ def test_health_check_logs_sql_and_spark_failure(caplog):
     }
     messages = [record.getMessage() for record in caplog.records]
     assert any(m.startswith("health check relation=`sales`.`orders` kind=table") for m in messages)
-    assert "spark.sql health_check: DESCRIBE QUERY SELECT * FROM `sales`.`orders`" in messages
     assert any(m.startswith("spark.sql health_check failed after") for m in messages)
     assert any("Unable to fetch tables" in (record.exc_text or "") for record in caplog.records)
-    assert targets.sql_summary("SELECT  1\n  FROM   t") == "SELECT 1 FROM t"
-    assert len(targets.sql_summary("x" * 5000)) == targets.SQL_LOG_WIDTH
 
 
 def test_sas():
@@ -245,9 +262,7 @@ def test_partition():
 
 
 def test_month_partition_aggregates_daily_query_results():
-    spark = FakeSpark(
-        lambda sql: [("2026-01-01", 3), ("2026-01-31", 4), ("2026-02-01", 5)]
-    )
+    spark = FakeSpark(lambda sql: [("2026-01-01", 3), ("2026-01-31", 4), ("2026-02-01", 5)])
     target = SparkTarget(spark, {**ORDERS, "partition": "month"})
     assert target.partition_counts() == {"2026-01-01": 7, "2026-02-01": 5}
     assert "GROUP BY to_date(`business_date`)" in spark.statements[0]

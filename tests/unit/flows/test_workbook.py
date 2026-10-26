@@ -31,7 +31,7 @@ def set_row(sheet, values):
         sheet.cell(2, column, value)
 
 
-def valid_pair_row(*, keys="ORDER_ID", partition="day", defaults='{"sample":0.1}'):
+def valid_pair_row(*, keys="ORDER_ID[numeric]", partition="day", defaults='{"sample":0.1}'):
     return [
         "orders",
         True,
@@ -83,7 +83,7 @@ def test_create_and_read_pair_workbook(tmp_path):
         {
             "pair_name": "orders",
             "enabled": True,
-            "key_columns": ["ORDER_ID"],
+            "key_columns": ["ORDER_ID[numeric]"],
             "vintage": "month",
             "partition": "day",
             "left_source": "oracle",
@@ -105,6 +105,85 @@ def test_create_and_read_pair_workbook(tmp_path):
             },
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("keys", "message"),
+    [
+        ("ORDER_ID", r"entries must be NAME\[type\], got 'ORDER_ID'"),
+        ("ORDER_ID[]", r"entries must be NAME\[type\]"),
+        ("ORDER_ID[money]", r"type 'money' must be one of categorical, date"),
+    ],
+)
+def test_key_columns_require_a_known_type(tmp_path, keys, message):
+    path = create_pair_workbook(tmp_path / "pairs.xlsx")
+    workbook = load_workbook(path)
+    set_row(workbook["pairs"], valid_pair_row(keys=keys))
+    workbook.save(path)
+    with pytest.raises(ValueError, match=message):
+        read_pair_workbook(path)
+
+
+def test_key_column_types_reach_the_config_and_the_field_guide(tmp_path):
+    path = create_pair_workbook(tmp_path / "pairs.xlsx")
+    workbook = load_workbook(path)
+    guide = {row[1]: row for row in workbook["field_guide"].iter_rows(min_row=2, values_only=True)}
+    assert guide["key_columns"][3] == "comma list of NAME[type]"
+    assert "numeric, sas_datetime_date, string" in guide["key_columns"][4]
+    assert guide["key_columns"][5] == "ACCT_ID[numeric],ORDER_DT[date]"
+    set_row(
+        workbook["pairs"],
+        valid_pair_row(keys="ACCT_ID[numeric], ORDER_DT[date],CAMPAIGN[string], ACCT_ID[numeric]"),
+    )
+    set_row(workbook["pair_sql"], ["orders", None, None, "SELECT * FROM main.sales.orders", None])
+    workbook.save(path)
+    row = read_pair_workbook(path)[0]
+    assert row["key_columns"] == ["ACCT_ID[numeric]", "ORDER_DT[date]", "CAMPAIGN[string]"]
+    config = build_pair_config(row)
+    assert config["key"] == "ACCT_ID,ORDER_DT,CAMPAIGN"
+    assert config["col_type_overrides"] == {"ACCT_ID": "numeric"}
+    assert config["column_types"] == {"ORDER_DT": "date", "CAMPAIGN": "string"}
+    assert config["col_map"] == {
+        "ACCT_ID": "ACCT_ID",
+        "ORDER_DT": "order_dt",
+        "CAMPAIGN": "CAMPAIGN",
+    }
+    assert "_key_types" not in config
+
+
+def test_key_column_types_override_the_column_map():
+    row = {
+        "pair_name": "p",
+        "left_source": "oracle",
+        "left_conn": "pcds",
+        "left_table": "T",
+        "left_date_col": "APP_CREATE_DT",
+        "right_source": "databricks_table",
+        "right_conn": "c.s",
+        "right_table": "t",
+        "right_date_col": "dw_bus_dt",
+        "key_columns": ["ACCT_ID[numeric]", "APP_CREATE_DT[date]", "CAMPAIGN"],
+        "vintage": "day",
+        "partition": "day",
+        "column_map_rows": [
+            {"left_column": "ACCT_ID", "right_column": "acct_id", "data_type": "string"},
+            {"left_column": "AMT", "right_column": "amt", "data_type": "numeric"},
+            {"left_column": "CAMPAIGN", "right_column": "campaign", "data_type": "exact"},
+        ],
+    }
+    config = build_pair_config(row)
+    assert config["key"] == "ACCT_ID,APP_CREATE_DT,CAMPAIGN"
+    assert config["col_type_overrides"] == {"ACCT_ID": "numeric", "AMT": "numeric"}
+    assert config["column_types"] == {"APP_CREATE_DT": "date", "CAMPAIGN": "exact"}
+    assert config["col_map"] == {
+        "ACCT_ID": "acct_id",
+        "AMT": "amt",
+        "CAMPAIGN": "campaign",
+        "APP_CREATE_DT": "dw_bus_dt",
+    }
+    bare = build_pair_config({**row, "key_columns": ["ACCT_ID", "APP_CREATE_DT"]})
+    assert bare["col_type_overrides"] == {"AMT": "numeric"}
+    assert bare["column_types"] == {"ACCT_ID": "string", "CAMPAIGN": "exact"}
 
 
 def test_pair_workbook_percentage_sample_requires_keys(tmp_path):

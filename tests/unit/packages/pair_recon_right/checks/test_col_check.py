@@ -108,7 +108,7 @@ def test_fetched():
 
 def _drained_store(sample_mode="all"):
     store = MemoryStore()
-    doc = left_document(sample=None if sample_mode == "all" else 1)
+    doc = left_document(sample={"all": None, "fixed": 1}.get(sample_mode, 0.5))
     store.put_json("row_check/left.json", doc)
     store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
     run_row_check(store, lambda _cfg: FakeTarget())
@@ -136,6 +136,23 @@ def test_unit(caplog):
         "n_unique=2|2 mean=1.5|1.5 std=0.7|0.7 min=1|1 max=2|2 "
         "length_avg=None|None length_max=None|None hash_sum=3|3"
     ) in caplog.text
+
+
+def test_total_mismatch_stops_the_right_after_recording_the_diff():
+    store, uid = _drained_store(sample_mode="fraction")
+    target = FakeTarget(stats={"amount": {**STATS, "n_total": 5}})
+    with pytest.raises(col_check.SampleCountMismatch) as info:
+        ColCheck(store, lambda _cfg: target, poll_interval=0).run()
+    message = str(info.value)
+    assert "p 2026-01-01: Left counted 2 rows but Right counted 5" in message
+    assert "sampled key sets differ" in message and "keys " in message
+    stored = dict(list_results(store))
+    assert [value["unit_id"] for value in stored.values()] == [uid]
+    assert next(iter(stored.values()))["verdict"] == "diff"
+    same_total = FakeTarget(stats={"amount": {**STATS, "n_unique": 9}})
+    store, _uid = _drained_store(sample_mode="fraction")
+    results = ColCheck(store, lambda _cfg: same_total, poll_interval=0).run()
+    assert results[0]["verdict"] == "diff"
 
 
 def test_result_detail():

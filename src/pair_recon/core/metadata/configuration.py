@@ -1,8 +1,40 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from typing import Any
+
+from pair_recon_left.common.model.hashing import FAMILIES
+
+KEY_TYPE_HINTS = ("numeric", "categorical")
+KEY_SPEC = re.compile(r"^([^\[\]]+?)\s*(?:\[\s*([^\[\]]*?)\s*\])?$")
+
+
+# >>> types allowed in NAME[type]: the statistics hints plus every registered normalizer <<< #
+def key_type_names() -> list[str]:
+    return sorted({*KEY_TYPE_HINTS, *FAMILIES})
+
+
+# >>> "NAME[type]" key entries -> unique names in order and {name: type}; a bare NAME carries no type <<< #
+def parse_key_columns(values: Any, pair: str = "pair") -> tuple[list[str], dict[str, str]]:
+    names: list[str] = []
+    types: dict[str, str] = {}
+    for item in values or []:
+        match = KEY_SPEC.match(str(item).strip())
+        if match is None or not match.group(1).strip():
+            raise ValueError(f"{pair}: key column {item!r} must be NAME or NAME[type]")
+        name, kind = match.group(1).strip(), (match.group(2) or "").strip()
+        if kind and kind not in key_type_names():
+            raise ValueError(
+                f"{pair}: key column {name!r} type {kind!r} must be one of "
+                f"{', '.join(key_type_names())}"
+            )
+        if name not in names:
+            names.append(name)
+        if kind:
+            types[name] = kind
+    return names, types
 
 
 def _object(value: Any, field: str, pair: str) -> dict[str, Any]:
@@ -114,9 +146,10 @@ def _explicit_config(row: dict[str, Any], pair: str) -> dict[str, Any]:
     value.update(right_pair_options)
     value["left"] = left
     value["right"] = right
-    keys = _strings(row.get("key_columns"), "key_columns", pair)
+    keys, key_types = parse_key_columns(_strings(row.get("key_columns"), "key_columns", pair), pair)
     if keys:
         value["key"] = ",".join(keys)
+    value["_key_types"] = key_types
     vintage = str(row.get("vintage") or "").strip().casefold()
     if vintage and partition != "all":
         value["vintage"] = vintage
@@ -125,13 +158,35 @@ def _explicit_config(row: dict[str, Any], pair: str) -> dict[str, Any]:
     return value
 
 
+# >>> one data_type value lands in either the numeric|categorical hints or the normalizer types <<< #
+def _assign_type(spec: str, left: str, overrides: dict, column_types: dict, pair: str) -> None:
+    if spec in KEY_TYPE_HINTS:
+        overrides[left] = spec
+        column_types.pop(left, None)
+        return
+    if spec[:1] in "{[":
+        try:
+            column_types[left] = json.loads(spec)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{pair}.{left}: invalid custom data_type JSON") from exc
+    else:
+        column_types[left] = spec
+    overrides.pop(left, None)
+
+
 def _apply_mappings(value: dict[str, Any], row: dict[str, Any], pair: str) -> None:
     mappings = row.get("column_map_rows") or []
-    if not mappings:
+    key_types = value.pop("_key_types", None) or {}
+    if not mappings and not key_types:
         return
-    col_map = {}
-    overrides = {}
-    column_types = {}
+    if mappings:
+        col_map: dict[str, str] = {}
+        overrides: dict[str, str] = {}
+        column_types: dict[str, Any] = {}
+    else:
+        col_map = dict(value.get("col_map") or {})
+        overrides = dict(value.get("col_type_overrides") or {})
+        column_types = dict(value.get("column_types") or {})
     for mapping in mappings:
         left = str(mapping.get("left_column") or "").strip()
         right = str(mapping.get("right_column") or "").strip()
@@ -139,17 +194,14 @@ def _apply_mappings(value: dict[str, Any], row: dict[str, Any], pair: str) -> No
             raise ValueError(f"{pair}: column mapping names must be non-empty")
         col_map[left] = right
         data_type = str(mapping.get("data_type") or "").strip()
-        if not data_type:
-            continue
-        if data_type in {"numeric", "categorical"}:
-            overrides[left] = data_type
-        elif data_type[:1] in "{[":
-            try:
-                column_types[left] = json.loads(data_type)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"{pair}.{left}: invalid custom data_type JSON") from exc
-        else:
-            column_types[left] = data_type
+        if data_type:
+            _assign_type(data_type, left, overrides, column_types, pair)
+    left_date = str((value.get("left") or {}).get("date_col") or "").casefold()
+    right_date = str((value.get("right") or {}).get("date_col") or "")
+    for name, kind in key_types.items():
+        _assign_type(kind, name, overrides, column_types, pair)
+        if name not in col_map:
+            col_map[name] = right_date if right_date and name.casefold() == left_date else name
     value["col_map"] = col_map
     value["col_type_overrides"] = overrides
     value["column_types"] = column_types
@@ -202,5 +254,6 @@ def build_pair_config(row: dict[str, Any]) -> dict[str, Any]:
         value = deepcopy(value)
         value["_run_defaults"] = {}
     _apply_mappings(value, row, pair)
+    value.pop("_key_types", None)
     _apply_sql(value, row, pair, legacy=not explicit)
     return value

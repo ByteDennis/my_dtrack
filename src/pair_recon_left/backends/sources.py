@@ -309,9 +309,7 @@ class SqlSource(ABC):
         for value, count in rows:
             day = canonical_date(value)
             counts[day] = counts.get(day, 0) + int(count)
-        return aggregate_partition_counts(
-            counts, self.partition
-        )
+        return aggregate_partition_counts(counts, self.partition)
 
     def pull_window(
         self,

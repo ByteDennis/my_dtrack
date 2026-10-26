@@ -9,6 +9,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any
 
+from tqdm.auto import tqdm
+
 from ..common.model.attribute_checks import attribute_check_names, get_attribute_check
 from ..common.model.audit import SqlAudit, attach_sql_audit
 from ..common.model.manifest import DEFAULT_STATISTICS, planned_unit_ids, unit_id_for, window_id
@@ -164,6 +166,31 @@ class ResultBatchCommitError(RuntimeError):
     pass
 
 
+class SampleCountMismatch(RuntimeError):
+    pass
+
+
+# >>> Left and Right totals of one window must agree, otherwise no column can match: stop the Right now <<< #
+def require_same_total(manifest, window, column, left, right) -> None:
+    left_total, right_total = left.get("n_total"), right.get("n_total")
+    if left_total is None or right_total is None or int(left_total) == int(right_total):
+        return
+    mode = (manifest.get("sample") or {}).get("mode", "all")
+    if mode == "fixed":
+        hint = "the fixed key tuples are not all present on both sides"
+    elif mode == "all":
+        hint = "the window row counts changed since the row check"
+    else:
+        hint = (
+            "the sampled key sets differ; check the key columns' types and data_type "
+            f"normalization on both sides (keys {', '.join(manifest.get('right_key_cols') or [])})"
+        )
+    raise SampleCountMismatch(
+        f"{manifest['pair']} {window}: Left counted {left_total} rows but Right counted "
+        f"{right_total} for column {column}; {hint}"
+    )
+
+
 class ColCheck:
     def __init__(
         self,
@@ -209,6 +236,35 @@ class ColCheck:
         self.pending_matches: list[dict[str, Any]] = []
         self.completed_batches = len(list_result_batches(store))
         self.legacy_result_mode = False
+        self.progress = None
+
+    def _refresh_progress(self):
+        total = len(self.active_ids)
+        completed = len(self.completed_ids & self.active_ids)
+        if self.progress is None:
+            self.progress = tqdm(
+                total=total,
+                desc="Right comparison",
+                unit="column",
+                dynamic_ncols=True,
+                leave=False,
+            )
+        elif self.progress.total != total:
+            self.progress.total = total
+        if completed > self.progress.n:
+            self.progress.update(completed - self.progress.n)
+        self.progress.set_postfix_str(
+            f"received={len(self.seen)}/{total} "
+            f"stats={len(self.ready_windows)}/{len(self.scheduler.windows)} "
+            f"fetching={len(self.scheduler.prefetching)} "
+            f"queued={len(self.scheduler.ready) + sum(map(len, self.scheduler.pending.values()))}",
+            refresh=True,
+        )
+
+    def _close_progress(self):
+        if self.progress is not None:
+            self._refresh_progress()
+            self.progress.close()
 
     def _validated_plan_ids(self):
         current = current_plan_ids(self.store)
@@ -359,7 +415,7 @@ class ColCheck:
                 self.unit_batches.add(key)
         if changed:
             self._write_progress()
-            log.info("poll: %d new protocol object(s)", changed)
+            self._refresh_progress()
         return changed
 
     def _failure(self, task, exc):
@@ -488,7 +544,8 @@ class ColCheck:
                 result["verdict"].upper(),
                 f" [{result['col_type']}] {detail}" if detail else "",
             )
-        except (PlanChangedError, ResultBatchCommitError):
+            require_same_total(manifest, task.window, pointer["column"], left, right)
+        except (PlanChangedError, ResultBatchCommitError, SampleCountMismatch):
             raise
         except Exception as exc:
             self._failure(task, exc)
@@ -507,69 +564,76 @@ class ColCheck:
     def run(self):
         jobs = {}
         log.info("Databricks query worker budget=%d", self.right_workers)
-        with ThreadPoolExecutor(
-            max_workers=self.right_workers,
-            thread_name_prefix="pair_recon-right",
-        ) as executor:
-            while True:
-                self.poll()
-                for future in [future for future in jobs if future.done()]:
-                    task = jobs.pop(future)
-                    try:
-                        stats, elapsed = future.result()
-                        self._complete_prefetch(task, stats, elapsed)
-                    except PlanChangedError:
-                        raise
-                    except Exception as exc:
-                        self._failure(task, exc)
-                while len(jobs) < self.right_workers:
-                    task = (
-                        None
-                        if not self.scheduler.ready and self.complete()
-                        else self.scheduler.next_task()
-                    )
-                    if task is None:
-                        break
-                    if task.kind == "prefetch":
-                        jobs[executor.submit(self._fetch_right, task)] = task
-                    else:
-                        self.run_task(task)
-                if jobs:
-                    wait(
-                        tuple(jobs),
-                        timeout=max(0.01, self.poll_interval),
-                        return_when=FIRST_COMPLETED,
-                    )
-                    continue
-                if self.pending_matches and not self.scheduler.ready:
-                    self._flush_matches(force=True)
-                if self.complete():
-                    plans = [plan for _key, plan in list_plans(self.store)]
-                    active = active_unit_ids(self.store)
-                    durable_results = {value["unit_id"] for _key, value in list_results(self.store)}
-                    durable_failures = {
-                        value["unit_id"] for _key, value in list_failures(self.store)
-                    }
-                    if not active <= durable_results | durable_failures:
-                        raise RuntimeError(
-                            "Right completion checkpoint is missing durable outcomes"
+        try:
+            with ThreadPoolExecutor(
+                max_workers=self.right_workers,
+                thread_name_prefix="pair_recon-right",
+            ) as executor:
+                while True:
+                    self.poll()
+                    for future in [future for future in jobs if future.done()]:
+                        task = jobs.pop(future)
+                        try:
+                            stats, elapsed = future.result()
+                            self._complete_prefetch(task, stats, elapsed)
+                        except PlanChangedError:
+                            raise
+                        except Exception as exc:
+                            self._failure(task, exc)
+                    while len(jobs) < self.right_workers:
+                        task = (
+                            None
+                            if not self.scheduler.ready and self.complete()
+                            else self.scheduler.next_task()
                         )
-                    refresh_units_status(self.store)
-                    SqlAudit(
-                        self.store,
-                        "right",
-                        enabled=any(bool(plan.get("audit")) for plan in plans),
-                    ).refresh()
-                    self._write_progress("complete")
-                    log.info(
-                        "col_check complete: %d result(s), %d dead",
-                        len(self.results),
-                        sum(
-                            value["unit_id"] in active for _key, value in list_failures(self.store)
-                        ),
-                    )
-                    return self.results
-                if self.on_idle and self.on_idle():
-                    continue
-                require_left_heartbeat(self.store, self.heartbeat_timeout)
-                time.sleep(self.poll_interval)
+                        if task is None:
+                            break
+                        if task.kind == "prefetch":
+                            jobs[executor.submit(self._fetch_right, task)] = task
+                        else:
+                            self.run_task(task)
+                    self._refresh_progress()
+                    if jobs:
+                        wait(
+                            tuple(jobs),
+                            timeout=max(0.01, self.poll_interval),
+                            return_when=FIRST_COMPLETED,
+                        )
+                        continue
+                    if self.pending_matches and not self.scheduler.ready:
+                        self._flush_matches(force=True)
+                    if self.complete():
+                        plans = [plan for _key, plan in list_plans(self.store)]
+                        active = active_unit_ids(self.store)
+                        durable_results = {
+                            value["unit_id"] for _key, value in list_results(self.store)
+                        }
+                        durable_failures = {
+                            value["unit_id"] for _key, value in list_failures(self.store)
+                        }
+                        if not active <= durable_results | durable_failures:
+                            raise RuntimeError(
+                                "Right completion checkpoint is missing durable outcomes"
+                            )
+                        refresh_units_status(self.store)
+                        SqlAudit(
+                            self.store,
+                            "right",
+                            enabled=any(bool(plan.get("audit")) for plan in plans),
+                        ).refresh()
+                        self._write_progress("complete")
+                        log.info(
+                            "col_check complete: %d result(s), %d dead",
+                            len(self.results),
+                            sum(
+                                value["unit_id"] in active
+                                for _key, value in list_failures(self.store)
+                            ),
+                        )
+                        return self.results
+                    if self.on_idle and self.on_idle():
+                        continue
+                    require_left_heartbeat(self.store, self.heartbeat_timeout)
+                    time.sleep(self.poll_interval)
+        finally:
+            self._close_progress()

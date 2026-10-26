@@ -243,11 +243,7 @@ def key_family_specs(pair: dict[str, Any], keys: list[str]) -> list[dict[str, An
             value = column_types.get(key)
         if value is None and overrides.get(key) == "numeric":
             value = "numeric"
-        if (
-            pair.get("partition", "day") != "all"
-            and value is None
-            and key.casefold() == date_col
-        ):
+        if pair.get("partition", "day") != "all" and value is None and key.casefold() == date_col:
             value = {
                 "type": "date",
                 "left_date_type": resolve_date_type(pair["left"].get("date_type")).spec(

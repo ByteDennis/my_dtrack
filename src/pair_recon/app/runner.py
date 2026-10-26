@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import threading
 import time
@@ -323,8 +324,13 @@ class StatementSql:
         return [dict(zip(columns, row)) for row in rows]
 
 
+# >>> browser login unless DATABRICKS_AUTH_TYPE says otherwise; other auth types fail on this setup <<< #
+def workspace_auth_type() -> str:
+    return os.environ.get("DATABRICKS_AUTH_TYPE") or "external-browser"
+
+
 def workspace(profile: str):
-    return WorkspaceClient(profile=profile)
+    return WorkspaceClient(profile=profile, auth_type=workspace_auth_type())
 
 
 def make_run_id(pair: str, owner: str, timezone: str, now=None) -> str:

@@ -1,7 +1,7 @@
 import duckdb
 import pytest
 
-from pair_recon_left.common.model.hashing import FAMILIES, hash32, key_family
+from pair_recon_left.common.model.hashing import FAMILIES, cast_text_sql, hash32, key_family
 from pair_recon_left.common.sql.sampling import (
     SamplingSqlNotSupported,
     composite_sql,
@@ -135,6 +135,25 @@ def test_date():
     right = normalize_sql("`dt`", family, "spark", "right")
     assert "1960-01-01" in left and "YYYY-MM-DD" in left
     assert "date_format" in right and "yyyy-MM-dd" in right
+
+
+@pytest.mark.parametrize(
+    ("dialect", "data_type", "expected"),
+    [
+        ("spark", None, "CAST(x AS STRING)"),
+        ("spark", "bigint", "CAST(x AS STRING)"),
+        ("spark", "string", "CAST(x AS STRING)"),
+        ("spark", "decimal(18,2)", "regexp_replace(regexp_replace(CAST(x AS STRING)"),
+        ("spark", "double", "CAST(try_cast(x AS DECIMAL(38,15)) AS STRING)"),
+        ("hadoop", "double", "CAST(CAST(x AS DECIMAL(38,15)) AS STRING)"),
+        ("hadoop", "decimal(10,0)", "regexp_replace(regexp_replace(CAST(x AS STRING)"),
+    ],
+)
+def test_spark_numeric_key_text_matches_oracle_tm9(dialect, data_type, expected):
+    sql = cast_text_sql("x", dialect, data_type)
+    assert expected in sql
+    if expected == "CAST(x AS STRING)":
+        assert sql == expected
 
 
 def test_column_type_sql_keeps_null_and_normalizes_values():

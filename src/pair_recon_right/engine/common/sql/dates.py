@@ -607,9 +607,7 @@ def partition_expression_where(
     grain: str = "day",
 ) -> str:
     column = resolve_date_type(date_type).predicate(expression, dialect)
-    return _partition_where(
-        column, partitions, dialect=dialect, date_type=date_type, grain=grain
-    )
+    return _partition_where(column, partitions, dialect=dialect, date_type=date_type, grain=grain)
 
 
 def _partition_where(

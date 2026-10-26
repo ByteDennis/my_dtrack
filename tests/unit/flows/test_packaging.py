@@ -78,7 +78,10 @@ def test_source_release_contains_only_the_main_runtime(tmp_path):
         assert "pair_recon/src/pair_recon_right/notebook.py" in names
         requirements = "pair_recon/src/pair_recon_right/requirements.txt"
         assert requirements in names
-        assert archive.read(requirements).decode().splitlines() == ["openpyxl>=3.1"]
+        assert archive.read(requirements).decode().splitlines() == [
+            "openpyxl>=3.1",
+            "tqdm>=4.67",
+        ]
         assert not any("pair_conn_release" in name for name in names)
         assert not any("pair_recon_gitlab" in name for name in names)
         assert "pair_recon/src/pair_recon/core/metadata/mapping.py" not in names

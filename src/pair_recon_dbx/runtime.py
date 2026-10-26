@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 import webbrowser
@@ -17,7 +18,9 @@ def client(profile: str):
         from databricks.sdk import WorkspaceClient
     except ImportError as exc:
         raise ImportError("pair_recon_dbx requires databricks-sdk") from exc
-    return WorkspaceClient(profile=profile)
+    return WorkspaceClient(
+        profile=profile, auth_type=os.environ.get("DATABRICKS_AUTH_TYPE") or "external-browser"
+    )
 
 
 def value(item: Any) -> Any:

@@ -68,8 +68,17 @@ def cast_text_sql(expr: str, dialect: str, data_type: str | None = None) -> str:
         ):
             return f"TO_CHAR({expr}, 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,''')"
         return f"TO_CHAR({expr})"
-    kind = "STRING" if dialect in {"spark", "hadoop"} else "VARCHAR"
-    return f"CAST({expr} AS {kind})"
+    if dialect in {"spark", "hadoop"}:
+        kind = str(data_type or "").lower()
+        if kind.startswith(("double", "float", "real")):
+            cast = "try_cast" if dialect == "spark" else "CAST"
+            return collapse_decimal_sql(
+                f"CAST({cast}({expr} AS DECIMAL(38,15)) AS STRING)", dialect
+            )
+        if kind.startswith(("decimal", "numeric")):
+            return collapse_decimal_sql(f"CAST({expr} AS STRING)", dialect)
+        return f"CAST({expr} AS STRING)"
+    return f"CAST({expr} AS VARCHAR)"
 
 
 def _regex_replace(expr: str, pattern: str, replacement: str, dialect: str) -> str:
@@ -411,9 +420,7 @@ class SasDatetimeDate(DateKeyFamily):
 @register_family
 class DateString(DateKeyFamily):
     name = "date_string"
-    date_type: ClassVar[Any] = DateType(
-        "date_string", python_formats=("%Y%m%d", "%Y-%m-%d")
-    )
+    date_type: ClassVar[Any] = DateType("date_string", python_formats=("%Y%m%d", "%Y-%m-%d"))
 
 
 # >>> resolves a normalizer spec: a registered name, a step list, or an object keyed by family/type <<< #

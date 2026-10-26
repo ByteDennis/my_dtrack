@@ -1574,6 +1574,42 @@ def test_prompt_can_use_databricks_metadata_without_syncing_local_workbook(
     assert "using Databricks metadata as the source of truth" in output
 
 
+def test_synchronize_key_types_writes_data_type_to_the_column_map():
+    calls = []
+
+    class Sql:
+        def execute(self, statement, parameters=None):
+            calls.append((statement, parameters))
+            return []
+
+    catalog = SimpleNamespace(
+        column_map_table="main.recon.pair_recon_column_map",
+        column_mappings=lambda pair: [
+            {
+                "pair_name": pair,
+                "left_column": "ACCT_ID",
+                "right_column": "acct_id",
+                "data_type": None,
+            }
+        ],
+    )
+    row = {
+        "pair_name": "p",
+        "key_columns": ["ACCT_ID[numeric]", "APP_CREATE_DT[date]", "CAMPAIGN[string]"],
+        "left_date_col": "APP_CREATE_DT",
+        "right_date_col": "dw_bus_dt",
+    }
+    assert cli.synchronize_key_types(Sql(), catalog, row) == 3
+    statement, parameters = calls[0]
+    assert "MERGE INTO main.recon.pair_recon_column_map" in statement
+    assert (parameters["r0_left_column"], parameters["r0_right_column"]) == ("ACCT_ID", "acct_id")
+    assert parameters["r0_data_type"] == "numeric"
+    assert (parameters["r1_right_column"], parameters["r1_data_type"]) == ("dw_bus_dt", "date")
+    assert (parameters["r2_right_column"], parameters["r2_data_type"]) == ("CAMPAIGN", "string")
+    assert cli.synchronize_key_types(Sql(), catalog, {"pair_name": "p", "key_columns": ["X"]}) == 0
+    assert len(calls) == 1
+
+
 def test_local(monkeypatch, tmp_path):
     store = MemoryStore()
     events = []

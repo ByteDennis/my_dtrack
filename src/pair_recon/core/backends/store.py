@@ -1,11 +1,26 @@
 import io
 import json
+import logging
 import posixpath
 import threading
+import time
 from copy import deepcopy
 from typing import Any
 
+import requests
 from databricks.sdk.errors import NotFound
+from urllib3.exceptions import HTTPError as Urllib3Error
+
+log = logging.getLogger("pair_recon.store")
+RETRY_ATTEMPTS = 5
+RETRY_BACKOFF_S = 2.0
+TRANSIENT_ERRORS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.Timeout,
+    Urllib3Error,
+    ConnectionError,
+)
 
 
 def _is_not_found(exc: Exception) -> bool:
@@ -14,6 +29,28 @@ def _is_not_found(exc: Exception) -> bool:
         or getattr(exc, "status_code", None) == 404
         or getattr(exc, "error_code", None) == "RESOURCE_DOES_NOT_EXIST"
     )
+
+
+# >>> repeat a Files API call after a broken connection or timeout, backing off attempt * RETRY_BACKOFF_S <<< #
+def retry_transient(operation: str, call, *, attempts: int = RETRY_ATTEMPTS):
+    for attempt in range(1, attempts + 1):
+        try:
+            return call()
+        except TRANSIENT_ERRORS as exc:
+            if attempt >= attempts:
+                raise
+            delay = RETRY_BACKOFF_S * attempt
+            log.warning(
+                "volume %s failed (%s: %s); retry %d/%d in %.0fs",
+                operation,
+                type(exc).__name__,
+                exc,
+                attempt,
+                attempts - 1,
+                delay,
+            )
+            time.sleep(delay)
+    return None
 
 
 class ApiVolumeStore:
@@ -55,8 +92,12 @@ class ApiVolumeStore:
 
     def put_bytes(self, relative: str, value: bytes, *, content_type: str = "") -> str:
         path = self._path(relative)
-        self.files.create_directory(posixpath.dirname(path))
-        self.files.upload(path, io.BytesIO(value), overwrite=True)
+
+        def upload():
+            self.files.create_directory(posixpath.dirname(path))
+            self.files.upload(path, io.BytesIO(value), overwrite=True)
+
+        retry_transient(f"upload {relative}", upload)
         return relative
 
     def put_json(self, relative: str, value: Any) -> str:
@@ -73,7 +114,10 @@ class ApiVolumeStore:
         return result
 
     def get_bytes(self, relative: str) -> bytes:
-        return self.files.download(self._path(relative)).contents.read()
+        path = self._path(relative)
+        return retry_transient(
+            f"download {relative}", lambda: self.files.download(path).contents.read()
+        )
 
     def get_json(self, relative: str) -> Any:
         path = self._path(relative)
@@ -87,9 +131,18 @@ class ApiVolumeStore:
                 self._json_cache[path] = deepcopy(value)
         return deepcopy(value) if self._cacheable_json(relative) else value
 
+    def _list_directory(self, path: str) -> list:
+        return retry_transient(
+            f"list {path}", lambda: list(self.files.list_directory_contents(path))
+        )
+
+    def _delete(self, path: str) -> None:
+        retry_transient(f"delete {path}", lambda: self.files.delete(path))
+
     def exists(self, relative: str) -> bool:
+        path = self._path(relative)
         try:
-            self.files.get_metadata(self._path(relative))
+            retry_transient(f"metadata {relative}", lambda: self.files.get_metadata(path))
             return True
         except Exception as exc:
             if _is_not_found(exc):
@@ -103,7 +156,7 @@ class ApiVolumeStore:
         while pending:
             current = pending.pop()
             try:
-                rows = list(self.files.list_directory_contents(current))
+                rows = self._list_directory(current)
             except Exception as exc:
                 if _is_not_found(exc):
                     continue
@@ -118,7 +171,7 @@ class ApiVolumeStore:
     def list_prefixes(self, prefix: str = "") -> list[str]:
         base = self.root if not prefix else self._path(prefix)
         try:
-            rows = self.files.list_directory_contents(base)
+            rows = self._list_directory(base)
             return sorted(
                 posixpath.basename(row.path.rstrip("/")) for row in rows if row.is_directory
             )
@@ -132,7 +185,7 @@ class ApiVolumeStore:
         for key in keys:
             path = self._path(key)
             try:
-                self.files.delete(path)
+                self._delete(path)
             except Exception as exc:
                 if _is_not_found(exc):
                     with self._state_lock:

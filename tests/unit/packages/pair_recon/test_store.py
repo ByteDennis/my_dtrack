@@ -1,7 +1,10 @@
 import io
 
+import pytest
+import requests
 from databricks.sdk.errors import NotFound
 
+from pair_recon.core.backends import store as store_module
 from pair_recon.core.backends.store import ApiVolumeStore
 
 
@@ -76,6 +79,48 @@ def test_delete_keys_ignores_remote_objects_that_are_already_missing():
 
     assert store.delete_keys(["row_check/left.json", "_status/col_check.closed.json"]) == 1
     assert not store.exists("row_check/left.json")
+
+
+def test_transient_network_errors_are_retried(monkeypatch):
+    monkeypatch.setattr(store_module, "RETRY_BACKOFF_S", 0)
+    broken = requests.exceptions.ChunkedEncodingError(
+        "Connection broken: IncompleteRead(0 bytes read, 479 more expected)"
+    )
+
+    class FlakyFiles(Files):
+        def __init__(self, failures):
+            super().__init__()
+            self.failures = failures
+            self.attempts = 0
+
+        def download(self, path):
+            self.attempts += 1
+            if self.failures:
+                self.failures -= 1
+                raise broken
+            return super().download(path)
+
+    files = FlakyFiles(2)
+    store = ApiVolumeStore("/Volumes/main/recon/runs/run-1", files=files)
+    store.put_json("_status/right.json", {"phase": "running"})
+    assert store.get_json("_status/right.json") == {"phase": "running"}
+    assert files.attempts == 3
+
+    dead = FlakyFiles(99)
+    dead.values[store._path("_status/right.json")] = b"{}"
+    with pytest.raises(requests.exceptions.ChunkedEncodingError):
+        ApiVolumeStore("/Volumes/main/recon/runs/run-1", files=dead).get_json("_status/right.json")
+    assert dead.attempts == store_module.RETRY_ATTEMPTS
+
+    class MissingFiles(Files):
+        calls = 0
+
+        def get_metadata(self, path):
+            MissingFiles.calls += 1
+            raise NotFound(path)
+
+    assert not ApiVolumeStore("/Volumes/x", files=MissingFiles()).exists("a.json")
+    assert MissingFiles.calls == 1
 
 
 def test_immutable_json_is_downloaded_once_and_invalidated_by_write_or_delete():

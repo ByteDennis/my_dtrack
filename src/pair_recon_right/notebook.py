@@ -83,6 +83,7 @@ logging.basicConfig(
 )
 logging.getLogger("pair_recon").info("widgets: %s", values)
 store = open_store(values["run_root"]).child(values["run_id"])
+spark.sql("SET spark.sql.legacy.timeParserPolicy = CORRECTED")
 
 try:
     outcome = run(

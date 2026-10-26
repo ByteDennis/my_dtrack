@@ -9,7 +9,7 @@ USING (
   SELECT
     'orders' AS pair_name,
     true AS enabled,
-    array('ORDER_ID') AS key_columns,
+    array('ORDER_ID[numeric]') AS key_columns,
     'month' AS vintage,
     'month' AS partition,
     'oracle' AS left_source,

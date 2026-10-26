@@ -43,13 +43,6 @@ NUMERIC_TYPES = (
 INTEGRAL_TYPES = ("int", "bigint", "smallint", "tinyint", "long", "short")
 TEMPORAL_TYPES = ("date", "timestamp")
 TEXT_DATE_TYPES = (StringDateType, NumericDateType, SasDateType)
-SQL_LOG_WIDTH = 4000
-
-
-# >>> single-line sql for logs, clipped to SQL_LOG_WIDTH <<< #
-def sql_summary(sql: str) -> str:
-    text = " ".join(sql.split())
-    return text if len(text) <= SQL_LOG_WIDTH else text[: SQL_LOG_WIDTH - 3] + "..."
 
 
 # >>> an explicit date type must fit the physical Spark column, otherwise ANSI casts fail or parse to NULL <<< #
@@ -204,7 +197,6 @@ class SparkTarget:
         return " AND ".join(f"({item})" for item in clauses) or "1=1"
 
     def _collect(self, sql: str, operation: str = "query") -> list:
-        log.info("spark.sql %s: %s", operation, sql_summary(sql))
         self._audit(sql, operation)
         started = time.monotonic()
         try:
@@ -240,6 +232,10 @@ class SparkTarget:
         types = getattr(self, "column_types", None) or {}
         check_date_column(column, types.get(column), date_type, role)
 
+    def _key_types(self, keys: list[str]) -> list[str | None]:
+        types = getattr(self, "column_types", None) or {}
+        return [types.get(key) for key in keys]
+
     def _check_key_families(self, keys: list[str], families: list[Any]) -> None:
         for column, spec in zip(keys, families):
             family = key_family(spec)
@@ -263,7 +259,6 @@ class SparkTarget:
                 for row in self._rows(f"DESCRIBE QUERY SELECT * FROM {relation}", "health_check")
                 if row[0] and not str(row[0]).startswith("#")
             }
-            log.info("health check columns: %s", columns)
             if self.partition != "all" and self.config["date_col"] not in columns:
                 raise ValueError(f"date_col {self.config['date_col']!r} not in {sorted(columns)}")
             self.column_types = columns
@@ -302,6 +297,7 @@ class SparkTarget:
             key_families or [],
             "spark",
             "right",
+            key_types=self._key_types(key_columns or []),
         )
         if self.partition == "all":
             rows = self._rows(
@@ -329,9 +325,7 @@ class SparkTarget:
         for value, count in rows:
             day = canonical_date(value)
             counts[day] = counts.get(day, 0) + int(count)
-        return aggregate_partition_counts(
-            counts, self.partition
-        )
+        return aggregate_partition_counts(counts, self.partition)
 
     def _sample_predicate(self, manifest: dict[str, Any], window: dict[str, Any]) -> str | None:
         keys, families = manifest["right_key_cols"], manifest["key_families"]
@@ -343,6 +337,7 @@ class SparkTarget:
             "spark",
             "right",
             window.get("key_tuples"),
+            key_types=self._key_types(keys),
         )
 
     def window_statistics(

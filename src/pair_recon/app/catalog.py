@@ -66,6 +66,13 @@ class Catalog:
             queries[pair] = row
         return [{**row, "pair_sql": queries.get(row["pair_name"])} for row in pairs]
 
+    def column_mappings(self, pair: str):
+        return self.sql.execute(
+            f"SELECT pair_name, left_column, right_column, data_type "
+            f"FROM {self.column_map_table} WHERE pair_name = :pair_name ORDER BY left_column",
+            {"pair_name": pair},
+        )
+
     def pairs(self):
         pairs = self.sql.execute(
             f"SELECT * FROM {self.pair_table} WHERE enabled = true ORDER BY pair_name"

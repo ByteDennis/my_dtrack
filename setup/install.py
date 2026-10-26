@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
@@ -75,7 +76,10 @@ def main(argv=None):
         if not args.pair_table:
             parser.error("--pair-table is required unless --skip-config is used")
         read_pair_workbook(args.config_workbook)
-    client = WorkspaceClient(profile=args.profile)
+    client = WorkspaceClient(
+        profile=args.profile,
+        auth_type=os.environ.get("DATABRICKS_AUTH_TYPE") or "external-browser",
+    )
     target = right_target(client, args.workspace_dir)
     uploaded, deleted = upload(client, right_source(), target)
     job_id = upsert(client, job_spec(args.job_name, right_notebook(target), args.cluster_id))

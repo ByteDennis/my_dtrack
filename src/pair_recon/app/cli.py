@@ -9,6 +9,8 @@ from pathlib import Path
 import yaml
 
 from pair_recon.core.debug import debugging, run_debugger
+from pair_recon.core.metadata.configuration import parse_key_columns
+from pair_recon.core.metadata.mapping import upsert_column_mappings
 from pair_recon.core.metadata.workbook import (
     changed_pair_configurations,
     read_pair_workbook,
@@ -403,7 +405,29 @@ def synchronize_pair_workbook(sql, catalog, pair_table: str, workbook_path: str 
         if changed
         else {"pair_meta_table": pair_table, "rows": 0, "sql_rows": 0, "pairs": []}
     )
-    return rows, {**result, "source": str(source)}
+    mapping_rows = sum(synchronize_key_types(sql, catalog, row) for row in changed)
+    return rows, {**result, "mapping_rows": mapping_rows, "source": str(source)}
+
+
+# >>> NAME[type] keys become data_type on the pair's column map rows; a missing row is created <<< #
+def synchronize_key_types(sql, catalog, row: dict) -> int:
+    pair = row["pair_name"]
+    _names, types = parse_key_columns(row.get("key_columns") or [], pair)
+    if not types:
+        return 0
+    existing = {item["left_column"]: item for item in catalog.column_mappings(pair)}
+    left_date = str(row.get("left_date_col") or "").casefold()
+    right_date = str(row.get("right_date_col") or "")
+    mappings = []
+    for name, kind in types.items():
+        current = existing.get(name)
+        if current is not None:
+            right = current["right_column"]
+        else:
+            right = right_date if right_date and name.casefold() == left_date else name
+        mappings.append({"left_column": name, "right_column": right, "data_type": kind})
+    upsert_column_mappings(sql, catalog.column_map_table, pair, mappings)
+    return len(mappings)
 
 
 def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = True):

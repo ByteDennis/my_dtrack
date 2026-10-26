@@ -9,7 +9,7 @@ from pair_recon_left.common.model.manifest import sample_plan
 from pair_recon_left.common.sql.query_windows import normalize_query_windows
 
 from . import companion_table, validate_table_name
-from .configuration import build_pair_config
+from .configuration import KEY_SPEC, build_pair_config, key_type_names, parse_key_columns
 
 PAIR_WORKBOOK_COLUMNS = (
     "pair_name",
@@ -89,7 +89,14 @@ PARTITIONS = ("day", "month", "all")
 FIELD_GUIDE = (
     ("pairs", "pair_name", "always", "text", "Unique Pair name.", "orders"),
     ("pairs", "enabled", "always", "boolean", "Show Pair in runs.", "TRUE"),
-    ("pairs", "key_columns", "when sampled", "comma list", "Stable sample keys.", "ORDER_ID"),
+    (
+        "pairs",
+        "key_columns",
+        "when sampled",
+        "comma list of NAME[type]",
+        f"Stable sample keys as NAME[type]; types: {', '.join(key_type_names())}.",
+        "ACCT_ID[numeric],ORDER_DT[date]",
+    ),
     ("pairs", "vintage", "always", "day|week|month|quarter|year", "Stats bucket.", "month"),
     (
         "pairs",
@@ -295,6 +302,14 @@ def _key_columns(value: Any, *, row: int) -> list[str]:
     values = [item.strip() for item in str(value).split(",") if item.strip()]
     if not values:
         raise ValueError(f"pairs.xlsx row {row}: key_columns must name one or more columns")
+    for item in values:
+        match = KEY_SPEC.match(item)
+        if match is None or not (match.group(2) or "").strip():
+            raise ValueError(
+                f"pairs.xlsx row {row}: key_columns entries must be NAME[type], got {item!r}; "
+                f"types: {', '.join(key_type_names())}"
+            )
+    parse_key_columns(values, f"pairs.xlsx row {row}")
     return list(dict.fromkeys(values))
 
 
