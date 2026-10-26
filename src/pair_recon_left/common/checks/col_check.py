@@ -41,6 +41,7 @@ from ..model.protocol import (
     unit_batch_path,
     write_left_state,
     write_run_status,
+    write_window_count,
 )
 from ..runtime.duck import use_temp
 from ..runtime.progress import StatisticsProgress
@@ -744,6 +745,7 @@ class LeftRuntime:
                         window["bucket"],
                         output,
                     )
+                    self._publish_window_count(manifest, window, output)
                     return output
             except (OSError, ValueError, json.JSONDecodeError):
                 log.warning("ignoring invalid Left pull cache metadata: %s", metadata)
@@ -771,10 +773,17 @@ class LeftRuntime:
             "left data pull completed: pair=%s vintage=%s sampled_rows=%d path=%s",
             manifest["pair"],
             window["bucket"],
-            _row_count(path),
+            self._publish_window_count(manifest, window, path),
             path,
         )
         return path
+
+    # >>> sampled row count goes to the Volume before statistics so the Right can compare it early <<< #
+    def _publish_window_count(self, manifest, window, path) -> int:
+        count = _row_count(path)
+        if self.store is not None:
+            write_window_count(self.store, manifest["pair"], window["bucket"], count)
+        return count
 
     @staticmethod
     def compute_stats(

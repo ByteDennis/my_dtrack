@@ -434,7 +434,7 @@ def _statistics(
     values = {}
     completed = 0
     for group in _batches(indexed, batch):
-        selects = ["count(*) AS n_total"] if "n_total" in selected else []
+        selects = ["count(*) AS n_total"]
         for index, column in group:
             raw, value = _quote(column), base[column]
             if numeric[column] and not strict:
@@ -508,9 +508,10 @@ def _statistics(
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-        payload: dict[str, Any] = {"col_type": "numeric" if is_numeric else "categorical"}
-        if "n_total" in selected:
-            payload["n_total"] = int(row["n_total"])
+        payload: dict[str, Any] = {
+            "col_type": "numeric" if is_numeric else "categorical",
+            "n_total": int(row["n_total"]),
+        }
         if "n_missing" in selected:
             payload["n_missing"] = int(row[f"n_missing_{index}"] or 0)
         if "n_unique" in selected:

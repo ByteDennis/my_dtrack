@@ -340,14 +340,11 @@ class SparkTarget:
             key_types=self._key_types(keys),
         )
 
-    def window_statistics(
-        self, manifest: dict[str, Any], window: dict[str, Any]
-    ) -> dict[str, dict[str, Any]]:
+    def _window_where(self, manifest: dict[str, Any], window: dict[str, Any]) -> tuple[str, bool]:
         if not hasattr(self, "column_types"):
             self.health_check()
         if self.partition != "all":
             self.date_type()
-        strict = bool(manifest.get("strict"))
         predicate = (
             partition_where(
                 self.config["date_col"],
@@ -361,14 +358,29 @@ class SparkTarget:
         )
         sample = self._sample_predicate(manifest, window)
         filters = " AND ".join(f"({item})" for item in (predicate, sample) if item)
-        where = self._where(filters or None)
+        return self._where(filters or None), bool(sample)
+
+    # >>> sampled row count of one window with the same predicate as window_statistics, one scan <<< #
+    def window_count(self, manifest: dict[str, Any], window: dict[str, Any]) -> int:
+        where, _sampled = self._window_where(manifest, window)
+        rows = self._rows(
+            f"SELECT count(1) FROM {self.relation(partitions=window['partitions'])} WHERE {where}",
+            "window_count",
+        )
+        return int(rows[0][0]) if rows else 0
+
+    def window_statistics(
+        self, manifest: dict[str, Any], window: dict[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        strict = bool(manifest.get("strict"))
+        where, sample = self._window_where(manifest, window)
         right_columns = [manifest["col_map"][column] for column in manifest["columns"]]
         overrides = manifest.get("col_type_overrides") or {}
         column_types = manifest.get("column_types") or {}
         selected = manifest.get("statistics") or list(DEFAULT_STATISTICS)
         include_top = "statistics" not in manifest
         kinds = {}
-        selects = ["count(1) AS n_total"] if "n_total" in selected else []
+        selects = ["count(1) AS n_total"]
         for i, (left_column, column) in enumerate(zip(manifest["columns"], right_columns)):
             ref = quote_ident(column, "spark")
             column_type = self.column_types.get(column, "")
@@ -444,9 +456,10 @@ class SparkTarget:
         stats = {}
         for i, column in enumerate(right_columns):
             numeric = kinds[column]
-            payload: dict[str, Any] = {"col_type": "numeric" if numeric else "categorical"}
-            if "n_total" in selected:
-                payload["n_total"] = int(row["n_total"])
+            payload: dict[str, Any] = {
+                "col_type": "numeric" if numeric else "categorical",
+                "n_total": int(row["n_total"]),
+            }
             if "n_missing" in selected:
                 payload["n_missing"] = int(row[f"n_missing_{i}"] or 0)
             if "n_unique" in selected:

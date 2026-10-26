@@ -112,7 +112,7 @@ def test_csv(tmp_path):
     manifest["statistics"] = ["n_unique", "hash_sum"]
     stats = target.window_statistics(manifest, {"partitions": ["all"]})
     assert stats["status"]["n_unique"] == 2
-    assert set(stats["amount"]) == {"col_type", "n_unique", "hash_sum"}
+    assert set(stats["amount"]) == {"col_type", "n_total", "n_unique", "hash_sum"}
 
 
 def test_health_check():
@@ -190,6 +190,18 @@ def test_numeric_keys_hash_as_plain_decimal_text():
     assert "regexp_replace(regexp_replace(CAST(`amount`" not in SparkTarget(
         None, ORDERS
     )._sample_predicate(manifest, {})
+
+
+def test_window_count_uses_the_statistics_predicate():
+    spark = FakeSpark(lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [(42,)])
+    target = SparkTarget(spark, ORDERS)
+    manifest = _manifest({"mode": "fraction", "threshold": 99})
+    window = {"bucket": "2026-01-01", "partitions": ["2026-01-01", "2026-01-02"]}
+    assert target.window_count(manifest, window) == 42
+    sql = spark.statements[-1]
+    assert sql.startswith("SELECT count(1) FROM `main`.`sales`.`orders` WHERE ")
+    assert "`business_date` >= DATE '2026-01-01' AND `business_date` < DATE '2026-01-03'" in sql
+    assert "< 99" in sql and "count(DISTINCT" not in sql
 
 
 def test_key_family_date_type_fits_column():
@@ -414,6 +426,7 @@ def test_statistics():
     )
     assert selected["amount"] == {
         "col_type": "numeric",
+        "n_total": 4,
         "n_unique": 2,
         "hash_sum": "2000",
     }

@@ -155,6 +155,65 @@ def test_total_mismatch_stops_the_right_after_recording_the_diff():
     assert results[0]["verdict"] == "diff"
 
 
+def test_first_window_count_is_compared_before_statistics():
+    class CountingTarget(FakeTarget):
+        def __init__(self, count, **options):
+            super().__init__(**options)
+            self.count = count
+            self.counts = []
+
+        def window_count(self, manifest, window):
+            self.counts.append((manifest["pair"], window["bucket"]))
+            return self.count
+
+    store, uid = _drained_store(sample_mode="fraction")
+    store.put_json("col_check/window_counts/p--2026-01-01.json", {"n_total": 2})
+    target = CountingTarget(5)
+    with pytest.raises(col_check.SampleCountMismatch) as info:
+        ColCheck(store, lambda _cfg: target, poll_interval=0).run()
+    assert "Left counted 2 rows but Right counted 5" in str(info.value)
+    assert "compared before statistics" in str(info.value)
+    assert target.counts == [("p", "2026-01-01")] and target.calls == []
+    assert list_results(store) == []
+
+    store, uid = _drained_store(sample_mode="fraction")
+    store.put_json("col_check/window_counts/p--2026-01-01.json", {"n_total": 2})
+    agreeing = CountingTarget(2)
+    results = ColCheck(store, lambda _cfg: agreeing, poll_interval=0).run()
+    assert [row["unit_id"] for row in results] == [uid]
+    assert agreeing.counts == [("p", "2026-01-01")] and len(agreeing.calls) == 1
+
+    store, uid = _drained_store(sample_mode="fraction")
+    absent = CountingTarget(9)
+    results = ColCheck(store, lambda _cfg: absent, poll_interval=0).run()
+    assert [row["unit_id"] for row in results] == [uid] and absent.counts == [("p", "2026-01-01")]
+
+
+def test_total_gate_works_without_n_total_in_checks():
+    manifest = {"pair": "p", "sample": {"mode": "fraction", "rate": 0.1}, "right_key_cols": ["id"]}
+    left = {**STATS, "n_total": 2}
+    right = {**STATS, "n_total": 3}
+    result = compare_statistics(
+        pair="p", window="w", column="c", left=left, right=right, statistics=["n_unique"]
+    )
+    assert result["verdict"] == "match" and "n_total_left" not in result
+    with pytest.raises(
+        col_check.SampleCountMismatch, match="Left counted 2 rows but Right counted 3"
+    ):
+        col_check.require_same_total(manifest, "w", "c", left, right)
+    col_check.require_same_total(manifest, "w", "c", left, {**STATS, "n_total": 2})
+    col_check.require_same_total(manifest, "w", "c", {"n_unique": 1}, right)
+
+
+def test_progress_bar_is_plain_text_on_stdout(capsys):
+    assert col_check.tqdm.__module__ == "tqdm.std"
+    store, _uid = _drained_store()
+    ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0).run()
+    captured = capsys.readouterr()
+    assert "Right comparison" in captured.out and "received=1/1" in captured.out
+    assert "Right comparison" not in captured.err
+
+
 def test_result_detail():
     changed = {**STATS, "n_unique": 3, "mean": 1.6}
     result = compare_statistics(pair="p", window="w", column="c", left=STATS, right=changed)

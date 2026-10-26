@@ -88,11 +88,13 @@ def test_csv(tmp_path):
     )
     assert selected["ID"] == {
         "col_type": "categorical",
+        "n_total": 2,
         "n_unique": 2,
         "hash_sum": result["ID"]["hash_sum"],
     }
     assert selected["AMOUNT"] == {
         "col_type": "numeric",
+        "n_total": 2,
         "n_unique": 2,
         "hash_sum": result["AMOUNT"]["hash_sum"],
     }

@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any, ClassVar
 
-from ..sql.dates import DateType, canonical_date, resolve_date_type
+from ..sql.dates import DateType, NativeDateType, canonical_date, resolve_date_type
 
 NULL = "<<NULL>>"
 PURE_DECIMAL = re.compile(r"^-?[0-9]+\.[0-9]+$")
@@ -287,10 +287,15 @@ class DateKeyFamily(KeyFamily):
     def normalize_sql(self, expr: str, dialect: str, side: str = "left") -> str:
         return self._kind(side).normalize_sql(expr, dialect_name(dialect))
 
+    # >>> a physical DATE/TIMESTAMP key skips text parsing (Oracle TO_CHAR would follow session NLS) <<< #
     def sql_dialect(
         self, expr: str, dialect: str, side: str = "right", data_type: str | None = None
     ) -> str:
-        body = self.normalize_sql(expr, dialect, side)
+        kind = str(data_type or "").upper()
+        if "DATE" in kind or "TIMESTAMP" in kind:
+            body = NativeDateType().normalize_sql(expr, dialect_name(dialect))
+        else:
+            body = self.normalize_sql(expr, dialect, side)
         return f"coalesce(nullif({body}, ''), '{NULL}')"
 
     def sql(self, expr: str, side: str = "right") -> str:

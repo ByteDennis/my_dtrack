@@ -72,6 +72,27 @@ def fixed_keys_document(store, pair: str) -> dict[str, Any] | None:
     return store.get_json(key) if store.exists(key) else None
 
 
+WINDOW_COUNT_PREFIX = "col_check/window_counts/"
+
+
+def window_count_path(pair: str, window: str) -> str:
+    return f"{WINDOW_COUNT_PREFIX}{pair}--{window}.json"
+
+
+# >>> Left sampled row count of one window, written right after the pull so the Right can gate early <<< #
+def write_window_count(store, pair: str, window: str, n_total: int) -> str:
+    path = window_count_path(pair, window)
+    store.put_json(path, {"pair": pair, "window": window, "n_total": int(n_total)})
+    return path
+
+
+def read_window_count(store, pair: str, window: str) -> int | None:
+    path = window_count_path(pair, window)
+    if not store.exists(path):
+        return None
+    return int(store.get_json(path)["n_total"])
+
+
 def unit_prefix(_pair: str) -> str:
     return "units/"
 

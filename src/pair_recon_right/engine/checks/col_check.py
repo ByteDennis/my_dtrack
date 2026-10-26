@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 import traceback
@@ -9,7 +10,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any
 
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from ..common.model.attribute_checks import attribute_check_names, get_attribute_check
 from ..common.model.audit import SqlAudit, attach_sql_audit
@@ -23,6 +24,7 @@ from ..common.model.protocol import (
     list_plans,
     list_result_batches,
     list_results,
+    read_window_count,
     refresh_units_status,
     unit_batch_units,
     unit_prefix,
@@ -143,6 +145,7 @@ class DrainScheduler:
 log = logging.getLogger("pair_recon.right.col_check")
 DEFAULT_RESULT_BATCH_SIZE = 64
 DEFAULT_HEARTBEAT_TIMEOUT = 600.0
+PROGRESS_INTERVAL = 30.0
 
 
 class PlanChangedError(RuntimeError):
@@ -175,6 +178,13 @@ def require_same_total(manifest, window, column, left, right) -> None:
     left_total, right_total = left.get("n_total"), right.get("n_total")
     if left_total is None or right_total is None or int(left_total) == int(right_total):
         return
+    raise SampleCountMismatch(
+        _mismatch_message(manifest, window, int(left_total), int(right_total))
+        + f" (first seen on column {column})"
+    )
+
+
+def _mismatch_message(manifest, window, left_total: int, right_total: int) -> str:
     mode = (manifest.get("sample") or {}).get("mode", "all")
     if mode == "fixed":
         hint = "the fixed key tuples are not all present on both sides"
@@ -185,9 +195,9 @@ def require_same_total(manifest, window, column, left, right) -> None:
             "the sampled key sets differ; check the key columns' types and data_type "
             f"normalization on both sides (keys {', '.join(manifest.get('right_key_cols') or [])})"
         )
-    raise SampleCountMismatch(
+    return (
         f"{manifest['pair']} {window}: Left counted {left_total} rows but Right counted "
-        f"{right_total} for column {column}; {hint}"
+        f"{right_total}; {hint}"
     )
 
 
@@ -237,6 +247,30 @@ class ColCheck:
         self.completed_batches = len(list_result_batches(store))
         self.legacy_result_mode = False
         self.progress = None
+        self.first_window: tuple[str, str, int] | None = None
+        self.first_window_started = False
+        self.first_window_checked = False
+        self.first_window_lock = threading.Lock()
+
+    # >>> the first window's sampled count is compared as soon as both sides have it, before any statistics <<< #
+    def _check_first_window(self) -> None:
+        with self.first_window_lock:
+            if self.first_window is None or self.first_window_checked:
+                return
+            pair, window, right_total = self.first_window
+            left_total = read_window_count(self.store, pair, window)
+            if left_total is None:
+                return
+            self.first_window_checked = True
+        if left_total != right_total:
+            manifest = self.scheduler.manifests[pair]
+            raise SampleCountMismatch(
+                _mismatch_message(manifest, window, left_total, right_total)
+                + " (sampled counts compared before statistics)"
+            )
+        log.info(
+            "B sampled counts agree %s %s: left=%d right=%d", pair, window, left_total, right_total
+        )
 
     def _refresh_progress(self):
         total = len(self.active_ids)
@@ -246,8 +280,11 @@ class ColCheck:
                 total=total,
                 desc="Right comparison",
                 unit="column",
-                dynamic_ncols=True,
-                leave=False,
+                file=sys.stdout,
+                ascii=True,
+                ncols=140,
+                leave=True,
+                mininterval=PROGRESS_INTERVAL,
             )
         elif self.progress.total != total:
             self.progress.total = total
@@ -258,7 +295,7 @@ class ColCheck:
             f"stats={len(self.ready_windows)}/{len(self.scheduler.windows)} "
             f"fetching={len(self.scheduler.prefetching)} "
             f"queued={len(self.scheduler.ready) + sum(map(len, self.scheduler.pending.values()))}",
-            refresh=True,
+            refresh=False,
         )
 
     def _close_progress(self):
@@ -416,6 +453,7 @@ class ColCheck:
         if changed:
             self._write_progress()
             self._refresh_progress()
+        self._check_first_window()
         return changed
 
     def _failure(self, task, exc):
@@ -462,8 +500,28 @@ class ColCheck:
         else:
             self.scheduler.requeue_unit(task.payload)
 
+    def _count_first_window(self, task, manifest) -> None:
+        target = self._target(manifest)
+        with self.first_window_lock:
+            if self.first_window_started or not hasattr(target, "window_count"):
+                return
+            self.first_window_started = True
+        started = time.monotonic()
+        count = int(target.window_count(manifest, task.payload))
+        log.info(
+            "B right count %s %s: %d sampled row(s) (%.3fs)",
+            task.pair,
+            task.window,
+            count,
+            time.monotonic() - started,
+        )
+        with self.first_window_lock:
+            self.first_window = (task.pair, task.window, count)
+        self._check_first_window()
+
     def _fetch_right(self, task):
         manifest = self.scheduler.manifests[task.pair]
+        self._count_first_window(task, manifest)
         started = time.monotonic()
         log.info(
             "B fetch_right %s %s: %d partition(s)",
@@ -576,7 +634,7 @@ class ColCheck:
                         try:
                             stats, elapsed = future.result()
                             self._complete_prefetch(task, stats, elapsed)
-                        except PlanChangedError:
+                        except (PlanChangedError, SampleCountMismatch):
                             raise
                         except Exception as exc:
                             self._failure(task, exc)

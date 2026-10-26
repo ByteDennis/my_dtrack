@@ -230,11 +230,15 @@ def test_cache(tmp_path, caplog):
             calls.append(columns)
             return write_rows(output, columns, [["1"]])
 
-    runtime = LeftRuntime(tmp_path)
+    store = MemoryStore()
+    runtime = LeftRuntime(tmp_path, store)
     runtime.sources["pair"] = Source()
     window = row["windows"][0]
     with caplog.at_level("INFO"):
         runtime.pull_window(row, window)
+    assert store.get_json("col_check/window_counts/pair--all.json")["n_total"] == 1
+    store.delete_keys(["col_check/window_counts/pair--all.json"])
     runtime.pull_window(row, window)
     assert calls == [["amount"]]
+    assert store.get_json("col_check/window_counts/pair--all.json")["n_total"] == 1
     assert "left data pull completed: pair=pair vintage=all sampled_rows=1 path=" in caplog.text

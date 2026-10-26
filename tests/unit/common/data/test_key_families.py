@@ -135,6 +135,25 @@ def test_registered_date_string_accepts_compact_and_dash(common, right):
     assert family.normalize(right, "right") == "2013-07-10"
 
 
+@pytest.mark.parametrize("name", ["date_string", "date_type", "sas_datetime_date"])
+def test_physical_date_keys_skip_text_parsing(common, name):
+    family = common.hashing.key_family(name)
+    spark = family.sql_dialect("`eff_dt`", "spark", "right", "timestamp")
+    assert "to_date(`eff_dt`)" in spark and "try_to_timestamp" not in spark
+    text = family.sql_dialect("`dw_bus_dt`", "spark", "right", "string")
+    if name != "sas_datetime_date":
+        assert "to_date(`dw_bus_dt`)" not in text and "try_to_timestamp" in text
+    assert family.sql_dialect("x", "spark", "right") == family.sql_dialect(
+        "x", "spark", "right", None
+    )
+    if common.side != "pair_recon_left":
+        return
+    oracle = family.sql_dialect("EFF_DT", "oracle", "left", "DB_TYPE_DATE")
+    assert "TRUNC(EFF_DT)" in oracle and "TO_CHAR(EFF_DT)" not in oracle
+    stamp = family.sql_dialect("EFF_DT", "oracle", "left", "DB_TYPE_TIMESTAMP")
+    assert "TRUNC(EFF_DT)" in stamp
+
+
 def test_normalize_sql_keeps_null_while_sql_dialect_uses_the_sentinel(common):
     family = common.hashing.key_family("numeric")
     raw = family.normalize_sql("x", "duckdb", "left")
