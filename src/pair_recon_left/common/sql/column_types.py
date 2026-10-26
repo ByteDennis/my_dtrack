@@ -9,9 +9,9 @@ DateColumnType = DateKeyFamily
 COLUMN_TYPES = FAMILIES
 
 
-# >>> registers a normalizer class under a name; column types and key families share one registry <<< #
-def register_column_type(name: str):
-    return register_family(name)
+# >>> registers a named normalizer class; column types and key families share one registry <<< #
+def register_column_type(cls: type[KeyFamily]) -> type[KeyFamily]:
+    return register_family(cls)
 
 
 # >>> resolves a column type spec through the shared normalizer registry <<< #

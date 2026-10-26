@@ -15,46 +15,35 @@ import pytest
         ("month", "2013-07-10 20:00:00", "201307"),
         ("month", "20130710", "201307"),
         ("month", "2013-07-10", "201307"),
+        ("month", "201307", "201307"),
+        ("month", 201307, "201307"),
+        ("month", "201313", "<<NULL>>"),
         ("digits", "123-45-6789", "123456789"),
-        (["trim", "upper", "strip_prefix:ID-"], " id-42", "42"),
-        (["lpad:5"], "42", "00042"),
-        (["strip_suffix:.0"], "42.0", "42"),
     ],
 )
 def test_builtin(common, family, value, expected):
     assert common.hashing.key_family(family).normalize(value) == expected
 
 
-def test_transform(common):
+def test_family_owns_python_and_sql_normalization(common):
     family = common.hashing.key_family("numeric")
-    assert family.left_transform("007") == family.right_transform("007") == family.transform("007")
-    assert family.left_transform_sql("x") == family.right_transform_sql("x")
-
-
-def test_side(common):
-    family = common.hashing.key_family(
-        {"family": "numeric", "left_transform": ["trim", "strip_prefix:A"]}
-    )
-    assert family.normalize("A007", "left") == "007"
-    assert family.normalize("007", "right") == "7"
-    assert family.spec() == {
-        "transform": ["trim", "strip_leading_zeros", "collapse_decimal"],
-        "left_transform": ["trim", "strip_prefix:A"],
-    }
-    assert common.hashing.key_family(family.spec()) == family
+    assert family.normalize("007", "left") == family.normalize("007", "right") == "7"
+    assert "regexp_replace" in family.normalize_sql("x", "spark", "left")
 
 
 def test_registered(common):
     keys = common.hashing
 
-    @keys.register_family("test_branch")
-    class Branch(keys.KeyFamily):
-        steps = ("trim",)
+    @keys.register_family
+    class Branch(keys.ExactFamily):
+        name = "test_branch"
 
-        def left_transform(self, text):
+        def normalize_left(self, text):
             return text.strip().split("-")[-1]
 
-        def left_transform_sql(self, text):
+        def normalize_left_sql(self, text, dialect):
+            if dialect != "spark":
+                raise keys.SamplingSqlNotSupported(f"test_branch does not support {dialect}")
             return f"element_at(split(trim({text}), '-'), -1)"
 
     try:
@@ -70,11 +59,9 @@ def test_registered(common):
     ("spec", "message"),
     [
         ("blob", "unsupported key family 'blob'"),
-        (["trim", "nope"], "unknown key step 'nope'"),
-        (["lpad"], "needs :arg"),
-        (["trim:x"], "takes no :arg"),
+        (["trim", "nope"], "registered name or a date type object"),
         ({"steps": ["trim"]}, "unsupported key family fields: steps"),
-        (7, "must be a name"),
+        (7, "registered name or a date type object"),
     ],
 )
 def test_invalid(common, spec, message):
@@ -133,10 +120,19 @@ def test_registered_date_class_is_a_shared_normalizer(common):
         "left_date_type": {"type": "sas", "format": "datetime"},
         "right_date_type": {"type": "string", "format": "compact"},
     }
-    with pytest.raises(ValueError, match="does not take transform steps"):
+    with pytest.raises(ValueError, match="unsupported key family fields: transform"):
         keys.key_family({"type": "sas_datetime_date", "transform": ["trim"]})
     with pytest.raises(ValueError, match="does not take date types"):
         keys.key_family({"type": "numeric", "right_date_type": "date"})
+
+
+@pytest.mark.parametrize("right", ["20130710", "2013-07-10"])
+def test_registered_date_string_accepts_compact_and_dash(common, right):
+    family = common.hashing.key_family("date_string")
+    assert isinstance(family, common.hashing.DateString)
+    assert family.spec() == "date_string"
+    assert family.normalize("2013-07-10 20:00:00", "left") == "2013-07-10"
+    assert family.normalize(right, "right") == "2013-07-10"
 
 
 def test_normalize_sql_keeps_null_while_sql_dialect_uses_the_sentinel(common):

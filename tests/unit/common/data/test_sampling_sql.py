@@ -32,7 +32,7 @@ VALUES = [
 
 @pytest.mark.parametrize(
     "spec",
-    [*sorted(FAMILIES), ["trim", "upper", "strip_prefix:ID-"], ["lpad:6"]],
+    sorted(FAMILIES),
     ids=str,
 )
 def test_duckdb(spec):
@@ -87,7 +87,7 @@ def test_custom():
     class CustomFamily(type(key_family("string"))):
         name = "custom-test"
 
-        def left_transform(self, text):
+        def normalize_left(self, text):
             return text.removeprefix("X")
 
     family = CustomFamily()

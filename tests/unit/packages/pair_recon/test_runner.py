@@ -2763,7 +2763,7 @@ def test_progress_sampler_survives_transient_snapshot_errors(monkeypatch):
         ).start(required=True)
 
 
-def test_mapping_data_type_accepts_names_step_lists_and_objects():
+def test_mapping_data_type_accepts_registered_names_and_date_objects():
     from pair_recon.core.metadata.configuration import build_pair_config
 
     row = {
@@ -2783,7 +2783,7 @@ def test_mapping_data_type_accepts_names_step_lists_and_objects():
             {"left_column": "EFF_DT", "right_column": "dw_bus_dt", "data_type": None},
             {"left_column": "ACCT_ID", "right_column": "acct_id", "data_type": "numeric"},
             {"left_column": "ZIP", "right_column": "zip", "data_type": "digits"},
-            {"left_column": "REF", "right_column": "ref", "data_type": '["trim","lpad:10"]'},
+            {"left_column": "REF", "right_column": "ref", "data_type": "exact"},
             {
                 "left_column": "OPEN_DT",
                 "right_column": "open_dt",
@@ -2797,7 +2797,7 @@ def test_mapping_data_type_accepts_names_step_lists_and_objects():
     assert config["col_type_overrides"] == {"ACCT_ID": "numeric"}
     assert config["column_types"] == {
         "ZIP": "digits",
-        "REF": ["trim", "lpad:10"],
+        "REF": "exact",
         "OPEN_DT": {"type": "date", "right_date_type": {"type": "string", "format": "compact"}},
     }
     assert config["key"] == "EFF_DT,ACCT_ID" and config["col_map"]["EFF_DT"] == "dw_bus_dt"
