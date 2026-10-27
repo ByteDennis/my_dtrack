@@ -1,4 +1,6 @@
+import errno
 import json
+import logging
 import os
 import threading
 import time
@@ -26,12 +28,38 @@ from ..common.model.protocol import (
     write_right_state,
 )
 
+log = logging.getLogger("pair_recon.right.store")
+RETRY_ATTEMPTS = 5
+RETRY_BACKOFF_S = 2.0
+RETRY_ERRNOS = {errno.EINVAL, errno.EIO, errno.ESTALE}
+
 
 def validate_run_id(value):
     run_id = str(value or "")
     if not run_id or run_id in {".", ".."} or any(char in run_id for char in "/\\\0"):
         raise ValueError("run_id must be one non-empty folder name")
     return run_id
+
+
+# >>> repeat a Volume read after the FUSE mount answers EINVAL/EIO/ESTALE, typically mid-overwrite <<< #
+def retry_io(operation, call, *, attempts=RETRY_ATTEMPTS):
+    for attempt in range(1, attempts + 1):
+        try:
+            return call()
+        except OSError as exc:
+            if exc.errno not in RETRY_ERRNOS or attempt >= attempts:
+                raise
+            delay = RETRY_BACKOFF_S * attempt
+            log.warning(
+                "volume %s failed (%s); retry %d/%d in %.0fs",
+                operation,
+                exc,
+                attempt,
+                attempts - 1,
+                delay,
+            )
+            time.sleep(delay)
+    return None
 
 
 class VolumeStore:
@@ -66,23 +94,26 @@ class VolumeStore:
         return self.put_bytes(relative, body, content_type="application/json")
 
     def get_bytes(self, relative):
-        return self._path(relative).read_bytes()
+        return retry_io(f"read {relative}", self._path(relative).read_bytes)
 
     def get_json(self, relative):
         return json.loads(self.get_bytes(relative).decode())
 
     def exists(self, relative):
-        return self._path(relative).is_file()
+        return retry_io(f"stat {relative}", self._path(relative).is_file)
 
     def list_keys(self, prefix, *, start_after=None):
         base = self._path(prefix) if prefix else self.root
         folder = base if base.is_dir() else base.parent
         if not folder.is_dir():
             return []
-        keys = sorted(
-            path.relative_to(self.root).as_posix()
-            for path in folder.rglob("*")
-            if path.is_file() and not path.name.endswith(".part")
+        keys = retry_io(
+            f"list {prefix}",
+            lambda: sorted(
+                path.relative_to(self.root).as_posix()
+                for path in folder.rglob("*")
+                if path.is_file() and not path.name.endswith(".part")
+            ),
         )
         return [
             key

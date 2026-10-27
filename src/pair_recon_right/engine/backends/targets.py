@@ -85,6 +85,9 @@ class CsvTarget:
             options = {}
         return self.source.partition_counts(from_date, to_date, **options)
 
+    def count_keys(self, from_date=None, to_date=None, **options):
+        return self.source.count_keys(from_date, to_date, side="right", **options)
+
     def window_statistics(self, manifest, window):
         from pair_recon_left.common.runtime.stats import compute_csv_statistics
 
@@ -98,7 +101,7 @@ class CsvTarget:
             mapping[column]: value for column, value in (manifest.get("column_types") or {}).items()
         }
         with TemporaryDirectory(prefix="pair_recon-right-") as folder:
-            path = self.source.pull_window(
+            path, _rows = self.source.pull_window(
                 window["partitions"],
                 columns,
                 Path(folder) / "window.csv",
@@ -326,6 +329,46 @@ class SparkTarget:
             day = canonical_date(value)
             counts[day] = counts.get(day, 0) + int(count)
         return aggregate_partition_counts(counts, self.partition)
+
+    # >>> how many of the Left's sampled key tuples the real predicate also selects here (smoke stage) <<< #
+    def count_keys(
+        self,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        *,
+        key_columns: list[str],
+        key_families: list[Any],
+        sample: dict[str, Any] | None,
+        key_tuples: list[list[object]],
+    ) -> int:
+        if not hasattr(self, "column_types"):
+            self.health_check()
+        self._check_key_families(key_columns, key_families)
+        keys = [quote_ident(key, "spark") for key in key_columns]
+        types = self._key_types(key_columns)
+        sampled = sample_predicate_sql(
+            sample, keys, key_families, "spark", "right", key_types=types
+        )
+        fixed = sample_predicate_sql(
+            {"mode": "fixed"}, keys, key_families, "spark", "right", key_tuples, types
+        )
+        bounds = None
+        if self.partition != "all":
+            self.date_type()
+            bounds = bounds_where(
+                self.config["date_col"],
+                dialect="spark",
+                date_type=self.config.get("date_type"),
+                from_date=from_date,
+                to_date=to_date,
+            )
+        predicate = " AND ".join(f"({item})" for item in (bounds, sampled, fixed) if item)
+        rows = self._rows(
+            f"SELECT count(1) FROM {self.relation(from_date=from_date, to_date=to_date)} "
+            f"WHERE {self._where(predicate or None)}",
+            "smoke_keys",
+        )
+        return int(rows[0][0]) if rows else 0
 
     def _sample_predicate(self, manifest: dict[str, Any], window: dict[str, Any]) -> str | None:
         keys, families = manifest["right_key_cols"], manifest["key_families"]

@@ -322,6 +322,19 @@ def get_right_state(store) -> dict[str, Any]:
     return _get_role_state(store, RIGHT_STATE)
 
 
+EMPTY_STATES = ("empty", "left_only", "right_only")
+
+
+# >>> verdict for a plan without windows from the row-check counts; None when both sides had rows <<< #
+def empty_plan_state(result: dict[str, Any]) -> str | None:
+    rows = list((result.get("partitions") or {}).values())
+    left = sum(int(row.get("left") or 0) for row in rows)
+    right = sum(int(row.get("right") or 0) for row in rows)
+    if left and right:
+        return None
+    return "empty" if not (left or right) else "right_only" if right else "left_only"
+
+
 def row_check_is_closed(store) -> bool:
     state = get_right_state(store)
     if "row_check_closed_at" in state:

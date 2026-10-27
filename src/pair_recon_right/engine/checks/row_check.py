@@ -272,7 +272,7 @@ def unresolved_version2_partitions(store) -> dict[str, list[str]]:
     results = {result["pair"]: result for _key, result in list_row_results(store)}
     unresolved = {}
     for pair, plan in plans.items():
-        if int(plan.get("version") or 1) != 2 or pair not in results:
+        if int(plan.get("version") or 1) != 2 or pair not in results or not plan.get("windows"):
             continue
         synonyms = results[pair].get("date_synonyms") or {}
         excluded = {synonyms.get(value, value) for value in plan.get("excluded_partitions") or []}

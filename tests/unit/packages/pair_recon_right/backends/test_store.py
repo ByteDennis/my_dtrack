@@ -1,3 +1,5 @@
+import errno
+
 import pytest
 
 from pair_recon_right.engine.backends import store as store_module
@@ -38,3 +40,27 @@ def test_temporary_name_does_not_repeat_target_name(tmp_path, monkeypatch):
     assert len(temporary.name) == 42
     assert target.name not in temporary.name
     assert store.get_bytes(key) == b"payload"
+
+
+def test_reads_retry_fuse_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_module, "RETRY_BACKOFF_S", 0)
+    store = VolumeStore(tmp_path)
+    store.put_json("_state/left.json", {"phase": "col_check"})
+    attempts = []
+    read_bytes = store_module.Path.read_bytes
+
+    def flaky(self):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise OSError(errno.EINVAL, "Invalid argument")
+        return read_bytes(self)
+
+    monkeypatch.setattr(store_module.Path, "read_bytes", flaky)
+    assert store.get_json("_state/left.json") == {"phase": "col_check"} and len(attempts) == 3
+
+    def gone(self):
+        raise OSError(errno.ENOENT, "No such file")
+
+    monkeypatch.setattr(store_module.Path, "read_bytes", gone)
+    with pytest.raises(OSError, match="No such file"):
+        store.get_bytes("_state/left.json")

@@ -12,6 +12,7 @@ from pair_recon_left.backends.sources import (
     OracleSource,
     source_from_config,
 )
+from pair_recon_left.common.model.hashing import HASH_BUCKET_SPACE
 from pair_recon_left.common.runtime.stop import StopRequested, StopSignal
 
 LDAP = "ldap://ldap.corp:389/PRODSVC,cn=OracleContext,dc=corp,dc=com"
@@ -49,10 +50,10 @@ def test_csv(tmp_path):
     assert source.partition_counts() == {"all": 2}
     columns, rows = source.query(f"SELECT * FROM {source.relation()}")
     assert columns == ["ID", "VALUE"] and rows == [("1", "文字"), ("2", "✓")]
-    output = source.query_to_csv(
+    output, count = source.query_to_csv(
         f"SELECT * FROM {source.relation()}", tmp_path / "copy.csv", columns
     )
-    assert "文字" in output.read_text(encoding="utf-8")
+    assert count == 2 and "文字" in output.read_text(encoding="utf-8")
 
 
 def test_credentials(monkeypatch):
@@ -188,8 +189,8 @@ def test_query(tmp_path):
     source.connect = lambda: connection
     columns, rows = source.query("SELECT * FROM T")
     assert columns == ["ID", "文字"] and rows == [(1, "✓")]
-    path = source.query_to_csv("SELECT * FROM T", tmp_path / "rows.csv", columns)
-    assert "文字" in path.read_text(encoding="utf-8")
+    path, count = source.query_to_csv("SELECT * FROM T", tmp_path / "rows.csv", columns)
+    assert count == 1 and "文字" in path.read_text(encoding="utf-8")
 
 
 def test_oracle_query_to_csv_tunes_fetch_and_retries_connection_loss(monkeypatch, tmp_path, caplog):
@@ -206,7 +207,7 @@ def test_oracle_query_to_csv_tunes_fetch_and_retries_connection_loss(monkeypatch
             pass
 
         def fetchmany(self, size):
-            assert size == 500
+            assert size == 500 and str(tmp_path / "rows.csv") in sources.FETCH_PROGRESS
             if self.fail:
                 self.fail = False
                 raise RuntimeError("DPY-4011: database or network closed the connection")
@@ -248,15 +249,16 @@ def test_oracle_query_to_csv_tunes_fetch_and_retries_connection_loss(monkeypatch
     source.connect = connect
 
     with caplog.at_level("INFO", logger="pair_recon.left.sources"):
-        path = source.query_to_csv("SELECT ID FROM T", tmp_path / "rows.csv", ["ID"])
+        path, count = source.query_to_csv("SELECT ID FROM T", tmp_path / "rows.csv", ["ID"])
 
-    assert path.read_text(encoding="utf-8") == "ID\n1\n2\n"
+    assert count == 2 and path.read_text(encoding="utf-8") == "ID\n1\n2\n"
     assert len(connections) == 2 and all(connection.closed for connection in connections)
     assert connections[1].cursor_value.arraysize == 500
     assert connections[1].cursor_value.prefetchrows == 250
     assert sleeps == [5]
     assert "retrying from the beginning" in caplog.text
     assert "throughput=" in caplog.text and "first_batch=" in caplog.text
+    assert not sources.FETCH_PROGRESS
 
 
 def test_oracle_query_to_csv_does_not_retry_non_connection_errors(monkeypatch, tmp_path):
@@ -358,3 +360,75 @@ def test_query_to_csv_cancels_the_running_statement_on_stop(tmp_path):
     assert not worker.is_alive() and connection.cancels == 1
     assert "Right failed" in str(outcome["error"])
     assert not (tmp_path / "rows.csv.part").exists()
+
+
+def test_oracle_connect_waits_out_the_session_limit(monkeypatch):
+    for name in ORACLE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ORACLE_SESSION_RETRIES", "2")
+    monkeypatch.setenv("ORACLE_SESSION_COOLDOWN_SECONDS", "7")
+    sleeps = []
+    monkeypatch.setattr(sources.time, "sleep", sleeps.append)
+    attempts = []
+
+    class Connection:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    def connect(**_options):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise RuntimeError("ORA-02391: exceeded simultaneous SESSIONS_PER_USER limit")
+        return Connection()
+
+    monkeypatch.setitem(sys.modules, "oracledb", SimpleNamespace(connect=connect))
+    source = OracleSource(
+        {
+            "source": "oracle",
+            "table": "T",
+            "user": "u",
+            "password": "p",
+            "dsn": "d",
+            "max_sessions": 1,
+        }
+    )
+    connection = source.connect()
+    assert len(attempts) == 3 and sleeps == [7.0, 7.0] and source._sessions._value == 0
+    connection.close()
+    connection.close()
+    assert connection.closed and source._sessions._value == 1
+    monkeypatch.setenv("ORACLE_SESSION_RETRIES", "0")
+    attempts.clear()
+    with pytest.raises(RuntimeError, match="ORA-02391"):
+        source.connect()
+    assert len(attempts) == 1 and source._sessions._value == 1
+
+
+def test_ldap_failures_count_as_transient():
+    class LDAPSocketOpenError(Exception):
+        pass
+
+    assert sources._transient_oracle_error(LDAPSocketOpenError("invalid server address"))
+    assert not sources._transient_oracle_error(RuntimeError("ORA-00942: table does not exist"))
+
+
+def test_csv_sample_rows_and_count_keys(tmp_path):
+    path = tmp_path / "rows.csv"
+    path.write_text("ID,VALUE\n1,a\n2,b\n3,c\n", encoding="utf-8")
+    source = CsvSource({"source": "csv", "path": str(path), "partition": "all"})
+    sample = {"mode": "fraction", "rate": 1.0, "threshold": HASH_BUCKET_SPACE}
+    columns, rows = source.sample_rows(
+        None, None, ["VALUE"], key_columns=["ID"], key_families=["numeric"], sample=sample, limit=2
+    )
+    assert columns == ["ID", "VALUE"] and len(rows) == 2
+    matched = source.count_keys(
+        None,
+        None,
+        key_columns=["ID"],
+        key_families=["numeric"],
+        sample=sample,
+        key_tuples=[[row[0]] for row in rows] + [["9"]],
+    )
+    assert matched == 2

@@ -29,6 +29,40 @@ from ..common.sql.sampling import fixed_keys_sql, sample_predicate_sql
 log = logging.getLogger("pair_recon.left.sources")
 _ORACLE_PULLS_LOCK = threading.Lock()
 _ORACLE_PULLS_ACTIVE = 0
+FETCH_PROGRESS: dict[str, tuple[int, float]] = {}
+FETCH_LOG_INTERVAL = 300.0
+SESSION_LIMIT = "ORA-02391"
+
+
+def _env_number(name: str, default):
+    return type(default)(os.getenv(name) or default)
+
+
+# >>> rows fetched so far per running pull, read by the stage watchdog; None clears the entry <<< #
+def _fetch_progress(key: str, rows: int | None) -> None:
+    with _ORACLE_PULLS_LOCK:
+        if rows is None:
+            FETCH_PROGRESS.pop(key, None)
+        else:
+            FETCH_PROGRESS[key] = (rows, time.monotonic())
+
+
+# >>> connection proxy that gives its session slot back exactly once on close <<< #
+class _Session:
+    def __init__(self, connection, release):
+        self._connection, self._release = connection, release
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def close(self):
+        release, self._release = self._release, None
+        if release is None:
+            return
+        try:
+            self._connection.close()
+        finally:
+            release()
 
 
 def _configured_int(config: dict[str, Any], name: str, default: int, *, minimum: int) -> int:
@@ -63,7 +97,7 @@ def _transient_oracle_error(exc: BaseException) -> bool:
         if getattr(details, "isrecoverable", False):
             return True
         text = str(current).upper()
-        if any(code in text for code in transient):
+        if any(code in text for code in transient) or type(current).__name__.startswith("LDAP"):
             return True
         current = current.__cause__ or current.__context__
     return False
@@ -205,12 +239,13 @@ class SqlSource(ABC):
 
     def query_to_csv(
         self, sql: str, output: Path, columns: list[str], *, operation: str = "query"
-    ) -> Path:
+    ) -> tuple[Path, int]:
         target = Path(output)
         target.parent.mkdir(parents=True, exist_ok=True)
         part = target.with_name(target.name + ".part")
         connection = self.connect()
         cursor = connection.cursor()
+        count = 0
         try:
             self._audit(sql, operation)
             with self._guard(cursor, connection):
@@ -221,14 +256,92 @@ class SqlSource(ABC):
                     while rows := cursor.fetchmany(10_000):
                         self._check_stop()
                         writer.writerows(rows)
+                        count += len(rows)
             os.replace(part, target)
-            return target
+            return target, count
         except Exception:
             part.unlink(missing_ok=True)
             raise
         finally:
             cursor.close()
             connection.close()
+
+    def _bounds(self, from_date: str | None, to_date: str | None) -> str | None:
+        if self.partition == "all":
+            return None
+        self.date_type()
+        return bounds_where(
+            self.config["date_col"],
+            dialect=self.dialect,
+            date_type=self.config.get("date_type"),
+            from_date=from_date,
+            to_date=to_date,
+        )
+
+    # >>> a few sampled rows over the whole range with the real predicate; the smoke stage uses it <<< #
+    def sample_rows(
+        self,
+        from_date: str | None,
+        to_date: str | None,
+        columns: list[str],
+        *,
+        key_columns: list[str],
+        key_families: list[Any],
+        sample: dict[str, Any] | None,
+        limit: int = 100,
+    ) -> tuple[list[str], list[tuple[Any, ...]]]:
+        dated = self.partition != "all"
+        selected = list(
+            dict.fromkeys([*([self.config["date_col"]] if dated else []), *key_columns, *columns])
+        )
+        sampled = sample_predicate_sql(
+            sample,
+            [quote_ident(column, self.dialect) for column in key_columns],
+            key_families,
+            self.dialect,
+            "left",
+            key_types=self.key_types(key_columns),
+        )
+        predicate = " AND ".join(
+            f"({item})" for item in (self._bounds(from_date, to_date), sampled) if item
+        )
+        tail = f"FETCH FIRST {limit} ROWS ONLY" if self.dialect == "oracle" else f"LIMIT {limit}"
+        sql = (
+            f"SELECT {', '.join(quote_ident(column, self.dialect) for column in selected)} "
+            f"FROM {self.relation(from_date=from_date, to_date=to_date)} "
+            f"WHERE {self._where(predicate or None)} {tail}"
+        )
+        return self.query(sql, operation="smoke_rows")
+
+    # >>> how many of the given key tuples the real sampling predicate also selects on this side <<< #
+    def count_keys(
+        self,
+        from_date: str | None,
+        to_date: str | None,
+        *,
+        key_columns: list[str],
+        key_families: list[Any],
+        sample: dict[str, Any] | None,
+        key_tuples: list[list[object]],
+        side: str = "left",
+    ) -> int:
+        keys = [quote_ident(column, self.dialect) for column in key_columns]
+        types = self.key_types(key_columns)
+        sampled = sample_predicate_sql(
+            sample, keys, key_families, self.dialect, side, key_types=types
+        )
+        fixed = sample_predicate_sql(
+            {"mode": "fixed"}, keys, key_families, self.dialect, side, key_tuples, types
+        )
+        predicate = " AND ".join(
+            f"({item})" for item in (self._bounds(from_date, to_date), sampled, fixed) if item
+        )
+        _columns, rows = self.query(
+            f"SELECT COUNT(*) FROM {self.relation(from_date=from_date, to_date=to_date)} "
+            f"WHERE {self._where(predicate or None)}",
+            operation="smoke_keys",
+        )
+        return int(rows[0][0]) if rows else 0
 
     def date_type(self):
         with self._date_type_lock:
@@ -322,7 +435,7 @@ class SqlSource(ABC):
         key_families: list[Any] | None = None,
         side: str = "left",
         key_tuples: list[list[object]] | None = None,
-    ) -> Path:
+    ) -> tuple[Path, int]:
         if self.partition != "all":
             self.date_type()
             selected = list(
@@ -456,11 +569,12 @@ class CsvSource(SqlSource):
 
     def query_to_csv(
         self, sql: str, output: Path, columns: list[str], *, operation: str = "query"
-    ) -> Path:
+    ) -> tuple[Path, int]:
         target = Path(output)
         target.parent.mkdir(parents=True, exist_ok=True)
         part = target.with_name(target.name + ".part")
         connection = self.connect()
+        count = 0
         try:
             self._audit(sql, operation)
             with self._guard(connection):
@@ -471,8 +585,9 @@ class CsvSource(SqlSource):
                     while rows := cursor.fetchmany(10_000):
                         self._check_stop()
                         writer.writerows(rows)
+                        count += len(rows)
             os.replace(part, target)
-            return target
+            return target, count
         except Exception:
             part.unlink(missing_ok=True)
             raise
@@ -542,6 +657,10 @@ class OracleSource(SqlSource):
         self.prefetchrows = _configured_int(config, "prefetchrows", 1_000, minimum=0)
         self.fetch_batch_size = _configured_int(config, "fetch_batch_size", 10_000, minimum=1)
         self.fetch_retries = _configured_int(config, "fetch_retries", 3, minimum=0)
+        self.max_sessions = _configured_int(
+            config, "max_sessions", _env_number("ORACLE_MAX_SESSIONS", 4), minimum=1
+        )
+        self._sessions = threading.BoundedSemaphore(self.max_sessions)
 
     def _pick(self, field: str, *suffixes: str) -> str | None:
         names = [self.config.get(f"{field}_env")]
@@ -570,11 +689,35 @@ class OracleSource(SqlSource):
 
         if not (self.user and self.password and (self.dsn or self.service or self.ldap_dsn)):
             raise ValueError("Oracle requires user, password, and dsn, service, or LDAP_DSN")
-        return oracledb.connect(user=self.user, password=self.password, dsn=self.resolve_dsn())
+        retries = _env_number("ORACLE_SESSION_RETRIES", 3)
+        cooldown = _env_number("ORACLE_SESSION_COOLDOWN_SECONDS", 30.0)
+        self._sessions.acquire()
+        try:
+            for attempt in range(retries + 1):
+                try:
+                    connection = oracledb.connect(
+                        user=self.user, password=self.password, dsn=self.resolve_dsn()
+                    )
+                    return _Session(connection, self._sessions.release)
+                except Exception as exc:
+                    if attempt >= retries or SESSION_LIMIT not in str(exc).upper():
+                        raise
+                    log.warning(
+                        "Oracle session limit reached (%s); retry %d/%d in %.0fs",
+                        exc,
+                        attempt + 1,
+                        retries,
+                        cooldown,
+                    )
+                    time.sleep(cooldown)
+        except BaseException:
+            self._sessions.release()
+            raise
+        return None
 
     def query_to_csv(
         self, sql: str, output: Path, columns: list[str], *, operation: str = "query"
-    ) -> Path:
+    ) -> tuple[Path, int]:
         global _ORACLE_PULLS_ACTIVE
 
         target = Path(output)
@@ -599,11 +742,13 @@ class OracleSource(SqlSource):
                 execute_seconds = fetch_seconds = write_seconds = 0.0
                 first_batch_seconds = None
                 row_count = 0
+                last_log = started
                 try:
                     connection = self.connect()
                     cursor = connection.cursor()
                     cursor.arraysize = self.arraysize
                     cursor.prefetchrows = self.prefetchrows
+                    _fetch_progress(str(target), 0)
                     with self._guard(cursor, connection):
                         mark = time.perf_counter()
                         cursor.execute(sql)
@@ -625,6 +770,18 @@ class OracleSource(SqlSource):
                                 writer.writerows(rows)
                                 write_seconds += time.perf_counter() - mark
                                 row_count += len(rows)
+                                _fetch_progress(str(target), row_count)
+                                now = time.perf_counter()
+                                if now - last_log >= FETCH_LOG_INTERVAL:
+                                    last_log = now
+                                    log.info(
+                                        "Oracle fetch progress: output=%s rows=%d elapsed=%.0fs "
+                                        "rows_per_second=%.1f",
+                                        target,
+                                        row_count,
+                                        now - started,
+                                        row_count / (now - started),
+                                    )
                     os.replace(part, target)
                     elapsed = time.perf_counter() - started
                     size_mb = target.stat().st_size / (1024 * 1024)
@@ -646,7 +803,7 @@ class OracleSource(SqlSource):
                         attempt + 1,
                         self.fetch_retries + 1,
                     )
-                    return target
+                    return target, row_count
                 except Exception as exc:
                     part.unlink(missing_ok=True)
                     if attempt >= self.fetch_retries or not _transient_oracle_error(exc):
@@ -669,6 +826,7 @@ class OracleSource(SqlSource):
                     _close_quietly(cursor)
                     _close_quietly(connection)
         finally:
+            _fetch_progress(str(target), None)
             with _ORACLE_PULLS_LOCK:
                 _ORACLE_PULLS_ACTIVE -= 1
 

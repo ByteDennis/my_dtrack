@@ -412,6 +412,7 @@ def test_checked_windows_skip_the_current_run():
         ({"row_errors": 0, "column_errors": 2, "failures": 0}, "different"),
         ({"row_errors": 1, "column_errors": 0, "failures": 0}, "different"),
         ({"row_errors": 0, "column_errors": 2, "failures": 1}, "incomplete"),
+        ({"row_errors": 1, "column_errors": 0, "failures": 0, "state": "right_only"}, "right_only"),
         ({}, "passed"),
     ],
 )

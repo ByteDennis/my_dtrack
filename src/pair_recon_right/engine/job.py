@@ -8,17 +8,51 @@ from .checks.col_check import DEFAULT_HEARTBEAT_TIMEOUT, ColCheck, require_left_
 from .checks.row_check import run_row_check
 from .common.model.protocol import (
     active_unit_ids,
+    empty_plan_state,
     list_failures,
     list_left_documents,
     list_plans,
     list_results,
     list_row_results,
+    write_right_state,
     write_run_status,
 )
 from .report import CONTENT_TYPES, build_report
 
 log = logging.getLogger("pair_recon.right.job")
 WAIT_LOG_INTERVAL = 300.0
+SMOKE_REQUEST = "_smoke/request.json"
+
+
+# >>> smoke stage: health check, a Volume state write, and the Left's sampled keys re-selected with the real predicate <<< #
+def smoke(store, target_factory):
+    request = store.get_json(SMOKE_REQUEST)
+    write_run_status(store, {"state": "right_smoke", "role": "right"})
+    write_right_state(store, {"phase": "smoke", "pair": request["pair"]})
+    target = target_factory({**request["right"], "partition": request.get("partition", "day")})
+    health = target.health_check()
+    result = {
+        "phase": "smoke",
+        "pair": request["pair"],
+        "health": health,
+        "matched": None,
+        "expected": len(request["key_tuples"]),
+    }
+    if health.get("ok"):
+        result["matched"] = target.count_keys(
+            request.get("from_date"),
+            request.get("to_date"),
+            key_columns=request["key_columns"],
+            key_families=request["key_families"],
+            sample=request["sample"],
+            key_tuples=request["key_tuples"],
+        )
+    write_right_state(store, result)
+    write_run_status(store, {"state": "smoke_complete", "role": "right"})
+    log.info("smoke: %s", result)
+    if not health.get("ok"):
+        raise RuntimeError(f"Right health check failed: {health.get('error')}")
+    return result
 
 
 # >>> blocks until the Left published its row data; only a stale Left heartbeat ends the wait <<< #
@@ -38,14 +72,19 @@ def wait_for_left_row_data(run_root, run_id, *, poll_interval, heartbeat_timeout
         time.sleep(poll_interval)
 
 
-# >>> a released plan without any unit means nothing was compared; never report that as passed <<< #
-def require_plan_units(store) -> None:
+# >>> a plan without units is empty/left_only/right_only when one side had no rows, otherwise an error <<< #
+def require_plan_units(store) -> str | None:
     plans = [plan for _key, plan in list_plans(store)]
-    if plans and not any(int(plan.get("expected_units") or 0) for plan in plans):
+    if not plans or any(int(plan.get("expected_units") or 0) for plan in plans):
+        return None
+    results = {result["pair"]: result for _key, result in list_row_results(store)}
+    states = {empty_plan_state(results.get(plan["pair"]) or {}) for plan in plans}
+    if None in states:
         raise RuntimeError(
             "plan has no units to compare: every window or column was excluded; "
             "fix the date mapping or sampling before rerunning"
         )
+    return next(iter(states))
 
 
 def publish_report(store) -> None:
@@ -126,7 +165,15 @@ def run(
         publish_report(store)
         write_run_status(store, {"state": "complete", "role": "right", **result})
         return result
-    require_plan_units(store)
+    verdict = require_plan_units(store)
+    if verdict:
+        result = {**summary(store), "state": verdict}
+        log.info("nothing to compare: %s", result)
+        publish_report(store)
+        write_run_status(
+            store, {**result, "state": "complete", "role": "right", "verdict": verdict}
+        )
+        return result
     write_run_status(store, {"state": "right_col_check", "role": "right"})
     compared = ColCheck(
         store,

@@ -70,14 +70,8 @@ def unexcluded_mismatches(result: dict[str, Any], plan: dict[str, Any]) -> list[
     )
 
 
-# >>> block until the Right published row_check/result.json; raise on unexcluded mismatches <<< #
-def wait_for_row_check_result(
-    store,
-    pair: str,
-    *,
-    poll_interval: float = 5,
-    abort_if=None,
-) -> dict[str, Any]:
+# >>> block until the Right published row_check/result.json <<< #
+def wait_for_row_result(store, pair: str, *, poll_interval: float = 5, abort_if=None):
     abort_if = abort_if or (lambda: None)
     started = time.monotonic()
     last_log = None
@@ -95,7 +89,18 @@ def wait_for_row_check_result(
             )
             last_log = now
         time.sleep(poll_interval)
-    result = store.get_json(path)
+    return store.get_json(path)
+
+
+# >>> the Right row result, raising on unexcluded mismatches <<< #
+def wait_for_row_check_result(
+    store,
+    pair: str,
+    *,
+    poll_interval: float = 5,
+    abort_if=None,
+) -> dict[str, Any]:
+    result = wait_for_row_result(store, pair, poll_interval=poll_interval, abort_if=abort_if)
     plan = store.get_json(plan_path(pair)) if store.exists(plan_path(pair)) else {}
     mismatches = unexcluded_mismatches(result, plan)
     if mismatches:
@@ -652,8 +657,8 @@ class ColCheckPipeline:
 
 
 def _row_count(path: str | Path) -> int:
-    with Path(path).open(encoding="utf-8") as handle:
-        return max(0, sum(1 for _ in handle) - 1)
+    with Path(path).open(encoding="utf-8", newline="") as handle:
+        return max(0, sum(1 for _ in csv.reader(handle)) - 1)
 
 
 class LeftRuntime:
@@ -745,11 +750,11 @@ class LeftRuntime:
                         window["bucket"],
                         output,
                     )
-                    self._publish_window_count(manifest, window, output)
+                    self._publish_window_count(manifest, window, _row_count(output))
                     return output
             except (OSError, ValueError, json.JSONDecodeError):
                 log.warning("ignoring invalid Left pull cache metadata: %s", metadata)
-        path = self.source(manifest).pull_window(
+        path, rows = self.source(manifest).pull_window(
             window["partitions"],
             manifest["columns"],
             output,
@@ -773,14 +778,13 @@ class LeftRuntime:
             "left data pull completed: pair=%s vintage=%s sampled_rows=%d path=%s",
             manifest["pair"],
             window["bucket"],
-            self._publish_window_count(manifest, window, path),
+            self._publish_window_count(manifest, window, rows),
             path,
         )
         return path
 
-    # >>> sampled row count goes to the Volume before statistics so the Right can compare it early <<< #
-    def _publish_window_count(self, manifest, window, path) -> int:
-        count = _row_count(path)
+    # >>> the source's exact row count goes to the Volume before statistics so the Right can compare it early <<< #
+    def _publish_window_count(self, manifest, window, count: int) -> int:
         if self.store is not None:
             write_window_count(self.store, manifest["pair"], window["bucket"], count)
         return count

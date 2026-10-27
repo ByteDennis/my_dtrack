@@ -12,9 +12,10 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import DatabricksError
 from databricks.sdk.service.sql import StatementParameterListItem
 
+from pair_recon.core.backends.store import volume_failure_streak
 from pair_recon.core.metadata.configuration import build_pair_config
 from pair_recon.core.progress import ProgressSampler
-from pair_recon_left.backends.sources import source_from_config
+from pair_recon_left.backends.sources import FETCH_PROGRESS, source_from_config
 from pair_recon_left.backends.store import VolumeStore, validate_run_id
 from pair_recon_left.cli.config import validate_config
 from pair_recon_left.common.checks.col_check import (
@@ -24,6 +25,7 @@ from pair_recon_left.common.checks.col_check import (
     publish_fixed_keys,
     wait_for_manifests,
     wait_for_row_check_result,
+    wait_for_row_result,
 )
 from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
 from pair_recon_left.common.model.protocol import (
@@ -32,7 +34,10 @@ from pair_recon_left.common.model.protocol import (
     UNITS_STATUS,
     active_unit_ids,
     current_plan_ids,
+    empty_plan_state,
     fixed_keys_path,
+    get_left_state,
+    get_right_state,
     list_failures,
     list_results,
     list_row_results,
@@ -54,6 +59,7 @@ _SENSITIVE_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname
 _SENSITIVE_WORDS = ("password", "secret", "token", "credential")
 _RUN_DATE = re.compile(r"-(\d{4})(\d{2})(\d{2})$")
 RIGHT_WAIT_CHUNK = timedelta(hours=1)
+WATCHDOG_INTERVAL = 30.0
 log = get_left_logger("runner")
 
 
@@ -123,6 +129,101 @@ def mismatched_partitions(error: BaseException | str, pair: str) -> list[str]:
         text,
     )
     return sorted(set(re.findall(r"\d{4}-\d{2}-\d{2}", match.group(1)))) if match else []
+
+
+def right_job_params(settings: dict, pair: str, run_id: str, run_values: dict) -> dict:
+    return {
+        "run_root": settings["volume_root"],
+        "run_id": run_id,
+        "pair": pair,
+        "owner": settings["owner"],
+        "timezone": settings["timezone"],
+        "pair_table": settings["pair_table"],
+        "status_table": settings["status_table"],
+        "error_table": settings["error_table"],
+        "right_workers": str(max(1, int(settings.get("right_workers", 8)))),
+        **{name: "" if value is None else str(value) for name, value in run_values.items()},
+    }
+
+
+def _env_seconds(name: str, default: float) -> float:
+    return float(os.getenv(name) or default)
+
+
+# >>> cancels both sides when a stage stops making progress; thresholds come from the environment, 0 disables one <<< #
+class StageWatchdog:
+    def __init__(self, store, stop, *, interval: float = WATCHDOG_INTERVAL):
+        self.store = store
+        self.stop = stop
+        self.interval = interval
+        self.fetch_stall = _env_seconds("FETCH_STALL_SECONDS", 1800)
+        self.first_result = _env_seconds("RIGHT_FIRST_RESULT_SECONDS", 7200)
+        self.state_stall = _env_seconds("RIGHT_STATE_STALL_SECONDS", 3600)
+        self.volume_failures = int(_env_seconds("VOLUME_READ_FAILURES", 10))
+        self.done = threading.Event()
+        self.left_published_at = None
+        self.right_snapshot = (None, None)
+        self.thread = threading.Thread(target=self._watch, name="pair-recon-watchdog", daemon=True)
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def close(self):
+        self.done.set()
+
+    def _watch(self):
+        while not self.done.wait(self.interval):
+            try:
+                reason = self.check()
+            except Exception:
+                log.debug("watchdog check skipped", exc_info=True)
+                continue
+            if reason:
+                log.error(
+                    "watchdog: %s; cancelling both sides, Volume checkpoints are kept", reason
+                )
+                self.stop.trigger(RuntimeError(f"watchdog: {reason}"))
+                return
+
+    def check(self, now: float | None = None) -> str | None:
+        now = time.monotonic() if now is None else now
+        if self.fetch_stall:
+            for key, (rows, at) in list(FETCH_PROGRESS.items()):
+                if now - at > self.fetch_stall:
+                    return (
+                        f"Oracle fetch {key} has had no new rows for {now - at:.0f}s (rows={rows})"
+                    )
+        streak = volume_failure_streak()
+        if self.volume_failures and streak >= self.volume_failures:
+            return f"{streak} consecutive Volume read failures"
+        if not (self.first_result or self.state_stall):
+            return None
+        left = get_left_state(self.store)
+        right = get_right_state(self.store)
+        published = int(left.get("published_units") or 0)
+        completed = int(right.get("completed_units") or 0)
+        if self.left_published_at is None and published:
+            self.left_published_at = now
+        if self.first_result and self.left_published_at is not None and not completed:
+            waited = now - self.left_published_at
+            if waited > self.first_result:
+                return f"Right produced no result {waited:.0f}s after the Left published its first unit"
+        if self.state_stall:
+            snapshot = json.dumps(
+                {k: v for k, v in right.items() if k not in {"updated_at", "revision"}},
+                sort_keys=True,
+            )
+            if snapshot != self.right_snapshot[0]:
+                self.right_snapshot = (snapshot, now)
+            elif (
+                right and published > completed and now - self.right_snapshot[1] > self.state_stall
+            ):
+                return (
+                    f"Right state unchanged for {now - self.right_snapshot[1]:.0f}s "
+                    f"(phase={right.get('phase')}, completed_units={completed}/{published} ready)"
+                )
+        return None
 
 
 # >>> watches the Right run with no deadline; a failure fires the stop signal so local statements get cancelled <<< #
@@ -444,14 +545,15 @@ def write_request_snapshot(settings: dict, config: dict) -> Path:
     return target
 
 
-# >>> a Left-built plan with no windows means nothing to compare; stop before the Right starts <<< #
+def plan_without_windows(store, pair: str) -> bool:
+    return store.exists(plan_path(pair)) and not store.get_json(plan_path(pair)).get("windows")
+
+
+# >>> a Left-built plan with no windows and rows on both sides means every partition was excluded <<< #
 def require_plan_windows(store, pair: str, pair_config: dict) -> None:
-    if not store.exists(plan_path(pair)):
+    if not plan_without_windows(store, pair):
         return
-    plan = store.get_json(plan_path(pair))
-    if plan.get("windows"):
-        return
-    excluded = plan.get("excluded_partitions") or []
+    excluded = store.get_json(plan_path(pair)).get("excluded_partitions") or []
     raise RuntimeError(
         f"plan for {pair} has no windows: every partition between "
         f"{pair_config.get('fromDate') or '*'} and {pair_config.get('toDate') or '*'} is "
@@ -537,11 +639,23 @@ def run_left(
             abort_if=abort_if,
         )
     abort_if()
-    require_plan_windows(store, pair, pair_config)
-    log_vintage_coverage(store, pair)
+    empty = plan_without_windows(store, pair)
+    if not empty:
+        log_vintage_coverage(store, pair)
     if release:
         release()
     abort_if()
+    if empty:
+        if left_only:
+            require_plan_windows(store, pair, pair_config)
+        result = wait_for_row_result(store, pair, abort_if=abort_if)
+        state = empty_plan_state(result)
+        if state is None:
+            require_plan_windows(store, pair, pair_config)
+        log.info(
+            "nothing to compare: pair=%s state=%s summary=%s", pair, state, result.get("summary")
+        )
+        return {"row": state, "units": 0}
     checks = pair_config.get("checks") or []
     if not any(check != "row_count" for check in checks):
         return {"row": "ready", "units": 0}
@@ -629,21 +743,11 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
     client = None
     store = None
     sampler = None
-    params = {
-        "run_root": settings["volume_root"],
-        "run_id": run_id,
-        "pair": pair,
-        "owner": settings["owner"],
-        "timezone": settings["timezone"],
-        "pair_table": settings["pair_table"],
-        "status_table": settings["status_table"],
-        "error_table": settings["error_table"],
-        "right_workers": str(max(1, int(settings.get("right_workers", 8)))),
-        **{name: "" if value is None else str(value) for name, value in run_values.items()},
-    }
+    params = right_job_params(settings, pair, run_id, run_values)
     remote = None
     monitor = None
     right = None
+    watchdog = None
     stop = StopSignal()
     final_state = "failed"
     failure_error = None
@@ -667,6 +771,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             clear_resume_outputs(store)
             retry_failed(store)
         beat(store)
+        watchdog = StageWatchdog(store, stop).start()
         if catalog:
             log.info("updating run status: table=%s state=running", settings["status_table"])
             catalog.status(
@@ -751,7 +856,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             int(settings.get("left_workers", 2)),
             release=release,
             left_only=left_only,
-            abort_if=lambda: monitor.raise_if_failed() if monitor else None,
+            abort_if=lambda: (monitor.raise_if_failed() if monitor else None, stop.check()),
             force=force,
             stop=stop,
         )
@@ -857,6 +962,8 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 log.exception("could not cancel Right Databricks run: run_id=%s", remote.run_id)
         raise
     finally:
+        if watchdog:
+            watchdog.close()
         try:
             if sampler:
                 sampler.stop(final_state, capture=not remote_right)

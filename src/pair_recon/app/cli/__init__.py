@@ -31,8 +31,8 @@ from pair_recon_left.common.model.protocol import local_timezone_name
 from pair_recon_left.common.runtime.run_logging import configure_console_logging, get_logger
 from pair_recon_left.common.sql.dates import contiguous_runs, resolve_date_type
 
-from .catalog import Catalog
-from .config import (
+from ..catalog import Catalog
+from ..config import (
     env_boolean,
     env_value,
     load_config,
@@ -42,7 +42,7 @@ from .config import (
     run_config,
     save_defaults,
 )
-from .runner import (
+from ..runner import (
     StatementSql,
     launch,
     local_run_directory,
@@ -999,12 +999,40 @@ def main_program(argv=None) -> int:
     )
 
 
+# >>> pair_recon smoke [--defaults path]: the cheap end-to-end check for the saved pair, no prompts <<< #
+def smoke_program(argv) -> int:
+    from .smoke import smoke
+
+    parser = argparse.ArgumentParser(prog="pair_recon smoke", allow_abbrev=False)
+    parser.add_argument("--defaults", dest="defaults_path", type=Path, default=DEFAULTS)
+    parser.add_argument("--log-level", default="INFO")
+    args = parser.parse_args(argv)
+    load_environment()
+    configure_console_logging(args.log_level)
+    settings, config, _action, client, _catalog = prompts(
+        load_defaults(args.defaults_path), interactive=False
+    )
+    try:
+        report = smoke(settings, config, workspace_client=client)
+    except Exception:
+        log.exception("Smoke failed")
+        return 1
+    print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+    return 0 if report["verdict"] == "ok" else 1
+
+
 def main(argv=None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     if values[:1] == ["dbx"]:
         from pair_recon_dbx.cli import main as dbx_main
 
         return dbx_main(values[1:])
+    if values[:1] == ["batch"]:
+        from .batch import main as batch_main
+
+        return batch_main(values[1:])
+    if values[:1] == ["smoke"]:
+        return smoke_program(values[1:])
     if values[:1] == ["gitlab"]:
         from pair_recon_gitlab.cli import main as gitlab_main
 

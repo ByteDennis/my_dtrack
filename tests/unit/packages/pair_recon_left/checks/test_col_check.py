@@ -228,7 +228,7 @@ def test_cache(tmp_path, caplog):
     class Source:
         def pull_window(self, _partitions, columns, output, **_options):
             calls.append(columns)
-            return write_rows(output, columns, [["1"]])
+            return write_rows(output, columns, [["a\nb"]]), 1
 
     store = MemoryStore()
     runtime = LeftRuntime(tmp_path, store)

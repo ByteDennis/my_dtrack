@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from pair_recon_right.catalog import publish, run_state
 from pair_recon_right.engine.backends.store import open_store
 from pair_recon_right.engine.backends.targets import SparkTarget
-from pair_recon_right.engine.job import run
+from pair_recon_right.engine.job import run, smoke
 
 for name in (
     "run_root",
@@ -33,6 +33,7 @@ for name in (
     "vintage",
     "sample_rate",
     "vintage_sample",
+    "smoke",
 ):
     dbutils.widgets.text(name, "")
 
@@ -53,6 +54,7 @@ values = {
         "vintage",
         "sample_rate",
         "vintage_sample",
+        "smoke",
     )
 }
 publish_values = {
@@ -86,16 +88,20 @@ store = open_store(values["run_root"]).child(values["run_id"])
 spark.sql("SET spark.sql.legacy.timeParserPolicy = CORRECTED")
 
 try:
-    outcome = run(
-        values["run_root"],
-        lambda config: SparkTarget(spark, config),
-        run_id=values["run_id"],
-        right_workers=int(values["right_workers"] or 8),
-    )
-    publish(spark, store, **publish_values, state=run_state(outcome))
+    if values["smoke"]:
+        outcome = smoke(store, lambda config: SparkTarget(spark, config))
+    else:
+        outcome = run(
+            values["run_root"],
+            lambda config: SparkTarget(spark, config),
+            run_id=values["run_id"],
+            right_workers=int(values["right_workers"] or 8),
+        )
+        publish(spark, store, **publish_values, state=run_state(outcome))
     print(outcome)
 except BaseException:
     logging.getLogger("pair_recon").exception("right job failed")
-    publish(spark, store, **publish_values, state="failed")
+    if not values["smoke"]:
+        publish(spark, store, **publish_values, state="failed")
     raise
 dbutils.notebook.exit(json.dumps(outcome, default=str))

@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import tomllib
@@ -84,7 +85,7 @@ def test_source_release_contains_only_the_main_runtime(tmp_path):
         ]
         assert not any("pair_conn_release" in name for name in names)
         assert not any("pair_recon_gitlab" in name for name in names)
-        assert "pair_recon/src/pair_recon/core/metadata/mapping.py" not in names
+        assert "pair_recon/src/pair_recon/core/metadata/mapping.py" in names
         assert "pair_recon/src/pair_recon/core/sas.py" not in names
         assert "pair_recon/src/pair_recon_dbx/cli.py" not in names
         assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
@@ -107,6 +108,19 @@ def test_source_release_contains_only_the_main_runtime(tmp_path):
         assert "just run" in readme
         assert "uv run python -m pair_recon" in readme
         assert "GitLab" not in readme
+
+        archive.extractall(tmp_path / "release")
+
+    release = tmp_path / "release" / "pair_recon"
+    smoke = subprocess.run(
+        [sys.executable, "-m", "pair_recon", "--help"],
+        cwd=release,
+        env={**os.environ, "PYTHONPATH": str(release / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert smoke.returncode == 0, smoke.stderr
 
 
 def test_setup_example_has_an_upsert_for_every_catalog_table():

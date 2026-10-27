@@ -28,9 +28,12 @@ from pair_recon_left.common.checks import col_check as left_col_check
 from pair_recon_left.common.model.protocol import (
     plan_path,
     result_path,
+    write_left_state,
+    write_right_state,
     write_run_status,
 )
 from pair_recon_left.common.runtime.run_logging import CONSOLE_LOG_FORMAT, ZonedFormatter
+from pair_recon_left.common.runtime.stop import StopSignal
 from pair_recon_right.engine.backends.store import VolumeStore as LocalStore
 from pair_recon_right.engine.backends.targets import CsvTarget
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
@@ -2739,16 +2742,42 @@ def test_run_left_reports_unexcluded_mismatches_before_pulling(monkeypatch, tmp_
     assert seen == []
 
 
-def test_run_left_fails_before_release_when_the_plan_has_no_windows(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("partitions", "state"),
+    [
+        ({}, "empty"),
+        ({"2026-01-01": {"left": None, "right": 5, "result": "right_only"}}, "right_only"),
+        ({"2026-01-01": {"left": 5, "right": None, "result": "left_only"}}, "left_only"),
+    ],
+)
+def test_run_left_classifies_an_empty_plan_after_both_row_counts(
+    monkeypatch, tmp_path, partitions, state
+):
+    store = MemoryStore()
+    config = _stub_column_checks(monkeypatch, store, [])
+    store.put_json("plan.json", {"pair": "orders", "windows": [], "excluded_partitions": []})
+    released = []
+
+    def release():
+        released.append(True)
+        store.put_json("row_check/result.json", {"pair": "orders", "partitions": partitions})
+
+    result = runner.run_left(config, store, "run", "orders", tmp_path, release=release)
+    assert result == {"row": state, "units": 0} and released == [True]
+
+
+def test_run_left_rejects_an_empty_plan_when_both_sides_have_rows(monkeypatch, tmp_path):
     store = MemoryStore()
     config = _stub_column_checks(monkeypatch, store, [])
     store.put_json("plan.json", {"pair": "orders", "windows": [], "excluded_partitions": ["x"]})
-    released = []
+    store.put_json(
+        "row_check/result.json",
+        {"pair": "orders", "partitions": {"x": {"left": 3, "right": 3, "result": "match"}}},
+    )
     with pytest.raises(RuntimeError, match="plan for orders has no windows"):
-        runner.run_left(
-            config, store, "run", "orders", tmp_path, release=lambda: released.append(True)
-        )
-    assert released == []
+        runner.run_left(config, store, "run", "orders", tmp_path, left_only=True)
+    with pytest.raises(RuntimeError, match="plan for orders has no windows"):
+        runner.run_left(config, store, "run", "orders", tmp_path)
 
 
 def test_progress_sampler_survives_transient_snapshot_errors(monkeypatch):
@@ -2837,3 +2866,54 @@ def test_mapping_data_type_accepts_registered_names_and_date_objects():
         "OPEN_DT": {"type": "date", "right_date_type": {"type": "string", "format": "compact"}},
     }
     assert config["key"] == "EFF_DT,ACCT_ID" and config["col_map"]["EFF_DT"] == "dw_bus_dt"
+
+
+def test_stage_watchdog_reports_each_stall(monkeypatch):
+    for name, value in (
+        ("FETCH_STALL_SECONDS", "100"),
+        ("RIGHT_FIRST_RESULT_SECONDS", "500"),
+        ("RIGHT_STATE_STALL_SECONDS", "600"),
+        ("VOLUME_READ_FAILURES", "3"),
+    ):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(runner, "volume_failure_streak", lambda: 0)
+    store = MemoryStore()
+    dog = runner.StageWatchdog(store, StopSignal())
+    assert dog.check(now=1000) is None
+    monkeypatch.setitem(runner.FETCH_PROGRESS, "left.csv", (5, 850.0))
+    assert "no new rows for 150s" in dog.check(now=1000)
+    monkeypatch.delitem(runner.FETCH_PROGRESS, "left.csv")
+    monkeypatch.setattr(runner, "volume_failure_streak", lambda: 3)
+    assert "3 consecutive Volume read failures" in dog.check(now=1000)
+    monkeypatch.setattr(runner, "volume_failure_streak", lambda: 0)
+    write_left_state(store, {"published_units": 4})
+    write_right_state(store, {"phase": "running", "completed_units": 0})
+    assert dog.check(now=1000) is None and dog.check(now=1400) is None
+    assert "no result 501s after the Left" in dog.check(now=1501)
+    write_right_state(store, {"phase": "running", "completed_units": 1})
+    assert dog.check(now=1600) is None and dog.check(now=2100) is None
+    assert "Right state unchanged for 601s" in dog.check(now=2201)
+    write_right_state(store, {"phase": "running", "completed_units": 4})
+    assert dog.check(now=2500) is None and dog.check(now=9000) is None
+
+
+def test_stage_watchdog_is_disabled_by_zero_thresholds(monkeypatch):
+    for name in (
+        "FETCH_STALL_SECONDS",
+        "RIGHT_FIRST_RESULT_SECONDS",
+        "RIGHT_STATE_STALL_SECONDS",
+        "VOLUME_READ_FAILURES",
+    ):
+        monkeypatch.setenv(name, "0")
+    monkeypatch.setattr(runner, "volume_failure_streak", lambda: 99)
+    monkeypatch.setitem(runner.FETCH_PROGRESS, "left.csv", (5, 0.0))
+    assert runner.StageWatchdog(MemoryStore(), StopSignal()).check(now=1e9) is None
+
+
+def test_stage_watchdog_triggers_the_stop_signal():
+    stop = StopSignal()
+    dog = runner.StageWatchdog(MemoryStore(), stop, interval=0.01)
+    dog.check = lambda now=None: "Oracle fetch stalled"
+    dog.start()
+    dog.thread.join(2)
+    assert stop.triggered and "watchdog: Oracle fetch stalled" in str(stop.reason)

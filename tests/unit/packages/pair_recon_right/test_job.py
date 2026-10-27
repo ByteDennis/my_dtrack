@@ -3,10 +3,13 @@ from support import FakeTarget, MemoryStore
 
 from pair_recon_right.engine import job
 from pair_recon_right.engine.backends.store import VolumeStore
+from pair_recon_right.engine.backends.targets import CsvTarget
+from pair_recon_right.engine.common.model.hashing import HASH_BUCKET_SPACE
+from pair_recon_right.engine.common.model.protocol import get_run_status
 from pair_recon_right.engine.job import run, summary
 
 
-def document(checks):
+def document(checks, counts=None):
     side = {
         "left": {"source": "oracle"},
         "right": {"source": "databricks", "table": "R"},
@@ -17,7 +20,7 @@ def document(checks):
         **side,
         "bounds": {"from": None, "to": None},
         "partition": "all",
-        "counts": {"all": 2},
+        "counts": {"all": 2} if counts is None else counts,
         "pair_config": {
             "version": 2,
             "partition": "all",
@@ -135,3 +138,52 @@ def test_summary_excludes_stale_outcomes_from_an_empty_current_plan():
     )
 
     assert summary(store) == {"row_errors": 0, "column_errors": 0, "failures": 0}
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "state"),
+    [
+        ({}, {"all": 0}, "empty"),
+        ({}, {"all": 3}, "right_only"),
+        ({"all": 3}, {"all": 0}, "left_only"),
+    ],
+)
+def test_run_reports_which_side_was_empty(tmp_path, left, right, state):
+    store = VolumeStore(tmp_path / "runs" / "r1")
+    store.put_json("row_check/left.json", document(["hash_sum"], left))
+    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    store.put_json(
+        "plan.json",
+        {"pair": "p", "version": 2, "windows": [], "columns": ["A"], "expected_units": 0},
+    )
+    result = run(
+        None, lambda _config: FakeTarget(counts=right), run_id="r1", store=store, poll_interval=0
+    )
+    assert result["state"] == state and result["failures"] == 0
+    assert get_run_status(store)["state"] == "complete"
+    assert get_run_status(store)["verdict"] == state and store.exists("report/summary.json")
+
+
+def test_smoke_reselects_the_left_keys_on_the_right(tmp_path):
+    right_csv = tmp_path / "right.csv"
+    right_csv.write_text("id,value\n1,a\n2,b\n3,c\n", encoding="utf-8")
+    store = VolumeStore(tmp_path / "runs" / "s1")
+    store.put_json(
+        job.SMOKE_REQUEST,
+        {
+            "pair": "p",
+            "partition": "all",
+            "right": {"source": "csv", "path": str(right_csv)},
+            "from_date": None,
+            "to_date": None,
+            "key_columns": ["id"],
+            "key_families": ["numeric"],
+            "sample": {"mode": "fraction", "rate": 1.0, "threshold": HASH_BUCKET_SPACE},
+            "key_tuples": [["1"], ["2"], ["9"]],
+            "columns": ["value"],
+        },
+    )
+    result = job.smoke(store, lambda config: CsvTarget(config))
+    assert result["matched"] == 2 and result["expected"] == 3 and result["health"]["ok"]
+    assert store.get_json("_state/right.json")["phase"] == "smoke"
+    assert get_run_status(store)["state"] == "smoke_complete"

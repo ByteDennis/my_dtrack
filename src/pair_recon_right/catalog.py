@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from .engine.common.model.attribute_checks import ATTRIBUTE_CHECKS
 from .engine.common.model.manifest import sample_plan, unit_id_for
 from .engine.common.model.protocol import (
+    EMPTY_STATES,
     active_unit_ids,
     list_failures,
     list_plans,
@@ -83,6 +84,8 @@ def companion_table(pair_table: str, name: str) -> str:
 
 # >>> terminal state from a Right summary: any runtime failure means the check did not finish <<< #
 def run_state(outcome: dict) -> str:
+    if outcome.get("state") in EMPTY_STATES:
+        return outcome["state"]
     if int(outcome.get("failures") or 0):
         return "incomplete"
     if int(outcome.get("row_errors") or 0) or int(outcome.get("column_errors") or 0):

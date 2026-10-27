@@ -126,6 +126,8 @@ left-only uploads full-range row counts to row_check/left.json; sample affects a
 
 STATS_WORKERS controls concurrent local statistics shards (default 2), and PAIR_RECON_STATS_BATCH controls columns per shard (default 64); pull_workers in .pair_recon.yaml controls source pulls. progress_interval controls how often the current progress row is refreshed. Query pair_recon_progress_snapshot by run_id for state, ready/completed/failed units, and expand payload for the complete run/Left/Right/thread snapshot.
 
+pair_recon smoke --defaults .pair_recon.yaml is the pre-flight for the saved pair: Left health check, 100 sampled rows with the real predicate, a Volume round trip, and a short Right job (smoke=1) that writes _state/right.json and counts how many of those keys its own predicate selects. Verdict ok, left_empty, or sample_mismatch; exit code 1 unless ok. pair_recon batch PAIR... runs pairs one by one, classifies by return code, and writes batch_summary.json. An empty plan ends as empty, left_only, or right_only once both row counts exist. Oracle sessions per source are capped by ORACLE_MAX_SESSIONS (4); ORA-02391 retries after ORACLE_SESSION_COOLDOWN_SECONDS (30) up to ORACLE_SESSION_RETRIES (3) times. The stage watchdog thresholds are FETCH_STALL_SECONDS (1800), RIGHT_FIRST_RESULT_SECONDS (7200), RIGHT_STATE_STALL_SECONDS (3600), and VOLUME_READ_FAILURES (10); 0 disables one. When it fires, both sides are cancelled and the Volume checkpoints stay for a resume.
+
 5. Optional SAS sampling
 
   just sas                              creates/updates left.sas only

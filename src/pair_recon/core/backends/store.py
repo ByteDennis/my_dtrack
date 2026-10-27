@@ -31,12 +31,23 @@ def _is_not_found(exc: Exception) -> bool:
     )
 
 
+_FAILURE_STREAK = [0]
+
+
+# >>> consecutive failed Files API attempts since the last success; the stage watchdog reads it <<< #
+def volume_failure_streak() -> int:
+    return _FAILURE_STREAK[0]
+
+
 # >>> repeat a Files API call after a broken connection or timeout, backing off attempt * RETRY_BACKOFF_S <<< #
 def retry_transient(operation: str, call, *, attempts: int = RETRY_ATTEMPTS):
     for attempt in range(1, attempts + 1):
         try:
-            return call()
+            value = call()
+            _FAILURE_STREAK[0] = 0
+            return value
         except TRANSIENT_ERRORS as exc:
+            _FAILURE_STREAK[0] += 1
             if attempt >= attempts:
                 raise
             delay = RETRY_BACKOFF_S * attempt

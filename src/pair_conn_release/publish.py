@@ -22,7 +22,6 @@ ROOT_FILES = (
     "run.sh",
 )
 RUNTIME_EXCLUDES = {
-    "src/pair_recon/core/metadata/mapping.py",
     "src/pair_recon/core/sas.py",
     "src/pair_recon_dbx/cli.py",
 }

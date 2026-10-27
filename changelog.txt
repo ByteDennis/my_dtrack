@@ -1,199 +1,46 @@
-pair_recon Typed keys, sample-count gate, and Files API retries — 2026-10-26
+pair_recon Batch reliability, smoke checks, and runtime recovery — 2026-10-27
 
-Added
-- src/pair_recon/core/metadata/configuration.py: `parse_key_columns` reads `NAME[type]` key entries; the type (numeric, categorical, or a registry name) becomes that key's `col_type_overrides`/`column_types` entry and wins over the column map; a key without a mapping row gets `right_date_col` (partition key) or its own name.
-- src/pair_recon/core/metadata/workbook.py: `key_columns` entries must be `NAME[type]`; the field guide lists every accepted type. setup/pairs.xlsx regenerated from the new template.
-- src/pair_recon/app/cli.py: `synchronize_key_types` writes the key types into `pair_recon_column_map.data_type` after each pair upsert; `catalog.column_mappings` reads one pair's rows.
-- src/pair_recon_right/engine/checks/col_check.py: `require_same_total` fails the Right (`SampleCountMismatch`) as soon as a window's Left and Right `n_total` differ, after recording that unit as diff; the message names the window, both counts, and the key columns to check. Both sides now always compute `n_total` (one `count(*)` in the same scan) so the gate also works when `checks` leaves it out; the verdict still compares only the selected checks. The first window is gated before any statistics: the Left writes its sampled row count to `col_check/window_counts/<pair>--<window>.json` right after the pull (`write_window_count`), the Right runs `SparkTarget.window_count` (same predicate, `count(1)` only) for the first window it prefetches and compares as soon as both counts exist; later windows skip the extra scan.
-- src/pair_recon/core/backends/store.py: `retry_transient` repeats Files API download, metadata, upload, list, and delete calls up to five times after broken connections or timeouts (`ChunkedEncodingError`, `ConnectionError`, urllib3 protocol errors), with 2s linear backoff.
-- src/pair_recon_left/common/model/hashing.py (mirrored): `DateKeyFamily.sql_dialect` uses the native day (`TRUNC` / `to_date`) whenever the key's physical type is DATE or TIMESTAMP, so `date_string`, `date_type`, and `sas_datetime_date` on an Oracle DATE key no longer depend on the session `NLS_DATE_FORMAT` (plain `TO_CHAR(date)` gave `DD-MON-RR`, which no parser accepted and every key became `<<NULL>>`). `cast_text_sql` renders Spark/Hive decimal keys without trailing zeros and double/float keys through `DECIMAL(38,15)`, matching Oracle `TM9`; `SparkTarget` passes the DESCRIBE column types as `key_types`.
-- src/pair_recon_right/notebook.py: `SET spark.sql.legacy.timeParserPolicy = CORRECTED`, so dirty date strings parse to NULL instead of failing the statement.
-- src/pair_recon_right/engine/checks/col_check.py: the Right progress bar is the plain-text tqdm on stdout (`ascii`, `leave=True`, redrawn at most every 30 s) instead of `tqdm.auto`, which picked the ipywidgets variant under Databricks and rendered nothing in job runs.
+Summary
+- Added sequential batch execution and an inexpensive end-to-end smoke command.
+- Added Oracle session/fetch recovery, Databricks Volume read recovery, and a cross-stage watchdog.
+- Preserved both row counts for empty plans and introduced `empty`, `left_only`, and `right_only` terminal states.
 
-Changed
-- src/pair_recon/app/runner.py, src/pair_recon_dbx/runtime.py, setup/install.py: `WorkspaceClient` uses `auth_type=external-browser` unless `DATABRICKS_AUTH_TYPE` is set.
+Added files
+- `src/pair_recon/app/cli/batch.py`: runs pairs sequentially in child processes, trusts exit codes, records elapsed time/state, and updates `batch_summary.json` after every pair.
+- `src/pair_recon/app/cli/smoke.py`: checks Left, samples 100 rows with the real predicate, verifies a Volume round trip, and runs a short Right key-selection check.
+- `tests/unit/flows/test_commands.py`: covers batch result parsing/classification, temporary defaults, continued execution after failures, and local CSV smoke behavior.
 
-pair_recon Right date type must fit the physical column — 2026-10-25
+Modified files
+- `README.md`: documents smoke/batch usage, empty-plan states, Oracle session controls, and watchdog thresholds.
+- `changelog.txt`: replaces accumulated history with this single-commit summary and complete file inventory.
+- `guideme.txt`: adds concise operator instructions for the new commands, recovery settings, and terminal behavior.
+- `src/pair_conn_release/publish.py`: restores `core/metadata/mapping.py` to the portable runtime so the packaged CLI imports successfully.
+- `src/pair_recon/app/runner.py`: adds `StageWatchdog`, propagates empty-side terminal states, preserves row-count evidence, and coordinates remote smoke/full-job completion.
+- `src/pair_recon/core/backends/store.py`: tracks consecutive Files API failures so the watchdog can stop a persistently unhealthy run.
+- `src/pair_recon_left/backends/sources.py`: returns exact fetched row counts, adds sampled-key helpers and fetch progress, bounds Oracle sessions, caches LDAP DSNs, and retries session/network failures.
+- `src/pair_recon_left/common/checks/col_check.py`: separates row-result waiting, publishes exact source row counts, and counts cached CSV records correctly when fields contain newlines.
+- `src/pair_recon_left/common/model/protocol.py`: defines shared empty-side states and derives `empty`, `left_only`, or `right_only` from reconciled row counts.
+- `src/pair_recon_right/catalog.py`: preserves empty-side terminal states when publishing the final Catalog result.
+- `src/pair_recon_right/engine/backends/store.py`: retries transient Databricks Volume FUSE `EINVAL`, `EIO`, and `ESTALE` failures.
+- `src/pair_recon_right/engine/backends/targets.py`: adds CSV/Spark sampled-key counting for smoke checks and accepts the new exact-row-count pull contract.
+- `src/pair_recon_right/engine/checks/row_check.py`: skips mismatch-exclusion enforcement when a plan has no windows.
+- `src/pair_recon_right/engine/common/model/protocol.py`: mirrors the Left protocol empty-side states and row-count classification.
+- `src/pair_recon_right/engine/job.py`: implements Right smoke execution and completes no-unit plans with an empty-side state when appropriate.
+- `src/pair_recon_right/notebook.py`: accepts the `smoke` widget, dispatches smoke/full execution, and avoids normal Catalog publication for smoke runs.
+- `tests/unit/flows/test_packaging.py`: verifies the mapping runtime is packaged and the extracted source release can execute CLI help.
+- `tests/unit/packages/pair_recon/test_catalog.py`: covers preservation of the `right_only` terminal state.
+- `tests/unit/packages/pair_recon/test_runner.py`: covers watchdog thresholds, cancellation, and empty/one-sided run outcomes.
+- `tests/unit/packages/pair_recon_left/backends/test_sources.py`: covers exact pull counts, sampled-key queries, DSN reuse, session limits, cooldown, and retry behavior.
+- `tests/unit/packages/pair_recon_left/checks/test_col_check.py`: updates the source contract test and verifies embedded-newline CSV rows are counted once.
+- `tests/unit/packages/pair_recon_right/backends/test_store.py`: covers retryable and non-retryable Volume FUSE read failures.
+- `tests/unit/packages/pair_recon_right/test_job.py`: covers smoke results and empty/left-only/right-only no-unit plan completion.
 
-Added
-- src/pair_recon_right/engine/backends/targets.py: `check_date_column` compares an explicit date type with the `DESCRIBE QUERY` column type; `string`/`number`/`sas` on a `date` or `timestamp` column and `date` on a text column fail the health check (partition `date_col`), `partition_counts`/`_sample_predicate` (`right_key_cols` date families), and `window_statistics` (date `column_types`) with a message naming the column, its type, and the declared date type. Before, Databricks ANSI mode raised `CAST_INVALID_INPUT ... cannot be cast to "TIMESTAMP"` from `col >= '20230901'` and the key normalization silently produced `<<NULL>>`.
+Renamed files
+- `src/pair_recon/app/cli.py` -> `src/pair_recon/app/cli/__init__.py`: converts the CLI into a package, fixes relative imports, and dispatches the new `batch` and `smoke` subcommands.
 
-pair_recon Heartbeat-only waits, window history, and strict completion — 2026-10-24
-
-Added
-- setup/schema.sql, setup/reference.sql, setup/setup.sql: `pair_recon_window_history` records one row per vintage window whose every column unit has a durable Right result and whose partitions matched on row count; `pair_recon_run_status.state` gains `incomplete`.
-- src/pair_recon_right/catalog.py: `window_rows`, `run_state`, `companion_table`; `publish` replaces the run's history rows and reports `incomplete` when any unit failed.
-- src/pair_recon/app/catalog.py: `checked_windows` reads finished windows of other runs; `finish` and `clear` maintain the history table.
-- src/pair_recon_left/common/model/manifest.py (mirrored to Right): random vintage selection skips `checked_vintages`, records `checked_before`, and fails with `coverage N/N` once every bucket is covered.
-- src/pair_recon/app/cli.py: `--recheck` ignores the window history.
-- src/pair_recon_left/common/runtime/stop.py: `beat` and `Heartbeat` write the Left heartbeat tolerantly during the row count and every wait loop.
-- src/pair_recon_left/common/runtime/stats.py: `execute_reporting` polls DuckDB `query_progress()` once a second while the load, infer, and aggregate statements run and reports the percentage through the new `query_status` callback; `duck.connect` enables `enable_progress_bar` without DuckDB's own console output.
-- src/pair_recon_left/common/runtime/progress.py: the Left statistics bar shows `phase=<phase> <pct>%` per running shard (and `phase=` in the 10-second log line), sets the postfix before each `bar.update`, and redraws percentage-only changes at most once a second.
-- src/pair_recon_left/common/model/hashing.py (mirrored to Right): one normalizer registry for key families and column types; `sas_datetime_date` is registered there; every family offers `normalize_sql` (statistics, NULL preserved) and `sql_dialect` (sampling, NULL sentinel) for oracle/hadoop/athena/duckdb/spark; specs accept `type` or `family`, a registered name with date overrides, and emit date objects as `{"type":"date",...}`.
-- src/pair_recon_left/common/sql/column_types.py (now mirrored to Right): aliases onto the shared registry; `register_column_type` is `register_family`.
-
-Changed
-- src/pair_recon_left/common/model/manifest.py (mirrored): a key without an explicit `key_families` entry takes its normalizer from the column's `column_types` entry, then `numeric` from `col_type_overrides`, then the partition date types; `column_types`/`col_type_overrides` may name the partition date column and keys; the partition key's Right name is `right_date_col`, a mapping row naming another Right column fails with a clear error, and unmapped non-partition keys keep the Left name; `mapping.csv` prints string types unquoted.
-- src/pair_recon_left/common/sql/sampling.py: dialect helpers (`cast_text_sql`, `step_sql`, literals, regex helpers) moved into hashing.py; `normalize_sql` delegates to `family.sql_dialect`.
-- src/pair_recon_left/common/checks/row_check.py: `column_types` and `col_type_overrides` join the stage-one fields that trigger a recount on resume.
-- src/pair_recon/app/runner.py: the Right Databricks job starts only after the Left row count is published, also for new runs; `RightJobMonitor` follows the job in one-hour chunks without a cap; `run_left` has no manifest timeout; the launcher injects `checked_vintages` from the history and logs `vintage coverage`; final states come from `run_state`.
-- src/pair_recon_right/engine/job.py and checks/col_check.py: no `wait_timeout` or `idle_timeout`; the Right waits for Left row data and units for as long as the Left heartbeat is fresh (`heartbeat_timeout` 600 s), tolerates unreadable heartbeats, and refuses a plan without units.
-- src/pair_recon_left/common/checks/col_check.py: `wait_for_row_check_result` and `wait_for_manifests` wait until the result arrives or `abort_if` raises, heartbeating every 60 seconds.
-- The `timeout` setting is no longer read; existing YAML keys are ignored.
-
-pair_recon Fast abort on Right failure and row-check gated pulls — 2026-10-23
-
-Added
-- src/pair_recon_left/common/runtime/stop.py: `StopSignal` cancels guarded Oracle/Hadoop/DuckDB statements (`connection.cancel()`, `cursor.cancel()`, `interrupt()`) and `abandoning_executor` stops joining running workers once the loop raises.
-
-Changed
-- src/pair_recon/app/runner.py: `RightJobMonitor` fires the stop signal on failure, so a failed Right stops the Left within seconds regardless of `--earlystop`; `run_left` waits for `row_check/result.json` before any column pull and reports unexcluded mismatches itself; a Left plan without windows fails before the Right job starts; resume keeps `row_check/left.json` and only rebuilds the plan.
-- src/pair_recon_left/backends/sources.py: query and pull loops register their statement with the stop signal and check it between fetch batches.
-- src/pair_recon_left/common/checks/row_check.py: the count loop honours `abort_if` and logs progress every 60 seconds instead of 30.
-- src/pair_recon/core/progress.py: a transient Volume download error no longer kills the progress sampler thread.
-- src/pair_recon_right/engine/report/excel.py: the Row Check sheet no longer prints the gate decision row.
-
-pair_recon Resumable protocol, batched results, and reports — 2026-10-22
-
-Added
-- Protocol 3 role checkpoints in `_state/left.json` and `_state/right.json`, with protocol-2 closure and heartbeat markers retained for rolling compatibility.
-- Immutable `col_check/result_batches/<hash>.json` uploads for matching Right outcomes, using deterministic batches of 64 by default while keeping differences and failures individually retryable.
-- Right terminal reports under `report/`: summary JSON, standalone HTML, and an Excel workbook with `Row Check` and `Column Check` sheets.
-- Conflict detection and recovery tests for duplicate outcomes, interrupted batch commits, plan changes, stale outcomes, and state-based WIP accounting.
-
-Changed
-- Missing `DBX_PAIR_WORKBOOK` files now skip workbook synchronization and read existing pair metadata directly from Unity Catalog without downloading or creating a workbook.
-- Re-running the same pair/owner daily `run_id` now resumes compatible checkpoints instead of clearing the run; successful units and local pulls are reused, while failures and differences are retried. `--force` retains full replacement behavior.
-- Automatic mismatch-partition recovery resumes the same run unless force is enabled; `--earlystop` disables recovery.
-- Resume publishes or refreshes the Left row/plan boundary before starting the remote Right job; incompatible effective config invalidates downstream Right row and plan artifacts before reuse.
-- Resume removes only derived `report/*` and `_status/units.csv` outputs before execution; durable units, successful results, role state, audit events, and compatible local pulls remain reusable after interruption or failure. `--force` remains the only full-run cleanup path.
-- Left/Right progress and backpressure use role-state counters instead of repeatedly scanning every unit/result object, and `units.csv` is generated at terminal boundaries instead of after every result.
-- Matching results upload in bounded batches; Right polls only unseen unit/result batches and skips completed deterministic unit IDs on restart.
-- Result persistence retries are separated from comparison failures, ambiguous uploads recover from durable batches, and conflicting duplicate outcomes fail explicitly.
-- Right timeout handling cancels non-terminal remote runs, and report/catalog summaries filter outcomes to the active plan.
-- README documents the compact protocol tree, compatibility markers, report files, workbook fallback, and same-run resume behavior.
+Deleted files
+- None. The former `src/pair_recon/app/cli.py` path was renamed rather than removed as functionality.
 
 Verification
-- 180 focused protocol, Left/Right check, report, and Right-job tests pass.
-- 15 final same-run resume, force, automatic-recovery, checkpoint invalidation, and batch-retry tests pass.
-- 40 focused report-sheet, stale-output cleanup, partial-failure report, row-check, and resume tests pass.
-- Ruff check, Ruff format check, mirrored protocol comparison, and git diff check pass.
-- No live Databricks/Volume performance benchmark was run.
-
-pair_recon Prompt date controls and reliable error publishing — 2026-10-22
-
-Added
-- src/pair_conn_release: builds a small source-only `dist/pair_recon.zip` from the original runtime files, then removes development configuration and non-run tools with explicit filters and regular-expression transforms.
-- just publish: packages the four main runtime packages, launchers, environment template, workbook, minimal pyproject/justfile, and concise English readme.txt; it does not build an executable.
-
-Changed
-- src/pair_recon/app/cli.py: restores `--defaults [yaml]` as a zero-interaction run, enables bounded mismatch-partition exclusion/restart by default with `--earlystop` as the opt-out, and adds `--force` PairRecon cache bypass plus result replacement.
-- src/pair_recon/app/runner.py: detects Right mismatch-partition errors, forwards force into row/pull cache control, and no longer downloads remote-success result JSON after the Databricks notebook has published Catalog results.
-- src/pair_recon/app/catalog.py: forwards remote failed/cancelled status and one runtime error directly from Jobs API details without reading Volume artifacts or replacing an existing result summary.
-- src/pair_recon/app/cli.py: date-mode runs prompt for Left/Right date columns and date types, accept registered names or JSON specifications, and retain the effective values in public settings.
-- src/pair_recon/app/config.py: applies the prompted date fields to the effective runtime config.
-- src/pair_recon/app/cli.py: prompts for excluded partitions, expands inclusive `YYYY-MM-DD->YYYY-MM-DD` ranges, and saves the normalized list.
-- Left/Right date SQL: supports numeric `YYYYMM` partitions through `{"type":"number","format":"month"}` and normalizes exclusions to month-start logical keys.
-- src/pair_recon_right/catalog.py: creates run-error DataFrames with the target table schema so row-count-only failures with all-null vintage/column fields publish reliably.
-- Left statistics publishing: stores one Volume JSON envelope per statistics shard instead of one file per column and uploads independent shards in parallel; Right expands each envelope back into column-level units and safely discovers out-of-order uploads.
-- Row-check output: renames the partition outcome field and CSV column from `verdict` to `result` without retaining the old field.
-- Progress snapshots: count logical units inside shard envelopes rather than counting files.
-- Remote terminal handling: the Right notebook owns successful/different Catalog publication; the local launcher forwards failed/cancelled Jobs API details without downloading Volume result JSON.
-- `pair_recon_run_status`: adds row/column total, match, difference, and runtime-failure summary columns; `setup/migrate_run_status.sql` upgrades an existing status table once.
-- README.md and the operator prompt notes: document the new prompts, defaults, and saved setting names.
-
-Verification
-- 712 unit tests pass.
-- Ruff check and format pass for the full source and unit/live-source test trees.
-- just publish creates a 68-file, 159302-byte ZIP; a clean extraction completes `uv sync` and `pair_recon --help`.
-- Source distribution and wheel builds pass.
-
-pair_recon Report Databricks wait progress (47f74e0) — 2026-10-21
-
-Changed
-- src/pair_recon/app/cli.py: reports Databricks client initialization, workbook comparison, metadata upsert decisions, enabled-pair loading, and Workspace sync start/finish/skip stages.
-- src/pair_recon/app/runner.py: StatementSql optionally reports submission, pending/running state, elapsed time, completion rows, and failures; the initial server wait is 10 seconds and continued waits report at 15-second intervals.
-- tests/unit/packages/pair_recon/test_runner.py: covers SQL wait-state messages, completion output, results, and the 10-second initial wait.
-
-Verification
-- 628 unit tests pass; 12 optional tests skip.
-- Targeted console-progress tests pass (11 tests), and Ruff check, Ruff format check, and git diff check pass.
-
-pair_recon Simplify right notebook imports (3fa58a4) — 2026-10-21
-
-Changed
-- src/pair_recon_right/notebook.py: uses normal pair_recon_right imports instead of dynamic importlib and sys.path setup.
-- src/pair_recon_dbx/deploy.py: deploys the fixed pair_recon_right package with the sibling pair_recon_right_job notebook and repoints the job to it.
-- setup/install.py and src/pair_recon/app/cli.py: use the fixed deployment layout and no longer accept DBX_RIGHT_PACKAGE.
-- README.md, guideme.txt, and .pair_recon.env.example: document the simplified Workspace layout and environment configuration.
-
-Removed
-- Runtime pip installation from the Right notebook and the empty src/pair_recon_right/requirements.txt file.
-- Configurable Right package naming and its legacy DBX_RIGHT_PACKAGE environment variable.
-
-Verification
-- 627 unit tests pass; 12 optional tests skip.
-- Ruff check, Ruff format check, and git diff check pass.
-
-pair_recon merge changes (0bed413) — 2026-10-21
-
-Changed
-- README.md: documents daily pair-owner-YYYYMMDD run ids, in-place progress row, and the flat single-pair Volume layout.
-- guideme.txt: same daily run id, flat Volume layout, and progress refresh wording as README.
-- setup/setup.sql: example run ids use the daily format; progress example merges on run_id only.
-- src/pair_recon/app/catalog.py: progress snapshot MERGE upserts one current row per run_id instead of appending.
-- src/pair_recon/app/cli.py: run id is generated, no longer prompted; an existing same-day run is replaced instead of resume/restart/cancel.
-- src/pair_recon/app/runner.py: make_run_id drops time and random suffix; new runs clear the store; final failed status is written after the sampler stops.
-- src/pair_recon/core/progress.py: counts units/results/failures from the flat run root.
-- src/pair_recon_left/common/checks/row_check.py: requires exactly one active pair and an explicit run_id; drops the config-hash run id.
-- src/pair_recon_left/common/model/audit.py: lists audit files from the flat audit/ prefix.
-- src/pair_recon_left/common/model/protocol.py: removes the pairs/<pair>/ layer; all paths live directly under the run directory.
-- src/pair_recon_left/common/runtime/progress.py: tqdm bar only on an interactive terminal, with logging redirected through it.
-- src/pair_recon_left/common/runtime/run_logging.py: console filter hides records marked console_silent while a bar is shown.
-- src/pair_recon_right/engine/checks/row_check.py: follows the flat protocol paths.
-- src/pair_recon_right/engine/common/model/audit.py: mirrors the Left flat audit listing.
-- src/pair_recon_right/engine/common/model/protocol.py: mirrors the Left flat protocol paths.
-- src/pair_recon_right/notebook.py: publish receives only catalog fields (no run_root); formatting cleanup.
-
-pair_recon 0.1.0 — 2026-10-18
-
-Added
-- pair_recon_gitlab package for private GitLab project creation, validation snapshot planning, and normal commit/push dispatch.
-- left, right, both, and all dispatch scopes.
-- pair_recon.ignore as the snapshot exclusion source, independent of .gitignore.
-- just gitlab recipe and standalone pair_recon_gitlab command with optional debug attach/ipdb.
-- Unit coverage for scope selection, protected files, private create commands, remote validation, first/repeated local Git pushes, CLI routing, and packaging.
-
-Changed
-- pair_recon gitlab delegates to the shared GitLab CLI implementation.
-- Snapshot pyproject.toml and justfile entries are reduced to packages actually dispatched.
-- Environment example, README, and guideme.txt document GitLab host, preview, dispatch, safety, and troubleshooting.
-
-Removed
-- No tracked files or existing capabilities were removed.
-
-Verification
-- 542 unit tests pass; 12 optional tests skip.
-- Ruff check and format checks pass.
-- Wheel and source distribution build successfully and include pair_recon_gitlab.
-- 9 live source tests collect successfully and were not executed.
-- Dispatched snapshots pass 34 Left tests, 73 Right tests, and 508 Both tests with 12 optional skips.
-- Local bare-repository tests prove first push, repeated dispatch, ordinary-file preservation, and no force-push.
-- No GitLab project was created and no external GitLab push was performed.
-
-File manifest
-M	.pair_recon.env.example
-M	README.md
-M	changelog.txt
-M	guideme.txt
-M	justfile
-A	pair_recon.ignore
-M	pyproject.toml
-M	src/pair_recon/app/cli.py
-A	src/pair_recon_gitlab/__init__.py
-A	src/pair_recon_gitlab/cli.py
-A	src/pair_recon_gitlab/dispatch.py
-A	src/pair_recon_gitlab/snapshot.py
-M	tests/unit/flows/test_packaging.py
-A	tests/unit/packages/pair_recon_gitlab/test_cli.py
-A	tests/unit/packages/pair_recon_gitlab/test_dispatch.py
+- `919 passed, 1 deselected` across the unit suite; the deselected `test_layout` is a pre-existing `src/pair_recon_dbx` directory-limit failure unchanged by this commit.
+- Ruff check and format check pass for `src` and `tests`; Left/Right protocol mirrors match; main, batch, and smoke CLI help checks pass.
