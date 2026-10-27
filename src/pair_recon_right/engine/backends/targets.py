@@ -523,3 +523,52 @@ class SparkTarget:
                 payload["top_10"] = ""
             stats[column] = payload
         return stats
+
+    # >>> keep a bounded raw sample in the Right process; it is written only if comparison finds a diff <<< #
+    def window_sample(
+        self, manifest: dict[str, Any], window: dict[str, Any], limit: int
+    ) -> dict[str, Any]:
+        pairs: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def include(left_column: str | None, right_column: str | None, *, context: bool) -> None:
+            if not left_column or not right_column:
+                return
+            identity = (str(left_column).casefold(), str(right_column).casefold())
+            if identity in seen:
+                if context:
+                    next(row for row in pairs if row["identity"] == identity)["context"] = True
+                return
+            seen.add(identity)
+            pairs.append(
+                {
+                    "identity": identity,
+                    "left_column": str(left_column),
+                    "right_column": str(right_column),
+                    "context": context,
+                }
+            )
+
+        for left_column, right_column in zip(
+            manifest.get("key_cols") or [], manifest.get("right_key_cols") or []
+        ):
+            include(left_column, right_column, context=True)
+        if manifest.get("partition", "day") != "all" and not manifest.get("left_snapshot"):
+            include(
+                (manifest.get("left") or {}).get("date_col"),
+                (manifest.get("right") or {}).get("date_col"),
+                context=True,
+            )
+        for left_column in manifest["columns"]:
+            include(left_column, manifest["col_map"][left_column], context=False)
+
+        where, _sampled = self._window_where(manifest, window)
+        selected = ", ".join(quote_ident(row["right_column"], "spark") for row in pairs)
+        sql = (
+            f"SELECT {selected} FROM {self.relation(partitions=window['partitions'])} "
+            f"WHERE {where} LIMIT {int(limit)}"
+        )
+        rows = [list(row) for row in self._collect(sql, "difference_sample")]
+        for row in pairs:
+            row.pop("identity")
+        return {"pairs": pairs, "rows": rows, "limit": int(limit)}

@@ -1,3 +1,6 @@
+import csv
+import gzip
+import io
 import threading
 import time
 
@@ -136,6 +139,68 @@ def test_unit(caplog):
         "n_unique=2|2 mean=1.5|1.5 std=0.7|0.7 min=1|1 max=2|2 "
         "length_avg=None|None length_max=None|None hash_sum=3|3"
     ) in caplog.text
+
+
+def test_only_different_columns_persist_a_right_sample():
+    store, _uid = _drained_store()
+
+    class SampleTarget(FakeTarget):
+        def window_sample(self, _manifest, _window, limit):
+            return {
+                "pairs": [
+                    {
+                        "left_column": "id",
+                        "right_column": "id",
+                        "context": True,
+                    },
+                    {
+                        "left_column": "amount",
+                        "right_column": "amount",
+                        "context": False,
+                    },
+                ],
+                "rows": [[1, 99]],
+                "limit": limit,
+            }
+
+    target = SampleTarget(stats={"amount": {**STATS, "n_unique": 9}})
+    ColCheck(store, lambda _cfg: target, poll_interval=0).run()
+
+    manifest = store.get_json("diagnostics/p/2026-01-01/manifest.json")
+    assert manifest["different_columns"] == ["amount"]
+    body = gzip.decompress(store.get_bytes("diagnostics/p/2026-01-01/right.csv.gz"))
+    assert list(csv.reader(io.StringIO(body.decode()))) == [["id", "amount"], ["1", "99"]]
+
+    matched_store, _uid = _drained_store()
+    ColCheck(matched_store, lambda _cfg: SampleTarget(), poll_interval=0).run()
+    assert matched_store.list_keys("diagnostics/") == []
+
+
+def test_stats_only_stages_right_statistics_and_sample_without_results():
+    store, _uid = _drained_store()
+
+    class SampleTarget(FakeTarget):
+        def window_sample(self, _manifest, _window, limit):
+            return {
+                "pairs": [
+                    {
+                        "left_column": "amount",
+                        "right_column": "amount",
+                        "context": False,
+                    }
+                ],
+                "rows": [[2]],
+                "limit": limit,
+            }
+
+    ColCheck(store, lambda _cfg: SampleTarget(), poll_interval=0, stats_only=True).run()
+
+    assert list_results(store) == []
+    assert store.get_json("_scratch/right_stats/p/2026-01-01.json")["statistics"] == {
+        "amount": STATS
+    }
+    assert store.exists("_scratch/right_samples/p/2026-01-01/right.csv.gz")
+    assert store.get_json("_state/right.json")["phase"] == "stats_ready"
 
 
 def test_total_mismatch_stops_the_right_after_recording_the_diff():

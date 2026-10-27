@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import csv
+import gzip
+import io
 import logging
 import sys
 import threading
@@ -19,6 +22,7 @@ from ..common.model.protocol import (
     active_unit_ids,
     col_check_close_document,
     current_plan_ids,
+    diagnostic_prefix,
     fixed_keys_document,
     list_failures,
     list_plans,
@@ -26,6 +30,8 @@ from ..common.model.protocol import (
     list_results,
     read_window_count,
     refresh_units_status,
+    right_sample_prefix,
+    right_stats_path,
     unit_batch_units,
     unit_prefix,
     unit_statistics,
@@ -109,12 +115,13 @@ class DrainScheduler:
         self.unit_windows.add(key)
         (self.ready if key in self.right_stats else self.pending[key]).append(pointer)
 
-    def mark_right_ready(self, pair, window, stats):
+    def mark_right_ready(self, pair, window, stats, *, promote=True):
         key = (pair, window)
         self.right_stats[key] = stats
         self.prefetching.discard(key)
-        while self.pending[key]:
-            self.ready.append(self.pending[key].popleft())
+        if promote:
+            while self.pending[key]:
+                self.ready.append(self.pending[key].popleft())
 
     def mark_prefetch_failed(self, pair, window):
         key = (pair, window)
@@ -214,6 +221,7 @@ class ColCheck:
         on_idle=None,
         right_workers=1,
         result_batch_size=DEFAULT_RESULT_BATCH_SIZE,
+        stats_only=False,
     ):
         self.store = store
         self.target_factory = target_factory
@@ -243,6 +251,10 @@ class ColCheck:
         self.unit_batches = set()
         self.ready_windows: set[tuple[str, str]] = set()
         self.result_batch_size = max(1, int(result_batch_size))
+        self.stats_only = bool(stats_only)
+        self.right_samples: dict[tuple[str, str], dict[str, Any]] = {}
+        self.difference_columns: dict[tuple[str, str], set[str]] = defaultdict(set)
+        self.compared_columns: dict[tuple[str, str], set[str]] = defaultdict(set)
         self.pending_matches: list[dict[str, Any]] = []
         self.completed_batches = len(list_result_batches(store))
         self.legacy_result_mode = False
@@ -529,7 +541,12 @@ class ColCheck:
             task.window,
             len(task.payload["partitions"]),
         )
-        stats = self._target(manifest).window_statistics(manifest, task.payload)
+        target = self._target(manifest)
+        stats = target.window_statistics(manifest, task.payload)
+        sample = None
+        sample_rows = int(manifest.get("difference_sample_rows") or 0)
+        if sample_rows and hasattr(target, "window_sample"):
+            sample = target.window_sample(manifest, task.payload, sample_rows)
         if stats:
             column, payload = next(iter(stats.items()))
             log.info(
@@ -540,12 +557,94 @@ class ColCheck:
                 column,
                 payload,
             )
-        return stats, time.monotonic() - started
+        return stats, sample, time.monotonic() - started
 
-    def _complete_prefetch(self, task, stats, elapsed):
+    @staticmethod
+    def _sample_csv(sample: dict[str, Any], pairs: list[dict[str, Any]]) -> bytes:
+        indexes = [sample["pairs"].index(pair) for pair in pairs]
+        output = io.StringIO(newline="")
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow([pair["right_column"] for pair in pairs])
+        for row in sample["rows"]:
+            writer.writerow([row[index] for index in indexes])
+        return gzip.compress(output.getvalue().encode("utf-8"))
+
+    def _stage_sample(self, task, sample: dict[str, Any]) -> None:
+        prefix = right_sample_prefix(task.pair, task.window)
+        self.store.put_bytes(
+            f"{prefix}right.csv.gz",
+            self._sample_csv(sample, sample["pairs"]),
+            content_type="application/gzip",
+        )
+        self.store.put_json(
+            f"{prefix}manifest.json",
+            {
+                "pair": task.pair,
+                "vintage": task.window,
+                "pairs": sample["pairs"],
+                "limit": sample["limit"],
+                "right_rows": len(sample["rows"]),
+                "right_file": "right.csv.gz",
+            },
+        )
+
+    def _persist_window_sample(self, pair: str, window: str) -> None:
+        sample = self.right_samples.pop((pair, window), None)
+        if sample is None:
+            return
+        different = self.difference_columns[(pair, window)]
+        if not different:
+            return
+        selected = [
+            row for row in sample["pairs"] if row.get("context") or row["left_column"] in different
+        ]
+        prefix = diagnostic_prefix(pair, window)
+        try:
+            self.store.put_bytes(
+                f"{prefix}right.csv.gz",
+                self._sample_csv(sample, selected),
+                content_type="application/gzip",
+            )
+            self.store.put_json(
+                f"{prefix}manifest.json",
+                {
+                    "pair": pair,
+                    "vintage": window,
+                    "different_columns": sorted(different),
+                    "pairs": selected,
+                    "limit": sample["limit"],
+                    "right_rows": len(sample["rows"]),
+                    "right_file": "right.csv.gz",
+                },
+            )
+        except Exception:
+            log.exception("could not persist difference sample %s %s", pair, window)
+            return
+        log.info(
+            "difference sample persisted %s %s: %d row(s), %d differing column(s)",
+            pair,
+            window,
+            len(sample["rows"]),
+            len(different),
+        )
+
+    def _persist_difference_samples(self) -> None:
+        for pair, window in sorted(self.right_samples):
+            self._persist_window_sample(pair, window)
+
+    def _complete_prefetch(self, task, stats, sample, elapsed):
         manifest = self.scheduler.manifests[task.pair]
         mapped = {left: stats[right] for left, right in manifest["col_map"].items()}
-        self.scheduler.mark_right_ready(task.pair, task.window, mapped)
+        if self.stats_only:
+            self.store.put_json(
+                right_stats_path(task.pair, task.window),
+                {"pair": task.pair, "vintage": task.window, "statistics": stats},
+            )
+            if sample is not None:
+                self._stage_sample(task, sample)
+        elif sample is not None:
+            self.right_samples[(task.pair, task.window)] = sample
+        self.scheduler.mark_right_ready(task.pair, task.window, mapped, promote=not self.stats_only)
         self.ready_windows.add((task.pair, task.window))
         self._write_progress()
         log.info(
@@ -560,8 +659,8 @@ class ColCheck:
         try:
             manifest = self.scheduler.manifests[task.pair]
             if task.kind == "prefetch":
-                stats, elapsed = self._fetch_right(task)
-                self._complete_prefetch(task, stats, elapsed)
+                stats, sample, elapsed = self._fetch_right(task)
+                self._complete_prefetch(task, stats, sample, elapsed)
                 return
             pointer = task.payload
             left = unit_statistics(self.store, pointer)
@@ -588,9 +687,14 @@ class ColCheck:
                     self.matched_ids.add(pointer["unit_id"])
                 else:
                     self.different_ids.add(pointer["unit_id"])
+                    self.difference_columns[(task.pair, task.window)].add(pointer["column"])
                 self.completed_ids.add(pointer["unit_id"])
                 self._write_progress()
             self.results.append(result)
+            window_key = (task.pair, task.window)
+            self.compared_columns[window_key].add(pointer["column"])
+            if self.compared_columns[window_key] >= set(manifest["columns"]):
+                self._persist_window_sample(task.pair, task.window)
             first = (task.pair, task.window) not in self.detailed
             self.detailed.add((task.pair, task.window))
             detail = result_detail(result, diff_only=not first)
@@ -617,6 +721,13 @@ class ColCheck:
             "plan_ids"
         ) != current_plan_ids(self.store):
             return False
+        if self.stats_only:
+            expected = {
+                (pair, window["bucket"])
+                for pair, manifest in self.scheduler.manifests.items()
+                for window in manifest["windows"]
+            }
+            return expected <= self.ready_windows
         return active_unit_ids(self.store) <= self.completed_ids
 
     def run(self):
@@ -632,8 +743,8 @@ class ColCheck:
                     for future in [future for future in jobs if future.done()]:
                         task = jobs.pop(future)
                         try:
-                            stats, elapsed = future.result()
-                            self._complete_prefetch(task, stats, elapsed)
+                            stats, sample, elapsed = future.result()
+                            self._complete_prefetch(task, stats, sample, elapsed)
                         except (PlanChangedError, SampleCountMismatch):
                             raise
                         except Exception as exc:
@@ -662,6 +773,17 @@ class ColCheck:
                         self._flush_matches(force=True)
                     if self.complete():
                         plans = [plan for _key, plan in list_plans(self.store)]
+                        if self.stats_only:
+                            SqlAudit(
+                                self.store,
+                                "right",
+                                enabled=any(bool(plan.get("audit")) for plan in plans),
+                            ).refresh()
+                            self._write_progress("stats_ready")
+                            log.info(
+                                "right statistics ready: %d window(s)", len(self.ready_windows)
+                            )
+                            return []
                         active = active_unit_ids(self.store)
                         durable_results = {
                             value["unit_id"] for _key, value in list_results(self.store)
@@ -674,6 +796,7 @@ class ColCheck:
                                 "Right completion checkpoint is missing durable outcomes"
                             )
                         refresh_units_status(self.store)
+                        self._persist_difference_samples()
                         SqlAudit(
                             self.store,
                             "right",

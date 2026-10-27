@@ -432,6 +432,38 @@ def test_statistics():
     }
 
 
+def test_window_sample_keeps_bounded_rows_in_memory():
+    spark = FakeSpark(
+        lambda sql: (
+            DESCRIBE if sql.startswith("DESCRIBE") else [(7, date(2026, 1, 1), 12.5, "open")]
+        )
+    )
+    manifest = {
+        **_manifest({"mode": "all"}),
+        "partition": "day",
+        "key_cols": ["ORDER_ID"],
+        "left": {"date_col": "ORDER_DT"},
+        "right": {"date_col": "business_date"},
+    }
+    sample = SparkTarget(spark, ORDERS).window_sample(
+        manifest,
+        {"bucket": "2026-01-01", "partitions": ["2026-01-01"]},
+        25,
+    )
+
+    assert sample["limit"] == 25
+    assert sample["rows"] == [[7, date(2026, 1, 1), 12.5, "open"]]
+    assert [row["right_column"] for row in sample["pairs"]] == [
+        "order_id",
+        "business_date",
+        "amount",
+        "status",
+    ]
+    assert sample["pairs"][0]["context"] is True
+    assert "LIMIT 25" in spark.statements[-1]
+    assert "WHERE" in spark.statements[-1]
+
+
 @pytest.mark.parametrize(
     ("overrides", "fragments", "types"),
     [

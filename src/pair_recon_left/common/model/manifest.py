@@ -372,6 +372,17 @@ def build_manifest(
     sampling = sample_plan(pair.get("sample"))
     if sampling["mode"] != "all" and not keys:
         raise ValueError(f"{pair_name}: sampling requires a key")
+    difference_sample_rows = pair.get("difference_sample_rows", 1000)
+    if isinstance(difference_sample_rows, bool):
+        raise TypeError(f"{pair_name}: difference_sample_rows must be a non-negative integer")
+    try:
+        difference_sample_rows = int(difference_sample_rows)
+    except (TypeError, ValueError):
+        raise TypeError(
+            f"{pair_name}: difference_sample_rows must be a non-negative integer"
+        ) from None
+    if difference_sample_rows < 0:
+        raise ValueError(f"{pair_name}: difference_sample_rows must be non-negative")
     manifest = {
         "protocol_version": PROTOCOL_VERSION,
         "version": version,
@@ -392,6 +403,8 @@ def build_manifest(
         "date_synonyms": dict(pair.get("date_synonyms") or {}),
         "strict": bool(pair.get("strict")),
         "audit": bool(pair.get("audit", False)),
+        "difference_sample_rows": difference_sample_rows,
+        "local_reconciliation": bool(pair.get("local_reconciliation", False)),
         "col_type_overrides": overrides,
         "column_types": column_types,
         "excluded_partitions": excluded_partitions,
@@ -403,7 +416,13 @@ def build_manifest(
     statistics = statistics_plan(pair.get("statistics"))
     if statistics is not None:
         manifest["statistics"] = statistics
-    manifest["plan_id"] = _digest(manifest)
+    manifest["plan_id"] = _digest(
+        {
+            key: value
+            for key, value in manifest.items()
+            if key not in {"difference_sample_rows", "local_reconciliation"}
+        }
+    )
     validate_manifest(manifest)
     return manifest
 
@@ -441,6 +460,15 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     statistics = statistics_plan(manifest.get("statistics"))
     if statistics is not None and manifest["statistics"] != statistics:
         raise ValueError("manifest statistics must use canonical order")
+    difference_sample_rows = manifest.get("difference_sample_rows", 1000)
+    if (
+        isinstance(difference_sample_rows, bool)
+        or not isinstance(difference_sample_rows, int)
+        or difference_sample_rows < 0
+    ):
+        raise ValueError("manifest difference_sample_rows must be a non-negative integer")
+    if not isinstance(manifest.get("local_reconciliation", False), bool):
+        raise TypeError("manifest local_reconciliation must be true or false")
     expected = len(manifest["windows"]) * len(manifest["columns"])
     if manifest["expected_units"] != expected:
         raise ValueError("expected_units does not equal Windows x columns")

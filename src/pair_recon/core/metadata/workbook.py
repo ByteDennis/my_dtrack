@@ -73,6 +73,7 @@ RUN_DEFAULT_FIELDS = {
     "sync_remote",
     "left_workers",
     "right_workers",
+    "difference_sample_rows",
     "vintage",
     "from_date",
     "to_date",
@@ -81,7 +82,7 @@ RUN_DEFAULT_FIELDS = {
     "vintage_values",
 }
 RUN_DEFAULT_BOOLS = ("strict", "audit", "sync_remote")
-RUN_DEFAULT_WORKERS = ("left_workers", "right_workers")
+RUN_DEFAULT_WORKERS = ("left_workers", "right_workers", "difference_sample_rows")
 RUN_DEFAULT_DATE_ONLY = ("from_date", "to_date", "vintage", "excluded_partitions")
 VINTAGES = ("day", "week", "month", "quarter", "year")
 PARTITIONS = ("day", "month", "all")

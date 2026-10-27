@@ -99,7 +99,13 @@ def run_config(
     selected.pop("run_mode", None)
     partition = answers.get("partition", selected.get("partition", "day"))
     selected["partition"] = partition
-    selected.update({key: answers[key] for key in ("sample", "strict", "audit") if key in answers})
+    selected.update(
+        {
+            key: answers[key]
+            for key in ("sample", "strict", "audit", "difference_sample_rows")
+            if key in answers
+        }
+    )
     checks = list(answers.get("checks", ()))
     selected["checks"] = checks
     statistics = [item for item in checks if item != "row_count"]

@@ -135,6 +135,7 @@ def run(
     right_workers=8,
     max_attempts=3,
     store=None,
+    local_reconciliation=False,
 ):
     resolved = run_id
     if store is None:
@@ -184,7 +185,16 @@ def run(
         heartbeat_timeout=heartbeat_timeout,
         poll_interval=poll_interval,
         on_idle=reconcile,
+        stats_only=local_reconciliation,
     ).run()
+    if local_reconciliation:
+        result = {
+            **summary(store),
+            "state": "right_stats_ready",
+            "stats_windows": sum(len(plan["windows"]) for _key, plan in list_plans(store)),
+        }
+        write_run_status(store, {**result, "state": "right_stats_ready", "role": "right"})
+        return result
     result = summary(store)
     active = active_unit_ids(store)
     result["results"] = sum(value["unit_id"] in active for _, value in list_results(store))

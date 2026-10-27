@@ -40,6 +40,25 @@ UNIT_STATUS_FIELDS = (
 UNIT_BATCH_FORMAT = "pair-recon-unit-batch-v1"
 RESULT_BATCH_FORMAT = "pair-recon-result-batch-v1"
 RESULT_BATCH_PREFIX = "col_check/result_batches/"
+RIGHT_STATS_PREFIX = "_scratch/right_stats/"
+RIGHT_SAMPLE_PREFIX = "_scratch/right_samples/"
+DIAGNOSTIC_PREFIX = "diagnostics/"
+
+
+def _artifact_segment(value: object) -> str:
+    return quote(str(value), safe="")
+
+
+def right_stats_path(pair: str, window: str) -> str:
+    return f"{RIGHT_STATS_PREFIX}{_artifact_segment(pair)}/{_artifact_segment(window)}.json"
+
+
+def right_sample_prefix(pair: str, window: str) -> str:
+    return f"{RIGHT_SAMPLE_PREFIX}{_artifact_segment(pair)}/{_artifact_segment(window)}/"
+
+
+def diagnostic_prefix(pair: str, window: str) -> str:
+    return f"{DIAGNOSTIC_PREFIX}{_artifact_segment(pair)}/{_artifact_segment(window)}/"
 
 
 def left_row_path(_pair: str) -> str:

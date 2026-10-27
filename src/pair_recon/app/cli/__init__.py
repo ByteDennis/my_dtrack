@@ -641,6 +641,10 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         ),
         "strict": confirm("Strict normalization", run_default("strict", False)),
         "audit": confirm("Audit SQL", run_default("audit", False)),
+        "difference_sample_rows": worker_budget(
+            "Difference sample rows",
+            run_default("difference_sample_rows", 1000),
+        ),
         **date_answers,
     }
     left_workers = worker_budget("Left source worker budget", run_default("left_workers", 2))
@@ -735,6 +739,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "sample": answers["sample"],
         "strict": answers["strict"],
         "audit": answers["audit"],
+        "difference_sample_rows": answers["difference_sample_rows"],
         "sync_remote": sync_remote,
         "work_dir": str(local_output_root(defaults)),
         "progress_interval": defaults.get("progress_interval", 30),
@@ -797,7 +802,7 @@ def sync_right_package(settings: dict, client) -> dict:
 
 
 def persistent_settings(settings: dict) -> dict:
-    transient = {"run_id", "earlystop", "force", "recheck"}
+    transient = {"run_id", "earlystop", "force", "recheck", "local_reconciliation"}
     return {
         key: value
         for key, value in settings.items()
@@ -845,6 +850,10 @@ def execute(args, *, raise_errors: bool = False) -> int:
                     settings["earlystop"] = bool(getattr(args, "earlystop", False))
                     settings["force"] = bool(getattr(args, "force", False))
                     settings["recheck"] = bool(getattr(args, "recheck", False))
+                    settings["local_reconciliation"] = bool(getattr(args, "debug", None))
+                    config["pairs"][settings["pair"]]["local_reconciliation"] = settings[
+                        "local_reconciliation"
+                    ]
                     if settings["force"]:
                         action = "restart"
                     configure_console_logging(args.log_level, settings["timezone"])

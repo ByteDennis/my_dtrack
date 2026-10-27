@@ -34,6 +34,7 @@ for name in (
     "sample_rate",
     "vintage_sample",
     "smoke",
+    "local_reconciliation",
 ):
     dbutils.widgets.text(name, "")
 
@@ -55,6 +56,7 @@ values = {
         "sample_rate",
         "vintage_sample",
         "smoke",
+        "local_reconciliation",
     )
 }
 publish_values = {
@@ -96,8 +98,10 @@ try:
             lambda config: SparkTarget(spark, config),
             run_id=values["run_id"],
             right_workers=int(values["right_workers"] or 8),
+            local_reconciliation=values["local_reconciliation"].casefold() == "true",
         )
-        publish(spark, store, **publish_values, state=run_state(outcome))
+        if values["local_reconciliation"].casefold() != "true":
+            publish(spark, store, **publish_values, state=run_state(outcome))
     print(outcome)
 except BaseException:
     logging.getLogger("pair_recon").exception("right job failed")

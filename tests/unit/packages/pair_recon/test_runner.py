@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 import yaml
-from support import MemoryStore
+from support import STATS, FakeTarget, MemoryStore, left_document
 
 from pair_recon.app import cli, runner
 from pair_recon.app.runner import (
@@ -17,8 +17,10 @@ from pair_recon.app.runner import (
     make_run_id,
     mismatched_partitions,
     pair_config,
+    publish_difference_samples,
     resolve_job_id,
     retry_failed,
+    run_local_reconciliation,
     write_request_snapshot,
 )
 from pair_recon.core import debug, sas
@@ -36,12 +38,14 @@ from pair_recon_left.common.runtime.run_logging import CONSOLE_LOG_FORMAT, Zoned
 from pair_recon_left.common.runtime.stop import StopSignal
 from pair_recon_right.engine.backends.store import VolumeStore as LocalStore
 from pair_recon_right.engine.backends.targets import CsvTarget
+from pair_recon_right.engine.checks.col_check import ColCheck as RightColCheck
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
 from pair_recon_right.engine.common.model.attribute_checks import (
     AttributeCheck,
     attribute_check_names,
     get_attribute_check,
 )
+from pair_recon_right.engine.common.model.manifest import unit_id
 from pair_recon_right.engine.job import run as run_right
 
 
@@ -68,6 +72,63 @@ def test_runid():
         "America/New_York",
         now=datetime(2026, 10, 22, 9, tzinfo=ZoneInfo("America/New_York")),
     ) == Path("outputs/2026-10-22/custom-run")
+
+
+def test_debug_reconciles_locally_and_publishes_only_difference_samples(tmp_path):
+    store = MemoryStore()
+    document = left_document(sample=None)
+    store.put_json("row_check/left.json", document)
+    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    run_right_row_check(store, lambda _cfg: FakeTarget())
+    manifest = store.get_json("plan.json")
+    uid = unit_id("p", "2026-01-01", "amount")
+    store.commit_units(
+        1,
+        [
+            {
+                "pair": "p",
+                "window": "2026-01-01",
+                "column": "amount",
+                "right_column": "amount",
+                "unit_id": uid,
+                "left_statistics": STATS,
+            }
+        ],
+    )
+    store.close_manifests(["p"], manifest["expected_units"])
+    store.heartbeat()
+
+    class SampleTarget(FakeTarget):
+        def window_sample(self, _manifest, _window, limit):
+            return {
+                "pairs": [
+                    {"left_column": "id", "right_column": "id", "context": True},
+                    {
+                        "left_column": "amount",
+                        "right_column": "amount",
+                        "context": False,
+                    },
+                ],
+                "rows": [[1, 9]],
+                "limit": limit,
+            }
+
+    RightColCheck(
+        store,
+        lambda _cfg: SampleTarget(stats={"amount": {**STATS, "n_unique": 9}}),
+        poll_interval=0,
+        stats_only=True,
+    ).run()
+    outcome = run_local_reconciliation(store, right_workers=2)
+    assert outcome["column_errors"] == 1
+
+    left = tmp_path / "p" / "2026-01-01" / "left.csv"
+    left.parent.mkdir(parents=True)
+    left.write_text("id,amount\n1,8\n", encoding="utf-8")
+    assert publish_difference_samples(store, tmp_path, "p") == 1
+    assert store.exists("diagnostics/p/2026-01-01/right.csv.gz")
+    assert store.exists("diagnostics/p/2026-01-01/left.csv.gz")
+    assert store.list_keys("_scratch/") == []
 
 
 def test_excluded_partition_ranges_and_month_numbers():

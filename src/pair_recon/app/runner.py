@@ -1,3 +1,6 @@
+import csv
+import gzip
+import io
 import json
 import os
 import re
@@ -34,6 +37,7 @@ from pair_recon_left.common.model.protocol import (
     UNITS_STATUS,
     active_unit_ids,
     current_plan_ids,
+    diagnostic_prefix,
     empty_plan_state,
     fixed_keys_path,
     get_left_state,
@@ -44,6 +48,7 @@ from pair_recon_left.common.model.protocol import (
     mapping_path,
     plan_path,
     refresh_units_status,
+    right_stats_path,
     row_result_path,
     write_right_state,
     write_run_status,
@@ -52,8 +57,11 @@ from pair_recon_left.common.runtime.run_logging import configure_left_logging, g
 from pair_recon_left.common.runtime.stop import StopSignal, beat
 from pair_recon_right.catalog import run_state, status_run_values
 from pair_recon_right.engine.backends.targets import CsvTarget
+from pair_recon_right.engine.checks.col_check import ColCheck as RightColCheck
 from pair_recon_right.engine.checks.row_check import run_row_check as run_right_row_check
+from pair_recon_right.engine.job import publish_report as publish_right_report
 from pair_recon_right.engine.job import run as run_right
+from pair_recon_right.engine.job import summary as right_summary
 
 _SENSITIVE_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
 _SENSITIVE_WORDS = ("password", "secret", "token", "credential")
@@ -142,6 +150,7 @@ def right_job_params(settings: dict, pair: str, run_id: str, run_values: dict) -
         "status_table": settings["status_table"],
         "error_table": settings["error_table"],
         "right_workers": str(max(1, int(settings.get("right_workers", 8)))),
+        "local_reconciliation": ("true" if settings.get("local_reconciliation") else "false"),
         **{name: "" if value is None else str(value) for name, value in run_values.items()},
     }
 
@@ -716,6 +725,133 @@ def clear_resume_outputs(store) -> int:
     return store.delete_keys(sorted(set(keys)))
 
 
+class StoredRightStatistics:
+    def __init__(self, store):
+        self.store = store
+
+    def window_statistics(self, manifest, window):
+        return self.store.get_json(right_stats_path(manifest["pair"], window["bucket"]))[
+            "statistics"
+        ]
+
+
+def run_local_reconciliation(store, *, right_workers: int) -> dict:
+    compared = RightColCheck(
+        store,
+        lambda _config: StoredRightStatistics(store),
+        poll_interval=0.1,
+        right_workers=max(1, int(right_workers)),
+    ).run()
+    result = right_summary(store)
+    active = active_unit_ids(store)
+    result["results"] = sum(value["unit_id"] in active for _key, value in list_results(store))
+    result["new_results"] = len(compared)
+    publish_right_report(store)
+    write_run_status(store, {"state": "complete", "role": "local", **result})
+    return result
+
+
+def _project_gzip_csv(body: bytes, pairs: list[dict], selected: list[dict]) -> bytes:
+    indexes = [pairs.index(pair) for pair in selected]
+    source = csv.reader(io.StringIO(gzip.decompress(body).decode("utf-8")))
+    next(source, None)
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow([pair["right_column"] for pair in selected])
+    for row in source:
+        writer.writerow([row[index] for index in indexes])
+    return gzip.compress(output.getvalue().encode("utf-8"))
+
+
+def _left_difference_csv(path: Path, columns: list[str], limit: int) -> tuple[bytes, int]:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(columns)
+    count = 0
+    with path.open("r", encoding="utf-8-sig", newline="", errors="replace") as handle:
+        reader = csv.DictReader(handle)
+        missing = [column for column in columns if column not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(f"Left diagnostic columns missing from {path}: {', '.join(missing)}")
+        for row in reader:
+            writer.writerow([row[column] for column in columns])
+            count += 1
+            if count >= limit:
+                break
+    return gzip.compress(output.getvalue().encode("utf-8")), count
+
+
+def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
+    results = [
+        value
+        for _key, value in list_results(store)
+        if value.get("pair") == pair and value.get("verdict") != "match"
+    ]
+    by_window: dict[str, set[str]] = {}
+    for result in results:
+        by_window.setdefault(str(result["vintage"]), set()).add(str(result["column"]))
+
+    scratch_manifests = [
+        key for key in store.list_keys("_scratch/right_samples/") if key.endswith("/manifest.json")
+    ]
+    for key in scratch_manifests:
+        document = store.get_json(key)
+        if document.get("pair") != pair:
+            continue
+        window = str(document["vintage"])
+        different = by_window.get(window, set())
+        prefix = key.removesuffix("manifest.json")
+        if different:
+            selected = [
+                row
+                for row in document["pairs"]
+                if row.get("context") or row["left_column"] in different
+            ]
+            target = diagnostic_prefix(pair, window)
+            store.put_bytes(
+                f"{target}right.csv.gz",
+                _project_gzip_csv(
+                    store.get_bytes(f"{prefix}{document['right_file']}"),
+                    document["pairs"],
+                    selected,
+                ),
+                content_type="application/gzip",
+            )
+            store.put_json(
+                f"{target}manifest.json",
+                {
+                    **document,
+                    "different_columns": sorted(different),
+                    "pairs": selected,
+                },
+            )
+        store.delete_keys(store.list_keys(prefix))
+
+    published = 0
+    for key in [
+        value for value in store.list_keys("diagnostics/") if value.endswith("/manifest.json")
+    ]:
+        document = store.get_json(key)
+        if document.get("pair") != pair or document.get("left_file"):
+            continue
+        window = str(document["vintage"])
+        left_path = run_dir / pair / window / "left.csv"
+        if not left_path.is_file():
+            log.warning("Left difference sample unavailable: %s", left_path)
+            continue
+        left_columns = [row["left_column"] for row in document["pairs"]]
+        body, rows = _left_difference_csv(left_path, left_columns, int(document["limit"]))
+        prefix = key.removesuffix("manifest.json")
+        store.put_bytes(f"{prefix}left.csv.gz", body, content_type="application/gzip")
+        store.put_json(
+            key,
+            {**document, "left_file": "left.csv.gz", "left_rows": rows},
+        )
+        published += 1
+    store.delete_keys(store.list_keys("_scratch/right_stats/"))
+    return published
+
+
 def launch(settings: dict, config: dict, *, action: str, workspace_client=None, catalog=None):
     pair = next(iter(config["pairs"]))
     run_id = validate_run_id(settings["run_id"])
@@ -902,16 +1038,39 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 )
         else:
             monitor.result()
-            right = {
-                "run_id": int(remote.run_id),
-                **monitor.outcome,
-            }
-            outcome_fields = ("row_errors", "column_errors", "failures")
-            if all(name in monitor.outcome for name in outcome_fields):
-                final_state = run_state(monitor.outcome)
+            if settings.get("local_reconciliation"):
+                log.info("starting local reconciliation from Databricks Right statistics")
+                local_outcome = run_local_reconciliation(
+                    store, right_workers=int(settings.get("right_workers", 8))
+                )
+                right = {"run_id": int(remote.run_id), **local_outcome}
+                final_state = run_state(local_outcome)
+                if catalog:
+                    catalog.finish(
+                        store,
+                        run_id=run_id,
+                        pair=pair,
+                        owner=settings["owner"],
+                        state=final_state,
+                        timezone=settings["timezone"],
+                        **run_values,
+                    )
             else:
-                published = catalog.run(run_id) if catalog else None
-                final_state = (published or {}).get("state") or "finished"
+                right = {
+                    "run_id": int(remote.run_id),
+                    **monitor.outcome,
+                }
+                outcome_fields = ("row_errors", "column_errors", "failures")
+                if all(name in monitor.outcome for name in outcome_fields):
+                    final_state = run_state(monitor.outcome)
+                else:
+                    published = catalog.run(run_id) if catalog else None
+                    final_state = (published or {}).get("state") or "finished"
+        try:
+            difference_samples = publish_difference_samples(store, run_dir, pair)
+        except Exception:
+            log.exception("could not publish Left/Right difference samples")
+            difference_samples = 0
         if sampler:
             sampler.stop(final_state, required=not remote_right, capture=not remote_right)
             sampler = None
@@ -924,6 +1083,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             "left": left,
             "left_log": str(left_log),
             "right": right,
+            "difference_samples": difference_samples,
             "volume_run_root": store.root_uri,
         }
     except BaseException as exc:
