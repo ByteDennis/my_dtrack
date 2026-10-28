@@ -53,7 +53,7 @@ def mapping_csv_bytes(pair: dict[str, Any]) -> bytes:
         lineterminator="\n",
     )
     writer.writeheader()
-    excluded = set(pair.get("excluded_columns") or [])
+    excluded = {str(column).casefold() for column in pair.get("excluded_columns") or []}
     overrides = pair.get("col_type_overrides") or {}
     column_types = pair.get("column_types") or {}
     partition = str(pair.get("partition") or "day")
@@ -61,7 +61,7 @@ def mapping_csv_bytes(pair: dict[str, Any]) -> bytes:
     for left_column, right_column in (pair.get("col_map") or {}).items():
         if partition != "all" and str(left_column).casefold() == date_col:
             usage = "partition"
-        elif left_column in excluded:
+        elif str(left_column).casefold() in excluded:
             usage = "excluded"
         else:
             usage = "compare"
@@ -311,8 +311,15 @@ def build_manifest(
     if partition_kind not in {"day", "month", "all"}:
         raise ValueError(f"{pair_name}: partition must be day, month or all")
     excluded_partitions = sorted(set(pair.get("excluded_partitions") or []))
-    excluded_columns = set(pair.get("excluded_columns") or [])
     mapped_columns = list((pair.get("col_map") or {}).keys())
+    lookup = {column.casefold(): column for column in mapped_columns}
+    requested = [str(column).strip() for column in pair.get("excluded_columns") or []]
+    unknown_excluded = sorted({column for column in requested if column.casefold() not in lookup})
+    if unknown_excluded:
+        raise ValueError(
+            f"{pair_name}: excluded_columns names unmapped columns: {', '.join(unknown_excluded)}"
+        )
+    excluded_columns = {lookup[column.casefold()] for column in requested}
     date_col = str(pair["left"].get("date_col") or "").lower()
     value_columns = (
         mapped_columns
@@ -385,7 +392,7 @@ def build_manifest(
     sampling = sample_plan(pair.get("sample"))
     if sampling["mode"] != "all" and not keys:
         raise ValueError(f"{pair_name}: sampling requires a key")
-    difference_sample_rows = pair.get("difference_sample_rows", 1000)
+    difference_sample_rows = pair.get("difference_sample_rows", 100)
     if isinstance(difference_sample_rows, bool):
         raise TypeError(f"{pair_name}: difference_sample_rows must be a non-negative integer")
     try:
@@ -480,7 +487,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     statistics = statistics_plan(manifest.get("statistics"))
     if statistics is not None and manifest["statistics"] != statistics:
         raise ValueError("manifest statistics must use canonical order")
-    difference_sample_rows = manifest.get("difference_sample_rows", 1000)
+    difference_sample_rows = manifest.get("difference_sample_rows", 100)
     if (
         isinstance(difference_sample_rows, bool)
         or not isinstance(difference_sample_rows, int)

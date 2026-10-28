@@ -472,13 +472,13 @@ def test_window_sample_keeps_bounded_rows_in_memory():
     ("overrides", "fragments", "types"),
     [
         pytest.param(
-                {"STATUS": "numeric", "AMOUNT": "categorical"},
-                (
-                    "avg(try_cast(",
-                    "AS mean_2",
-                    "NULL AS mean_1",
-                    "AS length_avg_1",
-                ),
+            {"STATUS": "numeric", "AMOUNT": "categorical"},
+            (
+                "avg(try_cast(",
+                "AS mean_2",
+                "NULL AS mean_1",
+                "AS length_avg_1",
+            ),
             {"status": "numeric", "amount": "categorical", "order_id": "categorical"},
             id="mixed",
         ),
@@ -540,3 +540,21 @@ def test_fixed():
     window = {"key_tuples": [[" ABC ", "1.50", "2026-01-31 00:00:00"], ["O'K", "007", "20260131"]]}
     predicate = SparkTarget(None, ORDERS)._sample_predicate(manifest, window)
     assert predicate.endswith("IN ('abc|1.5|2026-01-31', 'o\\'k|7|2026-01-31')")
+
+
+def test_statistics_batches_wide_tables(monkeypatch):
+    monkeypatch.setattr(targets, "STATS_COLUMNS", 2)
+    spark = FakeSpark(
+        lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]
+    )
+    window = {"bucket": "2026-01-01", "partitions": ["2026-01-01"]}
+    seen = []
+    stats = SparkTarget(spark, ORDERS).window_statistics(
+        _manifest({"mode": "all"}), window, progress=lambda done, total: seen.append((done, total))
+    )
+    queries = spark.statements[1:]
+    assert len(queries) == 2 and seen == [(2, 3), (3, 3)]
+    assert all(query.startswith("SELECT count(1) AS n_total, ") for query in queries)
+    assert "AS n_unique_1" in queries[0] and "AS n_unique_2" not in queries[0]
+    assert "AS n_unique_2" in queries[1] and "AS n_unique_0" not in queries[1]
+    assert stats["amount"]["hash_sum"] == "2000" and stats["status"]["length_max"] == 2

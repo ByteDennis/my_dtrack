@@ -261,6 +261,8 @@ class ColCheck:
         self.first_window_started = False
         self.first_window_checked = False
         self.first_window_lock = threading.Lock()
+        self.activity: dict[tuple[str, str], tuple[int, int]] = {}
+        self.activity_lock = threading.Lock()
 
     # >>> the first window's sampled count is compared as soon as both sides have it, before any statistics <<< #
     def _check_first_window(self) -> None:
@@ -338,8 +340,22 @@ class ColCheck:
                 "ready_windows": [
                     f"{pair}:{window}" for pair, window in sorted(self.ready_windows)
                 ],
+                "fetching": self._activity(),
             },
         )
+
+    def _activity(self):
+        with self.activity_lock:
+            return [
+                {"pair": pair, "window": window, "columns_done": done, "columns_total": total}
+                for (pair, window), (done, total) in sorted(self.activity.items())
+            ]
+
+    # >>> statistics batch progress from a worker thread; only the fetching field is rewritten <<< #
+    def _note_activity(self, task, done, total):
+        with self.activity_lock:
+            self.activity[(task.pair, task.window)] = (int(done), int(total))
+        write_right_state(self.store, {"fetching": self._activity()})
 
     def _flush_matches(self, *, force=False):
         while len(self.pending_matches) >= self.result_batch_size or (
@@ -539,7 +555,16 @@ class ColCheck:
             len(task.payload["partitions"]),
         )
         target = self._target(manifest)
-        stats = target.window_statistics(manifest, task.payload)
+        self._note_activity(task, 0, len(manifest["columns"]))
+        try:
+            stats = target.window_statistics(
+                manifest,
+                task.payload,
+                progress=lambda done, total: self._note_activity(task, done, total),
+            )
+        finally:
+            with self.activity_lock:
+                self.activity.pop((task.pair, task.window), None)
         sample = None
         sample_rows = int(manifest.get("difference_sample_rows") or 0)
         if sample_rows and hasattr(target, "window_sample"):

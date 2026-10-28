@@ -38,13 +38,14 @@ def validate_run_id(value):
     return run_id
 
 
-# >>> repeat a Volume read after the FUSE mount answers EINVAL/EIO/ESTALE, typically mid-overwrite <<< #
-def retry_io(operation, call, *, attempts=RETRY_ATTEMPTS):
+# >>> repeat a Volume read after EINVAL/EIO/ESTALE or a torn JSON document, both typical mid-overwrite <<< #
+def retry_io(operation, call, *, attempts=RETRY_ATTEMPTS, errors=(OSError,)):
     for attempt in range(1, attempts + 1):
         try:
             return call()
-        except OSError as exc:
-            if exc.errno not in RETRY_ERRNOS or attempt >= attempts:
+        except errors as exc:
+            transient = exc.errno in RETRY_ERRNOS if isinstance(exc, OSError) else True
+            if not transient or attempt >= attempts:
                 raise
             delay = RETRY_BACKOFF_S * attempt
             log.warning(
@@ -94,7 +95,11 @@ class VolumeStore:
         return retry_io(f"read {relative}", self._path(relative).read_bytes)
 
     def get_json(self, relative):
-        return json.loads(self.get_bytes(relative).decode())
+        return retry_io(
+            f"parse {relative}",
+            lambda: json.loads(self.get_bytes(relative).decode()),
+            errors=(ValueError,),
+        )
 
     def exists(self, relative):
         return retry_io(f"stat {relative}", self._path(relative).is_file)

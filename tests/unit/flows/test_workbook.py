@@ -256,6 +256,7 @@ def test_partition_column_builds_internal_config(tmp_path, partition):
         ({"left_workers": 0}, "left_workers must be a positive integer"),
         ({"right_workers": True}, "right_workers must be a positive integer"),
         ({"excluded_partitions": "2026-01-02"}, "excluded_partitions must be a string array"),
+        ({"excluded_columns": "AMOUNT"}, "excluded_columns must be a string array"),
         ({"cadence": "x"}, "run_defaults_json has unsupported fields: cadence"),
     ],
 )

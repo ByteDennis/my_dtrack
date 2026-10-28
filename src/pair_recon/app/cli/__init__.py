@@ -257,6 +257,12 @@ def date_type_value(value):
     return resolve_date_type(selected).spec(portable=True)
 
 
+# >>> comma text or a list into stripped, deduplicated column names <<< #
+def column_list(value) -> list[str]:
+    items = value if isinstance(value, list | tuple) else str(value or "").split(",")
+    return list(dict.fromkeys(str(item).strip() for item in items if str(item).strip()))
+
+
 def excluded_partition_values(value, date_type=None, partition: str = "day") -> list[str]:
     if value in (None, ""):
         return []
@@ -671,9 +677,18 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         ["row_count", *attribute_check_names()],
         run_default("checks", "row_count,hash_sum,n_unique"),
     )
-    difference_sample_rows = run_default("difference_sample_rows", 1000)
+    difference_sample_rows = run_default("difference_sample_rows", 100)
     if difference_sample_rows in (None, ""):
-        difference_sample_rows = 1000
+        difference_sample_rows = 100
+    excluded_columns = column_list(
+        answer(
+            "Excluded columns (comma-separated Left names)",
+            ", ".join(
+                column_list(run_default("excluded_columns", metadata.get("excluded_columns") or []))
+            ),
+            required=False,
+        )
+    )
     answers = {
         "partition": partition,
         "checks": selected,
@@ -683,6 +698,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "normalization_rules": normalization_rules,
         "audit": confirm("Audit SQL", run_default("audit", False)),
         "difference_sample_rows": int(difference_sample_rows),
+        "excluded_columns": excluded_columns,
         **date_answers,
     }
     left_workers = worker_budget("Left source worker budget", run_default("left_workers", 2))
@@ -794,6 +810,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "from_date",
         "to_date",
         "excluded_partitions",
+        "excluded_columns",
         "vintage",
     ):
         if key in answers:

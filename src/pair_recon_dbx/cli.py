@@ -34,9 +34,7 @@ def add_wait(parser) -> None:
 
 def parser() -> argparse.ArgumentParser:
     configured_catalog_schema = env_value(CATALOG_SCHEMA_ENV)
-    legacy_catalog_schema = (
-        None if configured_catalog_schema else legacy_catalog_tables()[0]
-    )
+    legacy_catalog_schema = None if configured_catalog_schema else legacy_catalog_tables()[0]
     root = argparse.ArgumentParser(prog="pair_recon dbx")
     root.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))
     commands = root.add_subparsers(dest="command", required=True)

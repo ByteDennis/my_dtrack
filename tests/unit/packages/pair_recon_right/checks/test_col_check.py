@@ -212,9 +212,7 @@ def test_stats_only_stages_right_statistics_and_sample_without_results():
     ColCheck(store, lambda _cfg: SampleTarget(), poll_interval=0, stats_only=True).run()
 
     assert list_results(store) == []
-    assert store.get_json(right_stats_path("p", "2026-01-01"))["statistics"] == {
-        "amount": STATS
-    }
+    assert store.get_json(right_stats_path("p", "2026-01-01"))["statistics"] == {"amount": STATS}
     assert store.exists(f"{right_sample_prefix('p', '2026-01-01')}right.csv.gz")
     assert get_right_state(store)["phase"] == "stats_ready"
 
@@ -343,7 +341,7 @@ def test_right_worker_budget_runs_window_queries_in_parallel():
     peak = 0
 
     class ParallelTarget(FakeTarget):
-        def window_statistics(self, *_args):
+        def window_statistics(self, *_args, **_kwargs):
             nonlocal active, peak
             with lock:
                 active += 1
@@ -449,7 +447,7 @@ def test_prefetch():
     store, uid = _drained_store()
 
     class Broken(FakeTarget):
-        def window_statistics(self, *_args):
+        def window_statistics(self, *_args, **_kwargs):
             raise ValueError("boom")
 
     results = ColCheck(store, lambda _cfg: Broken(), poll_interval=0, max_attempts=2).run()
@@ -556,3 +554,19 @@ def test_unreadable_heartbeat_does_not_fail_the_right(monkeypatch, caplog):
         results = ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0).run()
     assert len(results) == 1 and len(reads) >= 2
     assert "left heartbeat unreadable" in caplog.text
+
+
+# >>> batch progress reaches _protocol/right.json while a window is still being fetched <<< #
+def test_statistics_progress_is_published_while_fetching():
+    store, _uid = _drained_store()
+    seen = []
+
+    class Reporting(FakeTarget):
+        def window_statistics(self, manifest, window, progress=None):
+            progress(1, 1)
+            seen.append(get_right_state(store)["fetching"])
+            return self.stats
+
+    ColCheck(store, lambda _cfg: Reporting(), poll_interval=0).run()
+    assert seen[0][0]["pair"] == "p" and seen[0][0]["columns_done"] == 1
+    assert seen[0][0]["columns_total"] == 1 and get_right_state(store)["fetching"] == []

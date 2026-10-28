@@ -269,6 +269,6 @@ class FakeTarget:
     def partition_counts(self, *_args):
         return self.counts
 
-    def window_statistics(self, manifest, window):
+    def window_statistics(self, manifest, window, progress=None):
         self.calls.append((manifest["pair"], window["bucket"], window.get("key_tuples")))
         return self.stats

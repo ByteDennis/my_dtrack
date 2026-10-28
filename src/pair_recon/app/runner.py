@@ -174,8 +174,8 @@ class StageWatchdog:
         self.stop = stop
         self.interval = interval
         self.fetch_stall = _env_seconds("FETCH_STALL_SECONDS", 1800)
-        self.first_result = _env_seconds("RIGHT_FIRST_RESULT_SECONDS", 7200)
-        self.state_stall = _env_seconds("RIGHT_STATE_STALL_SECONDS", 3600)
+        self.first_result = _env_seconds("RIGHT_FIRST_RESULT_SECONDS", 14400)
+        self.state_stall = _env_seconds("RIGHT_STATE_STALL_SECONDS", 7200)
         self.volume_failures = int(_env_seconds("VOLUME_READ_FAILURES", 10))
         self.done = threading.Event()
         self.left_published_at = None
@@ -735,7 +735,7 @@ class StoredRightStatistics:
     def __init__(self, store):
         self.store = store
 
-    def window_statistics(self, manifest, window):
+    def window_statistics(self, manifest, window, progress=None):
         return self.store.get_json(right_stats_path(manifest["pair"], window["bucket"]))[
             "statistics"
         ]
@@ -893,7 +893,9 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
             log.warning("Left difference sample unavailable: %s", left_path)
             continue
         keys_path = difference_keys_path(pair, window)
-        key_tuples = store.get_json(keys_path).get("key_tuples", []) if store.exists(keys_path) else []
+        key_tuples = (
+            store.get_json(keys_path).get("key_tuples", []) if store.exists(keys_path) else []
+        )
         body, left_rows, right_rows, sample_rows, columns = _difference_sample_csv(
             left_path=left_path,
             right_body=store.get_bytes(f"{prefix}{document['right_file']}"),

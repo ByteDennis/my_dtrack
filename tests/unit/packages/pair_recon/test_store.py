@@ -6,7 +6,12 @@ from databricks.sdk.errors import NotFound
 
 from pair_recon.core.backends import store as store_module
 from pair_recon.core.backends.store import ApiVolumeStore
-from pair_recon_left.common.model.protocol import LEFT_STATE, RUN_STATUS, left_row_path, unit_batch_path
+from pair_recon_left.common.model.protocol import (
+    LEFT_STATE,
+    RUN_STATUS,
+    left_row_path,
+    unit_batch_path,
+)
 
 
 class Files:
@@ -142,3 +147,20 @@ def test_immutable_json_is_downloaded_once_and_invalidated_by_write_or_delete():
     assert files.downloads == [path]
     store.delete_keys([key])
     assert path not in store._json_cache
+
+
+def test_get_json_retries_a_torn_download(monkeypatch):
+    monkeypatch.setattr(store_module, "RETRY_BACKOFF_S", 0)
+
+    class TornFiles(Files):
+        def download(self, path):
+            whole = self.values[path]
+            self.downloads.append(path)
+            body = whole[: len(whole) // 2] if len(self.downloads) < 2 else whole
+            return type("Download", (), {"contents": io.BytesIO(body)})()
+
+    files = TornFiles()
+    store = ApiVolumeStore("/Volumes/main/recon/artifacts/runs", files=files).child("run-1")
+    store.put_json("pairs/p/value.json", {"pair": "p", "partitions": {"2026-01-01": 5}})
+    assert store.get_json("pairs/p/value.json")["partitions"] == {"2026-01-01": 5}
+    assert len(files.downloads) == 2

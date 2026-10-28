@@ -65,3 +65,21 @@ def test_reads_retry_fuse_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(store_module.Path, "read_bytes", gone)
     with pytest.raises(OSError, match="No such file"):
         store.get_bytes(LEFT_STATE)
+
+
+def test_reads_retry_torn_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_module, "RETRY_BACKOFF_S", 0)
+    store = VolumeStore(tmp_path)
+    store.put_json(LEFT_STATE, {"phase": "col_check"})
+    whole = store.get_bytes(LEFT_STATE)
+    attempts = []
+
+    def torn(self):
+        attempts.append(1)
+        return whole[: len(whole) // 2] if len(attempts) < 2 else whole
+
+    monkeypatch.setattr(store_module.Path, "read_bytes", torn)
+    assert store.get_json(LEFT_STATE) == {"phase": "col_check"} and len(attempts) == 2
+    monkeypatch.setattr(store_module.Path, "read_bytes", lambda self: whole[:3])
+    with pytest.raises(ValueError):
+        store.get_json(LEFT_STATE)

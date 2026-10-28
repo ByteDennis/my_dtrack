@@ -178,7 +178,10 @@ def test_reconcile(caplog):
     assert doc["timing"]["left_count_s"] == 0.1
     manifest = store.get_json(plan_path("p"))
     assert manifest["windows"][0]["partitions"] == ["2026-01-01"]
-    assert "plan released: memory://run/config/manifest.json (1 windows, 1 columns, 1 units)" in caplog.text
+    assert (
+        "plan released: memory://run/config/manifest.json (1 windows, 1 columns, 1 units)"
+        in caplog.text
+    )
     assert "right count p: 2 partitions, 3 rows" in caplog.text
     assert "first ('2026-01-01', 1)" in caplog.text
     assert "finding p 2026-01-02 count_diff left=" in caplog.text

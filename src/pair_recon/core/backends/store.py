@@ -21,6 +21,7 @@ TRANSIENT_ERRORS = (
     Urllib3Error,
     ConnectionError,
 )
+TORN_ERRORS = (json.JSONDecodeError, UnicodeDecodeError)
 
 
 def _is_not_found(exc: Exception) -> bool:
@@ -40,13 +41,15 @@ def volume_failure_streak() -> int:
 
 
 # >>> repeat a Files API call after a broken connection or timeout, backing off attempt * RETRY_BACKOFF_S <<< #
-def retry_transient(operation: str, call, *, attempts: int = RETRY_ATTEMPTS):
+def retry_transient(
+    operation: str, call, *, attempts: int = RETRY_ATTEMPTS, errors=TRANSIENT_ERRORS
+):
     for attempt in range(1, attempts + 1):
         try:
             value = call()
             _FAILURE_STREAK[0] = 0
             return value
-        except TRANSIENT_ERRORS as exc:
+        except errors as exc:
             _FAILURE_STREAK[0] += 1
             if attempt >= attempts:
                 raise
@@ -136,7 +139,11 @@ class ApiVolumeStore:
             with self._state_lock:
                 if path in self._json_cache:
                     return deepcopy(self._json_cache[path])
-        value = json.loads(self.get_bytes(relative).decode("utf-8"))
+        value = retry_transient(
+            f"parse {relative}",
+            lambda: json.loads(self.get_bytes(relative).decode("utf-8")),
+            errors=TORN_ERRORS,
+        )
         if self._cacheable_json(relative):
             with self._state_lock:
                 self._json_cache[path] = deepcopy(value)

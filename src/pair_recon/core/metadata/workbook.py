@@ -78,10 +78,12 @@ RUN_DEFAULT_FIELDS = {
     "from_date",
     "to_date",
     "excluded_partitions",
+    "excluded_columns",
     "vintage_sample_size",
     "vintage_values",
 }
 RUN_DEFAULT_BOOLS = ("audit", "sync_remote")
+RUN_DEFAULT_LISTS = ("excluded_partitions", "excluded_columns")
 RUN_DEFAULT_WORKERS = ("left_workers", "right_workers", "difference_sample_rows")
 RUN_DEFAULT_DATE_ONLY = ("from_date", "to_date", "vintage", "excluded_partitions")
 VINTAGES = ("day", "week", "month", "quarter", "year")
@@ -358,12 +360,13 @@ def _validate_run_defaults(
     }
     if len(bounds) == 2 and bounds["from_date"] > bounds["to_date"]:
         raise ValueError(f"pairs.xlsx row {row}: from_date must not be after to_date")
-    excluded = value.get("excluded_partitions")
-    if excluded is not None and (
-        not isinstance(excluded, list)
-        or not all(isinstance(item, str) and item.strip() for item in excluded)
-    ):
-        raise TypeError(f"pairs.xlsx row {row}: excluded_partitions must be a string array")
+    for field in RUN_DEFAULT_LISTS:
+        excluded = value.get(field)
+        if excluded is not None and (
+            not isinstance(excluded, list)
+            or not all(isinstance(item, str) and item.strip() for item in excluded)
+        ):
+            raise TypeError(f"pairs.xlsx row {row}: {field} must be a string array")
     if partition == "all":
         present = [field for field in RUN_DEFAULT_DATE_ONLY if value.get(field) not in (None, [])]
         if present:

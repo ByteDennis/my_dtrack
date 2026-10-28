@@ -445,3 +445,11 @@ def test_manifest4(common, change, message):
     change(manifest)
     with pytest.raises(ValueError, match=message):
         common.manifest.validate_manifest(manifest)
+
+
+def test_excluded_columns_match_case_insensitively_and_must_be_mapped(common):
+    pair = _variant(excluded_columns=["id"])
+    manifest = common.manifest.build_manifest("run", "p", pair, ROW_CHECK)
+    assert manifest["columns"] == ["AMOUNT"] and manifest["excluded_columns"] == ["ID"]
+    with pytest.raises(ValueError, match="excluded_columns names unmapped columns: NOTE"):
+        common.manifest.build_manifest("run", "p", _variant(excluded_columns=["NOTE"]), ROW_CHECK)

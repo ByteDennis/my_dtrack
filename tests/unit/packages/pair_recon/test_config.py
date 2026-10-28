@@ -174,3 +174,16 @@ def test_local_output_root_environment_overrides_saved_work_dir(monkeypatch, tmp
 
     assert local_output_root({"work_dir": "legacy"}) == target
     assert target.is_dir()
+
+
+def test_run_config_applies_excluded_columns():
+    pair = {
+        "left": {"source": "oracle", "table": "L", "date_col": "DT"},
+        "right": {"source": "databricks", "table": "r", "date_col": "dt"},
+        "partition": "all",
+        "key": "ID",
+        "col_map": {"ID": "id", "VALUE": "value"},
+    }
+    answers = {"partition": "all", "checks": ["row_count"], "excluded_columns": ["VALUE"]}
+    value = run_config("p", pair, answers, timezone="UTC")
+    assert value["pairs"]["p"]["excluded_columns"] == ["VALUE"]

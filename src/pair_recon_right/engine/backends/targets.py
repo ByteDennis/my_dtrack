@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -69,6 +70,9 @@ def check_date_column(column: str, column_type: str | None, date_type: DateType,
         )
 
 
+STATS_COLUMNS = int(os.environ.get("RIGHT_STATS_COLUMNS") or 50)
+
+
 class CsvTarget:
     def __init__(self, config: dict[str, Any]):
         from pair_recon_left.backends.sources import CsvSource
@@ -93,7 +97,7 @@ class CsvTarget:
     def count_keys(self, from_date=None, to_date=None, **options):
         return self.source.count_keys(from_date, to_date, side="right", **options)
 
-    def window_statistics(self, manifest, window):
+    def window_statistics(self, manifest, window, progress=None):
         from pair_recon_left.common.runtime.stats import compute_csv_statistics
 
         mapping = manifest["col_map"]
@@ -420,8 +424,9 @@ class SparkTarget:
         )
         return int(rows[0][0]) if rows else 0
 
+    # >>> one aggregate query per STATS_COLUMNS columns; wide tables otherwise stall Spark's planner <<< #
     def window_statistics(
-        self, manifest: dict[str, Any], window: dict[str, Any]
+        self, manifest: dict[str, Any], window: dict[str, Any], progress=None
     ) -> dict[str, dict[str, Any]]:
         normalization_rules = active_normalization_rules(
             manifest.get("normalization_rules"),
@@ -434,8 +439,9 @@ class SparkTarget:
         selected = manifest.get("statistics") or list(DEFAULT_STATISTICS)
         include_top = "statistics" not in manifest
         kinds = {}
-        selects = ["count(1) AS n_total"]
+        groups = []
         for i, (left_column, column) in enumerate(zip(manifest["columns"], right_columns)):
+            selects = []
             ref = quote_ident(column, "spark")
             column_type = self.column_types.get(column, "")
             native = any(column_type.startswith(t) for t in NUMERIC_TYPES)
@@ -499,18 +505,25 @@ class SparkTarget:
                     if numeric
                     else f"max(length({text})) AS length_max_{i}"
                 )
+            groups.append(selects)
+        batch = max(1, STATS_COLUMNS)
+        starts = range(0, len(groups), batch)
         log.info(
-            "window_statistics partitions=%s columns=%d statistics=%s sample=%s",
+            "window_statistics partitions=%s columns=%d statistics=%s sample=%s batches=%d",
             window["partitions"],
             len(right_columns),
             selected,
             bool(sample),
+            len(starts),
         )
-        sql = (
-            f"SELECT {', '.join(selects)} "
-            f"FROM {self.relation(partitions=window['partitions'])} WHERE {where}"
-        )
-        row = self._collect(sql, "window_statistics")[0].asDict()
+        relation = self.relation(partitions=window["partitions"])
+        row: dict[str, Any] = {}
+        for start in starts:
+            selects = [item for group in groups[start : start + batch] for item in group]
+            sql = f"SELECT {', '.join(['count(1) AS n_total', *selects])} FROM {relation} WHERE {where}"
+            row.update(self._collect(sql, "window_statistics")[0].asDict())
+            if progress is not None:
+                progress(min(start + batch, len(groups)), len(groups))
         stats = {}
         for i, column in enumerate(right_columns):
             numeric = kinds[column]

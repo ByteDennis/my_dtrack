@@ -129,9 +129,7 @@ def active_normalization_rules(
     if source not in NORMALIZATION_SOURCES[1:]:
         raise ValueError(f"unsupported normalization source: {source or '<empty>'}")
     return tuple(
-        rule
-        for rule in canonical_normalization_rules(rules)
-        if rule["source"] in {"all", source}
+        rule for rule in canonical_normalization_rules(rules) if rule["source"] in {"all", source}
     )
 
 

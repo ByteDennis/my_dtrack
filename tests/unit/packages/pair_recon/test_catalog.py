@@ -511,8 +511,12 @@ def test_result_summary_counts_row_column_and_runtime_outcomes():
             }
         },
     )
-    store.put_json(result_path("orders", "a"), {"pair": "orders", "unit_id": "a", "verdict": "match"})
-    store.put_json(result_path("orders", "b"), {"pair": "orders", "unit_id": "b", "verdict": "diff"})
+    store.put_json(
+        result_path("orders", "a"), {"pair": "orders", "unit_id": "a", "verdict": "match"}
+    )
+    store.put_json(
+        result_path("orders", "b"), {"pair": "orders", "unit_id": "b", "verdict": "diff"}
+    )
     store.put_json(failure_path("orders", "c"), {"pair": "orders", "unit_id": "c", "error": "boom"})
 
     assert result_summary(store) == {

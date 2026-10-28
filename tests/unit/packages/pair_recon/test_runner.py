@@ -1295,7 +1295,7 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
     remote_right = run_mode == "full" and right_source == "databricks"
     assert settings["sync_remote"] is remote_right
     assert settings["audit"] is False
-    assert settings["difference_sample_rows"] == 1000
+    assert settings["difference_sample_rows"] == 100
     assert settings["normalization_rules"] == default_normalization_rules()
     assert not any("Difference sample rows" in prompt for prompt in prompts)
     assert not any("Normalization rules" in prompt for prompt in prompts)
@@ -1858,10 +1858,7 @@ def test_run_left_fresh_row_check_invalidates_downstream_checkpoints(monkeypatch
     monkeypatch.setattr(runner, "reuse_row_check", lambda *_args, **_kwargs: None)
 
     def fresh_row_check(*_args, **_kwargs):
-        assert not any(
-            store.exists(key)
-            for key in invalidated
-        )
+        assert not any(store.exists(key) for key in invalidated)
 
     monkeypatch.setattr(runner, "run_row_check", fresh_row_check)
 
