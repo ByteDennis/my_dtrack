@@ -22,7 +22,7 @@ from ..common.model.protocol import (
     active_unit_ids,
     col_check_close_document,
     current_plan_ids,
-    diagnostic_prefix,
+    difference_keys_path,
     fixed_keys_document,
     list_failures,
     list_plans,
@@ -30,8 +30,10 @@ from ..common.model.protocol import (
     list_results,
     read_window_count,
     refresh_units_status,
+    right_ready_path,
     right_sample_prefix,
     right_stats_path,
+    timestamp,
     unit_batch_units,
     unit_prefix,
     unit_statistics,
@@ -252,12 +254,8 @@ class ColCheck:
         self.ready_windows: set[tuple[str, str]] = set()
         self.result_batch_size = max(1, int(result_batch_size))
         self.stats_only = bool(stats_only)
-        self.right_samples: dict[tuple[str, str], dict[str, Any]] = {}
-        self.difference_columns: dict[tuple[str, str], set[str]] = defaultdict(set)
-        self.compared_columns: dict[tuple[str, str], set[str]] = defaultdict(set)
         self.pending_matches: list[dict[str, Any]] = []
         self.completed_batches = len(list_result_batches(store))
-        self.legacy_result_mode = False
         self.progress = None
         self.first_window: tuple[str, str, int] | None = None
         self.first_window_started = False
@@ -439,7 +437,6 @@ class ColCheck:
                 for window in manifest["windows"]:
                     window["key_tuples"] = key_tuples.get(window["bucket"], [])
             self.scheduler.add_manifest(manifest, self.completed_ids)
-            self.legacy_result_mode |= int(manifest.get("protocol_version") or 2) < 3
             self.active_ids.update(planned_unit_ids(manifest))
             self.manifests.add(identity)
             log.info(
@@ -546,7 +543,13 @@ class ColCheck:
         sample = None
         sample_rows = int(manifest.get("difference_sample_rows") or 0)
         if sample_rows and hasattr(target, "window_sample"):
-            sample = target.window_sample(manifest, task.payload, sample_rows)
+            sample_window = dict(task.payload)
+            keys_path = difference_keys_path(task.pair, task.window)
+            if self.store.exists(keys_path):
+                sample_window["diagnostic_key_tuples"] = self.store.get_json(keys_path).get(
+                    "key_tuples", []
+                )
+            sample = target.window_sample(manifest, sample_window, sample_rows)
         if stats:
             column, payload = next(iter(stats.items()))
             log.info(
@@ -588,50 +591,6 @@ class ColCheck:
             },
         )
 
-    def _persist_window_sample(self, pair: str, window: str) -> None:
-        sample = self.right_samples.pop((pair, window), None)
-        if sample is None:
-            return
-        different = self.difference_columns[(pair, window)]
-        if not different:
-            return
-        selected = [
-            row for row in sample["pairs"] if row.get("context") or row["left_column"] in different
-        ]
-        prefix = diagnostic_prefix(pair, window)
-        try:
-            self.store.put_bytes(
-                f"{prefix}right.csv.gz",
-                self._sample_csv(sample, selected),
-                content_type="application/gzip",
-            )
-            self.store.put_json(
-                f"{prefix}manifest.json",
-                {
-                    "pair": pair,
-                    "vintage": window,
-                    "different_columns": sorted(different),
-                    "pairs": selected,
-                    "limit": sample["limit"],
-                    "right_rows": len(sample["rows"]),
-                    "right_file": "right.csv.gz",
-                },
-            )
-        except Exception:
-            log.exception("could not persist difference sample %s %s", pair, window)
-            return
-        log.info(
-            "difference sample persisted %s %s: %d row(s), %d differing column(s)",
-            pair,
-            window,
-            len(sample["rows"]),
-            len(different),
-        )
-
-    def _persist_difference_samples(self) -> None:
-        for pair, window in sorted(self.right_samples):
-            self._persist_window_sample(pair, window)
-
     def _complete_prefetch(self, task, stats, sample, elapsed):
         manifest = self.scheduler.manifests[task.pair]
         mapped = {left: stats[right] for left, right in manifest["col_map"].items()}
@@ -640,11 +599,18 @@ class ColCheck:
                 right_stats_path(task.pair, task.window),
                 {"pair": task.pair, "vintage": task.window, "statistics": stats},
             )
-            if sample is not None:
-                self._stage_sample(task, sample)
-        elif sample is not None:
-            self.right_samples[(task.pair, task.window)] = sample
+        if sample is not None:
+            self._stage_sample(task, sample)
         self.scheduler.mark_right_ready(task.pair, task.window, mapped, promote=not self.stats_only)
+        self.store.put_json(
+            right_ready_path(task.pair, task.window),
+            {
+                "pair": task.pair,
+                "window": task.window,
+                "window_id": window_id(manifest, task.payload),
+                "right_ready_at": timestamp(self.store),
+            },
+        )
         self.ready_windows.add((task.pair, task.window))
         self._write_progress()
         log.info(
@@ -677,7 +643,7 @@ class ColCheck:
             result["right_col"] = pointer.get("right_column") or pointer["column"]
             result["plan_id"] = manifest.get("plan_id")
             result["window_id"] = pointer.get("window_id")
-            if result["verdict"] == "match" and not self.legacy_result_mode:
+            if result["verdict"] == "match":
                 self.pending_matches.append(result)
                 self._flush_matches()
             else:
@@ -687,14 +653,9 @@ class ColCheck:
                     self.matched_ids.add(pointer["unit_id"])
                 else:
                     self.different_ids.add(pointer["unit_id"])
-                    self.difference_columns[(task.pair, task.window)].add(pointer["column"])
                 self.completed_ids.add(pointer["unit_id"])
                 self._write_progress()
             self.results.append(result)
-            window_key = (task.pair, task.window)
-            self.compared_columns[window_key].add(pointer["column"])
-            if self.compared_columns[window_key] >= set(manifest["columns"]):
-                self._persist_window_sample(task.pair, task.window)
             first = (task.pair, task.window) not in self.detailed
             self.detailed.add((task.pair, task.window))
             detail = result_detail(result, diff_only=not first)
@@ -796,7 +757,6 @@ class ColCheck:
                                 "Right completion checkpoint is missing durable outcomes"
                             )
                         refresh_units_status(self.store)
-                        self._persist_difference_samples()
                         SqlAudit(
                             self.store,
                             "right",

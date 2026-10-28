@@ -13,12 +13,24 @@ from typing import Any
 
 import pandas as pd
 
-from ..model.hashing import collapse_decimal
+from ..model.hashing import (
+    active_normalization_rules,
+    collapse_decimal,
+    is_transform_rule,
+    normalize_system_sql,
+    normalize_system_value,
+)
 from ..model.manifest import DEFAULT_STATISTICS, statistics_plan
 from ..sql.column_types import resolve_column_type
 from .run_logging import get_left_logger
 
 log = get_left_logger("stats")
+
+
+def _normalize_text(value: object, rules, normalization_date: str | None) -> object:
+    if value is None or pd.isna(value):
+        return value
+    return normalize_system_value(value, rules, run_date=normalization_date)
 
 
 def infer_column_type(
@@ -56,21 +68,18 @@ def _top10(series: pd.Series) -> str:
 def column_statistics(
     series: pd.Series,
     *,
-    strict: bool = False,
+    normalization_rules: list[dict[str, str]] | None = None,
+    normalization_source: str = "csv",
+    normalization_date: str | None = None,
     col_type: str | None = None,
     statistics: list[str] | None = None,
 ) -> dict[str, Any]:
     values = series.copy()
     original = values.dropna().astype(str)
     integers = int(original.str.fullmatch(r"[+-]?[0-9]+").sum())
-    if strict:
-        values = values.map(
-            lambda value: (
-                value
-                if value is None or pd.isna(value)
-                else collapse_decimal(str(value).strip()).lower()
-            )
-        )
+    rules = active_normalization_rules(normalization_rules, normalization_source)
+    if rules:
+        values = values.map(lambda value: _normalize_text(value, rules, normalization_date))
     non_null = values.dropna()
     numeric = pd.to_numeric(non_null, errors="coerce")
     inferred_type, is_integral = infer_column_type(
@@ -206,7 +215,9 @@ def compute_csv_statistics(
     path: str | Path,
     columns: list[str],
     *,
-    strict: bool = False,
+    normalization_rules: list[dict[str, str]] | None = None,
+    normalization_source: str = "csv",
+    normalization_date: str | None = None,
     col_types: dict[str, str] | None = None,
     column_types: dict[str, Any] | None = None,
     side: str = "left",
@@ -241,7 +252,9 @@ def compute_csv_statistics(
         return _parallel_statistics(
             workspace,
             columns,
-            strict,
+            normalization_rules,
+            normalization_source,
+            normalization_date,
             col_types or {},
             column_types or {},
             side,
@@ -259,7 +272,9 @@ def compute_csv_statistics(
 def _parallel_statistics(
     workspace,
     columns,
-    strict,
+    normalization_rules,
+    normalization_source,
+    normalization_date,
     requested_types,
     comparisons,
     side,
@@ -312,7 +327,9 @@ def _parallel_statistics(
             rows = _statistics(
                 connection,
                 group,
-                strict,
+                normalization_rules,
+                normalization_source,
+                normalization_date,
                 requested_types,
                 comparisons,
                 side,
@@ -364,7 +381,9 @@ def _parallel_statistics(
 def _statistics(
     connection,
     columns,
-    strict,
+    normalization_rules,
+    normalization_source,
+    normalization_date,
     requested_types,
     comparisons,
     side,
@@ -380,6 +399,8 @@ def _statistics(
         report = None if query_status is None else (lambda percent: query_status(phase, percent))
         return execute_reporting(connection, sql, report)
 
+    rules = active_normalization_rules(normalization_rules, normalization_source)
+    transform_names = {rule["rule_name"] for rule in rules if is_transform_rule(rule)}
     base = {}
     integral_values = {}
     for column in columns:
@@ -389,8 +410,13 @@ def _statistics(
             normalized = resolve_column_type(comparisons[column]).normalize_sql(ref, "duckdb", side)
             value = f"CASE WHEN {ref} IS NULL THEN NULL ELSE {normalized} END"
         integral_values[column] = value
-        if strict:
-            value = f"lower({_collapse(value)})"
+        if rules:
+            value = normalize_system_sql(
+                value,
+                "duckdb",
+                rules,
+                run_date=normalization_date,
+            )
         base[column] = value
 
     indexed = list(enumerate(columns))
@@ -436,8 +462,8 @@ def _statistics(
     for group in _batches(indexed, batch):
         selects = ["count(*) AS n_total"]
         for index, column in group:
-            raw, value = _quote(column), base[column]
-            if numeric[column] and not strict:
+            value = base[column]
+            if numeric[column] and "decimal" not in transform_names:
                 value = _collapse(value)
             values[column] = value
             number = f"try_cast({value} AS double)"
@@ -446,7 +472,7 @@ def _statistics(
                 f"cast('0x' || substr(sha256(coalesce({value}, '<<NULL>>')), 1, 16) as ubigint)"
             )
             if "n_missing" in selected:
-                selects.append(f"count_if({raw} IS NULL) AS n_missing_{index}")
+                selects.append(f"count_if({value} IS NULL) AS n_missing_{index}")
             if "n_unique" in selected:
                 selects.append(f"count(DISTINCT {value}) AS n_unique_{index}")
             if "hash_sum" in selected:

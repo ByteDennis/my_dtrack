@@ -333,7 +333,7 @@ def test_sql():
     ]
 
 
-def _manifest(sample, strict=False, keys=("order_id",), families=("numeric",)):
+def _manifest(sample, keys=("order_id",), families=("numeric",)):
     return {
         "pair": "orders",
         "columns": ["ORDER_ID", "AMOUNT", "STATUS"],
@@ -341,7 +341,6 @@ def _manifest(sample, strict=False, keys=("order_id",), families=("numeric",)):
         "right_key_cols": list(keys),
         "key_families": list(families),
         "sample": sample,
-        "strict": strict,
     }
 
 
@@ -396,7 +395,7 @@ def test_statistics():
     query = spark.statements[1]
     assert "`business_date` >= DATE '2026-01-01' AND `business_date` < DATE '2026-01-03'" in query
     assert "< 99" in query and "APPROX" not in query.upper()
-    assert "min(trim(cast(`order_id` as string)))" in query
+    assert "AS min_0" in query
     assert "cast(min(cast(`amount` as double)) as string)" in query
     assert stats["order_id"]["col_type"] == "categorical"
     assert stats["order_id"]["mean"] is None and stats["order_id"]["top_10"] == ""
@@ -447,7 +446,11 @@ def test_window_sample_keeps_bounded_rows_in_memory():
     }
     sample = SparkTarget(spark, ORDERS).window_sample(
         manifest,
-        {"bucket": "2026-01-01", "partitions": ["2026-01-01"]},
+        {
+            "bucket": "2026-01-01",
+            "partitions": ["2026-01-01"],
+            "diagnostic_key_tuples": [["7"]],
+        },
         25,
     )
 
@@ -459,8 +462,9 @@ def test_window_sample_keeps_bounded_rows_in_memory():
         "amount",
         "status",
     ]
-    assert sample["pairs"][0]["context"] is True
+    assert "key" in sample["pairs"][0]["roles"]
     assert "LIMIT 25" in spark.statements[-1]
+    assert "ORDER BY" in spark.statements[-1] and "'7'" in spark.statements[-1]
     assert "WHERE" in spark.statements[-1]
 
 
@@ -468,12 +472,13 @@ def test_window_sample_keeps_bounded_rows_in_memory():
     ("overrides", "fragments", "types"),
     [
         pytest.param(
-            {"STATUS": "numeric", "AMOUNT": "categorical"},
-            (
-                "avg(try_cast(CASE WHEN trim(cast(`status` as string))",
-                "NULL AS mean_1",
-                "avg(length(trim(cast(`amount` as string))))",
-            ),
+                {"STATUS": "numeric", "AMOUNT": "categorical"},
+                (
+                    "avg(try_cast(",
+                    "AS mean_2",
+                    "NULL AS mean_1",
+                    "AS length_avg_1",
+                ),
             {"status": "numeric", "amount": "categorical", "order_id": "categorical"},
             id="mixed",
         ),
@@ -519,15 +524,14 @@ def test_date():
         SparkTarget(text_spark, ORDERS).window_statistics(manifest, {"partitions": ["2026-01-01"]})
 
 
-def test_strict():
+def test_system_normalization_rules():
     spark = FakeSpark(
         lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [FakeRow(_stats_row())]
     )
     target = SparkTarget(spark, ORDERS)
-    target.window_statistics(
-        _manifest({"mode": "all"}, strict=True), {"partitions": ["2026-01-01"]}
-    )
-    assert "count(DISTINCT lower(CASE WHEN trim(cast(`status` as string))" in spark.statements[1]
+    target.window_statistics(_manifest({"mode": "all"}), {"partitions": ["2026-01-01"]})
+    assert "lower(trim(cast(`status` as string)))" in spark.statements[1]
+    assert "[0-9]{4}-[0-9]{2}-[0-9]{2}" in spark.statements[1]
 
 
 def test_fixed():

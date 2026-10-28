@@ -1,49 +1,69 @@
-pair_recon Batch reliability, smoke checks, diagnostics, and local reconciliation — 2026-10-27
+pair_recon Reliability, diagnostics, centralized tables, and normalization controls — 2026-10-28
 
 Summary
 - Added sequential batch execution and an inexpensive end-to-end smoke command.
 - Added Oracle session/fetch recovery, Databricks Volume read recovery, and a cross-stage watchdog.
 - Preserved both row counts for empty plans and introduced `empty`, `left_only`, and `right_only` terminal states.
-- Added bounded Right-side samples that remain in memory unless a column difference is found; persisted diagnostics contain only keys, date context, and differing columns.
+- Added protocol 4's operator-facing `config/`, `results/`, `differences/`, and `audit/` tree while isolating distributed checkpoints under `_protocol/` with no legacy markers.
+- Added exact-key difference sampling; each differing vintage writes one narrow `samples.csv.gz` with `sampled_key`, `partition`, `attribute`, `side`, and `value`.
 - Made `--debug` reconcile Left and Right statistics locally while keeping Right sampling and statistics computation in Databricks.
 - Added the `difference_sample_rows` run option, defaulting to 1000, without invalidating reusable statistical plan units.
+- Replaced separate Unity Catalog table settings with one `DBX_CATALOG_SCHEMA=catalog.schema` namespace and centrally fixed table names.
+- Added the five-column `pair_recon_normalization` registry for global transforms and source-scoped synonyms, including default `strip_datetime` and enabled Oracle `3000-01-01`/`9999-12-31` sentinels; no per-rule prompt was added.
+- Records the effective normalization rule list in YAML, request/config data, and every execution manifest.
+- Made table-controlled normalization symmetric between Left/DuckDB and Right/Spark and removed the runtime `strict` switch.
 
 Added files
+- `src/pair_recon/core/metadata/constant.py`: validates `catalog.schema` and provides the single fixed-name registry for all PairRecon Unity Catalog tables.
 - `src/pair_recon/app/cli/batch.py`: runs pairs sequentially in child processes, trusts exit codes, records elapsed time/state, and updates `batch_summary.json` after every pair.
 - `src/pair_recon/app/cli/smoke.py`: checks Left, samples 100 rows with the real predicate, verifies a Volume round trip, and runs a short Right key-selection check.
 - `tests/unit/flows/test_commands.py`: covers batch result parsing/classification, temporary defaults, continued execution after failures, and local CSV smoke behavior.
 
 Modified files
-- `README.md`: documents smoke/batch usage, empty-plan states, Oracle session controls, and watchdog thresholds.
-- `changelog.txt`: combines the reliability/smoke changes with the later sampled-diagnostics and local-reconciliation work in one complete file inventory.
-- `guideme.txt`: adds concise operator instructions for the new commands, recovery settings, and terminal behavior.
+- `.pair_recon.env.example`: replaces separate pair/status/error table variables with `DBX_CATALOG_SCHEMA`.
+- `README.md`: documents smoke/batch behavior, reliability controls, the central catalog namespace, system normalization rules, and mapping-based date equivalence.
+- `changelog.txt`: merges reliability, sampled diagnostics, local reconciliation, centralized table naming, and normalization controls in one complete file inventory.
+- `guideme.txt`: adds operator instructions for recovery, terminal behavior, the one-namespace setup, and non-interactive normalization rule management.
+- `setup/install.py`: accepts one catalog/schema namespace and derives the pair metadata table internally.
+- `setup/mapping.ipynb`: derives the pair and mapping tables from the central table registry.
+- `setup/reference.sql`: documents the compact normalization-table fields, source scope, synonyms, and seeded rule meanings.
+- `setup/schema.sql`: creates the five-column normalization registry and idempotently seeds global transforms while preserving operator `enabled` choices.
+- `setup/uc_tables.ipynb`: uses the central table registry for create/drop/merge operations, including the normalization table.
 - `src/pair_conn_release/publish.py`: restores `core/metadata/mapping.py` to the portable runtime so the packaged CLI imports successfully.
+- `src/pair_recon/app/catalog.py`: derives companion tables by fixed names and reads enabled normalization rules in stable order.
 - `src/pair_recon/app/cli/__init__.py`: dispatches batch/smoke commands, exposes `difference_sample_rows`, and enables transient local reconciliation whenever `--debug` is used.
-- `src/pair_recon/app/config.py`: carries `difference_sample_rows` from prompt answers into the effective run configuration.
-- `src/pair_recon/app/runner.py`: adds `StageWatchdog`, propagates empty-side terminal states, preserves row-count evidence, coordinates remote smoke/full-job completion, performs debug-mode local statistics reconciliation, and publishes projected Left/Right difference samples.
+- `src/pair_recon/app/config.py`: carries `difference_sample_rows` and the system normalization-rule snapshot into the effective run configuration.
+- `src/pair_recon/app/runner.py`: adds `StageWatchdog`, propagates empty-side terminal states, preserves row-count evidence, coordinates remote smoke/full-job completion, performs debug-mode local statistics reconciliation, and joins exact-key Left/Right values into narrow difference samples.
 - `src/pair_recon/core/backends/store.py`: tracks consecutive Files API failures so the watchdog can stop a persistently unhealthy run.
-- `src/pair_recon/core/metadata/workbook.py`: allows and validates `difference_sample_rows` in workbook run defaults.
+- `src/pair_recon/core/metadata/workbook.py`: allows and validates `difference_sample_rows` in workbook run defaults and uses the fixed pair-SQL table name.
+- `src/pair_recon_dbx/cache.py`: removes duplicated cache-table name derivation.
+- `src/pair_recon_dbx/cli.py`: resolves the cache index from `DBX_CATALOG_SCHEMA`.
 - `src/pair_recon_left/backends/sources.py`: returns exact fetched row counts, adds sampled-key helpers and fetch progress, bounds Oracle sessions, caches LDAP DSNs, and retries session/network failures.
-- `src/pair_recon_left/common/checks/col_check.py`: separates row-result waiting, publishes exact source row counts, and counts cached CSV records correctly when fields contain newlines.
-- `src/pair_recon_left/common/model/manifest.py`: validates diagnostic sampling/local-reconciliation settings and excludes them from the statistical `plan_id`.
+- `src/pair_recon_left/common/checks/col_check.py`: separates row-result waiting, publishes exact source row counts, counts cached CSV records correctly when fields contain newlines, and passes manifest normalization rules into statistics.
+- `src/pair_recon_left/common/model/manifest.py`: validates diagnostic sampling/local-reconciliation settings plus the system normalization-rule snapshot and includes normalization semantics in the statistical plan identity.
 - `src/pair_recon_left/common/model/protocol.py`: defines shared empty-side states, derives `empty`, `left_only`, or `right_only` from reconciled row counts, and shares safe scratch/diagnostic artifact paths with Right.
+- `src/pair_recon_left/common/runtime/stats.py`: applies enabled system rules in order and keeps typed column normalization consistent across pandas and DuckDB paths.
 - `src/pair_recon_right/catalog.py`: preserves empty-side terminal states when publishing the final Catalog result.
 - `src/pair_recon_right/engine/backends/store.py`: retries transient Databricks Volume FUSE `EINVAL`, `EIO`, and `ESTALE` failures.
-- `src/pair_recon_right/engine/backends/targets.py`: adds CSV/Spark sampled-key counting for smoke checks, accepts exact-row-count pulls, and retrieves a bounded Right window sample with the same filtering predicate used by validation.
-- `src/pair_recon_right/engine/checks/col_check.py`: supports stats-only debug runs, stages Right statistics/samples for local reconciliation, and persists compressed Right diagnostics only for differing attributes.
+- `src/pair_recon_right/engine/backends/targets.py`: adds CSV/Spark sampled-key counting for smoke checks, accepts exact-row-count pulls, retrieves a bounded Right window sample, and applies the same enabled rules as Left.
+- `src/pair_recon_right/engine/checks/col_check.py`: supports stats-only debug runs, stages bounded Right statistics/samples, and publishes per-window Right readiness under protocol 4.
 - `src/pair_recon_right/engine/checks/row_check.py`: skips mismatch-exclusion enforcement when a plan has no windows.
-- `src/pair_recon_right/engine/common/model/manifest.py`: mirrors diagnostic sampling/local-reconciliation validation and stable statistical `plan_id` behavior.
-- `src/pair_recon_right/engine/common/model/protocol.py`: mirrors Left empty-side classification and defines safe paths for scratch statistics, scratch samples, and persistent diagnostics.
+- `src/pair_recon_right/engine/common/model/manifest.py`: mirrors diagnostic and normalization-rule validation plus stable statistical plan identity behavior.
+- `src/pair_recon_right/engine/common/model/protocol.py`: mirrors the protocol 4 config/result/difference/audit tree and private resumable signal, unit, outcome, and temporary paths.
 - `src/pair_recon_right/engine/job.py`: implements Right smoke/no-unit behavior and switches the Right column check to stats-only mode for local reconciliation.
 - `src/pair_recon_right/notebook.py`: accepts smoke/local-reconciliation execution and skips premature Catalog publication when the local launcher owns the final result.
-- `tests/unit/common/protocol/test_manifest.py`: verifies diagnostic options, validation, and plan-ID stability.
+- `tests/unit/common/protocol/test_manifest.py`: verifies diagnostic options, normalization-rule defaults/validation, and plan-ID stability.
+- `tests/unit/common/runtime/test_stats.py`: verifies table-selected transforms, source synonyms, and date/time hash equality.
+- `tests/unit/flows/test_install.py`: verifies catalog/schema installer defaults and normalization-table notebook setup.
 - `tests/unit/flows/test_packaging.py`: verifies the mapping runtime is packaged and the extracted source release can execute CLI help.
-- `tests/unit/packages/pair_recon/test_catalog.py`: covers preservation of the `right_only` terminal state.
-- `tests/unit/packages/pair_recon/test_runner.py`: covers watchdog thresholds, cancellation, empty/one-sided outcomes, local reconciliation, and projected Left diagnostic publication.
+- `tests/unit/packages/pair_recon/test_catalog.py`: covers preservation of the `right_only` terminal state and ordered enabled normalization-rule loading.
+- `tests/unit/packages/pair_recon/test_runner.py`: covers watchdog thresholds, cancellation, empty/one-sided outcomes, local reconciliation, projected Left diagnostics, catalog/schema defaults, and non-interactive rule tracing.
+- `tests/unit/packages/pair_recon_dbx/test_cache.py`: verifies the fixed cache-index name and central namespace helper.
+- `tests/unit/packages/pair_recon_dbx/test_cli.py`: covers `DBX_CATALOG_SCHEMA` cache command defaults.
 - `tests/unit/packages/pair_recon_left/backends/test_sources.py`: covers exact pull counts, sampled-key queries, DSN reuse, session limits, cooldown, and retry behavior.
 - `tests/unit/packages/pair_recon_left/checks/test_col_check.py`: updates the source contract test and verifies embedded-newline CSV rows are counted once.
 - `tests/unit/packages/pair_recon_right/backends/test_store.py`: covers retryable and non-retryable Volume FUSE read failures.
-- `tests/unit/packages/pair_recon_right/backends/test_targets.py`: covers bounded Right window sampling and selected context/data columns.
+- `tests/unit/packages/pair_recon_right/backends/test_targets.py`: covers bounded Right window sampling, selected context/data columns, and table-controlled Spark normalization SQL.
 - `tests/unit/packages/pair_recon_right/checks/test_col_check.py`: covers in-memory diff-only samples, stats-only scratch artifacts, and compressed diagnostic output.
 - `tests/unit/packages/pair_recon_right/test_job.py`: covers smoke results and empty/left-only/right-only no-unit plan completion.
 
@@ -54,6 +74,6 @@ Deleted files
 - None. The former `src/pair_recon/app/cli.py` path was renamed rather than removed as functionality.
 
 Verification
-- `920 passed` across the unit suite excluding the packaging layout test; focused packaging coverage adds `5 passed, 1 deselected`.
-- The deselected `test_layout` is a pre-existing `src/pair_recon_dbx` directory-limit failure unchanged by these changes.
-- Ruff check and format check pass for the affected source/tests; `git diff --check` passes; Left/Right protocol mirrors match; main, batch, and smoke CLI help checks pass.
+- Normalization/table-registry focused suite: `299 passed`.
+- Unit suite excluding the pre-existing `src/pair_recon_dbx: 6` layout violation: `938 passed, 1 deselected`.
+- Ruff lint and formatting, notebook JSON parsing, and `git diff --check`: passed.

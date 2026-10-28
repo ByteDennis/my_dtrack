@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import time
+from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -31,18 +32,22 @@ from pair_recon_left.common.checks.col_check import (
     wait_for_row_result,
 )
 from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
+from pair_recon_left.common.model.hashing import composite_key, key_families
 from pair_recon_left.common.model.protocol import (
-    COL_CHECK_CLOSED,
-    ROW_CHECK_CLOSED,
+    REPORT_PREFIX,
+    RIGHT_SAMPLE_PREFIX,
+    RIGHT_STATS_PREFIX,
     UNITS_STATUS,
     active_unit_ids,
     current_plan_ids,
     diagnostic_prefix,
+    difference_keys_path,
     empty_plan_state,
     fixed_keys_path,
     get_left_state,
     get_right_state,
     list_failures,
+    list_plans,
     list_results,
     list_row_results,
     mapping_path,
@@ -52,6 +57,9 @@ from pair_recon_left.common.model.protocol import (
     row_result_path,
     write_right_state,
     write_run_status,
+)
+from pair_recon_left.common.model.protocol import (
+    failure_path as outcome_failure_path,
 )
 from pair_recon_left.common.runtime.run_logging import configure_left_logging, get_left_logger
 from pair_recon_left.common.runtime.stop import StopSignal, beat
@@ -119,7 +127,7 @@ def run_outcome(jobs, run) -> dict:
 def record_runtime_failure(store, pair: str, source: str, error: BaseException | str) -> None:
     message = str(error).strip() or type(error).__name__
     store.put_json(
-        f"col_check/failures/{source}.json",
+        outcome_failure_path(pair, source),
         {
             "pair": pair,
             "source": source,
@@ -634,8 +642,6 @@ def run_left(
                 plan_path(pair),
                 mapping_path(pair),
                 fixed_keys_path(pair),
-                ROW_CHECK_CLOSED,
-                COL_CHECK_CLOSED,
             ]
         )
         run_row_check(
@@ -719,7 +725,7 @@ def retry_failed(store) -> int:
 
 
 def clear_resume_outputs(store) -> int:
-    keys = store.list_keys("report/")
+    keys = store.list_keys(REPORT_PREFIX)
     if store.exists(UNITS_STATUS):
         keys.append(UNITS_STATUS)
     return store.delete_keys(sorted(set(keys)))
@@ -751,34 +757,107 @@ def run_local_reconciliation(store, *, right_workers: int) -> dict:
     return result
 
 
-def _project_gzip_csv(body: bytes, pairs: list[dict], selected: list[dict]) -> bytes:
-    indexes = [pairs.index(pair) for pair in selected]
-    source = csv.reader(io.StringIO(gzip.decompress(body).decode("utf-8")))
-    next(source, None)
-    output = io.StringIO(newline="")
-    writer = csv.writer(output, lineterminator="\n")
-    writer.writerow([pair["right_column"] for pair in selected])
-    for row in source:
-        writer.writerow([row[index] for index in indexes])
-    return gzip.compress(output.getvalue().encode("utf-8"))
+def _gzip_csv_rows(body: bytes) -> list[dict[str, str]]:
+    return list(
+        csv.DictReader(io.StringIO(gzip.decompress(body).decode("utf-8-sig", errors="replace")))
+    )
 
 
-def _left_difference_csv(path: Path, columns: list[str], limit: int) -> tuple[bytes, int]:
+def _difference_sample_csv(
+    *,
+    left_path: Path,
+    right_body: bytes,
+    pairs: list[dict],
+    manifest: dict,
+    different: set[str],
+    limit: int,
+    key_tuples: list[list[object]],
+) -> tuple[bytes, int, int, int, list[str]]:
+    key_names = list(manifest.get("key_cols") or [])
+    key_specs = key_families(manifest.get("key_families"), len(key_names))
+    key_pairs = [row for row in pairs if row["left_column"] in key_names]
+    attributes = [row for row in pairs if row["left_column"] in different]
+    date_name = (manifest.get("left") or {}).get("date_col")
+    partition = next(
+        (
+            row
+            for row in pairs
+            if date_name and row["left_column"] == date_name and row not in key_pairs
+        ),
+        None,
+    )
+    required_left = [row["left_column"] for row in [*key_pairs, *attributes]]
+    if partition:
+        required_left.append(partition["left_column"])
+
+    def row_key(row: dict[str, str], side: str) -> str:
+        names = [pair[f"{side}_column"] for pair in key_pairs]
+        return composite_key([row.get(name) for name in names], key_specs, side)
+
+    desired = [composite_key(values, key_specs, "left") for values in key_tuples]
+    desired_set = set(desired)
+    left_groups: dict[str, list[dict[str, str]]] = defaultdict(list)
+    with left_path.open("r", encoding="utf-8-sig", newline="", errors="replace") as handle:
+        reader = csv.DictReader(handle)
+        missing = [name for name in required_left if name not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(
+                f"Left diagnostic columns missing from {left_path}: {', '.join(missing)}"
+            )
+        for row in reader:
+            key = row_key(row, "left") if key_pairs else str(len(left_groups))
+            if desired_set and key not in desired_set:
+                continue
+            left_groups[key].append(row)
+            if desired_set and desired_set <= left_groups.keys():
+                break
+            if not desired_set and sum(map(len, left_groups.values())) >= limit:
+                break
+
+    right_groups: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in _gzip_csv_rows(right_body):
+        key = row_key(row, "right") if key_pairs else str(len(right_groups))
+        right_groups[key].append(row)
+
+    ordered = list(dict.fromkeys([*desired, *left_groups, *right_groups]))[:limit]
+    columns = ["sampled_key", "partition", "attribute", "side", "value"]
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\n")
     writer.writerow(columns)
-    count = 0
-    with path.open("r", encoding="utf-8-sig", newline="", errors="replace") as handle:
-        reader = csv.DictReader(handle)
-        missing = [column for column in columns if column not in (reader.fieldnames or [])]
-        if missing:
-            raise ValueError(f"Left diagnostic columns missing from {path}: {', '.join(missing)}")
-        for row in reader:
-            writer.writerow([row[column] for column in columns])
-            count += 1
-            if count >= limit:
-                break
-    return gzip.compress(output.getvalue().encode("utf-8")), count
+    rows_written = 0
+    for key in ordered:
+        left_rows = left_groups.get(key) or []
+        right_rows = right_groups.get(key) or []
+        for index in range(max(1, len(left_rows), len(right_rows))):
+            left = left_rows[index] if index < len(left_rows) else {}
+            right = right_rows[index] if index < len(right_rows) else {}
+            for pair in attributes:
+                writer.writerow(
+                    [
+                        key,
+                        left.get(partition["left_column"], "") if partition else "",
+                        pair["left_column"],
+                        "left",
+                        left.get(pair["left_column"], ""),
+                    ]
+                )
+                writer.writerow(
+                    [
+                        key,
+                        right.get(partition["right_column"], "") if partition else "",
+                        pair["left_column"],
+                        "right",
+                        right.get(pair["right_column"], ""),
+                    ]
+                )
+                rows_written += 2
+    return (
+        gzip.compress(output.getvalue().encode("utf-8")),
+        sum(map(len, left_groups.values())),
+        sum(map(len, right_groups.values())),
+        rows_written,
+        columns,
+    )
 
 
 def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
@@ -791,9 +870,14 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
     for result in results:
         by_window.setdefault(str(result["vintage"]), set()).add(str(result["column"]))
 
+    plans = {value["pair"]: value for _key, value in list_plans(store)}
+    manifest = plans.get(pair)
+    if manifest is None:
+        return 0
     scratch_manifests = [
-        key for key in store.list_keys("_scratch/right_samples/") if key.endswith("/manifest.json")
+        key for key in store.list_keys(RIGHT_SAMPLE_PREFIX) if key.endswith("/manifest.json")
     ]
+    published = 0
     for key in scratch_manifests:
         document = store.get_json(key)
         if document.get("pair") != pair:
@@ -801,54 +885,43 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
         window = str(document["vintage"])
         different = by_window.get(window, set())
         prefix = key.removesuffix("manifest.json")
-        if different:
-            selected = [
-                row
-                for row in document["pairs"]
-                if row.get("context") or row["left_column"] in different
-            ]
-            target = diagnostic_prefix(pair, window)
-            store.put_bytes(
-                f"{target}right.csv.gz",
-                _project_gzip_csv(
-                    store.get_bytes(f"{prefix}{document['right_file']}"),
-                    document["pairs"],
-                    selected,
-                ),
-                content_type="application/gzip",
-            )
-            store.put_json(
-                f"{target}manifest.json",
-                {
-                    **document,
-                    "different_columns": sorted(different),
-                    "pairs": selected,
-                },
-            )
-        store.delete_keys(store.list_keys(prefix))
-
-    published = 0
-    for key in [
-        value for value in store.list_keys("diagnostics/") if value.endswith("/manifest.json")
-    ]:
-        document = store.get_json(key)
-        if document.get("pair") != pair or document.get("left_file"):
+        if not different:
+            store.delete_keys(store.list_keys(prefix))
             continue
-        window = str(document["vintage"])
         left_path = run_dir / pair / window / "left.csv"
         if not left_path.is_file():
             log.warning("Left difference sample unavailable: %s", left_path)
             continue
-        left_columns = [row["left_column"] for row in document["pairs"]]
-        body, rows = _left_difference_csv(left_path, left_columns, int(document["limit"]))
-        prefix = key.removesuffix("manifest.json")
-        store.put_bytes(f"{prefix}left.csv.gz", body, content_type="application/gzip")
-        store.put_json(
-            key,
-            {**document, "left_file": "left.csv.gz", "left_rows": rows},
+        keys_path = difference_keys_path(pair, window)
+        key_tuples = store.get_json(keys_path).get("key_tuples", []) if store.exists(keys_path) else []
+        body, left_rows, right_rows, sample_rows, columns = _difference_sample_csv(
+            left_path=left_path,
+            right_body=store.get_bytes(f"{prefix}{document['right_file']}"),
+            pairs=document["pairs"],
+            manifest=manifest,
+            different=different,
+            limit=int(document["limit"]),
+            key_tuples=key_tuples,
         )
+        target = diagnostic_prefix(pair, window)
+        store.put_bytes(f"{target}samples.csv.gz", body, content_type="application/gzip")
+        store.put_json(
+            f"{target}manifest.json",
+            {
+                "pair": pair,
+                "vintage": window,
+                "different_columns": sorted(different),
+                "columns": columns,
+                "limit": int(document["limit"]),
+                "left_rows": left_rows,
+                "right_rows": right_rows,
+                "sample_rows": sample_rows,
+                "sample_file": "samples.csv.gz",
+            },
+        )
+        store.delete_keys(store.list_keys(prefix))
         published += 1
-    store.delete_keys(store.list_keys("_scratch/right_stats/"))
+    store.delete_keys(store.list_keys(RIGHT_STATS_PREFIX))
     return published
 
 
@@ -1096,8 +1169,8 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 failure_source = (
                     "right-job" if monitor and monitor.error is not None else "launcher"
                 )
-                failure_path = f"col_check/failures/{failure_source}.json"
-                if not store.exists(failure_path):
+                failure_key = outcome_failure_path(pair, failure_source)
+                if not store.exists(failure_key):
                     record_runtime_failure(store, pair, failure_source, exc)
             except Exception:
                 log.exception("could not publish runtime failure artifact")

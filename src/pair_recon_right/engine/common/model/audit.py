@@ -223,9 +223,9 @@ class SqlAudit:
         return ("-- " + " ".join(fields) + "\n" + statement + "\n\n").encode("utf-8")
 
     def _event_keys(self) -> list[str]:
-        current = self.store.list_keys("audit/")
-        current.extend(self.store.list_keys("_status/audit/"))
-        return sorted({key for key in current if key.endswith(".txt")})
+        return sorted(
+            key for key in self.store.list_keys(audit_prefix(self.pair)) if key.endswith(".txt")
+        )
 
     def refresh(self) -> bool:
         if not self.enabled:

@@ -95,7 +95,19 @@ USING (
     ('pair_recon_window_history', 'units', NULL, 'Column units with a durable Right result.'),
     ('pair_recon_window_history', 'matches', NULL, 'Column units whose statistics matched.'),
     ('pair_recon_window_history', 'differences', NULL, 'Column units whose statistics differed.'),
-    ('pair_recon_window_history', 'checked_at', NULL, 'Timestamp when the completing run published its results.')
+    ('pair_recon_window_history', 'checked_at', NULL, 'Timestamp when the completing run published its results.'),
+    ('pair_recon_normalization', 'rule_name', NULL, 'Stable system rule name recorded in every run configuration and manifest.'),
+    ('pair_recon_normalization', 'rule_name', 'trim', 'Trim leading and trailing whitespace before statistics and hashing.'),
+    ('pair_recon_normalization', 'rule_name', 'lowercase', 'Compare text without letter-case differences.'),
+    ('pair_recon_normalization', 'rule_name', 'decimal', 'Remove insignificant trailing decimal zeros such as 1.00 to 1.'),
+    ('pair_recon_normalization', 'rule_name', 'strip_datetime', 'Reduce an ISO datetime to its YYYY-MM-DD date before statistics and hashing.'),
+    ('pair_recon_normalization', 'rule_name', 'oracle_today_3000', 'Treat the Oracle business sentinel 3000-01-01 as the current run date.'),
+    ('pair_recon_normalization', 'rule_name', 'oracle_missing_9999', 'Treat the Oracle business sentinel 9999-12-31 as missing.'),
+    ('pair_recon_normalization', 'source', NULL, 'Source scope: all, oracle, hadoop, csv, or databricks.'),
+    ('pair_recon_normalization', 'source', 'all', 'Apply on both sides regardless of source platform.'),
+    ('pair_recon_normalization', 'match_value', NULL, 'Exact text matched by a synonym; null means rule_name is an enabled system transform.'),
+    ('pair_recon_normalization', 'canonical_value', NULL, 'Synonym replacement; @missing becomes NULL and @run_date becomes the run date.'),
+    ('pair_recon_normalization', 'enabled', NULL, 'System-level switch controlling whether the rule enters new run manifests.')
   AS v(table_name, column_name, keyword, definition)
 ) AS s
 ON t.table_name = s.table_name

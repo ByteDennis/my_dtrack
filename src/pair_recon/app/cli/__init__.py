@@ -10,6 +10,11 @@ import yaml
 
 from pair_recon.core.debug import debugging, run_debugger
 from pair_recon.core.metadata.configuration import parse_key_columns
+from pair_recon.core.metadata.constant import (
+    CATALOG_SCHEMA_ENV,
+    catalog_tables,
+    legacy_catalog_tables,
+)
 from pair_recon.core.metadata.mapping import upsert_column_mappings
 from pair_recon.core.metadata.workbook import (
     changed_pair_configurations,
@@ -430,6 +435,38 @@ def synchronize_key_types(sql, catalog, row: dict) -> int:
     return len(mappings)
 
 
+def table_settings(defaults: dict, answer) -> tuple[str, str, str, str, str]:
+    configured_catalog_schema = env_value(CATALOG_SCHEMA_ENV)
+    legacy_catalog_schema, legacy_tables = (
+        (None, {}) if configured_catalog_schema else legacy_catalog_tables()
+    )
+    catalog_schema = answer(
+        "Unity Catalog schema",
+        configured_catalog_schema or legacy_catalog_schema or defaults.get("catalog_schema"),
+    )
+    tables = catalog_tables(catalog_schema)
+    use_legacy_tables = (
+        not configured_catalog_schema
+        and legacy_catalog_schema is not None
+        and catalog_schema == legacy_catalog_schema
+    )
+    if not use_legacy_tables:
+        return (
+            catalog_schema,
+            tables.pair_meta,
+            tables.run_status,
+            tables.run_error,
+            tables.progress_snapshot,
+        )
+    return (
+        catalog_schema,
+        legacy_tables.get("pair_meta", tables.pair_meta),
+        legacy_tables.get("run_status", tables.run_status),
+        legacy_tables.get("run_error", tables.run_error),
+        tables.progress_snapshot,
+    )
+
+
 def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = True):
     session = _PROMPT_SESSION.get() if interactive else None
     if interactive:
@@ -455,22 +492,9 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "SQL warehouse id",
         env_value("DBX_WAREHOUSE_ID", default=defaults.get("warehouse_id")),
     )
-    pair_table = answer(
-        "Pair metadata table",
-        env_value("DBX_PAIR_TABLE", default=defaults.get("pair_table")),
+    catalog_schema, pair_table, status_table, error_table, progress_table = table_settings(
+        defaults, answer
     )
-    status_table = answer(
-        "Run status table",
-        env_value("DBX_STATUS_TABLE", default=defaults.get("status_table")),
-    )
-    error_table = answer(
-        "Run error table",
-        env_value("DBX_ERROR_TABLE", default=defaults.get("error_table")),
-    )
-    progress_default = defaults.get("progress_table")
-    if not progress_default and status_table.count(".") == 2:
-        progress_default = status_table.rsplit(".", 1)[0] + ".pair_recon_progress_snapshot"
-    progress_table = answer("Progress snapshot table", progress_default)
     volume_root = answer(
         "Volume runs path",
         env_value("DBX_RUN_PATH", default=defaults.get("volume_root")),
@@ -481,10 +505,10 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     metadata_key = (
         profile,
         warehouse,
+        catalog_schema,
         pair_table,
         status_table,
         error_table,
-        progress_table,
         str(workbook_path),
         sync_pair_metadata,
     )
@@ -537,6 +561,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         console(f"Loaded {len(by_name)} enabled pair(s).")
         if session:
             session.cache["metadata"] = (metadata_key, client, statement_sql, catalog, by_name)
+    system_normalization_rules = catalog.normalization_rules()
     pair_names = list(by_name)
     if not pair_names:
         raise RuntimeError(f"Catalog and {workbook_path} have no enabled pair")
@@ -558,6 +583,19 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     run_mode = select("Run mode", ["full", "left-only"], run_default("run_mode", "full"))
     left_source = str(metadata["left"].get("source") or "").casefold()
     right_source = str(metadata["right"].get("source") or "").casefold()
+    normalization_rules = [
+        rule
+        for rule in system_normalization_rules
+        if rule["source"] in {"all", left_source, right_source}
+    ]
+    console(
+        "System normalization rules: "
+        + (
+            ", ".join(f"{rule['source']}:{rule['rule_name']}" for rule in normalization_rules)
+            if normalization_rules
+            else "none"
+        )
+    )
     provenances = []
     if left_source == "csv":
         provenance = csv_defaults(metadata["left"]["path"], pair, "left")
@@ -633,18 +671,18 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         ["row_count", *attribute_check_names()],
         run_default("checks", "row_count,hash_sum,n_unique"),
     )
+    difference_sample_rows = run_default("difference_sample_rows", 1000)
+    if difference_sample_rows in (None, ""):
+        difference_sample_rows = 1000
     answers = {
         "partition": partition,
         "checks": selected,
         "sample": sample_value(
             answer("Sample", provenance.get("sample", run_default("sample", "all")))
         ),
-        "strict": confirm("Strict normalization", run_default("strict", False)),
+        "normalization_rules": normalization_rules,
         "audit": confirm("Audit SQL", run_default("audit", False)),
-        "difference_sample_rows": worker_budget(
-            "Difference sample rows",
-            run_default("difference_sample_rows", 1000),
-        ),
+        "difference_sample_rows": int(difference_sample_rows),
         **date_answers,
     }
     left_workers = worker_budget("Left source worker budget", run_default("left_workers", 2))
@@ -722,6 +760,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "owner": owner,
         "profile": profile,
         "warehouse_id": warehouse,
+        "catalog_schema": catalog_schema,
         "pair_table": pair_table,
         "pair_workbook": str(workbook_path),
         "status_table": status_table,
@@ -737,7 +776,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "partition": partition,
         "checks": ",".join(selected),
         "sample": answers["sample"],
-        "strict": answers["strict"],
+        "normalization_rules": answers["normalization_rules"],
         "audit": answers["audit"],
         "difference_sample_rows": answers["difference_sample_rows"],
         "sync_remote": sync_remote,

@@ -7,7 +7,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from ..common.model.hashing import DateKeyFamily, key_family
+from ..common.model.hashing import (
+    DateKeyFamily,
+    active_normalization_rules,
+    key_family,
+    normalize_system_sql,
+)
 from ..common.model.hashing import collapse_decimal_sql as _collapse_decimal_sql
 from ..common.model.manifest import DEFAULT_STATISTICS
 from ..common.sql.column_types import resolve_column_type
@@ -114,7 +119,10 @@ class CsvTarget:
             return compute_csv_statistics(
                 path,
                 columns,
-                strict=manifest.get("strict", False),
+                normalization_rules=manifest.get("normalization_rules"),
+                normalization_source=(manifest.get("right") or {}).get("source")
+                or self.config["source"],
+                normalization_date=manifest.get("normalization_date"),
                 col_types=overrides,
                 column_types=comparisons,
                 side="right",
@@ -415,7 +423,10 @@ class SparkTarget:
     def window_statistics(
         self, manifest: dict[str, Any], window: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
-        strict = bool(manifest.get("strict"))
+        normalization_rules = active_normalization_rules(
+            manifest.get("normalization_rules"),
+            (manifest.get("right") or {}).get("source") or self.config["source"],
+        )
         where, sample = self._window_where(manifest, window)
         right_columns = [manifest["col_map"][column] for column in manifest["columns"]]
         overrides = manifest.get("col_type_overrides") or {}
@@ -435,7 +446,7 @@ class SparkTarget:
                 requested == "numeric" or (requested is None and native and not integral)
             )
             kinds[column] = numeric
-            text = f"trim(cast({ref} as string))"
+            text = f"cast({ref} as string)"
             if comparison:
                 normalizer = resolve_column_type(comparison)
                 if isinstance(normalizer, DateKeyFamily):
@@ -443,8 +454,13 @@ class SparkTarget:
                 text = normalizer.normalize_sql(ref, "spark", "right")
             if numeric:
                 text = _collapse_decimal_sql(text)
-            if strict:
-                text = f"lower({_collapse_decimal_sql(text) if not numeric else text})"
+            if normalization_rules:
+                text = normalize_system_sql(
+                    text,
+                    "spark",
+                    normalization_rules,
+                    run_date=manifest.get("normalization_date"),
+                )
             value = (
                 (f"cast({ref} as double)" if native else f"try_cast({text} as double)")
                 if numeric
@@ -452,7 +468,7 @@ class SparkTarget:
             )
             extreme = ref if integral and numeric else value
             if "n_missing" in selected:
-                selects.append(f"count_if({ref} IS NULL) AS n_missing_{i}")
+                selects.append(f"count_if({text} IS NULL) AS n_missing_{i}")
             if "n_unique" in selected:
                 selects.append(f"count(DISTINCT {text}) AS n_unique_{i}")
             if "hash_sum" in selected:
@@ -484,11 +500,10 @@ class SparkTarget:
                     else f"max(length({text})) AS length_max_{i}"
                 )
         log.info(
-            "window_statistics partitions=%s columns=%d statistics=%s strict=%s sample=%s",
+            "window_statistics partitions=%s columns=%d statistics=%s sample=%s",
             window["partitions"],
             len(right_columns),
             selected,
-            strict,
             bool(sample),
         )
         sql = (
@@ -531,13 +546,14 @@ class SparkTarget:
         pairs: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
 
-        def include(left_column: str | None, right_column: str | None, *, context: bool) -> None:
+        def include(left_column: str | None, right_column: str | None, *, role: str) -> None:
             if not left_column or not right_column:
                 return
             identity = (str(left_column).casefold(), str(right_column).casefold())
             if identity in seen:
-                if context:
-                    next(row for row in pairs if row["identity"] == identity)["context"] = True
+                existing = next(row for row in pairs if row["identity"] == identity)
+                if role not in existing["roles"]:
+                    existing["roles"].append(role)
                 return
             seen.add(identity)
             pairs.append(
@@ -545,28 +561,55 @@ class SparkTarget:
                     "identity": identity,
                     "left_column": str(left_column),
                     "right_column": str(right_column),
-                    "context": context,
+                    "roles": [role],
                 }
             )
 
         for left_column, right_column in zip(
             manifest.get("key_cols") or [], manifest.get("right_key_cols") or []
         ):
-            include(left_column, right_column, context=True)
+            include(left_column, right_column, role="key")
         if manifest.get("partition", "day") != "all" and not manifest.get("left_snapshot"):
             include(
                 (manifest.get("left") or {}).get("date_col"),
                 (manifest.get("right") or {}).get("date_col"),
-                context=True,
+                role="partition",
             )
         for left_column in manifest["columns"]:
-            include(left_column, manifest["col_map"][left_column], context=False)
+            include(left_column, manifest["col_map"][left_column], role="attribute")
 
         where, _sampled = self._window_where(manifest, window)
+        diagnostic_keys = window.get("diagnostic_key_tuples")
+        if diagnostic_keys is not None:
+            keys = manifest.get("right_key_cols") or []
+            fixed = sample_predicate_sql(
+                {"mode": "fixed"},
+                [quote_ident(key, "spark") for key in keys],
+                manifest.get("key_families") or [],
+                "spark",
+                "right",
+                diagnostic_keys,
+                self._key_types(keys),
+            )
+            where = f"({where}) AND ({fixed})"
         selected = ", ".join(quote_ident(row["right_column"], "spark") for row in pairs)
+        key_types = self._key_types(manifest.get("right_key_cols") or [])
+        order = []
+        for index, (column, family_spec) in enumerate(
+            zip(manifest.get("right_key_cols") or [], manifest.get("key_families") or [])
+        ):
+            order.append(
+                key_family(family_spec).sql_dialect(
+                    quote_ident(column, "spark"),
+                    "spark",
+                    "right",
+                    data_type=key_types[index] if index < len(key_types) else None,
+                )
+            )
+        order_by = f" ORDER BY {', '.join(order)}" if order else ""
         sql = (
             f"SELECT {selected} FROM {self.relation(partitions=window['partitions'])} "
-            f"WHERE {where} LIMIT {int(limit)}"
+            f"WHERE {where}{order_by} LIMIT {int(limit)}"
         )
         rows = [list(row) for row in self._collect(sql, "difference_sample")]
         for row in pairs:

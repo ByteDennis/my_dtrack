@@ -8,9 +8,6 @@ import uuid
 from pathlib import Path
 
 from ..common.model.protocol import (
-    COL_CHECK_CLOSED,
-    HEARTBEAT,
-    ROW_CHECK_CLOSED,
     failure_path,
     get_left_state,
     get_run_status,
@@ -160,7 +157,6 @@ class VolumeStore:
             self,
             {"heartbeat_epoch_s": epoch, "heartbeat_at": timestamp(self)},
         )
-        self.put_json(HEARTBEAT, {"epoch_s": epoch, "updated_at": timestamp(self)})
         return path
 
     def heartbeat_age(self, now=None):
@@ -168,10 +164,7 @@ class VolumeStore:
         if state.get("heartbeat_epoch_s") is not None:
             current = time.time() if now is None else now
             return max(0.0, current - float(state["heartbeat_epoch_s"]))
-        if not self.exists(HEARTBEAT):
-            return None
-        current = time.time() if now is None else now
-        return max(0.0, current - float(self.get_json(HEARTBEAT)["epoch_s"]))
+        return None
 
     def close_manifests(self, pairs, expected_units, plan_ids=None):
         document = {
@@ -189,7 +182,6 @@ class VolumeStore:
                 "col_check_closed_at": document["closed_at"],
             },
         )
-        self.put_json(COL_CHECK_CLOSED, document)
         return path
 
     def close_row_check(self, pairs):
@@ -202,7 +194,6 @@ class VolumeStore:
                 "row_check_closed_at": closed_at,
             },
         )
-        self.put_json(ROW_CHECK_CLOSED, {"pairs": sorted(pairs), "closed_at": closed_at})
         return path
 
     def commit_results(self, results):

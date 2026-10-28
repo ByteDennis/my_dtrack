@@ -11,11 +11,19 @@ from pair_recon_left.common.checks.col_check import (
     wait_for_row_check_result,
 )
 from pair_recon_left.common.model.manifest import unit_id
+from pair_recon_left.common.model.protocol import (
+    LEFT_STATE,
+    difference_keys_path,
+    plan_path,
+    row_result_path,
+    unit_batch_path,
+    window_count_path,
+)
 
 
 def manifest():
     return {
-        "protocol_version": 2,
+        "protocol_version": 4,
         "run_id": "run",
         "pair": "pair",
         "sample": {"mode": "all"},
@@ -36,7 +44,7 @@ def manifest():
 def test_pipeline(caplog):
     store = MemoryStore()
     row = manifest()
-    store.put_json("plan.json", row)
+    store.put_json(plan_path("pair"), row)
     stats = {"amount": {"col_type": "numeric", "n_unique": 2, "hash_sum": "3"}}
     with caplog.at_level("INFO"):
         count = ColCheckPipeline(
@@ -45,8 +53,8 @@ def test_pipeline(caplog):
             compute_stats=lambda *_args: stats,
         ).run([row])
     uid = unit_id("pair", "all", "amount")
-    assert count == 1 and store.exists("units/00000001-0001.json")
-    assert store.get_json("units/00000001-0001.json")["units"][0]["unit_id"] == uid
+    assert count == 1 and store.exists(unit_batch_path(1, 1))
+    assert store.get_json(unit_batch_path(1, 1))["units"][0]["unit_id"] == uid
     assert "left data pull started: pair=pair vintage=all partitions=1 columns=1" in caplog.text
     assert "left data ready for statistics: pair=pair vintage=all" in caplog.text
 
@@ -54,7 +62,7 @@ def test_pipeline(caplog):
 def test_left_only_pipeline_does_not_wait_for_right(monkeypatch):
     store = MemoryStore()
     row = manifest()
-    store.put_json("plan.json", row)
+    store.put_json(plan_path("pair"), row)
     stats = {"amount": {"col_type": "numeric", "n_unique": 2, "hash_sum": "3"}}
     pipeline = ColCheckPipeline(
         store,
@@ -70,7 +78,7 @@ def test_left_only_pipeline_does_not_wait_for_right(monkeypatch):
     )
 
     assert pipeline.run([row]) == 1
-    assert store.get_json("_state/left.json")["phase"] == "col_check_closed"
+    assert store.get_json(LEFT_STATE)["phase"] == "col_check_closed"
 
 
 def test_wait_for_manifests_honors_abort_signal():
@@ -84,7 +92,7 @@ def test_wait_for_manifests_honors_abort_signal():
 def test_pipeline_passes_query_status_to_compute_stats():
     store = MemoryStore()
     row = manifest()
-    store.put_json("plan.json", row)
+    store.put_json(plan_path("pair"), row)
     seen = []
 
     def compute(_manifest, _window, _value, *, query_status):
@@ -123,7 +131,7 @@ def test_pipeline_honors_abort_signal_before_work():
 def test_pipeline_abort_does_not_wait_for_a_running_pull():
     store = MemoryStore()
     row = manifest()
-    store.put_json("plan.json", row)
+    store.put_json(plan_path("pair"), row)
     started, release = threading.Event(), threading.Event()
 
     def pull(*_args):
@@ -161,11 +169,11 @@ def test_pipeline_abort_does_not_wait_for_a_running_pull():
 def test_wait_for_row_check_result_raises_on_unexcluded_mismatches():
     store = MemoryStore()
     store.put_json(
-        "plan.json",
+        plan_path("pair"),
         {"pair": "pair", "version": 2, "excluded_partitions": ["2026-01-02"]},
     )
     store.put_json(
-        "row_check/result.json",
+        row_result_path("pair"),
         {
             "pair": "pair",
             "date_synonyms": {},
@@ -185,14 +193,14 @@ def test_wait_for_row_check_result_raises_on_unexcluded_mismatches():
 
 def test_wait_for_row_check_result_waits_for_the_right_then_accepts_matches(caplog):
     store = MemoryStore()
-    store.put_json("plan.json", {"pair": "pair", "version": 2})
+    store.put_json(plan_path("pair"), {"pair": "pair", "version": 2})
     polls = []
 
     def abort():
         polls.append(True)
         if len(polls) == 2:
             store.put_json(
-                "row_check/result.json",
+                row_result_path("pair"),
                 {
                     "pair": "pair",
                     "partitions": {"all": {"result": "match"}},
@@ -203,7 +211,7 @@ def test_wait_for_row_check_result_waits_for_the_right_then_accepts_matches(capl
     with caplog.at_level("INFO"):
         result = wait_for_row_check_result(store, "pair", poll_interval=0.01, abort_if=abort)
     assert result["summary"] == {"match": 1} and len(polls) == 2
-    assert store.exists("_status/heartbeat.json")
+    assert store.exists(LEFT_STATE)
     assert "waiting for the Right row check before pulling Left data: pair=pair" in caplog.text
     assert "Right row check accepted: pair=pair partitions=1" in caplog.text
 
@@ -236,9 +244,35 @@ def test_cache(tmp_path, caplog):
     window = row["windows"][0]
     with caplog.at_level("INFO"):
         runtime.pull_window(row, window)
-    assert store.get_json("col_check/window_counts/pair--all.json")["n_total"] == 1
-    store.delete_keys(["col_check/window_counts/pair--all.json"])
+    assert store.get_json(window_count_path("pair", "all"))["n_total"] == 1
+    store.delete_keys([window_count_path("pair", "all")])
     runtime.pull_window(row, window)
     assert calls == [["amount"]]
-    assert store.get_json("col_check/window_counts/pair--all.json")["n_total"] == 1
+    assert store.get_json(window_count_path("pair", "all"))["n_total"] == 1
     assert "left data pull completed: pair=pair vintage=all sampled_rows=1 path=" in caplog.text
+
+
+def test_left_pull_publishes_bounded_difference_keys(tmp_path):
+    row = {
+        **manifest(),
+        "version": 2,
+        "plan_id": "one",
+        "key_cols": ["id"],
+        "right_key_cols": ["id"],
+        "key_families": ["numeric"],
+        "difference_sample_rows": 2,
+    }
+
+    class Source:
+        def pull_window(self, _partitions, _columns, output, **_options):
+            return write_rows(output, ["id", "amount"], [["01", 1], ["2", 2], ["3", 3]]), 3
+
+    store = MemoryStore()
+    runtime = LeftRuntime(tmp_path, store)
+    runtime.sources["pair"] = Source()
+    runtime.pull_window(row, row["windows"][0])
+
+    assert store.get_json(difference_keys_path("pair", "all"))["key_tuples"] == [
+        ["01"],
+        ["2"],
+    ]

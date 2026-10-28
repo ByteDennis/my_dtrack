@@ -7,6 +7,7 @@ from .backends.store import resolve_run
 from .checks.col_check import DEFAULT_HEARTBEAT_TIMEOUT, ColCheck, require_left_heartbeat
 from .checks.row_check import run_row_check
 from .common.model.protocol import (
+    REPORT_PREFIX,
     active_unit_ids,
     empty_plan_state,
     list_failures,
@@ -21,7 +22,7 @@ from .report import CONTENT_TYPES, build_report
 
 log = logging.getLogger("pair_recon.right.job")
 WAIT_LOG_INTERVAL = 300.0
-SMOKE_REQUEST = "_smoke/request.json"
+SMOKE_REQUEST = "_protocol/smoke/request.json"
 
 
 # >>> smoke stage: health check, a Volume state write, and the Left's sampled keys re-selected with the real predicate <<< #
@@ -90,11 +91,11 @@ def require_plan_units(store) -> str | None:
 def publish_report(store) -> None:
     with tempfile.TemporaryDirectory(prefix="pair-recon-report-") as folder:
         files = build_report(store, folder)
-        store.delete_keys(store.list_keys("report/"))
+        store.delete_keys(store.list_keys(REPORT_PREFIX))
         for name, path in files.items():
             path = Path(path)
             store.put_bytes(
-                f"report/{name}",
+                f"{REPORT_PREFIX}{name}",
                 path.read_bytes(),
                 content_type=CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
             )

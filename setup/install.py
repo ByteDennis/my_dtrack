@@ -7,6 +7,11 @@ from databricks.sdk import WorkspaceClient
 
 from pair_recon.app.config import env_value, load_environment
 from pair_recon.app.runner import StatementSql
+from pair_recon.core.metadata.constant import (
+    CATALOG_SCHEMA_ENV,
+    catalog_tables,
+    legacy_catalog_tables,
+)
 from pair_recon.core.metadata.workbook import read_pair_workbook, upsert_pair_configuration
 from pair_recon_dbx.deploy import (
     DEFAULT_JOB_NAME,
@@ -44,6 +49,10 @@ def refresh_configuration(workspace, warehouse_id: str, pair_table: str, workboo
 
 def main(argv=None):
     load_environment(ROOT)
+    configured_catalog_schema = env_value(CATALOG_SCHEMA_ENV)
+    legacy_catalog_schema, legacy_tables = (
+        (None, {}) if configured_catalog_schema else legacy_catalog_tables()
+    )
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", default=env_value("DBX_PROFILE", default="corp"))
     parser.add_argument("--workspace-dir", default=env_value(WORKSPACE_DIR_ENV))
@@ -56,7 +65,10 @@ def main(argv=None):
         "--warehouse-id",
         default=env_value("DBX_WAREHOUSE_ID"),
     )
-    parser.add_argument("--pair-table", default=env_value("DBX_PAIR_TABLE"))
+    parser.add_argument(
+        "--catalog-schema",
+        default=configured_catalog_schema or legacy_catalog_schema,
+    )
     parser.add_argument(
         "--config-workbook",
         type=Path,
@@ -73,8 +85,11 @@ def main(argv=None):
     if not args.skip_config:
         if not args.warehouse_id:
             parser.error("--warehouse-id is required unless --skip-config is used")
-        if not args.pair_table:
-            parser.error("--pair-table is required unless --skip-config is used")
+        if not args.catalog_schema:
+            parser.error(
+                f"--catalog-schema is required unless --skip-config is used "
+                f"(or set {CATALOG_SCHEMA_ENV})"
+            )
         read_pair_workbook(args.config_workbook)
     client = WorkspaceClient(
         profile=args.profile,
@@ -86,7 +101,16 @@ def main(argv=None):
     configuration = (
         None
         if args.skip_config
-        else refresh_configuration(client, args.warehouse_id, args.pair_table, args.config_workbook)
+        else refresh_configuration(
+            client,
+            args.warehouse_id,
+            (
+                legacy_tables.get("pair_meta", catalog_tables(args.catalog_schema).pair_meta)
+                if not configured_catalog_schema and args.catalog_schema == legacy_catalog_schema
+                else catalog_tables(args.catalog_schema).pair_meta
+            ),
+            args.config_workbook,
+        )
     )
     print(
         json.dumps(

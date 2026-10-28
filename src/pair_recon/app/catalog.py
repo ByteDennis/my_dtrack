@@ -4,12 +4,18 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from pair_recon.core.metadata.constant import (
+    COLUMN_MAP_TABLE,
+    NORMALIZATION_TABLE,
+    PAIR_SQL_TABLE,
+    WINDOW_HISTORY_TABLE,
+)
+from pair_recon_left.common.model.hashing import canonical_normalization_rules
 from pair_recon_right.catalog import (
     ERROR_COLUMNS,
     STATUS_RUN_COLUMNS,
     STATUS_SUMMARY_COLUMNS,
     WINDOW_COLUMNS,
-    WINDOW_HISTORY_TABLE,
     companion_table,
     error_rows,
     result_summary,
@@ -32,10 +38,14 @@ class Catalog:
         column_map_table: str | None = None,
         pair_sql_table: str | None = None,
         window_table: str | None = None,
+        normalization_table: str | None = None,
     ):
-        column_map_table = column_map_table or companion_table(pair_table, "pair_recon_column_map")
-        pair_sql_table = pair_sql_table or companion_table(pair_table, "pair_recon_pair_sql")
+        column_map_table = column_map_table or companion_table(pair_table, COLUMN_MAP_TABLE)
+        pair_sql_table = pair_sql_table or companion_table(pair_table, PAIR_SQL_TABLE)
         window_table = window_table or companion_table(pair_table, WINDOW_HISTORY_TABLE)
+        normalization_table = normalization_table or companion_table(
+            pair_table, NORMALIZATION_TABLE
+        )
         for table in (
             pair_table,
             status_table,
@@ -44,6 +54,7 @@ class Catalog:
             column_map_table,
             pair_sql_table,
             window_table,
+            normalization_table,
         ):
             if not _TABLE.fullmatch(table):
                 raise ValueError(f"invalid table name: {table}")
@@ -55,6 +66,15 @@ class Catalog:
         self.column_map_table = column_map_table
         self.pair_sql_table = pair_sql_table
         self.window_table = window_table
+        self.normalization_table = normalization_table
+
+    def normalization_rules(self) -> list[dict[str, str]]:
+        rows = self.sql.execute(
+            f"SELECT rule_name, source, match_value, canonical_value "
+            f"FROM {self.normalization_table} "
+            "WHERE enabled = true ORDER BY source, rule_name"
+        )
+        return canonical_normalization_rules([dict(row) for row in rows])
 
     def configuration_rows(self):
         pairs = self.sql.execute(f"SELECT * FROM {self.pair_table} ORDER BY pair_name")

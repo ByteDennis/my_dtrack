@@ -66,14 +66,14 @@ def retry_transient(operation: str, call, *, attempts: int = RETRY_ATTEMPTS):
 
 class ApiVolumeStore:
     _IMMUTABLE_JSON = (
-        "units/",
-        "col_check/result_batches/",
-        "col_check/results/",
-        "col_check/failures/",
-        "col_check/right_ready/",
-        "row_check/left.json",
-        "plan.json",
-        "fixed_keys.json",
+        "_protocol/units/",
+        "_protocol/outcomes/matches/",
+        "_protocol/outcomes/differences/",
+        "_protocol/outcomes/failures/",
+        "_protocol/windows/",
+        "_protocol/row/left.json",
+        "config/manifest.json",
+        "config/sampled_keys.json",
     )
 
     def __init__(self, root: str, *, files=None, _json_cache=None):

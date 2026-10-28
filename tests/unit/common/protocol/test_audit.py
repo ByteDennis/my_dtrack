@@ -6,6 +6,7 @@ from pair_recon_left.common.model import audit as audit_module
 from pair_recon_left.common.model.audit import SqlAudit as LeftSqlAudit
 from pair_recon_right.engine.backends.store import VolumeStore
 from pair_recon_right.engine.common.model.audit import SqlAudit as RightSqlAudit
+from pair_recon_right.engine.common.model.protocol import AUDIT_SUMMARY, RUN_STATUS, audit_prefix
 
 
 def test_event(tmp_path):
@@ -15,12 +16,12 @@ def test_event(tmp_path):
 
     left_key = left.record("SELECT * FROM APP.ORDERS", backend="oracle")
     right_key = right.record("SELECT * FROM main.sales.orders", backend="spark")
-    assert not store.exists("_status/audit.txt")
+    assert not store.exists(AUDIT_SUMMARY)
     right.refresh()
 
     assert left_key and right_key
-    assert len(store.list_keys("audit/")) == 2
-    text = store.get_bytes("_status/audit.txt").decode()
+    assert len(store.list_keys(audit_prefix(None))) == 2
+    text = store.get_bytes(AUDIT_SUMMARY).decode()
     assert text == "SELECT * FROM APP.ORDERS\n\nSELECT * FROM main.sales.orders\n\n"
     assert "-- timestamp=" not in text
 
@@ -29,7 +30,7 @@ def test_event_order_uses_internal_order_when_timestamps_match(tmp_path):
     store = VolumeStore(tmp_path / "run")
     timestamp = "2026-10-21T04:38:46-04:00"
     store.put_bytes(
-        "audit/a.txt",
+        f"{audit_prefix(None)}a.txt",
         (
             f"-- timestamp={timestamp} side=right backend=spark operation=query "
             "audit_order=2026-10-21T04:38:46.000002-04:00\n"
@@ -37,7 +38,7 @@ def test_event_order_uses_internal_order_when_timestamps_match(tmp_path):
         ).encode(),
     )
     store.put_bytes(
-        "audit/z.txt",
+        f"{audit_prefix(None)}z.txt",
         (
             f"-- timestamp={timestamp} side=left backend=oracle operation=query "
             "audit_order=2026-10-21T04:38:46.000001-04:00\n"
@@ -46,7 +47,7 @@ def test_event_order_uses_internal_order_when_timestamps_match(tmp_path):
     )
 
     assert LeftSqlAudit(store, "left", pair="orders").refresh()
-    assert store.get_bytes("_status/audit.txt").decode() == (
+    assert store.get_bytes(AUDIT_SUMMARY).decode() == (
         "SELECT * FROM APP.ORDERS\n\nSELECT * FROM main.sales.orders\n\n"
     )
 
@@ -86,14 +87,14 @@ def test_metadata(tmp_path):
     audit = LeftSqlAudit(store, "local")
     assert audit.record("SHOW TABLES", backend="duckdb", operation="inspect")
     assert audit.refresh()
-    assert SimpleNamespace(text=store.get_bytes("_status/audit.txt").decode()).text.endswith(
+    assert SimpleNamespace(text=store.get_bytes(AUDIT_SUMMARY).decode()).text.endswith(
         "SHOW TABLES\n\n"
     )
 
 
 def test_audit(tmp_path):
     store = VolumeStore(tmp_path / "run")
-    store.put_json("_status/run.json", {"timezone": "Asia/Tokyo"})
+    store.put_json(RUN_STATUS, {"timezone": "Asia/Tokyo"})
     key = LeftSqlAudit(store, "left", pair="orders").record(
         "SELECT * FROM APP.ORDERS", backend="oracle", operation="pull_window"
     )
@@ -128,7 +129,7 @@ def test_shape(tmp_path):
     assert first and repeated is None and changed
     assert len(store.list_keys("audit/")) == 2
     audit.refresh()
-    text = store.get_bytes("_status/audit.txt").decode()
+    text = store.get_bytes(AUDIT_SUMMARY).decode()
     assert "2026-01-01" in text and "2026-02-01" in text
 
 
@@ -194,6 +195,6 @@ def test_sql(tmp_path):
     assert audit.record("DELETE FROM T WHERE ID = 1", backend="duckdb")
     assert audit.record("DELETE FROM T WHERE ID = 2", backend="duckdb")
     assert audit.record("SHOW TABLES", backend="duckdb", operation="landing_inspect") is None
-    keys = store.list_keys("_status/audit/")
+    keys = store.list_keys(audit_prefix(None))
     assert len(keys) == 2
     assert all("--" not in key and len(key.rsplit("/", 1)[-1]) <= 64 for key in keys)

@@ -183,6 +183,19 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "payload STRING" in schema
     assert "pair_recon_reference" in schema
     assert "pair_recon_cache_index" in schema
+    assert "pair_recon_normalization" in schema
+    normalization_schema = schema.split("pair_recon_normalization", 1)[1].split(
+        ") USING DELTA;", 1
+    )[0]
+    assert normalization_schema.count("\n") == 6
+    assert "rule_type" not in normalization_schema
+    assert "updated_at" not in normalization_schema
+    assert "('trim', 'all', NULL, NULL, true)" in schema
+    assert "('lowercase', 'all', NULL, NULL, true)" in schema
+    assert "('decimal', 'all', NULL, NULL, true)" in schema
+    assert "('strip_datetime', 'all', NULL, NULL, true)" in schema
+    assert "('oracle_today_3000', 'oracle', '3000-01-01', '@run_date', true)" in schema
+    assert "('oracle_missing_9999', 'oracle', '9999-12-31', '@missing', true)" in schema
     migration = (ROOT / "setup" / "migrate_pair_metadata.sql").read_text(encoding="utf-8")
     assert "left_conn STRING" in migration
     partition_migration = (ROOT / "setup" / "migrate_partition.sql").read_text(encoding="utf-8")
@@ -217,24 +230,38 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
         assert all(f"('{table}', '{column}', NULL," in reference for column in columns)
     uc_notebook = json.loads((ROOT / "setup" / "uc_tables.ipynb").read_text(encoding="utf-8"))
     uc_source = "\n".join(line for cell in uc_notebook["cells"] for line in cell.get("source", []))
-    assert '"pair_recon_reference"' in uc_source
+    assert "TABLE_NAMES" in uc_source
+    assert "DBX_CATALOG_SCHEMA" not in uc_source
+    assert "CATALOG_SCHEMA_ENV" in uc_source
     assert "reference_statements()" in uc_source
 
 
-def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize(
+    ("table_environment", "expected_pair_table"),
+    [
+        ("DBX_CATALOG_SCHEMA=main.recon\n", "main.recon.pair_recon_pair_meta"),
+        ("DBX_PAIR_TABLE=legacy.recon.custom_pairs\n", "legacy.recon.custom_pairs"),
+    ],
+)
+def test_main_uses_dbx_environment_defaults(
+    monkeypatch, tmp_path, capsys, table_environment, expected_pair_table
+):
     monkeypatch.chdir(tmp_path)
     for name in (
         "DBX_PROFILE",
         "DBX_WORKSPACE_PDIR",
         "DBX_CLUSTER_ID",
         "DBX_WAREHOUSE_ID",
+        "DBX_CATALOG_SCHEMA",
         "DBX_PAIR_TABLE",
+        "DBX_STATUS_TABLE",
+        "DBX_ERROR_TABLE",
         "DBX_PAIR_WORKBOOK",
     ):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".pair_recon.env").write_text(
         "DBX_PROFILE=team\nDBX_WORKSPACE_PDIR=deploy\nDBX_CLUSTER_ID=c9\n"
-        "DBX_WAREHOUSE_ID=w9\nDBX_PAIR_TABLE=main.recon.pair_recon_pair_meta\n"
+        f"DBX_WAREHOUSE_ID=w9\n{table_environment}"
         "DBX_PAIR_WORKBOOK=config/pairs.xlsx\n",
         encoding="utf-8",
     )
@@ -273,6 +300,6 @@ def test_main_uses_dbx_environment_defaults(monkeypatch, tmp_path, capsys):
         "/Users/me/deploy/pair_recon_job"
     )
     assert calls["job"][1]["tasks"][0]["existing_cluster_id"] == "c9"
-    assert calls["refresh"][1:3] == ("w9", "main.recon.pair_recon_pair_meta")
+    assert calls["refresh"][1:3] == ("w9", expected_pair_table)
     assert calls["refresh"][3] == Path("config/pairs.xlsx")
     assert json.loads(capsys.readouterr().out)["job_id"] == 7

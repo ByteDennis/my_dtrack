@@ -70,6 +70,36 @@ def test_manifest(common):
     assert manifest["key_cols"] == ["ID"] and manifest["right_key_cols"] == ["id"]
     assert manifest["key_families"] == ["numeric"] and manifest["sample"]["mode"] == "fraction"
     assert manifest["audit"] is False
+    assert manifest["normalization_rules"] == common.hashing.default_normalization_rules()
+    selected_rule_values = [
+        {"rule_name": "trim", "source": "all"},
+        {
+            "rule_name": "oracle_missing",
+            "source": "oracle",
+            "match_value": "9999-12-31",
+            "canonical_value": "@missing",
+        },
+    ]
+    selected_rules = common.manifest.build_manifest(
+        "run", "p", _variant(normalization_rules=selected_rule_values), ROW_CHECK
+    )
+    assert selected_rules["normalization_rules"] == selected_rule_values
+    run_date = common.manifest.build_manifest(
+        "p-owner-20261028",
+        "p",
+        _variant(
+            normalization_rules=[
+                {
+                    "rule_name": "oracle_today",
+                    "source": "oracle",
+                    "match_value": "3000-01-01",
+                    "canonical_value": "@run_date",
+                }
+            ]
+        ),
+        ROW_CHECK,
+    )
+    assert run_date["normalization_date"] == "2026-10-28"
     forced = common.manifest.build_manifest(
         "run", "p", _variant(col_type_overrides={"AMOUNT": "numeric"}), ROW_CHECK
     )
@@ -143,6 +173,21 @@ def _variant(**changes):
         (_variant(key=""), ROW_CHECK, "sampling requires a key"),
         (_variant(col_type_overrides={"NOPE": "numeric"}), ROW_CHECK, "got NOPE"),
         (_variant(col_type_overrides={"ID": "date"}), ROW_CHECK, "got date"),
+        (
+            _variant(normalization_rules=[{"rule_name": "unknown", "source": "all"}]),
+            ROW_CHECK,
+            "unsupported normalization transform",
+        ),
+        (
+            _variant(
+                normalization_rules=[
+                    {"rule_name": "trim", "source": "all"},
+                    {"rule_name": "trim", "source": "all"},
+                ]
+            ),
+            ROW_CHECK,
+            "must not repeat",
+        ),
     ],
 )
 def test_manifest2(common, pair, row_check, message):
@@ -276,7 +321,7 @@ def test_version2(common):
         window["bucket"]: common.manifest.unit_id_for(first, window, "AMOUNT")
         for window in first["windows"]
     }
-    assert first_ids["2026-01-01"] == "p--2026-01-01--amount--35348aa128b7"
+    assert first_ids["2026-01-01"] == "p--2026-01-01--amount--93c5e45b229c"
     second_ids = {
         window["bucket"]: common.manifest.unit_id_for(second, window, "AMOUNT")
         for window in second["windows"]

@@ -7,14 +7,19 @@ from pair_recon_left.common.checks.col_check import ColCheckPipeline
 from pair_recon_right.engine.checks.col_check import ColCheck, ResultBatchCommitError
 from pair_recon_right.engine.common.model.manifest import build_manifest, unit_id_for
 from pair_recon_right.engine.common.model.protocol import (
+    DIFFERENCE_PREFIX,
+    FAILURE_PREFIX,
     LEFT_STATE,
     RESULT_BATCH_PREFIX,
+    RIGHT_READY_PREFIX,
     RIGHT_STATE,
+    UNITS_STATUS,
     col_check_close_document,
     get_left_state,
     get_right_state,
     list_failures,
     list_results,
+    plan_path,
     row_check_is_closed,
     write_left_state,
     write_right_state,
@@ -35,7 +40,7 @@ def _two_column_store():
     manifest = build_manifest("run", "p", pair, row_check)
     window = manifest["windows"][0]
     store = MemoryStore()
-    store.put_json("plan.json", manifest)
+    store.put_json(plan_path("p"), manifest)
     units = [
         {
             "pair": "p",
@@ -69,13 +74,9 @@ def test_role_state_replaces_hot_signal_files():
     assert left["col_check_closed_at"]
     assert right["row_check_closed_at"]
     assert store.exists(LEFT_STATE) and store.exists(RIGHT_STATE)
-    assert store.exists("_status/heartbeat.json")
-    assert store.exists("_status/row_check.closed.json")
-    assert store.exists("_status/col_check.closed.json")
     assert row_check_is_closed(store)
     assert col_check_close_document(store)["expected_units"] == 2
 
-    store.put_json("_status/col_check.closed.json", {"expected_units": 99})
     write_left_state(
         store,
         {"phase": "col_check", "plan_ids": {"p": "new-plan"}, "col_check_closed_at": None},
@@ -91,9 +92,9 @@ def test_right_writes_one_result_batch_and_terminal_snapshots():
 
     assert len(results) == 2
     assert len(store.list_keys(RESULT_BATCH_PREFIX)) == 1
-    assert store.list_keys("col_check/results/") == []
-    assert store.list_keys("col_check/failures/") == []
-    assert store.list_keys("col_check/right_ready/") == []
+    assert store.list_keys(DIFFERENCE_PREFIX) == []
+    assert store.list_keys(FAILURE_PREFIX) == []
+    assert len(store.list_keys(RIGHT_READY_PREFIX)) == 1
     assert {value["unit_id"] for _key, value in list_results(store)} == {
         unit_id_for(manifest, manifest["windows"][0], column) for column in manifest["columns"]
     }
@@ -102,36 +103,7 @@ def test_right_writes_one_result_batch_and_terminal_snapshots():
     assert right["phase"] == "complete"
     assert right["completed_units"] == 2
     assert right["completed_batches"] == 1
-    assert store.exists("_status/units.csv")
-
-
-def test_result_batch_reader_keeps_legacy_per_unit_compatibility():
-    store = MemoryStore()
-    store.put_json(
-        "col_check/results/legacy.json",
-        {"unit_id": "legacy", "pair": "p", "verdict": "match"},
-    )
-    store.commit_results(
-        [{"unit_id": "new", "pair": "p", "verdict": "match"}],
-    )
-    store.put_json(
-        "col_check/failures/failed.json",
-        {"unit_id": "failed", "pair": "p", "error": "boom"},
-    )
-
-    assert {value["unit_id"] for _key, value in list_results(store)} == {"legacy", "new"}
-    assert {value["unit_id"] for _key, value in list_failures(store)} == {"failed"}
-
-
-def test_protocol_two_plan_keeps_per_unit_results_for_rolling_upgrade():
-    store, _manifest = _two_column_store()
-    store.objects["plan.json"]["protocol_version"] = 2
-    target = FakeTarget(stats={"amount": STATS, "status": STATS})
-
-    ColCheck(store, lambda _cfg: target, poll_interval=0).run()
-
-    assert store.list_keys(RESULT_BATCH_PREFIX) == []
-    assert len(store.list_keys("col_check/results/")) == 2
+    assert store.exists(UNITS_STATUS)
 
 
 def test_matching_results_are_chunked_and_units_csv_is_terminal_only():
@@ -149,7 +121,7 @@ def test_matching_results_are_chunked_and_units_csv_is_terminal_only():
     manifest = build_manifest("run", "p", pair, row_check)
     window = manifest["windows"][0]
     store = MemoryStore()
-    store.put_json("plan.json", manifest)
+    store.put_json(plan_path("p"), manifest)
     units = [
         {
             "pair": "p",
@@ -175,8 +147,8 @@ def test_matching_results_are_chunked_and_units_csv_is_terminal_only():
 
     assert len(results) == 130
     assert len(store.list_keys(RESULT_BATCH_PREFIX)) == 3
-    assert store.list_keys("col_check/results/") == []
-    assert sum(event == ("put", "_status/units.csv") for event in store.events) == 1
+    assert store.list_keys(DIFFERENCE_PREFIX) == []
+    assert sum(event == ("put", UNITS_STATUS) for event in store.events) == 1
 
 
 def test_retry_failed_keeps_batched_matches_and_deletes_retryable_objects():
@@ -194,7 +166,7 @@ def test_retry_failed_keeps_batched_matches_and_deletes_retryable_objects():
 
 def test_wip_uses_role_state_without_scanning_unit_or_result_objects(monkeypatch):
     store = MemoryStore()
-    store.put_json("plan.json", {"pair": "p", "plan_id": "plan"})
+    store.put_json(plan_path("p"), {"pair": "p", "plan_id": "plan"})
     write_left_state(
         store,
         {"plan_ids": {"p": "plan"}, "published_units": 90},
@@ -224,7 +196,7 @@ def test_right_rejects_plan_change_while_running():
     checker = ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0)
     assert checker.poll() > 0
     changed = {**manifest, "plan_id": "replacement-plan"}
-    store.put_json("plan.json", changed)
+    store.put_json(plan_path("p"), changed)
 
     with pytest.raises(RuntimeError, match="plan changed while Right was running"):
         checker.poll()

@@ -11,7 +11,22 @@ from pair_recon_right.engine.checks import col_check
 from pair_recon_right.engine.checks.col_check import ColCheck, DrainScheduler, compare_statistics
 from pair_recon_right.engine.checks.row_check import run_row_check
 from pair_recon_right.engine.common.model.manifest import build_manifest, unit_id, unit_id_for
-from pair_recon_right.engine.common.model.protocol import list_results
+from pair_recon_right.engine.common.model.protocol import (
+    DIAGNOSTIC_PREFIX,
+    LEFT_STATE,
+    RESULT_BATCH_PREFIX,
+    failure_path,
+    fixed_keys_path,
+    get_right_state,
+    left_row_path,
+    list_results,
+    plan_path,
+    right_sample_prefix,
+    right_stats_path,
+    unit_prefix,
+    window_count_path,
+    write_left_state,
+)
 
 
 def test_identical():
@@ -112,10 +127,10 @@ def test_fetched():
 def _drained_store(sample_mode="all"):
     store = MemoryStore()
     doc = left_document(sample={"all": None, "fixed": 1}.get(sample_mode, 0.5))
-    store.put_json("row_check/left.json", doc)
-    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    store.put_json(left_row_path("p"), doc)
+    write_left_state(store, {"pairs": ["p"], "row_check_closed_at": "now"})
     run_row_check(store, lambda _cfg: FakeTarget())
-    manifest = store.get_json("plan.json")
+    manifest = store.get_json(plan_path("p"))
     uid = unit_id("p", "2026-01-01", "amount")
     pointer = {"pair": "p", "window": "2026-01-01", "column": "amount", "right_column": "amount"}
     store.commit_units(1, [{**pointer, "unit_id": uid, "left_statistics": STATS}])
@@ -131,7 +146,7 @@ def test_unit(caplog):
         results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert results[0]["verdict"] == "match" and results[0]["right_col"] == "amount"
     assert [value["unit_id"] for _key, value in list_results(store)] == [uid]
-    assert len(store.list_keys("col_check/result_batches/")) == 1
+    assert len(store.list_keys(RESULT_BATCH_PREFIX)) == 1
     assert target.calls == [("p", "2026-01-01", None)]
     assert f"B right stats p 2026-01-01: 1 column(s); first amount = {STATS}" in caplog.text
     assert (
@@ -166,14 +181,15 @@ def test_only_different_columns_persist_a_right_sample():
     target = SampleTarget(stats={"amount": {**STATS, "n_unique": 9}})
     ColCheck(store, lambda _cfg: target, poll_interval=0).run()
 
-    manifest = store.get_json("diagnostics/p/2026-01-01/manifest.json")
-    assert manifest["different_columns"] == ["amount"]
-    body = gzip.decompress(store.get_bytes("diagnostics/p/2026-01-01/right.csv.gz"))
+    prefix = right_sample_prefix("p", "2026-01-01")
+    manifest = store.get_json(f"{prefix}manifest.json")
+    assert manifest["right_rows"] == 1
+    body = gzip.decompress(store.get_bytes(f"{prefix}right.csv.gz"))
     assert list(csv.reader(io.StringIO(body.decode()))) == [["id", "amount"], ["1", "99"]]
 
     matched_store, _uid = _drained_store()
     ColCheck(matched_store, lambda _cfg: SampleTarget(), poll_interval=0).run()
-    assert matched_store.list_keys("diagnostics/") == []
+    assert matched_store.list_keys(DIAGNOSTIC_PREFIX) == []
 
 
 def test_stats_only_stages_right_statistics_and_sample_without_results():
@@ -196,11 +212,11 @@ def test_stats_only_stages_right_statistics_and_sample_without_results():
     ColCheck(store, lambda _cfg: SampleTarget(), poll_interval=0, stats_only=True).run()
 
     assert list_results(store) == []
-    assert store.get_json("_scratch/right_stats/p/2026-01-01.json")["statistics"] == {
+    assert store.get_json(right_stats_path("p", "2026-01-01"))["statistics"] == {
         "amount": STATS
     }
-    assert store.exists("_scratch/right_samples/p/2026-01-01/right.csv.gz")
-    assert store.get_json("_state/right.json")["phase"] == "stats_ready"
+    assert store.exists(f"{right_sample_prefix('p', '2026-01-01')}right.csv.gz")
+    assert get_right_state(store)["phase"] == "stats_ready"
 
 
 def test_total_mismatch_stops_the_right_after_recording_the_diff():
@@ -232,7 +248,7 @@ def test_first_window_count_is_compared_before_statistics():
             return self.count
 
     store, uid = _drained_store(sample_mode="fraction")
-    store.put_json("col_check/window_counts/p--2026-01-01.json", {"n_total": 2})
+    store.put_json(window_count_path("p", "2026-01-01"), {"n_total": 2})
     target = CountingTarget(5)
     with pytest.raises(col_check.SampleCountMismatch) as info:
         ColCheck(store, lambda _cfg: target, poll_interval=0).run()
@@ -242,7 +258,7 @@ def test_first_window_count_is_compared_before_statistics():
     assert list_results(store) == []
 
     store, uid = _drained_store(sample_mode="fraction")
-    store.put_json("col_check/window_counts/p--2026-01-01.json", {"n_total": 2})
+    store.put_json(window_count_path("p", "2026-01-01"), {"n_total": 2})
     agreeing = CountingTarget(2)
     results = ColCheck(store, lambda _cfg: agreeing, poll_interval=0).run()
     assert [row["unit_id"] for row in results] == [uid]
@@ -305,7 +321,7 @@ def test_right_worker_budget_runs_window_queries_in_parallel():
     }
     manifest = build_manifest("run", "p", pair, row_check)
     store = MemoryStore()
-    store.put_json("plan.json", manifest)
+    store.put_json(plan_path("p"), manifest)
     for sequence, window in enumerate(manifest["windows"], 1):
         uid = unit_id_for(manifest, window, "amount")
         store.commit_units(
@@ -357,7 +373,7 @@ def test_fixed(monkeypatch):
         ColCheck(store, lambda _cfg: target, poll_interval=0, heartbeat_timeout=10).run()
     assert target.calls == []
     monkeypatch.setattr(store, "heartbeat_age", lambda now=None: 0.0)
-    store.put_json("fixed_keys.json", {"pair": "p", "windows": {"2026-01-01": [["7"]]}})
+    store.put_json(fixed_keys_path("p"), {"pair": "p", "windows": {"2026-01-01": [["7"]]}})
     results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert results and target.calls[-1] == ("p", "2026-01-01", [["7"]])
 
@@ -388,7 +404,7 @@ def test_v2():
     }
     store = MemoryStore()
     first = build_manifest("run", "p", pair, row_check)
-    store.put_json("plan.json", first)
+    store.put_json(plan_path("p"), first)
     for sequence, window in enumerate(first["windows"], 1):
         uid = unit_id_for(first, window, "amount")
         store.commit_units(
@@ -407,7 +423,7 @@ def test_v2():
     ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0).run()
 
     second = build_manifest("run", "p", {**pair, "excluded_partitions": ["2026-01-02"]}, row_check)
-    store.put_json("plan.json", second)
+    store.put_json(plan_path("p"), second)
     january = second["windows"][0]
     changed_uid = unit_id_for(second, january, "amount")
     store.commit_units(
@@ -437,17 +453,17 @@ def test_prefetch():
             raise ValueError("boom")
 
     results = ColCheck(store, lambda _cfg: Broken(), poll_interval=0, max_attempts=2).run()
-    failure = store.get_json(f"col_check/failures/{uid}.json")
+    failure = store.get_json(failure_path("p", uid))
     assert results == [] and failure["error"] == "boom"
 
 
 def test_compare():
     store, uid = _drained_store()
     target = FakeTarget(stats={"amount": STATS})
-    unit_key = next(key for key in store.objects if key.startswith("units/"))
+    unit_key = next(key for key in store.objects if key.startswith(unit_prefix("p")))
     store.objects[unit_key]["units"][0].pop("left_statistics")
     results = ColCheck(store, lambda _cfg: target, poll_interval=0, max_attempts=2).run()
-    assert results == [] and store.exists(f"col_check/failures/{uid}.json")
+    assert results == [] and store.exists(failure_path("p", uid))
 
 
 def test_poll_discovers_late_lower_sequence_batch():
@@ -466,7 +482,7 @@ def test_poll_discovers_late_lower_sequence_batch():
     amount = unit_id_for(manifest, window, "amount")
     status = unit_id_for(manifest, window, "status")
     store = MemoryStore()
-    store.put_json("plan.json", manifest)
+    store.put_json(plan_path("p"), manifest)
     store.commit_units(
         2,
         [
@@ -500,8 +516,7 @@ def test_poll_discovers_late_lower_sequence_batch():
 
 def test_idle():
     store, _uid = _drained_store()
-    store.objects["_state/left.json"].pop("col_check_closed_at")
-    store.objects.pop("_status/col_check.closed.json")
+    store.objects[LEFT_STATE].pop("col_check_closed_at")
     calls = []
 
     def on_idle():
@@ -516,8 +531,7 @@ def test_idle():
 
 def test_stale(monkeypatch):
     store, _uid = _drained_store()
-    store.objects["_state/left.json"].pop("col_check_closed_at")
-    store.objects.pop("_status/col_check.closed.json")
+    store.objects[LEFT_STATE].pop("col_check_closed_at")
     monkeypatch.setattr(store, "heartbeat_age", lambda now=None: 999.0)
     monkeypatch.setattr(col_check.time, "sleep", lambda _s: None)
     with pytest.raises(RuntimeError, match="heartbeat is stale"):
@@ -526,8 +540,7 @@ def test_stale(monkeypatch):
 
 def test_unreadable_heartbeat_does_not_fail_the_right(monkeypatch, caplog):
     store, _uid = _drained_store()
-    store.objects["_state/left.json"].pop("col_check_closed_at")
-    store.objects.pop("_status/col_check.closed.json")
+    store.objects[LEFT_STATE].pop("col_check_closed_at")
     reads = []
 
     def flaky(now=None):

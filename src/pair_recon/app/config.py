@@ -102,7 +102,12 @@ def run_config(
     selected.update(
         {
             key: answers[key]
-            for key in ("sample", "strict", "audit", "difference_sample_rows")
+            for key in (
+                "sample",
+                "normalization_rules",
+                "audit",
+                "difference_sample_rows",
+            )
             if key in answers
         }
     )

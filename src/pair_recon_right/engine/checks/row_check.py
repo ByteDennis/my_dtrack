@@ -8,7 +8,6 @@ from typing import Any
 from ..common.model.audit import SqlAudit, attach_sql_audit
 from ..common.model.manifest import build_manifest, key_family_specs, mapping_csv_bytes, sample_plan
 from ..common.model.protocol import (
-    ROW_CHECK_CLOSED,
     artifact_location,
     left_row_check_close_document,
     list_left_documents,
@@ -316,7 +315,6 @@ def run_row_check(
     health_checks: dict[str, dict[str, Any]] | None = None,
     health_check_seconds: dict[str, float] | None = None,
 ) -> int:
-    store.delete_keys([ROW_CHECK_CLOSED])
     write_right_state(
         store,
         {"phase": "row_check", "row_check_closed_at": None},

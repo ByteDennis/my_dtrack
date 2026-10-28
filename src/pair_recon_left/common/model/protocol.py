@@ -13,15 +13,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .. import PROTOCOL_VERSION
 
-RUN_STATUS = "_status/run.json"
-HEARTBEAT = "_status/heartbeat.json"
-UNITS_STATUS = "_status/units.csv"
-LEFT_ROW_CHECK_CLOSED = "_status/left_row_check.closed.json"
-ROW_CHECK_CLOSED = "_status/row_check.closed.json"
-COL_CHECK_CLOSED = "_status/col_check.closed.json"
-AUDIT_SUMMARY = "_status/audit.txt"
-LEFT_STATE = "_state/left.json"
-RIGHT_STATE = "_state/right.json"
+RUN_STATUS = "_protocol/run.json"
+UNITS_STATUS = "results/units.csv"
+AUDIT_SUMMARY = "audit/summary.txt"
+LEFT_STATE = "_protocol/left.json"
+RIGHT_STATE = "_protocol/right.json"
 
 UNIT_STATUS_FIELDS = (
     "pair",
@@ -39,42 +35,50 @@ UNIT_STATUS_FIELDS = (
 )
 UNIT_BATCH_FORMAT = "pair-recon-unit-batch-v1"
 RESULT_BATCH_FORMAT = "pair-recon-result-batch-v1"
-RESULT_BATCH_PREFIX = "col_check/result_batches/"
-RIGHT_STATS_PREFIX = "_scratch/right_stats/"
-RIGHT_SAMPLE_PREFIX = "_scratch/right_samples/"
-DIAGNOSTIC_PREFIX = "diagnostics/"
+RESULT_BATCH_PREFIX = "_protocol/outcomes/matches/"
+DIFFERENCE_PREFIX = "_protocol/outcomes/differences/"
+FAILURE_PREFIX = "_protocol/outcomes/failures/"
+RIGHT_READY_PREFIX = "_protocol/windows/"
+RIGHT_STATS_PREFIX = "_protocol/tmp/right_stats/"
+RIGHT_SAMPLE_PREFIX = "_protocol/tmp/right_samples/"
+DIAGNOSTIC_PREFIX = "differences/"
+REPORT_PREFIX = "results/report/"
 
 
 def _artifact_segment(value: object) -> str:
     return quote(str(value), safe="")
 
 
-def right_stats_path(pair: str, window: str) -> str:
-    return f"{RIGHT_STATS_PREFIX}{_artifact_segment(pair)}/{_artifact_segment(window)}.json"
+def right_stats_path(_pair: str, window: str) -> str:
+    return f"{RIGHT_STATS_PREFIX}{_artifact_segment(window)}.json"
 
 
-def right_sample_prefix(pair: str, window: str) -> str:
-    return f"{RIGHT_SAMPLE_PREFIX}{_artifact_segment(pair)}/{_artifact_segment(window)}/"
+def right_sample_prefix(_pair: str, window: str) -> str:
+    return f"{RIGHT_SAMPLE_PREFIX}{_artifact_segment(window)}/"
 
 
-def diagnostic_prefix(pair: str, window: str) -> str:
-    return f"{DIAGNOSTIC_PREFIX}{_artifact_segment(pair)}/{_artifact_segment(window)}/"
+def difference_keys_path(_pair: str, window: str) -> str:
+    return f"{RIGHT_READY_PREFIX}{_artifact_segment(window)}/sample_keys.json"
+
+
+def diagnostic_prefix(_pair: str, window: str) -> str:
+    return f"{DIAGNOSTIC_PREFIX}{_artifact_segment(window)}/"
 
 
 def left_row_path(_pair: str) -> str:
-    return "row_check/left.json"
+    return "_protocol/row/left.json"
 
 
 def row_result_path(_pair: str) -> str:
-    return "row_check/result.json"
+    return "results/row.json"
 
 
 def plan_path(_pair: str) -> str:
-    return "plan.json"
+    return "config/manifest.json"
 
 
 def mapping_path(_pair: str) -> str:
-    return "mapping.csv"
+    return "config/mapping.csv"
 
 
 def artifact_location(store, relative: str) -> str:
@@ -83,7 +87,7 @@ def artifact_location(store, relative: str) -> str:
 
 
 def fixed_keys_path(_pair: str) -> str:
-    return "fixed_keys.json"
+    return "config/sampled_keys.json"
 
 
 def fixed_keys_document(store, pair: str) -> dict[str, Any] | None:
@@ -91,11 +95,11 @@ def fixed_keys_document(store, pair: str) -> dict[str, Any] | None:
     return store.get_json(key) if store.exists(key) else None
 
 
-WINDOW_COUNT_PREFIX = "col_check/window_counts/"
+WINDOW_PREFIX = "_protocol/windows/"
 
 
-def window_count_path(pair: str, window: str) -> str:
-    return f"{WINDOW_COUNT_PREFIX}{pair}--{window}.json"
+def window_count_path(_pair: str, window: str) -> str:
+    return f"{WINDOW_PREFIX}{_artifact_segment(window)}/left.json"
 
 
 # >>> Left sampled row count of one window, written right after the pull so the Right can gate early <<< #
@@ -113,7 +117,7 @@ def read_window_count(store, pair: str, window: str) -> int | None:
 
 
 def unit_prefix(_pair: str) -> str:
-    return "units/"
+    return "_protocol/units/"
 
 
 def unit_batch_path(sequence: int, count: int) -> str:
@@ -213,23 +217,23 @@ def result_batch_document(
 
 
 def result_path(_pair: str, unit_id: str) -> str:
-    return f"col_check/results/{unit_id}.json"
+    return f"{DIFFERENCE_PREFIX}{unit_id}.json"
 
 
 def failure_path(_pair: str, unit_id: str) -> str:
-    return f"col_check/failures/{unit_id}.json"
+    return f"{FAILURE_PREFIX}{unit_id}.json"
 
 
 def right_ready_path(_pair: str, window: str) -> str:
-    return f"col_check/right_ready/{quote(str(window), safe='')}.json"
+    return f"{RIGHT_READY_PREFIX}{quote(str(window), safe='')}/right.json"
 
 
-def audit_prefix(pair: str | None) -> str:
-    return "audit/" if pair else "_status/audit/"
+def audit_prefix(_pair: str | None) -> str:
+    return "audit/sql/"
 
 
-def audit_error_prefix(pair: str | None) -> str:
-    return "audit_errors/" if pair else "_status/audit_errors/"
+def audit_error_prefix(_pair: str | None) -> str:
+    return "audit/errors/"
 
 
 def _list_json(store, prefix: str) -> list[tuple[str, dict[str, Any]]]:
@@ -289,7 +293,7 @@ def _outcome_records(store) -> list[tuple[str, str, dict[str, Any]]]:
             return
         records[unit_id] = (kind, key, row)
 
-    for kind, prefix in (("result", "col_check/results/"), ("failure", "col_check/failures/")):
+    for kind, prefix in (("result", DIFFERENCE_PREFIX), ("failure", FAILURE_PREFIX)):
         for key, value in _list_json(store, prefix):
             add(kind, key, value)
     for key, document in list_result_batches(store):
@@ -307,7 +311,11 @@ def list_failures(store) -> list[tuple[str, dict[str, Any]]]:
 
 
 def list_right_ready(store) -> list[tuple[str, dict[str, Any]]]:
-    return _list_json(store, "col_check/right_ready/")
+    return [
+        (key, value)
+        for key, value in _list_json(store, RIGHT_READY_PREFIX)
+        if key.endswith("/right.json")
+    ]
 
 
 def active_unit_ids(store) -> set[str]:
@@ -355,31 +363,24 @@ def empty_plan_state(result: dict[str, Any]) -> str | None:
 
 
 def row_check_is_closed(store) -> bool:
-    state = get_right_state(store)
-    if "row_check_closed_at" in state:
-        return bool(state.get("row_check_closed_at"))
-    return store.exists(ROW_CHECK_CLOSED)
+    return bool(get_right_state(store).get("row_check_closed_at"))
 
 
 def left_row_check_close_document(store) -> dict[str, Any] | None:
     state = get_left_state(store)
-    if "row_check_closed_at" in state:
-        return state if state.get("row_check_closed_at") else None
-    return store.get_json(LEFT_ROW_CHECK_CLOSED) if store.exists(LEFT_ROW_CHECK_CLOSED) else None
+    return state if state.get("row_check_closed_at") else None
 
 
 def col_check_close_document(store) -> dict[str, Any] | None:
     state = get_left_state(store)
-    if "col_check_closed_at" in state:
-        if not state.get("col_check_closed_at"):
-            return None
-        return {
-            "pairs": state.get("pairs") or [],
-            "expected_units": int(state.get("expected_units") or 0),
-            "plan_ids": state.get("plan_ids") or {},
-            "closed_at": state["col_check_closed_at"],
-        }
-    return store.get_json(COL_CHECK_CLOSED) if store.exists(COL_CHECK_CLOSED) else None
+    if not state.get("col_check_closed_at"):
+        return None
+    return {
+        "pairs": state.get("pairs") or [],
+        "expected_units": int(state.get("expected_units") or 0),
+        "plan_ids": state.get("plan_ids") or {},
+        "closed_at": state["col_check_closed_at"],
+    }
 
 
 def _offset_name(value: datetime) -> str:

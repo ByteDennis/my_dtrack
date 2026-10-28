@@ -1,3 +1,6 @@
+import csv
+import gzip
+import io
 import json
 import logging
 import threading
@@ -27,9 +30,21 @@ from pair_recon.core import debug, sas
 from pair_recon.core.progress import ProgressSampler, progress_snapshot
 from pair_recon.core.sas import export_bundle
 from pair_recon_left.common.checks import col_check as left_col_check
+from pair_recon_left.common.model.hashing import default_normalization_rules
 from pair_recon_left.common.model.protocol import (
+    LEFT_STATE,
+    REPORT_PREFIX,
+    RUN_STATUS,
+    UNITS_STATUS,
+    difference_keys_path,
+    failure_path,
+    fixed_keys_path,
+    left_row_path,
+    mapping_path,
     plan_path,
     result_path,
+    row_result_path,
+    unit_prefix,
     write_left_state,
     write_right_state,
     write_run_status,
@@ -77,10 +92,10 @@ def test_runid():
 def test_debug_reconciles_locally_and_publishes_only_difference_samples(tmp_path):
     store = MemoryStore()
     document = left_document(sample=None)
-    store.put_json("row_check/left.json", document)
-    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    store.put_json(left_row_path("p"), document)
+    write_left_state(store, {"pairs": ["p"], "row_check_closed_at": "now"})
     run_right_row_check(store, lambda _cfg: FakeTarget())
-    manifest = store.get_json("plan.json")
+    manifest = store.get_json(plan_path("p"))
     uid = unit_id("p", "2026-01-01", "amount")
     store.commit_units(
         1,
@@ -99,7 +114,10 @@ def test_debug_reconciles_locally_and_publishes_only_difference_samples(tmp_path
     store.heartbeat()
 
     class SampleTarget(FakeTarget):
-        def window_sample(self, _manifest, _window, limit):
+        sampled_keys = None
+
+        def window_sample(self, _manifest, window, limit):
+            self.sampled_keys = window.get("diagnostic_key_tuples")
             return {
                 "pairs": [
                     {"left_column": "id", "right_column": "id", "context": True},
@@ -113,12 +131,18 @@ def test_debug_reconciles_locally_and_publishes_only_difference_samples(tmp_path
                 "limit": limit,
             }
 
+    store.put_json(
+        difference_keys_path("p", "2026-01-01"),
+        {"pair": "p", "window": "2026-01-01", "columns": ["id"], "key_tuples": [["1"]]},
+    )
+    target = SampleTarget(stats={"amount": {**STATS, "n_unique": 9}})
     RightColCheck(
         store,
-        lambda _cfg: SampleTarget(stats={"amount": {**STATS, "n_unique": 9}}),
+        lambda _cfg: target,
         poll_interval=0,
         stats_only=True,
     ).run()
+    assert target.sampled_keys == [["1"]]
     outcome = run_local_reconciliation(store, right_workers=2)
     assert outcome["column_errors"] == 1
 
@@ -126,9 +150,13 @@ def test_debug_reconciles_locally_and_publishes_only_difference_samples(tmp_path
     left.parent.mkdir(parents=True)
     left.write_text("id,amount\n1,8\n", encoding="utf-8")
     assert publish_difference_samples(store, tmp_path, "p") == 1
-    assert store.exists("diagnostics/p/2026-01-01/right.csv.gz")
-    assert store.exists("diagnostics/p/2026-01-01/left.csv.gz")
-    assert store.list_keys("_scratch/") == []
+    sample = gzip.decompress(store.get_bytes("differences/2026-01-01/samples.csv.gz"))
+    assert list(csv.reader(io.StringIO(sample.decode()))) == [
+        ["sampled_key", "partition", "attribute", "side", "value"],
+        ["1", "", "amount", "left", "8"],
+        ["1", "", "amount", "right", "9"],
+    ]
+    assert store.list_keys("_protocol/tmp/") == []
 
 
 def test_excluded_partition_ranges_and_month_numbers():
@@ -193,7 +221,6 @@ def test_run_config_applies_prompted_vintage_sample():
             "partition": "day",
             "checks": ["row_count"],
             "sample": 0.1,
-            "strict": False,
             "audit": False,
             "from_date": "2026-01-01",
             "to_date": "2026-03-31",
@@ -214,7 +241,6 @@ def test_run_config_applies_prompted_vintage_sample():
             "partition": "all",
             "checks": ["row_count"],
             "sample": False,
-            "strict": False,
             "audit": False,
         },
         timezone="America/New_York",
@@ -846,7 +872,6 @@ def test_pair_metadata_builds_config_from_explicit_columns():
         {
             "partition": "day",
             "sample": 0.1,
-            "strict": False,
             "audit": True,
             "checks": ["row_count", "hash_sum"],
             "from_date": "2026-01-01",
@@ -967,38 +992,38 @@ def test_prompt_session_undo_returns_to_previous_question(monkeypatch):
 def test_retry():
     store = MemoryStore()
     store.put_json(
-        "row_check/result.json",
+        row_result_path("p"),
         {"partitions": {"all": {"result": "match"}}},
     )
-    store.put_json("col_check/results/good.json", {"verdict": "match"})
-    store.put_json("col_check/results/bad.json", {"verdict": "diff"})
-    store.put_json("col_check/failures/error.json", {"error": "boom"})
+    store.put_json(result_path("p", "good"), {"pair": "p", "unit_id": "good", "verdict": "match"})
+    store.put_json(result_path("p", "bad"), {"pair": "p", "unit_id": "bad", "verdict": "diff"})
+    store.put_json(failure_path("p", "error"), {"pair": "p", "unit_id": "error", "error": "boom"})
     assert retry_failed(store) == 2
-    assert store.exists("col_check/results/good.json")
-    assert not store.exists("col_check/results/bad.json")
-    assert not store.exists("col_check/failures/error.json")
+    assert store.exists(result_path("p", "good"))
+    assert not store.exists(result_path("p", "bad"))
+    assert not store.exists(failure_path("p", "error"))
 
 
 def test_retry_keeps_left_counts_when_the_row_check_mismatched():
     store = MemoryStore()
-    store.put_json("row_check/left.json", {"counts": {"2026-01-01": 2}})
+    store.put_json(left_row_path("p"), {"counts": {"2026-01-01": 2}})
     store.put_json(
-        "row_check/result.json",
+        row_result_path("p"),
         {"partitions": {"2026-01-01": {"result": "count_diff"}}},
     )
     assert retry_failed(store) == 1
-    assert store.exists("row_check/left.json")
-    assert not store.exists("row_check/result.json")
+    assert store.exists(left_row_path("p"))
+    assert not store.exists(row_result_path("p"))
 
 
 def test_require_plan_windows_rejects_an_empty_plan():
     store = MemoryStore()
     pair_config = {"fromDate": "2023-09-01", "toDate": "2026-09-30"}
     runner.require_plan_windows(store, "orders", pair_config)
-    store.put_json("plan.json", {"pair": "orders", "windows": [{"bucket": "2024-01-01"}]})
+    store.put_json(plan_path("orders"), {"pair": "orders", "windows": [{"bucket": "2024-01-01"}]})
     runner.require_plan_windows(store, "orders", pair_config)
     store.put_json(
-        "plan.json",
+        plan_path("orders"),
         {"pair": "orders", "windows": [], "excluded_partitions": ["2026-09-30"] * 36},
     )
     with pytest.raises(
@@ -1099,7 +1124,7 @@ def test_progress():
     write_run_status(
         store, {"state": "left_col_check", "run_id": "r", "timezone": "America/New_York"}
     )
-    store.put_json("row_check/left.json", {"counts": {"all": 2}})
+    store.put_json(left_row_path("p"), {"counts": {"all": 2}})
     store.put_json(plan_path("p"), {"pair": "p", "expected_units": 2, "windows": [], "columns": []})
     store.commit_units(
         1,
@@ -1148,7 +1173,6 @@ def test_sas(tmp_path):
         "right": {"source": "databricks", "table": "RIGHT_TABLE"},
         "key": "ID",
         "col_map": {"VALUE": "value"},
-        "strict": False,
     }
     bundle = tmp_path / "sas"
     result = export_bundle("orders", pair, bundle, rate=0.1)
@@ -1220,6 +1244,9 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
         def pairs(self):
             return [{"pair_name": "orders", "config_json": metadata}]
 
+        def normalization_rules(self):
+            return default_normalization_rules()
+
         def run(self, _run_id):
             return {"state": "failed"} if existing else None
 
@@ -1227,6 +1254,7 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
         "owner": "me",
         "profile": "corp",
         "warehouse_id": "warehouse",
+        "catalog_schema": "main.recon",
         "pair_table": "main.recon.pair_recon_pair_meta",
         "status_table": "main.recon.pair_recon_run_status",
         "error_table": "main.recon.pair_recon_run_error",
@@ -1238,7 +1266,6 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
         "partition": "all",
         "checks": "row_count,hash_sum",
         "sample": "all",
-        "strict": False,
         "pair_workbook": str(tmp_path / "missing.xlsx"),
     }
     (tmp_path / "request.yaml").write_text(
@@ -1268,12 +1295,18 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
     remote_right = run_mode == "full" and right_source == "databricks"
     assert settings["sync_remote"] is remote_right
     assert settings["audit"] is False
+    assert settings["difference_sample_rows"] == 1000
+    assert settings["normalization_rules"] == default_normalization_rules()
+    assert not any("Difference sample rows" in prompt for prompt in prompts)
+    assert not any("Normalization rules" in prompt for prompt in prompts)
+    assert not any("Strict normalization" in prompt for prompt in prompts)
     assert settings["left_workers"] == 2
     assert settings["right_workers"] == (8 if remote_right else 1)
     assert settings["work_dir"] == str(tmp_path / "artifacts")
     assert (tmp_path / "artifacts").is_dir()
     assert config["pairs"]["orders"]["statistics"] == ["hash_sum"]
     assert config["pairs"]["orders"]["audit"] is False
+    assert config["pairs"]["orders"]["normalization_rules"] == default_normalization_rules()
     assert config["pairs"]["orders"]["left"]["source"] == left_source
     assert "skipping workbook synchronization" in capsys.readouterr().out
     if left_source == "csv":
@@ -1320,6 +1353,9 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_
         def pairs(self):
             return [row]
 
+        def normalization_rules(self):
+            return default_normalization_rules()
+
         def run(self, _run_id):
             return None
 
@@ -1327,6 +1363,7 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_
         "owner": "me",
         "profile": "corp",
         "warehouse_id": "warehouse",
+        "catalog_schema": "main.recon",
         "pair_table": "main.recon.pair_recon_pair_meta",
         "status_table": "main.recon.pair_recon_run_status",
         "error_table": "main.recon.pair_recon_run_error",
@@ -1380,6 +1417,9 @@ def test_prompt_records_and_applies_date_columns_and_types(monkeypatch, tmp_path
         def pairs(self):
             return [{"pair_name": "orders", "config_json": metadata}]
 
+        def normalization_rules(self):
+            return default_normalization_rules()
+
         def run(self, _run_id):
             return None
 
@@ -1387,6 +1427,7 @@ def test_prompt_records_and_applies_date_columns_and_types(monkeypatch, tmp_path
         "owner": "me",
         "profile": "corp",
         "warehouse_id": "warehouse",
+        "catalog_schema": "main.recon",
         "pair_table": "main.recon.pair_recon_pair_meta",
         "status_table": "main.recon.pair_recon_run_status",
         "error_table": "main.recon.pair_recon_run_error",
@@ -1398,7 +1439,6 @@ def test_prompt_records_and_applies_date_columns_and_types(monkeypatch, tmp_path
         "partition": "day",
         "checks": "row_count,hash_sum",
         "sample": "all",
-        "strict": False,
         "from_date": "2026-01-01",
         "to_date": "2026-01-31",
         "excluded_partitions": [
@@ -1501,9 +1541,7 @@ def test_prompt_uses_dbx_environment_defaults(monkeypatch):
     monkeypatch.setenv("USERNAME", "owner")
     monkeypatch.setenv("DBX_PROFILE", "team")
     monkeypatch.setenv("DBX_WAREHOUSE_ID", "warehouse-from-env")
-    monkeypatch.setenv("DBX_PAIR_TABLE", "main.recon.pairs_from_env")
-    monkeypatch.setenv("DBX_STATUS_TABLE", "main.recon.status_from_env")
-    monkeypatch.setenv("DBX_ERROR_TABLE", "main.recon.errors_from_env")
+    monkeypatch.setenv("DBX_CATALOG_SCHEMA", "main.recon")
     monkeypatch.setenv("DBX_RUN_PATH", "/Volumes/main/recon/runs_from_env")
     monkeypatch.setattr(cli, "ask", stop)
 
@@ -1512,19 +1550,49 @@ def test_prompt_uses_dbx_environment_defaults(monkeypatch):
             {
                 "profile": "saved",
                 "warehouse_id": "saved-warehouse",
-                "pair_table": "main.recon.saved_pairs",
-                "status_table": "main.recon.saved_status",
-                "error_table": "main.recon.saved_errors",
+                "catalog_schema": "saved.recon",
                 "volume_root": "/Volumes/main/recon/saved_runs",
             }
         )
 
     assert seen["Databricks profile"] == "team"
     assert seen["SQL warehouse id"] == "warehouse-from-env"
-    assert seen["Pair metadata table"] == "main.recon.pairs_from_env"
-    assert seen["Run status table"] == "main.recon.status_from_env"
-    assert seen["Run error table"] == "main.recon.errors_from_env"
+    assert seen["Unity Catalog schema"] == "main.recon"
     assert seen["Volume runs path"] == "/Volumes/main/recon/runs_from_env"
+
+
+def test_table_settings_fall_back_to_legacy_table_environment(monkeypatch):
+    monkeypatch.delenv("DBX_CATALOG_SCHEMA", raising=False)
+    monkeypatch.setenv("DBX_PAIR_TABLE", "legacy.recon.custom_pairs")
+    monkeypatch.setenv("DBX_STATUS_TABLE", "legacy.recon.custom_status")
+    monkeypatch.setenv("DBX_ERROR_TABLE", "legacy.recon.custom_errors")
+
+    settings = cli.table_settings({}, lambda _label, default: default)
+
+    assert settings == (
+        "legacy.recon",
+        "legacy.recon.custom_pairs",
+        "legacy.recon.custom_status",
+        "legacy.recon.custom_errors",
+        "legacy.recon.pair_recon_progress_snapshot",
+    )
+
+
+def test_new_catalog_schema_ignores_legacy_table_environment(monkeypatch):
+    monkeypatch.setenv("DBX_CATALOG_SCHEMA", "main.recon")
+    monkeypatch.setenv("DBX_PAIR_TABLE", "invalid-old-value")
+    monkeypatch.setenv("DBX_STATUS_TABLE", "legacy.recon.custom_status")
+    monkeypatch.setenv("DBX_ERROR_TABLE", "legacy.recon.custom_errors")
+
+    settings = cli.table_settings({}, lambda _label, default: default)
+
+    assert settings == (
+        "main.recon",
+        "main.recon.pair_recon_pair_meta",
+        "main.recon.pair_recon_run_status",
+        "main.recon.pair_recon_run_error",
+        "main.recon.pair_recon_progress_snapshot",
+    )
 
 
 def test_synchronize_pair_workbook_upserts_only_changes(monkeypatch, tmp_path):
@@ -1603,6 +1671,7 @@ def test_prompt_can_use_databricks_metadata_without_syncing_local_workbook(
         "owner": "me",
         "profile": "corp",
         "warehouse_id": "warehouse",
+        "catalog_schema": "main.recon",
         "pair_table": "main.recon.pair_recon_pair_meta",
         "status_table": "main.recon.pair_recon_run_status",
         "error_table": "main.recon.pair_recon_run_error",
@@ -1616,6 +1685,9 @@ def test_prompt_can_use_databricks_metadata_without_syncing_local_workbook(
 
         def pairs(self):
             return []
+
+        def normalization_rules(self):
+            return default_normalization_rules()
 
     (tmp_path / "pairs.xlsx").touch()
     monkeypatch.setenv("DBX_SYNC_PAIR_METADATA", "false")
@@ -1773,14 +1845,13 @@ def test_run_left_force_bypasses_cached_row_check(monkeypatch, tmp_path):
 
 def test_run_left_fresh_row_check_invalidates_downstream_checkpoints(monkeypatch, tmp_path):
     store = MemoryStore()
-    for key in (
-        "row_check/result.json",
-        "plan.json",
-        "mapping.csv",
-        "fixed_keys.json",
-        "_status/row_check.closed.json",
-        "_status/col_check.closed.json",
-    ):
+    invalidated = (
+        row_result_path("orders"),
+        plan_path("orders"),
+        mapping_path("orders"),
+        fixed_keys_path("orders"),
+    )
+    for key in invalidated:
         store.put_json(key, {})
     config = {"pairs": {"orders": {"checks": ["row_count"]}}}
     monkeypatch.setattr(runner, "validate_config", lambda value: value)
@@ -1789,14 +1860,7 @@ def test_run_left_fresh_row_check_invalidates_downstream_checkpoints(monkeypatch
     def fresh_row_check(*_args, **_kwargs):
         assert not any(
             store.exists(key)
-            for key in (
-                "row_check/result.json",
-                "plan.json",
-                "mapping.csv",
-                "fixed_keys.json",
-                "_status/row_check.closed.json",
-                "_status/col_check.closed.json",
-            )
+            for key in invalidated
         )
 
     monkeypatch.setattr(runner, "run_row_check", fresh_row_check)
@@ -1809,9 +1873,9 @@ def test_run_left_fresh_row_check_invalidates_downstream_checkpoints(monkeypatch
 
 def test_remote_resume_starts_right_after_left_row_release(monkeypatch, tmp_path):
     store = MemoryStore()
-    store.put_bytes("report/index.html", b"old")
-    store.put_bytes("report/row_check.csv", b"old")
-    store.put_bytes("_status/units.csv", b"old")
+    store.put_bytes(f"{REPORT_PREFIX}index.html", b"old")
+    store.put_bytes(f"{REPORT_PREFIX}row_check.csv", b"old")
+    store.put_bytes(UNITS_STATUS, b"old")
     store.put_bytes("audit/keep.sql", b"select 1")
     events = []
 
@@ -1848,8 +1912,8 @@ def test_remote_resume_starts_right_after_left_row_release(monkeypatch, tmp_path
     def left(*_args, release=None, abort_if=None, **_kwargs):
         events.append("left-row-ready")
         assert "right-start" not in events
-        assert store.list_keys("report/") == []
-        assert not store.exists("_status/units.csv")
+        assert store.list_keys(REPORT_PREFIX) == []
+        assert not store.exists(UNITS_STATUS)
         assert store.exists("audit/keep.sql")
         release()
         abort_if()
@@ -1932,7 +1996,7 @@ def test_new_run_starts_right_only_after_left_row_release(monkeypatch, tmp_path)
     def left(*_args, release=None, abort_if=None, **_kwargs):
         events.append("left-row-ready")
         assert "right-start" not in events
-        assert store.exists("_status/heartbeat.json")
+        assert store.exists(LEFT_STATE)
         release()
         abort_if()
         return {"row": "ready", "units": 0}
@@ -2136,7 +2200,7 @@ def test_left_only_does_not_start_or_run_right(monkeypatch, tmp_path):
     assert result["state"] == "left_complete"
     assert result["right"] == {"state": "not_run"}
     assert result["volume_run_root"] == "memory://run"
-    assert store.get_json("_status/run.json")["state"] == "left_complete"
+    assert store.get_json(RUN_STATUS)["state"] == "left_complete"
     assert events == [
         "running",
         "start",
@@ -2325,7 +2389,7 @@ def test_launch_reports_right_failure_while_left_is_running(monkeypatch, tmp_pat
     assert "task run 910: ModuleNotFoundError" in content
     assert "Traceback for 910\n  File notebook, line 6" in content
     assert states == ["running", "fail:failed"]
-    assert not store.exists("col_check/failures/right-job.json")
+    assert not store.exists(failure_path("orders", "right-job"))
     assert cancelled == [91]
 
 
@@ -2468,7 +2532,7 @@ def test_launch_forwards_cancelled_job_and_finalizes_catalog(monkeypatch, tmp_pa
         )
 
     assert states == ["running", "fail:cancelled"]
-    assert not store.exists("col_check/failures/right-job.json")
+    assert not store.exists(failure_path("orders", "right-job"))
     assert cancelled == []
 
 
@@ -2690,15 +2754,14 @@ def test_left_only_csvrun_uploads_left_artifacts(tmp_path):
         left_only=True,
     )
 
-    units = store.list_json("units/")
+    units = store.list_json(unit_prefix("orders"))
     assert left == {"row": "ready", "units": 2}
-    assert store.get_json("row_check/left.json")["counts"] == {"all": 2}
-    assert store.get_json("plan.json")["expected_units"] == 2
+    assert store.get_json(left_row_path("orders"))["counts"] == {"all": 2}
+    assert store.get_json(plan_path("orders"))["expected_units"] == 2
     assert len(units) == 1
     assert len(units[0][1]["units"]) == 2
     assert all("left_statistics" in value for value in units[0][1]["units"])
-    assert store.get_json("_state/left.json")["phase"] == "col_check_closed"
-    assert not store.list_keys("col_check/results/")
+    assert store.get_json(LEFT_STATE)["phase"] == "col_check_closed"
 
 
 def test_left_only_rejects_snapshot_pair(tmp_path):
@@ -2739,7 +2802,7 @@ def _stub_column_checks(monkeypatch, store, seen):
         "windows": [{"bucket": "all", "partitions": ["all"]}],
         "excluded_partitions": [],
     }
-    store.put_json("plan.json", plan)
+    store.put_json(plan_path("orders"), plan)
 
     class Runtime:
         def __init__(self, *_args, **_kwargs):
@@ -2751,7 +2814,7 @@ def _stub_column_checks(monkeypatch, store, seen):
             pass
 
         def run(self, _manifests):
-            seen.append(store.exists("row_check/result.json"))
+            seen.append(store.exists(row_result_path("orders")))
             return 3
 
     monkeypatch.setattr(runner, "validate_config", lambda value: value)
@@ -2770,7 +2833,7 @@ def test_run_left_pulls_only_after_the_right_row_check_result(monkeypatch, tmp_p
 
     def release():
         store.put_json(
-            "row_check/result.json",
+            row_result_path("orders"),
             {"pair": "orders", "partitions": {"all": {"result": "match"}}},
         )
 
@@ -2794,7 +2857,7 @@ def test_run_left_reports_unexcluded_mismatches_before_pulling(monkeypatch, tmp_
     seen = []
     config = _stub_column_checks(monkeypatch, store, seen)
     store.put_json(
-        "row_check/result.json",
+        row_result_path("orders"),
         {"pair": "orders", "partitions": {"2026-01-05": {"result": "count_diff"}}},
     )
     with pytest.raises(RuntimeError, match="unexcluded mismatched partitions") as info:
@@ -2816,12 +2879,14 @@ def test_run_left_classifies_an_empty_plan_after_both_row_counts(
 ):
     store = MemoryStore()
     config = _stub_column_checks(monkeypatch, store, [])
-    store.put_json("plan.json", {"pair": "orders", "windows": [], "excluded_partitions": []})
+    store.put_json(
+        plan_path("orders"), {"pair": "orders", "windows": [], "excluded_partitions": []}
+    )
     released = []
 
     def release():
         released.append(True)
-        store.put_json("row_check/result.json", {"pair": "orders", "partitions": partitions})
+        store.put_json(row_result_path("orders"), {"pair": "orders", "partitions": partitions})
 
     result = runner.run_left(config, store, "run", "orders", tmp_path, release=release)
     assert result == {"row": state, "units": 0} and released == [True]
@@ -2830,9 +2895,12 @@ def test_run_left_classifies_an_empty_plan_after_both_row_counts(
 def test_run_left_rejects_an_empty_plan_when_both_sides_have_rows(monkeypatch, tmp_path):
     store = MemoryStore()
     config = _stub_column_checks(monkeypatch, store, [])
-    store.put_json("plan.json", {"pair": "orders", "windows": [], "excluded_partitions": ["x"]})
     store.put_json(
-        "row_check/result.json",
+        plan_path("orders"),
+        {"pair": "orders", "windows": [], "excluded_partitions": ["x"]},
+    )
+    store.put_json(
+        row_result_path("orders"),
         {"pair": "orders", "partitions": {"x": {"left": 3, "right": 3, "result": "match"}}},
     )
     with pytest.raises(RuntimeError, match="plan for orders has no windows"):

@@ -6,7 +6,14 @@ from support import MemoryStore
 
 from pair_recon_left.common.checks import row_check
 from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
-from pair_recon_left.common.model.protocol import COL_CHECK_CLOSED, get_left_state
+from pair_recon_left.common.model.protocol import (
+    get_left_state,
+    get_right_state,
+    left_row_path,
+    mapping_path,
+    plan_path,
+    row_result_path,
+)
 
 
 class Source:
@@ -50,8 +57,8 @@ def test_counts(mode, counts):
         run_id="run",
         source_factory=lambda _value: Source(counts),
     )
-    assert store.get_json("row_check/left.json")["counts"] == counts
-    assert not store.exists("plan.json")
+    assert store.get_json(left_row_path("p"))["counts"] == counts
+    assert not store.exists(plan_path("p"))
 
 
 def test_row_count_query_logs_start_heartbeat_and_completion(monkeypatch, caplog):
@@ -110,10 +117,13 @@ def test_plan(caplog):
             run_id="run",
             source_factory=lambda _value: Source({"all": 2}),
         )
-    assert store.get_json("plan.json")["statistics"] == ["n_unique", "hash_sum"]
-    assert "plan released: memory://run/plan.json (1 windows, 1 columns, 1 units)" in caplog.text
+    assert store.get_json(plan_path("p"))["statistics"] == ["n_unique", "hash_sum"]
+    assert (
+        "plan released: memory://run/config/manifest.json (1 windows, 1 columns, 1 units)"
+        in caplog.text
+    )
     assert "version=2" not in caplog.text
-    assert store.get_bytes("mapping.csv").decode().splitlines() == [
+    assert store.get_bytes(mapping_path("p")).decode().splitlines() == [
         "left_column,right_column,usage,data_type",
         "A,a,compare,",
     ]
@@ -136,11 +146,10 @@ def test_reused_row_check_reopens_column_stage():
         run_id="run",
         source_factory=lambda _value: Source({"all": 2}),
     )
-    store.close_manifests(["p"], 1, {"p": store.get_json("plan.json")["plan_id"]})
+    store.close_manifests(["p"], 1, {"p": store.get_json(plan_path("p"))["plan_id"]})
 
     assert reuse_row_check(config, store, run_id="run", pair_names=["p"])
 
-    assert not store.exists(COL_CHECK_CLOSED)
     assert get_left_state(store)["col_check_closed_at"] is None
 
 
@@ -161,16 +170,18 @@ def test_reused_left_counts_invalidate_right_when_effective_config_changes():
         run_id="run",
         source_factory=lambda _value: Source({"all": 2}),
     )
-    store.put_json("row_check/result.json", {"pair": "p", "partitions": {}})
+    store.put_json(row_result_path("p"), {"pair": "p", "partitions": {}})
     store.close_row_check(["p"])
-    pair["strict"] = True
+    pair["normalization_rules"] = [{"rule_name": "trim", "source": "all"}]
 
     assert reuse_row_check(config, store, run_id="run", pair_names=["p"])
 
-    assert not store.exists("row_check/result.json")
-    assert not store.exists("_status/row_check.closed.json")
-    assert store.get_json("row_check/left.json")["counts"] == {"all": 2}
-    assert store.get_json("plan.json")["strict"] is True
+    assert not store.exists(row_result_path("p"))
+    assert get_right_state(store).get("row_check_closed_at") is None
+    assert store.get_json(left_row_path("p"))["counts"] == {"all": 2}
+    assert store.get_json(plan_path("p"))["normalization_rules"] == [
+        {"rule_name": "trim", "source": "all"}
+    ]
 
 
 def test_vintage_sampling_keeps_full_row_counts():
@@ -196,8 +207,8 @@ def test_vintage_sampling_keeps_full_row_counts():
         run_id="run",
         source_factory=lambda _value: Source(counts),
     )
-    assert store.get_json("row_check/left.json")["counts"] == counts
-    plan = store.get_json("plan.json")
+    assert store.get_json(left_row_path("p"))["counts"] == counts
+    plan = store.get_json(plan_path("p"))
     assert len(plan["windows"]) == 1
     assert plan["vintage_selection"]["available"] == 3
 
@@ -225,7 +236,7 @@ def test_snapshot():
         source_factory=factory,
     )
     assert seen[0]["partition"] == "all"
-    assert not store.exists("plan.json")
+    assert not store.exists(plan_path("p"))
 
 
 def test_run_row_check_aborts_while_the_count_is_running(monkeypatch):
@@ -307,4 +318,4 @@ def test_run_row_check_heartbeats_while_the_count_is_running(monkeypatch):
         run_id="run",
         source_factory=lambda _value: SlowSource({"all": 2}),
     )
-    assert len(beats) >= 3 and store.exists("_status/heartbeat.json")
+    assert len(beats) >= 3 and get_left_state(store).get("heartbeat_epoch_s") is not None

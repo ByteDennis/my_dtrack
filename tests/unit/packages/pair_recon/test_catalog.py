@@ -4,6 +4,7 @@ import pytest
 from support import MemoryStore
 
 from pair_recon.app.catalog import Catalog
+from pair_recon.core.metadata.constant import TABLE_NAMES, catalog_tables, legacy_catalog_tables
 from pair_recon_right.catalog import (
     ERROR_COLUMNS,
     STATUS_RUN_COLUMNS,
@@ -17,6 +18,12 @@ from pair_recon_right.catalog import (
     window_rows,
 )
 from pair_recon_right.engine.common.model.manifest import unit_id_for
+from pair_recon_right.engine.common.model.protocol import (
+    failure_path,
+    plan_path,
+    result_path,
+    row_result_path,
+)
 
 
 class Sql:
@@ -26,6 +33,45 @@ class Sql:
     def execute(self, statement, parameters=None):
         self.calls.append((statement, parameters or {}))
         return []
+
+
+def test_catalog_tables_are_derived_from_one_namespace():
+    tables = catalog_tables("main.recon")
+
+    assert tables.pair_meta == "main.recon.pair_recon_pair_meta"
+    assert tables.run_status == "main.recon.pair_recon_run_status"
+    assert tables.run_error == "main.recon.pair_recon_run_error"
+    assert tables.progress_snapshot == "main.recon.pair_recon_progress_snapshot"
+    assert tables.normalization == "main.recon.pair_recon_normalization"
+    assert len(TABLE_NAMES) == len(set(TABLE_NAMES))
+
+
+@pytest.mark.parametrize("value", ["", "schema", "catalog.schema.table", "bad-name.schema"])
+def test_catalog_schema_must_have_two_safe_identifiers(value):
+    with pytest.raises(ValueError, match="catalog.schema"):
+        catalog_tables(value)
+
+
+def test_legacy_catalog_tables_infer_namespace_and_keep_exact_names():
+    namespace, tables = legacy_catalog_tables(
+        {
+            "DBX_PAIR_TABLE": "old.meta.custom_pairs",
+            "DBX_STATUS_TABLE": "old.status.custom_status",
+            "DBX_ERROR_TABLE": "old.errors.custom_errors",
+        }
+    )
+
+    assert namespace == "old.meta"
+    assert tables == {
+        "pair_meta": "old.meta.custom_pairs",
+        "run_status": "old.status.custom_status",
+        "run_error": "old.errors.custom_errors",
+    }
+
+
+def test_legacy_catalog_tables_reject_invalid_names():
+    with pytest.raises(ValueError, match="DBX_PAIR_TABLE must be catalog.schema.table"):
+        legacy_catalog_tables({"DBX_PAIR_TABLE": "schema.table"})
 
 
 def test_pairs_load_companion_metadata():
@@ -88,6 +134,40 @@ def test_configuration_rows_include_disabled_pairs_and_sql():
             "pair_sql": {"pair_name": "orders", "right_sql": "SELECT 1"},
         },
     ]
+
+
+def test_normalization_rules_use_enabled_rows_in_stable_order():
+    class NormalizationSql(Sql):
+        def execute(self, statement, parameters=None):
+            self.calls.append((statement, parameters or {}))
+            return [
+                {
+                    "rule_name": "trim",
+                    "source": "all",
+                    "match_value": None,
+                    "canonical_value": None,
+                },
+                {
+                    "rule_name": "oracle_missing",
+                    "source": "oracle",
+                    "match_value": "9999-12-31",
+                    "canonical_value": "@missing",
+                },
+            ]
+
+    catalog = Catalog(NormalizationSql(), "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress")
+
+    assert catalog.normalization_table == "c.s.pair_recon_normalization"
+    assert catalog.normalization_rules() == [
+        {"rule_name": "trim", "source": "all"},
+        {
+            "rule_name": "oracle_missing",
+            "source": "oracle",
+            "match_value": "9999-12-31",
+            "canonical_value": "@missing",
+        },
+    ]
+    assert "WHERE enabled = true ORDER BY source, rule_name" in catalog.sql.calls[0][0]
 
 
 def test_pairs_reject_duplicate_metadata():
@@ -239,7 +319,7 @@ def test_finish():
     sql = Sql()
     store = MemoryStore()
     store.put_json(
-        "row_check/result.json",
+        row_result_path("orders"),
         {"partitions": {"all": {"left": 2, "right": 1, "result": "count_diff"}}},
     )
     catalog = Catalog(sql, "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress")
@@ -284,27 +364,27 @@ def _completed_window_store(*, fail_column=None, diff_column=None, count_diff=Fa
         ],
         "expected_units": 4,
     }
-    store.put_json("plan.json", plan)
+    store.put_json(plan_path("orders"), plan)
     partitions = {
         "2026-01-02": {"result": "match"},
         "2026-01-03": {"result": "count_diff" if count_diff else "match"},
         "2026-02-01": {"result": "match"},
     }
     store.put_json(
-        "row_check/result.json",
+        row_result_path("orders"),
         {"pair": "orders", "partitions": partitions, "date_synonyms": {}},
     )
     for window in plan["windows"]:
         for column in plan["columns"]:
             uid = unit_id_for(plan, window, column)
             if window["bucket"] == "2026-01-01" and column == fail_column:
-                store.put_json(f"col_check/failures/{uid}.json", {"unit_id": uid, "error": "x"})
+                store.put_json(failure_path("orders", uid), {"unit_id": uid, "error": "x"})
                 continue
             verdict = (
                 "diff" if window["bucket"] == "2026-01-01" and column == diff_column else "match"
             )
             store.put_json(
-                f"col_check/results/{uid}.json",
+                result_path("orders", uid),
                 {"unit_id": uid, "pair": "orders", "verdict": verdict},
             )
     return store
@@ -423,7 +503,7 @@ def test_run_state_marks_runtime_failures_incomplete(outcome, state):
 def test_result_summary_counts_row_column_and_runtime_outcomes():
     store = MemoryStore()
     store.put_json(
-        "row_check/result.json",
+        row_result_path("orders"),
         {
             "partitions": {
                 "2026-01-01": {"result": "match"},
@@ -431,9 +511,9 @@ def test_result_summary_counts_row_column_and_runtime_outcomes():
             }
         },
     )
-    store.put_json("col_check/results/a.json", {"verdict": "match"})
-    store.put_json("col_check/results/b.json", {"verdict": "diff"})
-    store.put_json("col_check/failures/c.json", {"error": "boom"})
+    store.put_json(result_path("orders", "a"), {"pair": "orders", "unit_id": "a", "verdict": "match"})
+    store.put_json(result_path("orders", "b"), {"pair": "orders", "unit_id": "b", "verdict": "diff"})
+    store.put_json(failure_path("orders", "c"), {"pair": "orders", "unit_id": "c", "error": "boom"})
 
     assert result_summary(store) == {
         "row_total": 2,
@@ -448,13 +528,13 @@ def test_result_summary_counts_row_column_and_runtime_outcomes():
 
 def test_result_summary_excludes_stale_outcomes_when_current_plan_has_no_units():
     store = MemoryStore()
-    store.put_json("plan.json", {"pair": "p", "windows": [], "columns": []})
+    store.put_json(plan_path("p"), {"pair": "p", "windows": [], "columns": []})
     store.put_json(
-        "col_check/results/stale.json",
+        result_path("p", "stale"),
         {"unit_id": "stale", "pair": "p", "verdict": "diff", "mean_match": False},
     )
     store.put_json(
-        "col_check/failures/stale.json",
+        failure_path("p", "stale-failure"),
         {"unit_id": "stale-failure", "pair": "p", "error": "old"},
     )
 
@@ -466,7 +546,7 @@ def test_result_summary_excludes_stale_outcomes_when_current_plan_has_no_units()
 def test_error_rows_use_attribute_registry():
     store = MemoryStore()
     store.put_json(
-        "col_check/results/u.json",
+        result_path("orders", "u"),
         {
             "pair": "orders",
             "vintage": "2026-01",

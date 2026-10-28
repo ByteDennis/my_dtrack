@@ -72,7 +72,6 @@ def test_load_environment_does_not_override_process_environment(monkeypatch, tmp
                 "right_date_type": "date",
                 "excluded_partitions": ["2026-01-04", "2026-01-05"],
                 "sample": 0.1,
-                "strict": True,
                 "checks": ["row_count", "hash_sum"],
             },
             {
@@ -85,14 +84,13 @@ def test_load_environment_does_not_override_process_environment(monkeypatch, tmp
             "all",
             {
                 "sample": False,
-                "strict": False,
                 "checks": ["row_count", "n_unique"],
             },
             {"partition": "all", "statistics": ["n_unique"]},
         ),
         (
             "all",
-            {"sample": False, "strict": False, "checks": ["row_count"]},
+            {"sample": False, "checks": ["row_count"]},
             {"partition": "all", "checks": ["row_count"]},
         ),
     ],

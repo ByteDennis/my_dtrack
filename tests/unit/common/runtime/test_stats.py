@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from pair_recon_left.common.model.hashing import default_normalization_rules
 from pair_recon_left.common.runtime import stats
 
 
@@ -67,13 +68,107 @@ def test_null():
     assert result["min_val"] is None and result["length_max"] is None
 
 
-def test_strict():
+def test_enabled_normalization_rules_apply_automatically():
     compute = stats.column_statistics
-    loose_a, loose_b = compute(_series("Gold", "SILVER")), compute(_series("gold", "silver"))
-    strict_a = compute(_series("Gold", "SILVER"), strict=True)
-    strict_b = compute(_series("gold", "silver"), strict=True)
-    assert loose_a["hash_sum"] != loose_b["hash_sum"]
-    assert strict_a["hash_sum"] == strict_b["hash_sum"]
+    upper = compute(_series("Gold", "SILVER"))
+    lower = compute(_series("gold", "silver"))
+    assert upper["hash_sum"] == lower["hash_sum"]
+
+
+def test_strip_datetime_normalization():
+    compute = stats.column_statistics
+    timestamp = compute(_series("2026-01-01 00:00:00.000"))
+    iso_timestamp = compute(_series("2026-01-01T18:30:00"))
+    date = compute(_series("2026-01-01"))
+
+    assert timestamp["hash_sum"] == date["hash_sum"]
+    assert iso_timestamp["hash_sum"] == date["hash_sum"]
+
+
+def test_only_enabled_normalization_rules_apply():
+    trim = [{"rule_name": "trim", "source": "all"}]
+    left = stats.column_statistics(
+        _series(" Gold ", "1.00"),
+        normalization_rules=trim,
+        col_type="categorical",
+    )
+    right = stats.column_statistics(
+        _series("gold", "1"),
+        normalization_rules=trim,
+        col_type="categorical",
+    )
+    assert left["hash_sum"] != right["hash_sum"]
+
+    enabled = default_normalization_rules()
+    left = stats.column_statistics(
+        _series(" Gold ", "1.00"),
+        normalization_rules=enabled,
+        col_type="categorical",
+    )
+    right = stats.column_statistics(
+        _series("gold", "1"),
+        normalization_rules=enabled,
+        col_type="categorical",
+    )
+    assert left["hash_sum"] == right["hash_sum"]
+
+
+def test_source_synonyms_support_runtime_values():
+    rules = [
+        {
+            "rule_name": "oracle_missing",
+            "source": "oracle",
+            "match_value": "9999-12-31",
+            "canonical_value": "@missing",
+        },
+        {
+            "rule_name": "oracle_today",
+            "source": "oracle",
+            "match_value": "3000-01-01",
+            "canonical_value": "@run_date",
+        },
+    ]
+    oracle = stats.column_statistics(
+        _series("9999-12-31", "3000-01-01"),
+        normalization_rules=rules,
+        normalization_source="oracle",
+        normalization_date="2026-10-28",
+    )
+    canonical = stats.column_statistics(_series(None, "2026-10-28"))
+    unchanged = stats.column_statistics(
+        _series("9999-12-31", "3000-01-01"),
+        normalization_rules=rules,
+        normalization_source="databricks",
+        normalization_date="2026-10-28",
+    )
+
+    assert oracle["hash_sum"] == canonical["hash_sum"]
+    assert oracle["n_missing"] == 1
+    assert unchanged["hash_sum"] != canonical["hash_sum"]
+
+
+def test_date_column_type_normalizes_midnight_timestamp_for_hash_sum(tmp_path):
+    left = tmp_path / "left.csv"
+    right = tmp_path / "right.csv"
+    left.write_text("DT\n2025-10-10 00:00:00.000\n", encoding="utf-8")
+    right.write_text("DT\n2025-10-10\n", encoding="utf-8")
+
+    left_stats = stats.compute_csv_statistics(
+        left,
+        ["DT"],
+        column_types={"DT": "date"},
+        side="left",
+        statistics=["hash_sum"],
+    )
+    right_stats = stats.compute_csv_statistics(
+        right,
+        ["DT"],
+        column_types={"DT": "date"},
+        side="right",
+        statistics=["hash_sum"],
+    )
+
+    assert left_stats["DT"]["hash_sum"] == right_stats["DT"]["hash_sum"]
 
 
 def test_csv(tmp_path):
@@ -160,9 +255,9 @@ def test_batched(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("PAIR_RECON_STATS_BATCH", "1000")
-    single = stats.compute_csv_statistics(path, columns, strict=True)
+    single = stats.compute_csv_statistics(path, columns)
     monkeypatch.setenv("PAIR_RECON_STATS_BATCH", "7")
-    batched = stats.compute_csv_statistics(path, columns, strict=True)
+    batched = stats.compute_csv_statistics(path, columns)
     assert batched == single
     assert single["c0"]["col_type"] == "categorical" and single["c0"]["top_10"] == ""
     assert single["c2"]["col_type"] == "categorical"

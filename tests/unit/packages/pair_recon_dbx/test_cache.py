@@ -3,6 +3,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from pair_recon.core.metadata.constant import catalog_tables
 from pair_recon_dbx import cache
 
 
@@ -16,12 +17,10 @@ def result(columns, rows):
     }
 
 
-def test_cache_table_uses_pair_table_catalog_and_schema():
-    assert cache.cache_table("main.recon.pair_recon_pair_meta") == (
-        "main.recon.pair_recon_cache_index"
-    )
-    with pytest.raises(ValueError, match="catalog.schema.table"):
-        cache.cache_table("recon.pairs")
+def test_cache_table_uses_catalog_schema_constants():
+    assert catalog_tables("main.recon").cache_index == "main.recon.pair_recon_cache_index"
+    with pytest.raises(ValueError, match="catalog.schema"):
+        catalog_tables("recon")
 
 
 def test_show_and_explain(monkeypatch):

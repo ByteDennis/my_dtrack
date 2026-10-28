@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from pair_recon.core.metadata.constant import PAIR_SQL_TABLE
 from pair_recon_left.common.model.manifest import sample_plan
 from pair_recon_left.common.sql.query_windows import normalize_query_windows
 
@@ -67,7 +68,6 @@ RIGHT_OPTION_FIELDS = {"where", "date_type", "format", "schema_hints", "options"
 RUN_DEFAULT_FIELDS = {
     "run_mode",
     "sample",
-    "strict",
     "checks",
     "audit",
     "sync_remote",
@@ -81,7 +81,7 @@ RUN_DEFAULT_FIELDS = {
     "vintage_sample_size",
     "vintage_values",
 }
-RUN_DEFAULT_BOOLS = ("strict", "audit", "sync_remote")
+RUN_DEFAULT_BOOLS = ("audit", "sync_remote")
 RUN_DEFAULT_WORKERS = ("left_workers", "right_workers", "difference_sample_rows")
 RUN_DEFAULT_DATE_ONLY = ("from_date", "to_date", "vintage", "excluded_partitions")
 VINTAGES = ("day", "week", "month", "quarter", "year")
@@ -679,7 +679,7 @@ def changed_pair_configurations(
 
 def upsert_pair_configuration(sql, pair_table: str, rows: list[dict[str, Any]]) -> dict:
     pair_table = validate_table_name(pair_table)
-    pair_sql_table = companion_table(pair_table, "pair_recon_pair_sql")
+    pair_sql_table = companion_table(pair_table, PAIR_SQL_TABLE)
     meta_statement = f"""MERGE INTO {pair_table} AS t
 USING (SELECT :pair_name AS pair_name) AS s ON t.pair_name = s.pair_name
 WHEN MATCHED THEN UPDATE SET

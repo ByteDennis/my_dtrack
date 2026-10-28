@@ -6,11 +6,14 @@ from support import MemoryStore
 
 from pair_recon_right.engine.common.model.manifest import unit_id
 from pair_recon_right.engine.common.model.protocol import (
+    UNITS_STATUS,
     get_run_status,
     list_units,
+    plan_path,
     refresh_units_status,
     right_ready_path,
     timestamp,
+    unit_prefix,
     write_run_status,
 )
 
@@ -25,13 +28,13 @@ def _plan():
 
 def _status_rows(store):
     refresh_units_status(store)
-    text = store.get_bytes("_status/units.csv").decode()
+    text = store.get_bytes(UNITS_STATUS).decode()
     return {row["column"]: row for row in csv.DictReader(io.StringIO(text))}
 
 
 def test_unit():
     store = MemoryStore()
-    store.put_json("plan.json", _plan())
+    store.put_json(plan_path("orders"), _plan())
     assert {row["state"] for row in _status_rows(store).values()} == {"waiting_left"}
 
     amount = unit_id("orders", "2026-01", "amount")
@@ -87,7 +90,7 @@ def test_unit_batch_expands_to_logical_units():
     ]
     store.commit_units(1, units)
 
-    assert store.list_keys("units/") == ["units/00000001-0002.json"]
+    assert store.list_keys(unit_prefix("orders")) == [f"{unit_prefix('orders')}00000001-0002.json"]
     assert [row["unit_id"] for _key, row in list_units(store)] == ["amount", "status"]
 
 

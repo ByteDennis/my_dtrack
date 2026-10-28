@@ -200,7 +200,6 @@ def test_pair_workbook_percentage_sample_requires_keys(tmp_path):
 FULL_RUN_DEFAULTS = {
     "run_mode": "full",
     "sample": 0.1,
-    "strict": False,
     "checks": ["row_count", "hash_sum"],
     "audit": True,
     "sync_remote": False,

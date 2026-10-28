@@ -7,6 +7,7 @@ import pytest
 GATES = {
     "spark": ("--run-spark", "pass --run-spark"),
     "oracle": ("--run-oracle", "pass --run-oracle"),
+    "hive": ("--run-hive", "pass --run-hive"),
     "live": ("--run-live", "pass --run-live"),
 }
 

@@ -166,7 +166,7 @@ def test_runs_explicit_job_id_wins_over_saved_default(calls, monkeypatch, tmp_pa
 def test_cache_pair_shorthand_and_yaml_default(calls, monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DBX_WAREHOUSE_ID", "w1")
-    monkeypatch.setenv("DBX_PAIR_TABLE", "main.recon.pair_recon_pair_meta")
+    monkeypatch.setenv("DBX_CATALOG_SCHEMA", "main.recon")
     (tmp_path / ".pair_recon.yaml").write_text("pair: YAML_PAIR\n", encoding="utf-8")
     seen = []
     monkeypatch.setattr(
@@ -183,9 +183,18 @@ def test_cache_pair_shorthand_and_yaml_default(calls, monkeypatch, tmp_path, cap
     capsys.readouterr()
 
 
+def test_cache_infers_catalog_schema_from_legacy_pair_table(monkeypatch):
+    monkeypatch.delenv("DBX_CATALOG_SCHEMA", raising=False)
+    monkeypatch.setenv("DBX_PAIR_TABLE", "legacy.recon.custom_pairs")
+
+    args = cli.parser().parse_args(["cache", "explain", "--pair", "ORDERS"])
+
+    assert args.catalog_schema == "legacy.recon"
+
+
 def test_cache_show_and_peek(calls, monkeypatch, capsys):
     monkeypatch.setenv("DBX_WAREHOUSE_ID", "w1")
-    monkeypatch.setenv("DBX_PAIR_TABLE", "main.recon.pair_recon_pair_meta")
+    monkeypatch.setenv("DBX_CATALOG_SCHEMA", "main.recon")
     seen = []
     monkeypatch.setattr(
         cli.cache_ops,

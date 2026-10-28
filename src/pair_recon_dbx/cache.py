@@ -1,19 +1,9 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from . import runtime
-
-IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def cache_table(pair_table: str) -> str:
-    parts = str(pair_table or "").split(".")
-    if len(parts) != 3 or any(not IDENTIFIER.fullmatch(part) for part in parts):
-        raise ValueError("DBX_PAIR_TABLE must be catalog.schema.table")
-    return ".".join((*parts[:2], "pair_recon_cache_index"))
 
 
 def quoted_table(name: str) -> str:

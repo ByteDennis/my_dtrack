@@ -136,3 +136,32 @@ CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_cache_index (
   expires_at TIMESTAMP_NTZ,
   metadata_json STRING
 ) USING DELTA;
+
+CREATE TABLE IF NOT EXISTS ${catalog}.${schema}.pair_recon_normalization (
+  rule_name STRING NOT NULL,
+  source STRING NOT NULL,
+  match_value STRING,
+  canonical_value STRING,
+  enabled BOOLEAN NOT NULL
+) USING DELTA;
+
+MERGE INTO ${catalog}.${schema}.pair_recon_normalization AS t
+USING (
+  SELECT * FROM VALUES
+    ('trim', 'all', NULL, NULL, true),
+    ('lowercase', 'all', NULL, NULL, true),
+    ('decimal', 'all', NULL, NULL, true),
+    ('strip_datetime', 'all', NULL, NULL, true),
+    ('oracle_today_3000', 'oracle', '3000-01-01', '@run_date', true),
+    ('oracle_missing_9999', 'oracle', '9999-12-31', '@missing', true)
+  AS v(rule_name, source, match_value, canonical_value, enabled)
+) AS s
+ON t.rule_name = s.rule_name AND t.source = s.source
+WHEN MATCHED THEN UPDATE SET
+  t.match_value = s.match_value,
+  t.canonical_value = s.canonical_value
+WHEN NOT MATCHED THEN INSERT (
+  rule_name, source, match_value, canonical_value, enabled
+) VALUES (
+  s.rule_name, s.source, s.match_value, s.canonical_value, s.enabled
+);

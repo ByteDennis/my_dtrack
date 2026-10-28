@@ -124,7 +124,6 @@ def export_bundle(pair_name, pair, bundle, rate=0.01, sides=("left",)):
         "to_date": pair.get("toDate"),
         "vintage": pair.get("vintage", "day"),
         "col_map": pair["col_map"],
-        "strict": bool(pair.get("strict")),
         "col_type_overrides": pair.get("col_type_overrides") or {},
         "column_types": pair.get("column_types") or {},
         "generated": generated,

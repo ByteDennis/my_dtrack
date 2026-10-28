@@ -12,10 +12,24 @@ from .. import PROTOCOL_VERSION
 from ..sql.column_types import resolve_column_type
 from ..sql.dates import bucket_date, resolve_date_type
 from .attribute_checks import attribute_check_names
-from .hashing import HASH_BUCKET_SPACE, key_family
+from .hashing import (
+    HASH_BUCKET_SPACE,
+    RUN_DATE_VALUE,
+    canonical_normalization_rules,
+    key_family,
+)
 
 STATS_VERSION = 1
 DEFAULT_STATISTICS = attribute_check_names()
+
+
+def normalization_date(run_id: str, rules: list[dict[str, str]]) -> str | None:
+    if not any(rule.get("canonical_value") == RUN_DATE_VALUE for rule in rules):
+        return None
+    match = re.search(r"(?:^|-)([0-9]{4})([0-9]{2})([0-9]{2})$", run_id)
+    if match is None:
+        raise ValueError("@run_date normalization requires a run_id ending in YYYYMMDD")
+    return "-".join(match.groups())
 
 
 def statistics_plan(raw: Any) -> list[str] | None:
@@ -112,7 +126,6 @@ def unit_id_for(manifest: dict[str, Any], window: dict[str, Any], column: str) -
         "window_id": window_id(manifest, window),
         "column": column,
         "right_column": manifest["col_map"][column],
-        "strict": bool(manifest.get("strict")),
         "col_type_override": (manifest.get("col_type_overrides") or {}).get(column),
         "column_type": (manifest.get("column_types") or {}).get(column),
         "right": manifest.get("right") or {},
@@ -383,6 +396,11 @@ def build_manifest(
         ) from None
     if difference_sample_rows < 0:
         raise ValueError(f"{pair_name}: difference_sample_rows must be non-negative")
+    try:
+        normalization_rules = canonical_normalization_rules(pair.get("normalization_rules"))
+        normalized_on = normalization_date(run_id, normalization_rules)
+    except (TypeError, ValueError) as exc:
+        raise type(exc)(f"{pair_name}: {exc}") from None
     manifest = {
         "protocol_version": PROTOCOL_VERSION,
         "version": version,
@@ -401,7 +419,7 @@ def build_manifest(
         "left": dict(pair["left"]),
         "right": dict(pair["right"]),
         "date_synonyms": dict(pair.get("date_synonyms") or {}),
-        "strict": bool(pair.get("strict")),
+        "normalization_rules": normalization_rules,
         "audit": bool(pair.get("audit", False)),
         "difference_sample_rows": difference_sample_rows,
         "local_reconciliation": bool(pair.get("local_reconciliation", False)),
@@ -411,6 +429,8 @@ def build_manifest(
         "excluded_columns": sorted(excluded_columns),
         "expected_units": len(windows) * len(columns),
     }
+    if normalized_on is not None:
+        manifest["normalization_date"] = normalized_on
     if pair.get("snapshot"):
         manifest["left_snapshot"] = True
     statistics = statistics_plan(pair.get("statistics"))
@@ -443,7 +463,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     missing = sorted(required - manifest.keys())
     if missing:
         raise ValueError(f"manifest missing fields: {', '.join(missing)}")
-    if manifest["protocol_version"] not in {2, PROTOCOL_VERSION}:
+    if manifest["protocol_version"] != PROTOCOL_VERSION:
         raise ValueError("unsupported protocol version")
     version = int(manifest.get("version") or 1)
     if version not in {1, 2}:
@@ -469,6 +489,14 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("manifest difference_sample_rows must be a non-negative integer")
     if not isinstance(manifest.get("local_reconciliation", False), bool):
         raise TypeError("manifest local_reconciliation must be true or false")
+    normalization_rules = canonical_normalization_rules(manifest.get("normalization_rules"))
+    if manifest.get("normalization_rules") is not None and normalization_rules != manifest.get(
+        "normalization_rules"
+    ):
+        raise ValueError("manifest normalization_rules must use canonical rule objects")
+    normalized_on = normalization_date(str(manifest["run_id"]), normalization_rules)
+    if normalized_on is not None and manifest.get("normalization_date") != normalized_on:
+        raise ValueError("manifest normalization_date does not match its run_id")
     expected = len(manifest["windows"]) * len(manifest["columns"])
     if manifest["expected_units"] != expected:
         raise ValueError("expected_units does not equal Windows x columns")

@@ -9,9 +9,6 @@ from ...backends.sources import source_from_config
 from ..model.audit import SqlAudit, attach_sql_audit
 from ..model.manifest import build_manifest, key_family_specs, mapping_csv_bytes, sample_plan
 from ..model.protocol import (
-    COL_CHECK_CLOSED,
-    LEFT_ROW_CHECK_CLOSED,
-    ROW_CHECK_CLOSED,
     artifact_location,
     fixed_keys_path,
     left_row_path,
@@ -20,6 +17,7 @@ from ..model.protocol import (
     row_result_path,
     timestamp,
     write_left_state,
+    write_right_state,
     write_run_status,
 )
 from ..runtime.run_logging import get_left_logger
@@ -112,8 +110,6 @@ def reuse_row_check(
                     plan_path(name),
                     mapping_path(name),
                     fixed_keys_path(name),
-                    ROW_CHECK_CLOSED,
-                    COL_CHECK_CLOSED,
                 ]
             )
         cached[name] = {
@@ -134,7 +130,6 @@ def publish_row_check_results(
     missing = sorted(set(pairs) - set(results))
     if missing:
         raise ValueError(f"row-check results missing pair(s): {', '.join(missing)}")
-    store.delete_keys([COL_CHECK_CLOSED])
     documents = []
     for name, pair in pairs.items():
         result = results[name]
@@ -184,6 +179,14 @@ def publish_row_check_results(
             )
         documents.append(document)
     closed_at = timestamp(store)
+    write_right_state(
+        store,
+        {
+            "phase": "waiting_row_check",
+            "pairs": sorted(pairs),
+            "row_check_closed_at": None,
+        },
+    )
     write_left_state(
         store,
         {
@@ -193,10 +196,6 @@ def publish_row_check_results(
             "row_check_closed_at": closed_at,
             "col_check_closed_at": None,
         },
-    )
-    store.put_json(
-        LEFT_ROW_CHECK_CLOSED,
-        {"pairs": sorted(pairs), "run_id": run_id, "closed_at": closed_at},
     )
     store.heartbeat()
     write_run_status(store, {"state": "left_row_check_closed", "run_id": run_id, "role": "left"})
@@ -218,7 +217,6 @@ def run_row_check(
     abort_if = abort_if or (lambda: None)
     pairs = active_pairs(config, pair_names)
     log.info("run_id=%s work=%s pairs=%s", run_id, store.root_uri, list(pairs))
-    store.delete_keys([LEFT_ROW_CHECK_CLOSED, COL_CHECK_CLOSED])
     write_run_status(
         store,
         {"state": "left_row_check", "run_id": run_id, "role": "left"},

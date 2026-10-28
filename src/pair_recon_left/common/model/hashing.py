@@ -10,6 +10,11 @@ from ..sql.dates import DateType, NativeDateType, canonical_date, resolve_date_t
 
 NULL = "<<NULL>>"
 PURE_DECIMAL = re.compile(r"^-?[0-9]+\.[0-9]+$")
+ISO_DATETIME = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2})[ Tt].*$")
+NORMALIZATION_TRANSFORMS = ("trim", "lowercase", "decimal", "strip_datetime")
+NORMALIZATION_SOURCES = ("all", "oracle", "hadoop", "csv", "databricks")
+MISSING_VALUE = "@missing"
+RUN_DATE_VALUE = "@run_date"
 
 
 def collapse_decimal(text: str) -> str:
@@ -25,6 +30,19 @@ def collapse_decimal_sql(text: str, dialect: str = "spark") -> str:
     collapsed = _regex_replace(collapsed, r"\.0+$", "", dialect)
     matches = _regex_matches(text, r"^-?[0-9]+\.[0-9]+$", dialect)
     return f"CASE WHEN {matches} THEN {collapsed} ELSE {text} END"
+
+
+def strip_datetime(text: str) -> str:
+    match = ISO_DATETIME.match(text.strip())
+    return match.group(1) if match else text
+
+
+def strip_datetime_sql(text: str, dialect: str = "spark") -> str:
+    pattern = r"^([0-9]{4}-[0-9]{2}-[0-9]{2})[ Tt].*$"
+    replacement = r"\1" if dialect_name(dialect) in {"duckdb", "oracle"} else "$1"
+    stripped = _regex_replace(f"trim({text})", pattern, replacement, dialect)
+    matches = _regex_matches(f"trim({text})", pattern, dialect)
+    return f"CASE WHEN {matches} THEN {stripped} ELSE {text} END"
 
 
 def spark_literal(text: str) -> str:
@@ -51,6 +69,134 @@ def sql_literal(value: object, dialect: str) -> str:
     if dialect_name(dialect) in {"spark", "hadoop"}:
         return spark_literal(text)
     return "'" + text.replace("'", "''") + "'"
+
+
+def default_normalization_rules() -> list[dict[str, str]]:
+    return [{"rule_name": name, "source": "all"} for name in NORMALIZATION_TRANSFORMS]
+
+
+def is_transform_rule(rule: Mapping[str, str]) -> bool:
+    return "match_value" not in rule
+
+
+def canonical_normalization_rules(raw: object) -> list[dict[str, str]]:
+    if raw is None:
+        return default_normalization_rules()
+    if not isinstance(raw, list):
+        raise TypeError("normalization_rules must be a list of objects")
+    result = []
+    identities = set()
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise TypeError("normalization_rules must be a list of objects")
+        name = str(item.get("rule_name") or "").strip().casefold()
+        source = str(item.get("source") or "").strip().casefold()
+        if not name:
+            raise ValueError("normalization rule_name must not be empty")
+        if source not in NORMALIZATION_SOURCES:
+            raise ValueError(
+                f"normalization rule {name!r} source must be one of "
+                f"{', '.join(NORMALIZATION_SOURCES)}"
+            )
+        normalized = {"rule_name": name, "source": source}
+        match_value = str(item.get("match_value") or "")
+        if not match_value:
+            if name not in NORMALIZATION_TRANSFORMS:
+                raise ValueError(f"unsupported normalization transform: {name}")
+            if item.get("canonical_value") not in (None, ""):
+                raise ValueError(f"normalization transform {name!r} cannot define canonical_value")
+        else:
+            canonical_value = str(item.get("canonical_value") or "")
+            if not canonical_value:
+                raise ValueError(f"normalization synonym {name!r} needs canonical_value")
+            normalized.update(
+                match_value=match_value,
+                canonical_value=canonical_value,
+            )
+        identity = (source, name)
+        if identity in identities:
+            raise ValueError(f"normalization rule {source}.{name} must not repeat")
+        identities.add(identity)
+        result.append(normalized)
+    return result
+
+
+def active_normalization_rules(
+    rules: object,
+    source: str,
+) -> tuple[dict[str, str], ...]:
+    source = str(source or "").strip().casefold()
+    if source not in NORMALIZATION_SOURCES[1:]:
+        raise ValueError(f"unsupported normalization source: {source or '<empty>'}")
+    return tuple(
+        rule
+        for rule in canonical_normalization_rules(rules)
+        if rule["source"] in {"all", source}
+    )
+
+
+def normalize_system_value(
+    value: object,
+    rules: Iterable[Mapping[str, str]],
+    *,
+    run_date: str | None = None,
+) -> str | None:
+    text = str(value)
+    for rule in rules:
+        if is_transform_rule(rule):
+            if rule["rule_name"] == "trim":
+                text = text.strip()
+            elif rule["rule_name"] == "lowercase":
+                text = text.lower()
+            elif rule["rule_name"] == "decimal":
+                text = collapse_decimal(text)
+            elif rule["rule_name"] == "strip_datetime":
+                text = strip_datetime(text)
+        elif text == rule["match_value"]:
+            replacement = rule["canonical_value"]
+            if replacement == MISSING_VALUE:
+                return None
+            if replacement == RUN_DATE_VALUE:
+                if not run_date:
+                    raise ValueError("@run_date normalization needs normalization_date")
+                replacement = run_date
+            text = replacement
+    return text
+
+
+def normalize_system_sql(
+    expr: str,
+    dialect: str,
+    rules: Iterable[Mapping[str, str]],
+    *,
+    run_date: str | None = None,
+) -> str:
+    value = expr
+    for rule in rules:
+        if is_transform_rule(rule):
+            if rule["rule_name"] == "trim":
+                value = f"trim({value})"
+            elif rule["rule_name"] == "lowercase":
+                value = f"lower({value})"
+            elif rule["rule_name"] == "decimal":
+                value = collapse_decimal_sql(value, dialect)
+            elif rule["rule_name"] == "strip_datetime":
+                value = strip_datetime_sql(value, dialect)
+            continue
+        replacement = rule["canonical_value"]
+        if replacement == MISSING_VALUE:
+            target = "NULL"
+        else:
+            if replacement == RUN_DATE_VALUE:
+                if not run_date:
+                    raise ValueError("@run_date normalization needs normalization_date")
+                replacement = run_date
+            target = sql_literal(replacement, dialect)
+        value = (
+            f"CASE WHEN {value} = {sql_literal(rule['match_value'], dialect)} "
+            f"THEN {target} ELSE {value} END"
+        )
+    return value
 
 
 # >>> text form of a key expression; Oracle DATE/TIMESTAMP/NUMBER get explicit TO_CHAR formats <<< #

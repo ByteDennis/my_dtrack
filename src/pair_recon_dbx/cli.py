@@ -7,6 +7,11 @@ from pathlib import Path
 
 from pair_recon.app.config import env_value, load_defaults, load_environment
 from pair_recon.core.debug import debugging, run_debugger
+from pair_recon.core.metadata.constant import (
+    CATALOG_SCHEMA_ENV,
+    catalog_tables,
+    legacy_catalog_tables,
+)
 
 from . import cache as cache_ops
 from . import runtime
@@ -28,6 +33,10 @@ def add_wait(parser) -> None:
 
 
 def parser() -> argparse.ArgumentParser:
+    configured_catalog_schema = env_value(CATALOG_SCHEMA_ENV)
+    legacy_catalog_schema = (
+        None if configured_catalog_schema else legacy_catalog_tables()[0]
+    )
     root = argparse.ArgumentParser(prog="pair_recon dbx")
     root.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))
     commands = root.add_subparsers(dest="command", required=True)
@@ -117,7 +126,7 @@ def parser() -> argparse.ArgumentParser:
     cache.set_defaults(
         profile=env_value("DBX_PROFILE", default=runtime.DEFAULT_PROFILE),
         warehouse_id=env_value("DBX_WAREHOUSE_ID"),
-        pair_table=env_value("DBX_PAIR_TABLE"),
+        catalog_schema=configured_catalog_schema or legacy_catalog_schema,
     )
     return root
 
@@ -217,7 +226,7 @@ def execute(args) -> dict:
         )
     if args.command == "cache":
         warehouse_id = require(args.warehouse_id, "DBX_WAREHOUSE_ID")
-        table = cache_ops.cache_table(require(args.pair_table, "DBX_PAIR_TABLE"))
+        table = catalog_tables(require(args.catalog_schema, CATALOG_SCHEMA_ENV)).cache_index
         if args.cache_command == "show":
             return cache_ops.show(workspace, warehouse_id, table, args.cache_key)
         if args.cache_command == "peek":

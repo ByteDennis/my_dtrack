@@ -6,6 +6,7 @@ from databricks.sdk.errors import NotFound
 
 from pair_recon.core.backends import store as store_module
 from pair_recon.core.backends.store import ApiVolumeStore
+from pair_recon_left.common.model.protocol import LEFT_STATE, RUN_STATUS, left_row_path, unit_batch_path
 
 
 class Files:
@@ -61,7 +62,7 @@ def test_sdk_not_found_means_remote_object_is_missing():
 
     store = ApiVolumeStore("/Volumes/main/recon/artifacts/runs", files=MissingFiles())
 
-    assert not store.exists("new-run/_status/run.json")
+    assert not store.exists(f"new-run/{RUN_STATUS}")
     assert store.list_keys("new-run") == []
     assert store.list_prefixes("new-run") == []
 
@@ -75,10 +76,10 @@ def test_delete_keys_ignores_remote_objects_that_are_already_missing():
 
     files = StrictFiles()
     store = ApiVolumeStore("/Volumes/main/recon/artifacts/runs/run-1", files=files)
-    store.put_json("row_check/left.json", {"counts": {"all": 1}})
+    store.put_json(left_row_path("p"), {"counts": {"all": 1}})
 
-    assert store.delete_keys(["row_check/left.json", "_status/col_check.closed.json"]) == 1
-    assert not store.exists("row_check/left.json")
+    assert store.delete_keys([left_row_path("p"), "_protocol/missing.json"]) == 1
+    assert not store.exists(left_row_path("p"))
 
 
 def test_transient_network_errors_are_retried(monkeypatch):
@@ -102,14 +103,14 @@ def test_transient_network_errors_are_retried(monkeypatch):
 
     files = FlakyFiles(2)
     store = ApiVolumeStore("/Volumes/main/recon/runs/run-1", files=files)
-    store.put_json("_status/right.json", {"phase": "running"})
-    assert store.get_json("_status/right.json") == {"phase": "running"}
+    store.put_json(LEFT_STATE, {"phase": "running"})
+    assert store.get_json(LEFT_STATE) == {"phase": "running"}
     assert files.attempts == 3
 
     dead = FlakyFiles(99)
-    dead.values[store._path("_status/right.json")] = b"{}"
+    dead.values[store._path(LEFT_STATE)] = b"{}"
     with pytest.raises(requests.exceptions.ChunkedEncodingError):
-        ApiVolumeStore("/Volumes/main/recon/runs/run-1", files=dead).get_json("_status/right.json")
+        ApiVolumeStore("/Volumes/main/recon/runs/run-1", files=dead).get_json(LEFT_STATE)
     assert dead.attempts == store_module.RETRY_ATTEMPTS
 
     class MissingFiles(Files):
@@ -125,18 +126,19 @@ def test_transient_network_errors_are_retried(monkeypatch):
 
 def test_immutable_json_is_downloaded_once_and_invalidated_by_write_or_delete():
     files = Files()
-    path = "/Volumes/main/recon/runs/run-1/units/00000001-0001.json"
+    key = unit_batch_path(1, 1)
+    path = f"/Volumes/main/recon/runs/run-1/{key}"
     files.values[path] = b'{"value":1}'
     store = ApiVolumeStore("/Volumes/main/recon/runs/run-1", files=files)
 
-    assert store.get_json("units/00000001-0001.json") == {"value": 1}
-    first = store.get_json("units/00000001-0001.json")
+    assert store.get_json(key) == {"value": 1}
+    first = store.get_json(key)
     first["value"] = 99
-    assert store.get_json("units/00000001-0001.json") == {"value": 1}
+    assert store.get_json(key) == {"value": 1}
     assert files.downloads == [path]
 
-    store.put_json("units/00000001-0001.json", {"value": 2})
-    assert store.get_json("units/00000001-0001.json") == {"value": 2}
+    store.put_json(key, {"value": 2})
+    assert store.get_json(key) == {"value": 2}
     assert files.downloads == [path]
-    store.delete_keys(["units/00000001-0001.json"])
+    store.delete_keys([key])
     assert path not in store._json_cache

@@ -5,6 +5,13 @@ from support import STATS, MemoryStore
 
 from pair_recon_right.engine.checks.col_check import compare_statistics
 from pair_recon_right.engine.common.model.manifest import build_manifest, unit_id_for
+from pair_recon_right.engine.common.model.protocol import (
+    LEFT_STATE,
+    failure_path,
+    plan_path,
+    result_path,
+    row_result_path,
+)
 from pair_recon_right.engine.report import build_report
 from pair_recon_right.engine.report.build import collect
 
@@ -42,8 +49,8 @@ def _store():
     manifest = build_manifest("run", "p", pair, row_document)
     window = manifest["windows"][0]
     store = MemoryStore()
-    store.put_json("row_check/result.json", row_document)
-    store.put_json("plan.json", manifest)
+    store.put_json(row_result_path("p"), row_document)
+    store.put_json(plan_path("p"), manifest)
     store.close_manifests(["p"], manifest["expected_units"], {"p": manifest["plan_id"]})
 
     same = compare_statistics(
@@ -92,15 +99,15 @@ def test_report_builds_flat_files_from_batch_and_per_unit_results(tmp_path):
 def test_collect_filters_stale_outcomes_against_active_plan():
     store = _store()
     store.put_json(
-        "col_check/results/stale.json",
+        result_path("p", "stale"),
         {"unit_id": "stale", "pair": "p", "verdict": "diff"},
     )
     store.put_json(
-        "col_check/failures/stale.json",
+        failure_path("p", "stale-failure"),
         {"unit_id": "stale-failure", "pair": "p", "error": "old"},
     )
     store.put_json(
-        "col_check/failures/source.json",
+        failure_path("p", "source"),
         {"unit_id": "source", "source": "databricks", "error": "runtime"},
     )
 
@@ -112,10 +119,10 @@ def test_collect_filters_stale_outcomes_against_active_plan():
 
 def test_rows_only_is_complete_and_omits_column_sheet(tmp_path):
     store = _store()
-    store.objects.pop("plan.json")
-    store.objects.pop("_state/left.json")
+    store.objects.pop(plan_path("p"))
+    store.objects.pop(LEFT_STATE)
     for key in list(store.objects):
-        if key.startswith("col_check/"):
+        if key.startswith("_protocol/outcomes/"):
             store.objects.pop(key)
 
     files = build_report(store, tmp_path)

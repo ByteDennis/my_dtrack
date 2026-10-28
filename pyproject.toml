@@ -59,6 +59,7 @@ markers = [
     "slow: unit tests that exercise a full pipeline or another intentionally expensive path",
     "spark: tests/local/spark, local pyspark session (run with --run-spark)",
     "oracle: tests/local/oracle, Oracle via testcontainers (run with --run-oracle)",
+    "hive: tests/local/hive, HiveServer2 via testcontainers + Hive ODBC driver (run with --run-hive)",
     "live: tests/live, configured external services (run with --run-live)",
     "live_performance: opt-in external source timing profiles without fixed thresholds",
     "docker: needs a local Docker daemon; skipped when none is reachable (select with -m 'not docker')",

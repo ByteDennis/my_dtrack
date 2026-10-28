@@ -11,6 +11,19 @@ from pair_recon_right.engine.checks.row_check import (
     summarize_partitions,
 )
 from pair_recon_right.engine.common.model.manifest import build_manifest
+from pair_recon_right.engine.common.model.protocol import (
+    RIGHT_STATE,
+    UNITS_STATUS,
+    left_row_path,
+    mapping_path,
+    plan_path,
+    row_result_path,
+    write_left_state,
+)
+
+
+def _release(store):
+    write_left_state(store, {"pairs": ["p"], "row_check_closed_at": "now"})
 
 
 def test_partition():
@@ -53,10 +66,10 @@ def test_snapshot():
         checks=["hash_sum"],
         left=left["left"],
     )
-    store.put_json("row_check/left.json", left)
-    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    store.put_json(left_row_path("p"), left)
+    _release(store)
     run_row_check(store, lambda _config: FakeTarget(counts=counts))
-    plan = store.get_json("plan.json")
+    plan = store.get_json(plan_path("p"))
     assert plan["left_snapshot"] is True
     assert plan["windows"][0]["partitions"] == ["2026-01-03"]
 
@@ -148,24 +161,24 @@ def test_gate3(policy):
 
 def test_pending():
     store = MemoryStore()
-    store.put_json("row_check/left.json", left_document())
+    store.put_json(left_row_path("p"), left_document())
     assert [doc["pair"] for doc in pending_left_documents(store)] == ["p"]
-    store.put_json("row_check/result.json", {"pair": "p"})
+    store.put_json(row_result_path("p"), {"pair": "p"})
     assert pending_left_documents(store) == []
 
 
 def test_reconcile(caplog):
     store = MemoryStore()
-    store.put_json("row_check/left.json", left_document())
-    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    store.put_json(left_row_path("p"), left_document())
+    _release(store)
     with caplog.at_level("INFO"):
         assert run_row_check(store, lambda _cfg: FakeTarget()) == 1
-    doc = store.get_json("row_check/result.json")
+    doc = store.get_json(row_result_path("p"))
     assert doc["summary"] == {"match": 1, "count_diff": 1, "left_only": 1, "right_only": 0}
     assert doc["timing"]["left_count_s"] == 0.1
-    manifest = store.get_json("plan.json")
+    manifest = store.get_json(plan_path("p"))
     assert manifest["windows"][0]["partitions"] == ["2026-01-01"]
-    assert "plan released: memory://run/plan.json (1 windows, 1 columns, 1 units)" in caplog.text
+    assert "plan released: memory://run/config/manifest.json (1 windows, 1 columns, 1 units)" in caplog.text
     assert "right count p: 2 partitions, 3 rows" in caplog.text
     assert "first ('2026-01-01', 1)" in caplog.text
     assert "finding p 2026-01-02 count_diff left=" in caplog.text
@@ -176,29 +189,29 @@ def test_reconcile_caps_logged_findings(caplog):
     store = MemoryStore()
     doc = left_document()
     doc["counts"] = {f"2026-01-{day:02d}": 1 for day in range(1, 16)}
-    store.put_json("row_check/left.json", doc)
-    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    store.put_json(left_row_path("p"), doc)
+    _release(store)
     with caplog.at_level("INFO", logger="pair_recon.right.row_check"):
         run_row_check(store, lambda _cfg: FakeTarget(counts={"2026-01-01": 1}))
     assert caplog.text.count("  finding p ") == 10
     assert "  ... 4 more finding(s) omitted from the log" in caplog.text
-    assert store.get_bytes("mapping.csv").decode().splitlines() == [
+    assert store.get_bytes(mapping_path("p")).decode().splitlines() == [
         "left_column,right_column,usage,data_type",
         "amount,amount,compare,",
     ]
-    assert store.get_json("_state/right.json")["phase"] == "row_check_closed"
-    assert not store.exists("_status/units.csv")
+    assert store.get_json(RIGHT_STATE)["phase"] == "row_check_closed"
+    assert not store.exists(UNITS_STATUS)
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 0
 
 
 def test_restart():
     store = MemoryStore()
-    store.put_json("row_check/left.json", left_document())
-    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    store.put_json(left_row_path("p"), left_document())
+    _release(store)
     real_put = store.put_json
 
     def crash_on_manifest(key, value):
-        if key == "plan.json":
+        if key == plan_path("p"):
             raise ConnectionError("killed")
         return real_put(key, value)
 
@@ -206,32 +219,32 @@ def test_restart():
     with pytest.raises(ConnectionError):
         run_row_check(store, lambda _cfg: FakeTarget())
     store.put_json = real_put
-    assert not store.exists("row_check/result.json")
+    assert not store.exists(row_result_path("p"))
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 1
-    assert store.exists("plan.json")
-    assert store.get_json("_state/right.json")["phase"] == "row_check_closed"
+    assert store.exists(plan_path("p"))
+    assert store.get_json(RIGHT_STATE)["phase"] == "row_check_closed"
 
 
 def test_open():
     store = MemoryStore()
-    store.put_json("row_check/left.json", left_document())
+    store.put_json(left_row_path("p"), left_document())
     run_row_check(store, lambda _cfg: FakeTarget())
-    assert not store.exists("_status/row_check.closed.json")
+    assert not store.get_json(RIGHT_STATE).get("row_check_closed_at")
 
 
 def test_manual():
     store = MemoryStore()
-    store.put_json("row_check/left.json", left_document())
+    store.put_json(left_row_path("p"), left_document())
     run_row_check(store, lambda _cfg: FakeTarget(), gate="manual")
-    assert store.exists("row_check/result.json")
-    assert not store.exists("plan.json")
+    assert store.exists(row_result_path("p"))
+    assert not store.exists(plan_path("p"))
 
 
 def test_health_check():
     store = MemoryStore()
     with pytest.raises(RuntimeError, match="TABLE_OR_VIEW_NOT_FOUND"):
         reconcile_pair(store, left_document(), FakeTarget(healthy=False))
-    assert not store.exists("row_check/result.json")
+    assert not store.exists(row_result_path("p"))
 
 
 def test_v2():
@@ -246,13 +259,13 @@ def test_v2():
             for day, count in left["counts"].items()
         },
     }
-    store.put_json("row_check/left.json", left)
-    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    store.put_json(left_row_path("p"), left)
+    _release(store)
 
     with pytest.raises(RuntimeError, match=r"p: 2026-01-02, 2026-01-03"):
         run_row_check(store, lambda _cfg: FakeTarget())
-    assert store.exists("row_check/result.json")
-    assert store.get_json("plan.json")["version"] == 2
+    assert store.exists(row_result_path("p"))
+    assert store.get_json(plan_path("p"))["version"] == 2
 
     updated = build_manifest(
         "run",
@@ -260,7 +273,7 @@ def test_v2():
         {**left["pair_config"], "excluded_partitions": ["2026-01-02", "2026-01-03"]},
         baseline,
     )
-    store.put_json("plan.json", updated)
+    store.put_json(plan_path("p"), updated)
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 0
 
 
@@ -279,7 +292,7 @@ def test_all2():
         "right": left["right"],
         "col_map": {"amount": "amount"},
     }
-    store.put_json("row_check/left.json", left)
-    store.put_json("_status/left_row_check.closed.json", {"pairs": ["p"]})
+    store.put_json(left_row_path("p"), left)
+    _release(store)
     with pytest.raises(RuntimeError, match="partition all row counts differ"):
         run_row_check(store, lambda _cfg: FakeTarget(counts={"all": 6}))

@@ -22,8 +22,8 @@ from ...backends.store import replace_local_file
 from ..model.audit import SqlAudit, attach_sql_audit
 from ..model.manifest import planned_unit_ids, unit_id_for, validate_manifest, window_id
 from ..model.protocol import (
-    COL_CHECK_CLOSED,
     current_plan_ids,
+    difference_keys_path,
     fixed_keys_document,
     fixed_keys_path,
     get_left_state,
@@ -39,6 +39,7 @@ from ..model.protocol import (
     row_result_path,
     timestamp,
     unit_batch_path,
+    unit_prefix,
     write_left_state,
     write_run_status,
     write_window_count,
@@ -70,7 +71,7 @@ def unexcluded_mismatches(result: dict[str, Any], plan: dict[str, Any]) -> list[
     )
 
 
-# >>> block until the Right published row_check/result.json <<< #
+# >>> block until the Right publishes the durable row result <<< #
 def wait_for_row_result(store, pair: str, *, poll_interval: float = 5, abort_if=None):
     abort_if = abort_if or (lambda: None)
     started = time.monotonic()
@@ -304,7 +305,7 @@ class ColCheckPipeline:
         publication_lock = threading.Lock()
         reserved_ids = set(existing)
         plan_ids = {manifest["pair"]: manifest.get("plan_id") for manifest in manifests}
-        published_batches = len(self.store.list_keys("units/"))
+        published_batches = len(self.store.list_keys(unit_prefix("")))
         ready = deque()
         plan_rows = []
         for manifest, window in iter_windows_round_robin(manifests):
@@ -320,7 +321,6 @@ class ColCheckPipeline:
             plan_rows.append((manifest, window))
         plans = iter(plan_rows)
         exhausted = False
-        self.store.delete_keys([COL_CHECK_CLOSED])
         write_run_status(self.store, {"state": "left_col_check", "role": "left"})
         write_left_state(
             self.store,
@@ -750,6 +750,7 @@ class LeftRuntime:
                         window["bucket"],
                         output,
                     )
+                    self._publish_difference_keys(manifest, window, output)
                     self._publish_window_count(manifest, window, _row_count(output))
                     return output
             except (OSError, ValueError, json.JSONDecodeError):
@@ -781,7 +782,40 @@ class LeftRuntime:
             self._publish_window_count(manifest, window, rows),
             path,
         )
+        self._publish_difference_keys(manifest, window, path)
         return path
+
+    def _publish_difference_keys(self, manifest, window, path: str | Path) -> None:
+        limit = int(manifest.get("difference_sample_rows") or 0)
+        columns = list(manifest.get("key_cols") or [])
+        if self.store is None or not limit or not columns:
+            return
+        tuples = []
+        seen = set()
+        with Path(path).open(encoding="utf-8-sig", newline="", errors="replace") as handle:
+            reader = csv.DictReader(handle)
+            missing = [column for column in columns if column not in (reader.fieldnames or [])]
+            if missing:
+                raise ValueError(
+                    f"Left difference sample keys missing from {path}: {', '.join(missing)}"
+                )
+            for row in reader:
+                values = tuple(row[column] for column in columns)
+                if values in seen:
+                    continue
+                seen.add(values)
+                tuples.append(list(values))
+                if len(tuples) >= limit:
+                    break
+        self.store.put_json(
+            difference_keys_path(manifest["pair"], window["bucket"]),
+            {
+                "pair": manifest["pair"],
+                "window": window["bucket"],
+                "columns": columns,
+                "key_tuples": tuples,
+            },
+        )
 
     # >>> the source's exact row count goes to the Volume before statistics so the Right can compare it early <<< #
     def _publish_window_count(self, manifest, window, count: int) -> int:
@@ -803,7 +837,9 @@ class LeftRuntime:
         return compute_csv_statistics(
             path,
             manifest["columns"],
-            strict=manifest.get("strict", False),
+            normalization_rules=manifest.get("normalization_rules"),
+            normalization_source=manifest["left"]["source"],
+            normalization_date=manifest.get("normalization_date"),
             col_types=manifest.get("col_type_overrides"),
             column_types=manifest.get("column_types"),
             side="left",

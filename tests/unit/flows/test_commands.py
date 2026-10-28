@@ -8,6 +8,7 @@ from support import MemoryStore
 
 from pair_recon.app.cli import batch
 from pair_recon.app.cli import smoke as smoke_module
+from pair_recon_right.engine.job import SMOKE_REQUEST
 
 RESULT = '{\n  "settings": {"x": 1}\n}\nlog line\n{\n  "state": "%s",\n  "pair": "orders"\n}\n'
 
@@ -110,7 +111,7 @@ def test_smoke_runs_the_local_csv_pair_end_to_end(tmp_path, monkeypatch):
         "expected": 3,
     }
     assert report["verdict"] == "sample_mismatch" and "2/3" in report["hint"]
-    request = store.get_json("_smoke/request.json")
+    request = store.get_json(SMOKE_REQUEST)
     assert request["key_columns"] == ["id"] and request["columns"] == ["value", "note"]
     assert sorted(request["key_tuples"]) == [["1"], ["2"], ["3"]]
 
