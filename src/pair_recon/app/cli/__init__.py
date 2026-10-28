@@ -959,6 +959,8 @@ def execute(args, *, raise_errors: bool = False) -> int:
                 )
                 break
             except Exception as exc:
+                if report := getattr(exc, "pair_recon_console_report", None):
+                    console(report)
                 added = (
                     add_mismatched_partitions(settings, config, exc)
                     if not settings["earlystop"] and attempts < AUTO_EXCLUDE_RETRIES

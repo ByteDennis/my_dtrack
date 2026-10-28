@@ -7,6 +7,7 @@ from pair_recon_left.backends.sources import write_rows
 from pair_recon_left.common.checks.col_check import (
     ColCheckPipeline,
     LeftRuntime,
+    format_row_count_differences,
     wait_for_manifests,
     wait_for_row_check_result,
 )
@@ -189,6 +190,28 @@ def test_wait_for_row_check_result_raises_on_unexcluded_mismatches():
         match=r"unexcluded mismatched partitions.*\(pair: 2026-01-01\)",
     ):
         wait_for_row_check_result(store, "pair")
+
+
+def test_row_count_difference_table_is_compact_and_directional():
+    report = format_row_count_differences(
+        "orders",
+        {
+            "2026-01-01": {"left": 1200, "right": 1000, "result": "count_diff"},
+            "2026-01-02": {"left": 50, "right": 75, "result": "count_diff"},
+            "2026-01-03": {"left": 7, "right": None, "result": "left_only"},
+            "2026-01-04": {"left": None, "right": 9, "result": "right_only"},
+        },
+    )
+
+    assert report.splitlines() == [
+        "Row-count differences: orders (4)",
+        "Partition    Left  Right  Difference",
+        "----------  -----  -----  ----------",
+        "2026-01-01  1,200  1,000  Left +200",
+        "2026-01-02     50     75  Right +25",
+        "2026-01-03      7      -  Left only",
+        "2026-01-04      -      9  Right only",
+    ]
 
 
 def test_wait_for_row_check_result_waits_for_the_right_then_accepts_matches(caplog):

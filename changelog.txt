@@ -1,50 +1,26 @@
-pair_recon Wide-table statistics and runtime controls — 2026-10-28
+pair_recon Row-count diagnostics and Windows recovery — 2026-10-28
 
 Summary
-- Splits Right-side statistics into batches of `RIGHT_STATS_COLUMNS` columns (default 50), avoiding very large Spark aggregate plans on wide tables.
-- Publishes per-window `fetching` progress to `_protocol/right.json` after every statistics batch.
-- Retries torn JSON state reads on both the local Files API store and the Databricks Volume FUSE store.
-- Adds case-insensitive `excluded_columns` run defaults and an `Excluded columns` prompt, rejecting unknown mapped-column names.
-- Reduces the default difference sample limit from 1000 to 100 rows.
-- Raises the default Right first-result and state-stall watchdog limits to 14400 and 7200 seconds.
+- Prints a compact directional table for unexcluded row-count mismatches, including early-stop failures and persisted fallback results.
+- Preserves the existing bounded automatic partition-exclusion recovery behavior.
+- Prevents Windows `left.log` file-lock failures during forced automatic recovery by closing the previous file handler before deleting and reopening the log.
 
 Modified files
-- `README.md`: documents excluded columns, the 100-row diagnostic default, statistics batching, progress reporting, torn-read recovery, and revised watchdog limits.
-- `changelog.txt`: replaces the previous cumulative history with this commit-only inventory.
-- `guideme.txt`: updates operator guidance for excluded columns, statistics batching, torn-read recovery, and watchdog limits.
-- `src/pair_recon/app/cli/__init__.py`: parses excluded columns, prompts for them, persists them in settings, and changes the difference-sample default to 100.
-- `src/pair_recon/app/config.py`: carries excluded columns into the effective run configuration.
-- `src/pair_recon/app/runner.py`: raises watchdog defaults, supports the statistics progress callback contract, and formats diagnostic key loading.
-- `src/pair_recon/core/backends/store.py`: retries transient JSON decode failures caused by reading a state file during overwrite.
-- `src/pair_recon/core/metadata/workbook.py`: accepts and validates `excluded_columns` string arrays in workbook run defaults.
-- `src/pair_recon_dbx/cli.py`: formats the legacy catalog-schema fallback consistently.
-- `src/pair_recon_left/common/model/hashing.py`: formats normalization-rule filtering consistently.
-- `src/pair_recon_left/common/model/manifest.py`: validates excluded mapped columns case-insensitively and changes the diagnostic sample default to 100.
-- `src/pair_recon_right/engine/backends/store.py`: retries torn JSON documents as well as retryable FUSE read errors.
-- `src/pair_recon_right/engine/backends/targets.py`: batches Spark statistics queries and reports completed-column progress.
-- `src/pair_recon_right/engine/checks/col_check.py`: records active statistics batches in Right protocol state and clears completed activity.
-- `src/pair_recon_right/engine/common/model/hashing.py`: mirrors Left normalization-rule formatting.
-- `src/pair_recon_right/engine/common/model/manifest.py`: mirrors Left excluded-column validation and the 100-row diagnostic default.
-- `tests/support.py`: extends the fake target statistics signature with the progress callback.
-- `tests/unit/common/protocol/test_manifest.py`: covers case-insensitive excluded columns and unknown-column rejection.
-- `tests/unit/flows/test_workbook.py`: covers invalid workbook `excluded_columns` values.
-- `tests/unit/packages/pair_recon/test_catalog.py`: formats result-summary fixtures consistently.
-- `tests/unit/packages/pair_recon/test_config.py`: verifies excluded columns enter the run configuration.
-- `tests/unit/packages/pair_recon/test_runner.py`: verifies the 100-row default and formats checkpoint assertions.
-- `tests/unit/packages/pair_recon/test_store.py`: verifies local Files API torn-JSON retry behavior.
-- `tests/unit/packages/pair_recon_right/backends/test_store.py`: verifies Volume FUSE torn-JSON retry and exhaustion behavior.
-- `tests/unit/packages/pair_recon_right/backends/test_targets.py`: verifies wide-table batching and progress callbacks.
-- `tests/unit/packages/pair_recon_right/checks/test_col_check.py`: verifies live fetching progress in `_protocol/right.json` and updates callback-capable test targets.
-- `tests/unit/packages/pair_recon_right/checks/test_row_check.py`: formats the plan-release assertion consistently.
-- `tests/unit/packages/pair_recon_right/test_job.py`: formats report and terminal-state assertions consistently.
+- `changelog.txt`: records only the files and behavior changed by this commit.
+- `src/pair_recon/app/cli/__init__.py`: prints structured mismatch reports before retry or failure handling.
+- `src/pair_recon/app/runner.py`: recovers mismatch reports from persisted row results and delegates safe log reset ordering to the logging runtime.
+- `src/pair_recon_left/common/checks/col_check.py`: adds directional mismatch formatting and a structured unexcluded-partition exception.
+- `src/pair_recon_left/common/runtime/run_logging.py`: closes the active Left file handler before resetting `left.log`.
+- `tests/unit/packages/pair_recon/test_runner.py`: covers early-stop and persisted mismatch reporting and accepts the logging reset argument.
+- `tests/unit/packages/pair_recon_left/checks/test_col_check.py`: covers compact directional row-count output.
 
 Added files
-- None.
+- `tests/unit/common/runtime/test_run_logging.py`: verifies that the previous handler is closed before `left.log` is deleted.
 
 Deleted files
 - None.
 
 Verification
-- Ruff: passed for `src`, `tests`, and `setup/install.py`.
-- Unit suite excluding the pre-existing `src/pair_recon_dbx: 6` layout violation: `952 passed, 1 deselected`.
-- Full unit suite: `952 passed, 1 failed`; only `tests/unit/flows/test_packaging.py::test_layout` failed on that pre-existing layout violation.
+- Ruff: passed for all changed Python files.
+- Unit suite excluding the pre-existing layout check: `955 passed, 1 deselected`.
+- Full unit suite: `955 passed, 1 failed`; only the pre-existing `src/pair_recon_dbx: 6` layout violation failed.

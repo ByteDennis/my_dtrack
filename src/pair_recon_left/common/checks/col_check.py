@@ -58,6 +58,70 @@ ROW_RESULT_LOG_INTERVAL = 60.0
 UNEXCLUDED_PARTITIONS = "version 2 row-check found unexcluded mismatched partitions"
 
 
+def format_row_count_differences(pair: str, partitions: dict[str, dict[str, Any]]) -> str:
+    rows = []
+    for partition, values in sorted(partitions.items()):
+        left = values.get("left")
+        right = values.get("right")
+        if left is None and right is None:
+            difference = "Unavailable"
+        elif left is None:
+            difference = "Right only"
+        elif right is None:
+            difference = "Left only"
+        else:
+            delta = int(right) - int(left)
+            difference = (
+                f"Right +{delta:,}"
+                if delta > 0
+                else f"Left +{abs(delta):,}"
+                if delta < 0
+                else "Different"
+            )
+        rows.append(
+            (
+                partition,
+                "-" if left is None else f"{int(left):,}",
+                "-" if right is None else f"{int(right):,}",
+                difference,
+            )
+        )
+
+    headers = ("Partition", "Left", "Right", "Difference")
+    widths = [max(len(headers[index]), *(len(row[index]) for row in rows)) for index in range(4)]
+
+    def line(values, separator="  "):
+        return separator.join(
+            (
+                f"{values[0]:<{widths[0]}}",
+                f"{values[1]:>{widths[1]}}",
+                f"{values[2]:>{widths[2]}}",
+                f"{values[3]:<{widths[3]}}",
+            )
+        ).rstrip()
+
+    return "\n".join(
+        [
+            f"Row-count differences: {pair} ({len(rows)})",
+            line(headers),
+            line(tuple("-" * width for width in widths)),
+            *(line(row) for row in rows),
+        ]
+    )
+
+
+class UnexcludedPartitionsError(RuntimeError):
+    def __init__(self, pair: str, partitions: dict[str, dict[str, Any]]):
+        self.pair = pair
+        self.partitions = partitions
+        self.pair_recon_console_report = format_row_count_differences(pair, partitions)
+        values = ", ".join(sorted(partitions))
+        super().__init__(
+            f"{UNEXCLUDED_PARTITIONS}; add them to excluded_partitions, rerun the Left job "
+            f"with the same run-id, then restart Right ({pair}: {values})"
+        )
+
+
 # >>> version 2 partitions the Right reported as not matching and the plan does not exclude <<< #
 def unexcluded_mismatches(result: dict[str, Any], plan: dict[str, Any]) -> list[str]:
     if int(plan.get("version") or 1) != 2:
@@ -105,9 +169,9 @@ def wait_for_row_check_result(
     plan = store.get_json(plan_path(pair)) if store.exists(plan_path(pair)) else {}
     mismatches = unexcluded_mismatches(result, plan)
     if mismatches:
-        raise RuntimeError(
-            f"{UNEXCLUDED_PARTITIONS}; add them to excluded_partitions, rerun the Left job "
-            f"with the same run-id, then restart Right ({pair}: {', '.join(mismatches)})"
+        raise UnexcludedPartitionsError(
+            pair,
+            {partition: result["partitions"][partition] for partition in mismatches},
         )
     log.info(
         "Right row check accepted: pair=%s partitions=%d summary=%s",

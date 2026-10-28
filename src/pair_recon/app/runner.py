@@ -26,7 +26,9 @@ from pair_recon_left.common.checks.col_check import (
     UNEXCLUDED_PARTITIONS,
     ColCheckPipeline,
     LeftRuntime,
+    format_row_count_differences,
     publish_fixed_keys,
+    unexcluded_mismatches,
     wait_for_manifests,
     wait_for_row_check_result,
     wait_for_row_result,
@@ -145,6 +147,26 @@ def mismatched_partitions(error: BaseException | str, pair: str) -> list[str]:
         text,
     )
     return sorted(set(re.findall(r"\d{4}-\d{2}-\d{2}", match.group(1)))) if match else []
+
+
+def row_count_difference_report(store, pair: str) -> str | None:
+    if not store.exists(row_result_path(pair)):
+        return None
+    result = store.get_json(row_result_path(pair))
+    partitions = result.get("partitions") or {}
+    if store.exists(plan_path(pair)):
+        plan = store.get_json(plan_path(pair))
+        mismatches = unexcluded_mismatches(result, plan)
+    else:
+        mismatches = sorted(
+            partition for partition, row in partitions.items() if row.get("result") != "match"
+        )
+    if not mismatches:
+        return None
+    return format_row_count_differences(
+        pair,
+        {partition: partitions[partition] for partition in mismatches},
+    )
 
 
 def right_job_params(settings: dict, pair: str, run_id: str, run_values: dict) -> dict:
@@ -939,9 +961,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
     run_dir.mkdir(parents=True, exist_ok=True)
     left_log = run_dir / "left.log"
     force = bool(settings.get("force", False))
-    if force:
-        left_log.unlink(missing_ok=True)
-    configure_left_logging(left_log, settings["timezone"])
+    configure_left_logging(left_log, settings["timezone"], reset=force)
     log.info(
         "run started: run_id=%s pair=%s mode=%s action=%s",
         run_id,
@@ -1163,6 +1183,11 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         }
     except BaseException as exc:
         failure_error = exc
+        if store is not None and not getattr(exc, "pair_recon_console_report", None):
+            try:
+                exc.pair_recon_console_report = row_count_difference_report(store, pair)
+            except Exception:
+                log.exception("could not prepare row-count difference console report")
         stop.trigger(exc)
         final_state = "cancelled" if monitor and monitor.final_state == "cancelled" else "failed"
         log.exception("run %s", final_state)

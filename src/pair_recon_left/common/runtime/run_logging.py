@@ -62,16 +62,31 @@ def configure_console_logging(level: str, timezone_name: str | None = None) -> l
     return logger
 
 
-def configure_left_logging(path: str | Path, timezone_name: str | None = None) -> Path:
+def close_left_logging() -> None:
     global _current_left_log
 
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
     logger = get_left_logger()
     for handler in list(logger.handlers):
         if getattr(handler, "pair_recon_left_handler", False):
             logger.removeHandler(handler)
             handler.close()
+    _current_left_log = None
+
+
+def configure_left_logging(
+    path: str | Path,
+    timezone_name: str | None = None,
+    *,
+    reset: bool = False,
+) -> Path:
+    global _current_left_log
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    close_left_logging()
+    if reset:
+        target.unlink(missing_ok=True)
+    logger = get_left_logger()
 
     handler = logging.FileHandler(target, mode="a", encoding="utf-8")
     handler.setLevel(logging.INFO)

@@ -23,6 +23,7 @@ from pair_recon.app.runner import (
     publish_difference_samples,
     resolve_job_id,
     retry_failed,
+    row_count_difference_report,
     run_local_reconciliation,
     write_request_snapshot,
 )
@@ -87,6 +88,27 @@ def test_runid():
         "America/New_York",
         now=datetime(2026, 10, 22, 9, tzinfo=ZoneInfo("America/New_York")),
     ) == Path("outputs/2026-10-22/custom-run")
+
+
+def test_row_count_difference_report_without_column_plan():
+    store = MemoryStore()
+    store.put_json(
+        row_result_path("orders"),
+        {
+            "partitions": {
+                "2026-01-01": {"left": 8, "right": 5, "result": "count_diff"},
+                "2026-01-02": {"left": 6, "right": 6, "result": "match"},
+            }
+        },
+    )
+
+    assert (
+        row_count_difference_report(store, "orders")
+        == """Row-count differences: orders (1)
+Partition   Left  Right  Difference
+----------  ----  -----  ----------
+2026-01-01     8      5  Left +3"""
+    )
 
 
 def test_debug_reconciles_locally_and_publishes_only_difference_samples(tmp_path):
@@ -630,6 +652,7 @@ def test_execute_earlystop_reports_mismatch_without_retry(monkeypatch, tmp_path)
     }
     config = {"pairs": {"orders": {"excluded_partitions": ["2026-10-01"]}}}
     calls = []
+    console_messages = []
     monkeypatch.setattr(cli, "load_environment", lambda: None)
     monkeypatch.setattr(
         cli,
@@ -637,13 +660,20 @@ def test_execute_earlystop_reports_mismatch_without_retry(monkeypatch, tmp_path)
         lambda _defaults, *, interactive: (settings, config, "new", object(), object()),
     )
     monkeypatch.setattr(cli, "configure_console_logging", lambda *_args: None)
+    monkeypatch.setattr(cli, "console", console_messages.append)
     monkeypatch.setattr(cli, "write_request_snapshot", lambda *_args: tmp_path / "request.json")
 
     def launch(*_args, action, **_kwargs):
         calls.append(action)
-        raise RuntimeError(
-            "version 2 row-check found unexcluded mismatched partitions; "
-            "add them to excluded_partitions (orders: 2026-10-02)"
+        raise left_col_check.UnexcludedPartitionsError(
+            "orders",
+            {
+                "2026-10-02": {
+                    "left": 1250,
+                    "right": 1000,
+                    "result": "count_diff",
+                }
+            },
         )
 
     monkeypatch.setattr(cli, "launch", launch)
@@ -659,6 +689,12 @@ def test_execute_earlystop_reports_mismatch_without_retry(monkeypatch, tmp_path)
         cli.execute(args, raise_errors=True)
 
     assert calls == ["new"]
+    assert console_messages == [
+        """Row-count differences: orders (1)
+Partition    Left  Right  Difference
+----------  -----  -----  ----------
+2026-10-02  1,250  1,000  Left +250"""
+    ]
     assert settings["excluded_partitions"] == ["2026-10-01"]
     assert config["pairs"]["orders"]["excluded_partitions"] == ["2026-10-01"]
 
@@ -1786,7 +1822,7 @@ def test_local(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runner, "VolumeStore", Root)
     monkeypatch.setattr(runner, "ProgressSampler", Sampler)
-    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args: None)
+    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner, "run_left", left)
     monkeypatch.setattr(runner, "run_right_row_check", lambda *_args: events.append("row"))
     monkeypatch.setattr(
@@ -1918,7 +1954,7 @@ def test_remote_resume_starts_right_after_left_row_release(monkeypatch, tmp_path
 
     monkeypatch.setattr(runner, "VolumeStore", Root)
     monkeypatch.setattr(runner, "RightJobMonitor", Monitor)
-    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args: None)
+    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner, "run_left", left)
     settings = {
         "run_id": "resume-1",
@@ -2000,7 +2036,7 @@ def test_new_run_starts_right_only_after_left_row_release(monkeypatch, tmp_path)
 
     monkeypatch.setattr(runner, "VolumeStore", Root)
     monkeypatch.setattr(runner, "RightJobMonitor", Monitor)
-    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args: None)
+    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner, "run_left", left)
     settings = {
         "run_id": "new-1",
@@ -2075,7 +2111,7 @@ def test_launch_injects_checked_vintages_from_window_history(monkeypatch, tmp_pa
 
     monkeypatch.setattr(runner, "VolumeStore", Root)
     monkeypatch.setattr(runner, "ProgressSampler", Sampler)
-    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args: None)
+    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner, "run_left", left)
     monkeypatch.setattr(runner, "run_right_row_check", lambda *_args: None)
     monkeypatch.setattr(
@@ -2168,7 +2204,7 @@ def test_left_only_does_not_start_or_run_right(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runner, "VolumeStore", Root)
     monkeypatch.setattr(runner, "ProgressSampler", Sampler)
-    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args: None)
+    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner, "run_left", left)
     monkeypatch.setattr(runner, "run_right_row_check", right_called)
     monkeypatch.setattr(runner, "run_right", right_called)
