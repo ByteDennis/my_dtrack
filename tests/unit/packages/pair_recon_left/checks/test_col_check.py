@@ -275,6 +275,39 @@ def test_cache(tmp_path, caplog):
     assert "left data pull completed: pair=pair vintage=all sampled_rows=1 path=" in caplog.text
 
 
+def test_sas_input_reloads_as_standard_left_csv_without_boundary_fields(tmp_path):
+    sample = tmp_path / "left_sample.csv"
+    sample.write_text(
+        "__pair_recon_request_id,id,amount\ncontract-1,1,10\n",
+        encoding="utf-8",
+    )
+    row = {
+        **manifest(),
+        "version": 2,
+        "plan_id": "one",
+        "sample": {"mode": "fraction", "rate": 0.1, "threshold": 100_000},
+        "key_cols": ["id"],
+        "key_families": ["numeric"],
+    }
+    runtime = LeftRuntime(
+        tmp_path / "work",
+        MemoryStore(),
+        source_configs={
+            "pair": {
+                "source": "csv",
+                "path": str(sample),
+                "pre_sampled": True,
+                "source_contract_id": "contract-1",
+            }
+        },
+    )
+
+    output = runtime.pull_window(row, row["windows"][0])
+
+    assert output.read_text(encoding="utf-8") == "id,amount\n1,10\n"
+    assert "sas" not in output.read_text(encoding="utf-8").casefold()
+
+
 def test_left_pull_publishes_bounded_difference_keys(tmp_path):
     row = {
         **manifest(),

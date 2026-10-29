@@ -25,6 +25,7 @@ def test_result_state_reads_the_last_json_block():
         (0, "passed", "executed"),
         (0, "different", "executed"),
         (0, "empty", "executed"),
+        (0, "awaiting_sample", "executed"),
         (0, None, "failed"),
         (1, "different", "failed"),
         (512, None, "failed"),

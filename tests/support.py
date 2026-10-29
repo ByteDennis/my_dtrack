@@ -208,6 +208,11 @@ class FakeFrame:
     def collect(self):
         return list(self.rows)
 
+    def toPandas(self):
+        import pandas as pd
+
+        return pd.DataFrame([dict(row) for row in self.rows])
+
 
 class FakeSpark:
     def __init__(self, responder=lambda _sql: []):

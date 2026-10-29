@@ -20,17 +20,17 @@ from pair_recon.app.config import (
     [("true", True), ("YES", True), ("1", True), ("false", False), ("off", False), ("0", False)],
 )
 def test_env_boolean(monkeypatch, value, expected):
-    monkeypatch.setenv("DBX_SYNC_PAIR_METADATA", value)
+    monkeypatch.setenv("PAIR_RECON_TEST_BOOLEAN", value)
 
-    assert env_boolean("DBX_SYNC_PAIR_METADATA", default=not expected) is expected
+    assert env_boolean("PAIR_RECON_TEST_BOOLEAN", default=not expected) is expected
 
 
 def test_env_boolean_uses_default_and_rejects_invalid(monkeypatch):
-    monkeypatch.delenv("DBX_SYNC_PAIR_METADATA", raising=False)
-    assert env_boolean("DBX_SYNC_PAIR_METADATA", default=True) is True
-    monkeypatch.setenv("DBX_SYNC_PAIR_METADATA", "sometimes")
-    with pytest.raises(ValueError, match="DBX_SYNC_PAIR_METADATA must be true or false"):
-        env_boolean("DBX_SYNC_PAIR_METADATA")
+    monkeypatch.delenv("PAIR_RECON_TEST_BOOLEAN", raising=False)
+    assert env_boolean("PAIR_RECON_TEST_BOOLEAN", default=True) is True
+    monkeypatch.setenv("PAIR_RECON_TEST_BOOLEAN", "sometimes")
+    with pytest.raises(ValueError, match="PAIR_RECON_TEST_BOOLEAN must be true or false"):
+        env_boolean("PAIR_RECON_TEST_BOOLEAN")
 
 
 def test_load_environment_reads_only_pair_recon_file(monkeypatch, tmp_path: Path):

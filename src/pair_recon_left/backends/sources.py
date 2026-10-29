@@ -436,6 +436,28 @@ class SqlSource(ABC):
         side: str = "left",
         key_tuples: list[list[object]] | None = None,
     ) -> tuple[Path, int]:
+        sql, selected = self.pull_window_sql(
+            partitions,
+            columns,
+            key_columns=key_columns,
+            sample_plan=sample_plan,
+            key_families=key_families,
+            side=side,
+            key_tuples=key_tuples,
+        )
+        return self.query_to_csv(sql, output, selected, operation="pull_window")
+
+    def pull_window_sql(
+        self,
+        partitions: list[str],
+        columns: list[str],
+        *,
+        key_columns: list[str] | None = None,
+        sample_plan: dict[str, Any] | None = None,
+        key_families: list[Any] | None = None,
+        side: str = "left",
+        key_tuples: list[list[object]] | None = None,
+    ) -> tuple[str, list[str]]:
         if self.partition != "all":
             self.date_type()
             selected = list(
@@ -486,7 +508,7 @@ class SqlSource(ABC):
             f"FROM {self.relation(partitions=partitions if self.partition != 'all' else None)} "
             f"WHERE {self._where(predicate)}"
         )
-        return self.query_to_csv(sql, output, selected, operation="pull_window")
+        return sql, selected
 
     def sample_keys(
         self,

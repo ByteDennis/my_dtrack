@@ -38,7 +38,6 @@ from pair_recon_left.common.sql.dates import contiguous_runs, resolve_date_type
 
 from ..catalog import Catalog
 from ..config import (
-    env_boolean,
     env_value,
     load_config,
     load_defaults,
@@ -63,7 +62,6 @@ log = get_logger("cli")
 DEFAULTS = Path(".pair_recon.yaml")
 PAIR_WORKBOOK = Path(__file__).resolve().parents[3] / "setup" / "pairs.xlsx"
 PAIR_WORKBOOK_ENV = "DBX_PAIR_WORKBOOK"
-SYNC_PAIR_METADATA_ENV = "DBX_SYNC_PAIR_METADATA"
 AUTO_EXCLUDE_RETRIES = 3
 
 
@@ -507,7 +505,6 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     )
     email_to = answer("Outlook recipients", defaults.get("email_to"), required=False)
     workbook_path = pair_workbook_path(defaults)
-    sync_pair_metadata = env_boolean(SYNC_PAIR_METADATA_ENV, default=True)
     metadata_key = (
         profile,
         warehouse,
@@ -516,7 +513,6 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         status_table,
         error_table,
         str(workbook_path),
-        sync_pair_metadata,
     )
     cached = session.cache.get("metadata") if session else None
     if cached and cached[0] == metadata_key:
@@ -525,7 +521,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     else:
         console(f"Initializing Databricks client for profile {profile!r}...")
         client = workspace_factory(profile)
-        if sync_pair_metadata and workbook_path.exists():
+        if workbook_path.exists():
             console(
                 f"Checking {workbook_path} against {pair_table} through SQL warehouse {warehouse!r}."
             )
@@ -539,16 +535,10 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         )
         workbook_rows = []
         sync = {"rows": 0, "pairs": [], "source": str(workbook_path)}
-        if sync_pair_metadata:
-            workbook_rows, sync = synchronize_pair_workbook(
-                statement_sql, catalog, pair_table, workbook_path
-            )
-        if not sync_pair_metadata:
-            console(
-                f"{SYNC_PAIR_METADATA_ENV}=false; skipping local workbook synchronization "
-                "and using Databricks metadata as the source of truth."
-            )
-        elif sync.get("skipped") == "missing":
+        workbook_rows, sync = synchronize_pair_workbook(
+            statement_sql, catalog, pair_table, workbook_path
+        )
+        if sync.get("skipped") == "missing":
             console(
                 f"Pair workbook not found at {workbook_path}; skipping workbook synchronization "
                 "and reading existing metadata from Databricks."

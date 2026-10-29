@@ -63,6 +63,12 @@ LEFT_OPTION_FIELDS = {
     "date_format",
     "options",
     "sample_hash",
+    "arraysize",
+    "prefetchrows",
+    "fetch_batch_size",
+    "fetch_retries",
+    "max_sessions",
+    "sas_sample_csv",
 }
 RIGHT_OPTION_FIELDS = {"where", "date_type", "format", "schema_hints", "options"}
 RUN_DEFAULT_FIELDS = {
@@ -83,7 +89,7 @@ RUN_DEFAULT_FIELDS = {
     "vintage_values",
 }
 RUN_DEFAULT_BOOLS = ("audit", "sync_remote")
-RUN_DEFAULT_LISTS = ("excluded_partitions", "excluded_columns")
+RUN_DEFAULT_LISTS = ("checks", "excluded_partitions", "excluded_columns", "vintage_values")
 RUN_DEFAULT_WORKERS = ("left_workers", "right_workers", "difference_sample_rows")
 RUN_DEFAULT_DATE_ONLY = ("from_date", "to_date", "vintage", "excluded_partitions")
 VINTAGES = ("day", "week", "month", "quarter", "year")
@@ -147,6 +153,313 @@ FIELD_GUIDE = (
         "JSON object",
         "Run defaults; prefer sample fractions.",
         '{"sample":0.1}',
+    ),
+    (
+        "pairs",
+        "run_defaults_json.checks",
+        "optional",
+        "comma list or JSON array",
+        "Checks to run; comma text is normalized to a string array.",
+        "row_count, hash_sum, n_unique",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.excluded_columns",
+        "optional",
+        "comma list or JSON array",
+        "Left column names omitted from column comparison.",
+        "COMMENTS, INTERNAL_NOTE",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.excluded_partitions",
+        "optional",
+        "comma list or JSON array",
+        "Dates or inclusive date ranges omitted from comparison.",
+        "2026-01-01, 2026-02-01->2026-02-03",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.vintage_values",
+        "optional",
+        "comma list or JSON array",
+        "Explicit vintage dates; cannot be combined with vintage_sample_size.",
+        "2026-01-01, 2026-04-01",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.from_date",
+        "date partition",
+        "YYYY-MM-DD",
+        "Inclusive lower date bound; a single date, not a list.",
+        "2026-01-01",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.to_date",
+        "date partition",
+        "YYYY-MM-DD",
+        "Inclusive upper date bound; a single date, not a list.",
+        "2026-12-31",
+    ),
+    (
+        "pairs",
+        "left_options_json.sas_sample_csv",
+        "optional Oracle/Hadoop sampling",
+        "path",
+        "One combined SAS sample CSV for all selected vintage windows; SQL and request files are written beside it.",
+        "C:/PairRecon/samples/orders/left_sample.csv",
+    ),
+    (
+        "pairs",
+        "left_options_json.where",
+        "optional",
+        "SQL predicate",
+        "Additional Left source filter without the WHERE keyword.",
+        "ACTIVE_FLAG = 1",
+    ),
+    (
+        "pairs",
+        "left_options_json.date_type",
+        "optional",
+        "date type spec",
+        "Overrides automatic Left partition-date detection.",
+        "date",
+    ),
+    (
+        "pairs",
+        "left_options_json.snapshot",
+        "optional",
+        "boolean",
+        "Treat Left as a current snapshot while Right remains date partitioned.",
+        "FALSE",
+    ),
+    (
+        "pairs",
+        "left_options_json.oracle_tuning",
+        "optional Oracle",
+        "JSON numbers",
+        "Supported keys: arraysize, prefetchrows, fetch_batch_size, fetch_retries, max_sessions.",
+        '{"arraysize":1000,"max_sessions":4}',
+    ),
+    (
+        "pairs",
+        "right_options_json.where",
+        "optional",
+        "SQL predicate",
+        "Additional Right source filter without the WHERE keyword.",
+        "is_current = true",
+    ),
+    (
+        "pairs",
+        "right_options_json.date_type",
+        "optional",
+        "date type spec",
+        "Overrides automatic Right partition-date detection.",
+        "date",
+    ),
+    (
+        "pairs",
+        "right_options_json.format",
+        "Databricks files",
+        "text",
+        "Input file format for a Databricks files source.",
+        "parquet",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.run_mode",
+        "optional",
+        "full|left-only",
+        "Default execution mode.",
+        "full",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.sample",
+        "optional",
+        "all|fraction|count",
+        "Deterministic attribute sample; fractions are recommended.",
+        "0.1",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.audit",
+        "optional",
+        "boolean",
+        "Persist generated SQL audit artifacts.",
+        "FALSE",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.sync_remote",
+        "optional",
+        "boolean",
+        "Sync the Right package before a remote run.",
+        "TRUE",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.left_workers",
+        "optional",
+        "positive integer",
+        "Concurrent Left pull worker budget.",
+        "2",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.right_workers",
+        "optional",
+        "positive integer",
+        "Concurrent Right comparison worker budget.",
+        "8",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.difference_sample_rows",
+        "optional",
+        "positive integer",
+        "Maximum diagnostic difference rows per vintage.",
+        "100",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.vintage",
+        "date partition",
+        "day|week|month|quarter|year",
+        "Default comparison bucket.",
+        "month",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.vintage_sample_size",
+        "date partition",
+        "positive integer",
+        "Number of available vintage buckets selected deterministically for this run.",
+        "4",
+    ),
+    (
+        "pairs",
+        "left_options_json.service",
+        "optional Oracle",
+        "text",
+        "Oracle service override.",
+        "orders.example.net",
+    ),
+    (
+        "pairs",
+        "left_options_json.user_env",
+        "optional Oracle",
+        "environment variable name",
+        "Environment variable containing the Oracle user; never place the secret in Excel.",
+        "ORDERS_ORACLE_USER",
+    ),
+    (
+        "pairs",
+        "left_options_json.password_env",
+        "optional Oracle",
+        "environment variable name",
+        "Environment variable containing the Oracle password; never place the secret in Excel.",
+        "ORDERS_ORACLE_PASSWORD",
+    ),
+    (
+        "pairs",
+        "left_options_json.dsn_env",
+        "optional Oracle",
+        "environment variable name",
+        "Environment variable containing the Oracle DSN.",
+        "ORDERS_ORACLE_DSN",
+    ),
+    (
+        "pairs",
+        "left_options_json.ldap_dsn",
+        "optional Oracle",
+        "LDAP URL",
+        "Oracle LDAP naming URL without credentials.",
+        "ldap://host/service,cn=OracleContext,...",
+    ),
+    (
+        "pairs",
+        "left_options_json.ldap_dsn_env",
+        "optional Oracle",
+        "environment variable name",
+        "Environment variable containing the Oracle LDAP naming URL.",
+        "ORDERS_LDAP_DSN",
+    ),
+    (
+        "pairs",
+        "left_options_json.autocommit",
+        "optional Hadoop",
+        "boolean",
+        "ODBC autocommit setting.",
+        "TRUE",
+    ),
+    (
+        "pairs",
+        "left_options_json.nullstr",
+        "optional CSV",
+        "string or JSON array",
+        "CSV values treated as null.",
+        "NA",
+    ),
+    (
+        "pairs",
+        "left_options_json.date_format",
+        "optional CSV",
+        "date format",
+        "CSV partition date parsing format.",
+        "%Y%m%d",
+    ),
+    (
+        "pairs",
+        "left_options_json.options",
+        "optional CSV",
+        "JSON object",
+        "Additional DuckDB read_csv options.",
+        '{"delimiter":"|"}',
+    ),
+    (
+        "pairs",
+        "left_options_json.sample_hash",
+        "optional materialized sample",
+        "JSON object",
+        "Materialized deterministic sample-hash metadata.",
+        '{"version":1,"column":"SAMPLE_HASH"}',
+    ),
+    *(
+        (
+            "pairs",
+            f"left_options_json.{name}",
+            "optional Oracle",
+            "non-negative integer"
+            if name in {"prefetchrows", "fetch_retries"}
+            else "positive integer",
+            description,
+            example,
+        )
+        for name, description, example in (
+            ("arraysize", "Oracle cursor array size.", "1000"),
+            ("prefetchrows", "Oracle cursor prefetch row count.", "1000"),
+            ("fetch_batch_size", "Rows written per Oracle fetch batch.", "10000"),
+            ("fetch_retries", "Complete-vintage retries after transient Oracle errors.", "3"),
+            ("max_sessions", "Maximum concurrent Oracle sessions for this source.", "4"),
+        )
+    ),
+    (
+        "pairs",
+        "right_options_json.schema_hints",
+        "optional Databricks files",
+        "JSON object",
+        "Explicit input schema hints for file reads.",
+        '{"ORDER_ID":"BIGINT"}',
+    ),
+    (
+        "pairs",
+        "right_options_json.options",
+        "optional Databricks files/CSV",
+        "JSON object",
+        "Additional source reader options.",
+        '{"header":true}',
     ),
     ("pair_sql", "pair_name", "always", "text", "Must exist in pairs.", "orders"),
     ("pair_sql", "left_sql", "optional", "SQL", "Left base query.", "SELECT * FROM SALES.ORDERS"),
@@ -456,9 +769,26 @@ def _read_pair_rows(sheet) -> tuple[list[dict[str, Any]], dict[str, int]]:
             field="run_defaults_json",
             allowed=RUN_DEFAULT_FIELDS,
         )
+        for field in RUN_DEFAULT_LISTS:
+            if field not in defaults:
+                continue
+            raw_values = defaults[field]
+            if isinstance(raw_values, str):
+                raw_values = raw_values.split(",")
+            if isinstance(raw_values, list | tuple) and all(
+                isinstance(item, str) for item in raw_values
+            ):
+                defaults[field] = list(
+                    dict.fromkeys(item.strip() for item in raw_values if item.strip())
+                )
         _validate_run_defaults(defaults, row=number, keys=keys, partition=partition)
         if "snapshot" in left_options and not isinstance(left_options["snapshot"], bool):
             raise TypeError(f"pairs.xlsx row {number}: snapshot must be true or false")
+        if "sas_sample_csv" in left_options and not (
+            isinstance(left_options["sas_sample_csv"], str)
+            and left_options["sas_sample_csv"].strip()
+        ):
+            raise TypeError(f"pairs.xlsx row {number}: sas_sample_csv must be a path string")
         result.append(
             {
                 "pair_name": pair,

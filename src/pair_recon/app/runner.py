@@ -16,6 +16,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import DatabricksError
 from databricks.sdk.service.sql import StatementParameterListItem
 
+from pair_recon.core.backends.sas_sample import prepare_left_sample
 from pair_recon.core.backends.store import volume_failure_streak
 from pair_recon.core.metadata.configuration import build_pair_config
 from pair_recon.core.progress import ProgressSampler
@@ -679,10 +680,10 @@ def run_left(
     empty = plan_without_windows(store, pair)
     if not empty:
         log_vintage_coverage(store, pair)
-    if release:
-        release()
-    abort_if()
     if empty:
+        if release:
+            release()
+        abort_if()
         if left_only:
             require_plan_windows(store, pair, pair_config)
         result = wait_for_row_result(store, pair, abort_if=abort_if)
@@ -695,6 +696,8 @@ def run_left(
         return {"row": state, "units": 0}
     checks = pair_config.get("checks") or []
     if not any(check != "row_count" for check in checks):
+        if release:
+            release()
         return {"row": "ready", "units": 0}
     manifests = wait_for_manifests(
         store,
@@ -702,13 +705,46 @@ def run_left(
         pair_names=[pair],
         abort_if=abort_if,
     )
+    sas_sample = prepare_left_sample(pair, pair_config, manifests[0])
+    source_configs = None
+    if sas_sample:
+        if sas_sample["state"] != "ready":
+            log.warning(
+                "SAS sample required: pair=%s reason=%s; run %s in SAS and save %s",
+                pair,
+                sas_sample["reason"],
+                sas_sample["sql"],
+                sas_sample["csv"],
+            )
+            return {
+                "row": "ready",
+                "units": 0,
+                "state": "awaiting_sample",
+                "sas": sas_sample,
+            }
+        source_configs = {pair: sas_sample["source"]}
+        log.info(
+            "using validated SAS sample: pair=%s windows=%d csv=%s",
+            pair,
+            sas_sample["windows"],
+            sas_sample["csv"],
+        )
+    if release:
+        release()
+    abort_if()
     if not left_only:
         wait_for_row_check_result(store, pair, abort_if=abort_if)
     for manifest in manifests:
         abort_if()
         publish_fixed_keys(store, manifest, work_dir, stop=stop)
     abort_if()
-    runtime = LeftRuntime(work_dir, store, force=force, stop=stop)
+    runtime = LeftRuntime(
+        work_dir,
+        store,
+        force=force,
+        stop=stop,
+        source_configs=source_configs,
+    )
     units = ColCheckPipeline(
         store,
         pull_window=runtime.pull_window,
@@ -949,6 +985,40 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
     return published
 
 
+def cleanup_left_pull_files(
+    run_dir: str | Path, pair: str, *, preserve: tuple[str | Path, ...] = ()
+) -> dict[str, int]:
+    root = Path(run_dir) / pair
+    protected = {Path(path).expanduser().resolve() for path in preserve if path}
+    removed = 0
+    released_bytes = 0
+    for pattern in ("left.csv", "left.csv.pair_recon.json"):
+        for path in root.rglob(pattern) if root.is_dir() else ():
+            if path.resolve() in protected:
+                continue
+            try:
+                released_bytes += path.stat().st_size
+            except OSError:
+                pass
+            path.unlink(missing_ok=True)
+            removed += 1
+    if root.is_dir():
+        directories = (path for path in root.rglob("*") if path.is_dir())
+        for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+    if removed:
+        log.info(
+            "cleaned derived Left pull files: pair=%s files=%d bytes=%d",
+            pair,
+            removed,
+            released_bytes,
+        )
+    return {"files": removed, "bytes": released_bytes}
+
+
 def launch(settings: dict, config: dict, *, action: str, workspace_client=None, catalog=None):
     pair = next(iter(config["pairs"]))
     run_id = validate_run_id(settings["run_id"])
@@ -1092,7 +1162,31 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             stop=stop,
         )
         log.info("Left checks completed: %s", left)
-        if left_only:
+        if left.get("state") == "awaiting_sample":
+            final_state = "awaiting_sample"
+            right = {"state": "not_run"}
+            write_run_status(
+                store,
+                {
+                    "state": final_state,
+                    "run_id": run_id,
+                    "role": "left",
+                    "mode": run_mode,
+                    "sas": left["sas"],
+                },
+                timezone_name=settings["timezone"],
+            )
+            refresh_units_status(store)
+            if catalog:
+                catalog.status(
+                    run_id=run_id,
+                    pair=pair,
+                    owner=settings["owner"],
+                    state=final_state,
+                    timezone=settings["timezone"],
+                    **run_values,
+                )
+        elif left_only:
             final_state = "left_complete"
             right = {"state": "not_run"}
             write_run_status(
@@ -1166,6 +1260,14 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
         except Exception:
             log.exception("could not publish Left/Right difference samples")
             difference_samples = 0
+        cleanup = {"files": 0, "bytes": 0}
+        if final_state in {"passed", "different", "left_complete", "finished"}:
+            sas_csv = (config["pairs"][pair].get("left") or {}).get("sas_sample_csv")
+            cleanup = cleanup_left_pull_files(
+                run_dir,
+                pair,
+                preserve=(sas_csv,) if sas_csv else (),
+            )
         if sampler:
             sampler.stop(final_state, required=not remote_right, capture=not remote_right)
             sampler = None
@@ -1179,6 +1281,7 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             "left_log": str(left_log),
             "right": right,
             "difference_samples": difference_samples,
+            "local_cleanup": cleanup,
             "volume_run_root": store.root_uri,
         }
     except BaseException as exc:

@@ -5,7 +5,11 @@ import pytest
 from support import MemoryStore
 
 from pair_recon_left.common.checks import row_check
-from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
+from pair_recon_left.common.checks.row_check import (
+    public_pair_config,
+    reuse_row_check,
+    run_row_check,
+)
 from pair_recon_left.common.model.protocol import (
     get_left_state,
     get_right_state,
@@ -25,6 +29,21 @@ class Source:
 
     def partition_counts(self, *_args):
         return self.counts
+
+
+def test_public_pair_config_excludes_local_sas_handoff_path():
+    pair = {
+        "left": {
+            "source": "oracle",
+            "table": "orders",
+            "sas_sample_csv": "C:/PairRecon/samples/orders/left_sample.csv",
+        },
+        "right": {"source": "databricks", "table": "orders"},
+    }
+
+    public = public_pair_config(pair)
+
+    assert public["left"] == {"source": "oracle", "table": "orders"}
 
 
 def test_run_requires_exactly_one_pair():

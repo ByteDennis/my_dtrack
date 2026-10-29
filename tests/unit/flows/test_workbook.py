@@ -7,8 +7,11 @@ from openpyxl import load_workbook
 from pair_recon.core.metadata.configuration import build_pair_config
 from pair_recon.core.metadata.workbook import (
     FIELD_GUIDE_COLUMNS,
+    LEFT_OPTION_FIELDS,
     PAIR_SQL_WORKBOOK_COLUMNS,
     PAIR_WORKBOOK_COLUMNS,
+    RIGHT_OPTION_FIELDS,
+    RUN_DEFAULT_FIELDS,
     changed_pair_configurations,
     create_pair_workbook,
     pair_configuration_signature,
@@ -64,6 +67,11 @@ def test_create_and_read_pair_workbook(tmp_path):
         "Run defaults; prefer sample fractions.",
         '{"sample":0.1}',
     )
+    assert guide["left_options_json.sas_sample_csv"][5].endswith("left_sample.csv")
+    guide_names = set(guide)
+    assert {f"run_defaults_json.{name}" for name in RUN_DEFAULT_FIELDS} <= guide_names
+    assert {f"left_options_json.{name}" for name in LEFT_OPTION_FIELDS} <= guide_names
+    assert {f"right_options_json.{name}" for name in RIGHT_OPTION_FIELDS} <= guide_names
     set_row(workbook["pairs"], valid_pair_row())
     set_row(
         workbook["pair_sql"],
@@ -227,6 +235,50 @@ def test_run_defaults_accept_every_prompt_default(tmp_path):
     assert json.loads(rows[0]["run_defaults_json"]) == FULL_RUN_DEFAULTS
 
 
+def test_run_defaults_normalize_comma_lists(tmp_path):
+    values = {
+        **FULL_RUN_DEFAULTS,
+        "checks": "row_count, hash_sum, row_count",
+        "excluded_partitions": "2026-01-02, 2026-02-01->2026-02-03,",
+        "excluded_columns": "AMOUNT, COMMENTS, AMOUNT",
+        "vintage_sample_size": None,
+        "vintage_values": "2026-01-01, 2026-04-01",
+    }
+
+    defaults = json.loads(_read_with_defaults(tmp_path, values)[0]["run_defaults_json"])
+
+    assert defaults["checks"] == ["row_count", "hash_sum"]
+    assert defaults["excluded_partitions"] == [
+        "2026-01-02",
+        "2026-02-01->2026-02-03",
+    ]
+    assert defaults["excluded_columns"] == ["AMOUNT", "COMMENTS"]
+    assert defaults["vintage_values"] == ["2026-01-01", "2026-04-01"]
+
+
+def test_left_options_accept_sas_sample_path_and_oracle_tuning(tmp_path):
+    path = create_pair_workbook(tmp_path / "pairs.xlsx")
+    workbook = load_workbook(path)
+    row = valid_pair_row()
+    row[9] = json.dumps(
+        {
+            "sas_sample_csv": "C:/PairRecon/samples/orders/left_sample.csv",
+            "arraysize": 2000,
+            "prefetchrows": 1000,
+            "fetch_batch_size": 20000,
+            "fetch_retries": 2,
+            "max_sessions": 4,
+        }
+    )
+    set_row(workbook["pairs"], row)
+    set_row(workbook["pair_sql"], ["orders", None, None, "SELECT 1", None])
+    workbook.save(path)
+
+    parsed = read_pair_workbook(path)[0]
+
+    assert json.loads(parsed["left_options_json"])["sas_sample_csv"].endswith("left_sample.csv")
+
+
 @pytest.mark.parametrize(
     "partition",
     ["day", "month", "all"],
@@ -255,8 +307,8 @@ def test_partition_column_builds_internal_config(tmp_path, partition):
         ({"sync_remote": 1}, "sync_remote must be true or false"),
         ({"left_workers": 0}, "left_workers must be a positive integer"),
         ({"right_workers": True}, "right_workers must be a positive integer"),
-        ({"excluded_partitions": "2026-01-02"}, "excluded_partitions must be a string array"),
-        ({"excluded_columns": "AMOUNT"}, "excluded_columns must be a string array"),
+        ({"excluded_partitions": [20260102]}, "excluded_partitions must be a string array"),
+        ({"excluded_columns": {"AMOUNT": True}}, "excluded_columns must be a string array"),
         ({"cadence": "x"}, "run_defaults_json has unsupported fields: cadence"),
     ],
 )

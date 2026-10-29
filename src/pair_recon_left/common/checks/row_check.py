@@ -27,6 +27,7 @@ from ..sql.dates import resolve_date_type
 log = get_left_logger("row_check")
 ROW_COUNT_LOG_INTERVAL = 60.0
 SECRET_FIELDS = {"user", "password", "access_token", "dsn", "server_hostname", "http_path"}
+LOCAL_SOURCE_FIELDS = {"sas_sample_csv"}
 STAGE_ONE_FIELDS = (
     "left",
     "right",
@@ -49,7 +50,9 @@ def public_pair_config(pair: dict[str, Any]) -> dict[str, Any]:
     result = {key: value for key, value in pair.items() if key not in ("left", "right")}
     for side in ("left", "right"):
         result[side] = {
-            k: v for k, v in pair[side].items() if k not in SECRET_FIELDS and not k.endswith("_env")
+            k: v
+            for k, v in pair[side].items()
+            if k not in SECRET_FIELDS | LOCAL_SOURCE_FIELDS and not k.endswith("_env")
         }
         if "date_type" in result[side]:
             result[side]["date_type"] = resolve_date_type(result[side]["date_type"]).spec(

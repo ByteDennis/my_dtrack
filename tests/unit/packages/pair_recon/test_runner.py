@@ -28,6 +28,7 @@ from pair_recon.app.runner import (
     write_request_snapshot,
 )
 from pair_recon.core import debug, sas
+from pair_recon.core.backends import sas_sample
 from pair_recon.core.progress import ProgressSampler, progress_snapshot
 from pair_recon.core.sas import export_bundle
 from pair_recon_left.common.checks import col_check as left_col_check
@@ -1222,6 +1223,116 @@ def test_sas(tmp_path):
     assert (bundle / "left.sas").is_file() and (bundle / "right.sas").is_file()
 
 
+def test_sas_hadoop_query_keeps_native_odbc_dialect():
+    pair = {
+        "partition": "all",
+        "left": {"source": "hadoop", "schema": "risk", "table": "orders"},
+        "key": "ID",
+        "col_map": {"VALUE": "value"},
+    }
+
+    sql, adapter = sas._sql(pair, "left", 0.1)
+
+    assert adapter == "odbc"
+    assert "FROM `risk`.`orders`" in sql
+    assert "conv(SUBSTR(LOWER(md5(" in sql
+
+
+def test_sas_sample_request_combines_all_vintages_into_one_csv(monkeypatch, tmp_path):
+    calls = []
+
+    class Source:
+        dialect = "oracle"
+
+        def pull_window_sql(self, partitions, columns, **options):
+            calls.append((partitions, columns, options))
+            return "SELECT ORDER_DT, ID, VALUE FROM SALES.ORDERS WHERE ACTIVE = 1", [
+                "ORDER_DT",
+                "ID",
+                "VALUE",
+            ]
+
+    monkeypatch.setattr(sas_sample, "source_from_config", lambda _config: Source())
+    sample = tmp_path / "left_sample.csv"
+    pair = {
+        "left": {
+            "source": "oracle",
+            "table": "SALES.ORDERS",
+            "sas_sample_csv": str(sample),
+        }
+    }
+    windows = [
+        {"bucket": month, "partitions": [f"{month}-01", f"{month}-02"]}
+        for month in ("2026-01", "2026-04", "2026-07", "2026-10")
+    ]
+    manifest = {
+        "pair": "orders",
+        "plan_id": "plan-1",
+        "partition": "day",
+        "vintage": "month",
+        "sample": {"mode": "fraction", "rate": 0.1, "threshold": 100_000},
+        "windows": windows,
+        "left": {"source": "oracle", "table": "SALES.ORDERS", "date_col": "ORDER_DT"},
+        "key_cols": ["ID"],
+        "key_families": ["numeric"],
+        "columns": ["VALUE"],
+    }
+
+    waiting = sas_sample.prepare_left_sample("orders", pair, manifest)
+
+    assert waiting["state"] == "awaiting_sample"
+    assert waiting["windows"] == 4
+    assert Path(waiting["sql"]).is_file()
+    assert 'AS "__pair_recon_request_id"' in Path(waiting["sql"]).read_text(encoding="utf-8")
+    assert Path(waiting["request"]).is_file()
+    assert len(calls) == 1
+    assert calls[0][0] == [
+        "2026-01-01",
+        "2026-01-02",
+        "2026-04-01",
+        "2026-04-02",
+        "2026-07-01",
+        "2026-07-02",
+        "2026-10-01",
+        "2026-10-02",
+    ]
+    request_id = waiting["request_id"]
+    sample.write_text(
+        f"__pair_recon_request_id,ORDER_DT,ID,VALUE\n{request_id},2026-01-01,1,10\n",
+        encoding="utf-8",
+    )
+
+    ready = sas_sample.prepare_left_sample("orders", pair, manifest)
+
+    assert ready["state"] == "ready"
+    assert ready["source"]["path"] == str(sample)
+    assert ready["source"]["pre_sampled"] is True
+    assert not any("sas" in name for name in ready["source"])
+    assert list(tmp_path.glob("*.csv")) == [sample]
+
+
+def test_cleanup_left_pull_files_removes_only_derived_window_files(tmp_path):
+    run_dir = tmp_path / "run"
+    derived = run_dir / "orders" / "2026-01" / "left.csv"
+    metadata = derived.with_name("left.csv.pair_recon.json")
+    keep = run_dir / "orders" / "input" / "left.csv"
+    unrelated = run_dir / "orders" / "2026-01" / "notes.txt"
+    for path, content in (
+        (derived, "A\n1\n"),
+        (metadata, "{}"),
+        (keep, "A\n1\n"),
+        (unrelated, "keep"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    result = runner.cleanup_left_pull_files(run_dir, "orders", preserve=(keep,))
+
+    assert result == {"files": 2, "bytes": 6}
+    assert not derived.exists() and not metadata.exists()
+    assert keep.is_file() and unrelated.is_file()
+
+
 def test_sas_default_bundle_uses_output_root(monkeypatch, tmp_path, capsys):
     target = tmp_path / "artifacts"
     seen = {}
@@ -1700,9 +1811,7 @@ def test_pair_workbook_path_uses_environment_even_when_missing(monkeypatch, tmp_
     assert cli.pair_workbook_path({"pair_workbook": "ignored.xlsx"}) == workbook
 
 
-def test_prompt_can_use_databricks_metadata_without_syncing_local_workbook(
-    monkeypatch, tmp_path, capsys
-):
+def test_prompt_always_synchronizes_an_existing_local_workbook(monkeypatch, tmp_path):
     defaults = {
         "owner": "me",
         "profile": "corp",
@@ -1728,11 +1837,13 @@ def test_prompt_can_use_databricks_metadata_without_syncing_local_workbook(
     (tmp_path / "pairs.xlsx").touch()
     monkeypatch.setenv("DBX_SYNC_PAIR_METADATA", "false")
     monkeypatch.setattr(cli, "Catalog", Catalog)
-    monkeypatch.setattr(
-        cli,
-        "synchronize_pair_workbook",
-        lambda *_args: pytest.fail("disabled metadata synchronization must not read the workbook"),
-    )
+    calls = []
+
+    def synchronize(*args):
+        calls.append(args)
+        return [], {"rows": 0, "pairs": [], "source": str(tmp_path / "pairs.xlsx")}
+
+    monkeypatch.setattr(cli, "synchronize_pair_workbook", synchronize)
 
     with pytest.raises(RuntimeError, match="have no enabled pair"):
         cli.prompts(
@@ -1741,9 +1852,8 @@ def test_prompt_can_use_databricks_metadata_without_syncing_local_workbook(
             interactive=False,
         )
 
-    output = capsys.readouterr().out
-    assert "DBX_SYNC_PAIR_METADATA=false" in output
-    assert "using Databricks metadata as the source of truth" in output
+    assert len(calls) == 1
+    assert calls[0][3] == tmp_path / "pairs.xlsx"
 
 
 def test_synchronize_key_types_writes_data_type_to_the_column_map():
@@ -2241,6 +2351,92 @@ def test_left_only_does_not_start_or_run_right(monkeypatch, tmp_path):
         "finish:left_complete",
         "left_complete",
     ]
+
+
+def test_launch_records_awaiting_sample_without_finishing_or_starting_right(monkeypatch, tmp_path):
+    store = MemoryStore()
+    events = []
+
+    class Root:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def child(self, _run_id):
+            return store
+
+    class Sampler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self, **_kwargs):
+            return self
+
+        def stop(self, state, **_kwargs):
+            events.append(f"stop:{state}")
+
+    class Catalog:
+        progress = staticmethod(lambda _row: None)
+
+        def clear(self, _run_id):
+            pass
+
+        def status(self, **values):
+            events.append(f"status:{values['state']}")
+
+        def finish(self, *_args, **_kwargs):
+            pytest.fail("awaiting_sample is not a terminal result")
+
+    def right_called(*_args, **_kwargs):
+        pytest.fail("Right must not start while the SAS sample is missing")
+
+    sample = {
+        "state": "awaiting_sample",
+        "reason": "CSV is missing",
+        "sql": str(tmp_path / "left_sample.sql"),
+        "csv": str(tmp_path / "left_sample.csv"),
+        "request": str(tmp_path / "left_sample.request.yaml"),
+        "request_id": "abc",
+        "windows": 4,
+    }
+    monkeypatch.setattr(runner, "VolumeStore", Root)
+    monkeypatch.setattr(runner, "ProgressSampler", Sampler)
+    monkeypatch.setattr(runner, "configure_left_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "run_left",
+        lambda *_args, **_kwargs: {
+            "row": "ready",
+            "units": 0,
+            "state": "awaiting_sample",
+            "sas": sample,
+        },
+    )
+    settings = {
+        "run_id": "orders-me-20261028",
+        "run_mode": "full",
+        "profile": "corp",
+        "volume_root": "/Volumes/c/s/v/runs",
+        "work_dir": str(tmp_path),
+        "timezone": "America/New_York",
+        "owner": "me",
+        "pair_table": "c.s.pairs",
+        "status_table": "c.s.status",
+        "error_table": "c.s.errors",
+        "right_job_id": "42",
+    }
+    client = SimpleNamespace(
+        files=object(), jobs=SimpleNamespace(run_now=right_called, cancel_run=right_called)
+    )
+    config = {"pairs": {"orders": {"right": {"source": "databricks"}}}}
+
+    result = runner.launch(
+        settings, config, action="new", workspace_client=client, catalog=Catalog()
+    )
+
+    assert result["state"] == "awaiting_sample"
+    assert result["right"] == {"state": "not_run"}
+    assert store.get_json(RUN_STATUS)["sas"]["windows"] == 4
+    assert events == ["status:running", "status:awaiting_sample", "stop:awaiting_sample"]
 
 
 def test_launch_writes_early_failure_to_left_log(monkeypatch, tmp_path):
@@ -2883,6 +3079,46 @@ def test_run_left_pulls_only_after_the_right_row_check_result(monkeypatch, tmp_p
     with pytest.raises(RuntimeError, match="Right failed"):
         runner.run_left(config, MemoryStore(), "run", "orders", tmp_path, abort_if=abort)
     assert len(polls) == 3 and seen == [True]
+
+
+def test_run_left_waits_for_sas_sample_before_starting_right(monkeypatch, tmp_path):
+    store = MemoryStore()
+    seen = []
+    config = _stub_column_checks(monkeypatch, store, seen)
+    config["pairs"]["orders"]["left"] = {
+        "source": "oracle",
+        "sas_sample_csv": str(tmp_path / "left_sample.csv"),
+    }
+    events = []
+
+    def prepare(pair_name, pair, manifest):
+        events.append(("prepare", pair_name, manifest["pair"]))
+        assert pair is config["pairs"]["orders"]
+        return {
+            "state": "awaiting_sample",
+            "reason": "CSV is missing",
+            "sql": str(tmp_path / "left_sample.sql"),
+            "csv": str(tmp_path / "left_sample.csv"),
+            "request": str(tmp_path / "left_sample.request.yaml"),
+            "request_id": "abc",
+            "windows": 1,
+        }
+
+    monkeypatch.setattr(runner, "prepare_left_sample", prepare)
+
+    result = runner.run_left(
+        config,
+        store,
+        "run",
+        "orders",
+        tmp_path,
+        release=lambda: events.append(("release",)),
+    )
+
+    assert result["state"] == "awaiting_sample"
+    assert result["row"] == "ready"
+    assert events == [("prepare", "orders", "orders")]
+    assert seen == []
 
 
 def test_run_left_reports_unexcluded_mismatches_before_pulling(monkeypatch, tmp_path):

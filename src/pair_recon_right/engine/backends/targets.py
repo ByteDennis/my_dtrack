@@ -33,6 +33,7 @@ from ..common.sql.dates import (
 )
 from ..common.sql.query_windows import normalize_query_windows, render_query_windows
 from ..common.sql.sampling import sample_predicate_sql
+from .frame_stats import EXTREMES, frame_statistics
 
 log = logging.getLogger("pair_recon.right.target")
 NUMERIC_TYPES = (
@@ -71,6 +72,7 @@ def check_date_column(column: str, column_type: str | None, date_type: DateType,
 
 
 STATS_COLUMNS = int(os.environ.get("RIGHT_STATS_COLUMNS") or 50)
+STATS_DRIVER_ROWS = int(os.environ.get("RIGHT_STATS_DRIVER_ROWS") or 2000000)
 
 
 class CsvTarget:
@@ -424,24 +426,17 @@ class SparkTarget:
         )
         return int(rows[0][0]) if rows else 0
 
-    # >>> one aggregate query per STATS_COLUMNS columns; wide tables otherwise stall Spark's planner <<< #
-    def window_statistics(
-        self, manifest: dict[str, Any], window: dict[str, Any], progress=None
-    ) -> dict[str, dict[str, Any]]:
+    # >>> per-column Spark expressions: normalized text, double value, and the min/max operand <<< #
+    def _column_plans(self, manifest: dict[str, Any]) -> list[dict[str, Any]]:
         normalization_rules = active_normalization_rules(
             manifest.get("normalization_rules"),
             (manifest.get("right") or {}).get("source") or self.config["source"],
         )
-        where, sample = self._window_where(manifest, window)
-        right_columns = [manifest["col_map"][column] for column in manifest["columns"]]
         overrides = manifest.get("col_type_overrides") or {}
         column_types = manifest.get("column_types") or {}
-        selected = manifest.get("statistics") or list(DEFAULT_STATISTICS)
-        include_top = "statistics" not in manifest
-        kinds = {}
-        groups = []
-        for i, (left_column, column) in enumerate(zip(manifest["columns"], right_columns)):
-            selects = []
+        plans = []
+        for i, left_column in enumerate(manifest["columns"]):
+            column = manifest["col_map"][left_column]
             ref = quote_ident(column, "spark")
             column_type = self.column_types.get(column, "")
             native = any(column_type.startswith(t) for t in NUMERIC_TYPES)
@@ -451,7 +446,6 @@ class SparkTarget:
             numeric = not comparison and (
                 requested == "numeric" or (requested is None and native and not integral)
             )
-            kinds[column] = numeric
             text = f"cast({ref} as string)"
             if comparison:
                 normalizer = resolve_column_type(comparison)
@@ -472,7 +466,25 @@ class SparkTarget:
                 if numeric
                 else text
             )
-            extreme = ref if integral and numeric else value
+            plans.append(
+                {
+                    "index": i,
+                    "column": column,
+                    "text": text,
+                    "value": value,
+                    "extreme": ref if integral and numeric else value,
+                    "numeric": numeric,
+                    "integral": integral,
+                }
+            )
+        return plans
+
+    # >>> one Spark aggregate query over a batch of columns; the row carries <name>_<index> fields <<< #
+    def _spark_statistics(self, plans, selected, relation, where) -> dict[str, dict[str, Any]]:
+        selects = ["count(1) AS n_total"]
+        for plan in plans:
+            i, text, value, extreme = plan["index"], plan["text"], plan["value"], plan["extreme"]
+            numeric = plan["numeric"]
             if "n_missing" in selected:
                 selects.append(f"count_if({text} IS NULL) AS n_missing_{i}")
             if "n_unique" in selected:
@@ -505,30 +517,13 @@ class SparkTarget:
                     if numeric
                     else f"max(length({text})) AS length_max_{i}"
                 )
-            groups.append(selects)
-        batch = max(1, STATS_COLUMNS)
-        starts = range(0, len(groups), batch)
-        log.info(
-            "window_statistics partitions=%s columns=%d statistics=%s sample=%s batches=%d",
-            window["partitions"],
-            len(right_columns),
-            selected,
-            bool(sample),
-            len(starts),
-        )
-        relation = self.relation(partitions=window["partitions"])
-        row: dict[str, Any] = {}
-        for start in starts:
-            selects = [item for group in groups[start : start + batch] for item in group]
-            sql = f"SELECT {', '.join(['count(1) AS n_total', *selects])} FROM {relation} WHERE {where}"
-            row.update(self._collect(sql, "window_statistics")[0].asDict())
-            if progress is not None:
-                progress(min(start + batch, len(groups)), len(groups))
+        sql = f"SELECT {', '.join(selects)} FROM {relation} WHERE {where}"
+        row = self._collect(sql, "window_statistics")[0].asDict()
         stats = {}
-        for i, column in enumerate(right_columns):
-            numeric = kinds[column]
+        for plan in plans:
+            i = plan["index"]
             payload: dict[str, Any] = {
-                "col_type": "numeric" if numeric else "categorical",
+                "col_type": "numeric" if plan["numeric"] else "categorical",
                 "n_total": int(row["n_total"]),
             }
             if "n_missing" in selected:
@@ -547,9 +542,65 @@ class SparkTarget:
             for name in ("min", "max"):
                 if name in selected:
                     payload[f"{name}_val"] = row[f"{name}_{i}"]
-            if include_top:
+            stats[plan["column"]] = payload
+        return stats
+
+    # >>> Spark only projects the normalized text (and double value) of a batch; pandas reduces it on the driver <<< #
+    def _driver_statistics(self, plans, selected, relation, where) -> dict[str, dict[str, Any]]:
+        selects = []
+        for plan in plans:
+            selects.append(f"{plan['text']} AS t{plan['index']}")
+            if plan["numeric"] and any(name in selected for name in EXTREMES):
+                selects.append(f"{plan['value']} AS v{plan['index']}")
+        sql = f"SELECT {', '.join(selects)} FROM {relation} WHERE {where}"
+        self._audit(sql, "window_statistics")
+        started = time.monotonic()
+        try:
+            frame = self.spark.sql(sql).toPandas()
+        except Exception:
+            log.exception(
+                "spark.sql window_statistics failed after %.3fs", time.monotonic() - started
+            )
+            raise
+        log.info(
+            "spark.sql window_statistics: %d rows x %d columns to pandas (%.3fs)",
+            len(frame),
+            len(frame.columns),
+            time.monotonic() - started,
+        )
+        return frame_statistics(frame, plans, selected)
+
+    # >>> STATS_COLUMNS columns per query; windows up to STATS_DRIVER_ROWS rows are reduced in pandas on the driver, larger ones aggregate in Spark <<< #
+    def window_statistics(
+        self, manifest: dict[str, Any], window: dict[str, Any], progress=None
+    ) -> dict[str, dict[str, Any]]:
+        where, sample = self._window_where(manifest, window)
+        plans = self._column_plans(manifest)
+        selected = manifest.get("statistics") or list(DEFAULT_STATISTICS)
+        relation = self.relation(partitions=window["partitions"])
+        rows = self.window_count(manifest, window) if STATS_DRIVER_ROWS > 0 else None
+        on_driver = rows is not None and rows <= STATS_DRIVER_ROWS
+        batch = max(1, STATS_COLUMNS)
+        starts = range(0, len(plans), batch)
+        log.info(
+            "window_statistics partitions=%s columns=%d statistics=%s sample=%s rows=%s engine=%s batches=%d",
+            window["partitions"],
+            len(plans),
+            selected,
+            bool(sample),
+            rows,
+            "pandas" if on_driver else "spark",
+            len(starts),
+        )
+        reduce = self._driver_statistics if on_driver else self._spark_statistics
+        stats: dict[str, dict[str, Any]] = {}
+        for start in starts:
+            stats.update(reduce(plans[start : start + batch], selected, relation, where))
+            if progress is not None:
+                progress(min(start + batch, len(plans)), len(plans))
+        if "statistics" not in manifest:
+            for payload in stats.values():
                 payload["top_10"] = ""
-            stats[column] = payload
         return stats
 
     # >>> keep a bounded raw sample in the Right process; it is written only if comparison finds a diff <<< #

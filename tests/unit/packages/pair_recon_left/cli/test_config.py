@@ -52,6 +52,41 @@ def test_hadoop():
     assert validate_config({"version": 2, "pairs": {"p": value}})
 
 
+@pytest.mark.parametrize("source", ["oracle", "hadoop"])
+def test_sas_sample_csv(source):
+    value = pair("day")
+    value["sample"] = 0.1
+    value["key"] = "A"
+    value["left"] = {
+        "source": source,
+        "date_col": "D",
+        "sas_sample_csv": " C:/PairRecon/samples/left.csv ",
+        **({"table": "L"} if source == "oracle" else {"schema": "risk", "table": "L"}),
+    }
+
+    configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
+
+    assert configured["left"]["sas_sample_csv"] == "C:/PairRecon/samples/left.csv"
+
+
+def test_sas_sample_csv_rejects_csv_source_and_fixed_sampling():
+    value = pair("day")
+    value["left"] = {
+        "source": "csv",
+        "path": "left.csv",
+        "date_col": "D",
+        "sas_sample_csv": "sample.csv",
+    }
+    with pytest.raises(ValueError, match="Oracle or Hadoop"):
+        validate_config({"version": 2, "pairs": {"p": value}})
+
+    value = pair("day")
+    value.update(sample=10, key="A")
+    value["left"]["sas_sample_csv"] = "sample.csv"
+    with pytest.raises(ValueError, match="all or fraction"):
+        validate_config({"version": 2, "pairs": {"p": value}})
+
+
 @pytest.mark.parametrize("source", ["databricks", "csv"])
 def test_right(source):
     value = pair()

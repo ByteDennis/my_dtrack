@@ -18,6 +18,7 @@ EXECUTED = {
     "left_only",
     "right_only",
     "left_complete",
+    "awaiting_sample",
     "finished",
 }
 

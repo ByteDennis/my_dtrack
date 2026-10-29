@@ -1,11 +1,14 @@
+import csv
 import re
 from datetime import date
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 from support import FakeRow, FakeSpark
 
 from pair_recon_right.engine.backends import targets
+from pair_recon_right.engine.backends.frame_stats import frame_statistics, hash16
 from pair_recon_right.engine.backends.targets import CsvTarget, SparkTarget
 from pair_recon_right.engine.common.model.hashing import collapse_decimal
 
@@ -19,6 +22,11 @@ DESCRIBE = [
     ("", "", ""),
     ("# Partition Information", "", ""),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _spark_aggregates(monkeypatch):
+    monkeypatch.setattr(targets, "STATS_DRIVER_ROWS", 0)
 
 
 def _spark_rule(sql_text):
@@ -558,3 +566,134 @@ def test_statistics_batches_wide_tables(monkeypatch):
     assert "AS n_unique_1" in queries[0] and "AS n_unique_2" not in queries[0]
     assert "AS n_unique_2" in queries[1] and "AS n_unique_0" not in queries[1]
     assert stats["amount"]["hash_sum"] == "2000" and stats["status"]["length_max"] == 2
+
+
+DRIVER_ROWS = {
+    "t0": ["1", "2", "9", "9"],
+    "t1": ["2.5", "9.75", None, "9.75"],
+    "v1": [2.5, 9.75, None, 9.75],
+    "t2": ["a", "bb", None, "a"],
+}
+
+
+def _driver_spark(count=4):
+    def respond(sql):
+        if sql.startswith("DESCRIBE"):
+            return DESCRIBE
+        if sql.startswith("SELECT count(1) FROM"):
+            return [(count,)]
+        names = re.findall(r" AS ([tv][0-9]+)", sql)
+        return [FakeRow({name: DRIVER_ROWS[name][i] for name in names}) for i in range(4)]
+
+    return FakeSpark(respond)
+
+
+def test_statistics_reduce_in_pandas_below_the_driver_row_cap(monkeypatch):
+    monkeypatch.setattr(targets, "STATS_DRIVER_ROWS", 1000)
+    monkeypatch.setattr(targets, "STATS_COLUMNS", 2)
+    spark = _driver_spark()
+    seen = []
+    stats = SparkTarget(spark, ORDERS).window_statistics(
+        _manifest({"mode": "all"}),
+        {"bucket": "2026-01-01", "partitions": ["2026-01-01"]},
+        progress=lambda done, total: seen.append((done, total)),
+    )
+    count, *queries = spark.statements[1:]
+    assert count.startswith("SELECT count(1) FROM `main`.`sales`.`orders` WHERE ")
+    assert len(queries) == 2 and seen == [(2, 3), (3, 3)]
+    assert queries[0].startswith("SELECT ") and "cast(`order_id` as string)" in queries[0]
+    assert " AS t0, " in queries[0] and " AS t1, " in queries[0] and " AS t2" not in queries[0]
+    assert " AS v1 FROM" in queries[0] and " AS v0" not in queries[0]
+    assert "cast(`status` as string)" in queries[1] and " AS t2 FROM" in queries[1]
+    assert " AS t1" not in queries[1] and " AS v2" not in queries[1]
+    assert all("count(DISTINCT" not in query and "sha2(" not in query for query in queries)
+    assert stats["order_id"] == {
+        "col_type": "categorical",
+        "n_total": 4,
+        "n_missing": 0,
+        "n_unique": 3,
+        "hash_sum": str(sum(hash16(value) for value in DRIVER_ROWS["t0"])),
+        "mean": None,
+        "std": None,
+        "min_val": "1",
+        "max_val": "9",
+        "length_avg": 1.0,
+        "length_max": 1,
+        "top_10": "",
+    }
+    amount = stats["amount"]
+    assert amount["col_type"] == "numeric" and amount["n_missing"] == 1
+    assert amount["n_unique"] == 2 and amount["min_val"] == "2.5" and amount["max_val"] == "9.75"
+    assert amount["hash_sum"] == str(hash16("2.5") + 2 * hash16("9.75") + hash16("<<NULL>>"))
+    assert amount["mean"] == pytest.approx(22 / 3) and amount["std"] == pytest.approx(4.186, 1e-3)
+    assert amount["length_avg"] is None and amount["length_max"] is None
+    assert stats["status"]["length_avg"] == pytest.approx(4 / 3)
+    assert stats["status"]["length_max"] == 2 and stats["status"]["n_unique"] == 2
+    manifest = _manifest({"mode": "all"})
+    manifest["statistics"] = ["n_unique", "hash_sum"]
+    selected = SparkTarget(spark, ORDERS).window_statistics(
+        manifest, {"partitions": ["2026-01-01"]}
+    )
+    assert " AS v1" not in spark.statements[-1]
+    assert selected["amount"] == {
+        "col_type": "numeric",
+        "n_total": 4,
+        "n_unique": 2,
+        "hash_sum": amount["hash_sum"],
+    }
+
+
+def test_statistics_fall_back_to_spark_above_the_driver_row_cap(monkeypatch):
+    monkeypatch.setattr(targets, "STATS_DRIVER_ROWS", 3)
+    spark = FakeSpark(
+        lambda sql: (
+            DESCRIBE
+            if sql.startswith("DESCRIBE")
+            else [(4,)]
+            if sql.startswith("SELECT count(1) FROM")
+            else [FakeRow(_stats_row())]
+        )
+    )
+    stats = SparkTarget(spark, ORDERS).window_statistics(
+        _manifest({"mode": "all"}), {"partitions": ["2026-01-01"]}
+    )
+    assert spark.statements[2].startswith("SELECT count(1) AS n_total, count_if(")
+    assert stats["amount"]["hash_sum"] == "2000"
+
+
+def test_driver_statistics_match_the_left_duckdb_statistics(tmp_path):
+    from pair_recon_left.common.model.manifest import DEFAULT_STATISTICS
+    from pair_recon_left.common.runtime.stats import compute_csv_statistics
+
+    amount = ["2.5", "9.75", None, "9.75", "3.125"]
+    status = ["a", "bb", None, "a", "好"]
+    code = ["007", "12", "12", None, "5"]
+    path = tmp_path / "left.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["amount", "status", "code"])
+        writer.writerows(zip(amount, status, code))
+    selected = list(DEFAULT_STATISTICS)
+    left = compute_csv_statistics(path, ["amount", "status", "code"], statistics=selected)
+    frame = pd.DataFrame(
+        {
+            "t0": amount,
+            "v0": [None if value is None else float(value) for value in amount],
+            "t1": status,
+            "t2": code,
+        }
+    )
+    plans = [
+        {"index": 0, "column": "amount", "numeric": True, "integral": False},
+        {"index": 1, "column": "status", "numeric": False, "integral": False},
+        {"index": 2, "column": "code", "numeric": False, "integral": True},
+    ]
+    right = frame_statistics(frame, plans, selected)
+    assert set(left) == set(right)
+    for column in left:
+        assert set(left[column]) == set(right[column]), column
+        for name, value in left[column].items():
+            if isinstance(value, float):
+                assert right[column][name] == pytest.approx(value), (column, name)
+            else:
+                assert right[column][name] == value, (column, name)

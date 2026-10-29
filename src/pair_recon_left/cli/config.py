@@ -68,6 +68,15 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             and not (left.get("schema") and left.get("table"))
         ):
             raise ValueError(f"{name}: Hadoop Left source requires query or schema and table")
+        sas_sample_csv = left.get("sas_sample_csv")
+        if sas_sample_csv is not None:
+            if not isinstance(sas_sample_csv, str) or not sas_sample_csv.strip():
+                raise TypeError(f"{name}: sas_sample_csv must be a non-empty path string")
+            if left_source not in {"oracle", "hadoop"}:
+                raise ValueError(f"{name}: sas_sample_csv requires an Oracle or Hadoop Left source")
+            if sample_plan(pair.get("sample"))["mode"] == "fixed":
+                raise ValueError(f"{name}: sas_sample_csv supports all or fraction sampling")
+            left["sas_sample_csv"] = sas_sample_csv.strip()
         pre_sampled = pair.get("pre_sampled", False)
         if not isinstance(pre_sampled, bool):
             raise TypeError(f"{name}: pre_sampled must be true or false")

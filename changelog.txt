@@ -1,3 +1,28 @@
+pair_recon Driver-side window statistics — 2026-10-29
+
+Summary
+- Right window statistics of a window with at most `RIGHT_STATS_DRIVER_ROWS` (2000000) sampled rows are projected by Spark as normalized text and reduced in pandas on the driver; larger windows keep the batched Spark aggregates.
+- Spark queries become plain projections of `RIGHT_STATS_COLUMNS` columns, which the planner handles in seconds, so 867-column windows finish in a fraction of the batched-aggregate time.
+- Each distinct text is hashed once (sha256 first 16 hex digits weighted by its count), matching the Left DuckDB and Spark aggregate results exactly.
+
+Modified files
+- `README.md`: documents the driver row cap and the pandas reduction.
+- `changelog.txt`: records this commit.
+- `guideme.txt`: documents the driver row cap and the pandas reduction.
+- `src/pair_recon_right/engine/backends/targets.py`: splits window statistics into column plans, a Spark aggregate reducer, and a pandas reducer chosen by the sampled row count.
+- `tests/support.py`: adds `toPandas` to the fake Spark frame.
+- `tests/unit/packages/pair_recon_right/backends/test_targets.py`: covers the pandas path, the row-cap fallback, and parity with the Left DuckDB statistics.
+
+Added files
+- `src/pair_recon_right/engine/backends/frame_stats.py`: pandas reduction of a fetched batch into the statistics payload.
+
+Deleted files
+- None.
+
+Verification
+- Ruff: passed for `src` and `tests`.
+- Local Spark 3.5.9 parity: Spark aggregates and the pandas path return identical statistics for 100 columns x 3500 rows (all default statistics).
+
 pair_recon Row-count diagnostics and Windows recovery — 2026-10-28
 
 Summary

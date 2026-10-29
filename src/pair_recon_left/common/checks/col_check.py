@@ -734,6 +734,7 @@ class LeftRuntime:
         reuse_pulled: bool = True,
         force: bool = False,
         stop=None,
+        source_configs: dict[str, dict] | None = None,
     ):
         self.work_dir = Path(work_dir)
         use_temp(self.work_dir / "duckdb")
@@ -741,6 +742,7 @@ class LeftRuntime:
         self.reuse_pulled = reuse_pulled
         self.force = force
         self.stop = stop
+        self.source_configs = source_configs or {}
         self.sources = {}
         self.sources_lock = threading.Lock()
 
@@ -748,10 +750,11 @@ class LeftRuntime:
         pair = manifest["pair"]
         with self.sources_lock:
             if pair not in self.sources:
+                source_config = self.source_configs.get(pair, manifest["left"])
                 self.sources[pair] = attach_sql_audit(
                     source_from_config(
                         {
-                            **manifest["left"],
+                            **source_config,
                             "partition": "all"
                             if manifest.get("left_snapshot")
                             else manifest.get("partition", "day"),
@@ -802,6 +805,16 @@ class LeftRuntime:
                 ).encode()
             ).hexdigest(),
         }
+        source_override = self.source_configs.get(manifest["pair"])
+        if source_override:
+            sample_path = Path(source_override["path"])
+            stat = sample_path.stat()
+            cache["source_override"] = {
+                "path": str(sample_path.resolve()),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "contract_id": source_override.get("source_contract_id"),
+            }
         if self.reuse_pulled and not self.force and output.is_file() and metadata.is_file():
             try:
                 saved = json.loads(metadata.read_text(encoding="utf-8"))
@@ -824,7 +837,9 @@ class LeftRuntime:
             manifest["columns"],
             output,
             key_columns=manifest["key_cols"],
-            sample_plan=manifest["sample"],
+            sample_plan={"mode": "all"}
+            if source_override and source_override.get("pre_sampled")
+            else manifest["sample"],
             key_families=manifest["key_families"],
             side="left",
             key_tuples=window.get("key_tuples"),
