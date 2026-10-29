@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from pair_recon_left.backends.sources import OracleSource
+from pair_recon_left.backends.sources import CsvSource, HadoopSource, OracleSource
 from pair_recon_right.engine.backends.targets import SparkTarget
 
 from . import validate_table_name
@@ -22,9 +24,7 @@ def _type_name(value: Any) -> str | None:
     return str(getattr(value, "name", None) or getattr(value, "__name__", None) or value)
 
 
-def discover_oracle_columns(config: dict[str, Any], *, source_factory=OracleSource):
-    if str(config.get("source") or "").casefold() != "oracle":
-        raise ValueError("Left column discovery requires source='oracle'")
+def _discover_sql_columns(config: dict[str, Any], source_factory) -> list[ColumnInfo]:
     source = source_factory(config)
     connection = source.connect()
     cursor = connection.cursor()
@@ -41,6 +41,28 @@ def discover_oracle_columns(config: dict[str, Any], *, source_factory=OracleSour
         connection.close()
 
 
+def discover_oracle_columns(
+    config: dict[str, Any], *, source_factory=OracleSource
+) -> list[ColumnInfo]:
+    if str(config.get("source") or "").casefold() != "oracle":
+        raise ValueError("Oracle column discovery requires source='oracle'")
+    return _discover_sql_columns(config, source_factory)
+
+
+def discover_hadoop_columns(
+    config: dict[str, Any], *, source_factory=HadoopSource
+) -> list[ColumnInfo]:
+    if str(config.get("source") or "").casefold() != "hadoop":
+        raise ValueError("Hadoop column discovery requires source='hadoop'")
+    return _discover_sql_columns(config, source_factory)
+
+
+def discover_csv_columns(config: dict[str, Any], *, source_factory=CsvSource) -> list[ColumnInfo]:
+    if str(config.get("source") or "").casefold() != "csv":
+        raise ValueError("CSV column discovery requires source='csv'")
+    return _discover_sql_columns(config, source_factory)
+
+
 def discover_databricks_columns(sql, config: dict[str, Any]) -> list[ColumnInfo]:
     if str(config.get("source") or "").casefold() != "databricks":
         raise ValueError("Right column discovery requires source='databricks'")
@@ -55,6 +77,206 @@ def discover_databricks_columns(sql, config: dict[str, Any]) -> list[ColumnInfo]
             continue
         data_type = row.get("data_type") or row.get("type")
         result.append(ColumnInfo(str(name), None if data_type is None else str(data_type)))
+    return result
+
+
+def discover_columns(config: dict[str, Any], *, sql=None) -> list[ColumnInfo]:
+    source = str(config.get("source") or "").casefold()
+    if source == "oracle":
+        return discover_oracle_columns(config)
+    if source == "hadoop":
+        return discover_hadoop_columns(config)
+    if source == "csv":
+        return discover_csv_columns(config)
+    if source == "databricks":
+        if sql is None:
+            raise ValueError("Databricks column discovery requires a SQL executor")
+        return discover_databricks_columns(sql, config)
+    raise ValueError(f"Unsupported column discovery source: {source!r}")
+
+
+def _configured_relation(config: dict[str, Any]) -> dict[str, Any]:
+    return {key: config[key] for key in ("catalog", "schema", "table", "path") if config.get(key)}
+
+
+def discover_oracle_relations(
+    config: dict[str, Any], *, source_factory=OracleSource
+) -> dict[str, Any]:
+    if str(config.get("source") or "").casefold() != "oracle":
+        raise ValueError("Oracle relation discovery requires source='oracle'")
+    source = source_factory(config)
+    relation = source.relation()
+    result = {"source": "oracle", "relation": relation, **_configured_relation(config)}
+    table = str(config.get("table") or "").strip()
+    if not table:
+        return {**result, "primary_keys": []}
+
+    connection = source.connect()
+    cursor = connection.cursor()
+    try:
+        owner = str(config.get("schema") or "").strip() or None
+        statement = """
+            SELECT text
+            FROM all_views
+            WHERE upper(view_name) = upper(:view_name)
+              AND (:owner IS NULL OR upper(owner) = upper(:owner))
+        """
+        cursor.execute(statement, {"view_name": table, "owner": owner})
+        row = cursor.fetchone()
+        base_table = table
+        if row and row[0]:
+            match = re.search(r"\bFROM\s+(?:[\w$#]+\.)?([\w$#]+)", str(row[0]), flags=re.IGNORECASE)
+            if match:
+                base_table = match.group(1)
+        cursor.execute(
+            """
+            SELECT acc.column_name
+            FROM all_constraints ac
+            JOIN all_cons_columns acc
+              ON ac.owner = acc.owner
+             AND ac.constraint_name = acc.constraint_name
+            WHERE ac.constraint_type = 'P'
+              AND upper(ac.table_name) = upper(:table_name)
+              AND (:owner IS NULL OR upper(ac.owner) = upper(:owner))
+            ORDER BY acc.position
+            """,
+            {"table_name": base_table, "owner": owner},
+        )
+        return {
+            **result,
+            "table": base_table,
+            "primary_keys": [str(item[0]) for item in cursor.fetchall()],
+        }
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def discover_hadoop_relations(
+    config: dict[str, Any], *, source_factory=HadoopSource
+) -> dict[str, Any]:
+    if str(config.get("source") or "").casefold() != "hadoop":
+        raise ValueError("Hadoop relation discovery requires source='hadoop'")
+    source = source_factory(config)
+    result = {
+        "source": "hadoop",
+        "relation": source.relation(),
+        **_configured_relation(config),
+        "primary_keys": [],
+    }
+    table = str(config.get("table") or "").strip()
+    if not table:
+        return result
+
+    connection = source.connect()
+    cursor = connection.cursor()
+    try:
+        import pyodbc
+
+        primary_keys = getattr(cursor, "primaryKeys", None)
+        if primary_keys is None:
+            return result
+        rows = primary_keys(table=table, schema=config.get("schema")).fetchall()
+        keys = []
+        for row in rows:
+            position = getattr(row, "KEY_SEQ", None)
+            column = getattr(row, "COLUMN_NAME", None)
+            keys.append((int(position if position is not None else row[4]), str(column or row[3])))
+        keys.sort(key=lambda item: item[0])
+        return {**result, "primary_keys": [name for _position, name in keys]}
+    except pyodbc.Error:
+        return result
+    finally:
+        cursor.close()
+        connection.close()
+
+
+def discover_csv_relations(config: dict[str, Any]) -> dict[str, Any]:
+    if str(config.get("source") or "").casefold() != "csv":
+        raise ValueError("CSV relation discovery requires source='csv'")
+    path = str(config.get("path") or "").strip()
+    if not path:
+        raise ValueError("CSV relation discovery requires path")
+    return {
+        "source": "csv",
+        "relation": path,
+        "path": path,
+        "table": Path(path).name,
+        "primary_keys": [],
+    }
+
+
+def discover_databricks_relations(sql, config: dict[str, Any]) -> list[dict[str, str]]:
+    if str(config.get("source") or "").casefold() != "databricks":
+        raise ValueError("Databricks relation discovery requires source='databricks'")
+    table = str(config.get("table") or "").strip()
+    if not table:
+        return []
+    rows = sql.execute(
+        """
+        SELECT table_catalog, table_schema, table_name
+        FROM system.information_schema.tables
+        WHERE upper(table_name) LIKE upper(:table_name)
+        ORDER BY table_catalog, table_schema, table_name
+        """,
+        {"table_name": f"%{table}%"},
+    )
+    return [
+        {
+            "catalog": str(row["table_catalog"]),
+            "schema": str(row["table_schema"]),
+            "table": str(row["table_name"]),
+        }
+        for row in rows
+    ]
+
+
+def discover_databricks_partition(sql, config: dict[str, Any]) -> str | None:
+    if str(config.get("source") or "").casefold() != "databricks":
+        raise ValueError("Databricks partition discovery requires source='databricks'")
+    if str(config.get("kind") or "table").casefold() != "table":
+        return None
+    relation = SparkTarget(None, config).relation()
+    rows = sql.execute(f"SHOW CREATE TABLE {relation}")
+    ddl = "\n".join(
+        str(row.get("createtab_stmt") or next(iter(row.values()))) for row in rows if row
+    )
+    match = re.search(r"PARTITIONED\s+BY\s*\(\s*`?([^`,)\s]+)`?", ddl, flags=re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def discover_relations(config: dict[str, Any], *, sql=None):
+    source = str(config.get("source") or "").casefold()
+    if source == "oracle":
+        return discover_oracle_relations(config)
+    if source == "hadoop":
+        return discover_hadoop_relations(config)
+    if source == "csv":
+        return discover_csv_relations(config)
+    if source == "databricks":
+        if sql is None:
+            raise ValueError("Databricks relation discovery requires a SQL executor")
+        return discover_databricks_relations(sql, config)
+    raise ValueError(f"Unsupported relation discovery source: {source!r}")
+
+
+def get_date_column_type(config: dict[str, Any], columns, sql=None) -> dict[str, Any]:
+    date_col = str(config.get("date_col") or "").strip()
+    if not date_col:
+        return {"column": None, "data_type": None}
+    data_type = next(
+        (
+            column.data_type
+            for column in (_column(value) for value in columns)
+            if column.name.casefold() == date_col.casefold()
+        ),
+        None,
+    )
+    result = {"column": date_col, "data_type": data_type}
+    if sql is not None and str(config.get("source") or "").casefold() == "databricks":
+        relation = SparkTarget(None, config).relation()
+        rows = sql.execute(f"SELECT `{date_col}` FROM {relation} LIMIT 1")
+        result["sample_value"] = next(iter(rows[0].values())) if rows else None
     return result
 
 

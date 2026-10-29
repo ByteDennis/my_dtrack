@@ -488,11 +488,10 @@ def refresh_units_status(store) -> str:
         for window in plan.get("windows") or []:
             bucket = window["bucket"]
             ready = right_ready.get((pair, bucket), {})
-            if int(plan.get("version") or 1) == 2:
-                from .manifest import window_id
+            from .manifest import window_id
 
-                if ready.get("window_id") != window_id(plan, window):
-                    ready = {}
+            if ready.get("window_id") != window_id(plan, window):
+                ready = {}
             for column in plan.get("columns") or []:
                 uid = unit_id_for(plan, window, column)
                 unit = units.get(uid, {})

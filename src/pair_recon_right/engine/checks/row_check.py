@@ -261,13 +261,10 @@ def reconcile_pair(
         decision["passed"],
         decision["excluded_ratio"],
     )
-    version = int(left_doc["pair_config"].get("version") or 1)
     column_checks = any(
         check != "row_count" for check in left_doc["pair_config"].get("checks") or ()
     )
-    if (version == 1 and decision["passed"]) or (
-        version == 2 and column_checks and not store.exists(plan_path(pair))
-    ):
+    if column_checks and not store.exists(plan_path(pair)):
         manifest = build_manifest(left_doc["run_id"], pair, left_doc["pair_config"], document)
         store.put_bytes(
             mapping_path(pair),
@@ -288,13 +285,13 @@ def reconcile_pair(
     return document
 
 
-def unresolved_version2_partitions(store) -> dict[str, list[str]]:
+def unresolved_partitions(store) -> dict[str, list[str]]:
 
     plans = {plan["pair"]: plan for _key, plan in list_plans(store)}
     results = {result["pair"]: result for _key, result in list_row_results(store)}
     unresolved = {}
     for pair, plan in plans.items():
-        if int(plan.get("version") or 1) != 2 or pair not in results or not plan.get("windows"):
+        if pair not in results or not plan.get("windows"):
             continue
         synonyms = results[pair].get("date_synonyms") or {}
         excluded = {synonyms.get(value, value) for value in plan.get("excluded_partitions") or []}
@@ -308,8 +305,8 @@ def unresolved_version2_partitions(store) -> dict[str, list[str]]:
     return unresolved
 
 
-def require_version2_exclusions(store) -> None:
-    unresolved = unresolved_version2_partitions(store)
+def require_exclusions(store) -> None:
+    unresolved = unresolved_partitions(store)
     if not unresolved:
         return
     plans = {plan["pair"]: plan for _key, plan in list_plans(store)}
@@ -323,7 +320,7 @@ def require_version2_exclusions(store) -> None:
         )
     details = "; ".join(f"{pair}: {', '.join(values)}" for pair, values in unresolved.items())
     raise RuntimeError(
-        "version 2 row-check found unexcluded mismatched partitions; "
+        "row-check found unexcluded mismatched partitions; "
         f"add them to excluded_partitions, rerun the Left job with the same run-id, "
         f"then restart Right ({details})"
     )
@@ -384,5 +381,5 @@ def run_row_check(
             log.info("row_check closed: %d/%d pairs released", len(released), len(pairs))
     if processed:
         SqlAudit(store, "right", enabled=audit_enabled).refresh()
-    require_version2_exclusions(store)
+    require_exclusions(store)
     return processed

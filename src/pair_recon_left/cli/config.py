@@ -30,10 +30,6 @@ def resolve_connections(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
-    version = config.get("version", 1)
-    if isinstance(version, bool) or not isinstance(version, int) or version not in {1, 2}:
-        raise ValueError("config version must be 1 or 2")
-    config["version"] = version
     pairs = config.get("pairs")
     if not isinstance(pairs, dict) or not pairs:
         raise ValueError("config requires a non-empty pairs object")
@@ -46,7 +42,6 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     for name, pair in pairs.items():
         if pair.get("skip"):
             continue
-        pair["version"] = version
         left, right = pair.get("left") or {}, pair.get("right") or {}
         left_source = str(left.get("source") or "").lower()
         right_source = str(right.get("source") or "").lower()
@@ -218,8 +213,6 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             pair["statistics"] = statistics
         excluded_partitions = pair.get("excluded_partitions") or []
         excluded_columns = pair.get("excluded_columns") or []
-        if version == 1 and (excluded_partitions or excluded_columns):
-            raise ValueError(f"{name}: exclusions require config version 2")
         if not isinstance(excluded_partitions, list) or not all(
             isinstance(value, str) for value in excluded_partitions
         ):

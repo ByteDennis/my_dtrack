@@ -31,7 +31,6 @@ def document(checks, counts=None):
         "partition": "all",
         "counts": {"all": 2} if counts is None else counts,
         "pair_config": {
-            "version": 2,
             "partition": "all",
             **side,
             "col_map": {"A": "a"},
@@ -98,7 +97,7 @@ def test_run_refuses_a_plan_without_units(tmp_path):
     release(store)
     store.put_json(
         plan_path("p"),
-        {"pair": "p", "version": 2, "windows": [], "columns": ["A"], "expected_units": 0},
+        {"pair": "p", "windows": [], "columns": ["A"], "expected_units": 0},
     )
     with pytest.raises(RuntimeError, match="plan has no units to compare"):
         run(
@@ -165,7 +164,7 @@ def test_run_reports_which_side_was_empty(tmp_path, left, right, state):
     release(store)
     store.put_json(
         plan_path("p"),
-        {"pair": "p", "version": 2, "windows": [], "columns": ["A"], "expected_units": 0},
+        {"pair": "p", "windows": [], "columns": ["A"], "expected_units": 0},
     )
     result = run(
         None, lambda _config: FakeTarget(counts=right), run_id="r1", store=store, poll_interval=0

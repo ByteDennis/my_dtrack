@@ -211,6 +211,25 @@ def _collapse(expr: str) -> str:
     )
 
 
+# >>> DuckDB text of one column after column-type and system-rule normalization, the form statistics hash <<< #
+def normalized_value_sql(
+    ref: str,
+    side: str,
+    comparison=None,
+    rules=(),
+    normalization_date: str | None = None,
+    *,
+    collapse: bool = False,
+) -> str:
+    value = ref
+    if comparison is not None:
+        normalized = resolve_column_type(comparison).normalize_sql(ref, "duckdb", side)
+        value = f"CASE WHEN {ref} IS NULL THEN NULL ELSE {normalized} END"
+    if rules:
+        value = normalize_system_sql(value, "duckdb", rules, run_date=normalization_date)
+    return _collapse(value) if collapse else value
+
+
 def compute_csv_statistics(
     path: str | Path,
     columns: list[str],
@@ -404,20 +423,11 @@ def _statistics(
     base = {}
     integral_values = {}
     for column in columns:
-        ref = _quote(column)
-        value = ref
-        if column in comparisons:
-            normalized = resolve_column_type(comparisons[column]).normalize_sql(ref, "duckdb", side)
-            value = f"CASE WHEN {ref} IS NULL THEN NULL ELSE {normalized} END"
-        integral_values[column] = value
-        if rules:
-            value = normalize_system_sql(
-                value,
-                "duckdb",
-                rules,
-                run_date=normalization_date,
-            )
-        base[column] = value
+        comparison = comparisons.get(column)
+        integral_values[column] = normalized_value_sql(_quote(column), side, comparison)
+        base[column] = normalized_value_sql(
+            _quote(column), side, comparison, rules, normalization_date
+        )
 
     indexed = list(enumerate(columns))
     inferred: dict[int, tuple] = {}

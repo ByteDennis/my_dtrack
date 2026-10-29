@@ -5,7 +5,10 @@ import pytest
 from pair_recon.core.metadata.mapping import (
     ColumnInfo,
     automatch_columns,
+    discover_csv_columns,
+    discover_csv_relations,
     discover_databricks_columns,
+    discover_hadoop_columns,
     discover_oracle_columns,
     upsert_column_mappings,
 )
@@ -56,6 +59,66 @@ def test_discover_oracle_columns_uses_real_query_description():
         ColumnInfo("POSTED_AT", "DATE"),
     ]
     assert "SELECT * FROM LEFT_ORDERS WHERE 1=0" in events
+
+
+def test_discover_hadoop_columns_uses_odbc_description():
+    events = []
+
+    class Cursor:
+        def __init__(self):
+            self.description = [("ACCOUNT_ID", str), ("EFF_DT", NS(name="DATE"))]
+
+        def execute(self, statement):
+            events.append(statement)
+
+        def close(self):
+            events.append("cursor closed")
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def close(self):
+            events.append("connection closed")
+
+    class Source:
+        def __init__(self, _config):
+            pass
+
+        def connect(self):
+            return Connection()
+
+        def relation(self):
+            return "`risk`.`accounts`"
+
+        def _audit(self, statement, operation):
+            events.append((operation, statement))
+
+    columns = discover_hadoop_columns(
+        {"source": "hadoop", "schema": "risk", "table": "accounts"},
+        source_factory=Source,
+    )
+
+    assert columns == [ColumnInfo("ACCOUNT_ID", "str"), ColumnInfo("EFF_DT", "DATE")]
+    assert "SELECT * FROM `risk`.`accounts` WHERE 1=0" in events
+
+
+def test_discover_csv_columns_and_relation(tmp_path):
+    path = tmp_path / "orders.csv"
+    path.write_text("ORDER_ID,POSTED_AT\n1,2026-01-01\n", encoding="utf-8")
+    config = {"source": "csv", "path": str(path), "partition": "all"}
+
+    columns = discover_csv_columns(config)
+
+    assert [column.name for column in columns] == ["ORDER_ID", "POSTED_AT"]
+    assert all(column.data_type == "VARCHAR" for column in columns)
+    assert discover_csv_relations(config) == {
+        "source": "csv",
+        "relation": str(path),
+        "path": str(path),
+        "table": "orders.csv",
+        "primary_keys": [],
+    }
 
 
 def test_discover_databricks_columns_and_automatch():

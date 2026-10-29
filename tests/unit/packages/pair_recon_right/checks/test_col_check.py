@@ -10,7 +10,7 @@ from support import STATS, FakeTarget, MemoryStore, left_document
 from pair_recon_right.engine.checks import col_check
 from pair_recon_right.engine.checks.col_check import ColCheck, DrainScheduler, compare_statistics
 from pair_recon_right.engine.checks.row_check import run_row_check
-from pair_recon_right.engine.common.model.manifest import build_manifest, unit_id, unit_id_for
+from pair_recon_right.engine.common.model.manifest import build_manifest, unit_id_for
 from pair_recon_right.engine.common.model.protocol import (
     DIAGNOSTIC_PREFIX,
     LEFT_STATE,
@@ -127,14 +127,15 @@ def test_fetched():
 def _drained_store(sample_mode="all"):
     store = MemoryStore()
     doc = left_document(sample={"all": None, "fixed": 1}.get(sample_mode, 0.5))
+    doc["pair_config"]["checks"] = ["hash_sum"]
     store.put_json(left_row_path("p"), doc)
     write_left_state(store, {"pairs": ["p"], "row_check_closed_at": "now"})
-    run_row_check(store, lambda _cfg: FakeTarget())
+    run_row_check(store, lambda _cfg: FakeTarget(counts=doc["counts"]))
     manifest = store.get_json(plan_path("p"))
-    uid = unit_id("p", "2026-01-01", "amount")
+    uid = unit_id_for(manifest, manifest["windows"][0], "amount")
     pointer = {"pair": "p", "window": "2026-01-01", "column": "amount", "right_column": "amount"}
     store.commit_units(1, [{**pointer, "unit_id": uid, "left_statistics": STATS}])
-    store.close_manifests(["p"], manifest["expected_units"])
+    store.close_manifests(["p"], manifest["expected_units"], {"p": manifest["plan_id"]})
     store.heartbeat()
     return store, uid
 
@@ -304,7 +305,6 @@ def test_result_detail():
 
 def test_right_worker_budget_runs_window_queries_in_parallel():
     pair = {
-        "version": 2,
         "left": {"source": "oracle", "date_col": "dt"},
         "right": {"source": "databricks", "date_col": "dt"},
         "col_map": {"amount": "amount"},
@@ -371,7 +371,19 @@ def test_fixed(monkeypatch):
         ColCheck(store, lambda _cfg: target, poll_interval=0, heartbeat_timeout=10).run()
     assert target.calls == []
     monkeypatch.setattr(store, "heartbeat_age", lambda now=None: 0.0)
-    store.put_json(fixed_keys_path("p"), {"pair": "p", "windows": {"2026-01-01": [["7"]]}})
+    manifest = store.get_json(plan_path("p"))
+    store.put_json(
+        fixed_keys_path("p"),
+        {
+            "pair": "p",
+            "plan_id": manifest["plan_id"],
+            "window_ids": {
+                window["bucket"]: col_check.window_id(manifest, window)
+                for window in manifest["windows"]
+            },
+            "windows": {"2026-01-01": [["7"]]},
+        },
+    )
     results = ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert results and target.calls[-1] == ("p", "2026-01-01", [["7"]])
 
@@ -384,9 +396,8 @@ def test_resume():
     assert target.calls == []
 
 
-def test_v2():
+def test_plan_includes_nonmatching_unexcluded_partitions():
     pair = {
-        "version": 2,
         "left": {"source": "oracle", "date_col": "dt"},
         "right": {"source": "databricks", "date_col": "dt"},
         "col_map": {"amount": "amount"},
@@ -466,7 +477,6 @@ def test_compare():
 
 def test_poll_discovers_late_lower_sequence_batch():
     pair = {
-        "version": 2,
         "left": {"source": "oracle", "date_col": "dt"},
         "right": {"source": "databricks", "date_col": "dt"},
         "col_map": {"amount": "amount", "status": "status"},
@@ -520,7 +530,8 @@ def test_idle():
     def on_idle():
         calls.append(1)
         if len(calls) == 2:
-            store.close_manifests(["p"], 1)
+            plan_id = store.get_json(plan_path("p"))["plan_id"]
+            store.close_manifests(["p"], 1, {"p": plan_id})
         return len(calls) <= 2
 
     results = ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0, on_idle=on_idle).run()
@@ -545,7 +556,8 @@ def test_unreadable_heartbeat_does_not_fail_the_right(monkeypatch, caplog):
         reads.append(1)
         if len(reads) == 1:
             raise OSError("IncompleteRead(0 bytes read, 481 more expected)")
-        store.close_manifests(["p"], 1)
+        plan_id = store.get_json(plan_path("p"))["plan_id"]
+        store.close_manifests(["p"], 1, {"p": plan_id})
         return 0.0
 
     monkeypatch.setattr(store, "heartbeat_age", flaky)
@@ -570,3 +582,45 @@ def test_statistics_progress_is_published_while_fetching():
     ColCheck(store, lambda _cfg: Reporting(), poll_interval=0).run()
     assert seen[0][0]["pair"] == "p" and seen[0][0]["columns_done"] == 1
     assert seen[0][0]["columns_total"] == 1 and get_right_state(store)["fetching"] == []
+
+
+def test_differing_windows_stage_right_rows_after_comparison():
+    store, _uid = _drained_store()
+
+    class RowsTarget(FakeTarget):
+        requested = None
+
+        def window_rows(self, manifest, window, columns):
+            self.requested = (window["bucket"], window["partitions"], columns)
+            return {
+                "pairs": [
+                    {"left_column": column, "right_column": manifest["col_map"][column]}
+                    for column in columns
+                ],
+                "key_columns": manifest["right_key_cols"],
+                "rows": [["1", "1", "9", "9"], ["2", "2", None, None]],
+            }
+
+    target = RowsTarget(stats={"amount": {**STATS, "n_unique": 9}})
+    ColCheck(store, lambda _cfg: target, poll_interval=0).run()
+    assert target.requested == (
+        "2026-01-01",
+        ["2026-01-01", "2026-01-02", "2026-01-03"],
+        ["amount"],
+    )
+    prefix = right_sample_prefix("p", "2026-01-01")
+    document = store.get_json(f"{prefix}rows.json")
+    assert document["right_rows"] == 2 and document["key_columns"] == ["id"]
+    assert document["pairs"] == [{"left_column": "amount", "right_column": "amount"}]
+    body = gzip.decompress(store.get_bytes(f"{prefix}rows.csv.gz")).decode()
+    assert list(csv.reader(io.StringIO(body))) == [
+        ["_key", "k0", "v0", "n0"],
+        ["1", "1", "9", "9"],
+        ["2", "2", "", ""],
+    ]
+
+    matched_store, _uid = _drained_store()
+    matched = RowsTarget()
+    ColCheck(matched_store, lambda _cfg: matched, poll_interval=0).run()
+    assert matched.requested is None
+    assert not matched_store.exists(f"{prefix}rows.json")

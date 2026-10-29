@@ -89,20 +89,12 @@ def _slug(value: object) -> str:
     return text[:48] or "empty"
 
 
-def unit_id(pair: str, window: str, column: str) -> str:
-    raw = json.dumps([pair, window, column], ensure_ascii=False, separators=(",", ":"))
-    digest = hashlib.sha256(raw.encode()).hexdigest()[:12]
-    return f"{_slug(pair)}--{_slug(window)}--{_slug(column)}--{digest}"
-
-
 def _digest(value: Any, length: int = 16) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()[:length]
 
 
 def window_id(manifest: dict[str, Any], window: dict[str, Any]) -> str:
-    if int(manifest.get("version") or 1) == 1:
-        return str(window["bucket"])
     return _digest(
         {
             "stats_version": STATS_VERSION,
@@ -120,8 +112,6 @@ def window_id(manifest: dict[str, Any], window: dict[str, Any]) -> str:
 
 
 def unit_id_for(manifest: dict[str, Any], window: dict[str, Any], column: str) -> str:
-    if int(manifest.get("version") or 1) == 1:
-        return unit_id(manifest["pair"], window["bucket"], column)
     identity = {
         "window_id": window_id(manifest, window),
         "column": column,
@@ -300,13 +290,8 @@ def build_manifest(
     pair: dict[str, Any],
     row_check: dict[str, Any],
 ) -> dict[str, Any]:
-    version = int(pair.get("version") or 1)
-    if version not in {1, 2}:
-        raise ValueError(f"{pair_name}: version must be 1 or 2")
     if str((pair.get("right") or {}).get("source", "")).lower() not in {"databricks", "csv"}:
         raise ValueError(f"{pair_name}: unsupported Right source")
-    if version == 1 and not row_check["gate_decision"].get("passed"):
-        raise ValueError(f"{pair_name}: row check has not passed")
     partition_kind = str(pair.get("partition") or "day")
     if partition_kind not in {"day", "month", "all"}:
         raise ValueError(f"{pair_name}: partition must be day, month or all")
@@ -333,11 +318,7 @@ def build_manifest(
     grouped: dict[str, list[str]] = defaultdict(list)
     counts: dict[str, int] = {}
     for partition, row in sorted(row_check["partitions"].items()):
-        admitted = (
-            row.get("left") is not None and partition not in excluded_partitions
-            if version == 2
-            else row["result"] == "match"
-        )
+        admitted = row.get("left") is not None and partition not in excluded_partitions
         if admitted:
             bucket = "all" if partition_kind == "all" else bucket_date(partition, vintage)
             grouped[bucket].append(partition)
@@ -408,7 +389,6 @@ def build_manifest(
         raise type(exc)(f"{pair_name}: {exc}") from None
     manifest = {
         "protocol_version": PROTOCOL_VERSION,
-        "version": version,
         "run_id": run_id,
         "pair": pair_name,
         "sample": sampling,
@@ -470,11 +450,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError(f"manifest missing fields: {', '.join(missing)}")
     if manifest["protocol_version"] != PROTOCOL_VERSION:
         raise ValueError("unsupported protocol version")
-    version = int(manifest.get("version") or 1)
-    if version not in {1, 2}:
-        raise ValueError("manifest version must be 1 or 2")
-    if version == 2 and not manifest.get("plan_id"):
-        raise ValueError("version 2 manifest requires plan_id")
+    if not manifest.get("plan_id"):
+        raise ValueError("manifest requires plan_id")
     if str(manifest["right"].get("source", "")).lower() not in {"databricks", "csv"}:
         raise ValueError("manifest has unsupported Right source")
     partition_kind = str(manifest.get("partition") or "day")

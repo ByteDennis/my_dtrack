@@ -4,7 +4,7 @@ from datetime import datetime
 
 from support import MemoryStore
 
-from pair_recon_right.engine.common.model.manifest import unit_id
+from pair_recon_right.engine.common.model.manifest import build_manifest, unit_id_for, window_id
 from pair_recon_right.engine.common.model.protocol import (
     UNITS_STATUS,
     get_run_status,
@@ -19,11 +19,20 @@ from pair_recon_right.engine.common.model.protocol import (
 
 
 def _plan():
-    return {
-        "pair": "orders",
-        "windows": [{"bucket": "2026-01", "partitions": ["2026-01-01"]}],
-        "columns": ["amount", "status"],
-    }
+    return build_manifest(
+        "run",
+        "orders",
+        {
+            "left": {"source": "oracle", "date_col": "dt"},
+            "right": {"source": "databricks", "date_col": "dt"},
+            "col_map": {"amount": "amount", "status": "status"},
+            "vintage": "month",
+        },
+        {
+            "gate_decision": {"passed": True},
+            "partitions": {"2026-01-01": {"left": 1, "right": 1, "result": "match"}},
+        },
+    )
 
 
 def _status_rows(store):
@@ -34,14 +43,16 @@ def _status_rows(store):
 
 def test_unit():
     store = MemoryStore()
-    store.put_json(plan_path("orders"), _plan())
+    plan = _plan()
+    store.put_json(plan_path("orders"), plan)
     assert {row["state"] for row in _status_rows(store).values()} == {"waiting_left"}
 
-    amount = unit_id("orders", "2026-01", "amount")
-    status = unit_id("orders", "2026-01", "status")
+    window = plan["windows"][0]
+    amount = unit_id_for(plan, window, "amount")
+    status = unit_id_for(plan, window, "status")
     pointer = {
         "pair": "orders",
-        "window": "2026-01",
+        "window": window["bucket"],
         "column": "amount",
         "right_column": "amount",
     }
@@ -52,8 +63,13 @@ def test_unit():
     assert _status_rows(store)["amount"]["state"] == "left_ready"
 
     store.put_json(
-        right_ready_path("orders", "2026-01"),
-        {"pair": "orders", "window": "2026-01", "right_ready_at": timestamp(store)},
+        right_ready_path("orders", window["bucket"]),
+        {
+            "pair": "orders",
+            "window": window["bucket"],
+            "window_id": window_id(plan, window),
+            "right_ready_at": timestamp(store),
+        },
     )
     assert {row["state"] for row in _status_rows(store).values()} == {"right_ready"}
 

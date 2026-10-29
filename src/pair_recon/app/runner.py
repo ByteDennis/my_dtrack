@@ -35,6 +35,7 @@ from pair_recon_left.common.checks.col_check import (
     wait_for_row_result,
 )
 from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
+from pair_recon_left.common.checks.row_diff import compare_rows, row_difference_workbook
 from pair_recon_left.common.model.hashing import composite_key, key_families
 from pair_recon_left.common.model.protocol import (
     REPORT_PREFIX,
@@ -924,7 +925,6 @@ def _difference_sample_workbook(
     right_end = right_start + len(right_columns) - 1
     banner_fill = PatternFill("solid", fgColor="1F4E78")
     banner_font = Font(color="FFFFFF", bold=True)
-    difference_fill = PatternFill("solid", fgColor="FFC7CE")
     difference_font = Font(color="9C0006")
 
     def banner(start: int, end: int, value: str) -> None:
@@ -964,7 +964,6 @@ def _difference_sample_workbook(
                 right_cell = sheet.cell(row_number, right_start + offset, right_value)
                 if left_value != right_value:
                     for cell in (left_cell, right_cell):
-                        cell.fill = difference_fill
                         cell.font = difference_font
             rows_written += 1
         if rows_written >= limit:
@@ -988,6 +987,47 @@ def _difference_sample_workbook(
         rows_written,
         columns,
     )
+
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+# >>> rows.xlsx for one differing window: the local Left CSV joined with the Right rows, first sample_rows differences, Volume and run directory <<< #
+def publish_row_differences(store, run_dir: Path, manifest, document, prefix, results) -> int:
+    pair, window = document["pair"], str(document["vintage"])
+    numeric = {
+        str(result["column"])
+        for result in results
+        if str(result["vintage"]) == window and result.get("col_type") == "numeric"
+    }
+    compared = compare_rows(
+        run_dir / pair / window / "left.csv",
+        store.get_bytes(f"{prefix}{document['right_file']}"),
+        document,
+        manifest,
+        numeric=numeric,
+        limit=int(manifest.get("sample_rows") or 0),
+    )
+    body = row_difference_workbook(
+        compared,
+        left_label=_relation_label(manifest.get("left") or {}),
+        right_label=_relation_label(manifest.get("right") or {}),
+    )
+    store.put_bytes(f"{diagnostic_prefix(pair, window)}rows.xlsx", body, content_type=XLSX)
+    local = run_dir / pair / window / "rows.xlsx"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_bytes(body)
+    log.info(
+        "row differences %s %s: %d of %d row(s) written (different=%d left_only=%d right_only=%d)",
+        pair,
+        window,
+        len(compared["rows"]),
+        compared["total"],
+        compared["totals"]["different"],
+        compared["totals"]["left_only"],
+        compared["totals"]["right_only"],
+    )
+    return compared["total"]
 
 
 def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
@@ -1038,11 +1078,14 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
             key_tuples=key_tuples,
         )
         store.delete_keys(store.list_keys(target))
-        store.put_bytes(
-            f"{target}samples.xlsx",
-            body,
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        store.put_bytes(f"{target}samples.xlsx", body, content_type=XLSX)
+        if store.exists(f"{prefix}rows.json"):
+            try:
+                publish_row_differences(
+                    store, run_dir, manifest, store.get_json(f"{prefix}rows.json"), prefix, results
+                )
+            except Exception:
+                log.exception("could not publish row differences: %s %s", pair, window)
         store.delete_keys(store.list_keys(prefix))
         published += 1
     store.delete_keys(store.list_keys(RIGHT_STATS_PREFIX))

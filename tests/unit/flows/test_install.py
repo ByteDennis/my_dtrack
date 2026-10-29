@@ -136,8 +136,9 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert list(workbook["field_guide"].tables) == []
     notebook = json.loads((ROOT / "setup" / "mapping.ipynb").read_text(encoding="utf-8"))
     source = "\n".join(line for cell in notebook["cells"] for line in cell.get("source", []))
-    assert "discover_oracle_columns" in source
-    assert "discover_databricks_columns" in source
+    assert "discover_columns" in source
+    assert "discover_relations" in source
+    assert "discover_databricks_partition" in source
     assert "upsert_column_mappings" in source
     assert "load_environment()" in source
     assert "DBX_WAREHOUSE_ID" in source

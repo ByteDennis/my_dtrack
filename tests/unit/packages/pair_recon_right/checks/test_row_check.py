@@ -91,7 +91,6 @@ def test_snapshot():
     left = left_document(counts={"all": 10})
     left["left"] = {"source": "oracle", "table": "CURRENT"}
     left["pair_config"].update(
-        version=2,
         snapshot=True,
         checks=["hash_sum"],
         left=left["left"],
@@ -128,7 +127,6 @@ def test_sample(key, mode, family, right_pre_sampled):
         {"from": None, "to": None} if mode == "all" else {"from": "2026-01-01", "to": "2026-01-01"}
     )
     left["pair_config"].update(
-        version=2,
         checks=["row_count"],
         partition=mode,
         pre_sampled=True,
@@ -206,12 +204,7 @@ def test_reconcile(caplog):
     doc = store.get_json(row_result_path("p"))
     assert doc["summary"] == {"match": 1, "count_diff": 1, "left_only": 1, "right_only": 0}
     assert doc["timing"]["left_count_s"] == 0.1
-    manifest = store.get_json(plan_path("p"))
-    assert manifest["windows"][0]["partitions"] == ["2026-01-01"]
-    assert (
-        "plan released: memory://run/config/manifest.json (1 windows, 1 columns, 1 units)"
-        in caplog.text
-    )
+    assert not store.exists(plan_path("p"))
     assert "right count p: 2 partitions, 3 rows" in caplog.text
     assert "first ('2026-01-01', 1)" in caplog.text
     assert "finding p 2026-01-02 count_diff left=" in caplog.text
@@ -228,10 +221,7 @@ def test_reconcile_caps_logged_findings(caplog):
         run_row_check(store, lambda _cfg: FakeTarget(counts={"2026-01-01": 1}))
     assert caplog.text.count("  finding p ") == 10
     assert "  ... 4 more finding(s) omitted from the log" in caplog.text
-    assert store.get_bytes(mapping_path("p")).decode().splitlines() == [
-        "left_column,right_column,usage,data_type",
-        "amount,amount,compare,",
-    ]
+    assert not store.exists(mapping_path("p"))
     assert store.get_json(RIGHT_STATE)["phase"] == "row_check_closed"
     assert not store.exists(UNITS_STATUS)
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 0
@@ -243,18 +233,18 @@ def test_restart():
     _release(store)
     real_put = store.put_json
 
-    def crash_on_manifest(key, value):
-        if key == plan_path("p"):
+    def crash_on_result(key, value):
+        if key == row_result_path("p"):
             raise ConnectionError("killed")
         return real_put(key, value)
 
-    store.put_json = crash_on_manifest
+    store.put_json = crash_on_result
     with pytest.raises(ConnectionError):
         run_row_check(store, lambda _cfg: FakeTarget())
     store.put_json = real_put
     assert not store.exists(row_result_path("p"))
     assert run_row_check(store, lambda _cfg: FakeTarget()) == 1
-    assert store.exists(plan_path("p"))
+    assert not store.exists(plan_path("p"))
     assert store.get_json(RIGHT_STATE)["phase"] == "row_check_closed"
 
 
@@ -280,10 +270,9 @@ def test_health_check():
     assert not store.exists(row_result_path("p"))
 
 
-def test_v2():
+def test_unexcluded_partitions_require_retry():
     store = MemoryStore()
     left = left_document()
-    left["pair_config"]["version"] = 2
     left["pair_config"]["checks"] = ["hash_sum"]
     baseline = {
         "gate_decision": {"passed": True},
@@ -298,7 +287,7 @@ def test_v2():
     with pytest.raises(RuntimeError, match=r"p: 2026-01-02, 2026-01-03"):
         run_row_check(store, lambda _cfg: FakeTarget())
     assert store.exists(row_result_path("p"))
-    assert store.get_json(plan_path("p"))["version"] == 2
+    assert store.get_json(plan_path("p"))["plan_id"]
 
     updated = build_manifest(
         "run",
@@ -318,7 +307,6 @@ def test_all2():
     left["left"] = {"source": "oracle", "table": "A"}
     left["right"] = {"source": "databricks", "table": "a"}
     left["pair_config"] = {
-        "version": 2,
         "checks": ["hash_sum"],
         "partition": "all",
         "left": left["left"],

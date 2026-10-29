@@ -55,7 +55,7 @@ log = get_left_logger("col_check")
 BACKPRESSURE_LOG_INTERVAL = 30.0
 DEFAULT_PROGRESS_INTERVAL = 10.0
 ROW_RESULT_LOG_INTERVAL = 60.0
-UNEXCLUDED_PARTITIONS = "version 2 row-check found unexcluded mismatched partitions"
+UNEXCLUDED_PARTITIONS = "row-check found unexcluded mismatched partitions"
 
 
 def format_row_count_differences(pair: str, partitions: dict[str, dict[str, Any]]) -> str:
@@ -122,10 +122,8 @@ class UnexcludedPartitionsError(RuntimeError):
         )
 
 
-# >>> version 2 partitions the Right reported as not matching and the plan does not exclude <<< #
+# >>> partitions the Right reported as not matching and the plan does not exclude <<< #
 def unexcluded_mismatches(result: dict[str, Any], plan: dict[str, Any]) -> list[str]:
-    if int(plan.get("version") or 1) != 2:
-        return []
     synonyms = result.get("date_synonyms") or {}
     excluded = {synonyms.get(value, value) for value in plan.get("excluded_partitions") or []}
     return sorted(
@@ -205,9 +203,9 @@ def wait_for_manifests(
         left_closed = left_row_check_close_document(store)
         if left_closed:
             expected = set(pair_names or left_closed.get("pairs") or [])
-            planned = {plan["pair"] for plan in plans if int(plan.get("version") or 1) == 2}
+            planned = {plan["pair"] for plan in plans}
             if expected and expected <= planned:
-                log.info("version 2 Left plans ready: %d plan(s) released", len(plans))
+                log.info("Left plans ready: %d plan(s) released", len(plans))
                 return plans
         state = get_run_status(store)
         if state != last_state:
@@ -228,10 +226,6 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path, *, stop=None) -> d
     if manifest["sample"]["mode"] != "fixed":
         return None
     existing = fixed_keys_document(store, manifest["pair"])
-    if existing is not None and int(manifest.get("version") or 1) == 1:
-        for window in manifest["windows"]:
-            window["key_tuples"] = existing["windows"].get(window["bucket"], [])
-        return None
     source = attach_sql_audit(
         source_from_config(
             {
@@ -253,10 +247,7 @@ def publish_fixed_keys(store, manifest, work_dir: str | Path, *, stop=None) -> d
     changed = existing is None or existing.get("plan_id") != manifest.get("plan_id")
     for window in manifest["windows"]:
         current_window_id = window_id(manifest, window)
-        if (
-            int(manifest.get("version") or 1) == 2
-            and window_ids.get(window["bucket"]) == current_window_id
-        ):
+        if window_ids.get(window["bucket"]) == current_window_id:
             window["key_tuples"] = windows.get(window["bucket"], [])
             continue
         output = Path(work_dir) / manifest["pair"] / window["bucket"] / "keys.csv"
@@ -357,7 +348,6 @@ class ColCheckPipeline:
         manifests = list(manifests)
         for manifest in manifests:
             validate_manifest(manifest)
-        version2 = any(int(item.get("version") or 1) == 2 for item in manifests)
         pair_names = [manifest["pair"] for manifest in manifests]
         active_ids = set().union(*(planned_unit_ids(manifest) for manifest in manifests))
         existing_rows = list_units(self.store, pair_names)
@@ -469,7 +459,7 @@ class ColCheckPipeline:
                     if not pending:
                         return
                     if self.wait_for_right:
-                        self._wait_for_capacity(active_ids, version2)
+                        self._wait_for_capacity(active_ids)
                     path = unit_batch_path(first, len(pending))
                     log.info(
                         "statistics shard upload %s %s: attributes=%d -> %s",
@@ -680,7 +670,7 @@ class ColCheckPipeline:
         }
         return len(units), len(finished), len(units - finished)
 
-    def _wait_for_capacity(self, active_ids: set[str], version2: bool) -> None:
+    def _wait_for_capacity(self, active_ids: set[str]) -> None:
         waiting_started = None
         last_wait_log = None
         heartbeat = Heartbeat(self.store)
@@ -688,7 +678,7 @@ class ColCheckPipeline:
             self.abort_if()
             heartbeat.tick()
             left_ready, right_finished, active_ready_unclaimed = self._unit_progress(active_ids)
-            ready_unclaimed = active_ready_unclaimed if version2 else self.store.ready_unclaimed()
+            ready_unclaimed = active_ready_unclaimed
             if ready_unclaimed < self.wip:
                 if waiting_started is not None:
                     log.info(

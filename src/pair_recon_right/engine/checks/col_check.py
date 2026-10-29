@@ -193,6 +193,14 @@ def require_same_total(manifest, window, column, left, right) -> None:
     )
 
 
+def _gzip_csv(header: list[str], rows) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(header)
+    writer.writerows(rows)
+    return gzip.compress(output.getvalue().encode("utf-8"))
+
+
 def _mismatch_message(manifest, window, left_total: int, right_total: int) -> str:
     mode = (manifest.get("sample") or {}).get("mode", "all")
     if mode == "fixed":
@@ -261,6 +269,7 @@ class ColCheck:
         self.first_window_started = False
         self.first_window_checked = False
         self.first_window_lock = threading.Lock()
+        self.window_payloads: dict[tuple[str, str], dict[str, Any]] = {}
         self.activity: dict[tuple[str, str], tuple[int, int]] = {}
         self.activity_lock = threading.Lock()
 
@@ -440,13 +449,10 @@ class ColCheck:
                 keys_document = fixed_keys_document(self.store, manifest["pair"])
                 if keys_document is None:
                     continue
-                if int(manifest.get("version") or 1) == 2 and (
-                    keys_document.get("plan_id") != manifest.get("plan_id")
-                    or any(
-                        (keys_document.get("window_ids") or {}).get(window["bucket"])
-                        != window_id(manifest, window)
-                        for window in manifest["windows"]
-                    )
+                if keys_document.get("plan_id") != manifest.get("plan_id") or any(
+                    (keys_document.get("window_ids") or {}).get(window["bucket"])
+                    != window_id(manifest, window)
+                    for window in manifest["windows"]
                 ):
                     continue
                 key_tuples = keys_document["windows"]
@@ -590,12 +596,65 @@ class ColCheck:
     @staticmethod
     def _sample_csv(sample: dict[str, Any], pairs: list[dict[str, Any]]) -> bytes:
         indexes = [sample["pairs"].index(pair) for pair in pairs]
-        output = io.StringIO(newline="")
-        writer = csv.writer(output, lineterminator="\n")
-        writer.writerow([pair["right_column"] for pair in pairs])
-        for row in sample["rows"]:
-            writer.writerow([row[index] for index in indexes])
-        return gzip.compress(output.getvalue().encode("utf-8"))
+        return _gzip_csv(
+            [pair["right_column"] for pair in pairs],
+            ([row[index] for index in indexes] for row in sample["rows"]),
+        )
+
+    # >>> after comparison, every sampled row of a differing window for its differing columns goes to the Volume as rows.csv.gz <<< #
+    def _stage_rows(self) -> None:
+        differing: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for _key, result in list_results(self.store):
+            if result.get("verdict") != "match":
+                differing[(result["pair"], str(result["vintage"]))].add(result["column"])
+        for (pair, window), names in sorted(differing.items()):
+            manifest = self.scheduler.manifests.get(pair)
+            if manifest is None or not int(manifest.get("sample_rows") or 0):
+                continue
+            target = self._target(manifest)
+            columns = [column for column in manifest["columns"] if column in names]
+            payload = self.window_payloads.get((pair, window)) or next(
+                (dict(item) for item in manifest["windows"] if str(item["bucket"]) == window),
+                None,
+            )
+            if not hasattr(target, "window_rows") or payload is None or not columns:
+                continue
+            started = time.monotonic()
+            try:
+                rows = target.window_rows(manifest, payload, columns)
+            except Exception:
+                log.exception("A rows %s %s: fetch failed; the key sample stays", pair, window)
+                continue
+            header = ["_key"]
+            header += [f"k{i}" for i in range(len(rows["key_columns"]))]
+            header += [f"v{i}" for i in range(len(rows["pairs"]))]
+            header += [f"n{i}" for i in range(len(rows["pairs"]))]
+            prefix = right_sample_prefix(pair, window)
+            self.store.put_bytes(
+                f"{prefix}rows.csv.gz",
+                _gzip_csv(header, rows["rows"]),
+                content_type="application/gzip",
+            )
+            self.store.put_json(
+                f"{prefix}rows.json",
+                {
+                    "pair": pair,
+                    "vintage": window,
+                    "key_columns": list(manifest.get("key_cols") or []),
+                    "right_key_columns": rows["key_columns"],
+                    "pairs": rows["pairs"],
+                    "right_rows": len(rows["rows"]),
+                    "right_file": "rows.csv.gz",
+                },
+            )
+            log.info(
+                "A rows %s %s: %d sampled row(s) for %d differing column(s) (%.3fs)",
+                pair,
+                window,
+                len(rows["rows"]),
+                len(columns),
+                time.monotonic() - started,
+            )
 
     def _stage_sample(self, task, sample: dict[str, Any]) -> None:
         prefix = right_sample_prefix(task.pair, task.window)
@@ -618,6 +677,7 @@ class ColCheck:
 
     def _complete_prefetch(self, task, stats, sample, elapsed):
         manifest = self.scheduler.manifests[task.pair]
+        self.window_payloads[(task.pair, task.window)] = dict(task.payload)
         mapped = {left: stats[right] for left, right in manifest["col_map"].items()}
         if self.stats_only:
             self.store.put_json(
@@ -702,10 +762,7 @@ class ColCheck:
         closed = col_check_close_document(self.store)
         if closed is None:
             return False
-        plans = [plan for _key, plan in list_plans(self.store)]
-        if any(int(plan.get("version") or 1) == 2 for plan in plans) and closed.get(
-            "plan_ids"
-        ) != current_plan_ids(self.store):
+        if closed.get("plan_ids") != current_plan_ids(self.store):
             return False
         if self.stats_only:
             expected = {
@@ -781,6 +838,7 @@ class ColCheck:
                             raise RuntimeError(
                                 "Right completion checkpoint is missing durable outcomes"
                             )
+                        self._stage_rows()
                         refresh_units_status(self.store)
                         SqlAudit(
                             self.store,

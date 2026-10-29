@@ -1,27 +1,33 @@
-pair_recon Driver-side window statistics and Right log capture — 2026-10-29
+pair_recon Driver-side window statistics, Right log capture, and row-level differences — 2026-10-29
 
 Summary
 - Right window statistics of a window with at most `RIGHT_STATS_DRIVER_ROWS` (2000000) sampled rows are projected by Spark as normalized text and reduced in pandas on the driver; larger windows keep the batched Spark aggregates.
-- Spark queries become plain projections of `RIGHT_STATS_COLUMNS` columns, which the planner handles in seconds, so 867-column windows finish in a fraction of the batched-aggregate time.
+- Spark queries become plain projections sized by `RIGHT_STATS_DRIVER_CELLS` (50000000 cells per scan), so a few-thousand-row window of 867 columns is fetched in one scan instead of 18, and the planner handles them in seconds.
 - Each distinct text is hashed once (sha256 first 16 hex digits weighted by its count), matching the Left DuckDB and Spark aggregate results exactly.
+- After comparison the Right uploads every sampled row of each differing window for its differing columns (`rows.csv.gz`: normalized key, raw and normalized values); the Left joins them with its local window CSV in DuckDB on the normalized key and writes the first `sample_rows` row-level differences (different, left only, right only) as `differences/<vintage>/rows.xlsx` on the Volume and beside `left.csv` locally.
 - The Right notebook buffers its log in memory and rewrites `_protocol/right.log` on the Volume every 30 seconds from a daemon thread (20 MB cap, failed writes retried, never raised into the job); the Left copies it to `right.log` beside `left.log` once the job ends.
 
 Modified files
 - `README.md`: documents the driver row cap, the pandas reduction, and the Right log capture.
 - `changelog.txt`: records this commit.
 - `guideme.txt`: documents the driver row cap, the pandas reduction, and the Right log capture.
-- `src/pair_recon/app/runner.py`: saves `_protocol/right.log` to the local run directory after the Right job ends.
+- `src/pair_recon/app/runner.py`: saves `_protocol/right.log` to the local run directory after the Right job ends; publishes `rows.xlsx` from the Right rows slice.
+- `src/pair_recon_left/common/runtime/stats.py`: factors the DuckDB value normalization into `normalized_value_sql`.
 - `src/pair_recon_left/common/model/protocol.py`: adds the `RIGHT_LOG` path.
 - `src/pair_recon_right/engine/common/model/protocol.py`: mirrors the `RIGHT_LOG` path.
 - `src/pair_recon_right/notebook.py`: attaches the Volume log handler and closes it before exiting.
-- `src/pair_recon_right/engine/backends/targets.py`: splits window statistics into column plans, a Spark aggregate reducer, and a pandas reducer chosen by the sampled row count.
+- `src/pair_recon_right/engine/checks/col_check.py`: stages the differing-window rows slice after comparison.
+- `src/pair_recon_right/engine/backends/targets.py`: adds `window_rows`; splits window statistics into column plans, a Spark aggregate reducer, and a pandas reducer chosen by the sampled row count.
 - `tests/support.py`: adds `toPandas` to the fake Spark frame.
-- `tests/unit/packages/pair_recon/test_runner.py`: covers saving the Right log locally.
-- `tests/unit/packages/pair_recon_right/backends/test_targets.py`: covers the pandas path, the row-cap fallback, and parity with the Left DuckDB statistics.
+- `tests/unit/packages/pair_recon/test_runner.py`: covers saving the Right log locally and publishing `rows.xlsx`.
+- `tests/unit/packages/pair_recon_right/checks/test_col_check.py`: covers staging the rows slice only for differing windows.
+- `tests/unit/packages/pair_recon_right/backends/test_targets.py`: covers the pandas path, the row-cap fallback, parity with the Left DuckDB statistics, and the `window_rows` projection.
 
 Added files
 - `src/pair_recon_right/engine/backends/frame_stats.py`: pandas reduction of a fetched batch into the statistics payload.
 - `src/pair_recon_right/engine/backends/volume_log.py`: buffered Volume log handler.
+- `src/pair_recon_left/common/checks/row_diff.py`: DuckDB row-level join of the Left window CSV with the Right rows slice and the `rows.xlsx` writer.
+- `tests/unit/packages/pair_recon_left/checks/test_row_diff.py`: covers the normalized-key join, status totals, the limit, and the workbook.
 - `tests/unit/packages/pair_recon_right/backends/test_volume_log.py`: covers flushing, failure retry, and the size cap.
 
 Deleted files

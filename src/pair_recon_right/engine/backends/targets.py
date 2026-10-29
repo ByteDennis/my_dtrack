@@ -32,7 +32,7 @@ from ..common.sql.dates import (
     resolve_date_type,
 )
 from ..common.sql.query_windows import normalize_query_windows, render_query_windows
-from ..common.sql.sampling import sample_predicate_sql
+from ..common.sql.sampling import composite_sql, sample_predicate_sql
 from .frame_stats import EXTREMES, frame_statistics
 
 log = logging.getLogger("pair_recon.right.target")
@@ -73,6 +73,7 @@ def check_date_column(column: str, column_type: str | None, date_type: DateType,
 
 STATS_COLUMNS = int(os.environ.get("RIGHT_STATS_COLUMNS") or 50)
 STATS_DRIVER_ROWS = int(os.environ.get("RIGHT_STATS_DRIVER_ROWS") or 2000000)
+STATS_DRIVER_CELLS = int(os.environ.get("RIGHT_STATS_DRIVER_CELLS") or 50000000)
 
 
 class CsvTarget:
@@ -213,15 +214,18 @@ class SparkTarget:
         clauses = [item for item in (self.config.get("where"), extra) if item]
         return " AND ".join(f"({item})" for item in clauses) or "1=1"
 
-    def _collect(self, sql: str, operation: str = "query") -> list:
+    def _collect(
+        self, sql: str, operation: str = "query", *, log_context: str | None = None
+    ) -> list:
         self._audit(sql, operation)
         started = time.monotonic()
+        label = f"{operation} {log_context}" if log_context else operation
         try:
             rows = self.spark.sql(sql).collect()
         except Exception:
-            log.exception("spark.sql %s failed after %.3fs", operation, time.monotonic() - started)
+            log.exception("spark.sql %s failed after %.3fs", label, time.monotonic() - started)
             raise
-        log.info("spark.sql %s: %d rows (%.3fs)", operation, len(rows), time.monotonic() - started)
+        log.info("spark.sql %s: %d rows (%.3fs)", label, len(rows), time.monotonic() - started)
         return rows
 
     def _rows(self, sql: str, operation: str = "query") -> list[tuple]:
@@ -483,6 +487,7 @@ class SparkTarget:
             plans.append(
                 {
                     "index": i,
+                    "left": left_column,
                     "column": column,
                     "text": text,
                     "value": value,
@@ -494,7 +499,9 @@ class SparkTarget:
         return plans
 
     # >>> one Spark aggregate query over a batch of columns; the row carries <name>_<index> fields <<< #
-    def _spark_statistics(self, plans, selected, relation, where) -> dict[str, dict[str, Any]]:
+    def _spark_statistics(
+        self, plans, selected, relation, where, *, log_context: str
+    ) -> dict[str, dict[str, Any]]:
         selects = ["count(1) AS n_total"]
         for plan in plans:
             i, text, value, extreme = plan["index"], plan["text"], plan["value"], plan["extreme"]
@@ -532,7 +539,7 @@ class SparkTarget:
                     else f"max(length({text})) AS length_max_{i}"
                 )
         sql = f"SELECT {', '.join(selects)} FROM {relation} WHERE {where}"
-        row = self._collect(sql, "window_statistics")[0].asDict()
+        row = self._collect(sql, "window_statistics", log_context=log_context)[0].asDict()
         stats = {}
         for plan in plans:
             i = plan["index"]
@@ -560,7 +567,9 @@ class SparkTarget:
         return stats
 
     # >>> Spark only projects the normalized text (and double value) of a batch; pandas reduces it on the driver <<< #
-    def _driver_statistics(self, plans, selected, relation, where) -> dict[str, dict[str, Any]]:
+    def _driver_statistics(
+        self, plans, selected, relation, where, *, log_context: str
+    ) -> dict[str, dict[str, Any]]:
         selects = []
         for plan in plans:
             selects.append(f"{plan['text']} AS t{plan['index']}")
@@ -573,18 +582,21 @@ class SparkTarget:
             frame = self.spark.sql(sql).toPandas()
         except Exception:
             log.exception(
-                "spark.sql window_statistics failed after %.3fs", time.monotonic() - started
+                "spark.sql window_statistics %s failed after %.3fs",
+                log_context,
+                time.monotonic() - started,
             )
             raise
         log.info(
-            "spark.sql window_statistics: %d rows x %d columns to pandas (%.3fs)",
+            "spark.sql window_statistics %s: %d rows x %d columns to pandas (%.3fs)",
+            log_context,
             len(frame),
             len(frame.columns),
             time.monotonic() - started,
         )
         return frame_statistics(frame, plans, selected)
 
-    # >>> STATS_COLUMNS columns per query; windows up to STATS_DRIVER_ROWS rows are reduced in pandas on the driver, larger ones aggregate in Spark <<< #
+    # >>> windows up to STATS_DRIVER_ROWS rows are reduced in pandas on the driver, STATS_DRIVER_CELLS cells per scan; larger ones aggregate in Spark, STATS_COLUMNS columns per query <<< #
     def window_statistics(
         self, manifest: dict[str, Any], window: dict[str, Any], progress=None
     ) -> dict[str, dict[str, Any]]:
@@ -594,10 +606,15 @@ class SparkTarget:
         relation = self.relation(partitions=window["partitions"])
         rows = self.window_count(manifest, window) if STATS_DRIVER_ROWS > 0 else None
         on_driver = rows is not None and rows <= STATS_DRIVER_ROWS
-        batch = max(1, STATS_COLUMNS)
+        batch = max(1, STATS_DRIVER_CELLS // max(rows or 0, 1) if on_driver else STATS_COLUMNS)
         starts = range(0, len(plans), batch)
+        pair = manifest.get("pair") or "?"
+        vintage = window.get("bucket") or "all"
         log.info(
-            "window_statistics partitions=%s columns=%d statistics=%s sample=%s rows=%s engine=%s batches=%d",
+            "window_statistics pair=%s vintage=%s partitions=%s columns=%d statistics=%s "
+            "sample=%s rows=%s engine=%s batches=%d",
+            pair,
+            vintage,
             window["partitions"],
             len(plans),
             selected,
@@ -608,8 +625,17 @@ class SparkTarget:
         )
         reduce = self._driver_statistics if on_driver else self._spark_statistics
         stats: dict[str, dict[str, Any]] = {}
-        for start in starts:
-            stats.update(reduce(plans[start : start + batch], selected, relation, where))
+        for batch_index, start in enumerate(starts, 1):
+            context = f"pair={pair} vintage={vintage} batch={batch_index}/{len(starts)}"
+            stats.update(
+                reduce(
+                    plans[start : start + batch],
+                    selected,
+                    relation,
+                    where,
+                    log_context=context,
+                )
+            )
             if progress is not None:
                 progress(min(start + batch, len(plans)), len(plans))
         if "statistics" not in manifest:
@@ -617,10 +643,8 @@ class SparkTarget:
                 payload["top_10"] = ""
         return stats
 
-    # >>> keep a bounded raw sample in the Right process; it is written only if comparison finds a diff <<< #
-    def window_sample(
-        self, manifest: dict[str, Any], window: dict[str, Any], limit: int
-    ) -> dict[str, Any]:
+    # >>> key, partition, and attribute column pairs of a sample, one entry per distinct Left/Right name pair <<< #
+    def _sample_pairs(self, manifest: dict[str, Any], columns: list[str]) -> list[dict[str, Any]]:
         pairs: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
 
@@ -653,9 +677,17 @@ class SparkTarget:
                 (manifest.get("right") or {}).get("date_col"),
                 role="partition",
             )
-        for left_column in manifest["columns"]:
+        for left_column in columns:
             include(left_column, manifest["col_map"][left_column], role="attribute")
+        for row in pairs:
+            row.pop("identity")
+        return pairs
 
+    # >>> keep a bounded raw sample in the Right process; it is written only if comparison finds a diff <<< #
+    def window_sample(
+        self, manifest: dict[str, Any], window: dict[str, Any], limit: int
+    ) -> dict[str, Any]:
+        pairs = self._sample_pairs(manifest, manifest["columns"])
         where, _sampled = self._window_where(manifest, window)
         diagnostic_keys = window.get("diagnostic_key_tuples")
         if diagnostic_keys is not None:
@@ -690,6 +722,32 @@ class SparkTarget:
             f"WHERE {where}{order_by} LIMIT {int(limit)}"
         )
         rows = [list(row) for row in self._collect(sql, "difference_sample")]
-        for row in pairs:
-            row.pop("identity")
         return {"pairs": pairs, "rows": rows, "limit": int(limit)}
+
+    # >>> every sampled row of a window for the differing columns: normalized composite key, raw keys, raw and normalized values <<< #
+    def window_rows(
+        self, manifest: dict[str, Any], window: dict[str, Any], columns: list[str]
+    ) -> dict[str, Any]:
+        where, _sampled = self._window_where(manifest, window)
+        keys = list(manifest.get("right_key_cols") or [])
+        key_sql = composite_sql(
+            [quote_ident(key, "spark") for key in keys],
+            manifest.get("key_families") or [],
+            "spark",
+            "right",
+            self._key_types(keys),
+        )
+        plans = {plan["left"]: plan for plan in self._column_plans(manifest)}
+        pairs = [
+            {"left_column": column, "right_column": manifest["col_map"][column]}
+            for column in columns
+        ]
+        selects = [f"{key_sql} AS _key"]
+        selects += [f"{quote_ident(key, 'spark')} AS k{i}" for i, key in enumerate(keys)]
+        selects += [
+            f"{quote_ident(row['right_column'], 'spark')} AS v{i}" for i, row in enumerate(pairs)
+        ]
+        selects += [f"{plans[row['left_column']]['text']} AS n{i}" for i, row in enumerate(pairs)]
+        sql = f"SELECT {', '.join(selects)} FROM {self.relation(partitions=window['partitions'])} WHERE {where}"
+        rows = [list(row) for row in self._collect(sql, "difference_rows")]
+        return {"pairs": pairs, "key_columns": keys, "rows": rows}

@@ -25,15 +25,6 @@ ROW_CHECK = {
 }
 
 
-def test_unit(common):
-    unit_id = common.manifest.unit_id
-    assert unit_id("p", "2026-01-01", "AMOUNT") == unit_id("p", "2026-01-01", "AMOUNT")
-    assert unit_id("p", "2026-01-01", "AMOUNT").startswith("p--2026-01-01--amount--")
-    assert unit_id("p", "w", "a b") != unit_id("p", "w", "a_b")
-    assert unit_id("p", "w", "***").split("--")[2] == "empty"
-    assert len(unit_id("x" * 99, "w", "c").split("--")[0]) == 48
-
-
 @pytest.mark.parametrize(
     ("raw", "expected", "error"),
     [
@@ -63,8 +54,16 @@ def test_manifest(common):
     manifest = common.manifest.build_manifest("run", "p", PAIR, ROW_CHECK)
     assert manifest["columns"] == ["ID", "AMOUNT"]
     assert manifest["windows"] == [
-        {"bucket": "2026-01-01", "partitions": ["2026-01-01", "2026-01-03"], "n_left": 7},
-        {"bucket": "2026-02-01", "partitions": ["2026-02-01"], "n_left": 5},
+        {
+            "bucket": "2026-01-01",
+            "partitions": ["2026-01-01", "2026-01-02", "2026-01-03"],
+            "n_left": 8,
+        },
+        {
+            "bucket": "2026-02-01",
+            "partitions": ["2026-02-01", "2026-02-02"],
+            "n_left": 10,
+        },
     ]
     assert manifest["expected_units"] == 4
     assert manifest["key_cols"] == ["ID"] and manifest["right_key_cols"] == ["id"]
@@ -167,7 +166,6 @@ def _variant(**changes):
     ("pair", "row_check", "message"),
     [
         (_variant(right={"source": "oracle"}), ROW_CHECK, "unsupported Right source"),
-        (PAIR, {**ROW_CHECK, "gate_decision": {"passed": False}}, "has not passed"),
         (_variant(col_map={"DT": "dt"}), ROW_CHECK, "no mapped value columns"),
         (_variant(key_families={"ID": "blob"}), ROW_CHECK, "unsupported key families"),
         (_variant(key=""), ROW_CHECK, "sampling requires a key"),
@@ -199,8 +197,21 @@ def test_manifest3(common):
     manifest = common.manifest.build_manifest(
         "run", "p", _variant(vintage=None, sample=None, key=""), ROW_CHECK
     )
-    assert [w["bucket"] for w in manifest["windows"]] == ["2026-01-01", "2026-01-03", "2026-02-01"]
+    assert [w["bucket"] for w in manifest["windows"]] == [
+        "2026-01-01",
+        "2026-01-02",
+        "2026-01-03",
+        "2026-02-01",
+        "2026-02-02",
+    ]
     assert manifest["sample"] == {"mode": "all"}
+
+
+def test_failed_gate_does_not_filter_the_plan(common):
+    manifest = common.manifest.build_manifest(
+        "run", "p", PAIR, {**ROW_CHECK, "gate_decision": {"passed": False}}
+    )
+    assert manifest["expected_units"] == 4
 
 
 def test_vintage_selection(common):
@@ -297,14 +308,13 @@ def test_all(common):
     assert manifest["expected_units"] == 2
 
 
-def test_version(common):
+def test_exclusions(common):
     pair = _variant(
-        version=2,
         excluded_partitions=["2026-01-02", "2026-02-02"],
         excluded_columns=["ID"],
     )
     manifest = common.manifest.build_manifest("run", "p", pair, ROW_CHECK)
-    assert manifest["version"] == 2 and manifest["plan_id"]
+    assert "version" not in manifest and manifest["plan_id"]
     assert manifest["columns"] == ["AMOUNT"]
     assert manifest["windows"] == [
         {"bucket": "2026-01-01", "partitions": ["2026-01-01", "2026-01-03"], "n_left": 7},
@@ -312,10 +322,10 @@ def test_version(common):
     ]
 
 
-def test_version2(common):
-    first = common.manifest.build_manifest("run", "p", _variant(version=2), ROW_CHECK)
+def test_plan_and_unit_identity(common):
+    first = common.manifest.build_manifest("run", "p", _variant(), ROW_CHECK)
     second = common.manifest.build_manifest(
-        "run", "p", _variant(version=2, excluded_partitions=["2026-01-02"]), ROW_CHECK
+        "run", "p", _variant(excluded_partitions=["2026-01-02"]), ROW_CHECK
     )
     first_ids = {
         window["bucket"]: common.manifest.unit_id_for(first, window, "AMOUNT")
@@ -328,25 +338,25 @@ def test_version2(common):
     }
     assert first_ids["2026-01-01"] != second_ids["2026-01-01"]
     selected = common.manifest.build_manifest(
-        "run", "p", _variant(version=2, statistics=["hash_sum", "n_unique"]), ROW_CHECK
+        "run", "p", _variant(statistics=["hash_sum", "n_unique"]), ROW_CHECK
     )
     assert common.manifest.unit_id_for(
         first, first["windows"][0], "AMOUNT"
     ) != common.manifest.unit_id_for(selected, selected["windows"][0], "AMOUNT")
     assert first_ids["2026-02-01"] == second_ids["2026-02-01"]
     right_only = common.manifest.build_manifest(
-        "run", "p", _variant(version=2, excluded_partitions=["2026-03-01"]), ROW_CHECK
+        "run", "p", _variant(excluded_partitions=["2026-03-01"]), ROW_CHECK
     )
     assert common.manifest.planned_unit_ids(right_only) == common.manifest.planned_unit_ids(first)
     assert right_only["plan_id"] != first["plan_id"]
 
 
 def test_diagnostic_controls_do_not_invalidate_statistics_plan(common):
-    first = common.manifest.build_manifest("run", "p", _variant(version=2), ROW_CHECK)
+    first = common.manifest.build_manifest("run", "p", _variant(), ROW_CHECK)
     diagnostic = common.manifest.build_manifest(
         "run",
         "p",
-        _variant(version=2, sample_rows=25, local_reconciliation=True),
+        _variant(sample_rows=25, local_reconciliation=True),
         ROW_CHECK,
     )
     assert diagnostic["sample_rows"] == 25

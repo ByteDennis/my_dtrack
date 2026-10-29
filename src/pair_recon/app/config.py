@@ -152,4 +152,4 @@ def run_config(
                 selected[field] = answers[field]
             elif field in answers:
                 selected.pop(field, None)
-    return {"version": 2, "timezone": timezone, "pairs": {name: selected}}
+    return {"timezone": timezone, "pairs": {name: selected}}

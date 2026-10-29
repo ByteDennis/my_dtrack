@@ -11,7 +11,7 @@ from pair_recon_left.common.checks.col_check import (
     wait_for_manifests,
     wait_for_row_check_result,
 )
-from pair_recon_left.common.model.manifest import unit_id
+from pair_recon_left.common.model.manifest import unit_id_for
 from pair_recon_left.common.model.protocol import (
     LEFT_STATE,
     difference_keys_path,
@@ -39,6 +39,7 @@ def manifest():
         "left": {"source": "oracle"},
         "right": {"source": "databricks", "table": "orders"},
         "expected_units": 1,
+        "plan_id": "plan",
     }
 
 
@@ -53,7 +54,7 @@ def test_pipeline(caplog):
             pull_window=lambda *_args: "pulled",
             compute_stats=lambda *_args: stats,
         ).run([row])
-    uid = unit_id("pair", "all", "amount")
+    uid = unit_id_for(row, row["windows"][0], "amount")
     assert count == 1 and store.exists(unit_batch_path(1, 1))
     assert store.get_json(unit_batch_path(1, 1))["units"][0]["unit_id"] == uid
     assert "left data pull started: pair=pair vintage=all partitions=1 columns=1" in caplog.text
@@ -71,7 +72,7 @@ def test_pipeline_only_pulls_columns_without_reusable_units():
         1,
         [
             {
-                "unit_id": unit_id("pair", "all", "amount"),
+                "unit_id": unit_id_for(row, row["windows"][0], "amount"),
                 "left_statistics": {"hash_sum": "3"},
                 "pair": "pair",
                 "window": "all",
@@ -207,7 +208,7 @@ def test_wait_for_row_check_result_raises_on_unexcluded_mismatches():
     store = MemoryStore()
     store.put_json(
         plan_path("pair"),
-        {"pair": "pair", "version": 2, "excluded_partitions": ["2026-01-02"]},
+        {"pair": "pair", "excluded_partitions": ["2026-01-02"]},
     )
     store.put_json(
         row_result_path("pair"),
@@ -252,7 +253,7 @@ def test_row_count_difference_table_is_compact_and_directional():
 
 def test_wait_for_row_check_result_waits_for_the_right_then_accepts_matches(caplog):
     store = MemoryStore()
-    store.put_json(plan_path("pair"), {"pair": "pair", "version": 2})
+    store.put_json(plan_path("pair"), {"pair": "pair"})
     polls = []
 
     def abort():
@@ -289,7 +290,7 @@ def test_wait_for_row_check_result_waits_until_aborted():
 
 
 def test_cache(tmp_path, caplog):
-    row = {**manifest(), "version": 2, "plan_id": "one"}
+    row = {**manifest(), "plan_id": "one"}
     calls = []
 
     class Source:
@@ -319,7 +320,6 @@ def test_sas_input_reloads_as_standard_left_csv_without_boundary_fields(tmp_path
     )
     row = {
         **manifest(),
-        "version": 2,
         "plan_id": "one",
         "sample": {"mode": "fraction", "rate": 0.1, "threshold": 100_000},
         "key_cols": ["id"],
@@ -347,7 +347,6 @@ def test_sas_input_reloads_as_standard_left_csv_without_boundary_fields(tmp_path
 def test_left_pull_publishes_bounded_difference_keys(tmp_path):
     row = {
         **manifest(),
-        "version": 2,
         "plan_id": "one",
         "key_cols": ["id"],
         "right_key_cols": ["id"],

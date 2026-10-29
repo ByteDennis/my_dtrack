@@ -16,7 +16,6 @@ from pair_recon_right.engine.report.build import _summary, collect
 
 def _store():
     pair = {
-        "version": 2,
         "left": {"source": "oracle", "table": "A", "date_col": "DT"},
         "right": {
             "source": "databricks",

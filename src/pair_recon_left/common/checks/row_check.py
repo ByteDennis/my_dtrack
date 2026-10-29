@@ -161,10 +161,8 @@ def publish_row_check_results(
         }
         store.put_json(left_row_path(name), document)
         log.info("-> %s", left_row_path(name))
-        if (
-            int(public.get("version") or 1) == 2
-            and not public.get("snapshot")
-            and any(check != "row_count" for check in public.get("checks") or ())
+        if not public.get("snapshot") and any(
+            check != "row_count" for check in public.get("checks") or ()
         ):
             baseline = {
                 "gate_decision": {"passed": True},
@@ -350,18 +348,11 @@ def run_row_check(
             "timing": {"left_count_s": took},
         }
     documents = publish_row_check_results(store, run_id, pairs, results)
-    if all(int(pair.get("version") or 1) == 2 for pair in pairs.values()):
-        log.info(
-            "left row check closed: %d pair(s) in %.3fs; version 2 plans are ready for col-check",
-            len(pairs),
-            time.monotonic() - started,
-        )
-    else:
-        log.info(
-            "left side closed: %d pair(s) in %.3fs; waiting on the Right side for row-check verdicts",
-            len(pairs),
-            time.monotonic() - started,
-        )
+    log.info(
+        "left row check closed: %d pair(s) in %.3fs; plans are ready for col-check",
+        len(pairs),
+        time.monotonic() - started,
+    )
     SqlAudit(
         store, "left", enabled=any(bool(pair.get("audit")) for pair in pairs.values())
     ).refresh()

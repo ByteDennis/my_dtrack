@@ -105,7 +105,7 @@ def test_config(partition, answers, expected):
     }
     value = run_config("订单", pair, answers, timezone="America/New_York")
     assert list(value["pairs"]) == ["订单"]
-    assert value["version"] == 2 and value["timezone"] == "America/New_York"
+    assert "version" not in value and value["timezone"] == "America/New_York"
     for key, item in expected.items():
         assert value["pairs"]["订单"][key] == item
     if partition == "all":

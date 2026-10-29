@@ -349,7 +349,6 @@ def _completed_window_store(*, fail_column=None, diff_column=None, count_diff=Fa
     plan = {
         "pair": "orders",
         "run_id": "r1",
-        "version": 2,
         "vintage": "month",
         "partition": "day",
         "left": {"source": "oracle"},

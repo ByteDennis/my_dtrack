@@ -44,6 +44,7 @@ from pair_recon_left.common.model.protocol import (
     mapping_path,
     plan_path,
     result_path,
+    right_sample_prefix,
     row_result_path,
     row_retry_path,
     unit_prefix,
@@ -62,7 +63,7 @@ from pair_recon_right.engine.common.model.attribute_checks import (
     attribute_check_names,
     get_attribute_check,
 )
-from pair_recon_right.engine.common.model.manifest import unit_id
+from pair_recon_right.engine.common.model.manifest import unit_id_for
 from pair_recon_right.engine.job import run as run_right
 
 
@@ -124,11 +125,12 @@ Partition   Left  Right  Difference
 def test_debug_reconciles_locally_and_publishes_only_difference_samples(tmp_path):
     store = MemoryStore()
     document = left_document(sample=None)
+    document["pair_config"]["checks"] = ["hash_sum"]
     store.put_json(left_row_path("p"), document)
     write_left_state(store, {"pairs": ["p"], "row_check_closed_at": "now"})
-    run_right_row_check(store, lambda _cfg: FakeTarget())
+    run_right_row_check(store, lambda _cfg: FakeTarget(counts=document["counts"]))
     manifest = store.get_json(plan_path("p"))
-    uid = unit_id("p", "2026-01-01", "amount")
+    uid = unit_id_for(manifest, manifest["windows"][0], "amount")
     store.commit_units(
         1,
         [
@@ -142,7 +144,7 @@ def test_debug_reconciles_locally_and_publishes_only_difference_samples(tmp_path
             }
         ],
     )
-    store.close_manifests(["p"], manifest["expected_units"])
+    store.close_manifests(["p"], manifest["expected_units"], {"p": manifest["plan_id"]})
     store.heartbeat()
 
     class SampleTarget(FakeTarget):
@@ -202,8 +204,76 @@ def test_debug_reconciles_locally_and_publishes_only_difference_samples(tmp_path
         "9",
     ]
     assert sheet["A2"].font.bold is True
-    assert sheet["B3"].fill.fgColor.rgb == sheet["E3"].fill.fgColor.rgb == "00FFC7CE"
+    assert sheet["B3"].font.color.rgb == sheet["E3"].font.color.rgb == "009C0006"
+    assert sheet["B3"].fill.fill_type is sheet["E3"].fill.fill_type is None
     assert store.list_keys("differences/2026-01-01/") == ["differences/2026-01-01/samples.xlsx"]
+    assert store.list_keys("_protocol/tmp/") == []
+
+
+def test_publish_difference_samples_writes_row_differences_when_right_rows_exist(tmp_path):
+    store = MemoryStore()
+    document = left_document()
+    document["pair_config"]["checks"] = ["hash_sum"]
+    store.put_json(left_row_path("p"), document)
+    write_left_state(store, {"pairs": ["p"], "row_check_closed_at": "now"})
+    run_right_row_check(store, lambda _cfg: FakeTarget(counts=document["counts"]))
+    manifest = store.get_json(plan_path("p"))
+    uid = unit_id_for(manifest, manifest["windows"][0], "amount")
+    pointer = {"pair": "p", "window": "2026-01-01", "column": "amount", "right_column": "amount"}
+    store.commit_units(1, [{**pointer, "unit_id": uid, "left_statistics": STATS}])
+    store.close_manifests(["p"], manifest["expected_units"], {"p": manifest["plan_id"]})
+    store.heartbeat()
+
+    class SampleTarget(FakeTarget):
+        def window_sample(self, _manifest, _window, limit):
+            return {
+                "pairs": [
+                    {"left_column": "id", "right_column": "id", "context": True},
+                    {"left_column": "amount", "right_column": "amount", "context": False},
+                ],
+                "rows": [[1, 9]],
+                "limit": limit,
+            }
+
+        def window_rows(self, _manifest, _window, columns):
+            return {
+                "pairs": [{"left_column": "amount", "right_column": "amount"}],
+                "key_columns": ["id"],
+                "rows": [["1", "1", "9", "9"], ["2", "2", "8", "8"]],
+            }
+
+    RightColCheck(
+        store,
+        lambda _cfg: SampleTarget(stats={"amount": {**STATS, "n_unique": 9}}),
+        poll_interval=0,
+    ).run()
+    prefix = right_sample_prefix("p", "2026-01-01")
+    assert store.exists(f"{prefix}rows.json")
+    left = tmp_path / "p" / "2026-01-01" / "left.csv"
+    left.parent.mkdir(parents=True)
+    left.write_text("id,amount\n1,8\n2,8\n", encoding="utf-8")
+    assert publish_difference_samples(store, tmp_path, "p") == 1
+    assert store.list_keys("differences/2026-01-01/") == [
+        "differences/2026-01-01/rows.xlsx",
+        "differences/2026-01-01/samples.xlsx",
+    ]
+    from openpyxl import load_workbook
+
+    sheet = load_workbook(io.BytesIO(store.get_bytes("differences/2026-01-01/rows.xlsx")))["Rows"]
+    assert (
+        sheet.cell(1, 1).value == "1 of 1 differing rows (different 1, left only 0, right only 0)"
+    )
+    assert [sheet.cell(3, column).value for column in range(1, 7)] == [
+        "1",
+        "different",
+        "8",
+        None,
+        None,
+        "9",
+    ]
+    assert (tmp_path / "p" / "2026-01-01" / "rows.xlsx").read_bytes() == store.get_bytes(
+        "differences/2026-01-01/rows.xlsx"
+    )
     assert store.list_keys("_protocol/tmp/") == []
 
 
@@ -229,7 +299,7 @@ def test_excluded_partition_ranges_and_month_numbers():
 
 def test_mismatched_partitions_parses_only_the_selected_pair():
     error = RuntimeError(
-        "version 2 row-check found unexcluded mismatched partitions; "
+        "row-check found unexcluded mismatched partitions; "
         "add them to excluded_partitions (other: 2026-09-01; "
         "orders: 2026-10-02, 2026-10-05, 2026-10-02)"
     )
@@ -305,7 +375,7 @@ def test_add_mismatched_partitions_normalizes_month_date_type():
     }
     config = {"pairs": {"orders": {}}}
     error = RuntimeError(
-        "version 2 row-check found unexcluded mismatched partitions "
+        "row-check found unexcluded mismatched partitions "
         "(orders: 2026-09-03, 2026-09-18, 2026-10-02)"
     )
 
@@ -636,7 +706,7 @@ def test_execute_automatically_adds_exclusions_and_resumes_same_run(monkeypatch,
         calls.append((action, _settings["run_id"]))
         if len(calls) == 1:
             raise RuntimeError(
-                "version 2 row-check found unexcluded mismatched partitions; "
+                "row-check found unexcluded mismatched partitions; "
                 "add them to excluded_partitions (orders: 2026-10-02, 2026-10-05)"
             )
         return {"state": "passed"}
@@ -3056,7 +3126,6 @@ def test_csvrun(tmp_path):
     left_path.write_text("ID,VALUE\n1,文字\n2,✓\n", encoding="utf-8")
     right_path.write_text("id,value\n1,文字\n2,✓\n", encoding="utf-8")
     pair = {
-        "version": 2,
         "partition": "all",
         "left": {"source": "csv", "path": str(left_path)},
         "right": {"source": "csv", "path": str(right_path), "pre_sampled": True},
@@ -3067,7 +3136,7 @@ def test_csvrun(tmp_path):
         "statistics": ["hash_sum", "n_unique"],
         "col_map": {"ID": "id", "VALUE": "value"},
     }
-    config = {"version": 2, "timezone": "America/New_York", "pairs": {"orders": pair}}
+    config = {"timezone": "America/New_York", "pairs": {"orders": pair}}
     store = LocalStore(tmp_path / "run")
     factory = lambda values: CsvTarget(values)
     left = runner.run_left(
@@ -3093,7 +3162,6 @@ def test_left_only_csvrun_uploads_left_artifacts(tmp_path):
     left_path = tmp_path / "left.csv"
     left_path.write_text("ID,VALUE\n1,文字\n2,✓\n", encoding="utf-8")
     pair = {
-        "version": 2,
         "partition": "all",
         "left": {"source": "csv", "path": str(left_path)},
         "right": {"source": "databricks", "table": "orders"},
@@ -3102,7 +3170,7 @@ def test_left_only_csvrun_uploads_left_artifacts(tmp_path):
         "statistics": ["hash_sum", "n_unique"],
         "col_map": {"ID": "id", "VALUE": "value"},
     }
-    config = {"version": 2, "timezone": "America/New_York", "pairs": {"orders": pair}}
+    config = {"timezone": "America/New_York", "pairs": {"orders": pair}}
     store = LocalStore(tmp_path / "run")
 
     left = runner.run_left(
@@ -3126,7 +3194,6 @@ def test_left_only_csvrun_uploads_left_artifacts(tmp_path):
 
 def test_left_only_rejects_snapshot_pair(tmp_path):
     config = {
-        "version": 2,
         "timezone": "America/New_York",
         "pairs": {
             "orders": {
@@ -3158,7 +3225,6 @@ def test_left_only_rejects_snapshot_pair(tmp_path):
 def _stub_column_checks(monkeypatch, store, seen):
     plan = {
         "pair": "orders",
-        "version": 2,
         "windows": [{"bucket": "all", "partitions": ["all"]}],
         "excluded_partitions": [],
     }
@@ -3183,7 +3249,7 @@ def _stub_column_checks(monkeypatch, store, seen):
     monkeypatch.setattr(runner, "publish_fixed_keys", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner, "LeftRuntime", Runtime)
     monkeypatch.setattr(runner, "ColCheckPipeline", Pipeline)
-    return {"pairs": {"orders": {"checks": ["row_count", "hash_sum"], "version": 2}}}
+    return {"pairs": {"orders": {"checks": ["row_count", "hash_sum"]}}}
 
 
 def test_run_left_pulls_only_after_the_right_row_check_result(monkeypatch, tmp_path):

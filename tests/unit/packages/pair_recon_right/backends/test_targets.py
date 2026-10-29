@@ -597,19 +597,29 @@ def _driver_spark(count=4):
     return FakeSpark(respond)
 
 
-def test_statistics_reduce_in_pandas_below_the_driver_row_cap(monkeypatch):
+def test_statistics_reduce_in_pandas_below_the_driver_row_cap(monkeypatch, caplog):
     monkeypatch.setattr(targets, "STATS_DRIVER_ROWS", 1000)
-    monkeypatch.setattr(targets, "STATS_COLUMNS", 2)
+    monkeypatch.setattr(targets, "STATS_DRIVER_CELLS", 8)
+    monkeypatch.setattr(targets, "STATS_COLUMNS", 1)
     spark = _driver_spark()
     seen = []
-    stats = SparkTarget(spark, ORDERS).window_statistics(
-        _manifest({"mode": "all"}),
-        {"bucket": "2026-01-01", "partitions": ["2026-01-01"]},
-        progress=lambda done, total: seen.append((done, total)),
-    )
+    with caplog.at_level("INFO", logger="pair_recon.right.target"):
+        stats = SparkTarget(spark, ORDERS).window_statistics(
+            _manifest({"mode": "all"}),
+            {"bucket": "2026-01-01", "partitions": ["2026-01-01"]},
+            progress=lambda done, total: seen.append((done, total)),
+        )
     count, *queries = spark.statements[1:]
     assert count.startswith("SELECT count(1) FROM `main`.`sales`.`orders` WHERE ")
     assert len(queries) == 2 and seen == [(2, 3), (3, 3)]
+    assert "pair=orders vintage=2026-01-01 batch=1/2" in caplog.text
+    wide = _driver_spark()
+    monkeypatch.setattr(targets, "STATS_DRIVER_CELLS", 50000000)
+    SparkTarget(wide, ORDERS).window_statistics(
+        _manifest({"mode": "all"}), {"partitions": ["2026-01-01"]}
+    )
+    assert len(wide.statements) == 3 and " AS t2 FROM" in wide.statements[-1]
+    assert "pair=orders vintage=2026-01-01 batch=2/2" in caplog.text
     assert queries[0].startswith("SELECT ") and "cast(`order_id` as string)" in queries[0]
     assert " AS t0, " in queries[0] and " AS t1, " in queries[0] and " AS t2" not in queries[0]
     assert " AS v1 FROM" in queries[0] and " AS v0" not in queries[0]
@@ -706,3 +716,22 @@ def test_driver_statistics_match_the_left_duckdb_statistics(tmp_path):
                 assert right[column][name] == pytest.approx(value), (column, name)
             else:
                 assert right[column][name] == value, (column, name)
+
+
+def test_window_rows_projects_normalized_key_raw_and_normalized_values():
+    spark = FakeSpark(
+        lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [("7|2026-01-01", 7, "2.50", "2.5")]
+    )
+    manifest = _manifest({"mode": "fraction", "threshold": 99})
+    rows = SparkTarget(spark, ORDERS).window_rows(
+        manifest, {"bucket": "2026-01-01", "partitions": ["2026-01-01"]}, ["AMOUNT"]
+    )
+    sql = spark.statements[-1]
+    assert sql.startswith("SELECT concat_ws('|', ") and " AS _key, `order_id` AS k0, " in sql
+    assert "`amount` AS v0, " in sql and " AS n0 FROM `main`.`sales`.`orders` WHERE " in sql
+    assert "< 99" in sql and "LIMIT" not in sql and " IN (" not in sql
+    assert rows == {
+        "pairs": [{"left_column": "AMOUNT", "right_column": "amount"}],
+        "key_columns": ["order_id"],
+        "rows": [["7|2026-01-01", 7, "2.50", "2.5"]],
+    }

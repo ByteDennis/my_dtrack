@@ -16,7 +16,7 @@ def pair(partition="all"):
 
 @pytest.mark.parametrize("partition", ["all", "day", "month"])
 def test_valid(partition):
-    value = validate_config({"version": 2, "pairs": {"p": pair(partition)}})
+    value = validate_config({"pairs": {"p": pair(partition)}})
     assert value["pairs"]["p"]["statistics"] == ["n_unique", "hash_sum"]
     assert value["pairs"]["p"]["audit"] is False
 
@@ -25,7 +25,7 @@ def test_audit_must_be_boolean():
     value = pair()
     value["audit"] = "false"
     with pytest.raises(TypeError, match="audit must be true or false"):
-        validate_config({"version": 2, "pairs": {"p": value}})
+        validate_config({"pairs": {"p": value}})
 
 
 @pytest.mark.parametrize(
@@ -40,16 +40,16 @@ def test_source(source, valid):
     if source == "hadoop":
         value["left"]["schema"] = "risk"
     if valid:
-        assert validate_config({"version": 2, "pairs": {"p": value}})
+        assert validate_config({"pairs": {"p": value}})
     else:
         with pytest.raises(ValueError, match="unsupported Left source"):
-            validate_config({"version": 2, "pairs": {"p": value}})
+            validate_config({"pairs": {"p": value}})
 
 
 def test_hadoop():
     value = pair()
     value["left"] = {"source": "hadoop", "query": "SELECT A FROM risk.L"}
-    assert validate_config({"version": 2, "pairs": {"p": value}})
+    assert validate_config({"pairs": {"p": value}})
 
 
 @pytest.mark.parametrize("source", ["oracle", "hadoop"])
@@ -64,7 +64,7 @@ def test_sas_sample_csv(source):
         **({"table": "L"} if source == "oracle" else {"schema": "risk", "table": "L"}),
     }
 
-    configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
+    configured = validate_config({"pairs": {"p": value}})["pairs"]["p"]
 
     assert configured["left"]["sas_sample_csv"] == "C:/PairRecon/samples/left.csv"
 
@@ -78,13 +78,13 @@ def test_sas_sample_csv_rejects_csv_source_and_fixed_sampling():
         "sas_sample_csv": "sample.csv",
     }
     with pytest.raises(ValueError, match="Oracle or Hadoop"):
-        validate_config({"version": 2, "pairs": {"p": value}})
+        validate_config({"pairs": {"p": value}})
 
     value = pair("day")
     value.update(sample=10, key="A")
     value["left"]["sas_sample_csv"] = "sample.csv"
     with pytest.raises(ValueError, match="all or fraction"):
-        validate_config({"version": 2, "pairs": {"p": value}})
+        validate_config({"pairs": {"p": value}})
 
 
 @pytest.mark.parametrize("source", ["databricks", "csv"])
@@ -93,14 +93,14 @@ def test_right(source):
     if source == "csv":
         value["right"] = {"source": "csv", "path": "right.csv"}
         value["right_pre_sampled"] = True
-    assert validate_config({"version": 2, "pairs": {"p": value}})
+    assert validate_config({"pairs": {"p": value}})
 
 
 def test_snapshot():
     value = pair("day")
     value["snapshot"] = True
     value["left"].pop("date_col")
-    assert validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]["snapshot"]
+    assert validate_config({"pairs": {"p": value}})["pairs"]["p"]["snapshot"]
 
 
 def test_query_windows_on_both_sides():
@@ -113,7 +113,7 @@ def test_query_windows_on_both_sides():
         "query": "SELECT * FROM R r WHERE {{query_windows:driver}}",
         "query_windows": {"driver": {"expression": "r.D", "date_type": "date"}},
     }
-    configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
+    configured = validate_config({"pairs": {"p": value}})["pairs"]["p"]
     assert configured["left"]["query_windows"]["driver"]["expression"] == "l.D"
     assert configured["right"]["query_windows"]["driver"]["expression"] == "r.D"
 
@@ -122,22 +122,22 @@ def test_query_windows_require_date_mode_and_declarations():
     value = pair()
     value["right"] |= {"query": "SELECT * FROM R WHERE {{query_windows:driver}}"}
     with pytest.raises(ValueError, match="Right query_windows"):
-        validate_config({"version": 2, "pairs": {"p": value}})
+        validate_config({"pairs": {"p": value}})
 
     value["right"]["query_windows"] = {"driver": {"expression": "D"}}
     with pytest.raises(ValueError, match="partition all"):
-        validate_config({"version": 2, "pairs": {"p": value}})
+        validate_config({"pairs": {"p": value}})
 
 
 def test_vintage_selection_config():
     value = pair("day")
     value["vintage_values"] = ["2026-01-01", "2026-01-01"]
-    configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
+    configured = validate_config({"pairs": {"p": value}})["pairs"]["p"]
     assert configured["vintage_values"] == ["2026-01-01"]
 
     value = pair("day")
     value["vintage_sample_size"] = "3"
-    configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
+    configured = validate_config({"pairs": {"p": value}})["pairs"]["p"]
     assert configured["vintage_sample_size"] == 3
 
 
@@ -147,7 +147,7 @@ def test_month_number_date_type_normalizes_excluded_partitions():
     value["right"]["date_type"] = {"type": "number", "format": "month"}
     value["excluded_partitions"] = ["2026-01-15", "2026-01-31", "2026-02-01"]
 
-    configured = validate_config({"version": 2, "pairs": {"p": value}})["pairs"]["p"]
+    configured = validate_config({"pairs": {"p": value}})["pairs"]["p"]
 
     assert configured["excluded_partitions"] == ["2026-01-01", "2026-02-01"]
 
@@ -156,17 +156,17 @@ def test_vintage_selection_config_rejects_ambiguity_and_all_mode():
     value = pair("day")
     value.update(vintage_sample_size=2, vintage_values=["2026-01-01"])
     with pytest.raises(ValueError, match="not both"):
-        validate_config({"version": 2, "pairs": {"p": value}})
+        validate_config({"pairs": {"p": value}})
 
     value = pair()
     value["vintage_sample_size"] = 2
     with pytest.raises(ValueError, match="cannot select vintages"):
-        validate_config({"version": 2, "pairs": {"p": value}})
+        validate_config({"pairs": {"p": value}})
 
     value = pair("day")
     value["vintage_sample_size"] = 1.5
     with pytest.raises(TypeError, match="positive integer"):
-        validate_config({"version": 2, "pairs": {"p": value}})
+        validate_config({"pairs": {"p": value}})
 
 
 @pytest.mark.parametrize("sample", [10, "10"])
@@ -175,4 +175,4 @@ def test_sample(sample):
     value["left"] = {"source": "csv", "path": "sample.csv"}
     value.update(pre_sampled=True, sample=sample, key="A")
     with pytest.raises(ValueError, match="requires all or fraction"):
-        validate_config({"version": 2, "pairs": {"p": value}})
+        validate_config({"pairs": {"p": value}})

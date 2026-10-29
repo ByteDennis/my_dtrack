@@ -113,7 +113,6 @@ def test_smoke_runs_the_local_csv_pair_end_to_end(tmp_path, monkeypatch):
 
     monkeypatch.setattr(smoke_module, "VolumeStore", Store)
     pair = {
-        "version": 2,
         "partition": "all",
         "left": {"source": "csv", "path": str(left)},
         "right": {"source": "csv", "path": str(right)},
@@ -122,7 +121,7 @@ def test_smoke_runs_the_local_csv_pair_end_to_end(tmp_path, monkeypatch):
         "checks": ["row_count", "hash_sum"],
         "col_map": {"ID": "id", "VALUE": "value", "NOTE": "note"},
     }
-    config = {"version": 2, "timezone": "America/New_York", "pairs": {"orders": pair}}
+    config = {"timezone": "America/New_York", "pairs": {"orders": pair}}
     settings = {"run_id": "orders-me-20261027", "volume_root": "/Volumes/x", "profile": "corp"}
     client = SimpleNamespace(files=None)
 

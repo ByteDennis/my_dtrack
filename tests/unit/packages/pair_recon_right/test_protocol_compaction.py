@@ -28,7 +28,6 @@ from pair_recon_right.engine.common.model.protocol import (
 
 def _two_column_store():
     pair = {
-        "version": 2,
         "left": {"source": "oracle", "date_col": "dt"},
         "right": {"source": "databricks", "date_col": "dt"},
         "col_map": {"amount": "amount", "status": "status"},
@@ -109,7 +108,6 @@ def test_right_writes_one_result_batch_and_terminal_snapshots():
 def test_matching_results_are_chunked_and_units_csv_is_terminal_only():
     columns = [f"column_{index:03d}" for index in range(130)]
     pair = {
-        "version": 2,
         "left": {"source": "oracle", "date_col": "dt"},
         "right": {"source": "databricks", "date_col": "dt"},
         "col_map": {column: column for column in columns},

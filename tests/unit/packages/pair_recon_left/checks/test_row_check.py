@@ -67,11 +67,10 @@ def test_counts(mode, counts):
         "right": {"source": "databricks", "table": "R", **dates},
         "col_map": {"A": "a"},
         "checks": ["row_count"],
-        "version": 2,
     }
     store = MemoryStore()
     run_row_check(
-        {"version": 2, "pairs": {"p": pair}},
+        {"pairs": {"p": pair}},
         store,
         run_id="run",
         source_factory=lambda _value: Source(counts),
@@ -99,13 +98,12 @@ def test_row_count_query_logs_start_heartbeat_and_completion(monkeypatch, caplog
         },
         "col_map": {"A": "a"},
         "checks": ["row_count"],
-        "version": 2,
     }
     monkeypatch.setattr(row_check, "ROW_COUNT_LOG_INTERVAL", 0.005)
 
     with caplog.at_level("INFO"):
         run_row_check(
-            {"version": 2, "pairs": {"p": pair}},
+            {"pairs": {"p": pair}},
             MemoryStore(),
             run_id="run",
             source_factory=lambda _value: SlowSource({"2026-01-01": 2}),
@@ -126,12 +124,11 @@ def test_plan(caplog):
         "col_map": {"A": "a"},
         "checks": ["hash_sum", "n_unique"],
         "statistics": ["n_unique", "hash_sum"],
-        "version": 2,
     }
     store = MemoryStore()
     with caplog.at_level("INFO"):
         run_row_check(
-            {"version": 2, "pairs": {"p": pair}},
+            {"pairs": {"p": pair}},
             store,
             run_id="run",
             source_factory=lambda _value: Source({"all": 2}),
@@ -141,7 +138,7 @@ def test_plan(caplog):
         "plan released: memory://run/config/manifest.json (1 windows, 1 columns, 1 units)"
         in caplog.text
     )
-    assert "version=2" not in caplog.text
+    assert "version=" not in caplog.text
     assert store.get_bytes(mapping_path("p")).decode().splitlines() == [
         "left_column,right_column,usage,data_type",
         "A,a,compare,",
@@ -155,9 +152,8 @@ def test_reused_row_check_reopens_column_stage():
         "right": {"source": "databricks", "table": "R"},
         "col_map": {"A": "a"},
         "checks": ["hash_sum"],
-        "version": 2,
     }
-    config = {"version": 2, "pairs": {"p": pair}}
+    config = {"pairs": {"p": pair}}
     store = MemoryStore()
     run_row_check(
         config,
@@ -179,9 +175,8 @@ def test_reused_left_counts_invalidate_right_when_effective_config_changes():
         "right": {"source": "databricks", "table": "R"},
         "col_map": {"A": "a"},
         "checks": ["hash_sum"],
-        "version": 2,
     }
-    config = {"version": 2, "pairs": {"p": pair}}
+    config = {"pairs": {"p": pair}}
     store = MemoryStore()
     run_row_check(
         config,
@@ -211,9 +206,8 @@ def test_reused_left_counts_allow_non_key_column_type_changes():
         "key": "ID",
         "col_map": {"ID": "id", "AMOUNT": "amount"},
         "checks": ["hash_sum"],
-        "version": 2,
     }
-    config = {"version": 2, "pairs": {"p": pair}}
+    config = {"pairs": {"p": pair}}
     store = MemoryStore()
     run_row_check(
         config,
@@ -236,9 +230,8 @@ def test_reused_left_counts_reject_sampled_key_type_changes():
         "key": "ID",
         "col_map": {"ID": "id", "AMOUNT": "amount"},
         "checks": ["hash_sum"],
-        "version": 2,
     }
-    config = {"version": 2, "pairs": {"p": pair}}
+    config = {"pairs": {"p": pair}}
     store = MemoryStore()
     run_row_check(
         config,
@@ -265,11 +258,10 @@ def test_vintage_sampling_keeps_full_row_counts():
         "checks": ["hash_sum"],
         "vintage": "month",
         "vintage_sample_size": 1,
-        "version": 2,
     }
     store = MemoryStore()
     run_row_check(
-        {"version": 2, "pairs": {"p": pair}},
+        {"pairs": {"p": pair}},
         store,
         run_id="run",
         source_factory=lambda _value: Source(counts),
@@ -288,7 +280,6 @@ def test_snapshot():
         "right": {"source": "databricks", "table": "HISTORY", "date_col": "D"},
         "col_map": {"A": "a"},
         "checks": ["hash_sum"],
-        "version": 2,
     }
     store = MemoryStore()
 
@@ -297,7 +288,7 @@ def test_snapshot():
         return Source({"all": 2})
 
     run_row_check(
-        {"version": 2, "pairs": {"p": pair}},
+        {"pairs": {"p": pair}},
         store,
         run_id="run",
         source_factory=factory,
@@ -325,7 +316,6 @@ def test_run_row_check_aborts_while_the_count_is_running(monkeypatch):
         "right": {"source": "databricks", "table": "R"},
         "col_map": {"A": "a"},
         "checks": ["row_count"],
-        "version": 2,
     }
     monkeypatch.setattr(row_check, "ROW_COUNT_LOG_INTERVAL", 0.01)
     outcome = {}
@@ -334,7 +324,7 @@ def test_run_row_check_aborts_while_the_count_is_running(monkeypatch):
     def run():
         try:
             run_row_check(
-                {"version": 2, "pairs": {"p": pair}},
+                {"pairs": {"p": pair}},
                 store,
                 run_id="run",
                 source_factory=lambda _value: BlockedSource({"all": 2}),
@@ -377,10 +367,9 @@ def test_run_row_check_heartbeats_while_the_count_is_running(monkeypatch):
         "right": {"source": "databricks", "table": "R"},
         "col_map": {"A": "a"},
         "checks": ["row_count"],
-        "version": 2,
     }
     run_row_check(
-        {"version": 2, "pairs": {"p": pair}},
+        {"pairs": {"p": pair}},
         store,
         run_id="run",
         source_factory=lambda _value: SlowSource({"all": 2}),
