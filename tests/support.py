@@ -208,16 +208,40 @@ class FakeFrame:
     def collect(self):
         return list(self.rows)
 
+    def toLocalIterator(self):
+        return iter(self.rows)
+
+    def persist(self, *_level):
+        return self
+
+    def unpersist(self):
+        return self
+
+    def createOrReplaceTempView(self, _name):
+        return None
+
+    def count(self):
+        return len(self.rows)
+
     def toPandas(self):
         import pandas as pd
 
         return pd.DataFrame([dict(row) for row in self.rows])
 
 
+class FakeCatalog:
+    def __init__(self):
+        self.dropped = []
+
+    def dropTempView(self, name):
+        self.dropped.append(name)
+
+
 class FakeSpark:
     def __init__(self, responder=lambda _sql: []):
         self.responder = responder
         self.statements = []
+        self.catalog = FakeCatalog()
 
     def sql(self, text):
         self.statements.append(text)

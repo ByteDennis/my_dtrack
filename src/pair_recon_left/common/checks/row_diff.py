@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from ..model.hashing import active_normalization_rules, is_transform_rule
+from ..model.hashing import active_normalization_rules
 from ..runtime.stats import _quote, normalized_value_sql
 from ..sql.sampling import composite_sql
 
@@ -30,7 +30,6 @@ def compare_rows(
     left_rules = active_normalization_rules(
         manifest.get("normalization_rules"), (manifest.get("left") or {}).get("source") or "csv"
     )
-    transforms = {rule["rule_name"] for rule in left_rules if is_transform_rule(rule)}
     comparisons = manifest.get("column_types") or {}
     key_sql = composite_sql(
         [_quote(key) for key in keys], manifest.get("key_families") or [], "duckdb", "left"
@@ -42,7 +41,7 @@ def compare_rows(
             comparisons.get(row["left_column"]),
             left_rules,
             manifest.get("normalization_date"),
-            collapse=row["left_column"] in numeric and "decimal" not in transforms,
+            collapse=row["left_column"] in numeric,
         )
         for row in pairs
     ]

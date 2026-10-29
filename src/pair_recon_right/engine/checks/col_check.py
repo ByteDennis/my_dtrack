@@ -11,6 +11,8 @@ import traceback
 from collections import defaultdict, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from tqdm import tqdm
@@ -191,6 +193,18 @@ def require_same_total(manifest, window, column, left, right) -> None:
         _mismatch_message(manifest, window, int(left_total), int(right_total))
         + f" (first seen on column {column})"
     )
+
+
+# >>> stream rows into a gzip CSV on local disk; returns the row count <<< #
+def _write_gzip_csv(path: Path, header: list[str], rows) -> int:
+    count = 0
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow(row)
+            count += 1
+    return count
 
 
 def _gzip_csv(header: list[str], rows) -> bytes:
@@ -561,26 +575,30 @@ class ColCheck:
             len(task.payload["partitions"]),
         )
         target = self._target(manifest)
-        self._note_activity(task, 0, len(manifest["columns"]))
         try:
-            stats = target.window_statistics(
-                manifest,
-                task.payload,
-                progress=lambda done, total: self._note_activity(task, done, total),
-            )
-        finally:
-            with self.activity_lock:
-                self.activity.pop((task.pair, task.window), None)
-        sample = None
-        sample_rows = int(manifest.get("sample_rows") or 0)
-        if sample_rows and hasattr(target, "window_sample"):
-            sample_window = dict(task.payload)
-            keys_path = difference_keys_path(task.pair, task.window)
-            if self.store.exists(keys_path):
-                sample_window["diagnostic_key_tuples"] = self.store.get_json(keys_path).get(
-                    "key_tuples", []
+            self._note_activity(task, 0, len(manifest["columns"]))
+            try:
+                stats = target.window_statistics(
+                    manifest,
+                    task.payload,
+                    progress=lambda done, total: self._note_activity(task, done, total),
                 )
-            sample = target.window_sample(manifest, sample_window, sample_rows)
+            finally:
+                with self.activity_lock:
+                    self.activity.pop((task.pair, task.window), None)
+            sample = None
+            sample_rows = int(manifest.get("sample_rows") or 0)
+            if sample_rows and hasattr(target, "window_sample"):
+                sample_window = dict(task.payload)
+                keys_path = difference_keys_path(task.pair, task.window)
+                if self.store.exists(keys_path):
+                    sample_window["diagnostic_key_tuples"] = self.store.get_json(keys_path).get(
+                        "key_tuples", []
+                    )
+                sample = target.window_sample(manifest, sample_window, sample_rows)
+        finally:
+            if hasattr(target, "release_window"):
+                target.release_window(task.payload)
         if stats:
             column, payload = next(iter(stats.items()))
             log.info(
@@ -630,11 +648,16 @@ class ColCheck:
             header += [f"v{i}" for i in range(len(rows["pairs"]))]
             header += [f"n{i}" for i in range(len(rows["pairs"]))]
             prefix = right_sample_prefix(pair, window)
-            self.store.put_bytes(
-                f"{prefix}rows.csv.gz",
-                _gzip_csv(header, rows["rows"]),
-                content_type="application/gzip",
-            )
+            with TemporaryDirectory(prefix="pair_recon-rows-") as folder:
+                path = Path(folder) / "rows.csv.gz"
+                try:
+                    count = _write_gzip_csv(path, header, rows["rows"])
+                except Exception:
+                    log.exception("A rows %s %s: fetch failed; the key sample stays", pair, window)
+                    continue
+                self.store.put_bytes(
+                    f"{prefix}rows.csv.gz", path.read_bytes(), content_type="application/gzip"
+                )
             self.store.put_json(
                 f"{prefix}rows.json",
                 {
@@ -643,7 +666,7 @@ class ColCheck:
                     "key_columns": list(manifest.get("key_cols") or []),
                     "right_key_columns": rows["key_columns"],
                     "pairs": rows["pairs"],
-                    "right_rows": len(rows["rows"]),
+                    "right_rows": count,
                     "right_file": "rows.csv.gz",
                 },
             )
@@ -651,10 +674,12 @@ class ColCheck:
                 "A rows %s %s: %d sampled row(s) for %d differing column(s) (%.3fs)",
                 pair,
                 window,
-                len(rows["rows"]),
+                count,
                 len(columns),
                 time.monotonic() - started,
             )
+            if hasattr(target, "release_window"):
+                target.release_window(payload)
 
     def _stage_sample(self, task, sample: dict[str, Any]) -> None:
         prefix = right_sample_prefix(task.pair, task.window)

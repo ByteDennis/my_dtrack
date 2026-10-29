@@ -624,3 +624,31 @@ def test_differing_windows_stage_right_rows_after_comparison():
     ColCheck(matched_store, lambda _cfg: matched, poll_interval=0).run()
     assert matched.requested is None
     assert not matched_store.exists(f"{prefix}rows.json")
+
+
+def test_cached_window_views_are_released_after_prefetch_and_rows():
+    store, _uid = _drained_store()
+
+    released = []
+
+    class CachingTarget(FakeTarget):
+        def window_sample(self, _manifest, _window, limit):
+            return {
+                "pairs": [{"left_column": "amount", "right_column": "amount"}],
+                "rows": [[9]],
+                "limit": limit,
+            }
+
+        def window_rows(self, manifest, _window, columns):
+            return {
+                "pairs": [{"left_column": "amount", "right_column": "amount"}],
+                "key_columns": ["id"],
+                "rows": [],
+            }
+
+        def release_window(self, window):
+            released.append(window["bucket"])
+
+    target = CachingTarget(stats={"amount": {**STATS, "n_unique": 9}})
+    ColCheck(store, lambda _cfg: target, poll_interval=0).run()
+    assert released == ["2026-01-01", "2026-01-01"]

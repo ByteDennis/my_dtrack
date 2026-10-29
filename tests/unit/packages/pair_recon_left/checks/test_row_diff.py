@@ -55,17 +55,19 @@ def _fixture(tmp_path):
         "2,2026-08-02,2.50,closed\n"
         "3,2026-08-02,7,x\n"
         "3,2026-08-02,8,x\n"
-        "5,2026-08-02,1.00,\n",
+        "5,2026-08-02,1.00,\n"
+        "6,2026-08-02,01.20,x\n",
         encoding="utf-8",
     )
     right = _gzip_rows(
         ["_key", "k0", "k1", "v0", "v1", "n0", "n1"],
         [
-            ["1|2026-08-02", "1", "20260802", ".19", "OPEN", ".19", "open"],
+            ["1|2026-08-02", "1", "20260802", ".19", "OPEN", "0.19", "open"],
             ["2|2026-08-02", "2", "20260802", "2.5", "closed", "2.5", "closed"],
             ["3|2026-08-02", "3", "20260802", "7", "x", "7", "x"],
             ["4|2026-08-02", "4", "20260802", "4", "new", "4", "new"],
             ["5|2026-08-02", "5", "20260802", "1", None, "1", None],
+            ["6|2026-08-02", "6", "20260802", "1.3", "x", "1.3", "x"],
         ],
     )
     return left, right
@@ -77,9 +79,10 @@ def test_compare_rows_joins_on_the_normalized_key_and_keeps_differences(tmp_path
     assert result["totals"] == {"different": 1, "left_only": 1, "right_only": 1}
     assert result["total"] == 3
     rows = {tuple(row[1:3]): row for row in result["rows"]}
-    different = rows[("1", "2026-08-02")]
+    assert ("1", "2026-08-02") not in rows
+    different = rows[("6", "2026-08-02")]
     assert different[0] == "different"
-    assert different[3:7] == ("0.19", "Open ", ".19", "OPEN")
+    assert different[3:7] == ("01.20", "x", "1.3", "x")
     assert different[7:] == (True, False)
     assert rows[("3", "2026-08-02")][0] == "left_only"
     assert rows[("3", "2026-08-02")][3:5] == ("8", "x")
@@ -109,17 +112,17 @@ def test_row_difference_workbook_marks_differing_cells(tmp_path):
         "amount",
         "status",
     ]
-    assert [sheet.cell(3, column).value for column in range(1, 10)] == [
-        "1",
+    assert [sheet.cell(5, column).value for column in range(1, 10)] == [
+        "6",
         "2026-08-02",
         "different",
-        "0.19",
-        "Open ",
+        "01.20",
+        "x",
         None,
         None,
-        ".19",
-        "OPEN",
+        "1.3",
+        "x",
     ]
-    assert sheet["D3"].font.color.rgb == sheet["H3"].font.color.rgb == "009C0006"
-    assert sheet["E3"].font.color is None or sheet["E3"].font.color.rgb != "009C0006"
-    assert sheet.cell(4, 3).value == "left only" and sheet.cell(5, 3).value == "right only"
+    assert sheet["D5"].font.color.rgb == sheet["H5"].font.color.rgb == "009C0006"
+    assert sheet["E5"].font.color is None or sheet["E5"].font.color.rgb != "009C0006"
+    assert sheet.cell(3, 3).value == "left only" and sheet.cell(4, 3).value == "right only"

@@ -4,6 +4,7 @@ import hashlib
 import math
 import re
 from collections.abc import Iterable, Mapping
+from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
 
 from ..sql.dates import DateType, NativeDateType, canonical_date, resolve_date_type
@@ -30,6 +31,44 @@ def collapse_decimal_sql(text: str, dialect: str = "spark") -> str:
     collapsed = _regex_replace(collapsed, r"\.0+$", "", dialect)
     matches = _regex_matches(text, r"^-?[0-9]+\.[0-9]+$", dialect)
     return f"CASE WHEN {matches} THEN {collapsed} ELSE {text} END"
+
+
+# >>> canonical numeric text for hashes and row comparison; invalid text stays visible instead of becoming NULL <<< #
+def canonical_numeric(value: object) -> str:
+    text = str(value).strip()
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return text
+    if not number.is_finite():
+        return text
+    if not number:
+        return "0"
+    rendered = format(number, "f")
+    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
+
+
+def canonical_numeric_sql(expr: str, dialect: str) -> str:
+    dialect = dialect_name(dialect)
+    text = f"trim({expr})"
+    safe = _regex_matches(
+        text,
+        r"^[+-]?(?:[0-9]{1,20}(?:\.[0-9]{0,18})?|\.[0-9]{1,18}|[0-9]{1,20}[eE][+-]?(?:[0-9]|1[0-8]))$",
+        dialect,
+    )
+    if dialect in {"spark", "duckdb", "athena"}:
+        cast = "VARCHAR" if dialect in {"duckdb", "athena"} else "STRING"
+        parsed = f"try_cast({text} AS DECIMAL(38,18))"
+    elif dialect == "hadoop":
+        cast = "STRING"
+        parsed = f"CAST({text} AS DECIMAL(38,18))"
+    else:
+        raise SamplingSqlNotSupported(f"canonical numeric SQL does not support dialect {dialect!r}")
+    rendered = collapse_decimal_sql(f"CAST({parsed} AS {cast})", dialect)
+    return (
+        f"CASE WHEN {expr} IS NULL THEN NULL WHEN NOT ({safe}) OR {parsed} IS NULL THEN {text} "
+        f"ELSE {rendered} END"
+    )
 
 
 def strip_datetime(text: str) -> str:

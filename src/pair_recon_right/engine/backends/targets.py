@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import threading
@@ -11,10 +12,10 @@ from typing import Any
 from ..common.model.hashing import (
     DateKeyFamily,
     active_normalization_rules,
+    canonical_numeric_sql,
     key_family,
     normalize_system_sql,
 )
-from ..common.model.hashing import collapse_decimal_sql as _collapse_decimal_sql
 from ..common.model.manifest import DEFAULT_STATISTICS
 from ..common.sql.column_types import resolve_column_type
 from ..common.sql.dates import (
@@ -71,9 +72,25 @@ def check_date_column(column: str, column_type: str | None, date_type: DateType,
         )
 
 
+# >>> rows streamed partition by partition, so the driver never holds the whole result <<< #
+def _iterate(frame, operation: str):
+    started = time.monotonic()
+    count = 0
+    for row in frame.toLocalIterator():
+        count += 1
+        yield list(row)
+    log.info("spark.sql %s: %d rows streamed (%.3fs)", operation, count, time.monotonic() - started)
+
+
+def _bucket(window: dict[str, Any]) -> str:
+    return str(window.get("bucket") or "|".join(map(str, window.get("partitions") or [])))
+
+
 STATS_COLUMNS = int(os.environ.get("RIGHT_STATS_COLUMNS") or 50)
 STATS_DRIVER_ROWS = int(os.environ.get("RIGHT_STATS_DRIVER_ROWS") or 2000000)
-STATS_DRIVER_CELLS = int(os.environ.get("RIGHT_STATS_DRIVER_CELLS") or 50000000)
+STATS_DRIVER_CELLS = int(os.environ.get("RIGHT_STATS_DRIVER_CELLS") or 5000000)
+DRIVER_FETCHES = max(1, int(os.environ.get("RIGHT_DRIVER_FETCHES") or 1))
+_driver_slots = threading.BoundedSemaphore(DRIVER_FETCHES)
 
 
 class CsvTarget:
@@ -146,6 +163,8 @@ class SparkTarget:
         self.sql_audit = None
         self._date_type = None
         self._date_type_lock = threading.Lock()
+        self._views: dict[str, dict[str, Any]] = {}
+        self._view_lock = threading.Lock()
         macro = str(config.get("conn_macro") or "")
         if "." in macro and not (config.get("catalog") or config.get("schema")):
             self.config["catalog"], self.config["schema"] = macro.split(".", 1)
@@ -437,12 +456,57 @@ class SparkTarget:
 
     # >>> sampled row count of one window with the same predicate as window_statistics, one scan <<< #
     def window_count(self, manifest: dict[str, Any], window: dict[str, Any]) -> int:
-        where, _sampled = self._window_where(manifest, window)
-        rows = self._rows(
-            f"SELECT count(1) FROM {self.relation(partitions=window['partitions'])} WHERE {where}",
-            "window_count",
-        )
+        relation, where = self._scope(manifest, window)
+        rows = self._rows(f"SELECT count(1) FROM {relation} WHERE {where}", "window_count")
         return int(rows[0][0]) if rows else 0
+
+    # >>> relation and predicate for one window: the cached view without predicate once materialized, else the source relation with the window predicate <<< #
+    def _scope(self, manifest: dict[str, Any], window: dict[str, Any]) -> tuple[str, str]:
+        with self._view_lock:
+            view = self._views.get(_bucket(window))
+        if view is not None:
+            return view["relation"], "1=1"
+        where, _sampled = self._window_where(manifest, window)
+        return self.relation(partitions=window["partitions"]), where
+
+    # >>> the sampled window materialized once as a persisted temp view, so count, statistics, samples, and rows never re-plan or re-scan the relation <<< #
+    def _window_view(self, manifest: dict[str, Any], window: dict[str, Any]) -> dict[str, Any]:
+        bucket = _bucket(window)
+        with self._view_lock:
+            if bucket in self._views:
+                return self._views[bucket]
+        where, _sampled = self._window_where(manifest, window)
+        sql = f"SELECT * FROM {self.relation(partitions=window['partitions'])} WHERE {where}"
+        self._audit(sql, "window_materialize")
+        started = time.monotonic()
+        name = "pair_recon_" + hashlib.sha256(f"{id(self)}|{bucket}".encode()).hexdigest()[:16]
+        frame = self.spark.sql(sql)
+        try:
+            from pyspark import StorageLevel
+
+            frame = frame.persist(StorageLevel.MEMORY_AND_DISK)
+        except ImportError:
+            frame = frame.persist()
+        frame.createOrReplaceTempView(name)
+        rows = int(frame.count())
+        log.info(
+            "window materialized %s: %d sampled row(s) (%.3fs)",
+            bucket,
+            rows,
+            time.monotonic() - started,
+        )
+        view = {"name": name, "relation": quote_ident(name, "spark"), "frame": frame, "rows": rows}
+        with self._view_lock:
+            self._views[bucket] = view
+        return view
+
+    def release_window(self, window: dict[str, Any]) -> None:
+        with self._view_lock:
+            view = self._views.pop(_bucket(window), None)
+        if view is None:
+            return
+        view["frame"].unpersist()
+        self.spark.catalog.dropTempView(view["name"])
 
     # >>> per-column Spark expressions: normalized text, double value, and the min/max operand <<< #
     def _column_plans(self, manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -471,7 +535,7 @@ class SparkTarget:
                     self._check_date_column(column, normalizer.right_date_type, "column")
                 text = normalizer.normalize_sql(ref, "spark", "right")
             if numeric:
-                text = _collapse_decimal_sql(text)
+                text = canonical_numeric_sql(text, "spark")
             if normalization_rules:
                 text = normalize_system_sql(
                     text,
@@ -578,23 +642,24 @@ class SparkTarget:
         sql = f"SELECT {', '.join(selects)} FROM {relation} WHERE {where}"
         self._audit(sql, "window_statistics")
         started = time.monotonic()
-        try:
-            frame = self.spark.sql(sql).toPandas()
-        except Exception:
-            log.exception(
-                "spark.sql window_statistics %s failed after %.3fs",
+        with _driver_slots:
+            try:
+                frame = self.spark.sql(sql).toPandas()
+            except Exception:
+                log.exception(
+                    "spark.sql window_statistics %s failed after %.3fs",
+                    log_context,
+                    time.monotonic() - started,
+                )
+                raise
+            log.info(
+                "spark.sql window_statistics %s: %d rows x %d columns to pandas (%.3fs)",
                 log_context,
+                len(frame),
+                len(frame.columns),
                 time.monotonic() - started,
             )
-            raise
-        log.info(
-            "spark.sql window_statistics %s: %d rows x %d columns to pandas (%.3fs)",
-            log_context,
-            len(frame),
-            len(frame.columns),
-            time.monotonic() - started,
-        )
-        return frame_statistics(frame, plans, selected)
+            return frame_statistics(frame, plans, selected)
 
     # >>> windows up to STATS_DRIVER_ROWS rows are reduced in pandas on the driver, STATS_DRIVER_CELLS cells per scan; larger ones aggregate in Spark, STATS_COLUMNS columns per query <<< #
     def window_statistics(
@@ -603,9 +668,12 @@ class SparkTarget:
         where, sample = self._window_where(manifest, window)
         plans = self._column_plans(manifest)
         selected = manifest.get("statistics") or list(DEFAULT_STATISTICS)
-        relation = self.relation(partitions=window["partitions"])
-        rows = self.window_count(manifest, window) if STATS_DRIVER_ROWS > 0 else None
+        view = self._window_view(manifest, window) if STATS_DRIVER_ROWS > 0 else None
+        rows = view["rows"] if view is not None else None
         on_driver = rows is not None and rows <= STATS_DRIVER_ROWS
+        if view is not None and not on_driver:
+            self.release_window(window)
+        relation, where = self._scope(manifest, window)
         batch = max(1, STATS_DRIVER_CELLS // max(rows or 0, 1) if on_driver else STATS_COLUMNS)
         starts = range(0, len(plans), batch)
         pair = manifest.get("pair") or "?"
@@ -688,7 +756,7 @@ class SparkTarget:
         self, manifest: dict[str, Any], window: dict[str, Any], limit: int
     ) -> dict[str, Any]:
         pairs = self._sample_pairs(manifest, manifest["columns"])
-        where, _sampled = self._window_where(manifest, window)
+        relation, where = self._scope(manifest, window)
         diagnostic_keys = window.get("diagnostic_key_tuples")
         if diagnostic_keys is not None:
             keys = manifest.get("right_key_cols") or []
@@ -717,18 +785,15 @@ class SparkTarget:
                 )
             )
         order_by = f" ORDER BY {', '.join(order)}" if order else ""
-        sql = (
-            f"SELECT {selected} FROM {self.relation(partitions=window['partitions'])} "
-            f"WHERE {where}{order_by} LIMIT {int(limit)}"
-        )
+        sql = f"SELECT {selected} FROM {relation} WHERE {where}{order_by} LIMIT {int(limit)}"
         rows = [list(row) for row in self._collect(sql, "difference_sample")]
         return {"pairs": pairs, "rows": rows, "limit": int(limit)}
 
-    # >>> every sampled row of a window for the differing columns: normalized composite key, raw keys, raw and normalized values <<< #
+    # >>> every sampled row of a window for the differing columns, streamed: normalized composite key, raw keys, raw and normalized values <<< #
     def window_rows(
         self, manifest: dict[str, Any], window: dict[str, Any], columns: list[str]
     ) -> dict[str, Any]:
-        where, _sampled = self._window_where(manifest, window)
+        relation, where = self._scope(manifest, window)
         keys = list(manifest.get("right_key_cols") or [])
         key_sql = composite_sql(
             [quote_ident(key, "spark") for key in keys],
@@ -748,6 +813,7 @@ class SparkTarget:
             f"{quote_ident(row['right_column'], 'spark')} AS v{i}" for i, row in enumerate(pairs)
         ]
         selects += [f"{plans[row['left_column']]['text']} AS n{i}" for i, row in enumerate(pairs)]
-        sql = f"SELECT {', '.join(selects)} FROM {self.relation(partitions=window['partitions'])} WHERE {where}"
-        rows = [list(row) for row in self._collect(sql, "difference_rows")]
-        return {"pairs": pairs, "key_columns": keys, "rows": rows}
+        sql = f"SELECT {', '.join(selects)} FROM {relation} WHERE {where}"
+        self._audit(sql, "difference_rows")
+        frame = self.spark.sql(sql)
+        return {"pairs": pairs, "key_columns": keys, "rows": _iterate(frame, "difference_rows")}

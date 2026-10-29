@@ -43,6 +43,48 @@ def test_numeric():
     assert a["length_avg"] is None and a["top_10"] == ""
 
 
+@pytest.mark.parametrize("source", ["oracle", "hadoop", "csv", "databricks"])
+def test_numeric_type_hashes_equivalent_decimal_text_identically(tmp_path, source):
+    left = tmp_path / f"{source}-left.csv"
+    right = tmp_path / f"{source}-right.csv"
+    left.write_text(
+        "AMOUNT\n0.19\n1.0\n01.20\n+4.00\n-0.00\n1e3\ninvalid\n",
+        encoding="utf-8",
+    )
+    right.write_text(
+        "AMOUNT\n.19\n1e0\n1.2\n4\n0\n1000\ninvalid\n",
+        encoding="utf-8",
+    )
+
+    options = {
+        "normalization_rules": default_normalization_rules(),
+        "normalization_source": source,
+        "col_types": {"AMOUNT": "numeric"},
+        "statistics": ["n_unique", "hash_sum", "mean", "min", "max"],
+    }
+    left_stats = stats.compute_csv_statistics(left, ["AMOUNT"], **options)["AMOUNT"]
+    right_stats = stats.compute_csv_statistics(right, ["AMOUNT"], **options)["AMOUNT"]
+
+    assert left_stats == right_stats
+
+
+def test_numeric_type_does_not_round_distinct_high_precision_values_into_one_hash(tmp_path):
+    path = tmp_path / "precision.csv"
+    path.write_text(
+        "AMOUNT\n0.12345678901234567891\n0.12345678901234567892\n",
+        encoding="utf-8",
+    )
+
+    result = stats.compute_csv_statistics(
+        path,
+        ["AMOUNT"],
+        col_types={"AMOUNT": "numeric"},
+        statistics=["n_unique", "hash_sum"],
+    )["AMOUNT"]
+
+    assert result["n_unique"] == 2
+
+
 def test_integral():
     result = stats.column_statistics(_series("100003", "7", "42"))
     assert result["col_type"] == "categorical"

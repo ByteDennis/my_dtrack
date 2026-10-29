@@ -15,8 +15,8 @@ import pandas as pd
 
 from ..model.hashing import (
     active_normalization_rules,
-    collapse_decimal,
-    is_transform_rule,
+    canonical_numeric,
+    canonical_numeric_sql,
     normalize_system_sql,
     normalize_system_value,
 )
@@ -93,9 +93,7 @@ def column_statistics(
         numeric = numeric.dropna()
     if is_numeric:
         values = values.map(
-            lambda value: (
-                value if value is None or pd.isna(value) else collapse_decimal(str(value).strip())
-            )
+            lambda value: value if value is None or pd.isna(value) else canonical_numeric(value)
         )
         non_null = values.dropna()
     n_total = len(values)
@@ -201,14 +199,7 @@ def _quote(name: str) -> str:
 
 
 def _collapse(expr: str) -> str:
-    trimmed = f"trim({expr})"
-    collapsed = (
-        f"regexp_replace(regexp_replace({trimmed}, '(\\.[0-9]*[1-9])0+$', '\\1'), '\\.0+$', '')"
-    )
-    return (
-        f"CASE WHEN regexp_matches({trimmed}, '^-?[0-9]+\\.[0-9]+$') "
-        f"THEN {collapsed} ELSE {trimmed} END"
-    )
+    return canonical_numeric_sql(expr, "duckdb")
 
 
 # >>> DuckDB text of one column after column-type and system-rule normalization, the form statistics hash <<< #
@@ -419,7 +410,6 @@ def _statistics(
         return execute_reporting(connection, sql, report)
 
     rules = active_normalization_rules(normalization_rules, normalization_source)
-    transform_names = {rule["rule_name"] for rule in rules if is_transform_rule(rule)}
     base = {}
     integral_values = {}
     for column in columns:
@@ -473,7 +463,7 @@ def _statistics(
         selects = ["count(*) AS n_total"]
         for index, column in group:
             value = base[column]
-            if numeric[column] and "decimal" not in transform_names:
+            if numeric[column]:
                 value = _collapse(value)
             values[column] = value
             number = f"try_cast({value} AS double)"

@@ -10,7 +10,7 @@ from support import FakeRow, FakeSpark
 from pair_recon_right.engine.backends import targets
 from pair_recon_right.engine.backends.frame_stats import frame_statistics, hash16
 from pair_recon_right.engine.backends.targets import CsvTarget, SparkTarget
-from pair_recon_right.engine.common.model.hashing import collapse_decimal
+from pair_recon_right.engine.common.model.hashing import collapse_decimal, collapse_decimal_sql
 
 ORDERS = {"source": "databricks", "catalog": "main", "schema": "sales", "table": "orders"}
 ORDERS |= {"date_col": "business_date", "date_type": "date"}
@@ -44,7 +44,7 @@ def _spark_rule(sql_text):
 
 @pytest.mark.parametrize("text", ["2.50", "2.0", "-0.10", "10", "007", "1e3", "abc", "0.000"])
 def test_decimal(text):
-    sql = targets._collapse_decimal_sql("x")
+    sql = collapse_decimal_sql("x")
     assert sql.startswith("CASE WHEN x rlike ")
     assert _spark_rule(sql)(text) == collapse_decimal(text)
 
@@ -609,8 +609,9 @@ def test_statistics_reduce_in_pandas_below_the_driver_row_cap(monkeypatch, caplo
             {"bucket": "2026-01-01", "partitions": ["2026-01-01"]},
             progress=lambda done, total: seen.append((done, total)),
         )
-    count, *queries = spark.statements[1:]
-    assert count.startswith("SELECT count(1) FROM `main`.`sales`.`orders` WHERE ")
+    materialize, *queries = spark.statements[1:]
+    assert materialize.startswith("SELECT * FROM `main`.`sales`.`orders` WHERE ")
+    assert all("FROM `pair_recon_" in query and "WHERE 1=1" in query for query in queries)
     assert len(queries) == 2 and seen == [(2, 3), (3, 3)]
     assert "pair=orders vintage=2026-01-01 batch=1/2" in caplog.text
     wide = _driver_spark()
@@ -668,8 +669,8 @@ def test_statistics_fall_back_to_spark_above_the_driver_row_cap(monkeypatch):
         lambda sql: (
             DESCRIBE
             if sql.startswith("DESCRIBE")
-            else [(4,)]
-            if sql.startswith("SELECT count(1) FROM")
+            else [FakeRow({})] * 4
+            if sql.startswith("SELECT * FROM")
             else [FakeRow(_stats_row())]
         )
     )
@@ -677,6 +678,8 @@ def test_statistics_fall_back_to_spark_above_the_driver_row_cap(monkeypatch):
         _manifest({"mode": "all"}), {"partitions": ["2026-01-01"]}
     )
     assert spark.statements[2].startswith("SELECT count(1) AS n_total, count_if(")
+    assert "FROM `main`.`sales`.`orders` WHERE" in spark.statements[2]
+    assert len(spark.catalog.dropped) == 1
     assert stats["amount"]["hash_sum"] == "2000"
 
 
@@ -730,8 +733,21 @@ def test_window_rows_projects_normalized_key_raw_and_normalized_values():
     assert sql.startswith("SELECT concat_ws('|', ") and " AS _key, `order_id` AS k0, " in sql
     assert "`amount` AS v0, " in sql and " AS n0 FROM `main`.`sales`.`orders` WHERE " in sql
     assert "< 99" in sql and "LIMIT" not in sql and " IN (" not in sql
+    assert list(rows.pop("rows")) == [["7|2026-01-01", 7, "2.50", "2.5"]]
     assert rows == {
         "pairs": [{"left_column": "AMOUNT", "right_column": "amount"}],
         "key_columns": ["order_id"],
-        "rows": [["7|2026-01-01", 7, "2.50", "2.5"]],
     }
+
+
+def test_numeric_column_plan_uses_canonical_decimal_text_for_databricks():
+    target = SparkTarget(None, ORDERS)
+    target.column_types = {"amount": "string"}
+    manifest = _manifest({"mode": "all"})
+    manifest["col_type_overrides"] = {"AMOUNT": "numeric"}
+
+    plan = next(plan for plan in target._column_plans(manifest) if plan["left"] == "AMOUNT")
+
+    assert plan["numeric"] is True
+    assert "try_cast" in plan["text"]
+    assert "DECIMAL(38,18)" in plan["text"]
