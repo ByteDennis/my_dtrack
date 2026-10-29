@@ -46,6 +46,7 @@ from pair_recon_left.common.model.protocol import (
     plan_path,
     result_path,
     row_result_path,
+    row_retry_path,
     unit_prefix,
     write_left_state,
     write_right_state,
@@ -738,6 +739,57 @@ def test_execute_force_overrides_resume_with_restart(monkeypatch, tmp_path):
     assert actions == ["restart"]
 
 
+def test_execute_last_failed_resumes_previous_run(monkeypatch, tmp_path):
+    settings = {
+        "pair": "orders",
+        "owner": "me",
+        "run_id": "orders-me-20261029",
+        "timezone": "America/New_York",
+        "sync_remote": False,
+        "email_to": "",
+    }
+    config = {"pairs": {"orders": {}}}
+    launched = []
+
+    class Catalog:
+        def latest_run(self, pair, owner):
+            assert (pair, owner) == ("orders", "me")
+            return {"run_id": "orders-me-20261024", "state": "different"}
+
+    monkeypatch.setattr(cli, "load_environment", lambda: None)
+    monkeypatch.setattr(cli, "load_defaults", lambda _path: {})
+    monkeypatch.setattr(
+        cli,
+        "prompts",
+        lambda _defaults: (settings, config, "new", object(), Catalog()),
+    )
+    monkeypatch.setattr(cli, "configure_console_logging", lambda *_args: None)
+    monkeypatch.setattr(cli, "yes_no", lambda *_args: True)
+    monkeypatch.setattr(cli, "save_defaults", lambda *_args: None)
+    monkeypatch.setattr(cli, "write_request_snapshot", lambda *_args: tmp_path / "request.json")
+    monkeypatch.setattr(
+        cli,
+        "launch",
+        lambda current, *_args, action, **_kwargs: launched.append(
+            (current["run_id"], action)
+        )
+        or {"state": "different"},
+    )
+    args = SimpleNamespace(
+        config=None,
+        defaults_path=None,
+        earlystop=False,
+        force=False,
+        recheck=False,
+        last_failed=True,
+        log_level="INFO",
+        debug=None,
+    )
+
+    assert cli.execute(args, raise_errors=True) == 0
+    assert launched == [("orders-me-20261024", "resume")]
+
+
 def test_main_program_parses_defaults_earlystop_and_force(monkeypatch, tmp_path):
     seen = {}
     defaults = tmp_path / "run.yaml"
@@ -752,6 +804,57 @@ def test_main_program_parses_defaults_earlystop_and_force(monkeypatch, tmp_path)
     assert seen["defaults_path"] == defaults
     assert seen["earlystop"] is True
     assert seen["force"] is True
+
+
+def test_main_program_parses_last_failed(monkeypatch, tmp_path):
+    seen = {}
+    defaults = tmp_path / "run.yaml"
+    monkeypatch.setattr(
+        cli,
+        "execute",
+        lambda args, **_kwargs: seen.update(vars(args)) or 0,
+    )
+    monkeypatch.setattr(cli, "run_debugger", lambda _mode, callback: callback())
+
+    assert cli.main_program(["--defaults", str(defaults), "--last-failed"]) == 0
+    assert seen["last_failed"] is True
+
+
+@pytest.mark.parametrize("conflict", ["--force", "--recheck"])
+def test_main_program_rejects_last_failed_conflicts(conflict):
+    with pytest.raises(SystemExit):
+        cli.main_program(["--last-failed", conflict])
+
+
+def test_select_last_failed_run_reuses_latest_non_passing_run():
+    class Catalog:
+        def latest_run(self, pair, owner):
+            assert (pair, owner) == ("orders", "me")
+            return {"run_id": "orders-me-20261024", "state": "different"}
+
+    settings = {"pair": "orders", "owner": "me", "run_id": "orders-me-20261029"}
+
+    assert cli.select_last_failed_run(settings, Catalog()) == "resume"
+    assert settings["run_id"] == "orders-me-20261024"
+
+
+@pytest.mark.parametrize("state", ["passed", "running", "cancelled"])
+def test_select_last_failed_run_rejects_latest_run_without_failures(state):
+    class Catalog:
+        def latest_run(self, _pair, _owner):
+            return {"run_id": "orders-me-20261024", "state": state}
+
+    with pytest.raises(ValueError, match="requires the latest run"):
+        cli.select_last_failed_run(
+            {"pair": "orders", "owner": "me", "run_id": "orders-me-20261029"},
+            Catalog(),
+        )
+
+
+def test_last_failed_is_not_saved_to_defaults():
+    assert cli.persistent_settings(
+        {"pair": "orders", "last_failed": True, "run_id": "orders-me-20261024"}
+    ) == {"pair": "orders"}
 
 
 def test_main_program_rejects_removed_default_alias():
@@ -1051,6 +1154,9 @@ def test_retry_keeps_left_counts_when_the_row_check_mismatched():
     assert retry_failed(store) == 1
     assert store.exists(left_row_path("p"))
     assert not store.exists(row_result_path("p"))
+    assert store.get_json(row_retry_path("p"))["partitions"] == {
+        "2026-01-01": {"result": "count_diff"}
+    }
 
 
 def test_require_plan_windows_rejects_an_empty_plan():

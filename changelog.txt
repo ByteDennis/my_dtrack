@@ -21,7 +21,8 @@ Deleted files
 
 Verification
 - Ruff: passed for `src` and `tests`.
-- Local Spark 3.5.9 parity: Spark aggregates and the pandas path return identical statistics for 100 columns x 3500 rows (all default statistics).
+- Local Spark 3.5.9 parity: Spark aggregates and the pandas path return identical statistics (all default statistics) for 100 and 867 columns x 3500 rows and 200 columns x 50000 rows; 867 columns took 402s batched in Spark versus 53s in pandas.
+- Unit suite: `971 passed, 1 failed`; only the pre-existing `src/pair_recon_dbx: 6` layout violation fails.
 
 pair_recon Row-count diagnostics and Windows recovery — 2026-10-28
 

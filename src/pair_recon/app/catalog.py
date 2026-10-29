@@ -141,6 +141,15 @@ class Catalog:
         )
         return rows[0] if rows else None
 
+    def latest_run(self, pair: str, owner: str):
+        rows = self.sql.execute(
+            f"SELECT run_id, state FROM {self.status_table} "
+            "WHERE pair_name=:pair AND owner=:owner "
+            "ORDER BY updated_at DESC LIMIT 1",
+            {"pair": pair, "owner": owner},
+        )
+        return rows[0] if rows else None
+
     def clear(self, run_id: str):
         values = {"run_id": run_id}
         self.sql.execute(f"DELETE FROM {self.error_table} WHERE run_id=:run_id", values)

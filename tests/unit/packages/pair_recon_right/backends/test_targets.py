@@ -281,6 +281,15 @@ def test_partition():
     ]
 
 
+def test_partition_counts_can_limit_a_retry_to_failed_partitions():
+    spark = FakeSpark(lambda sql: [("2026-01-02", 4)])
+    target = SparkTarget(spark, ORDERS)
+
+    assert target.partition_counts(partitions=["2026-01-02"]) == {"2026-01-02": 4}
+    assert "`business_date` >= DATE '2026-01-02'" in spark.statements[0]
+    assert "`business_date` < DATE '2026-01-03'" in spark.statements[0]
+
+
 def test_month_partition_aggregates_daily_query_results():
     spark = FakeSpark(lambda sql: [("2026-01-01", 3), ("2026-01-31", 4), ("2026-02-01", 5)])
     target = SparkTarget(spark, {**ORDERS, "partition": "month"})

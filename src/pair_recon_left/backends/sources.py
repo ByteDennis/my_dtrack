@@ -385,6 +385,7 @@ class SqlSource(ABC):
         sample: dict[str, Any] | None = None,
         key_columns: list[str] | None = None,
         key_families: list[Any] | None = None,
+        partitions: list[str] | None = None,
     ) -> dict[str, int]:
         sampled = sample_predicate_sql(
             sample,
@@ -411,7 +412,20 @@ class SqlSource(ABC):
             from_date=from_date,
             to_date=to_date,
         )
+        selected = (
+            partition_where(
+                date_col,
+                partitions,
+                dialect=self.dialect,
+                date_type=self.config.get("date_type"),
+                grain=self.partition,
+            )
+            if partitions
+            else None
+        )
         predicate = f"({bounds}) AND ({sampled})" if bounds and sampled else bounds or sampled
+        if selected:
+            predicate = f"({predicate}) AND ({selected})" if predicate else selected
         sql = (
             f"SELECT {date_ref} AS pair_recon_partition, COUNT(*) AS pair_recon_count "
             f"FROM {self.relation(from_date=from_date, to_date=to_date)} "

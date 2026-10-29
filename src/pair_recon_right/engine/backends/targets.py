@@ -93,7 +93,7 @@ class CsvTarget:
 
     def partition_counts(self, from_date=None, to_date=None, **options):
         if self.config.get("pre_sampled"):
-            options = {}
+            options = {key: value for key, value in options.items() if key == "partitions"}
         return self.source.partition_counts(from_date, to_date, **options)
 
     def count_keys(self, from_date=None, to_date=None, **options):
@@ -306,6 +306,7 @@ class SparkTarget:
         sample: dict[str, Any] | None = None,
         key_columns: list[str] | None = None,
         key_families: list[Any] | None = None,
+        partitions: list[str] | None = None,
     ) -> dict[str, int]:
         self._check_key_families(key_columns or [], key_families or [])
         sampled = sample_predicate_sql(
@@ -332,7 +333,20 @@ class SparkTarget:
             from_date=from_date,
             to_date=to_date,
         )
+        selected = (
+            partition_where(
+                date_col,
+                partitions,
+                dialect="spark",
+                date_type=self.config.get("date_type"),
+                grain=self.partition,
+            )
+            if partitions
+            else None
+        )
         predicate = f"({bounds}) AND ({sampled})" if bounds and sampled else bounds or sampled
+        if selected:
+            predicate = f"({predicate}) AND ({selected})" if predicate else selected
         rows = self._rows(
             f"SELECT {ref}, COUNT(*) FROM {self.relation(from_date=from_date, to_date=to_date)} "
             f"WHERE {self._where(predicate)} GROUP BY {ref}",

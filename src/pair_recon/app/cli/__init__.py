@@ -848,12 +848,46 @@ def sync_right_package(settings: dict, client) -> dict:
 
 
 def persistent_settings(settings: dict) -> dict:
-    transient = {"run_id", "earlystop", "force", "recheck", "local_reconciliation"}
+    transient = {
+        "run_id",
+        "earlystop",
+        "force",
+        "recheck",
+        "last_failed",
+        "local_reconciliation",
+    }
     return {
         key: value
         for key, value in settings.items()
         if key not in transient and not key.startswith("_")
     }
+
+
+LAST_FAILED_STATES = {"different", "incomplete", "failed"}
+
+
+def select_last_failed_run(settings: dict, catalog) -> str:
+    latest = catalog.latest_run(settings["pair"], settings["owner"])
+    if latest is None:
+        raise ValueError(
+            f"--last-failed found no earlier run for {settings['pair']} owned by "
+            f"{settings['owner']}"
+        )
+    state = str(latest.get("state") or "")
+    if state not in LAST_FAILED_STATES:
+        raise ValueError(
+            f"--last-failed requires the latest run to be different, incomplete, or failed; "
+            f"{latest['run_id']} is {state or 'unknown'}"
+        )
+    settings["run_id"] = latest["run_id"]
+    log.info(
+        "last-failed resume selected: pair=%s owner=%s run_id=%s state=%s",
+        settings["pair"],
+        settings["owner"],
+        settings["run_id"],
+        state,
+    )
+    return "resume"
 
 
 def add_mismatched_partitions(settings: dict, config: dict, error: BaseException) -> list[str]:
@@ -896,13 +930,20 @@ def execute(args, *, raise_errors: bool = False) -> int:
                     settings["earlystop"] = bool(getattr(args, "earlystop", False))
                     settings["force"] = bool(getattr(args, "force", False))
                     settings["recheck"] = bool(getattr(args, "recheck", False))
+                    settings["last_failed"] = bool(getattr(args, "last_failed", False))
                     settings["local_reconciliation"] = bool(getattr(args, "debug", None))
                     config["pairs"][settings["pair"]]["local_reconciliation"] = settings[
                         "local_reconciliation"
                     ]
+                    configure_console_logging(args.log_level, settings["timezone"])
                     if settings["force"]:
                         action = "restart"
-                    configure_console_logging(args.log_level, settings["timezone"])
+                    if settings["last_failed"]:
+                        if settings["force"] or settings["recheck"]:
+                            raise ValueError(
+                                "--last-failed cannot be combined with --force or --recheck"
+                            )
+                        action = select_last_failed_run(settings, catalog)
                     print(
                         json.dumps(
                             {
@@ -1045,9 +1086,16 @@ def main_program(argv=None) -> int:
         action="store_true",
         help="ignore pair_recon_window_history so random vintage sampling may repeat checked vintages",
     )
+    parser.add_argument(
+        "--last-failed",
+        action="store_true",
+        help="resume the latest non-passing run for this pair and owner, reusing passing results",
+    )
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))
     args = parser.parse_args(values)
+    if args.last_failed and (args.force or args.recheck):
+        parser.error("--last-failed cannot be combined with --force or --recheck")
     configure_console_logging(args.log_level)
     raise_errors = debugging(args.debug)
     return run_debugger(

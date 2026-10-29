@@ -15,6 +15,7 @@ from ..model.protocol import (
     mapping_path,
     plan_path,
     row_result_path,
+    row_retry_path,
     timestamp,
     write_left_state,
     write_right_state,
@@ -40,10 +41,15 @@ STAGE_ONE_FIELDS = (
     "right_pre_sampled",
     "audit",
     "key",
-    "key_families",
-    "column_types",
-    "col_type_overrides",
 )
+
+
+def stage_one_config(pair: dict[str, Any]) -> dict[str, Any]:
+    keys = [part.strip() for part in str(pair.get("key") or "").split(",") if part.strip()]
+    return {
+        **{field: pair.get(field) for field in STAGE_ONE_FIELDS},
+        "key_families": key_family_specs(pair, keys),
+    }
 
 
 def public_pair_config(pair: dict[str, Any]) -> dict[str, Any]:
@@ -104,7 +110,7 @@ def reuse_row_check(
             if requested.requires_probe and requested.name == concrete.name:
                 pair[side]["date_type"] = stored
                 current[side]["date_type"] = stored
-        if any(current.get(field) != counted.get(field) for field in STAGE_ONE_FIELDS):
+        if stage_one_config(current) != stage_one_config(counted):
             return None
         if current != counted:
             store.delete_keys(
@@ -113,6 +119,7 @@ def reuse_row_check(
                     plan_path(name),
                     mapping_path(name),
                     fixed_keys_path(name),
+                    row_retry_path(name),
                 ]
             )
         cached[name] = {

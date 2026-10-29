@@ -18,6 +18,7 @@ from pair_recon_right.engine.common.model.protocol import (
     mapping_path,
     plan_path,
     row_result_path,
+    row_retry_path,
     write_left_state,
 )
 
@@ -51,6 +52,35 @@ def test_date():
         {"3000-01-01": 2}, {"2026-07-01": 2}, date_synonyms={"3000-01-01": "2026-07-01"}
     )
     assert rows == {"2026-07-01": {"left": 2, "right": 2, "result": "match"}}
+
+
+def test_retry_queries_only_failed_partitions_and_preserves_matches():
+    seen = {}
+
+    class Target(FakeTarget):
+        def partition_counts(self, *_args, **options):
+            seen.update(options)
+            return {"2026-01-02": 5}
+
+    store = MemoryStore()
+    left = left_document(counts={"2026-01-01": 3, "2026-01-02": 5})
+    previous = {
+        "pair": "p",
+        "partitions": {
+            "2026-01-01": {"left": 3, "right": 3, "result": "match"},
+            "2026-01-02": {"left": 5, "right": 4, "result": "count_diff", "delta": -1},
+        },
+    }
+    store.put_json(row_retry_path("p"), previous)
+
+    result = reconcile_pair(store, left, Target())
+
+    assert seen["partitions"] == ["2026-01-02"]
+    assert result["partitions"] == {
+        "2026-01-01": {"left": 3, "right": 3, "result": "match"},
+        "2026-01-02": {"left": 5, "right": 5, "result": "match"},
+    }
+    assert not store.exists(row_retry_path("p"))
 
 
 def test_snapshot():

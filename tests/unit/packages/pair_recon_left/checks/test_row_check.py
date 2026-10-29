@@ -203,6 +203,54 @@ def test_reused_left_counts_invalidate_right_when_effective_config_changes():
     ]
 
 
+def test_reused_left_counts_allow_non_key_column_type_changes():
+    pair = {
+        "partition": "all",
+        "left": {"source": "oracle", "table": "L"},
+        "right": {"source": "databricks", "table": "R"},
+        "key": "ID",
+        "col_map": {"ID": "id", "AMOUNT": "amount"},
+        "checks": ["hash_sum"],
+        "version": 2,
+    }
+    config = {"version": 2, "pairs": {"p": pair}}
+    store = MemoryStore()
+    run_row_check(
+        config,
+        store,
+        run_id="run",
+        source_factory=lambda _value: Source({"all": 2}),
+    )
+    pair["column_types"] = {"AMOUNT": "numeric"}
+
+    assert reuse_row_check(config, store, run_id="run", pair_names=["p"])
+    assert store.get_json(left_row_path("p"))["counts"] == {"all": 2}
+    assert store.get_json(plan_path("p"))["column_types"] == {"AMOUNT": "numeric"}
+
+
+def test_reused_left_counts_reject_sampled_key_type_changes():
+    pair = {
+        "partition": "all",
+        "left": {"source": "oracle", "table": "L"},
+        "right": {"source": "databricks", "table": "R"},
+        "key": "ID",
+        "col_map": {"ID": "id", "AMOUNT": "amount"},
+        "checks": ["hash_sum"],
+        "version": 2,
+    }
+    config = {"version": 2, "pairs": {"p": pair}}
+    store = MemoryStore()
+    run_row_check(
+        config,
+        store,
+        run_id="run",
+        source_factory=lambda _value: Source({"all": 2}),
+    )
+    pair["column_types"] = {"ID": "numeric"}
+
+    assert reuse_row_check(config, store, run_id="run", pair_names=["p"]) is None
+
+
 def test_vintage_sampling_keeps_full_row_counts():
     counts = {"2026-01-01": 2, "2026-02-01": 3, "2026-03-01": 4}
     pair = {

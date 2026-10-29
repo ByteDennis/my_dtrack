@@ -73,6 +73,10 @@ def row_result_path(_pair: str) -> str:
     return "results/row.json"
 
 
+def row_retry_path(_pair: str) -> str:
+    return "_protocol/retry/row.json"
+
+
 def plan_path(_pair: str) -> str:
     return "config/manifest.json"
 

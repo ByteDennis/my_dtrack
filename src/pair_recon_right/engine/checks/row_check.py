@@ -17,6 +17,7 @@ from ..common.model.protocol import (
     plan_path,
     row_check_is_closed,
     row_result_path,
+    row_retry_path,
     write_right_state,
 )
 from ..common.sql.dates import apply_synonyms
@@ -178,6 +179,21 @@ def reconcile_pair(
             "key_columns": [pair_config["col_map"].get(key, key) for key in keys],
             "key_families": key_family_specs(pair_config, keys),
         }
+    retry = (
+        store.get_json(row_retry_path(pair)) if store.exists(row_retry_path(pair)) else None
+    )
+    retry_partitions = None
+    if retry and not left_doc.get("date_synonyms") and not pair_config.get("snapshot"):
+        retry_partitions = sorted(
+            partition
+            for partition, row in (retry.get("partitions") or {}).items()
+            if row.get("result") != "match"
+        )
+        if retry_partitions:
+            options["partitions"] = retry_partitions
+            log.info(
+                "right count retry %s: %d failed partition(s)", pair, len(retry_partitions)
+            )
     right_counts = target.partition_counts(
         left_doc["bounds"].get("from"), left_doc["bounds"].get("to"), **options
     )
@@ -191,7 +207,7 @@ def reconcile_pair(
         next(iter(sorted(right_counts.items())), None),
     )
     snapshot = bool(left_doc["pair_config"].get("snapshot"))
-    partitions = (
+    fresh_partitions = (
         reconcile_snapshot(left_doc["counts"], right_counts)
         if snapshot
         else reconcile_partitions(
@@ -201,6 +217,15 @@ def reconcile_pair(
             left_doc.get("partition", "day"),
         )
     )
+    if retry_partitions:
+        partitions = dict(retry["partitions"])
+        for partition in retry_partitions:
+            if partition in fresh_partitions:
+                partitions[partition] = fresh_partitions[partition]
+            else:
+                partitions.pop(partition, None)
+    else:
+        partitions = fresh_partitions
     document = {
         "run_id": left_doc["run_id"],
         "pair": pair,
@@ -262,6 +287,8 @@ def reconcile_pair(
             manifest["expected_units"],
         )
     store.put_json(row_result_path(pair), document)
+    if retry:
+        store.delete_keys([row_retry_path(pair)])
     return document
 
 

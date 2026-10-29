@@ -73,6 +73,28 @@ def test_main_runs_every_pair_and_keeps_going_after_failures(tmp_path, monkeypat
     assert "| a | executed | different | 0 |" in batch.summary_table(rows)
 
 
+def test_batch_forwards_last_failed(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(batch, "_run", lambda command: seen.append(command) or (0, RESULT % "passed"))
+    defaults = tmp_path / ".pair_recon.yaml"
+    defaults.write_text("owner: me\n", encoding="utf-8")
+
+    assert (
+        batch.main(
+            [
+                "orders",
+                "--defaults",
+                str(defaults),
+                "--summary",
+                str(tmp_path / "summary.json"),
+                "--last-failed",
+            ]
+        )
+        == 0
+    )
+    assert "--last-failed" in seen[0]
+
+
 def test_smoke_runs_the_local_csv_pair_end_to_end(tmp_path, monkeypatch):
     left = tmp_path / "left.csv"
     left.write_text("ID,VALUE,NOTE\n1,a,x\n2,b,y\n3,c,z\n", encoding="utf-8")

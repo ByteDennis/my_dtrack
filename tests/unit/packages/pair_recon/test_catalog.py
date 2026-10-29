@@ -485,6 +485,28 @@ def test_checked_windows_skip_the_current_run():
     assert values == {"pair": "orders", "vintage": "month", "run_id": "orders-me-20261024"}
 
 
+def test_latest_run_is_scoped_to_pair_and_owner():
+    class RunSql(Sql):
+        def execute(self, statement, parameters=None):
+            super().execute(statement, parameters)
+            return [{"run_id": "orders-me-20261024", "state": "different"}]
+
+    sql = RunSql()
+    catalog = Catalog(sql, "c.s.pairs", "c.s.status", "c.s.errors", "c.s.progress")
+
+    assert catalog.latest_run("orders", "me") == {
+        "run_id": "orders-me-20261024",
+        "state": "different",
+    }
+    statement, values = sql.calls[-1]
+    assert statement == (
+        "SELECT run_id, state FROM c.s.status "
+        "WHERE pair_name=:pair AND owner=:owner "
+        "ORDER BY updated_at DESC LIMIT 1"
+    )
+    assert values == {"pair": "orders", "owner": "me"}
+
+
 @pytest.mark.parametrize(
     ("outcome", "state"),
     [

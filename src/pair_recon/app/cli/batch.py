@@ -95,12 +95,15 @@ def main(argv=None) -> int:
     parser.add_argument("--summary", type=Path, default=Path("batch_summary.json"))
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--recheck", action="store_true")
+    parser.add_argument("--last-failed", action="store_true")
     parser.add_argument("--earlystop", action="store_true")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     defaults = load_defaults(args.defaults_path)
     flags = ["--log-level", args.log_level] + [
-        f"--{name}" for name in ("force", "recheck", "earlystop") if getattr(args, name)
+        f"--{name.replace('_', '-')}"
+        for name in ("force", "recheck", "last_failed", "earlystop")
+        if getattr(args, name)
     ]
     rows = []
     try:

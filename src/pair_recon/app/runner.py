@@ -58,6 +58,7 @@ from pair_recon_left.common.model.protocol import (
     refresh_units_status,
     right_stats_path,
     row_result_path,
+    row_retry_path,
     write_right_state,
     write_run_status,
 )
@@ -665,6 +666,7 @@ def run_left(
                 plan_path(pair),
                 mapping_path(pair),
                 fixed_keys_path(pair),
+                row_retry_path(pair),
             ]
         )
         run_row_check(
@@ -761,6 +763,7 @@ def retry_failed(store) -> int:
     keys += [key for key, value in list_results(store) if value.get("verdict") != "match"]
     for key, value in list_row_results(store):
         if any(row.get("result") != "match" for row in (value.get("partitions") or {}).values()):
+            store.put_json(row_retry_path(value.get("pair") or ""), value)
             keys.append(key)
     deleted = store.delete_keys(sorted(set(keys)))
     active = active_unit_ids(store)

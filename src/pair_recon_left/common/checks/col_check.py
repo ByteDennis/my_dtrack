@@ -373,16 +373,19 @@ class ColCheckPipeline:
         ready = deque()
         plan_rows = []
         for manifest, window in iter_windows_round_robin(manifests):
-            if all(
-                unit_id_for(manifest, window, column) in existing for column in manifest["columns"]
-            ):
+            missing_columns = [
+                column
+                for column in manifest["columns"]
+                if unit_id_for(manifest, window, column) not in existing
+            ]
+            if not missing_columns:
                 log.info(
                     "skip %s %s: every unit already indexed",
                     manifest["pair"],
                     window["bucket"],
                 )
                 continue
-            plan_rows.append((manifest, window))
+            plan_rows.append(({**manifest, "columns": missing_columns}, window))
         plans = iter(plan_rows)
         exhausted = False
         write_run_status(self.store, {"state": "left_col_check", "role": "left"})

@@ -60,6 +60,42 @@ def test_pipeline(caplog):
     assert "left data ready for statistics: pair=pair vintage=all" in caplog.text
 
 
+def test_pipeline_only_pulls_columns_without_reusable_units():
+    store = MemoryStore()
+    row = manifest()
+    row["columns"] = ["amount", "status"]
+    row["col_map"]["status"] = "status"
+    row["expected_units"] = 2
+    store.put_json(plan_path("pair"), row)
+    store.commit_units(
+        1,
+        [
+            {
+                "unit_id": unit_id("pair", "all", "amount"),
+                "left_statistics": {"hash_sum": "3"},
+                "pair": "pair",
+                "window": "all",
+                "column": "amount",
+                "right_column": "amount",
+            }
+        ],
+    )
+    pulled = []
+
+    def pull(work_manifest, _window):
+        pulled.append(work_manifest["columns"])
+        return "pulled"
+
+    def compute(work_manifest, *_args, **_kwargs):
+        return {
+            column: {"col_type": "categorical", "n_unique": 2, "hash_sum": "3"}
+            for column in work_manifest["columns"]
+        }
+
+    assert ColCheckPipeline(store, pull_window=pull, compute_stats=compute).run([row]) == 1
+    assert pulled == [["status"]]
+
+
 def test_left_only_pipeline_does_not_wait_for_right(monkeypatch):
     store = MemoryStore()
     row = manifest()
