@@ -1,20 +1,28 @@
-pair_recon Driver-side window statistics — 2026-10-29
+pair_recon Driver-side window statistics and Right log capture — 2026-10-29
 
 Summary
 - Right window statistics of a window with at most `RIGHT_STATS_DRIVER_ROWS` (2000000) sampled rows are projected by Spark as normalized text and reduced in pandas on the driver; larger windows keep the batched Spark aggregates.
 - Spark queries become plain projections of `RIGHT_STATS_COLUMNS` columns, which the planner handles in seconds, so 867-column windows finish in a fraction of the batched-aggregate time.
 - Each distinct text is hashed once (sha256 first 16 hex digits weighted by its count), matching the Left DuckDB and Spark aggregate results exactly.
+- The Right notebook buffers its log in memory and rewrites `_protocol/right.log` on the Volume every 30 seconds from a daemon thread (20 MB cap, failed writes retried, never raised into the job); the Left copies it to `right.log` beside `left.log` once the job ends.
 
 Modified files
-- `README.md`: documents the driver row cap and the pandas reduction.
+- `README.md`: documents the driver row cap, the pandas reduction, and the Right log capture.
 - `changelog.txt`: records this commit.
-- `guideme.txt`: documents the driver row cap and the pandas reduction.
+- `guideme.txt`: documents the driver row cap, the pandas reduction, and the Right log capture.
+- `src/pair_recon/app/runner.py`: saves `_protocol/right.log` to the local run directory after the Right job ends.
+- `src/pair_recon_left/common/model/protocol.py`: adds the `RIGHT_LOG` path.
+- `src/pair_recon_right/engine/common/model/protocol.py`: mirrors the `RIGHT_LOG` path.
+- `src/pair_recon_right/notebook.py`: attaches the Volume log handler and closes it before exiting.
 - `src/pair_recon_right/engine/backends/targets.py`: splits window statistics into column plans, a Spark aggregate reducer, and a pandas reducer chosen by the sampled row count.
 - `tests/support.py`: adds `toPandas` to the fake Spark frame.
+- `tests/unit/packages/pair_recon/test_runner.py`: covers saving the Right log locally.
 - `tests/unit/packages/pair_recon_right/backends/test_targets.py`: covers the pandas path, the row-cap fallback, and parity with the Left DuckDB statistics.
 
 Added files
 - `src/pair_recon_right/engine/backends/frame_stats.py`: pandas reduction of a fetched batch into the statistics payload.
+- `src/pair_recon_right/engine/backends/volume_log.py`: buffered Volume log handler.
+- `tests/unit/packages/pair_recon_right/backends/test_volume_log.py`: covers flushing, failure retry, and the size cap.
 
 Deleted files
 - None.

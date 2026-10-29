@@ -1,5 +1,3 @@
-import csv
-import gzip
 import io
 import json
 import logging
@@ -36,6 +34,7 @@ from pair_recon_left.common.model.hashing import default_normalization_rules
 from pair_recon_left.common.model.protocol import (
     LEFT_STATE,
     REPORT_PREFIX,
+    RIGHT_LOG,
     RUN_STATUS,
     UNITS_STATUS,
     difference_keys_path,
@@ -65,6 +64,15 @@ from pair_recon_right.engine.common.model.attribute_checks import (
 )
 from pair_recon_right.engine.common.model.manifest import unit_id
 from pair_recon_right.engine.job import run as run_right
+
+
+def test_save_right_log_copies_the_volume_log_next_to_left_log(tmp_path):
+    store = MemoryStore()
+    assert runner.save_right_log(store, tmp_path) is None
+    store.put_bytes(RIGHT_LOG, "INFO 好 done\n".encode())
+    saved = runner.save_right_log(store, tmp_path)
+    assert saved == tmp_path / "right.log"
+    assert saved.read_text(encoding="utf-8") == "INFO 好 done\n"
 
 
 def test_runid():
@@ -174,12 +182,28 @@ def test_debug_reconciles_locally_and_publishes_only_difference_samples(tmp_path
     left.parent.mkdir(parents=True)
     left.write_text("id,amount\n1,8\n", encoding="utf-8")
     assert publish_difference_samples(store, tmp_path, "p") == 1
-    sample = gzip.decompress(store.get_bytes("differences/2026-01-01/samples.csv.gz"))
-    assert list(csv.reader(io.StringIO(sample.decode()))) == [
-        ["sampled_key", "partition", "attribute", "side", "value"],
-        ["1", "", "amount", "left", "8"],
-        ["1", "", "amount", "right", "9"],
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(io.BytesIO(store.get_bytes("differences/2026-01-01/samples.xlsx")))
+    sheet = workbook["Differences"]
+    assert [sheet.cell(1, column).value for column in range(1, 6)] == [None, "A", None, None, "a"]
+    assert [sheet.cell(2, column).value for column in range(1, 6)] == [
+        "id",
+        "amount",
+        None,
+        None,
+        "amount",
     ]
+    assert [sheet.cell(3, column).value for column in range(1, 6)] == [
+        "1",
+        "8",
+        None,
+        None,
+        "9",
+    ]
+    assert sheet["A2"].font.bold is True
+    assert sheet["B3"].fill.fgColor.rgb == sheet["E3"].fill.fgColor.rgb == "00FFC7CE"
+    assert store.list_keys("differences/2026-01-01/") == ["differences/2026-01-01/samples.xlsx"]
     assert store.list_keys("_protocol/tmp/") == []
 
 
@@ -770,10 +794,9 @@ def test_execute_last_failed_resumes_previous_run(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli,
         "launch",
-        lambda current, *_args, action, **_kwargs: launched.append(
-            (current["run_id"], action)
-        )
-        or {"state": "different"},
+        lambda current, *_args, action, **_kwargs: (
+            launched.append((current["run_id"], action)) or {"state": "different"}
+        ),
     )
     args = SimpleNamespace(
         config=None,
@@ -1548,9 +1571,11 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
     remote_right = run_mode == "full" and right_source == "databricks"
     assert settings["sync_remote"] is remote_right
     assert settings["audit"] is False
-    assert settings["difference_sample_rows"] == 100
+    assert settings["sample_rows"] == 50
     assert settings["normalization_rules"] == default_normalization_rules()
-    assert not any("Difference sample rows" in prompt for prompt in prompts)
+    assert any(
+        "Sample rows (maximum difference rows saved per vintage)" in prompt for prompt in prompts
+    )
     assert not any("Normalization rules" in prompt for prompt in prompts)
     assert not any("Strict normalization" in prompt for prompt in prompts)
     assert settings["left_workers"] == 2

@@ -79,7 +79,7 @@ RUN_DEFAULT_FIELDS = {
     "sync_remote",
     "left_workers",
     "right_workers",
-    "difference_sample_rows",
+    "sample_rows",
     "vintage",
     "from_date",
     "to_date",
@@ -90,7 +90,7 @@ RUN_DEFAULT_FIELDS = {
 }
 RUN_DEFAULT_BOOLS = ("audit", "sync_remote")
 RUN_DEFAULT_LISTS = ("checks", "excluded_partitions", "excluded_columns", "vintage_values")
-RUN_DEFAULT_WORKERS = ("left_workers", "right_workers", "difference_sample_rows")
+RUN_DEFAULT_WORKERS = ("left_workers", "right_workers", "sample_rows")
 RUN_DEFAULT_DATE_ONLY = ("from_date", "to_date", "vintage", "excluded_partitions")
 VINTAGES = ("day", "week", "month", "quarter", "year")
 PARTITIONS = ("day", "month", "all")
@@ -316,11 +316,11 @@ FIELD_GUIDE = (
     ),
     (
         "pairs",
-        "run_defaults_json.difference_sample_rows",
+        "run_defaults_json.sample_rows",
         "optional",
         "positive integer",
-        "Maximum diagnostic difference rows per vintage.",
-        "100",
+        "Maximum diagnostic difference rows saved per vintage.",
+        "50",
     ),
     (
         "pairs",

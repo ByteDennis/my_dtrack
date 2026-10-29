@@ -38,6 +38,7 @@ from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_che
 from pair_recon_left.common.model.hashing import composite_key, key_families
 from pair_recon_left.common.model.protocol import (
     REPORT_PREFIX,
+    RIGHT_LOG,
     RIGHT_SAMPLE_PREFIX,
     RIGHT_STATS_PREFIX,
     UNITS_STATUS,
@@ -126,6 +127,20 @@ def run_outcome(jobs, run) -> dict:
         if isinstance(value, dict):
             return value
     return {}
+
+
+# >>> copy the Right notebook's buffered log next to left.log; a missing or unreadable log is only logged <<< #
+def save_right_log(store, run_dir: str | Path) -> Path | None:
+    try:
+        if not store.exists(RIGHT_LOG):
+            return None
+        target = Path(run_dir) / "right.log"
+        target.write_bytes(store.get_bytes(RIGHT_LOG))
+        log.info("Right log saved: %s", target)
+        return target
+    except Exception:
+        log.exception("could not save the Right log")
+        return None
 
 
 def record_runtime_failure(store, pair: str, source: str, error: BaseException | str) -> None:
@@ -824,7 +839,11 @@ def _gzip_csv_rows(body: bytes) -> list[dict[str, str]]:
     )
 
 
-def _difference_sample_csv(
+def _relation_label(config: dict) -> str:
+    return str(config.get("table") or config.get("path") or config.get("source") or "")
+
+
+def _difference_sample_workbook(
     *,
     left_path: Path,
     right_body: bytes,
@@ -834,10 +853,16 @@ def _difference_sample_csv(
     limit: int,
     key_tuples: list[list[object]],
 ) -> tuple[bytes, int, int, int, list[str]]:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
     key_names = list(manifest.get("key_cols") or [])
     key_specs = key_families(manifest.get("key_families"), len(key_names))
     key_pairs = [row for row in pairs if row["left_column"] in key_names]
     attributes = [row for row in pairs if row["left_column"] in different]
+    if not attributes:
+        raise ValueError("difference sample has no mapped differing attributes")
     date_name = (manifest.get("left") or {}).get("date_col")
     partition = next(
         (
@@ -880,40 +905,84 @@ def _difference_sample_csv(
         key = row_key(row, "right") if key_pairs else str(len(right_groups))
         right_groups[key].append(row)
 
-    ordered = list(dict.fromkeys([*desired, *left_groups, *right_groups]))[:limit]
-    columns = ["sampled_key", "partition", "attribute", "side", "value"]
-    output = io.StringIO(newline="")
-    writer = csv.writer(output, lineterminator="\n")
-    writer.writerow(columns)
+    ordered = list(dict.fromkeys([*desired, *left_groups, *right_groups]))
+    key_columns = [row["left_column"] for row in key_pairs]
+    left_columns = [row["left_column"] for row in attributes]
+    right_columns = [row["right_column"] for row in attributes]
+    columns = [*key_columns, *left_columns, "", "", *right_columns]
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Differences"
+    sheet.sheet_view.showGridLines = False
+    sheet.freeze_panes = "A3"
+
+    key_count = len(key_columns)
+    left_start = key_count + 1
+    left_end = left_start + len(left_columns) - 1
+    right_start = left_end + 3
+    right_end = right_start + len(right_columns) - 1
+    banner_fill = PatternFill("solid", fgColor="1F4E78")
+    banner_font = Font(color="FFFFFF", bold=True)
+    difference_fill = PatternFill("solid", fgColor="FFC7CE")
+    difference_font = Font(color="9C0006")
+
+    def banner(start: int, end: int, value: str) -> None:
+        if start < end:
+            sheet.merge_cells(start_row=1, start_column=start, end_row=1, end_column=end)
+        cell = sheet.cell(1, start, value)
+        cell.fill = banner_fill
+        cell.font = banner_font
+        cell.alignment = Alignment(horizontal="center")
+        for column in range(start + 1, end + 1):
+            sheet.cell(1, column).fill = banner_fill
+
+    banner(left_start, left_end, _relation_label(manifest.get("left") or {}))
+    banner(right_start, right_end, _relation_label(manifest.get("right") or {}))
+    for column, value in enumerate(columns, start=1):
+        cell = sheet.cell(2, column, value)
+        cell.alignment = Alignment(horizontal="center")
+        if column <= key_count:
+            cell.font = Font(bold=True)
+
     rows_written = 0
     for key in ordered:
         left_rows = left_groups.get(key) or []
         right_rows = right_groups.get(key) or []
         for index in range(max(1, len(left_rows), len(right_rows))):
+            if rows_written >= limit:
+                break
             left = left_rows[index] if index < len(left_rows) else {}
             right = right_rows[index] if index < len(right_rows) else {}
-            for pair in attributes:
-                writer.writerow(
-                    [
-                        key,
-                        left.get(partition["left_column"], "") if partition else "",
-                        pair["left_column"],
-                        "left",
-                        left.get(pair["left_column"], ""),
-                    ]
-                )
-                writer.writerow(
-                    [
-                        key,
-                        right.get(partition["right_column"], "") if partition else "",
-                        pair["left_column"],
-                        "right",
-                        right.get(pair["right_column"], ""),
-                    ]
-                )
-                rows_written += 2
+            row_number = rows_written + 3
+            for column, pair in enumerate(key_pairs, start=1):
+                sheet.cell(row_number, column, str(left.get(pair["left_column"], "")))
+            for offset, pair in enumerate(attributes):
+                left_value = str(left.get(pair["left_column"], ""))
+                right_value = str(right.get(pair["right_column"], ""))
+                left_cell = sheet.cell(row_number, left_start + offset, left_value)
+                right_cell = sheet.cell(row_number, right_start + offset, right_value)
+                if left_value != right_value:
+                    for cell in (left_cell, right_cell):
+                        cell.fill = difference_fill
+                        cell.font = difference_font
+            rows_written += 1
+        if rows_written >= limit:
+            break
+
+    for column, value in enumerate(columns, start=1):
+        if not value:
+            sheet.column_dimensions[get_column_letter(column)].width = 3
+            continue
+        values = [str(sheet.cell(row, column).value or "") for row in range(1, rows_written + 3)]
+        sheet.column_dimensions[get_column_letter(column)].width = min(
+            40, max(12, max(map(len, values), default=0) + 2)
+        )
+
+    output = io.BytesIO()
+    workbook.save(output)
     return (
-        gzip.compress(output.getvalue().encode("utf-8")),
+        output.getvalue(),
         sum(map(len, left_groups.values())),
         sum(map(len, right_groups.values())),
         rows_written,
@@ -946,8 +1015,10 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
         window = str(document["vintage"])
         different = by_window.get(window, set())
         prefix = key.removesuffix("manifest.json")
+        target = diagnostic_prefix(pair, window)
         if not different:
             store.delete_keys(store.list_keys(prefix))
+            store.delete_keys(store.list_keys(target))
             continue
         left_path = run_dir / pair / window / "left.csv"
         if not left_path.is_file():
@@ -957,7 +1028,7 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
         key_tuples = (
             store.get_json(keys_path).get("key_tuples", []) if store.exists(keys_path) else []
         )
-        body, left_rows, right_rows, sample_rows, columns = _difference_sample_csv(
+        body, *_ = _difference_sample_workbook(
             left_path=left_path,
             right_body=store.get_bytes(f"{prefix}{document['right_file']}"),
             pairs=document["pairs"],
@@ -966,21 +1037,11 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
             limit=int(document["limit"]),
             key_tuples=key_tuples,
         )
-        target = diagnostic_prefix(pair, window)
-        store.put_bytes(f"{target}samples.csv.gz", body, content_type="application/gzip")
-        store.put_json(
-            f"{target}manifest.json",
-            {
-                "pair": pair,
-                "vintage": window,
-                "different_columns": sorted(different),
-                "columns": columns,
-                "limit": int(document["limit"]),
-                "left_rows": left_rows,
-                "right_rows": right_rows,
-                "sample_rows": sample_rows,
-                "sample_file": "samples.csv.gz",
-            },
+        store.delete_keys(store.list_keys(target))
+        store.put_bytes(
+            f"{target}samples.xlsx",
+            body,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         store.delete_keys(store.list_keys(prefix))
         published += 1
@@ -1328,6 +1389,8 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
                 log.exception("could not cancel Right Databricks run: run_id=%s", remote.run_id)
         raise
     finally:
+        if remote_right and remote is not None and store is not None:
+            save_right_log(store, run_dir)
         if watchdog:
             watchdog.close()
         try:

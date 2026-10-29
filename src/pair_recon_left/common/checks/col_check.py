@@ -868,7 +868,7 @@ class LeftRuntime:
         return path
 
     def _publish_difference_keys(self, manifest, window, path: str | Path) -> None:
-        limit = int(manifest.get("difference_sample_rows") or 0)
+        limit = int(manifest.get("sample_rows") or 0)
         columns = list(manifest.get("key_cols") or [])
         if self.store is None or not limit or not columns:
             return

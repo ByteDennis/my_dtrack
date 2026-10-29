@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from pair_recon_right.catalog import publish, run_state
 from pair_recon_right.engine.backends.store import open_store
 from pair_recon_right.engine.backends.targets import SparkTarget
+from pair_recon_right.engine.backends.volume_log import VolumeLogHandler
 from pair_recon_right.engine.job import run, smoke
 
 for name in (
@@ -87,6 +88,9 @@ logging.basicConfig(
 )
 logging.getLogger("pair_recon").info("widgets: %s", values)
 store = open_store(values["run_root"]).child(values["run_id"])
+volume_log = VolumeLogHandler(store)
+volume_log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logging.getLogger().addHandler(volume_log)
 spark.sql("SET spark.sql.legacy.timeParserPolicy = CORRECTED")
 
 try:
@@ -108,4 +112,6 @@ except BaseException:
     if not values["smoke"]:
         publish(spark, store, **publish_values, state="failed")
     raise
+finally:
+    volume_log.close()
 dbutils.notebook.exit(json.dumps(outcome, default=str))

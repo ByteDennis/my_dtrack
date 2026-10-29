@@ -62,7 +62,6 @@ def test_rowonly(tmp_path):
     assert set(store.list_keys(REPORT_PREFIX)) == {
         f"{REPORT_PREFIX}index.html",
         f"{REPORT_PREFIX}report.xlsx",
-        f"{REPORT_PREFIX}summary.json",
     }
 
 
@@ -128,7 +127,6 @@ def test_row_check_failure_publishes_partial_workbook_without_csv(tmp_path):
     assert set(store.list_keys(REPORT_PREFIX)) == {
         f"{REPORT_PREFIX}index.html",
         f"{REPORT_PREFIX}report.xlsx",
-        f"{REPORT_PREFIX}summary.json",
     }
 
     from openpyxl import load_workbook
@@ -174,9 +172,7 @@ def test_run_reports_which_side_was_empty(tmp_path, left, right, state):
     )
     assert result["state"] == state and result["failures"] == 0
     assert get_run_status(store)["state"] == "complete"
-    assert get_run_status(store)["verdict"] == state and store.exists(
-        f"{REPORT_PREFIX}summary.json"
-    )
+    assert get_run_status(store)["verdict"] == state and store.exists(f"{REPORT_PREFIX}report.xlsx")
 
 
 def test_smoke_reselects_the_left_keys_on_the_right(tmp_path):

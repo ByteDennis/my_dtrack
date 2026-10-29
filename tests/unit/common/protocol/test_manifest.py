@@ -346,10 +346,10 @@ def test_diagnostic_controls_do_not_invalidate_statistics_plan(common):
     diagnostic = common.manifest.build_manifest(
         "run",
         "p",
-        _variant(version=2, difference_sample_rows=25, local_reconciliation=True),
+        _variant(version=2, sample_rows=25, local_reconciliation=True),
         ROW_CHECK,
     )
-    assert diagnostic["difference_sample_rows"] == 25
+    assert diagnostic["sample_rows"] == 25
     assert diagnostic["local_reconciliation"] is True
     assert diagnostic["plan_id"] == first["plan_id"]
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -142,19 +141,12 @@ def build_report(
     )
     files["report.xlsx"] = out / "report.xlsx"
     build_workbook(documents, results_by_pair).save(files["report.xlsx"])
-    summary["files"] = sorted(files)
-    files["summary.json"] = out / "summary.json"
-    files["summary.json"].write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
     for name, path in sorted(files.items()):
         log.info("wrote %s (%d bytes)", name, path.stat().st_size)
     return files
 
 
 CONTENT_TYPES = {
-    ".json": "application/json",
     ".html": "text/html; charset=utf-8",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }

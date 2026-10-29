@@ -18,6 +18,7 @@ UNITS_STATUS = "results/units.csv"
 AUDIT_SUMMARY = "audit/summary.txt"
 LEFT_STATE = "_protocol/left.json"
 RIGHT_STATE = "_protocol/right.json"
+RIGHT_LOG = "_protocol/right.log"
 
 UNIT_STATUS_FIELDS = (
     "pair",

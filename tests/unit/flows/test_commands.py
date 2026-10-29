@@ -75,7 +75,9 @@ def test_main_runs_every_pair_and_keeps_going_after_failures(tmp_path, monkeypat
 
 def test_batch_forwards_last_failed(tmp_path, monkeypatch):
     seen = []
-    monkeypatch.setattr(batch, "_run", lambda command: seen.append(command) or (0, RESULT % "passed"))
+    monkeypatch.setattr(
+        batch, "_run", lambda command: seen.append(command) or (0, RESULT % "passed")
+    )
     defaults = tmp_path / ".pair_recon.yaml"
     defaults.write_text("owner: me\n", encoding="utf-8")
 

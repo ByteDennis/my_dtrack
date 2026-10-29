@@ -1,5 +1,3 @@
-import json
-
 import pytest
 from support import STATS, MemoryStore
 
@@ -13,7 +11,7 @@ from pair_recon_right.engine.common.model.protocol import (
     row_result_path,
 )
 from pair_recon_right.engine.report import build_report
-from pair_recon_right.engine.report.build import collect
+from pair_recon_right.engine.report.build import _summary, collect
 
 
 def _store():
@@ -76,16 +74,14 @@ def test_report_builds_flat_files_from_batch_and_per_unit_results(tmp_path):
     assert set(files) == {
         "index.html",
         "report.xlsx",
-        "summary.json",
     }
-    summary = json.loads(files["summary.json"].read_text())
+    summary = _summary("run", collect(_store()), "now")
     assert summary["status"] == "DONE" and summary["pairs"] == 1
     assert summary["findings"] == {
         "row_count_diff": 1,
         "partition_missing": 1,
         "col_stat_diff": 1,
     }
-    assert summary["files"] == ["index.html", "report.xlsx"]
     page = files["index.html"].read_text()
     assert "days mismatch: 1" in page and "y → y_r" in page and "mean (1.5000→9)" in page
 
@@ -126,7 +122,7 @@ def test_rows_only_is_complete_and_omits_column_sheet(tmp_path):
             store.objects.pop(key)
 
     files = build_report(store, tmp_path)
-    summary = json.loads(files["summary.json"].read_text())
+    summary = _summary("run", collect(store), "now")
 
     assert summary["status"] == "DONE"
     assert "Stage 2" not in files["index.html"].read_text()

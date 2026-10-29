@@ -667,9 +667,6 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         ["row_count", *attribute_check_names()],
         run_default("checks", "row_count,hash_sum,n_unique"),
     )
-    difference_sample_rows = run_default("difference_sample_rows", 100)
-    if difference_sample_rows in (None, ""):
-        difference_sample_rows = 100
     excluded_columns = column_list(
         answer(
             "Excluded columns (comma-separated Left names)",
@@ -685,9 +682,12 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "sample": sample_value(
             answer("Sample", provenance.get("sample", run_default("sample", "all")))
         ),
+        "sample_rows": worker_budget(
+            "Sample rows (maximum difference rows saved per vintage)",
+            run_default("sample_rows", 50),
+        ),
         "normalization_rules": normalization_rules,
         "audit": confirm("Audit SQL", run_default("audit", False)),
-        "difference_sample_rows": int(difference_sample_rows),
         "excluded_columns": excluded_columns,
         **date_answers,
     }
@@ -784,7 +784,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "sample": answers["sample"],
         "normalization_rules": answers["normalization_rules"],
         "audit": answers["audit"],
-        "difference_sample_rows": answers["difference_sample_rows"],
+        "sample_rows": answers["sample_rows"],
         "sync_remote": sync_remote,
         "work_dir": str(local_output_root(defaults)),
         "progress_interval": defaults.get("progress_interval", 30),

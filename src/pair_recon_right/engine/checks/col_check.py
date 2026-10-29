@@ -566,7 +566,7 @@ class ColCheck:
             with self.activity_lock:
                 self.activity.pop((task.pair, task.window), None)
         sample = None
-        sample_rows = int(manifest.get("difference_sample_rows") or 0)
+        sample_rows = int(manifest.get("sample_rows") or 0)
         if sample_rows and hasattr(target, "window_sample"):
             sample_window = dict(task.payload)
             keys_path = difference_keys_path(task.pair, task.window)

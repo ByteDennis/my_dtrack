@@ -106,7 +106,7 @@ def run_config(
                 "sample",
                 "normalization_rules",
                 "audit",
-                "difference_sample_rows",
+                "sample_rows",
                 "excluded_columns",
             )
             if key in answers

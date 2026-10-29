@@ -352,7 +352,7 @@ def test_left_pull_publishes_bounded_difference_keys(tmp_path):
         "key_cols": ["id"],
         "right_key_cols": ["id"],
         "key_families": ["numeric"],
-        "difference_sample_rows": 2,
+        "sample_rows": 2,
     }
 
     class Source:
