@@ -152,6 +152,8 @@ class SqlSource(ABC):
 
     def __init__(self, config: dict[str, Any]):
         self.config = dict(config)
+        self.arraysize = _configured_int(config, "arraysize", 1_000, minimum=1)
+        self.fetchsize = _configured_int(config, "fetchsize", 10_000, minimum=1)
         windows = normalize_query_windows(
             self.config.get("query"),
             self.config.get("query_windows"),
@@ -248,12 +250,14 @@ class SqlSource(ABC):
         count = 0
         try:
             self._audit(sql, operation)
+            if hasattr(cursor, "arraysize"):
+                cursor.arraysize = self.arraysize
             with self._guard(cursor, connection):
                 cursor.execute(sql)
                 with part.open("w", newline="", encoding="utf-8") as handle:
                     writer = csv.writer(handle, lineterminator="\n")
                     writer.writerow(columns)
-                    while rows := cursor.fetchmany(10_000):
+                    while rows := cursor.fetchmany(self.fetchsize):
                         self._check_stop()
                         writer.writerows(rows)
                         count += len(rows)
@@ -265,6 +269,99 @@ class SqlSource(ABC):
         finally:
             cursor.close()
             connection.close()
+
+    # >>> bounded throughput probe: fetch small batches, serialize them like CSV, then close <<< #
+    def measure_query_rate(
+        self,
+        sql: str,
+        *,
+        seconds: float,
+        min_batches: int = 3,
+        reporter=None,
+        clock=time.perf_counter,
+    ) -> dict[str, Any]:
+        if seconds <= 0:
+            raise ValueError("timing observation seconds must be positive")
+        if min_batches <= 0:
+            raise ValueError("timing minimum batches must be positive")
+        connection = self.connect()
+        cursor = connection.cursor()
+        rows_read = 0
+        batches = 0
+        exhausted = False
+        execute_seconds = 0.0
+        fetch_started = 0.0
+        elapsed = 0.0
+        first_batch_seconds = None
+        first_batch_rows = 0
+        buffer = None
+        try:
+            if hasattr(cursor, "arraysize"):
+                cursor.arraysize = self.arraysize
+            if hasattr(cursor, "prefetchrows") and hasattr(self, "prefetchrows"):
+                cursor.prefetchrows = self.prefetchrows
+            self._audit(sql, "timing_pull")
+            with self._guard(cursor, connection):
+                started = clock()
+                cursor.execute(sql)
+                execute_seconds = clock() - started
+                fetch_started = clock()
+                while True:
+                    rows = cursor.fetchmany(self.arraysize)
+                    if not rows:
+                        exhausted = True
+                        break
+                    self._check_stop()
+                    if buffer is None:
+                        import io
+
+                        buffer = io.StringIO()
+                    buffer.seek(0)
+                    buffer.truncate(0)
+                    csv.writer(buffer, lineterminator="\n").writerows(rows)
+                    rows_read += len(rows)
+                    batches += 1
+                    elapsed = max(clock() - fetch_started, 1e-9)
+                    if first_batch_seconds is None:
+                        first_batch_seconds = elapsed
+                        first_batch_rows = len(rows)
+                    steady_seconds = elapsed - first_batch_seconds
+                    steady_rows = rows_read - first_batch_rows
+                    rate = (
+                        steady_rows / steady_seconds
+                        if steady_rows and steady_seconds > 0
+                        else rows_read / elapsed
+                    )
+                    if reporter:
+                        reporter(rows_read, elapsed, rate, batches)
+                    if elapsed >= seconds and batches >= min_batches:
+                        break
+            if not elapsed:
+                elapsed = max(clock() - fetch_started, 1e-9)
+            first_batch_seconds = first_batch_seconds or elapsed
+            steady_seconds = elapsed - first_batch_seconds
+            steady_rows = rows_read - first_batch_rows
+            rate = (
+                steady_rows / steady_seconds
+                if steady_rows and steady_seconds > 0
+                else rows_read / elapsed
+            )
+            return {
+                "rows": rows_read,
+                "batches": batches,
+                "records_per_second": rate,
+                "observed_seconds": elapsed,
+                "execute_seconds": execute_seconds,
+                "first_batch_seconds": first_batch_seconds,
+                "first_batch_rows": first_batch_rows,
+                "exhausted": exhausted,
+            }
+        finally:
+            # No fetch is active once control reaches here. Closing the cursor is the
+            # portable way to discard the remaining result set; python-oracledb can
+            # raise ORA-01013/StopIteration if cancel() is followed by close().
+            _close_quietly(cursor)
+            _close_quietly(connection)
 
     def _bounds(self, from_date: str | None, to_date: str | None) -> str | None:
         if self.partition == "all":
@@ -689,9 +786,7 @@ class OracleSource(SqlSource):
         self._resolve_lock = threading.Lock()
         self._key_types: dict[tuple[str, ...], list[str | None]] = {}
         self._key_types_lock = threading.Lock()
-        self.arraysize = _configured_int(config, "arraysize", 1_000, minimum=1)
         self.prefetchrows = _configured_int(config, "prefetchrows", 1_000, minimum=0)
-        self.fetch_batch_size = _configured_int(config, "fetch_batch_size", 10_000, minimum=1)
         self.fetch_retries = _configured_int(config, "fetch_retries", 3, minimum=0)
         self.max_sessions = _configured_int(
             config, "max_sessions", _env_number("ORACLE_MAX_SESSIONS", 4), minimum=1
@@ -764,12 +859,12 @@ class OracleSource(SqlSource):
             _ORACLE_PULLS_ACTIVE += 1
             active = _ORACLE_PULLS_ACTIVE
         log.info(
-            "Oracle fetch started: output=%s active=%d arraysize=%d prefetchrows=%d batch_size=%d",
+            "Oracle fetch started: output=%s active=%d arraysize=%d prefetchrows=%d fetchsize=%d",
             target,
             active,
             self.arraysize,
             self.prefetchrows,
-            self.fetch_batch_size,
+            self.fetchsize,
         )
         try:
             for attempt in range(self.fetch_retries + 1):
@@ -794,7 +889,7 @@ class OracleSource(SqlSource):
                             writer.writerow(columns)
                             while True:
                                 mark = time.perf_counter()
-                                rows = cursor.fetchmany(self.fetch_batch_size)
+                                rows = cursor.fetchmany(self.fetchsize)
                                 batch_seconds = time.perf_counter() - mark
                                 fetch_seconds += batch_seconds
                                 if first_batch_seconds is None:

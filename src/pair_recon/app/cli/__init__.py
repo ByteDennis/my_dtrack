@@ -240,19 +240,28 @@ def vintage_sample_text(size=None, values=None) -> str:
     return str(size) if size not in (None, "") else "all"
 
 
-def date_type_text(value) -> str:
-    selected = "string" if value in (None, "") else value
-    if isinstance(selected, dict):
-        return json.dumps(selected, ensure_ascii=False, separators=(",", ":"))
-    return str(selected)
+def pair_metadata_settings(metadata: dict) -> dict:
+    key = metadata.get("key")
+    if isinstance(key, list | tuple):
+        key = ",".join(str(value).strip() for value in key if str(value).strip())
+    key = str(key or "").strip() or None
+    left = metadata.get("left") or {}
+    right = metadata.get("right") or {}
+    return {
+        "sampled_key": key,
+        "left_date_col": left.get("date_col"),
+        "left_date_type": left.get("date_type"),
+        "right_date_col": right.get("date_col"),
+        "right_date_type": right.get("date_type"),
+    }
 
 
-def date_type_value(value):
-    selected = value
-    if isinstance(value, str):
-        text = value.strip()
-        selected = json.loads(text) if text.startswith("{") else text
-    return resolve_date_type(selected).spec(portable=True)
+def metadata_setting_text(value, *, automatic=False) -> str:
+    if value in (None, ""):
+        return "auto" if automatic else "none"
+    if isinstance(value, dict | list):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
 
 
 # >>> comma text or a list into stripped, deduplicated column names <<< #
@@ -634,34 +643,15 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         ["day", "month", "all"],
         provenance.get("partition", run_default("partition", metadata.get("partition", "day"))),
     )
-    date_answers = {}
-    if partition != "all":
-        snapshot = bool(metadata.get("snapshot", False))
-        left_date_col = answer(
-            "Left date column",
-            run_default("left_date_col", metadata["left"].get("date_col")),
-            required=not snapshot,
-        )
-        date_answers["left_date_col"] = left_date_col
-        if left_date_col:
-            date_answers["left_date_type"] = date_type_value(
-                answer(
-                    "Left date type (date/string/number/sas or JSON)",
-                    date_type_text(
-                        run_default("left_date_type", metadata["left"].get("date_type"))
-                    ),
-                )
-            )
-        date_answers["right_date_col"] = answer(
-            "Right date column",
-            run_default("right_date_col", metadata["right"].get("date_col")),
-        )
-        date_answers["right_date_type"] = date_type_value(
-            answer(
-                "Right date type (date/string/number/sas or JSON)",
-                date_type_text(run_default("right_date_type", metadata["right"].get("date_type"))),
-            )
-        )
+    metadata_settings = pair_metadata_settings(metadata)
+    console(
+        "Pair metadata (saved to YAML): "
+        f"sampled_key={metadata_setting_text(metadata_settings['sampled_key'])}; "
+        f"left_date_col={metadata_setting_text(metadata_settings['left_date_col'])}; "
+        f"left_date_type={metadata_setting_text(metadata_settings['left_date_type'], automatic=True)}; "
+        f"right_date_col={metadata_setting_text(metadata_settings['right_date_col'])}; "
+        f"right_date_type={metadata_setting_text(metadata_settings['right_date_type'], automatic=True)}"
+    )
     selected = select_many(
         "Checks",
         ["row_count", *attribute_check_names()],
@@ -689,7 +679,6 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "normalization_rules": normalization_rules,
         "audit": confirm("Audit SQL", run_default("audit", False)),
         "excluded_columns": excluded_columns,
-        **date_answers,
     }
     left_workers = worker_budget("Left source worker budget", run_default("left_workers", 2))
     right_workers = (
@@ -719,12 +708,12 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
                 "Excluded partitions (YYYY-MM-DD or start->end, comma-separated)",
                 excluded_partitions_text(
                     excluded_default,
-                    answers.get("left_date_type"),
+                    metadata_settings["left_date_type"],
                     answers["partition"],
                 ),
                 required=False,
             ),
-            answers.get("left_date_type"),
+            metadata_settings["left_date_type"],
             answers["partition"],
         )
         vintage_choices = (
@@ -790,13 +779,10 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "progress_interval": defaults.get("progress_interval", 30),
         "left_workers": left_workers,
         "right_workers": right_workers,
+        **metadata_settings,
         "_catalog_row": by_name[pair],
     }
     for key in (
-        "left_date_col",
-        "left_date_type",
-        "right_date_col",
-        "right_date_type",
         "from_date",
         "to_date",
         "excluded_partitions",
@@ -967,6 +953,16 @@ def execute(args, *, raise_errors: bool = False) -> int:
                     console("Returning to the previous question...")
         finally:
             _PROMPT_SESSION.reset(token)
+        timing_value = os.getenv("PAIR_RECON_TIMING", "").strip()
+        if timing_value:
+            from ..timing import left_pull_timing
+
+            log.info(
+                "PAIR_RECON_TIMING enabled: measuring a bounded Left pull; "
+                "Right and statistics will not run"
+            )
+            left_pull_timing(settings, config, timing_value=timing_value)
+            return 0
         if settings["sync_remote"]:
             if not env_value(WORKSPACE_DIR_ENV):
                 raise ValueError(f"Sync remote requires {WORKSPACE_DIR_ENV} in .pair_recon.env")

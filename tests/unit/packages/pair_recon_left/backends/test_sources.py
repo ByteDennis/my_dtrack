@@ -242,7 +242,7 @@ def test_oracle_query_to_csv_tunes_fetch_and_retries_connection_loss(monkeypatch
             "table": "T",
             "arraysize": 500,
             "prefetchrows": 250,
-            "fetch_batch_size": 500,
+            "fetchsize": 500,
             "fetch_retries": 1,
         }
     )
@@ -276,6 +276,74 @@ def test_oracle_query_to_csv_does_not_retry_non_connection_errors(monkeypatch, t
     with pytest.raises(RuntimeError, match="ORA-00942"):
         source.query_to_csv("SELECT * FROM T", tmp_path / "rows.csv", ["ID"])
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("source_type", [OracleSource, HadoopSource])
+def test_sql_source_timing_uses_arraysize_batches_and_closes(source_type):
+    class Cursor:
+        def __init__(self):
+            self.arraysize = None
+            self.prefetchrows = None
+            self.rows = [(value,) for value in range(8)]
+            self.cancelled = False
+            self.closed = False
+
+        def execute(self, _sql):
+            pass
+
+        def fetchmany(self, size):
+            rows, self.rows = self.rows[:size], self.rows[size:]
+            return rows
+
+        def cancel(self):
+            self.cancelled = True
+
+        def close(self):
+            self.closed = True
+
+    class Connection:
+        def __init__(self):
+            self.cursor_value = Cursor()
+            self.closed = False
+
+        def cursor(self):
+            return self.cursor_value
+
+        def close(self):
+            self.closed = True
+
+    connection = Connection()
+    config = {"source": "oracle", "table": "T", "arraysize": 2}
+    if source_type is HadoopSource:
+        config = {"source": "hadoop", "table": "T", "dsn": "HIVE", "arraysize": 2}
+    source = source_type(config)
+    source.connect = lambda: connection
+    ticks = iter([0.0, 1.0, 1.0, 2.0, 3.0, 4.0])
+    progress = []
+
+    result = source.measure_query_rate(
+        "SELECT * FROM T",
+        seconds=2,
+        min_batches=3,
+        reporter=lambda *values: progress.append(values),
+        clock=lambda: next(ticks),
+    )
+
+    assert result == {
+        "rows": 6,
+        "batches": 3,
+        "records_per_second": 2.0,
+        "observed_seconds": 3.0,
+        "execute_seconds": 1.0,
+        "first_batch_seconds": 1.0,
+        "first_batch_rows": 2,
+        "exhausted": False,
+    }
+    assert progress[-1] == (6, 3.0, 2.0, 3)
+    assert connection.cursor_value.arraysize == 2
+    assert not connection.cursor_value.cancelled
+    assert connection.cursor_value.closed
+    assert connection.closed
 
 
 @pytest.mark.parametrize(

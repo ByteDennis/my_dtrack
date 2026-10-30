@@ -65,7 +65,7 @@ LEFT_OPTION_FIELDS = {
     "sample_hash",
     "arraysize",
     "prefetchrows",
-    "fetch_batch_size",
+    "fetchsize",
     "fetch_retries",
     "max_sessions",
     "sas_sample_csv",
@@ -239,7 +239,7 @@ FIELD_GUIDE = (
         "left_options_json.oracle_tuning",
         "optional Oracle",
         "JSON numbers",
-        "Supported keys: arraysize, prefetchrows, fetch_batch_size, fetch_retries, max_sessions.",
+        "Supported keys: arraysize, prefetchrows, fetchsize, fetch_retries, max_sessions.",
         '{"arraysize":1000,"max_sessions":4}',
     ),
     (
@@ -440,7 +440,7 @@ FIELD_GUIDE = (
         for name, description, example in (
             ("arraysize", "Oracle cursor array size.", "1000"),
             ("prefetchrows", "Oracle cursor prefetch row count.", "1000"),
-            ("fetch_batch_size", "Rows written per Oracle fetch batch.", "10000"),
+            ("fetchsize", "Rows written per Oracle fetch batch.", "10000"),
             ("fetch_retries", "Complete-vintage retries after transient Oracle errors.", "3"),
             ("max_sessions", "Maximum concurrent Oracle sessions for this source.", "4"),
         )

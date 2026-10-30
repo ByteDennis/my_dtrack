@@ -265,7 +265,7 @@ def test_left_options_accept_sas_sample_path_and_oracle_tuning(tmp_path):
             "sas_sample_csv": "C:/PairRecon/samples/orders/left_sample.csv",
             "arraysize": 2000,
             "prefetchrows": 1000,
-            "fetch_batch_size": 20000,
+            "fetchsize": 20000,
             "fetch_retries": 2,
             "max_sessions": 4,
         }

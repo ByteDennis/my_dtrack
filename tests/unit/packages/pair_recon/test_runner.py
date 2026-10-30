@@ -11,7 +11,7 @@ import pytest
 import yaml
 from support import STATS, FakeTarget, MemoryStore, left_document
 
-from pair_recon.app import cli, runner
+from pair_recon.app import cli, runner, timing
 from pair_recon.app.runner import (
     StatementSql,
     local_run_directory,
@@ -831,6 +831,64 @@ def test_execute_force_overrides_resume_with_restart(monkeypatch, tmp_path):
 
     assert cli.execute(args, raise_errors=True) == 0
     assert actions == ["restart"]
+
+
+def test_execute_timing_exits_before_sync_snapshot_and_launch(monkeypatch):
+    settings = {
+        "pair": "orders",
+        "run_id": "orders-me-20261030",
+        "timezone": "America/New_York",
+        "sync_remote": True,
+        "email_to": "",
+    }
+    config = {"pairs": {"orders": {}}}
+    calls = []
+    monkeypatch.setenv("PAIR_RECON_TIMING", "120")
+    monkeypatch.setattr(cli, "load_environment", lambda: None)
+    monkeypatch.setattr(cli, "load_defaults", lambda _path: {})
+    monkeypatch.setattr(
+        cli,
+        "prompts",
+        lambda _defaults: (settings, config, "new", object(), object()),
+    )
+    monkeypatch.setattr(cli, "configure_console_logging", lambda *_args: None)
+    monkeypatch.setattr(cli, "yes_no", lambda *_args: True)
+    monkeypatch.setattr(cli, "save_defaults", lambda *_args: None)
+    monkeypatch.setattr(
+        timing,
+        "left_pull_timing",
+        lambda current, selected, **options: calls.append(
+            (current, selected, options["timing_value"])
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "sync_right_package",
+        lambda *_args: pytest.fail("timing mode must not sync Right"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "write_request_snapshot",
+        lambda *_args: pytest.fail("timing mode must not write a run snapshot"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "launch",
+        lambda *_args, **_kwargs: pytest.fail("timing mode must not launch validation"),
+    )
+    args = SimpleNamespace(
+        config=None,
+        defaults_path=None,
+        earlystop=False,
+        force=False,
+        recheck=False,
+        last_failed=False,
+        log_level="INFO",
+        debug=None,
+    )
+
+    assert cli.execute(args, raise_errors=True) == 0
+    assert calls == [(settings, config, "120")]
 
 
 def test_execute_last_failed_resumes_previous_run(monkeypatch, tmp_path):
@@ -1741,8 +1799,9 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_
     assert settings["right_workers"] == 12
 
 
-def test_prompt_records_and_applies_date_columns_and_types(monkeypatch, tmp_path):
+def test_prompt_prints_and_records_metadata_columns_without_asking(monkeypatch, tmp_path, capsys):
     metadata = {
+        "key": "ORDER_ID,ORDER_DT",
         "left": {
             "source": "oracle",
             "table": "L",
@@ -1798,10 +1857,6 @@ def test_prompt_records_and_applies_date_columns_and_types(monkeypatch, tmp_path
         ],
     }
     replies = {
-        "Left date column": "BUSINESS_DT",
-        "Left date type": '{"type":"sas","format":"datetime"}',
-        "Right date column": "business_dt",
-        "Right date type": '{"type":"string","format":"dash"}',
         "Excluded partitions": "2026-01-02->2026-01-05, 2026-01-10",
     }
     prompts = []
@@ -1819,13 +1874,16 @@ def test_prompt_records_and_applies_date_columns_and_types(monkeypatch, tmp_path
         defaults, workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object())
     )
 
-    assert any(prompt.startswith("Left date column [ORDER_DT]") for prompt in prompts)
-    assert any(
-        prompt.startswith(
-            'Left date type (date/string/number/sas or JSON) [{"type":"string","format":"compact"}]'
-        )
-        for prompt in prompts
-    )
+    output = capsys.readouterr().out
+    assert not any(prompt.startswith("Left date column") for prompt in prompts)
+    assert not any(prompt.startswith("Left date type") for prompt in prompts)
+    assert not any(prompt.startswith("Right date column") for prompt in prompts)
+    assert not any(prompt.startswith("Right date type") for prompt in prompts)
+    assert "sampled_key=ORDER_ID,ORDER_DT" in output
+    assert "left_date_col=ORDER_DT" in output
+    assert 'left_date_type={"type":"string","format":"compact"}' in output
+    assert "right_date_col=order_dt" in output
+    assert "right_date_type=date" in output
     assert any(
         prompt.startswith(
             "Excluded partitions (YYYY-MM-DD or start->end, comma-separated) "
@@ -1833,10 +1891,25 @@ def test_prompt_records_and_applies_date_columns_and_types(monkeypatch, tmp_path
         )
         for prompt in prompts
     )
-    assert settings["left_date_col"] == "BUSINESS_DT"
-    assert settings["left_date_type"] == {"type": "sas", "format": "datetime"}
-    assert settings["right_date_col"] == "business_dt"
-    assert settings["right_date_type"] == {"type": "string", "format": "dash"}
+    assert settings["sampled_key"] == "ORDER_ID,ORDER_DT"
+    assert settings["left_date_col"] == "ORDER_DT"
+    assert settings["left_date_type"] == {"type": "string", "format": "compact"}
+    assert settings["right_date_col"] == "order_dt"
+    assert settings["right_date_type"] == "date"
+    saved = cli.persistent_settings(settings)
+    assert saved["sampled_key"] == "ORDER_ID,ORDER_DT"
+    assert saved["left_date_col"] == "ORDER_DT"
+    assert saved["left_date_type"] == {"type": "string", "format": "compact"}
+    assert saved["right_date_col"] == "order_dt"
+    assert saved["right_date_type"] == "date"
+    defaults_path = tmp_path / ".pair_recon.yaml"
+    cli.save_defaults(defaults_path, saved)
+    yaml_settings = yaml.safe_load(defaults_path.read_text(encoding="utf-8"))
+    assert yaml_settings["sampled_key"] == "ORDER_ID,ORDER_DT"
+    assert yaml_settings["left_date_col"] == "ORDER_DT"
+    assert yaml_settings["left_date_type"] == {"type": "string", "format": "compact"}
+    assert yaml_settings["right_date_col"] == "order_dt"
+    assert yaml_settings["right_date_type"] == "date"
     assert settings["excluded_partitions"] == [
         "2026-01-02",
         "2026-01-03",
@@ -1845,10 +1918,10 @@ def test_prompt_records_and_applies_date_columns_and_types(monkeypatch, tmp_path
         "2026-01-10",
     ]
     pair = config["pairs"]["orders"]
-    assert pair["left"]["date_col"] == "BUSINESS_DT"
-    assert pair["left"]["date_type"] == {"type": "sas", "format": "datetime"}
-    assert pair["right"]["date_col"] == "business_dt"
-    assert pair["right"]["date_type"] == {"type": "string", "format": "dash"}
+    assert pair["left"]["date_col"] == "ORDER_DT"
+    assert pair["left"]["date_type"] == {"type": "string", "format": "compact"}
+    assert pair["right"]["date_col"] == "order_dt"
+    assert pair["right"]["date_type"] == "date"
     assert pair["excluded_partitions"] == settings["excluded_partitions"]
 
 
