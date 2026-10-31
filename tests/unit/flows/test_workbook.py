@@ -208,6 +208,7 @@ def test_pair_workbook_percentage_sample_requires_keys(tmp_path):
 FULL_RUN_DEFAULTS = {
     "run_mode": "full",
     "sample": 0.1,
+    "use_modular": "CUST_ID",
     "checks": ["row_count", "hash_sum"],
     "audit": True,
     "sync_remote": False,
@@ -263,6 +264,8 @@ def test_left_options_accept_sas_sample_path_and_oracle_tuning(tmp_path):
     row[9] = json.dumps(
         {
             "sas_sample_csv": "C:/PairRecon/samples/orders/left_sample.csv",
+            "user": "temporary_user",
+            "password": "temporary_password",
             "arraysize": 2000,
             "prefetchrows": 1000,
             "fetchsize": 20000,
@@ -276,7 +279,10 @@ def test_left_options_accept_sas_sample_path_and_oracle_tuning(tmp_path):
 
     parsed = read_pair_workbook(path)[0]
 
-    assert json.loads(parsed["left_options_json"])["sas_sample_csv"].endswith("left_sample.csv")
+    options = json.loads(parsed["left_options_json"])
+    assert options["sas_sample_csv"].endswith("left_sample.csv")
+    assert options["user"] == "temporary_user"
+    assert options["password"] == "temporary_password"
 
 
 @pytest.mark.parametrize(

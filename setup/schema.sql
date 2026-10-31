@@ -152,6 +152,7 @@ USING (
     ('lowercase', 'all', NULL, NULL, true),
     ('decimal', 'all', NULL, NULL, true),
     ('strip_datetime', 'all', NULL, NULL, true),
+    ('dbx_today_3000', 'databricks', '3000-01-01', '@run_date', true),
     ('oracle_today_3000', 'oracle', '3000-01-01', '@run_date', true),
     ('oracle_missing_9999', 'oracle', '9999-12-31', '@missing', true)
   AS v(rule_name, source, match_value, canonical_value, enabled)

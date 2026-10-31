@@ -162,6 +162,31 @@ def _variant(**changes):
     return pair
 
 
+def test_modular_sampling_uses_record_keys_and_daily_vintage_seed(common):
+    pair = _variant(use_modular="id")
+    first = common.manifest.build_manifest("p-owner-20261031", "p", pair, ROW_CHECK)
+    repeated = common.manifest.build_manifest("p-owner-20261031", "p", pair, ROW_CHECK)
+    next_day = common.manifest.build_manifest("p-owner-20261101", "p", pair, ROW_CHECK)
+
+    assert first["key_cols"] == ["ID"]
+    assert first["sample"]["modular"] == {
+        "left_column": "ID",
+        "right_column": "id",
+        "run_date": "2026-10-31",
+    }
+    assert [window["sample_seed"] for window in first["windows"]] == [
+        window["sample_seed"] for window in repeated["windows"]
+    ]
+    assert first["windows"][0]["sample_seed"] != first["windows"][1]["sample_seed"]
+    assert first["windows"][0]["sample_seed"] != next_day["windows"][0]["sample_seed"]
+    assert common.manifest.window_sample_plan(first, first["windows"][0], "left")[
+        "modular_column"
+    ] == "ID"
+    assert common.manifest.window_sample_plan(first, first["windows"][0], "right")[
+        "modular_column"
+    ] == "id"
+
+
 @pytest.mark.parametrize(
     ("pair", "row_check", "message"),
     [

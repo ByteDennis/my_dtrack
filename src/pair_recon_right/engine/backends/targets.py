@@ -16,7 +16,7 @@ from ..common.model.hashing import (
     key_family,
     normalize_system_sql,
 )
-from ..common.model.manifest import DEFAULT_STATISTICS
+from ..common.model.manifest import DEFAULT_STATISTICS, window_sample_plan
 from ..common.sql.column_types import resolve_column_type
 from ..common.sql.dates import (
     DateType,
@@ -135,7 +135,7 @@ class CsvTarget:
                 columns,
                 Path(folder) / "window.csv",
                 key_columns=manifest["right_key_cols"],
-                sample_plan=manifest["sample"],
+                sample_plan=window_sample_plan(manifest, window, "right"),
                 key_families=manifest["key_families"],
                 side="right",
                 key_tuples=window.get("key_tuples"),
@@ -425,7 +425,7 @@ class SparkTarget:
         keys, families = manifest["right_key_cols"], manifest["key_families"]
         self._check_key_families(keys, families)
         return sample_predicate_sql(
-            manifest["sample"],
+            window_sample_plan(manifest, window, "right"),
             [quote_ident(key, "spark") for key in keys],
             families,
             "spark",

@@ -7,6 +7,7 @@ from pair_recon_left.common.sql.sampling import (
     composite_sql,
     hash32_sql,
     hash_hex_sql,
+    modular_sample_condition,
     normalize_sql,
     sample_predicate_sql,
 )
@@ -81,6 +82,27 @@ def test_predicate():
     )
     assert "md5(" in fraction and fraction.endswith("< 99")
     assert "IN ('7', '2')" in fixed
+
+
+def test_modular_predicate_uses_numeric_selector_without_hashing():
+    plan = {
+        "mode": "fraction",
+        "rate": 0.25,
+        "modular_column": "customer_id",
+        "modular_seed": 123,
+    }
+    predicate = sample_predicate_sql(
+        plan, ["record_id"], ["string"], "duckdb", "left"
+    )
+
+    assert predicate == modular_sample_condition("customer_id", 0.25, 123, "duckdb")
+    assert '"customer_id"' in predicate
+    assert "md5" not in predicate.casefold()
+
+    selected = duckdb.sql(
+        f"SELECT customer_id FROM range(0, 1000) rows(customer_id) WHERE {predicate}"
+    ).fetchall()
+    assert 240 <= len(selected) <= 260
 
 
 def test_custom():

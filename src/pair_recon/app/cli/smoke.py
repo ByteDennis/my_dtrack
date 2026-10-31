@@ -4,7 +4,13 @@ from pair_recon_left.backends.sources import source_from_config
 from pair_recon_left.backends.store import VolumeStore
 from pair_recon_left.cli.config import validate_config
 from pair_recon_left.common.checks.row_check import public_pair_config
-from pair_recon_left.common.model.manifest import key_family_specs, right_key_columns, sample_plan
+from pair_recon_left.common.model.manifest import (
+    configured_sample_plan,
+    key_family_specs,
+    modular_sample_seed,
+    right_key_columns,
+    window_sample_plan,
+)
 from pair_recon_left.common.model.protocol import get_right_state
 from pair_recon_left.common.runtime.run_logging import get_left_logger
 from pair_recon_right.catalog import status_run_values
@@ -34,7 +40,13 @@ def smoke(settings: dict, config: dict, *, workspace_client=None) -> dict:
         value.strip() for value in str(pair_config.get("key") or "").split(",") if value.strip()
     ]
     families = key_family_specs(pair_config, keys)
-    sample = sample_plan(pair_config.get("sample"))
+    sample = configured_sample_plan(settings["run_id"], pair, pair_config)
+    smoke_window = {"bucket": "smoke"}
+    if sample.get("modular"):
+        smoke_window["sample_seed"] = modular_sample_seed(
+            sample["modular"]["run_date"], smoke_window["bucket"]
+        )
+    sample_manifest = {"sample": sample}
     col_map = pair_config.get("col_map") or {}
     columns = [column for column in col_map if column not in keys][:SMOKE_COLUMNS]
     bounds = (pair_config.get("fromDate"), pair_config.get("toDate"))
@@ -47,7 +59,12 @@ def smoke(settings: dict, config: dict, *, workspace_client=None) -> dict:
         raise RuntimeError(f"Left health check failed: {health.get('error')}")
     started = time.monotonic()
     names, rows = source.sample_rows(
-        *bounds, columns, key_columns=keys, key_families=families, sample=sample, limit=SMOKE_ROWS
+        *bounds,
+        columns,
+        key_columns=keys,
+        key_families=families,
+        sample=window_sample_plan(sample_manifest, smoke_window, "left"),
+        limit=SMOKE_ROWS,
     )
     positions = [
         next(i for i, name in enumerate(names) if name.casefold() == key.casefold()) for key in keys
@@ -71,7 +88,7 @@ def smoke(settings: dict, config: dict, *, workspace_client=None) -> dict:
         "to_date": bounds[1],
         "key_columns": right_key_columns(pair, pair_config, keys, partition, date_col),
         "key_families": families,
-        "sample": sample,
+        "sample": window_sample_plan(sample_manifest, smoke_window, "right"),
         "key_tuples": key_tuples,
         "columns": [col_map[column] for column in columns],
     }

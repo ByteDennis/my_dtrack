@@ -70,10 +70,12 @@ LEFT_OPTION_FIELDS = {
     "max_sessions",
     "sas_sample_csv",
 }
+LEFT_CREDENTIAL_FIELDS = {"user", "password"}
 RIGHT_OPTION_FIELDS = {"where", "date_type", "format", "schema_hints", "options"}
 RUN_DEFAULT_FIELDS = {
     "run_mode",
     "sample",
+    "use_modular",
     "checks",
     "audit",
     "sync_remote",
@@ -281,6 +283,14 @@ FIELD_GUIDE = (
         "all|fraction|count",
         "Deterministic attribute sample; fractions are recommended.",
         "0.1",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.use_modular",
+        "percentage sampling",
+        "Left column name",
+        "Numeric cohort selector; sample keys remain record identity keys.",
+        "CUST_ID",
     ),
     (
         "pairs",
@@ -693,6 +703,11 @@ def _validate_run_defaults(
     sampling = sample_plan(value.get("sample", False))
     if sampling["mode"] != "all" and not keys:
         raise ValueError(f"pairs.xlsx row {row}: sampled runs require key_columns")
+    selector = value.get("use_modular")
+    if selector is not None and (not isinstance(selector, str) or not selector.strip()):
+        raise TypeError(f"pairs.xlsx row {row}: use_modular must be a non-empty column name")
+    if selector is not None and sampling["mode"] != "fraction":
+        raise ValueError(f"pairs.xlsx row {row}: use_modular requires percentage sampling")
     size = value.get("vintage_sample_size")
     vintages = value.get("vintage_values")
     if size not in (None, "") and (
@@ -755,7 +770,7 @@ def _read_pair_rows(sheet) -> tuple[list[dict[str, Any]], dict[str, int]]:
             raw["left_options_json"],
             row=number,
             field="left_options_json",
-            allowed=LEFT_OPTION_FIELDS,
+            allowed=LEFT_OPTION_FIELDS | LEFT_CREDENTIAL_FIELDS,
         )
         right_options = _options(
             raw["right_options_json"],

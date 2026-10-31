@@ -103,6 +103,7 @@ USING (
     ('pair_recon_normalization', 'rule_name', 'lowercase', 'Compare text without letter-case differences.'),
     ('pair_recon_normalization', 'rule_name', 'decimal', 'Remove insignificant trailing decimal zeros such as 1.00 to 1.'),
     ('pair_recon_normalization', 'rule_name', 'strip_datetime', 'Reduce an ISO datetime to its YYYY-MM-DD date before statistics and hashing.'),
+    ('pair_recon_normalization', 'rule_name', 'dbx_today_3000', 'Treat the Databricks business sentinel 3000-01-01 as the current run date.'),
     ('pair_recon_normalization', 'rule_name', 'oracle_today_3000', 'Treat the Oracle business sentinel 3000-01-01 as the current run date.'),
     ('pair_recon_normalization', 'rule_name', 'oracle_missing_9999', 'Treat the Oracle business sentinel 9999-12-31 as missing.'),
     ('pair_recon_normalization', 'source', NULL, 'Source scope: all, oracle, hadoop, csv, or databricks.'),

@@ -7,7 +7,11 @@ from typing import Any
 from pair_recon_left.backends.sources import source_from_config
 from pair_recon_left.cli.config import validate_config
 from pair_recon_left.common.checks.row_check import public_pair_config
-from pair_recon_left.common.model.manifest import build_manifest, key_family_specs
+from pair_recon_left.common.model.manifest import (
+    build_manifest,
+    key_family_specs,
+    window_sample_plan,
+)
 
 DEFAULT_TIMING_SECONDS = 120.0
 MIN_TIMING_BATCHES = 3
@@ -135,7 +139,7 @@ def left_pull_timing(
         measured["partitions"],
         manifest["columns"],
         key_columns=manifest["key_cols"],
-        sample_plan=configured_sample,
+        sample_plan=window_sample_plan(manifest, measured, "left"),
         key_families=families,
         side="left",
     )

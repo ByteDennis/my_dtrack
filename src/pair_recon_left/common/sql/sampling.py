@@ -17,6 +17,10 @@ from ..model.hashing import (
     key_families,
     sql_literal,
 )
+from .dates import quote_ident
+
+MODULAR_BUCKET_SPACE = 2_147_483_647
+MODULAR_MULTIPLIER = 1_103_515_245
 
 
 # >>> key normalization SQL for one side; timezone-bearing Oracle keys have no canonical text <<< #
@@ -96,6 +100,31 @@ def hash32_sql(expr: str, dialect: str) -> str:
     raise SamplingSqlNotSupported(f"sampling hash does not support dialect {dialect!r}")
 
 
+def modular_sample_condition(column: str, rate: float, seed: int, dialect: str) -> str:
+    dialect = dialect_name(dialect)
+    ref = quote_ident(column, dialect)
+    if dialect == "oracle":
+        numeric = (
+            f"TO_NUMBER(TRIM(CAST({ref} AS VARCHAR2(128))) "
+            "DEFAULT NULL ON CONVERSION ERROR)"
+        )
+    elif dialect in {"spark", "duckdb", "athena"}:
+        numeric = f"try_cast({ref} AS DECIMAL(38,0))"
+    elif dialect == "hadoop":
+        numeric = f"CAST({ref} AS DECIMAL(38,0))"
+    else:
+        raise SamplingSqlNotSupported(
+            f"modular sampling does not support dialect {dialect!r}"
+        )
+    residue = f"MOD(MOD({numeric}, {MODULAR_BUCKET_SPACE}) + {MODULAR_BUCKET_SPACE}, {MODULAR_BUCKET_SPACE})"
+    bucket = (
+        f"MOD(({residue} * {MODULAR_MULTIPLIER}) + "
+        f"{int(seed) % MODULAR_BUCKET_SPACE}, {MODULAR_BUCKET_SPACE})"
+    )
+    threshold = max(1, round(float(rate) * MODULAR_BUCKET_SPACE))
+    return f"({numeric} IS NOT NULL AND {bucket} < {threshold})"
+
+
 def sample_predicate_sql(
     plan: dict[str, Any] | None,
     key_columns: Iterable[str],
@@ -109,14 +138,22 @@ def sample_predicate_sql(
     columns = list(key_columns)
     if plan["mode"] == "all" or not columns:
         return None
-    composite = composite_sql(columns, families, dialect, side, key_types)
     if plan["mode"] == "fraction":
+        if plan.get("modular_column"):
+            return modular_sample_condition(
+                str(plan["modular_column"]),
+                float(plan["rate"]),
+                int(plan["modular_seed"]),
+                dialect,
+            )
+        composite = composite_sql(columns, families, dialect, side, key_types)
         threshold = int(
             plan.get("threshold") or max(1, round(float(plan["rate"]) * HASH_BUCKET_SPACE))
         )
         return f"{hash32_sql(composite, dialect)} < {threshold}"
     if plan["mode"] != "fixed":
         raise ValueError(f"unsupported sample mode: {plan['mode']}")
+    composite = composite_sql(columns, families, dialect, side, key_types)
     resolved = key_families(families, len(columns))
     values = list(
         dict.fromkeys(

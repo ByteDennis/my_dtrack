@@ -32,6 +32,13 @@ def normalization_date(run_id: str, rules: list[dict[str, str]]) -> str | None:
     return "-".join(match.groups())
 
 
+def run_date(run_id: str) -> str:
+    match = re.search(r"(?:^|-)([0-9]{4})([0-9]{2})([0-9]{2})$", run_id)
+    if match is None:
+        raise ValueError("modular sampling requires a run_id ending in YYYYMMDD")
+    return "-".join(match.groups())
+
+
 def statistics_plan(raw: Any) -> list[str] | None:
     if raw is None:
         return None
@@ -95,20 +102,21 @@ def _digest(value: Any, length: int = 16) -> str:
 
 
 def window_id(manifest: dict[str, Any], window: dict[str, Any]) -> str:
-    return _digest(
-        {
-            "stats_version": STATS_VERSION,
-            "run_id": manifest["run_id"],
-            "pair": manifest["pair"],
-            "bucket": window["bucket"],
-            "partitions": window["partitions"],
-            "sample": manifest["sample"],
-            "key_cols": manifest.get("key_cols") or [],
-            "right_key_cols": manifest.get("right_key_cols") or [],
-            "key_families": manifest.get("key_families") or [],
-            "left": manifest.get("left") or {},
-        }
-    )
+    identity = {
+        "stats_version": STATS_VERSION,
+        "run_id": manifest["run_id"],
+        "pair": manifest["pair"],
+        "bucket": window["bucket"],
+        "partitions": window["partitions"],
+        "sample": manifest["sample"],
+        "key_cols": manifest.get("key_cols") or [],
+        "right_key_cols": manifest.get("right_key_cols") or [],
+        "key_families": manifest.get("key_families") or [],
+        "left": manifest.get("left") or {},
+    }
+    if "sample_seed" in window:
+        identity["sample_seed"] = window["sample_seed"]
+    return _digest(identity)
 
 
 def unit_id_for(manifest: dict[str, Any], window: dict[str, Any], column: str) -> str:
@@ -153,6 +161,52 @@ def sample_plan(raw: Any) -> dict[str, Any]:
     if count <= 0:
         raise ValueError("fixed sample must be positive")
     return {"mode": "fixed", "count": count}
+
+
+def configured_sample_plan(
+    run_id: str, pair_name: str, pair: dict[str, Any]
+) -> dict[str, Any]:
+    plan = sample_plan(pair.get("sample"))
+    raw_selector = pair.get("use_modular")
+    if raw_selector in (None, ""):
+        return plan
+    if not isinstance(raw_selector, str) or not raw_selector.strip():
+        raise TypeError(f"{pair_name}: use_modular must be a non-empty Left column name")
+    if plan["mode"] != "fraction":
+        raise ValueError(f"{pair_name}: use_modular requires percentage sampling")
+    mappings = pair.get("col_map") or {}
+    lookup = {str(column).casefold(): column for column in mappings}
+    selector = lookup.get(raw_selector.strip().casefold())
+    if selector is None:
+        raise ValueError(f"{pair_name}: use_modular names an unmapped Left column")
+    plan["modular"] = {
+        "left_column": selector,
+        "right_column": mappings[selector],
+        "run_date": run_date(run_id),
+    }
+    return plan
+
+
+def modular_sample_seed(run_day: str, vintage: str) -> int:
+    digest = hashlib.sha256(f"{run_day}\0{vintage}".encode()).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+def window_sample_plan(
+    manifest: dict[str, Any], window: dict[str, Any], side: str
+) -> dict[str, Any]:
+    plan = dict(manifest.get("sample") or {"mode": "all"})
+    modular = plan.get("modular")
+    if not modular:
+        return plan
+    if side not in {"left", "right"}:
+        raise ValueError("sampling side must be left or right")
+    plan["modular_column"] = modular[f"{side}_column"]
+    plan["modular_seed"] = int(
+        window.get("sample_seed")
+        or modular_sample_seed(modular["run_date"], str(window["bucket"]))
+    )
+    return plan
 
 
 def select_vintage_windows(
@@ -370,9 +424,14 @@ def build_manifest(
         }
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{pair_name}: unsupported column types: {exc}") from None
-    sampling = sample_plan(pair.get("sample"))
+    sampling = configured_sample_plan(run_id, pair_name, pair)
     if sampling["mode"] != "all" and not keys:
         raise ValueError(f"{pair_name}: sampling requires a key")
+    if sampling.get("modular"):
+        for window in windows:
+            window["sample_seed"] = modular_sample_seed(
+                sampling["modular"]["run_date"], window["bucket"]
+            )
     sample_rows = pair.get("sample_rows", 50)
     if isinstance(sample_rows, bool):
         raise TypeError(f"{pair_name}: sample_rows must be a non-negative integer")
@@ -493,3 +552,13 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             raise ValueError("all-partition manifest must contain only the all window")
         if window["partitions"] != sorted(set(window["partitions"])):
             raise ValueError("Window Partitions must be sorted and unique")
+    modular = (manifest.get("sample") or {}).get("modular")
+    if modular:
+        if set(modular) != {"left_column", "right_column", "run_date"}:
+            raise ValueError("manifest modular sampling configuration is invalid")
+        if run_date(str(manifest["run_id"])) != modular["run_date"]:
+            raise ValueError("manifest modular sampling date does not match its run_id")
+        for window in manifest["windows"]:
+            expected_seed = modular_sample_seed(modular["run_date"], window["bucket"])
+            if window.get("sample_seed") != expected_seed:
+                raise ValueError("manifest modular sample seed does not match its vintage")

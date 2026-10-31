@@ -41,6 +41,8 @@ def _request_column(dialect: str) -> str:
 
 
 def _sample_request(pair_name: str, pair: dict[str, Any], manifest: dict[str, Any]) -> dict:
+    if pair.get("use_modular"):
+        raise ValueError(f"{pair_name}: sas_sample_csv does not support use_modular")
     left = {**manifest["left"], "partition": manifest.get("partition", "day")}
     source = source_from_config(left)
     if source.dialect not in {"oracle", "hadoop"}:

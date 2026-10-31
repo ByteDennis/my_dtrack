@@ -35,5 +35,22 @@
             "notebook.focusedCellBorder": "#0969da",
             "notebook.outputContainerBackgroundColor": "#fafbfc"
         }
-    }
+    },
+    "files.exclude": {
+        "**/.git": true,
+        "**/.svn": true,
+        "**/.hg": true,
+        "**/.jj": true,
+        "**/.DS_Store": true,
+        "**/Thumbs.db": true,
+        ".coverage-html": true,
+        ".dtrack-work": true,
+        ".pytest_cache": true,
+        ".ruff_cache": true,
+        ".venv": true,
+        ".venv-live": true,
+        ".coverage": true,
+    },
+    "jupyter.notebookFileRoot": "${workspaceFolder}",
+    "editor.codeActionsOnSave": {"source.organizeImports": "explicit"}
 }

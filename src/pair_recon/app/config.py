@@ -104,6 +104,7 @@ def run_config(
             key: answers[key]
             for key in (
                 "sample",
+                "use_modular",
                 "normalization_rules",
                 "audit",
                 "sample_rows",

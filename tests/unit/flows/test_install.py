@@ -195,6 +195,7 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "('lowercase', 'all', NULL, NULL, true)" in schema
     assert "('decimal', 'all', NULL, NULL, true)" in schema
     assert "('strip_datetime', 'all', NULL, NULL, true)" in schema
+    assert "('dbx_today_3000', 'databricks', '3000-01-01', '@run_date', true)" in schema
     assert "('oracle_today_3000', 'oracle', '3000-01-01', '@run_date', true)" in schema
     assert "('oracle_missing_9999', 'oracle', '9999-12-31', '@missing', true)" in schema
     migration = (ROOT / "setup" / "migrate_pair_metadata.sql").read_text(encoding="utf-8")

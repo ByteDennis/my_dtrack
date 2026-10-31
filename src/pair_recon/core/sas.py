@@ -38,6 +38,8 @@ def _relation(pair, side, config):
 
 
 def _sql(pair, side, rate):
+    if pair.get("use_modular"):
+        raise ValueError("SAS bundle export does not support per-vintage use_modular sampling")
     config = pair[side]
     relation, dialect, adapter = _relation(pair, side, config)
     mapping = pair["col_map"]

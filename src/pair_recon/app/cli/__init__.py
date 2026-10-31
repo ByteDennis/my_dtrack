@@ -680,6 +680,9 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "audit": confirm("Audit SQL", run_default("audit", False)),
         "excluded_columns": excluded_columns,
     }
+    modular_selector = run_default("use_modular", metadata.get("use_modular"))
+    if modular_selector not in (None, ""):
+        answers["use_modular"] = modular_selector
     left_workers = worker_budget("Left source worker budget", run_default("left_workers", 2))
     right_workers = (
         worker_budget("Databricks query worker budget", run_default("right_workers", 8))
@@ -782,6 +785,8 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         **metadata_settings,
         "_catalog_row": by_name[pair],
     }
+    if modular_selector not in (None, ""):
+        settings["use_modular"] = modular_selector
     for key in (
         "from_date",
         "to_date",

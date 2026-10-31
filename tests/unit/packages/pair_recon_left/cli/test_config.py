@@ -87,6 +87,30 @@ def test_sas_sample_csv_rejects_csv_source_and_fixed_sampling():
         validate_config({"pairs": {"p": value}})
 
 
+def test_modular_sampling_resolves_mapped_selector():
+    value = pair("day")
+    value.update(sample=0.1, key="A", use_modular="a")
+
+    configured = validate_config({"pairs": {"p": value}})["pairs"]["p"]
+
+    assert configured["use_modular"] == "A"
+
+
+@pytest.mark.parametrize(
+    ("selector", "sample", "message"),
+    [
+        ("missing", 0.1, "outside col_map"),
+        ("A", 10, "requires percentage sampling"),
+        ("", 0.1, "non-empty Left column"),
+    ],
+)
+def test_modular_sampling_rejects_invalid_configuration(selector, sample, message):
+    value = pair("day")
+    value.update(sample=sample, key="A", use_modular=selector)
+    with pytest.raises((TypeError, ValueError), match=message):
+        validate_config({"pairs": {"p": value}})
+
+
 @pytest.mark.parametrize("source", ["databricks", "csv"])
 def test_right(source):
     value = pair()

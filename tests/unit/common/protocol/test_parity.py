@@ -94,6 +94,15 @@ def test_key():
     [
         ({"mode": "all"}, None),
         ({"mode": "fraction", "threshold": 123456}, None),
+        (
+            {
+                "mode": "fraction",
+                "rate": 0.1,
+                "modular_column": "customer_id",
+                "modular_seed": 123,
+            },
+            None,
+        ),
         ({"mode": "fixed", "count": 2}, [["007", " AbC "], ["2.0", "O'K"]]),
     ],
 )

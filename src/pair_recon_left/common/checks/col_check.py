@@ -20,7 +20,13 @@ import pandas as pd
 from ...backends.sources import source_from_config
 from ...backends.store import replace_local_file
 from ..model.audit import SqlAudit, attach_sql_audit
-from ..model.manifest import planned_unit_ids, unit_id_for, validate_manifest, window_id
+from ..model.manifest import (
+    planned_unit_ids,
+    unit_id_for,
+    validate_manifest,
+    window_id,
+    window_sample_plan,
+)
 from ..model.protocol import (
     current_plan_ids,
     difference_keys_path,
@@ -832,7 +838,7 @@ class LeftRuntime:
             key_columns=manifest["key_cols"],
             sample_plan={"mode": "all"}
             if source_override and source_override.get("pre_sampled")
-            else manifest["sample"],
+            else window_sample_plan(manifest, window, "left"),
             key_families=manifest["key_families"],
             side="left",
             key_tuples=window.get("key_tuples"),

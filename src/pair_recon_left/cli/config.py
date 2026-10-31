@@ -203,6 +203,19 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         _expand_inline_col_map(pair)
         if not isinstance(pair.get("col_map"), dict) or not pair["col_map"]:
             raise ValueError(f"{name}: col_map must be non-empty")
+        selector = pair.get("use_modular")
+        if selector is not None:
+            if not isinstance(selector, str) or not selector.strip():
+                raise TypeError(f"{name}: use_modular must be a non-empty Left column name")
+            if sample_plan(pair.get("sample"))["mode"] != "fraction":
+                raise ValueError(f"{name}: use_modular requires percentage sampling")
+            lookup = {str(column).casefold(): column for column in pair["col_map"]}
+            resolved = lookup.get(selector.strip().casefold())
+            if resolved is None:
+                raise ValueError(f"{name}: use_modular names a column outside col_map")
+            if pre_sampled or right_pre_sampled or sas_sample_csv:
+                raise ValueError(f"{name}: use_modular requires live Left and Right sampling")
+            pair["use_modular"] = resolved
         try:
             statistics = statistics_plan(pair.get("statistics"))
         except (TypeError, ValueError) as exc:
