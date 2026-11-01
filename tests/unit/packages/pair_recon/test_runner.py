@@ -690,6 +690,7 @@ def test_execute_automatically_adds_exclusions_and_resumes_same_run(monkeypatch,
     config = {"pairs": {"orders": {"excluded_partitions": ["2026-10-01"]}}}
     calls = []
     snapshots = []
+    sleeps = []
     monkeypatch.setattr(cli, "load_environment", lambda: None)
     monkeypatch.setattr(
         cli,
@@ -697,6 +698,7 @@ def test_execute_automatically_adds_exclusions_and_resumes_same_run(monkeypatch,
         lambda _defaults, *, interactive: (settings, config, "new", object(), object()),
     )
     monkeypatch.setattr(cli, "configure_console_logging", lambda *_args: None)
+    monkeypatch.setattr(cli.time, "sleep", sleeps.append)
 
     def snapshot(values, effective):
         snapshots.append(list(effective["pairs"]["orders"]["excluded_partitions"]))
@@ -730,6 +732,7 @@ def test_execute_automatically_adds_exclusions_and_resumes_same_run(monkeypatch,
         ["2026-10-01"],
         ["2026-10-01", "2026-10-02", "2026-10-05"],
     ]
+    assert sleeps == [10]
     saved = yaml.safe_load(defaults.read_text(encoding="utf-8"))
     assert saved["excluded_partitions"] == ["2026-10-01", "2026-10-02", "2026-10-05"]
     assert "earlystop" not in saved and "force" not in saved
@@ -2042,6 +2045,12 @@ def test_synchronize_pair_workbook_upserts_only_changes(monkeypatch, tmp_path):
             or {"pair_meta_table": table, "rows": 1, "sql_rows": 0, "pairs": ["changed"]}
         ),
     )
+    synchronized = []
+    monkeypatch.setattr(
+        cli,
+        "synchronize_key_types",
+        lambda _sql, _catalog, row: synchronized.append(row["pair_name"]) or 1,
+    )
 
     actual, result = cli.synchronize_pair_workbook(
         "sql", catalog, "main.recon.pair_recon_pair_meta", workbook
@@ -2049,7 +2058,9 @@ def test_synchronize_pair_workbook_upserts_only_changes(monkeypatch, tmp_path):
 
     assert actual == rows
     assert result["pairs"] == ["changed"] and result["source"] == str(workbook)
+    assert result["mapping_rows"] == 2
     assert seen["rows"] == changed
+    assert synchronized == ["same", "changed"]
 
 
 def test_synchronize_pair_workbook_skips_missing(monkeypatch, tmp_path):
@@ -2130,7 +2141,7 @@ def test_prompt_always_synchronizes_an_existing_local_workbook(monkeypatch, tmp_
     assert calls[0][3] == tmp_path / "pairs.xlsx"
 
 
-def test_synchronize_key_types_writes_data_type_to_the_column_map():
+def test_synchronize_key_types_and_run_defaults_write_data_type_to_the_column_map():
     calls = []
 
     class Sql:
@@ -2154,16 +2165,54 @@ def test_synchronize_key_types_writes_data_type_to_the_column_map():
         "key_columns": ["ACCT_ID[numeric]", "APP_CREATE_DT[date]", "CAMPAIGN[string]"],
         "left_date_col": "APP_CREATE_DT",
         "right_date_col": "dw_bus_dt",
+        "run_defaults_json": json.dumps(
+            {"data_type": {"ACCT_ID": "categorical", "AMOUNT": "numeric"}}
+        ),
     }
-    assert cli.synchronize_key_types(Sql(), catalog, row) == 3
+    assert cli.synchronize_key_types(Sql(), catalog, row) == 4
     statement, parameters = calls[0]
     assert "MERGE INTO main.recon.pair_recon_column_map" in statement
     assert (parameters["r0_left_column"], parameters["r0_right_column"]) == ("ACCT_ID", "acct_id")
-    assert parameters["r0_data_type"] == "numeric"
+    assert parameters["r0_data_type"] == "categorical"
     assert (parameters["r1_right_column"], parameters["r1_data_type"]) == ("dw_bus_dt", "date")
     assert (parameters["r2_right_column"], parameters["r2_data_type"]) == ("CAMPAIGN", "string")
+    assert (parameters["r3_left_column"], parameters["r3_right_column"]) == ("AMOUNT", "AMOUNT")
+    assert parameters["r3_data_type"] == "numeric"
     assert cli.synchronize_key_types(Sql(), catalog, {"pair_name": "p", "key_columns": ["X"]}) == 0
     assert len(calls) == 1
+
+
+def test_synchronize_key_types_forces_date_column_mapping_and_preserves_type():
+    calls = []
+
+    class Sql:
+        def execute(self, statement, parameters=None):
+            calls.append((statement, parameters))
+            return []
+
+    catalog = SimpleNamespace(
+        column_map_table="main.recon.pair_recon_column_map",
+        column_mappings=lambda pair: [
+            {
+                "pair_name": pair,
+                "left_column": "BUSINESS_DT",
+                "right_column": "wrong_date",
+                "data_type": "date",
+            }
+        ],
+    )
+    row = {
+        "pair_name": "p",
+        "key_columns": [],
+        "left_date_col": "BUSINESS_DT",
+        "right_date_col": "business_date",
+    }
+
+    assert cli.synchronize_key_types(Sql(), catalog, row) == 1
+    _statement, parameters = calls[0]
+    assert parameters["r0_left_column"] == "BUSINESS_DT"
+    assert parameters["r0_right_column"] == "business_date"
+    assert parameters["r0_data_type"] == "date"
 
 
 def test_local(monkeypatch, tmp_path):

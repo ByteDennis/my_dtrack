@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from contextvars import ContextVar
 from datetime import date, timedelta
 from pathlib import Path
@@ -63,6 +64,7 @@ DEFAULTS = Path(".pair_recon.yaml")
 PAIR_WORKBOOK = Path(__file__).resolve().parents[3] / "setup" / "pairs.xlsx"
 PAIR_WORKBOOK_ENV = "DBX_PAIR_WORKBOOK"
 AUTO_EXCLUDE_RETRIES = 3
+AUTO_EXCLUDE_COOLDOWN_SECONDS = 10
 
 
 class UndoPrompt(Exception):
@@ -423,26 +425,42 @@ def synchronize_pair_workbook(sql, catalog, pair_table: str, workbook_path: str 
         if changed
         else {"pair_meta_table": pair_table, "rows": 0, "sql_rows": 0, "pairs": []}
     )
-    mapping_rows = sum(synchronize_key_types(sql, catalog, row) for row in changed)
+    mapping_rows = sum(synchronize_key_types(sql, catalog, row) for row in rows)
     return rows, {**result, "mapping_rows": mapping_rows, "source": str(source)}
 
 
-# >>> NAME[type] keys become data_type on the pair's column map rows; a missing row is created <<< #
+# >>> sync declared types and force the configured Left/Right date-column mapping <<< #
 def synchronize_key_types(sql, catalog, row: dict) -> int:
     pair = row["pair_name"]
     _names, types = parse_key_columns(row.get("key_columns") or [], pair)
+    defaults = row.get("run_defaults_json") or {}
+    if isinstance(defaults, str):
+        defaults = json.loads(defaults)
+    types.update(defaults.get("data_type") or {})
+    existing_rows = list(catalog.column_mappings(pair))
+    existing = {item["left_column"]: item for item in existing_rows}
+    existing_folded = {str(name).casefold(): item for name, item in existing.items()}
+    left_date = str(row.get("left_date_col") or "").strip()
+    right_date = str(row.get("right_date_col") or "").strip()
+    left_date_folded = left_date.casefold()
+    if left_date and right_date and not any(
+        str(name).casefold() == left_date_folded for name in types
+    ):
+        current = existing_folded.get(left_date_folded)
+        types[str(current["left_column"]) if current else left_date] = (
+            current.get("data_type") if current else None
+        )
     if not types:
         return 0
-    existing = {item["left_column"]: item for item in catalog.column_mappings(pair)}
-    left_date = str(row.get("left_date_col") or "").casefold()
-    right_date = str(row.get("right_date_col") or "")
     mappings = []
     for name, kind in types.items():
         current = existing.get(name)
-        if current is not None:
+        if left_date and str(name).casefold() == left_date_folded and right_date:
+            right = right_date
+        elif current is not None:
             right = current["right_column"]
         else:
-            right = right_date if right_date and name.casefold() == left_date else name
+            right = name
         mappings.append({"left_column": name, "right_column": right, "data_type": kind})
     upsert_column_mappings(sql, catalog.column_map_table, pair, mappings)
     return len(mappings)
@@ -1014,6 +1032,7 @@ def execute(args, *, raise_errors: bool = False) -> int:
                     settings["run_id"],
                     ", ".join(added),
                 )
+                time.sleep(AUTO_EXCLUDE_COOLDOWN_SECONDS)
         result["request_snapshot"] = str(snapshot)
         if settings.get("email_to"):
             try:

@@ -219,6 +219,7 @@ FULL_RUN_DEFAULTS = {
     "to_date": "2026-02-28",
     "excluded_partitions": ["2026-01-02", "2026-02-01->2026-02-03"],
     "vintage_sample_size": 3,
+    "data_type": {"AMOUNT": "numeric", "ORDER_DT": "date"},
 }
 
 
@@ -234,6 +235,9 @@ def _read_with_defaults(tmp_path, defaults):
 def test_run_defaults_accept_every_prompt_default(tmp_path):
     rows = _read_with_defaults(tmp_path, FULL_RUN_DEFAULTS)
     assert json.loads(rows[0]["run_defaults_json"]) == FULL_RUN_DEFAULTS
+    config = build_pair_config(rows[0])
+    assert "data_type" not in config
+    assert config["_run_defaults"]["data_type"] == FULL_RUN_DEFAULTS["data_type"]
 
 
 def test_run_defaults_normalize_comma_lists(tmp_path):
@@ -315,6 +319,9 @@ def test_partition_column_builds_internal_config(tmp_path, partition):
         ({"right_workers": True}, "right_workers must be a positive integer"),
         ({"excluded_partitions": [20260102]}, "excluded_partitions must be a string array"),
         ({"excluded_columns": {"AMOUNT": True}}, "excluded_columns must be a string array"),
+        ({"data_type": ["AMOUNT", "numeric"]}, "data_type must be a JSON object"),
+        ({"data_type": {"": "numeric"}}, "data_type column names must be non-empty"),
+        ({"data_type": {"AMOUNT": ""}}, "data_type values must be non-empty strings"),
         ({"cadence": "x"}, "run_defaults_json has unsupported fields: cadence"),
     ],
 )

@@ -89,6 +89,7 @@ RUN_DEFAULT_FIELDS = {
     "excluded_columns",
     "vintage_sample_size",
     "vintage_values",
+    "data_type",
 }
 RUN_DEFAULT_BOOLS = ("audit", "sync_remote")
 RUN_DEFAULT_LISTS = ("checks", "excluded_partitions", "excluded_columns", "vintage_values")
@@ -283,6 +284,14 @@ FIELD_GUIDE = (
         "all|fraction|count",
         "Deterministic attribute sample; fractions are recommended.",
         "0.1",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.data_type",
+        "optional mapping update",
+        "JSON object of column to data type",
+        "Upsert data_type for mapped Left columns; existing Right column names are preserved.",
+        '{"AMOUNT":"numeric","ORDER_DT":"date"}',
     ),
     (
         "pairs",
@@ -663,6 +672,16 @@ def _iso_day(value: Any, *, row: int, field: str) -> date:
 def _validate_run_defaults(
     value: dict[str, Any], *, row: int, keys: list[str], partition: str
 ) -> None:
+    data_types = value.get("data_type")
+    if data_types is not None:
+        if not isinstance(data_types, dict):
+            raise TypeError(f"pairs.xlsx row {row}: data_type must be a JSON object")
+        if not all(isinstance(name, str) and name.strip() for name in data_types):
+            raise ValueError(f"pairs.xlsx row {row}: data_type column names must be non-empty")
+        if not all(isinstance(kind, str) and kind.strip() for kind in data_types.values()):
+            raise TypeError(
+                f"pairs.xlsx row {row}: data_type values must be non-empty strings"
+            )
     if value.get("run_mode") not in (None, "full", "left-only"):
         raise ValueError(f"pairs.xlsx row {row}: run_mode must be full or left-only")
     for field in RUN_DEFAULT_BOOLS:

@@ -138,6 +138,7 @@ def _explicit_config(row: dict[str, Any], pair: str) -> dict[str, Any]:
     value.pop("partition_mode", None)
     value.pop("partition_grain", None)
     run_defaults = deepcopy(value)
+    value.pop("data_type", None)
     partition = str(row.get("partition") or "").strip().casefold()
     if partition not in {"day", "month", "all"}:
         raise ValueError(f"{pair}: partition must be day, month or all")
