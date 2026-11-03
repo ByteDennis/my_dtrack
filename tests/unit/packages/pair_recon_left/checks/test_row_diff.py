@@ -126,3 +126,26 @@ def test_row_difference_workbook_marks_differing_cells(tmp_path):
     assert sheet["D5"].font.color.rgb == sheet["H5"].font.color.rgb == "009C0006"
     assert sheet["E5"].font.color is None or sheet["E5"].font.color.rgb != "009C0006"
     assert sheet.cell(3, 3).value == "left only" and sheet.cell(4, 3).value == "right only"
+
+
+def test_all_window_sorts_sampled_keys_before_limiting_to_50(tmp_path):
+    left = tmp_path / "left.csv"
+    keys = [f"{number:03}" for number in range(61)]
+    left.write_text("id,value\n" + "".join(f"{key},left\n" for key in reversed(keys)))
+    right = _gzip_rows(
+        ["_key", "k0", "v0", "n0"],
+        [
+            [key, key, "left" if key == "000" else "right", "left" if key == "000" else "right"]
+            for key in keys
+        ],
+    )
+    manifest = {
+        "partition": "all",
+        "key_cols": ["id"],
+        "key_families": ["string"],
+        "left": {"source": "csv"},
+    }
+    document = {"key_columns": ["id"], "pairs": [{"left_column": "value", "right_column": "value"}]}
+    result = compare_rows(left, right, document, manifest, numeric=set(), limit=50)
+    assert result["total"] == 60
+    assert [row[1] for row in result["rows"]] == keys[1:51]

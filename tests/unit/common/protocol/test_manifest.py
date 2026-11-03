@@ -488,3 +488,18 @@ def test_excluded_columns_match_case_insensitively_and_must_be_mapped(common):
     assert manifest["columns"] == ["AMOUNT"] and manifest["excluded_columns"] == ["ID"]
     with pytest.raises(ValueError, match="excluded_columns names unmapped columns: NOTE"):
         common.manifest.build_manifest("run", "p", _variant(excluded_columns=["NOTE"]), ROW_CHECK)
+
+
+def test_sample_columns_resolve_case_insensitively_and_stay_out_of_plan_id(common):
+    plain = common.manifest.build_manifest("run", "p", _variant(), ROW_CHECK)
+    chosen = common.manifest.build_manifest(
+        "run", "p", _variant(sample_columns=["amount"]), ROW_CHECK
+    )
+    assert "sample_columns" not in plain
+    assert chosen["sample_columns"] == ["AMOUNT"] and chosen["plan_id"] == plain["plan_id"]
+    with pytest.raises(ValueError, match="sample_columns names unmapped columns: NOTE"):
+        common.manifest.build_manifest("run", "p", _variant(sample_columns=["NOTE"]), ROW_CHECK)
+    with pytest.raises(ValueError, match="sample_columns names no compared column"):
+        common.manifest.build_manifest(
+            "run", "p", _variant(excluded_columns=["ID"], sample_columns=["ID"]), ROW_CHECK
+        )

@@ -109,6 +109,7 @@ def run_config(
                 "audit",
                 "sample_rows",
                 "excluded_columns",
+                "sample_columns",
             )
             if key in answers
         }

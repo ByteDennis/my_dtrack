@@ -684,6 +684,13 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
             required=False,
         )
     )
+    sample_columns = column_list(
+        answer(
+            "Sample columns (evidence only; blank keeps all differing columns)",
+            ", ".join(column_list(run_default("sample_columns", []))),
+            required=False,
+        )
+    )
     answers = {
         "partition": partition,
         "checks": selected,
@@ -697,6 +704,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "normalization_rules": normalization_rules,
         "audit": confirm("Audit SQL", run_default("audit", False)),
         "excluded_columns": excluded_columns,
+        "sample_columns": sample_columns,
     }
     modular_selector = run_default("use_modular", metadata.get("use_modular"))
     if modular_selector not in (None, ""):
@@ -810,6 +818,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "to_date",
         "excluded_partitions",
         "excluded_columns",
+        "sample_columns",
         "vintage",
     ):
         if key in answers:

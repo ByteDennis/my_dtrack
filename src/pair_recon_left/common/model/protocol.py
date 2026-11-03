@@ -42,7 +42,7 @@ FAILURE_PREFIX = "_protocol/outcomes/failures/"
 RIGHT_READY_PREFIX = "_protocol/windows/"
 RIGHT_STATS_PREFIX = "_protocol/tmp/right_stats/"
 RIGHT_SAMPLE_PREFIX = "_protocol/tmp/right_samples/"
-DIAGNOSTIC_PREFIX = "differences/"
+DIAGNOSTIC_PREFIX = "results/report/differences/"
 REPORT_PREFIX = "results/report/"
 
 

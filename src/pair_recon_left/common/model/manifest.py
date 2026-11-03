@@ -441,6 +441,17 @@ def build_manifest(
         raise TypeError(f"{pair_name}: sample_rows must be a non-negative integer") from None
     if sample_rows < 0:
         raise ValueError(f"{pair_name}: sample_rows must be non-negative")
+    requested_samples = [str(column).strip() for column in pair.get("sample_columns") or []]
+    unknown_samples = sorted(
+        {column for column in requested_samples if column.casefold() not in lookup}
+    )
+    if unknown_samples:
+        raise ValueError(
+            f"{pair_name}: sample_columns names unmapped columns: {', '.join(unknown_samples)}"
+        )
+    sample_columns = {lookup[column.casefold()] for column in requested_samples}
+    if sample_columns and not sample_columns & set(columns):
+        raise ValueError(f"{pair_name}: sample_columns names no compared column")
     try:
         normalization_rules = canonical_normalization_rules(pair.get("normalization_rules"))
         normalized_on = normalization_date(run_id, normalization_rules)
@@ -477,6 +488,8 @@ def build_manifest(
         manifest["normalization_date"] = normalized_on
     if pair.get("snapshot"):
         manifest["left_snapshot"] = True
+    if sample_columns:
+        manifest["sample_columns"] = [column for column in columns if column in sample_columns]
     statistics = statistics_plan(pair.get("statistics"))
     if statistics is not None:
         manifest["statistics"] = statistics
@@ -484,7 +497,7 @@ def build_manifest(
         {
             key: value
             for key, value in manifest.items()
-            if key not in {"sample_rows", "local_reconciliation"}
+            if key not in {"sample_rows", "sample_columns", "local_reconciliation"}
         }
     )
     validate_manifest(manifest)

@@ -1,0 +1,9 @@
+# Optional include fragment, not a replacement for ~/.gitconfig.
+# No identity, credentials, account, remote, SSH routing or signing settings.
+[diff]
+    algorithm = histogram
+    colorMoved = default
+[merge]
+    conflictStyle = diff3
+[core]
+    whitespace = trailing-space,space-before-tab

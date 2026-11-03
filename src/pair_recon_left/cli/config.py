@@ -256,6 +256,21 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         ):
             raise ValueError(f"{name}: excluded_columns cannot include the Left date_col")
         pair["excluded_columns"] = list(dict.fromkeys(excluded_columns))
+        sample_columns = pair.get("sample_columns") or []
+        if not isinstance(sample_columns, list) or not all(
+            isinstance(value, str) for value in sample_columns
+        ):
+            raise TypeError(f"{name}: sample_columns must be a list of Left column names")
+        unknown_samples = sorted(set(sample_columns) - set(pair["col_map"]))
+        if unknown_samples:
+            raise ValueError(
+                f"{name}: sample_columns names columns outside col_map: "
+                f"{', '.join(unknown_samples)}"
+            )
+        if sample_columns:
+            pair["sample_columns"] = list(dict.fromkeys(sample_columns))
+        else:
+            pair.pop("sample_columns", None)
         overrides = pair.get("col_type_overrides") or {}
         if set(overrides) - set(pair["col_map"]) or set(overrides.values()) - COL_TYPES:
             raise ValueError(f"{name}: col_type_overrides maps col_map keys to numeric|categorical")

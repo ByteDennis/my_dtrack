@@ -183,10 +183,8 @@ def test_only_different_columns_persist_a_right_sample():
     ColCheck(store, lambda _cfg: target, poll_interval=0).run()
 
     prefix = right_sample_prefix("p", "2026-01-01")
-    manifest = store.get_json(f"{prefix}manifest.json")
-    assert manifest["right_rows"] == 1
-    body = gzip.decompress(store.get_bytes(f"{prefix}right.csv.gz"))
-    assert list(csv.reader(io.StringIO(body.decode()))) == [["id", "amount"], ["1", "99"]]
+    assert not store.exists(f"{prefix}manifest.json")
+    assert not store.exists(f"{prefix}right.csv.gz")
 
     matched_store, _uid = _drained_store()
     ColCheck(matched_store, lambda _cfg: SampleTarget(), poll_interval=0).run()
@@ -214,7 +212,7 @@ def test_stats_only_stages_right_statistics_and_sample_without_results():
 
     assert list_results(store) == []
     assert store.get_json(right_stats_path("p", "2026-01-01"))["statistics"] == {"amount": STATS}
-    assert store.exists(f"{right_sample_prefix('p', '2026-01-01')}right.csv.gz")
+    assert not store.exists(f"{right_sample_prefix('p', '2026-01-01')}right.csv.gz")
     assert get_right_state(store)["phase"] == "stats_ready"
 
 
@@ -652,3 +650,21 @@ def test_cached_window_views_are_released_after_prefetch_and_rows():
     target = CachingTarget(stats={"amount": {**STATS, "n_unique": 9}})
     ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert released == ["2026-01-01", "2026-01-01"]
+
+
+def test_sample_columns_limit_right_rows_to_chosen_columns():
+    store, _uid = _drained_store()
+    manifest = store.get_json(plan_path("p"))
+    store.put_json(plan_path("p"), {**manifest, "sample_columns": ["note"]})
+
+    class RowsTarget(FakeTarget):
+        requested = None
+
+        def window_rows(self, manifest, window, columns):
+            self.requested = columns
+            return {"pairs": [], "key_columns": [], "rows": []}
+
+    target = RowsTarget(stats={"amount": {**STATS, "n_unique": 9}})
+    ColCheck(store, lambda _cfg: target, poll_interval=0).run()
+    assert target.requested is None
+    assert not store.exists(f"{right_sample_prefix('p', '2026-01-01')}rows.json")

@@ -87,12 +87,19 @@ RUN_DEFAULT_FIELDS = {
     "to_date",
     "excluded_partitions",
     "excluded_columns",
+    "sample_columns",
     "vintage_sample_size",
     "vintage_values",
     "data_type",
 }
 RUN_DEFAULT_BOOLS = ("audit", "sync_remote")
-RUN_DEFAULT_LISTS = ("checks", "excluded_partitions", "excluded_columns", "vintage_values")
+RUN_DEFAULT_LISTS = (
+    "checks",
+    "excluded_partitions",
+    "excluded_columns",
+    "sample_columns",
+    "vintage_values",
+)
 RUN_DEFAULT_WORKERS = ("left_workers", "right_workers", "sample_rows")
 RUN_DEFAULT_DATE_ONLY = ("from_date", "to_date", "vintage", "excluded_partitions")
 VINTAGES = ("day", "week", "month", "quarter", "year")
@@ -172,6 +179,14 @@ FIELD_GUIDE = (
         "comma list or JSON array",
         "Left column names omitted from column comparison.",
         "COMMENTS, INTERNAL_NOTE",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.sample_columns",
+        "optional",
+        "comma list or JSON array",
+        "Left column names whose differing rows are saved as evidence; blank keeps all.",
+        "AMOUNT, STATUS",
     ),
     (
         "pairs",

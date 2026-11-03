@@ -24,7 +24,6 @@ from ..common.model.protocol import (
     active_unit_ids,
     col_check_close_document,
     current_plan_ids,
-    difference_keys_path,
     fixed_keys_document,
     list_failures,
     list_plans,
@@ -587,15 +586,6 @@ class ColCheck:
                 with self.activity_lock:
                     self.activity.pop((task.pair, task.window), None)
             sample = None
-            sample_rows = int(manifest.get("sample_rows") or 0)
-            if sample_rows and hasattr(target, "window_sample"):
-                sample_window = dict(task.payload)
-                keys_path = difference_keys_path(task.pair, task.window)
-                if self.store.exists(keys_path):
-                    sample_window["diagnostic_key_tuples"] = self.store.get_json(keys_path).get(
-                        "key_tuples", []
-                    )
-                sample = target.window_sample(manifest, sample_window, sample_rows)
         finally:
             if hasattr(target, "release_window"):
                 target.release_window(task.payload)
@@ -630,7 +620,10 @@ class ColCheck:
             if manifest is None or not int(manifest.get("sample_rows") or 0):
                 continue
             target = self._target(manifest)
-            columns = [column for column in manifest["columns"] if column in names]
+            chosen = set(manifest.get("sample_columns") or manifest["columns"])
+            columns = [
+                column for column in manifest["columns"] if column in names and column in chosen
+            ]
             payload = self.window_payloads.get((pair, window)) or next(
                 (dict(item) for item in manifest["windows"] if str(item["bucket"]) == window),
                 None,

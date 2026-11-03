@@ -1,0 +1,64 @@
+# Portable overrides only. Unspecified options keep tuios defaults.
+# Find the destination with: tuios config path
+[appearance]
+border_style = "rounded"
+dockbar_position = "top"
+window_title_position = "top"
+scrollback_lines = 20000
+# Keep the terminal's own palette; no external theme or font required.
+theme = ""
+
+# Personal key layout: Ctrl+a leader, tmux preset; no hooks or accounts.
+[keybindings]
+leader_key = "ctrl+a"  # define the leader key
+nest_exit_key = "ctrl+\\"  # exit nest mode
+preset = "tmux"        # try to emulate tmux shortcuts
+repeat = [
+    "terminal_focus_left", "terminal_focus_down",
+    "terminal_focus_up", "terminal_focus_right",
+    "resize_pane_left_5", "resize_pane_down_5",
+    "resize_pane_up_5", "resize_pane_right_5",
+    "prev_workspace", "next_workspace"
+]   # which action can be repeated once <leader> is pressed
+
+[keybindings.prefix_mode]
+nest = ["ctrl+\\"]  # leader then ctrl+backslash enters nest mode
+prefix_tape = ["q"]            # tape menu: q then r (record), s (stop)
+prefix_exit_mode = ["o"]        # exit terminal mode, enter window mode
+prefix_last_message = ["O"]     # latest TUIOS message
+prefix_next_finished= ["Y"]     # next available (agent-finished) msg to check
+prefix_next_window = []
+prefix_toggle_other_rail = []
+next_agent = []
+prev_agent = []
+last_session = ["S"]
+new_session = ["C"]
+prev_session = ["P", "("]       # switch session
+next_session = ["N", ")"]
+rename_session = ["R", "$"]     # rename session
+prefix_session_switcher = ["W", "s"]
+prefix_settings = []           
+prefix_command_palette = [":"]  # ctrl + p 
+prefix_rotate_split = []
+terminal_focus_left = ["h", "left"]
+terminal_focus_down = ["j", "down"]
+terminal_focus_up = ["k", "up"]
+terminal_focus_right = ["l", "right"]
+prev_workspace = ["ctrl+h", "p"]
+next_workspace = ["ctrl+l", "n"]
+rename_workspace = ["r", ","]
+reload_config = ["ctrl+r"]
+resize_pane_left_5 = ["H"]
+resize_pane_down_5 = ["J"]
+resize_pane_up_5 = ["K"]
+resize_pane_right_5 = ["L"]
+
+[keybindings.terminal_mode]
+terminal_focus_left = ["alt+h", "alt+left"]
+terminal_focus_down = ["alt+j", "alt+down"]
+terminal_focus_up = ["alt+k", "alt+up"]
+terminal_focus_right = ["alt+l", "alt+right"]
+
+[keybindings.mode_control]
+enter_terminal_mode = ["a", "i", "enter"]  
+

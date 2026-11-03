@@ -1,0 +1,55 @@
+# Unix (Linux/macOS/WSL): ~/.config/lf/lfrc
+set shell sh
+set shellopts '-eu'
+set ifs "\n"
+set hidden true
+set number true
+set relativenumber true
+set ratios 1:2:3
+set scrolloff 5
+set info size
+set sortby natural
+set dirfirst true
+# Built-in preview; no external preview script required.
+# Custom keyboard layout. Optional programs: mimeopen, bat, fzf, zoxide,
+# trash-put, tmux, bcompare. Commands run only when their binding is used.
+map o $mimeopen --ask "$f"
+map O $mimeopen --ask-default "$f"
+map i $LESS='-iQMXR~' bat --paging=always --theme=TwoDark "$f"
+map <c-d> trash
+map . set hidden!
+map ad push $mkdir<space>
+map af push $touch<space>
+map au !du -hsx * | sort -rh | less
+map ai !stat "$f"; echo; du -sh "$f"; echo; file -b "$f"
+map f $lf -remote "send $id select $(fzf)"
+map zz push :z<space>
+map sn :{{ set sortby natural; set info size; set preview; }}
+map sa :{{ set sortby natural; set info size; set nopreview; set ratios 3:5; }}
+map ss :{{ set sortby size; set info size; set preview; }}
+map st :{{ set sortby time; set info time; set preview; }}
+map sg &tmux split-window -h lf
+map sv &tmux split-window -v lf
+map g? $lf -doc | less
+map = &bcompare $fx
+map gh cd .
+map g/ cd /
+map g~ cd ~
+map R reload
+
+# Pass file arguments without pathname expansion; filenames are newline-separated.
+cmd trash ${{
+    set -f
+    if command -v trash-put >/dev/null 2>&1; then
+        trash-put -v -- $fx
+    else
+        printf '%s\n' 'Install trash-cli to use Ctrl+d.' >&2
+        exit 1
+    fi
+}}
+
+cmd z ${{
+    dest=$(zoxide query "$@")
+    escaped=$(printf '%s' "$dest" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    lf -remote "send $id cd \"$escaped\""
+}}

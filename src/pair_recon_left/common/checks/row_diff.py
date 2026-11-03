@@ -125,7 +125,7 @@ def _literal(path: str | Path) -> str:
     return "'" + str(Path(path)).replace("'", "''") + "'"
 
 
-# >>> rows.xlsx: keys, status, Left values, two spacer columns, Right values; cells whose normalized values differ are red <<< #
+# >>> samples.xlsx: keys, status, Left values, two spacer columns, Right values; cells whose normalized values differ are red <<< #
 def row_difference_workbook(result: dict[str, Any], *, left_label: str, right_label: str) -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill

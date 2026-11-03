@@ -176,37 +176,16 @@ def test_debug_reconciles_locally_and_publishes_only_difference_samples(tmp_path
         poll_interval=0,
         stats_only=True,
     ).run()
-    assert target.sampled_keys == [["1"]]
+    assert target.sampled_keys is None
     outcome = run_local_reconciliation(store, right_workers=2)
     assert outcome["column_errors"] == 1
 
     left = tmp_path / "p" / "2026-01-01" / "left.csv"
     left.parent.mkdir(parents=True)
     left.write_text("id,amount\n1,8\n", encoding="utf-8")
-    assert publish_difference_samples(store, tmp_path, "p") == 1
-    from openpyxl import load_workbook
-
-    workbook = load_workbook(io.BytesIO(store.get_bytes("differences/2026-01-01/samples.xlsx")))
-    sheet = workbook["Differences"]
-    assert [sheet.cell(1, column).value for column in range(1, 6)] == [None, "A", None, None, "a"]
-    assert [sheet.cell(2, column).value for column in range(1, 6)] == [
-        "id",
-        "amount",
-        None,
-        None,
-        "amount",
-    ]
-    assert [sheet.cell(3, column).value for column in range(1, 6)] == [
-        "1",
-        "8",
-        None,
-        None,
-        "9",
-    ]
-    assert sheet["A2"].font.bold is True
-    assert sheet["B3"].font.color.rgb == sheet["E3"].font.color.rgb == "009C0006"
-    assert sheet["B3"].fill.fill_type is sheet["E3"].fill.fill_type is None
-    assert store.list_keys("differences/2026-01-01/") == ["differences/2026-01-01/samples.xlsx"]
+    # A bounded preview is not evidence of differing rows.
+    assert publish_difference_samples(store, tmp_path, "p") == 0
+    assert store.list_keys("results/report/differences/") == []
     assert store.list_keys("_protocol/tmp/") == []
 
 
@@ -253,13 +232,14 @@ def test_publish_difference_samples_writes_row_differences_when_right_rows_exist
     left.parent.mkdir(parents=True)
     left.write_text("id,amount\n1,8\n2,8\n", encoding="utf-8")
     assert publish_difference_samples(store, tmp_path, "p") == 1
-    assert store.list_keys("differences/2026-01-01/") == [
-        "differences/2026-01-01/rows.xlsx",
-        "differences/2026-01-01/samples.xlsx",
+    assert store.list_keys("results/report/differences/2026-01-01/") == [
+        "results/report/differences/2026-01-01/samples.xlsx",
     ]
     from openpyxl import load_workbook
 
-    sheet = load_workbook(io.BytesIO(store.get_bytes("differences/2026-01-01/rows.xlsx")))["Rows"]
+    sheet = load_workbook(
+        io.BytesIO(store.get_bytes("results/report/differences/2026-01-01/samples.xlsx"))
+    )["Rows"]
     assert (
         sheet.cell(1, 1).value == "1 of 1 differing rows (different 1, left only 0, right only 0)"
     )
@@ -271,9 +251,9 @@ def test_publish_difference_samples_writes_row_differences_when_right_rows_exist
         None,
         "9",
     ]
-    assert (tmp_path / "p" / "2026-01-01" / "rows.xlsx").read_bytes() == store.get_bytes(
-        "differences/2026-01-01/rows.xlsx"
-    )
+    assert (
+        tmp_path / "results" / "report" / "differences" / "2026-01-01" / "samples.xlsx"
+    ).read_bytes() == store.get_bytes("results/report/differences/2026-01-01/samples.xlsx")
     assert store.list_keys("_protocol/tmp/") == []
 
 

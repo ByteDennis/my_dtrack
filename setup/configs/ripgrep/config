@@ -1,0 +1,6 @@
+# Activate explicitly through RIPGREP_CONFIG_PATH (see shell/interactive.sh).
+# Normal ignore rules remain enabled; hidden files are not searched by default.
+--smart-case
+--line-number
+--color=auto
+--glob=!.git/**
