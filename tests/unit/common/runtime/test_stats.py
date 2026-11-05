@@ -48,11 +48,11 @@ def test_numeric_type_hashes_equivalent_decimal_text_identically(tmp_path, sourc
     left = tmp_path / f"{source}-left.csv"
     right = tmp_path / f"{source}-right.csv"
     left.write_text(
-        "AMOUNT\n0.19\n1.0\n01.20\n+4.00\n-0.00\n1e3\ninvalid\n",
+        "AMOUNT\n0.19\n1.0\n01.20\n+4.00\n-0.00\n1e3\n1.23E-4\n5.6475e-05\n1.23e+03\n-.25e+2\ninvalid\n",
         encoding="utf-8",
     )
     right.write_text(
-        "AMOUNT\n.19\n1e0\n1.2\n4\n0\n1000\ninvalid\n",
+        "AMOUNT\n.19\n1e0\n1.2\n4\n0\n1000\n0.000123\n0.000056475\n1230\n-25\ninvalid\n",
         encoding="utf-8",
     )
 
@@ -71,7 +71,7 @@ def test_numeric_type_hashes_equivalent_decimal_text_identically(tmp_path, sourc
 def test_numeric_type_does_not_round_distinct_high_precision_values_into_one_hash(tmp_path):
     path = tmp_path / "precision.csv"
     path.write_text(
-        "AMOUNT\n0.12345678901234567891\n0.12345678901234567892\n",
+        "AMOUNT\n0.12345678901234567891\n0.12345678901234567892\n1.1e-18\n0.000000000000000001\n",
         encoding="utf-8",
     )
 
@@ -82,7 +82,7 @@ def test_numeric_type_does_not_round_distinct_high_precision_values_into_one_has
         statistics=["n_unique", "hash_sum"],
     )["AMOUNT"]
 
-    assert result["n_unique"] == 2
+    assert result["n_unique"] == 4
 
 
 def test_integral():

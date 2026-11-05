@@ -668,3 +668,44 @@ def test_sample_columns_limit_right_rows_to_chosen_columns():
     ColCheck(store, lambda _cfg: target, poll_interval=0).run()
     assert target.requested is None
     assert not store.exists(f"{right_sample_prefix('p', '2026-01-01')}rows.json")
+
+
+@pytest.mark.parametrize("sample_rows", [0, 50])
+def test_keepcsv_preserves_raw_values_only_for_first_differing_window(sample_rows):
+    store, _uid = _drained_store()
+    manifest = store.get_json(plan_path("p"))
+    manifest.update(keepcsv=True, sample_rows=sample_rows, sample_columns=["note"])
+    manifest["windows"].append({**manifest["windows"][0], "bucket": "2026-02-01"})
+    for window in manifest["windows"]:
+        store.put_result(
+            window["bucket"],
+            {
+                "unit_id": window["bucket"],
+                "pair": "p",
+                "vintage": window["bucket"],
+                "column": "amount",
+                "verdict": "diff",
+            },
+        )
+
+    raw_calls = []
+
+    class RawTarget(FakeTarget):
+        def window_raw_rows(self, manifest, window):
+            raw_calls.append(window["bucket"])
+            return {
+                "columns": ["id", "amount"],
+                "rows": iter([["001", "5.6475e-05"], ["002", " 0100 "]]),
+            }
+
+    target = RawTarget()
+    engine = ColCheck(store, lambda _cfg: target, poll_interval=0)
+    engine.scheduler.manifests["p"] = manifest
+    engine._stage_rows()
+    engine._stage_rows()  # resume reuses the completed Right export
+    assert raw_calls == ["2026-01-01"]
+    assert store.get_bytes("results/report/differences/2026-01-01/right.csv").decode() == (
+        "id,amount\n001,5.6475e-05\n002, 0100 \n"
+    )
+    assert store.get_json("results/report/differences/2026-01-01/sample.json")["right_rows"] == 2
+    assert not store.list_keys("results/report/differences/2026-02-01/")

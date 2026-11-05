@@ -503,3 +503,11 @@ def test_sample_columns_resolve_case_insensitively_and_stay_out_of_plan_id(commo
         common.manifest.build_manifest(
             "run", "p", _variant(excluded_columns=["ID"], sample_columns=["ID"]), ROW_CHECK
         )
+
+
+def test_keepcsv_changes_only_diagnostic_settings(common):
+    plain = common.manifest.build_manifest("run", "p", PAIR, ROW_CHECK)
+    kept = common.manifest.build_manifest("run", "p", {**PAIR, "keepcsv": True}, ROW_CHECK)
+    assert kept["keepcsv"] is True and "keepcsv" not in plain
+    assert kept["plan_id"] == plain["plan_id"]
+    assert common.manifest.planned_unit_ids(kept) == common.manifest.planned_unit_ids(plain)

@@ -934,10 +934,13 @@ def test_main_program_parses_defaults_earlystop_and_force(monkeypatch, tmp_path)
     )
     monkeypatch.setattr(cli, "run_debugger", lambda _mode, callback: callback())
 
-    assert cli.main_program(["--defaults", str(defaults), "--earlystop", "--force"]) == 0
+    assert (
+        cli.main_program(["--defaults", str(defaults), "--earlystop", "--force", "--keepcsv"]) == 0
+    )
     assert seen["defaults_path"] == defaults
     assert seen["earlystop"] is True
     assert seen["force"] is True
+    assert seen["keepcsv"] is True
 
 
 def test_main_program_parses_last_failed(monkeypatch, tmp_path):
@@ -1684,9 +1687,7 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
     assert settings["audit"] is False
     assert settings["sample_rows"] == 50
     assert settings["normalization_rules"] == default_normalization_rules()
-    assert any(
-        "Sample rows (maximum difference rows saved per vintage)" in prompt for prompt in prompts
-    )
+    assert not any("Sample rows" in prompt for prompt in prompts)
     assert not any("Normalization rules" in prompt for prompt in prompts)
     assert not any("Strict normalization" in prompt for prompt in prompts)
     assert settings["left_workers"] == 2
@@ -3614,3 +3615,77 @@ def test_stage_watchdog_triggers_the_stop_signal():
     dog.start()
     dog.thread.join(2)
     assert stop.triggered and "watchdog: Oracle fetch stalled" in str(stop.reason)
+
+
+def test_publish_kept_left_csv_uploads_original_sample_bytes(tmp_path):
+    store = MemoryStore()
+    prefix = "results/report/differences/all/"
+    store.put_json(prefix + "sample.json", {"pair": "p", "vintage": "all"})
+    store.put_bytes(prefix + "right.csv", b"id,value\n001,0.000056475\n")
+    left = tmp_path / "p" / "all" / "left.csv"
+    left.parent.mkdir(parents=True)
+    left.write_bytes(b'id,value\n001,"5.6475e-05"\n')
+    runner.publish_kept_left_csv(store, tmp_path, "p")
+    assert store.get_bytes(prefix + "left.csv") == left.read_bytes()
+    # Retrying after local cleanup keeps the existing cloud export.
+    left.unlink()
+    runner.publish_kept_left_csv(store, tmp_path, "p")
+    assert store.exists(prefix + "left.csv")
+
+
+def test_only_first_differing_vintage_publishes_samples_and_preserves_raw_csv(tmp_path):
+    import csv
+    import gzip
+
+    store = MemoryStore()
+    manifest = {
+        "pair": "p",
+        "key_cols": ["id"],
+        "key_families": ["string"],
+        "columns": ["value"],
+        "col_map": {"value": "value"},
+        "left": {"source": "csv"},
+        "right": {"source": "csv"},
+        "sample_rows": 50,
+    }
+    store.put_json(plan_path("p"), manifest)
+    for window in ["2026-01-01", "2026-02-01"]:
+        store.put_result(
+            window,
+            {
+                "unit_id": window,
+                "pair": "p",
+                "vintage": window,
+                "column": "value",
+                "verdict": "diff",
+            },
+        )
+        path = tmp_path / "p" / window / "left.csv"
+        path.parent.mkdir(parents=True)
+        path.write_text("id,value\n001,left\n")
+        body = io.StringIO()
+        writer = csv.writer(body)
+        writer.writerow(["_key", "k0", "v0", "n0"])
+        writer.writerow(["001", "001", "right", "right"])
+        prefix = right_sample_prefix("p", window)
+        store.put_bytes(prefix + "rows.csv.gz", gzip.compress(body.getvalue().encode()))
+        store.put_json(
+            prefix + "rows.json",
+            {
+                "pair": "p",
+                "vintage": window,
+                "key_columns": ["id"],
+                "pairs": [{"left_column": "value", "right_column": "value"}],
+                "right_file": "rows.csv.gz",
+            },
+        )
+    prefix = "results/report/differences/2026-01-01/"
+    store.put_json(prefix + "sample.json", {"pair": "p", "vintage": "2026-01-01"})
+    store.put_bytes(prefix + "right.csv", b"id,value\n001,right\n")
+    assert publish_difference_samples(store, tmp_path, "p") == 1
+    assert store.exists(prefix + "samples.xlsx")
+    assert store.exists(prefix + "left.csv")
+    assert store.exists(prefix + "right.csv")
+    assert store.exists(prefix + "sample.json")
+    assert not store.list_keys("results/report/differences/2026-02-01/")
+    assert not store.list_keys(right_sample_prefix("p", "2026-02-01"))

@@ -117,6 +117,42 @@ class CsvTarget:
     def count_keys(self, from_date=None, to_date=None, **options):
         return self.source.count_keys(from_date, to_date, side="right", **options)
 
+    def window_raw_rows(self, manifest, window):
+        import csv
+
+        columns = list(
+            dict.fromkeys(
+                [
+                    *manifest["right_key_cols"],
+                    *(
+                        [self.config["date_col"]]
+                        if manifest.get("partition", "day") != "all"
+                        else []
+                    ),
+                    *[manifest["col_map"][column] for column in manifest["columns"]],
+                ]
+            )
+        )
+
+        def rows():
+            with TemporaryDirectory(prefix="pair_recon-keepcsv-") as folder:
+                path, _count = self.source.pull_window(
+                    window["partitions"],
+                    columns,
+                    Path(folder) / "right.csv",
+                    key_columns=manifest["right_key_cols"],
+                    sample_plan=window_sample_plan(manifest, window, "right"),
+                    key_families=manifest["key_families"],
+                    side="right",
+                    key_tuples=window.get("key_tuples"),
+                )
+                with Path(path).open(encoding="utf-8-sig", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    for row in reader:
+                        yield [row[column] for column in columns]
+
+        return {"columns": columns, "rows": rows()}
+
     def window_statistics(self, manifest, window, progress=None):
         from pair_recon_left.common.runtime.stats import compute_csv_statistics
 
@@ -788,6 +824,25 @@ class SparkTarget:
         sql = f"SELECT {selected} FROM {relation} WHERE {where}{order_by} LIMIT {int(limit)}"
         rows = [list(row) for row in self._collect(sql, "difference_sample")]
         return {"pairs": pairs, "rows": rows, "limit": int(limit)}
+
+    def window_raw_rows(self, manifest, window):
+        relation, where = self._scope(manifest, window)
+        columns = list(
+            dict.fromkeys(
+                [
+                    *manifest["right_key_cols"],
+                    *(
+                        [self.config["date_col"]]
+                        if manifest.get("partition", "day") != "all"
+                        else []
+                    ),
+                    *[manifest["col_map"][column] for column in manifest["columns"]],
+                ]
+            )
+        )
+        sql = f"SELECT {', '.join(quote_ident(column, 'spark') for column in columns)} FROM {relation} WHERE {where}"
+        self._audit(sql, "keepcsv")
+        return {"columns": columns, "rows": _iterate(self.spark.sql(sql), "keepcsv")}
 
     # >>> every sampled row of a window for the differing columns, streamed: normalized composite key, raw keys, raw and normalized values <<< #
     def window_rows(

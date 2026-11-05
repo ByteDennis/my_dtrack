@@ -24,11 +24,13 @@ from ..common.model.protocol import (
     active_unit_ids,
     col_check_close_document,
     current_plan_ids,
+    diagnostic_prefix,
     fixed_keys_document,
     list_failures,
     list_plans,
     list_result_batches,
     list_results,
+    list_units,
     read_window_count,
     refresh_units_status,
     right_ready_path,
@@ -298,6 +300,10 @@ class ColCheck:
             self.first_window_checked = True
         if left_total != right_total:
             manifest = self.scheduler.manifests[pair]
+            payload = next(
+                item for item in manifest["windows"] if str(item["bucket"]) == str(window)
+            )
+            self._keep_csv(manifest, payload)
             raise SampleCountMismatch(
                 _mismatch_message(manifest, window, left_total, right_total)
                 + " (sampled counts compared before statistics)"
@@ -609,15 +615,59 @@ class ColCheck:
             ([row[index] for index in indexes] for row in sample["rows"]),
         )
 
+    def _keep_csv(self, manifest, window):
+        if not manifest.get("keepcsv"):
+            return
+        prefix = diagnostic_prefix(manifest["pair"], str(window["bucket"]))
+        if self.store.exists(f"{prefix}right.csv") and self.store.exists(f"{prefix}sample.json"):
+            return
+        target = self._target(manifest)
+        raw = target.window_raw_rows(manifest, window)
+        with TemporaryDirectory(prefix="pair_recon-keepcsv-") as folder:
+            path = Path(folder) / "right.csv"
+            count = 0
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle, lineterminator="\n")
+                writer.writerow(raw["columns"])
+                for row in raw["rows"]:
+                    writer.writerow(row)
+                    count += 1
+            self.store.put_bytes(f"{prefix}right.csv", path.read_bytes(), content_type="text/csv")
+        self.store.put_json(
+            f"{prefix}sample.json",
+            {
+                "pair": manifest["pair"],
+                "vintage": str(window["bucket"]),
+                "plan_id": manifest["plan_id"],
+                "sample": manifest["sample"],
+                "sample_seed": window.get("sample_seed"),
+                "key_columns": manifest["key_cols"],
+                "right_key_columns": manifest["right_key_cols"],
+                "column_map": manifest["col_map"],
+                "right_rows": count,
+                "right_columns": raw["columns"],
+            },
+        )
+        log.info(
+            "kept raw Right sample %s %s: %d row(s)", manifest["pair"], window["bucket"], count
+        )
+
     # >>> after comparison, every sampled row of a differing window for its differing columns goes to the Volume as rows.csv.gz <<< #
-    def _stage_rows(self) -> None:
+    def _stage_rows(self, results=None) -> None:
         differing: dict[tuple[str, str], set[str]] = defaultdict(set)
-        for _key, result in list_results(self.store):
+        results = (
+            results if results is not None else [row for _key, row in list_results(self.store)]
+        )
+        for result in results:
             if result.get("verdict") != "match":
                 differing[(result["pair"], str(result["vintage"]))].add(result["column"])
+        retained_pairs = set()
         for (pair, window), names in sorted(differing.items()):
+            if pair in retained_pairs:
+                continue
+            retained_pairs.add(pair)
             manifest = self.scheduler.manifests.get(pair)
-            if manifest is None or not int(manifest.get("sample_rows") or 0):
+            if manifest is None:
                 continue
             target = self._target(manifest)
             chosen = set(manifest.get("sample_columns") or manifest["columns"])
@@ -628,6 +678,10 @@ class ColCheck:
                 (dict(item) for item in manifest["windows"] if str(item["bucket"]) == window),
                 None,
             )
+            if payload is not None:
+                self._keep_csv(manifest, payload)
+            if not int(manifest.get("sample_rows") or 0):
+                continue
             if not hasattr(target, "window_rows") or payload is None or not columns:
                 continue
             started = time.monotonic()
@@ -771,7 +825,10 @@ class ColCheck:
                 f" [{result['col_type']}] {detail}" if detail else "",
             )
             require_same_total(manifest, task.window, pointer["column"], left, right)
-        except (PlanChangedError, ResultBatchCommitError, SampleCountMismatch):
+        except SampleCountMismatch:
+            self._keep_csv(manifest, self.window_payloads[(task.pair, task.window)])
+            raise
+        except (PlanChangedError, ResultBatchCommitError):
             raise
         except Exception as exc:
             self._failure(task, exc)
@@ -835,6 +892,24 @@ class ColCheck:
                     if self.complete():
                         plans = [plan for _key, plan in list_plans(self.store)]
                         if self.stats_only:
+                            previews = []
+                            for _key, pointer in list_units(self.store):
+                                pair, window = pointer["pair"], pointer["window"]
+                                manifest = self.scheduler.manifests.get(pair)
+                                stats = self.scheduler.right_stats.get((pair, window))
+                                if manifest is None or stats is None:
+                                    continue
+                                previews.append(
+                                    compare_statistics(
+                                        pair=pair,
+                                        window=window,
+                                        column=pointer["column"],
+                                        left=unit_statistics(self.store, pointer),
+                                        right=stats[pointer["column"]],
+                                        statistics=manifest.get("statistics"),
+                                    )
+                                )
+                            self._stage_rows(previews)
                             SqlAudit(
                                 self.store,
                                 "right",

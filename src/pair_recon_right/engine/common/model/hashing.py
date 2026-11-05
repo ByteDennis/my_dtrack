@@ -51,9 +51,21 @@ def canonical_numeric(value: object) -> str:
 def canonical_numeric_sql(expr: str, dialect: str) -> str:
     dialect = dialect_name(dialect)
     text = f"trim({expr})"
+    mantissa = r"(?:[0-9]{1,20}(?:[.][0-9]{0,18})?|[.][0-9]{1,18})"
+    # A negative exponent adds fractional places. Reject values that would
+    # round at scale 18, while allowing extra trailing fractional zeros.
+    negative_exponents = []
+    for exponent in range(1, 19):
+        scale = 18 - exponent
+        fractional = rf"(?:[.][0-9]{{0,{scale}}}0*)?"
+        leading_dot = rf"|[.][0-9]{{1,{scale}}}0*" if scale else r"|[.]0+"
+        negative_exponents.append(
+            rf"(?:[0-9]{{1,20}}{fractional}{leading_dot})[eE]-0*{exponent}"
+        )
+    scientific_negative = "|".join(negative_exponents)
     safe = _regex_matches(
         text,
-        r"^[+-]?(?:[0-9]{1,20}(?:\.[0-9]{0,18})?|\.[0-9]{1,18}|[0-9]{1,20}[eE][+-]?(?:[0-9]|1[0-8]))$",
+        rf"^[+-]?(?:{mantissa}(?:[eE](?:[+-]?0+|[+]?0*(?:[1-9]|1[0-8])))?|{scientific_negative})$",
         dialect,
     )
     if dialect in {"spark", "duckdb", "athena"}:

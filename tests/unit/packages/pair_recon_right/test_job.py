@@ -197,3 +197,21 @@ def test_smoke_reselects_the_left_keys_on_the_right(tmp_path):
     assert result["matched"] == 2 and result["expected"] == 3 and result["health"]["ok"]
     assert store.get_json(RIGHT_STATE)["phase"] == "smoke"
     assert get_run_status(store)["state"] == "smoke_complete"
+
+
+def test_report_refresh_preserves_kept_csvs(tmp_path):
+    from pair_recon_right.engine.job import publish_report
+
+    store = VolumeStore(tmp_path / "runs" / "r1")
+    store.put_json(left_row_path("p"), document(["row_count"]))
+    release(store)
+    run(
+        tmp_path / "runs",
+        lambda _config: FakeTarget(counts={"all": 2}),
+        run_id="r1",
+        poll_interval=0,
+    )
+    path = f"{REPORT_PREFIX}differences/all/right.csv"
+    store.put_bytes(path, b"id,value\n001,0100\n")
+    publish_report(store)
+    assert store.get_bytes(path) == b"id,value\n001,0100\n"

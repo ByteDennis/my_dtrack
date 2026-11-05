@@ -484,6 +484,8 @@ def build_manifest(
         "excluded_columns": sorted(excluded_columns),
         "expected_units": len(windows) * len(columns),
     }
+    if pair.get("keepcsv"):
+        manifest["keepcsv"] = True
     if normalized_on is not None:
         manifest["normalization_date"] = normalized_on
     if pair.get("snapshot"):
@@ -497,7 +499,7 @@ def build_manifest(
         {
             key: value
             for key, value in manifest.items()
-            if key not in {"sample_rows", "sample_columns", "local_reconciliation"}
+            if key not in {"sample_rows", "sample_columns", "local_reconciliation", "keepcsv"}
         }
     )
     validate_manifest(manifest)

@@ -684,23 +684,14 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
             required=False,
         )
     )
-    sample_columns = column_list(
-        answer(
-            "Sample columns (evidence only; blank keeps all differing columns)",
-            ", ".join(column_list(run_default("sample_columns", []))),
-            required=False,
-        )
-    )
+    sample_columns = column_list(run_default("sample_columns", []))
     answers = {
         "partition": partition,
         "checks": selected,
         "sample": sample_value(
             answer("Sample", provenance.get("sample", run_default("sample", "all")))
         ),
-        "sample_rows": worker_budget(
-            "Sample rows (maximum difference rows saved per vintage)",
-            run_default("sample_rows", 50),
-        ),
+        "sample_rows": int(run_default("sample_rows", 50)),
         "normalization_rules": normalization_rules,
         "audit": confirm("Audit SQL", run_default("audit", False)),
         "excluded_columns": excluded_columns,
@@ -945,6 +936,9 @@ def execute(args, *, raise_errors: bool = False) -> int:
                         prompts(defaults) if interactive else prompts(defaults, interactive=False)
                     )
                     settings, config, action, client, catalog = prompt_result
+                    config["pairs"][settings["pair"]]["keepcsv"] = bool(
+                        getattr(args, "keepcsv", False)
+                    )
                     settings["earlystop"] = bool(getattr(args, "earlystop", False))
                     settings["force"] = bool(getattr(args, "force", False))
                     settings["recheck"] = bool(getattr(args, "recheck", False))
@@ -1119,6 +1113,11 @@ def main_program(argv=None) -> int:
         "--last-failed",
         action="store_true",
         help="resume the latest non-passing run for this pair and owner, reusing passing results",
+    )
+    parser.add_argument(
+        "--keepcsv",
+        action="store_true",
+        help="keep raw Left/Right sampled CSVs for the first differing vintage",
     )
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--debug", nargs="?", const="console", choices=("console", "attach"))

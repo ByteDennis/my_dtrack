@@ -33,6 +33,7 @@ from pair_recon_left.common.checks.col_check import (
 from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
 from pair_recon_left.common.checks.row_diff import compare_rows, row_difference_workbook
 from pair_recon_left.common.model.protocol import (
+    DIAGNOSTIC_PREFIX,
     REPORT_PREFIX,
     RIGHT_LOG,
     RIGHT_SAMPLE_PREFIX,
@@ -873,7 +874,26 @@ def publish_row_differences(store, run_dir: Path, manifest, document, prefix, re
     return compared["total"]
 
 
+def publish_kept_left_csv(store, run_dir: Path, pair: str):
+    for key in store.list_keys(DIAGNOSTIC_PREFIX):
+        if not key.endswith("/sample.json"):
+            continue
+        document = store.get_json(key)
+        if document.get("pair") != pair:
+            continue
+        path = run_dir / pair / str(document["vintage"]) / "left.csv"
+        if not path.is_file():
+            if not store.exists(key.removesuffix("sample.json") + "left.csv"):
+                log.warning("kept Left sample unavailable: %s", path)
+            continue
+        store.put_bytes(
+            key.removesuffix("sample.json") + "left.csv", path.read_bytes(), content_type="text/csv"
+        )
+        log.info("kept raw Left sample: %s", path)
+
+
 def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
+    publish_kept_left_csv(store, run_dir, pair)
     results = [
         value
         for _key, value in list_results(store)
@@ -890,6 +910,7 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
     scratch_manifests = [
         key for key in store.list_keys(RIGHT_SAMPLE_PREFIX) if key.endswith("/rows.json")
     ]
+    first_window = min(by_window) if by_window else None
     published = 0
     for key in scratch_manifests:
         document = store.get_json(key)
@@ -898,8 +919,8 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
         window = str(document["vintage"])
         prefix = key.removesuffix("rows.json")
         target = diagnostic_prefix(pair, window)
-        store.delete_keys(store.list_keys(target))
-        if not by_window.get(window):
+        store.delete_keys([key for key in store.list_keys(target) if key.endswith(".xlsx")])
+        if window != first_window:
             store.delete_keys(store.list_keys(prefix))
             continue
         left_path = run_dir / pair / window / "left.csv"
@@ -1225,6 +1246,11 @@ def launch(settings: dict, config: dict, *, action: str, workspace_client=None, 
             "volume_run_root": store.root_uri,
         }
     except BaseException as exc:
+        if store is not None:
+            try:
+                publish_kept_left_csv(store, run_dir, pair)
+            except Exception:
+                log.exception("could not preserve Left sample on failure")
         failure_error = exc
         if store is not None and not getattr(exc, "pair_recon_console_report", None):
             try:

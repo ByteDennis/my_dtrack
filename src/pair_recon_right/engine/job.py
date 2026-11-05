@@ -7,6 +7,7 @@ from .backends.store import resolve_run
 from .checks.col_check import DEFAULT_HEARTBEAT_TIMEOUT, ColCheck, require_left_heartbeat
 from .checks.row_check import run_row_check
 from .common.model.protocol import (
+    DIAGNOSTIC_PREFIX,
     REPORT_PREFIX,
     active_unit_ids,
     empty_plan_state,
@@ -91,7 +92,9 @@ def require_plan_units(store) -> str | None:
 def publish_report(store) -> None:
     with tempfile.TemporaryDirectory(prefix="pair-recon-report-") as folder:
         files = build_report(store, folder)
-        store.delete_keys(store.list_keys(REPORT_PREFIX))
+        store.delete_keys(
+            [key for key in store.list_keys(REPORT_PREFIX) if not key.startswith(DIAGNOSTIC_PREFIX)]
+        )
         for name, path in files.items():
             path = Path(path)
             store.put_bytes(
