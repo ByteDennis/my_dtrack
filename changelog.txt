@@ -1,3 +1,27 @@
+pair_recon Whitespace-only missing synonyms — 2026-11-06
+
+Summary
+- Adds the table-controlled @whitespace match token. Mapping it to @missing converts empty strings and whitespace-only values, including spaces, tabs, line breaks, and Unicode whitespace, to NULL on both Left and Right.
+- Values containing non-whitespace characters retain their content under this rule. Converted values contribute to n_missing and are excluded from n_unique.
+- Seeds the enabled all-source zz_missing_whitespace rule for new installations and provides an idempotent migration for existing normalization tables. Deploy the updated Left and Right code before enabling the rule.
+
+Modified files
+- `setup/schema.sql`: seeds the whitespace missing synonym.
+- `setup/reference.sql`: documents the @whitespace match token.
+- `src/pair_recon_left/common/model/hashing.py`: implements whitespace matching in Python and generated SQL.
+- `src/pair_recon_right/engine/common/model/hashing.py`: mirrors the Left implementation.
+- `tests/unit/common/data/test_hashing.py`: verifies whitespace and nonblank text behavior in both mirrored modules.
+- `tests/unit/common/runtime/test_stats.py`: verifies n_missing and n_unique after whitespace normalization.
+- `changelog.txt`: records the feature published in commit 21cb9b2.
+
+Added files
+- `setup/migrate_missing_whitespace.sql`: enables the rule on an existing normalization table.
+
+Verification
+- Normalization, statistics, and protocol parity tests: 124 passed across the focused runs.
+- Ruff and git diff --check: passed.
+- Databricks execution and cloud-table migration remain unverified.
+
 pair_recon Driver-side window statistics, Right log capture, and row-level differences — 2026-10-29
 
 Summary
