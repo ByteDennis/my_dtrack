@@ -461,8 +461,16 @@ def synchronize_key_types(sql, catalog, row: dict) -> int:
             right = current["right_column"]
         else:
             right = name
-        mappings.append({"left_column": name, "right_column": right, "data_type": kind})
-    upsert_column_mappings(sql, catalog.column_map_table, pair, mappings)
+        data_type = str(kind or "").strip() or None
+        if (
+            current is not None
+            and str(current["right_column"]).strip() == str(right).strip()
+            and (str(current.get("data_type") or "").strip() or None) == data_type
+        ):
+            continue
+        mappings.append({"left_column": name, "right_column": right, "data_type": data_type})
+    if mappings:
+        upsert_column_mappings(sql, catalog.column_map_table, pair, mappings)
     return len(mappings)
 
 
@@ -576,9 +584,11 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
                 f"{sync['pair_meta_table']}: {', '.join(sync['pairs'])}"
             )
         elif workbook_rows:
-            console("Pair workbook metadata is already current; no remote upsert was needed.")
+            console("Pair workbook metadata is already current; checking declared column mappings.")
         else:
             console("Pair workbook has no configuration rows; remote metadata was not changed.")
+        if sync.get("mapping_rows"):
+            console(f"Updated {sync['mapping_rows']} column mapping(s) from the Pair workbook.")
         console("Loading enabled pairs, column mappings, and pair SQL from Databricks...")
         by_name = {row["pair_name"]: row for row in catalog.pairs()}
         console(f"Loaded {len(by_name)} enabled pair(s).")

@@ -1,3 +1,19 @@
+pair_recon Avoid unnecessary SQL MERGE — 2026-11-06
+
+Summary
+- Compare declared key types, run-default data types, and the configured date-column mapping with current catalog mappings before issuing a MERGE.
+- Upload only new or changed mappings. Continue checking every workbook Pair so stale date mappings are repaired even when Pair metadata is unchanged.
+- Report column-mapping updates separately from Pair metadata updates.
+
+Modified files
+- `src/pair_recon/app/cli/__init__.py`: skips unchanged column-mapping writes and reports changed mapping counts.
+- `tests/unit/packages/pair_recon/test_runner.py`: covers unchanged mappings, date-mapping repairs, and data-type changes.
+- `changelog.txt`: records the synchronization change.
+
+Verification
+- Runner suite: 125 passed, including unchanged mappings, date-mapping repairs, and data-type changes.
+- Ruff and git diff --check: passed.
+
 pair_recon Whitespace-only missing synonyms — 2026-11-06
 
 Summary

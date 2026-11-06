@@ -3689,3 +3689,35 @@ def test_only_first_differing_vintage_publishes_samples_and_preserves_raw_csv(tm
     assert store.exists(prefix + "sample.json")
     assert not store.list_keys("results/report/differences/2026-02-01/")
     assert not store.list_keys(right_sample_prefix("p", "2026-02-01"))
+
+
+def test_key_type_sync_skips_unchanged_mappings_and_repairs_date_mapping():
+    calls = []
+    existing = [
+        {"left_column": "ID", "right_column": "id", "data_type": "numeric"},
+        {"left_column": "DT", "right_column": "business_date", "data_type": "date"},
+        {"left_column": "AMOUNT", "right_column": "amount", "data_type": "numeric"},
+    ]
+    catalog = SimpleNamespace(
+        column_map_table="main.recon.pair_recon_column_map",
+        column_mappings=lambda _pair: existing,
+    )
+    sql = SimpleNamespace(execute=lambda statement, parameters: calls.append((statement, parameters)))
+    row = {
+        "pair_name": "p", "key_columns": ["ID[numeric]"],
+        "left_date_col": "DT", "right_date_col": "business_date",
+        "run_defaults_json": {"data_type": {"AMOUNT": "numeric"}},
+    }
+    assert cli.synchronize_key_types(sql, catalog, row) == 0
+    assert calls == []
+    existing[1]["right_column"] = "wrong_date"
+    assert cli.synchronize_key_types(sql, catalog, row) == 1
+    parameters = calls[-1][1]
+    assert parameters["r0_left_column"] == "DT"
+    assert parameters["r0_right_column"] == "business_date"
+    assert "r1_left_column" not in parameters
+    existing[1]["right_column"] = "business_date"
+    existing[0]["data_type"] = "categorical"
+    assert cli.synchronize_key_types(sql, catalog, row) == 1
+    assert calls[-1][1]["r0_left_column"] == "ID"
+    assert calls[-1][1]["r0_data_type"] == "numeric"
