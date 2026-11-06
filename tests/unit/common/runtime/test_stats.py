@@ -457,3 +457,31 @@ def test_step_family_column_type_normalizes_statistics(tmp_path):
 
     assert plain["K"]["n_unique"] == 3 and typed["K"]["n_unique"] == 1
     assert typed["K"]["col_type"] == "categorical"
+
+
+def test_whitespace_missing_rule_updates_missing_and_unique_counts(tmp_path):
+    import csv
+
+    path = tmp_path / "whitespace.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["value"])
+        writer.writerows([[v] for v in [" ", " \t\n", "\u00a0", "\u3000", "id", " id "]])
+    rules = [
+        {
+            "rule_name": "zz_missing_whitespace",
+            "source": "all",
+            "match_value": "@whitespace",
+            "canonical_value": "@missing",
+        }
+    ]
+    result = stats.compute_csv_statistics(
+        path,
+        ["value"],
+        normalization_rules=rules,
+        col_types={"value": "categorical"},
+        statistics=["n_total", "n_missing", "n_unique"],
+    )["value"]
+    assert result["n_total"] == 6
+    assert result["n_missing"] == 4
+    assert result["n_unique"] == 2

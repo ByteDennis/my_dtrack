@@ -103,3 +103,46 @@ def test_fixed2(
     ranked = sorted("1234", key=lambda key: hashlib.md5(key.encode()).hexdigest())[:2]
     assert sorted(set(sampled["id"])) == sorted(ranked)
     assert len(sampled) == sum(2 if key == "1" else 1 for key in ranked)
+
+
+@pytest.mark.parametrize(
+    "value", ["", " ", "    ", "\t", "\r\n", " \t\n ", "\u00a0", "\u2003\u3000", "\x1c\u0085"]
+)
+def test_whitespace_synonym_matches_python_and_sql(common, value):
+    import duckdb
+
+    rules = [
+        {
+            "rule_name": "zz_missing_whitespace",
+            "source": "all",
+            "match_value": "@whitespace",
+            "canonical_value": "@missing",
+        }
+    ]
+    rules = common.hashing.canonical_normalization_rules(rules)
+    assert common.hashing.normalize_system_value(value, rules) is None
+    sql = common.hashing.normalize_system_sql("v", "duckdb", rules)
+    assert (
+        duckdb.sql(f"SELECT {sql} FROM (SELECT ?::VARCHAR AS v)", params=[value]).fetchone()[0]
+        is None
+    )
+
+
+@pytest.mark.parametrize("value", [" 0100 ", "a b", "\tX\n", "\u200b"])
+def test_whitespace_synonym_preserves_nonblank_text(common, value):
+    import duckdb
+
+    rules = [
+        {
+            "rule_name": "zz_missing_whitespace",
+            "source": "all",
+            "match_value": "@whitespace",
+            "canonical_value": "@missing",
+        }
+    ]
+    assert common.hashing.normalize_system_value(value, rules) == value
+    sql = common.hashing.normalize_system_sql("v", "duckdb", rules)
+    assert (
+        duckdb.sql(f"SELECT {sql} FROM (SELECT ?::VARCHAR AS v)", params=[value]).fetchone()[0]
+        == value
+    )

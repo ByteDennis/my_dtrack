@@ -152,6 +152,7 @@ USING (
     ('lowercase', 'all', NULL, NULL, true),
     ('decimal', 'all', NULL, NULL, true),
     ('strip_datetime', 'all', NULL, NULL, true),
+    ('zz_missing_whitespace', 'all', '@whitespace', '@missing', true),
     ('dbx_today_3000', 'databricks', '3000-01-01', '@run_date', true),
     ('oracle_today_3000', 'oracle', '3000-01-01', '@run_date', true),
     ('oracle_missing_9999', 'oracle', '9999-12-31', '@missing', true)

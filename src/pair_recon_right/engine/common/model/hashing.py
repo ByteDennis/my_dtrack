@@ -15,6 +15,12 @@ ISO_DATETIME = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2})[ Tt].*$")
 NORMALIZATION_TRANSFORMS = ("trim", "lowercase", "decimal", "strip_datetime")
 NORMALIZATION_SOURCES = ("all", "oracle", "hadoop", "csv", "databricks")
 MISSING_VALUE = "@missing"
+WHITESPACE_VALUE = "@whitespace"
+# Python str.strip whitespace, expressed for both RE2 and Java regex engines.
+WHITESPACE_PATTERN = (
+    r"^[\s\x{001c}-\x{001f}\x{0085}\x{00a0}\x{1680}"
+    r"\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}]*$"
+)
 RUN_DATE_VALUE = "@run_date"
 
 
@@ -201,7 +207,9 @@ def normalize_system_value(
                 text = collapse_decimal(text)
             elif rule["rule_name"] == "strip_datetime":
                 text = strip_datetime(text)
-        elif text == rule["match_value"]:
+        elif text == rule["match_value"] or (
+            rule["match_value"] == WHITESPACE_VALUE and not text.strip()
+        ):
             replacement = rule["canonical_value"]
             if replacement == MISSING_VALUE:
                 return None
@@ -241,10 +249,12 @@ def normalize_system_sql(
                     raise ValueError("@run_date normalization needs normalization_date")
                 replacement = run_date
             target = sql_literal(replacement, dialect)
-        value = (
-            f"CASE WHEN {value} = {sql_literal(rule['match_value'], dialect)} "
-            f"THEN {target} ELSE {value} END"
+        matches = (
+            _regex_matches(value, WHITESPACE_PATTERN, dialect)
+            if rule["match_value"] == WHITESPACE_VALUE
+            else f"{value} = {sql_literal(rule['match_value'], dialect)}"
         )
+        value = f"CASE WHEN {matches} THEN {target} ELSE {value} END"
     return value
 
 

@@ -108,6 +108,7 @@ USING (
     ('pair_recon_normalization', 'rule_name', 'oracle_missing_9999', 'Treat the Oracle business sentinel 9999-12-31 as missing.'),
     ('pair_recon_normalization', 'source', NULL, 'Source scope: all, oracle, hadoop, csv, or databricks.'),
     ('pair_recon_normalization', 'source', 'all', 'Apply on both sides regardless of source platform.'),
+    ('pair_recon_normalization', 'match_value', '@whitespace', 'Match empty strings and strings made entirely of whitespace, including tabs, newlines and Unicode whitespace.'),
     ('pair_recon_normalization', 'match_value', NULL, 'Exact text matched by a synonym; null means rule_name is an enabled system transform.'),
     ('pair_recon_normalization', 'canonical_value', NULL, 'Synonym replacement; @missing becomes NULL and @run_date becomes the run date.'),
     ('pair_recon_normalization', 'enabled', NULL, 'System-level switch controlling whether the rule enters new run manifests.')
