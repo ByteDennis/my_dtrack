@@ -1,3 +1,27 @@
+pair_recon Setup notebook examples and editor configurations — 2026-11-06
+
+Summary
+- Expand the environment/catalog notebook with isolated examples of environment loading, setting precedence, output-directory selection, namespace validation, and catalog table names.
+- Expand the workbook/metadata notebook with temporary workbook creation, typed-key parsing, configuration comparison, and mock SQL upserts.
+- Preserve these examples in the notebook generator.
+- Add the Neovim configuration with navigation, window, buffer, terminal, clipboard, and editing shortcuts.
+- Include the oh-my Markdown 0.1.0 VS Code extension package for notebook cells and Markdown previews.
+
+Modified files
+- `setup/nbs/01_environment_catalog.ipynb`: adds executable environment and catalog examples.
+- `setup/nbs/02_workbook_metadata.ipynb`: adds executable workbook and metadata examples.
+- `setup/nbs/_build.py`: reproduces the expanded notebooks.
+- `changelog.txt`: records the notebook and editor additions.
+
+Added files
+- `setup/configs/nvim/init.lua`: Neovim settings and custom keybindings.
+- `setup/configs/vscode/omk-markdown-0.1.0.vsix`: packaged Markdown extension.
+
+Verification
+- All code cells in both notebooks executed successfully, and notebook contents match the generator.
+- VSIX archive integrity, packaged JavaScript syntax, and sensitive-content checks passed.
+- Neovim loading and VS Code UI activation were not exercised.
+
 pair_recon Avoid unnecessary SQL MERGE — 2026-11-06
 
 Summary

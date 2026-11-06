@@ -463,6 +463,120 @@ show(run_sql, format_sql_result, warehouse_start)""",
 }
 
 
+# Keep the examples in the generator so rebuilding the notebooks preserves them.
+NOTEBOOKS["01_environment_catalog.ipynb"]["cells"] = [
+    markdown("Explore environment settings and catalog table names with isolated, local examples. The examples do not contact Databricks."),
+    code(f"""{TOOLS}
+from pair_recon.app.config import load_environment, env_value, env_boolean, local_output_root
+from pair_recon.core.metadata.constant import CatalogTables, catalog_tables, validate_catalog_schema
+
+show(load_environment, env_value, env_boolean, local_output_root, validate_catalog_schema, catalog_tables)
+show_methods(CatalogTables, 'table', 'pair_meta', 'column_map', 'run_status', 'run_error')"""),
+    markdown("## `load_environment`\n\nLoad a temporary `.pair_recon.env`. Existing process variables take precedence; the environment is restored after the example."),
+    code('''import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+with TemporaryDirectory() as directory:
+    root = Path(directory)
+    (root / ".pair_recon.env").write_text("PAIR_RECON_TOY_VALUE=from_file\\n")
+    with patch("pair_recon.app.config.find_dotenv", return_value=""), patch.dict(os.environ, {}, clear=True):
+        print("loaded file:", load_environment(root).name)
+        print("value:", os.environ["PAIR_RECON_TOY_VALUE"])
+# loaded file: .pair_recon.env
+# value: from_file'''),
+    markdown("## `env_value` and `env_boolean`\n\nThe first non-empty variable wins. Boolean values accept common true/false spellings."),
+    code('''with patch.dict(os.environ, {"TOY_PRIMARY": "  ", "TOY_FALLBACK": " hello ", "TOY_ENABLED": "yes"}, clear=True):
+    print(env_value("TOY_PRIMARY", "TOY_FALLBACK", default="missing"))
+    print(env_value("TOY_UNKNOWN", default="missing"))
+    print(env_boolean("TOY_ENABLED"))
+    print(env_boolean("TOY_UNKNOWN", default=False))
+# hello
+# missing
+# True
+# False'''),
+    markdown("## `local_output_root`\n\nThe environment variable takes precedence over the default work directory. The selected directory is created."),
+    code('''with TemporaryDirectory() as directory:
+    target = Path(directory) / "toy-output"
+    with patch.dict(os.environ, {"PAIR_RECON_OUTPUT_DIR": str(target)}, clear=True):
+        result = local_output_root({"work_dir": "unused"})
+        print("selected:", result.name)
+        print("created:", result.is_dir())
+# selected: toy-output
+# created: True'''),
+    markdown("## `validate_catalog_schema` and `catalog_tables`\n\nA valid namespace contains exactly a catalog and schema. Invalid inputs raise `ValueError`."),
+    code('''print(validate_catalog_schema("  demo.recon  "))
+tables = catalog_tables("demo.recon")
+print(type(tables).__name__, tables.catalog_schema)
+try:
+    validate_catalog_schema("demo")
+except ValueError as error:
+    print(type(error).__name__, str(error))
+# demo.recon
+# CatalogTables demo.recon
+# ValueError catalog schema must be catalog.schema'''),
+    markdown("## `CatalogTables.table` and table properties\n\nThe method accepts known PairRecon table names. The properties return fully qualified names."),
+    code('''print("table:", tables.table("pair_recon_pair_meta"))
+print("pair_meta:", tables.pair_meta)
+print("column_map:", tables.column_map)
+print("run_status:", tables.run_status)
+print("run_error:", tables.run_error)
+try:
+    tables.table("unknown")
+except ValueError as error:
+    print(type(error).__name__, str(error))
+# table: demo.recon.pair_recon_pair_meta
+# pair_meta: demo.recon.pair_recon_pair_meta
+# column_map: demo.recon.pair_recon_column_map
+# run_status: demo.recon.pair_recon_run_status
+# run_error: demo.recon.pair_recon_run_error
+# ValueError unknown PairRecon table: unknown'''),
+]
+
+NOTEBOOKS["02_workbook_metadata.ipynb"]["cells"][0] = markdown(
+    "Explore workbook creation, loading, configuration comparison, and metadata upserts using temporary files and a mock SQL client."
+)
+NOTEBOOKS["02_workbook_metadata.ipynb"]["cells"].extend([
+    markdown("## Create and read a workbook\n\nThe workbook is created in a temporary directory. Reading the empty template returns an empty list."),
+    code('''from pathlib import Path
+from tempfile import TemporaryDirectory
+
+with TemporaryDirectory() as directory:
+    path = Path(directory) / "pairs.xlsx"
+    created = create_pair_workbook(path)
+    print("created:", created.name, created.exists())
+    print("rows:", read_pair_workbook(path))'''),
+    markdown("## Parse key columns\n\nA list of typed key specifications becomes a list of names and a type mapping."),
+    code('''keys = ["ORDER_ID[numeric]", "EFF_DT[date]"]
+print("input:", keys)
+print("output:", parse_key_columns(keys))'''),
+    markdown("## Build and compare a pair configuration\n\nThis small legacy-style row supplies `config_json`. The comparison normalizes the row into a signature before detecting changes."),
+    code('''from pprint import pprint
+
+row = {"pair_name": "ORDERS", "enabled": True, "key_columns": ["ORDER_ID"], "config_json": {"left": {}, "right": {}}}
+print("input row:")
+pprint(row)
+print("built config:")
+pprint(build_pair_config(row))
+print("signature:")
+pprint(pair_configuration_signature(row))
+print("new pair:", [item["pair_name"] for item in changed_pair_configurations([row], [])])
+print("unchanged:", changed_pair_configurations([row], [row]))'''),
+    markdown("## Upsert with a mock SQL client\n\nThe client records the SQL and parameters; no database is contacted. The input row is the same one used above."),
+    code('''from unittest.mock import Mock
+
+sql = Mock()
+result = upsert_pair_configuration(sql, "demo.recon.pair_recon_pair_meta", [row])
+print("result:", result)
+print("SQL calls:", sql.execute.call_count)
+for call in sql.execute.call_args_list:
+    statement, parameters = call.args
+    print("target:", statement.splitlines()[0])
+    print("pair_name:", parameters["pair_name"])'''),
+])
+
+
 def main() -> None:
     HERE.mkdir(parents=True, exist_ok=True)
     for name, value in NOTEBOOKS.items():
