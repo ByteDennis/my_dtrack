@@ -135,3 +135,17 @@ def test_environment_timezone_default(monkeypatch):
     assert status["timezone"] == "Asia/Tokyo"
     assert status["updated_at"].endswith("+09:00")
     assert timestamp().endswith("+09:00")
+
+
+def test_sample_window_selection_uses_explicit_preference_order():
+    from pair_recon_left.common.model.protocol import select_sample_window as left_select
+    from pair_recon_right.engine.common.model.protocol import select_sample_window as right_select
+
+    for select in (left_select, right_select):
+        available = ["2026-01-01", "2026-02-01"]
+        assert select({}, available) == "2026-01-01"
+        assert select({"sample_partitions": ["2026-02-01"]}, available) == "2026-02-01"
+        assert (
+            select({"sample_partitions": ["2026-03-01", "2026-02-01"]}, available) == "2026-02-01"
+        )
+        assert select({"sample_partitions": ["2026-03-01"]}, available) is None

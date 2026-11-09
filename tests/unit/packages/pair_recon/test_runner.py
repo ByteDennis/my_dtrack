@@ -232,28 +232,13 @@ def test_publish_difference_samples_writes_row_differences_when_right_rows_exist
     left.parent.mkdir(parents=True)
     left.write_text("id,amount\n1,8\n2,8\n", encoding="utf-8")
     assert publish_difference_samples(store, tmp_path, "p") == 1
-    assert store.list_keys("results/report/differences/2026-01-01/") == [
-        "results/report/differences/2026-01-01/samples.xlsx",
-    ]
-    from openpyxl import load_workbook
+    import csv
 
-    sheet = load_workbook(
-        io.BytesIO(store.get_bytes("results/report/differences/2026-01-01/samples.xlsx"))
-    )["Rows"]
-    assert (
-        sheet.cell(1, 1).value == "1 of 1 differing rows (different 1, left only 0, right only 0)"
-    )
-    assert [sheet.cell(3, column).value for column in range(1, 7)] == [
-        "1",
-        "different",
-        "8",
-        None,
-        None,
-        "9",
-    ]
-    assert (
-        tmp_path / "results" / "report" / "differences" / "2026-01-01" / "samples.xlsx"
-    ).read_bytes() == store.get_bytes("results/report/differences/2026-01-01/samples.xlsx")
+    path = "results/report/differences/diff_amount.csv"
+    assert store.list_keys("results/report/differences/") == [path]
+    rows = list(csv.reader(io.StringIO(store.get_bytes(path).decode("utf-8-sig"))))
+    assert rows == [["id", "amount", "", "", "amount"], ["1", "8", "", "", "9"]]
+    assert (tmp_path / path).read_bytes() == store.get_bytes(path)
     assert store.list_keys("_protocol/tmp/") == []
 
 
@@ -1728,6 +1713,9 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(
             {
                 "sample": 0.01,
                 **({"use_modular": modular_selector} if modular_selector else {}),
+                "sample_rows": 0,
+                "sample_columns": ["A"],
+                "sample_partitions": ["2026-03-15", "2026-03-01"],
                 "from_date": "2026-03-01",
                 "to_date": "2026-03-31",
                 "vintage": "week",
@@ -1770,6 +1758,9 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(
         "pair": saved_pair,
         "pair_workbook": str(tmp_path / "missing.xlsx"),
         "use_modular": "OLD_SELECTOR",
+        "sample_rows": 25,
+        "sample_columns": ["OLD"],
+        "sample_partitions": ["2025-01-01"],
         "sample": 0.25,
         "left_workers": 1,
         "audit": False,
@@ -1802,6 +1793,10 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(
     assert settings["right_workers"] == 12
 
     assert settings["sample"] == 0.01
+    for values in (settings, config["pairs"]["orders"]):
+        assert values["sample_rows"] == 0
+        assert values["sample_columns"] == ["A"]
+        assert values["sample_partitions"] == ["2026-03-15", "2026-03-01"]
     if modular_selector:
         assert settings["use_modular"] == modular_selector
         assert config["pairs"]["orders"]["use_modular"] == modular_selector
@@ -3658,7 +3653,7 @@ def test_stage_watchdog_triggers_the_stop_signal():
 
 def test_publish_kept_left_csv_uploads_original_sample_bytes(tmp_path):
     store = MemoryStore()
-    prefix = "results/report/differences/all/"
+    prefix = "results/report/differences/"
     store.put_json(prefix + "sample.json", {"pair": "p", "vintage": "all"})
     store.put_bytes(prefix + "right.csv", b"id,value\n001,0.000056475\n")
     left = tmp_path / "p" / "all" / "left.csv"
@@ -3672,7 +3667,10 @@ def test_publish_kept_left_csv_uploads_original_sample_bytes(tmp_path):
     assert store.exists(prefix + "left.csv")
 
 
-def test_only_first_differing_vintage_publishes_samples_and_preserves_raw_csv(tmp_path):
+@pytest.mark.parametrize("sample_partitions", [[], ["2026-02-01"], ["2026-02-01", "2026-01-01"]])
+def test_only_first_differing_vintage_publishes_samples_and_preserves_raw_csv(
+    tmp_path, sample_partitions
+):
     import csv
     import gzip
 
@@ -3686,6 +3684,7 @@ def test_only_first_differing_vintage_publishes_samples_and_preserves_raw_csv(tm
         "left": {"source": "csv"},
         "right": {"source": "csv"},
         "sample_rows": 50,
+        "sample_partitions": sample_partitions,
     }
     store.put_json(plan_path("p"), manifest)
     for window in ["2026-01-01", "2026-02-01"]:
@@ -3701,11 +3700,11 @@ def test_only_first_differing_vintage_publishes_samples_and_preserves_raw_csv(tm
         )
         path = tmp_path / "p" / window / "left.csv"
         path.parent.mkdir(parents=True)
-        path.write_text("id,value\n001,left\n")
+        path.write_text(f"id,value\n001,left-{window}\n")
         body = io.StringIO()
         writer = csv.writer(body)
         writer.writerow(["_key", "k0", "v0", "n0"])
-        writer.writerow(["001", "001", "right", "right"])
+        writer.writerow(["001", "001", f"right-{window}", f"right-{window}"])
         prefix = right_sample_prefix("p", window)
         store.put_bytes(prefix + "rows.csv.gz", gzip.compress(body.getvalue().encode()))
         store.put_json(
@@ -3718,16 +3717,28 @@ def test_only_first_differing_vintage_publishes_samples_and_preserves_raw_csv(tm
                 "right_file": "rows.csv.gz",
             },
         )
-    prefix = "results/report/differences/2026-01-01/"
-    store.put_json(prefix + "sample.json", {"pair": "p", "vintage": "2026-01-01"})
+    selected = sample_partitions[0] if sample_partitions else "2026-01-01"
+    prefix = "results/report/differences/"
+    store.put_json(prefix + "sample.json", {"pair": "p", "vintage": selected})
     store.put_bytes(prefix + "right.csv", b"id,value\n001,right\n")
     assert publish_difference_samples(store, tmp_path, "p") == 1
-    assert store.exists(prefix + "samples.xlsx")
+    assert store.exists(prefix + "diff_value.csv")
     assert store.exists(prefix + "left.csv")
     assert store.exists(prefix + "right.csv")
     assert store.exists(prefix + "sample.json")
     assert not store.list_keys("results/report/differences/2026-02-01/")
     assert not store.list_keys(right_sample_prefix("p", "2026-02-01"))
+    assert not store.list_keys("results/report/differences/2026-01-01/")
+    assert list(
+        csv.reader(io.StringIO(store.get_bytes(prefix + "diff_value.csv").decode("utf-8-sig")))
+    ) == [
+        ["id", "value", "", "", "value"],
+        ["001", f"left-{selected}", "", "", f"right-{selected}"],
+    ]
+
+    # Repeated publication after staging cleanup preserves the completed report.
+    assert publish_difference_samples(store, tmp_path, "p") == 0
+    assert store.exists(prefix + "diff_value.csv")
 
 
 def test_key_type_sync_skips_unchanged_mappings_and_repairs_date_mapping():
@@ -3817,3 +3828,39 @@ def test_statement_sql_failure_is_compact_but_exception_keeps_full_detail():
     assert str(caught.value) == error
     assert len(messages) == 1 and len(messages[0]) <= 80
     assert "\n" not in messages[0] and messages[0].endswith("...")
+
+
+def test_workbook_sync_checks_mappings_only_for_enabled_pairs(monkeypatch, tmp_path):
+    workbook = tmp_path / "pairs.xlsx"
+    workbook.touch()
+    rows = [
+        {"pair_name": "active", "enabled": True},
+        {"pair_name": "disabled", "enabled": False},
+    ]
+    metadata_updates = []
+    mapping_checks = []
+    monkeypatch.setattr(cli, "read_pair_workbook", lambda _path: rows)
+    monkeypatch.setattr(cli, "changed_pair_configurations", lambda local, _remote: local)
+    monkeypatch.setattr(
+        cli,
+        "upsert_pair_configuration",
+        lambda _sql, _table, changed: (
+            metadata_updates.extend(changed)
+            or {"rows": len(changed), "pairs": [row["pair_name"] for row in changed]}
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "synchronize_key_types",
+        lambda _sql, _catalog, row: mapping_checks.append(row["pair_name"]) or 1,
+    )
+    actual, result = cli.synchronize_pair_workbook(
+        object(),
+        SimpleNamespace(configuration_rows=list),
+        "main.recon.pair_recon_pair_meta",
+        workbook,
+    )
+    assert actual == rows and metadata_updates == rows
+    assert mapping_checks == ["active"]
+    assert result["mapping_rows"] == 1
+    assert result["pairs"] == ["active", "disabled"]

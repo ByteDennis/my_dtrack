@@ -511,3 +511,13 @@ def test_keepcsv_changes_only_diagnostic_settings(common):
     assert kept["keepcsv"] is True and "keepcsv" not in plain
     assert kept["plan_id"] == plain["plan_id"]
     assert common.manifest.planned_unit_ids(kept) == common.manifest.planned_unit_ids(plain)
+
+
+def test_sample_partitions_affect_only_diagnostic_selection(common):
+    plain = common.manifest.build_manifest("run", "p", PAIR, ROW_CHECK)
+    chosen = common.manifest.build_manifest(
+        "run", "p", {**PAIR, "sample_partitions": ["2026-02-01"]}, ROW_CHECK
+    )
+    assert chosen["sample_partitions"] == ["2026-02-01"]
+    assert chosen["plan_id"] == plain["plan_id"]
+    assert common.manifest.planned_unit_ids(chosen) == common.manifest.planned_unit_ids(plain)

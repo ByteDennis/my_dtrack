@@ -192,6 +192,7 @@ def test_setup_assets_are_three_sheet_workbook_and_mapping_notebook():
     assert "rule_type" not in normalization_schema
     assert "updated_at" not in normalization_schema
     assert "('trim', 'all', NULL, NULL, true)" in schema
+    assert "('strip_quotes', 'all', NULL, NULL, true)" in schema
     assert "('lowercase', 'all', NULL, NULL, true)" in schema
     assert "('decimal', 'all', NULL, NULL, true)" in schema
     assert "('strip_datetime', 'all', NULL, NULL, true)" in schema

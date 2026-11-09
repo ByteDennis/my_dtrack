@@ -36,3 +36,34 @@ def test_reset_closes_the_previous_handler_before_deleting_the_log(monkeypatch, 
         )
     finally:
         close_left_logging()
+
+
+def test_compact_console_line_is_bounded_without_shortening_file_record():
+    import logging
+
+    from pair_recon_left.common.runtime.run_logging import (
+        CONSOLE_LOG_FORMAT,
+        LEFT_LOG_FORMAT,
+        ConsoleFormatter,
+        ZonedFormatter,
+    )
+
+    record = logging.LogRecord(
+        "pair_recon.left.col_check",
+        logging.INFO,
+        __file__,
+        1,
+        "backpressure: ready_unclaimed=%d, wip=%d",
+        (256, 200),
+        None,
+    )
+    record.console_message = "col_check: wait R\n" + "x" * 120
+    console = ConsoleFormatter(CONSOLE_LOG_FORMAT, "UTC").format(record)
+    assert len(console) == 80 and console.endswith("...") and "\n" not in console
+    full = ZonedFormatter(LEFT_LOG_FORMAT, "UTC").format(record)
+    assert "backpressure: ready_unclaimed=256, wip=200" in full
+    assert "pair_recon.left.col_check" in full
+    ordinary = logging.LogRecord("pair_recon.left", logging.INFO, __file__, 1, "ordinary", (), None)
+    assert ConsoleFormatter(CONSOLE_LOG_FORMAT, "UTC").format(ordinary) == ZonedFormatter(
+        CONSOLE_LOG_FORMAT, "UTC"
+    ).format(ordinary)

@@ -88,6 +88,7 @@ RUN_DEFAULT_FIELDS = {
     "excluded_partitions",
     "excluded_columns",
     "sample_columns",
+    "sample_partitions",
     "vintage_sample_size",
     "vintage_values",
     "data_type",
@@ -98,6 +99,7 @@ RUN_DEFAULT_LISTS = (
     "excluded_partitions",
     "excluded_columns",
     "sample_columns",
+    "sample_partitions",
     "vintage_values",
 )
 RUN_DEFAULT_WORKERS = ("left_workers", "right_workers", "sample_rows")
@@ -179,6 +181,14 @@ FIELD_GUIDE = (
         "comma list or JSON array",
         "Left column names omitted from column comparison.",
         "COMMENTS, INTERNAL_NOTE",
+    ),
+    (
+        "pairs",
+        "run_defaults_json.sample_partitions",
+        "optional",
+        "comma list or JSON array",
+        "Vintage IDs eligible for difference samples, in preference order; blank picks the first differing vintage.",
+        "2026-01-01, 2026-02-01",
     ),
     (
         "pairs",

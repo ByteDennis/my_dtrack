@@ -1,6 +1,8 @@
 import json
 import os
+from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,53 @@ _PRIVATE = ("password", "secret", "token", "credential")
 OUTPUT_DIR_ENV = "PAIR_RECON_OUTPUT_DIR"
 DEFAULT_OUTPUT_DIR = "outputs"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def column_list(value) -> list[str]:
+    """Convert comma text or a sequence into stripped, unique names in input order."""
+    items = value if isinstance(value, list | tuple) else str(value or "").split(",")
+    return list(dict.fromkeys(str(item).strip() for item in items if str(item).strip()))
+
+
+def _sample_rows(value) -> int:
+    count = int(value)
+    if count < 0:
+        raise ValueError("sample_rows must be a non-negative integer")
+    return count
+
+
+@dataclass(frozen=True)
+class RunOption:
+    default: Any = None
+    parse: Callable[[Any], Any] | None = None
+
+
+# All entries are saved and passed directly to Pair configuration. A parser marks
+# options read without a prompt; interactive options keep their CLI handling.
+RUN_OPTIONS = {
+    "sample": RunOption(),
+    "use_modular": RunOption(),
+    "normalization_rules": RunOption(),
+    "audit": RunOption(),
+    "sample_rows": RunOption(50, _sample_rows),
+    "excluded_columns": RunOption(),
+    "sample_columns": RunOption((), column_list),
+    "sample_partitions": RunOption((), column_list),
+}
+
+
+def read_run_options(defaults: dict[str, Any]) -> dict[str, Any]:
+    """Read automatic options after resolving source precedence, preserving explicit values."""
+    return {
+        name: option.parse(defaults.get(name, option.default))
+        for name, option in RUN_OPTIONS.items()
+        if option.parse is not None
+    }
+
+
+def select_run_options(values: dict[str, Any]) -> dict[str, Any]:
+    """Select supplied direct options for both saved settings and Pair configuration."""
+    return {name: deepcopy(values[name]) for name in RUN_OPTIONS if name in values}
 
 
 def load_environment(root: str | Path | None = None) -> Path | None:
@@ -124,21 +173,7 @@ def run_config(
     selected.pop("run_mode", None)
     partition = answers.get("partition", selected.get("partition", "day"))
     selected["partition"] = partition
-    selected.update(
-        {
-            key: answers[key]
-            for key in (
-                "sample",
-                "use_modular",
-                "normalization_rules",
-                "audit",
-                "sample_rows",
-                "excluded_columns",
-                "sample_columns",
-            )
-            if key in answers
-        }
-    )
+    selected.update(select_run_options(answers))
     checks = list(answers.get("checks", ()))
     selected["checks"] = checks
     statistics = [item for item in checks if item != "row_count"]

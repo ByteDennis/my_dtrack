@@ -576,6 +576,498 @@ for call in sql.execute.call_args_list:
     print("pair_name:", parameters["pair_name"])'''),
 ])
 
+NOTEBOOKS["03_cli_prompt_defaults.ipynb"]["cells"][0] = markdown(
+    "Explore CLI prompts, workbook synchronization and run-default precedence. Examples use local values; no Databricks connection is made."
+)
+NOTEBOOKS["03_cli_prompt_defaults.ipynb"]["cells"].extend([
+    markdown("## Resolve saved and catalog defaults\n\nSaved values normally take precedence. When catalog metadata is authoritative, catalog-owned values and run defaults take precedence, including an absent resettable `use_modular`."),
+    code('''from pprint import pprint
+from pair_recon.app.config import resolve_run_defaults
+
+metadata = {"partition": "month", "_run_defaults": {"sample": 0.1}}
+saved = {"partition": "day", "sample": 0.5, "use_modular": True}
+print("metadata:"); pprint(metadata)
+print("saved:"); pprint(saved)
+print("workbook precedence:"); pprint(resolve_run_defaults(metadata, saved))
+print("catalog precedence:"); pprint(resolve_run_defaults(metadata, saved, catalog_authoritative=True))'''),
+    markdown("## Workbook synchronization skips disabled pair mappings\n\nA temporary file and mocks show which rows are synchronized; the example does not connect to a database."),
+    code('''from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import Mock, patch
+
+rows = [{"pair_name": "ON", "enabled": True}, {"pair_name": "OFF", "enabled": False}]
+catalog = Mock()
+catalog.configuration_rows.return_value = []
+with TemporaryDirectory() as directory:
+    path = Path(directory) / "pairs.xlsx"
+    path.touch()
+    with patch("pair_recon.app.cli.read_pair_workbook", return_value=rows), \\
+         patch("pair_recon.app.cli.changed_pair_configurations", return_value=[]), \\
+         patch("pair_recon.app.cli.synchronize_key_types", return_value=1) as sync:
+        loaded, result = synchronize_pair_workbook(Mock(), catalog, "demo.recon.pair_recon_pair_meta", path)
+        print("input pairs:", [row["pair_name"] for row in loaded])
+        print("mapping rows:", result["mapping_rows"])
+        print("synchronized pairs:", [call.args[2]["pair_name"] for call in sync.call_args_list])'''),
+])
+
+NOTEBOOKS["03_cli_prompt_defaults.ipynb"]["cells"].extend([
+    markdown("## `PromptSession` input methods\n\nMock the terminal helpers so the example is deterministic. The recorded answers demonstrate `begin`, `answer`, `select`, `select_many`, `confirm`, and `worker_budget`."),
+    code('''from unittest.mock import patch
+
+session = PromptSession()
+session.begin()
+with patch("pair_recon.app.cli.ask", return_value="alex") as ask_mock, \\
+     patch("pair_recon.app.cli.choose", return_value="orders") as choose_mock, \\
+     patch("pair_recon.app.cli.choose_many", return_value=["min", "max"]) as many_mock, \\
+     patch("pair_recon.app.cli.yes_no", return_value=True) as confirm_mock, \\
+     patch("pair_recon.app.cli.positive_int", return_value=4) as workers_mock:
+    print("answer:", session.answer("Owner", "guest"), "input:", ask_mock.call_args)
+    print("select:", session.select("Pair", ["orders", "items"], "items"), "input:", choose_mock.call_args)
+    print("select_many:", session.select_many("Checks", ["min", "max"], ["min"]), "input:", many_mock.call_args)
+    print("confirm:", session.confirm("Continue", False), "input:", confirm_mock.call_args)
+    print("worker_budget:", session.worker_budget("Workers", 2), "input:", workers_mock.call_args)
+print("stored answers:", session.answers)
+print("cursor before begin:", session.cursor)
+session.begin()
+print("cursor after begin:", session.cursor)'''),
+    markdown("## Persist settings and select the latest failed run\n\nTransient command flags are removed from saved settings. A mock catalog supplies the previous run."),
+    code('''from unittest.mock import Mock
+settings = {"pair": "orders", "owner": "alex", "run_id": "old", "force": True, "_internal": 1}
+print("input settings:", settings)
+print("persistent settings:", persistent_settings(settings))
+catalog = Mock()
+catalog.latest_run.return_value = {"run_id": "orders-alex-20261109", "state": "failed"}
+print("latest run:", catalog.latest_run.return_value)
+print("action:", select_last_failed_run(settings, catalog))
+print("selected run:", settings["run_id"])
+print("catalog input:", catalog.latest_run.call_args)'''),
+    markdown("## Synchronize key types without a database\n\nThe mock catalog provides existing mappings; the mocked upsert exposes the exact rows and overwrite mode that would be sent."),
+    code('''from unittest.mock import Mock, patch
+catalog = Mock()
+catalog.column_map_table = "demo.recon.pair_recon_column_map"
+catalog.column_mappings.return_value = []
+row = {"pair_name": "orders", "key_columns": ["ORDER_ID[numeric]"], "left_date_col": "ORDER_DT", "right_date_col": "order_date"}
+with patch("pair_recon.app.cli.upsert_column_mappings") as upsert:
+    count = synchronize_key_types(Mock(), catalog, row)
+    print("input:", row)
+    print("changed mappings:", count)
+    print("upsert target:", upsert.call_args.args[1])
+    print("upsert pair:", upsert.call_args.args[2])
+    print("upsert mappings:", upsert.call_args.args[3])
+    print("upsert options:", upsert.call_args.kwargs)'''),
+    markdown("## Add mismatched partitions\n\nMock the error parser to make the partition input explicit; the real function updates both settings and pair configuration."),
+    code('''settings = {"pair": "orders", "excluded_partitions": ["2026-01-01"]}
+config = {"pairs": {"orders": {}}}
+with patch("pair_recon.app.cli.mismatched_partitions", return_value=["2026-01-02"]):
+    print("input settings:", settings)
+    print("added:", add_mismatched_partitions(settings, config, RuntimeError("toy row mismatch")))
+    print("updated settings:", settings)
+    print("updated configuration:", config)'''),
+])
+
+NOTEBOOKS["25_mapping_discovery.ipynb"]["cells"][0] = markdown(
+    "Explore column discovery and mapping updates. The example uses a mock SQL client and does not contact a database."
+)
+NOTEBOOKS["25_mapping_discovery.ipynb"]["cells"].extend([
+    markdown("## Replace or patch mappings\n\n`overwrite=True` replaces the entire mapping table, including rows for other pairs. `overwrite=False` patches the selected pair using MERGE. This example only records SQL calls."),
+    code('''from unittest.mock import Mock
+import json
+
+mapping = [{"left_column": "ORDER_ID", "right_column": "order_id", "data_type": "numeric"}]
+for overwrite in (True, False):
+    sql = Mock()
+    result = upsert_column_mappings(sql, "demo.recon.pair_recon_column_map", "ORDERS", mapping, overwrite=overwrite)
+    statement, parameters = sql.execute.call_args.args
+    print("input:", mapping, "overwrite:", overwrite)
+    print("result:", result)
+    print("SQL:", statement.splitlines()[0])
+    print("SQL input:", json.loads(parameters["mappings_json"]))
+
+sql = Mock()
+result = upsert_column_mappings(sql, "demo.recon.pair_recon_column_map", "ORDERS", [], overwrite=False)
+print("empty patch:", result["rows"], "SQL calls:", sql.execute.call_count)'''),
+])
+
+NOTEBOOKS["04_launch_lifecycle.ipynb"]["cells"][0] = markdown(
+    "Explore the local launcher, the Right job monitor, and cooperative stop handling. The example simulates a Right failure locally."
+)
+NOTEBOOKS["04_launch_lifecycle.ipynb"]["cells"].extend([
+    markdown("## A Right failure triggers the local stop signal\n\nA mock remote job fails immediately. The monitor runs in a local thread; no Databricks job is submitted."),
+    code('''from unittest.mock import Mock
+from pair_recon_left.common.runtime.stop import StopSignal, StopRequested
+
+remote = Mock()
+remote.run_id = 123
+remote.result.side_effect = RuntimeError("toy Right failure")
+stop = StopSignal()
+monitor = RightJobMonitor(remote, stop=stop).start()
+monitor.done.wait(timeout=5)
+print("run id:", monitor.run_id)
+print("monitor state:", monitor.final_state)
+print("stop triggered:", stop.triggered)
+try:
+    stop.check()
+except StopRequested as error:
+    print("Left sees:", type(error).__name__, str(error))'''),
+])
+
+NOTEBOOKS["08_dates_partitions.ipynb"]["cells"].extend([
+    markdown("## Date and partition helpers\n\nThese examples show concrete date values and generated SQL; no database is contacted."),
+    code('''print("canonical_date:", "2026-01-02", "->", canonical_date("2026-01-02"))
+print("partition_key:", "2026-01-02", "month ->", partition_key("2026-01-02", "month"))
+print("partition_where:", partition_where("ORDER_DT", ["2026-01-02"], dialect="oracle", date_type="date", grain="day"))
+print("bounds_where:", bounds_where("ORDER_DT", dialect="oracle", date_type="date", from_date="2026-01-01", to_date="2026-01-31"))'''),
+    markdown("## Date type methods\n\nEach object receives a representative value and emits its portable specification, normalized value, partition key and SQL. Detection resolves `auto` formats from concrete values."),
+    code('''examples = [
+    (NativeDateType(), "2026-01-02"),
+    (StringDateType(format="compact"), "20260102"),
+    (NumericDateType(format="day"), 20260102),
+    (SasDateType(format="days"), 24108),
+]
+for date_type, value in examples:
+    print("\\nclass:", type(date_type).__name__, "input:", value)
+    print("spec:", date_type.spec(portable=True))
+    print("normalize:", date_type.normalize(value))
+    try:
+        print("partition_key:", date_type.partition_key(value))
+    except ValueError as error:
+        print("partition_key error:", str(error))
+    print("predicate:", date_type.predicate("ORDER_DT", "oracle"))
+    print("normalize_sql:", date_type.normalize_sql("ORDER_DT", "oracle"))
+    print("day:", date_type.day("ORDER_DT", "oracle"))
+for date_type, values in [(StringDateType(), ["20260102"]), (SasDateType(), [24108])]:
+    print("detect:", type(date_type).__name__, values, "->", date_type.detect(values).spec(portable=True))'''),
+])
+
+DESCRIPTIONS = {
+    "00": "Follow the CLI, Left and Right execution entry points.",
+    "05": "Inspect Volume storage and its retry behavior without a remote connection.",
+    "06": "Explore protocol paths and batch documents shared by Left and Right.",
+    "07": "Inspect Left data sources and their query interfaces.",
+    "08": "Explore date types, partition keys and date predicates.",
+    "09": "Explore key normalization and stable composite hashes.",
+    "10": "Generate sampling SQL for different database dialects.",
+    "11": "Inspect row checks, sampling plans and manifests.",
+    "12": "Inspect the Left column pipeline and row-result gate.",
+    "13": "Explore local statistics and DuckDB execution.",
+    "14": "Explore cooperative stop signals, heartbeats and SQL auditing.",
+    "15": "Explore Right-side partition reconciliation and row gates.",
+    "16": "Inspect Right-side column scheduling and statistics comparison.",
+    "17": "Inspect CSV and Spark target interfaces.",
+    "18": "Explore attribute checks and row-difference reports.",
+    "19": "Inspect report generation and catalog publishing.",
+    "20": "Inspect catalog operations and progress snapshots.",
+    "21": "Inspect local reconciliation and difference samples.",
+    "22": "Explore checkpoint reuse and failed-run selection.",
+    "23": "Explore timing, smoke checks and batch execution.",
+    "24": "Inspect SAS sample preparation and bundle export.",
+    "26": "Inspect Databricks SDK integration; the live example is disabled by default.",
+    "27": "Read the Databricks notebook entry point without executing it locally.",
+    "28": "Explore configuration loading and validation.",
+    "29": "Inspect query windows and date SQL platforms.",
+    "30": "Inspect Outlook notifications and Volume logging.",
+    "31": "Inspect Databricks deployment and job operations.",
+    "32": "Inspect Databricks workspace and cache operations.",
+}
+
+TOY_EXAMPLES = {
+    "00": '''from datetime import datetime, timezone
+from pair_recon.app.runner import make_run_id
+print("input:", "ORDERS", "alex", "UTC", "2026-01-02")
+print("run id:", make_run_id("ORDERS", "alex", "UTC", now=datetime(2026, 1, 2, tzinfo=timezone.utc)))''',
+    "05": '''calls = []
+def operation():
+    calls.append("attempt")
+    if len(calls) == 1:
+        raise ConnectionError("temporary")
+    return "ok"
+from unittest.mock import patch
+with patch("pair_recon.core.backends.store.time.sleep"):
+    print("result:", retry_transient("toy", operation))
+print("attempts:", len(calls))''',
+    "06": '''from pprint import pprint
+units = [{"unit_id": "ORDERS:2026-01:AMOUNT", "pair": "ORDERS", "window": "2026-01"}]
+print("input units:", units)
+pprint(unit_batch_document(1, units, left_ready_at="2026-01-01T00:00:00Z"))
+pprint(result_batch_document([{"unit_id": units[0]["unit_id"], "verdict": "match"}], committed_at="2026-01-01T00:01:00Z"))''',
+    "07": '''config = {"source": "csv", "path": "orders.csv"}
+source = source_from_config(config)
+print("input:", config)
+print("source type:", type(source).__name__)
+print("source config:", source.config)''',
+    "08": '''counts = {"2026-01-01": 2, "2026-01-02": 3, "2026-02-01": 4}
+print("input:", counts)
+print("monthly:", aggregate_partition_counts(counts, "month"))
+print("bucket:", bucket_date("2026-01-02", "month"))''',
+    "09": '''for value in ("0035", "35.000", "0.0050100000"):
+    print(repr(value), "->", canonical_numeric(value))
+print("date text:", strip_datetime("2026-01-01 12:30:00"))''',
+    "11": '''from pprint import pprint
+for raw in (0.1, 100):
+    try:
+        print("sample input:", raw); pprint(sample_plan(raw))
+    except (TypeError, ValueError) as error:
+        print(type(error).__name__, str(error))
+print("statistics input:", ["min", "max"])
+print("statistics output:", statistics_plan(["min", "max"]))''',
+    "12": '''manifests = [{"pair": "ORDERS", "windows": [{"bucket": "2026-01"}, {"bucket": "2026-02"}]}, {"pair": "ITEMS", "windows": [{"bucket": "2026-01"}]}]
+print("input:", manifests)
+print("round robin:", [(m["pair"], w["bucket"]) for m, w in iter_windows_round_robin(manifests)])''',
+    "13": '''from pprint import pprint
+import pandas as pd
+values = pd.Series(["10", "20", None])
+print("input:", values.tolist())
+print("inferred:", infer_column_type(2, 2, 2))
+pprint(column_statistics(values))''',
+    "14": '''from unittest.mock import Mock
+from pair_recon_left.common.runtime.stop import StopRequested
+handle = Mock()
+stop = StopSignal()
+try:
+    with stop.guard(handle):
+        print("initial:", stop.triggered)
+        stop.trigger("toy failure")
+        print("cancel calls:", handle.cancel.call_count)
+        stop.check()
+except StopRequested as error:
+    print(type(error).__name__, str(error))''',
+    "15": '''from pprint import pprint
+left = {"2026-01-01": 2, "2026-01-02": 1}
+right = {"2026-01-01": 2, "2026-01-02": 3}
+print("left:", left, "right:", right)
+partitions = reconcile_partitions(left, right)
+pprint(partitions)
+print("summary:"); pprint(summarize_partitions(partitions))
+print("gate:"); pprint(evaluate_gate(partitions))''',
+    "16": '''from pprint import pprint
+left = {"n_total": 2}
+right = {"n_total": 3}
+print("input:", left, right)
+pprint(compare_statistics(pair="ORDERS", window="2026-01", column="AMOUNT", left=left, right=right, statistics=["n_total"]))''',
+    "17": '''from pair_recon_left.common.sql.dates import resolve_date_type
+date_type = resolve_date_type("date")
+print("input:", "ORDER_DT", "date", date_type.spec(), "left")
+print("result:", check_date_column("ORDER_DT", "date", date_type, "left"))''',
+    "18": '''for name in attribute_check_names():
+    check = get_attribute_check(name)
+    print("input:", name, "output:", type(check).__name__)''',
+    "19": '''for outcome in ({"state": "matched"}, {"state": "different"}, {"state": "failed"}):
+    print("input:", outcome, "output:", run_state(outcome))''',
+    "20": '''from unittest.mock import Mock
+store = Mock()
+store.exists.return_value = False
+store.list_keys.return_value = []
+snapshot = progress_snapshot(store, "orders-alex-20261109", "orders", "UTC")
+print("input:", {"run_id": "orders-alex-20261109", "pair": "orders", "timezone": "UTC"})
+print("snapshot:", {key: snapshot[key] for key in ("state", "units_expected", "units_ready", "units_complete", "units_failed")})''',
+    "21": '''from pathlib import Path
+from tempfile import TemporaryDirectory
+with TemporaryDirectory() as directory:
+    print("input:", {"run_dir": "temporary directory", "pair": "ORDERS"})
+    print("cleanup result:", cleanup_left_pull_files(Path(directory), "ORDERS"))''',
+    "22": '''from unittest.mock import Mock
+catalog = Mock()
+catalog.latest_run.return_value = {"run_id": "orders-alex-20261109", "state": "failed"}
+settings = {"pair": "orders", "owner": "alex"}
+print("input:", settings, "latest:", catalog.latest_run.return_value)
+print("action:", select_last_failed_run(settings, catalog))
+print("updated settings:", settings)
+print("catalog call:", catalog.latest_run.call_args)''',
+    "23": '''for returncode, state in [(0, "matched"), (0, "different"), (1, "failed")]:
+    print("input:", returncode, state, "output:", classify(returncode, state))''',
+    "24": '''pair = {"left": {"source": "csv"}}
+print("pair:", pair)
+print("result:", prepare_left_sample("ORDERS", pair, {}))''',
+    "25": '''left = ["ORDER_ID", "AMOUNT", "LEFT_ONLY"]
+right = ["order_id", "AMOUNT", "RIGHT_ONLY"]
+print("left:", left, "right:", right)
+print("matched:", automatch_columns(left, right))''',
+    "26": '''from unittest.mock import Mock
+client = Mock()
+print("input job reference:", "123")
+print("job id:", resolve_job_id(client, "123"))
+print("SDK list calls:", client.jobs.list.call_count)''',
+    "28": '''from pathlib import Path
+from tempfile import TemporaryDirectory
+with TemporaryDirectory() as directory:
+    path = Path(directory) / "defaults.yaml"
+    data = {"owner": "alex", "password": "secret"}
+    print("input keys:", sorted(data))
+    print("saved:", save_defaults(path, data))
+    print("loaded:", load_defaults(path))''',
+    "29": '''for dialect in ("oracle", "spark", "hadoop", "duckdb"):
+    platform = date_platform(dialect)
+    print("input:", dialect, "platform:", type(platform).__name__)''',
+    "30": '''from unittest.mock import Mock
+client = Mock()
+message = client.Dispatch.return_value.CreateItem.return_value
+result = send_outlook("alex@example.com; sam@example.com", "Toy report", "Hello", client=client)
+print("recipients:", message.To)
+print("subject:", message.Subject, "body:", message.Body)
+print("output:", result, "send calls:", message.Send.call_count)''',
+    "31": '''spec = job_spec("toy-job", "/Shared/pair_recon/notebook", "cluster-123")
+print("job spec:", spec)''',
+    "32": '''result = {"pair": "ORDERS", "artifacts": [], "total_artifacts": 0, "total_size_bytes": 0}
+print("input:", result)
+print("formatted output:\\n" + format_explain(result))''',
+}
+
+for name, document in NOTEBOOKS.items():
+    prefix = name[:2]
+    if prefix in DESCRIPTIONS:
+        document["cells"][0] = markdown(DESCRIPTIONS[prefix])
+    if prefix in TOY_EXAMPLES:
+        document["cells"].extend([
+            markdown("## Toy example\n\nRun this cell locally to inspect the concrete inputs and outputs."),
+            code(TOY_EXAMPLES[prefix]),
+        ])
+
+NOTEBOOKS["06_protocol_files.ipynb"]["cells"].extend([
+    markdown("## Protocol reads and writes with an in-memory store\n\nThe fake store prints the keys and documents that would be persisted. It supports the same methods used by these helpers and performs no network calls."),
+    code('''from pprint import pprint
+
+class ToyStore:
+    def __init__(self):
+        self.documents = {}
+        self.files = {}
+    def exists(self, key):
+        return key in self.documents
+    def get_json(self, key):
+        return self.documents[key]
+    def put_json(self, key, value):
+        self.documents[key] = value
+        return key
+    def list_keys(self, prefix):
+        return sorted(key for key in self.documents if key.startswith(prefix))
+    def put_bytes(self, key, body, *, content_type=None):
+        self.files[key] = body
+        return key
+
+store = ToyStore()
+print("plan path:", plan_path("ORDERS"))
+print("mapping path:", mapping_path("ORDERS"))
+print("initial plans:", list_plans(store))
+print("initial units:", list_units(store))
+print("initial results:", list_results(store))
+print("initial failures:", list_failures(store))
+print("run status key:", write_run_status(store, {"state": "running"}, timezone_name="UTC"))
+print("left state key:", write_left_state(store, {"col_check_closed_at": "2026-01-01T00:00:00Z", "pairs": ["ORDERS"], "expected_units": 0}, timezone_name="UTC"))
+print("right state key:", write_right_state(store, {"phase": "waiting"}, timezone_name="UTC"))
+print("close document:"); pprint(col_check_close_document(store))
+status_key = refresh_units_status(store)
+print("units status key:", status_key)
+print("units status CSV:", store.files[status_key].decode().strip())
+print("stored JSON documents:"); pprint(store.documents)'''),
+])
+
+NOTEBOOKS["05_volume_store.ipynb"]["cells"].extend([
+    markdown("## `ApiVolumeStore` and Left store with a fake Files API\n\nThe fake records byte payloads in memory. Each input and returned value is printed; no Databricks API is called."),
+    code('''import io
+from types import SimpleNamespace
+
+class FakeFiles:
+    def __init__(self):
+        self.data = {}
+    def create_directory(self, path):
+        pass
+    def upload(self, path, content, overwrite):
+        self.data[path] = content.read()
+    def download(self, path):
+        if path not in self.data:
+            raise FileNotFoundError(path)
+        return SimpleNamespace(contents=io.BytesIO(self.data[path]))
+    def get_metadata(self, path):
+        if path not in self.data:
+            raise FileNotFoundError(path)
+        return SimpleNamespace(path=path)
+    def list_directory_contents(self, path):
+        return [SimpleNamespace(path=key, is_directory=False) for key in self.data if key.startswith(path.rstrip("/") + "/")]
+    def delete(self, path):
+        del self.data[path]
+
+files = FakeFiles()
+store = ApiVolumeStore("/Volumes/demo/recon/runs", files=files)
+child = store.child("toy-run")
+print("child root:", child.root)
+print("put bytes:", child.put_bytes("sample.txt", b"hello"))
+print("get bytes:", child.get_bytes("sample.txt"))
+print("put json:", child.put_json("state.json", {"state": "ready"}))
+print("get json:", child.get_json("state.json"))
+print("exists:", child.exists("state.json"), child.exists("missing.json"))
+print("list keys:", child.list_keys(""))
+print("delete keys:", child.delete_keys(["sample.txt"]))
+print("clear remaining:", child.clear())
+print("remaining fake files:", files.data)
+left = LeftVolumeStore("/Volumes/demo/recon/left", files=files)
+print("Left put:", left.put_bytes("toy.txt", b"left"))
+print("Left get:", left.get_bytes("toy.txt"), "exists:", left.exists("toy.txt"))
+print("failure streak after successful calls:", volume_failure_streak())'''),
+    markdown("## Right `VolumeStore` with a temporary directory\n\nRight accesses files through a mounted directory. A temporary local directory makes the filesystem behavior visible without using a real Volume."),
+    code('''from tempfile import TemporaryDirectory
+with TemporaryDirectory() as directory:
+    right = RightVolumeStore(directory)
+    print("input bytes:", b"right")
+    print("put:", right.put_bytes("toy.txt", b"right"))
+    print("get:", right.get_bytes("toy.txt"))
+    print("exists:", right.exists("toy.txt"), right.exists("missing.txt"))'''),
+])
+
+NOTEBOOKS["04_launch_lifecycle.ipynb"]["cells"].extend([
+    markdown("## Right job parameters and outcome\n\nInputs are ordinary dictionaries. A mock Jobs API supplies the notebook result as JSON."),
+    code('''from pprint import pprint
+from types import SimpleNamespace
+from unittest.mock import Mock
+from datetime import datetime, timezone
+
+settings = {"volume_root": "/Volumes/demo/recon/runs", "owner": "alex", "timezone": "UTC", "pair_table": "demo.recon.pair_recon_pair_meta", "status_table": "demo.recon.pair_recon_run_status", "error_table": "demo.recon.pair_recon_run_error", "right_workers": 2}
+run_id = make_run_id("orders", "alex", "UTC", now=datetime(2026, 1, 2, tzinfo=timezone.utc))
+print("run id input:", "orders", "alex", "UTC", "2026-01-02")
+print("run id output:", run_id)
+print("settings:"); pprint(settings)
+print("job parameters:"); pprint(right_job_params(settings, "orders", run_id, {"sample": 0.1}))
+jobs = Mock()
+jobs.get_run_output.return_value = SimpleNamespace(notebook_output=SimpleNamespace(result='{"state":"matched","count":3}'))
+run = SimpleNamespace(run_id=42, tasks=[])
+print("notebook output input:", jobs.get_run_output.return_value.notebook_output.result)
+print("run outcome:", run_outcome(jobs, run))
+print("SDK call:", jobs.get_run_output.call_args)
+store = Mock()
+record_runtime_failure(store, "orders", "right-job", RuntimeError("toy failure"))
+print("failure artifact input:", store.put_json.call_args)'''),
+    markdown("## Monitor cancellation and error propagation\n\nThese objects are local. `request_cancel` marks a caller-initiated cancellation; `failure`, `raise_if_failed`, and `result` expose a detected failure."),
+    code('''from unittest.mock import Mock
+remote = Mock()
+remote.run_id = 123
+monitor = RightJobMonitor(remote)
+print("failure before error:", monitor.failure())
+monitor.request_cancel()
+print("cancel requested:", monitor.cancel_requested.is_set())
+monitor.error = RuntimeError("toy failure")
+monitor.done.set()
+print("failure:", monitor.failure())
+for method in (monitor.raise_if_failed, monitor.result):
+    try:
+        method()
+    except RuntimeError as error:
+        print(method.__name__, "raised:", str(error))'''),
+    markdown("## `StageWatchdog.check`, `start`, and `close`\n\nThe mock store returns no state; timeouts are disabled for a deterministic no-stall example. The daemon is closed immediately."),
+    code('''from unittest.mock import Mock
+from pair_recon_left.common.runtime.stop import StopSignal
+store = Mock()
+store.exists.return_value = False
+watchdog = StageWatchdog(store, StopSignal(), interval=60)
+watchdog.fetch_stall = 0
+watchdog.first_result = 0
+watchdog.state_stall = 0
+watchdog.volume_failures = 0
+print("check output:", watchdog.check(now=100))
+watchdog.start()
+print("thread alive:", watchdog.thread.is_alive())
+watchdog.close()
+watchdog.thread.join(timeout=1)
+print("thread stopped:", not watchdog.thread.is_alive())'''),
+])
+
 
 def main() -> None:
     HERE.mkdir(parents=True, exist_ok=True)

@@ -35,6 +35,15 @@ class ZonedFormatter(logging.Formatter):
         return super().format(record)
 
 
+class ConsoleFormatter(ZonedFormatter):
+    def format(self, record):
+        compact = getattr(record, "console_message", None)
+        if compact is not None:
+            message = " ".join(compact.split())
+            return message if len(message) <= 80 else message[:77] + "..."
+        return super().format(record)
+
+
 def get_logger(name: str | None = None) -> logging.Logger:
     return logging.getLogger(LOGGER_NAME if not name else f"{LOGGER_NAME}.{name}")
 
@@ -53,7 +62,7 @@ def configure_console_logging(level: str, timezone_name: str | None = None) -> l
     resolved = getattr(logging, level.upper(), logging.INFO)
     handler = logging.StreamHandler(sys.stderr)
     handler.setLevel(resolved)
-    handler.setFormatter(ZonedFormatter(CONSOLE_LOG_FORMAT, timezone_name))
+    handler.setFormatter(ConsoleFormatter(CONSOLE_LOG_FORMAT, timezone_name))
     handler.addFilter(_ConsoleFilter())
     handler.pair_recon_console_handler = True
     logger.addHandler(handler)

@@ -24,7 +24,7 @@ NORMALIZATION_TABLE = "pair_recon_normalization"
 # Catalog-owned Pair settings that also provide run defaults.
 CATALOG_RUN_DEFAULT_FIELDS = ("partition", "vintage", "excluded_columns")
 # Missing catalog values explicitly clear a previously saved local selection.
-CATALOG_RESETTABLE_RUN_DEFAULT_FIELDS = ("use_modular",)
+CATALOG_RESETTABLE_RUN_DEFAULT_FIELDS = ("use_modular", "sample_partitions")
 
 TABLE_NAMES = (
     PAIR_META_TABLE,

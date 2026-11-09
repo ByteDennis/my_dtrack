@@ -547,7 +547,7 @@ def test_system_normalization_rules():
     )
     target = SparkTarget(spark, ORDERS)
     target.window_statistics(_manifest({"mode": "all"}), {"partitions": ["2026-01-01"]})
-    assert "lower(trim(cast(`status` as string)))" in spark.statements[1]
+    assert "lower(regexp_replace(trim(cast(`status` as string))" in spark.statements[1]
     assert "[0-9]{4}-[0-9]{2}-[0-9]{2}" in spark.statements[1]
 
 

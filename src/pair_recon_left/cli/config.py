@@ -271,6 +271,14 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             pair["sample_columns"] = list(dict.fromkeys(sample_columns))
         else:
             pair.pop("sample_columns", None)
+        sample_partitions = pair.get("sample_partitions") or []
+        if not isinstance(sample_partitions, list) or not all(
+            isinstance(value, str) and value.strip() for value in sample_partitions
+        ):
+            raise TypeError(f"{name}: sample_partitions must be a list of vintage IDs")
+        pair["sample_partitions"] = list(
+            dict.fromkeys(value.strip() for value in sample_partitions)
+        )
         overrides = pair.get("col_type_overrides") or {}
         if set(overrides) - set(pair["col_map"]) or set(overrides.values()) - COL_TYPES:
             raise ValueError(f"{name}: col_type_overrides maps col_map keys to numeric|categorical")

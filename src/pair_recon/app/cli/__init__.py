@@ -39,14 +39,17 @@ from pair_recon_left.common.sql.dates import contiguous_runs, resolve_date_type
 
 from ..catalog import Catalog
 from ..config import (
+    column_list,
     env_value,
     load_config,
     load_defaults,
     load_environment,
     local_output_root,
+    read_run_options,
     resolve_run_defaults,
     run_config,
     save_defaults,
+    select_run_options,
 )
 from ..runner import (
     StatementSql,
@@ -267,12 +270,6 @@ def metadata_setting_text(value, *, automatic=False) -> str:
     return str(value)
 
 
-# >>> comma text or a list into stripped, deduplicated column names <<< #
-def column_list(value) -> list[str]:
-    items = value if isinstance(value, list | tuple) else str(value or "").split(",")
-    return list(dict.fromkeys(str(item).strip() for item in items if str(item).strip()))
-
-
 def excluded_partition_values(value, date_type=None, partition: str = "day") -> list[str]:
     if value in (None, ""):
         return []
@@ -426,7 +423,7 @@ def synchronize_pair_workbook(sql, catalog, pair_table: str, workbook_path: str 
         if changed
         else {"pair_meta_table": pair_table, "rows": 0, "sql_rows": 0, "pairs": []}
     )
-    mapping_rows = sum(synchronize_key_types(sql, catalog, row) for row in rows)
+    mapping_rows = sum(synchronize_key_types(sql, catalog, row) for row in rows if row["enabled"])
     return rows, {**result, "mapping_rows": mapping_rows, "source": str(source)}
 
 
@@ -444,8 +441,10 @@ def synchronize_key_types(sql, catalog, row: dict) -> int:
     left_date = str(row.get("left_date_col") or "").strip()
     right_date = str(row.get("right_date_col") or "").strip()
     left_date_folded = left_date.casefold()
-    if left_date and right_date and not any(
-        str(name).casefold() == left_date_folded for name in types
+    if (
+        left_date
+        and right_date
+        and not any(str(name).casefold() == left_date_folded for name in types)
     ):
         current = existing_folded.get(left_date_folded)
         types[str(current["left_column"]) if current else left_date] = (
@@ -703,18 +702,16 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
             required=False,
         )
     )
-    sample_columns = column_list(run_default("sample_columns", []))
     answers = {
+        **read_run_options(resolved_defaults),
         "partition": partition,
         "checks": selected,
         "sample": sample_value(
             answer("Sample", provenance.get("sample", run_default("sample", "all")))
         ),
-        "sample_rows": int(run_default("sample_rows", 50)),
         "normalization_rules": normalization_rules,
         "audit": confirm("Audit SQL", run_default("audit", False)),
         "excluded_columns": excluded_columns,
-        "sample_columns": sample_columns,
     }
     modular_selector = run_default("use_modular", metadata.get("use_modular"))
     if modular_selector not in (None, ""):
@@ -809,10 +806,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         "timezone": timezone,
         "partition": partition,
         "checks": ",".join(selected),
-        "sample": answers["sample"],
-        "normalization_rules": answers["normalization_rules"],
-        "audit": answers["audit"],
-        "sample_rows": answers["sample_rows"],
+        **select_run_options(answers),
         "sync_remote": sync_remote,
         "work_dir": str(local_output_root(defaults)),
         "progress_interval": defaults.get("progress_interval", 30),
@@ -821,14 +815,10 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         **metadata_settings,
         "_catalog_row": by_name[pair],
     }
-    if modular_selector not in (None, ""):
-        settings["use_modular"] = modular_selector
     for key in (
         "from_date",
         "to_date",
         "excluded_partitions",
-        "excluded_columns",
-        "sample_columns",
         "vintage",
     ):
         if key in answers:

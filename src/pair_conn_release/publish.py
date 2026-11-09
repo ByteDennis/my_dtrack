@@ -17,7 +17,6 @@ RUNTIME_PACKAGES = (
     "pair_recon_right",
 )
 ROOT_FILES = (
-    ".pair_recon.env.example",
     "run.cmd",
     "run.sh",
 )
@@ -33,7 +32,7 @@ Requirements: Python 3.11+, uv, and just.
 Install
 1. Extract the ZIP and open a terminal in the pair_recon folder.
 2. Run: uv sync
-3. Copy .pair_recon.env.example to .pair_recon.env.
+3. Create .pair_recon.env using your organization's connection settings.
 4. Fill .pair_recon.env and setup/pairs.xlsx.
 
 Run

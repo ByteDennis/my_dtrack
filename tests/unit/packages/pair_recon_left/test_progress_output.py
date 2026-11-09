@@ -140,3 +140,33 @@ def test_console_filter_hides_file_only_progress_records():
     assert console_filter.filter(record)
     record.console_silent = True
     assert not console_filter.filter(record)
+
+
+def test_backpressure_waiters_share_one_line_and_clear_it_on_error(monkeypatch):
+    from types import SimpleNamespace
+
+    messages = []
+    bars = []
+    closed = []
+
+    def make_bar(**options):
+        bars.append(options)
+        return SimpleNamespace(
+            set_description_str=lambda message, refresh: messages.append(message),
+            close=lambda: closed.append(True),
+        )
+
+    monkeypatch.setattr(progress, "_interactive_terminal", lambda: True)
+    monkeypatch.setattr(progress, "tqdm", make_bar)
+    status = progress.BackpressureProgress()
+    with pytest.raises(RuntimeError, match="abort"), status:
+        status.update("col_check: wait R | 1s")
+        with status:
+            status.update("col_check: wait R | 2s")
+        assert not closed  # another waiter still owns the same terminal line
+        status.update("x" * 100)
+        raise RuntimeError("abort")
+    assert len(bars) == 1 and closed == [True]
+    assert messages[:2] == ["col_check: wait R | 1s", "col_check: wait R | 2s"]
+    assert len(messages[-1]) == 80 and messages[-1].endswith("...")
+    assert status.bar is None and status.waiters == 0

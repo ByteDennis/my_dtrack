@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import os
 import re
@@ -6,6 +8,7 @@ import time
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from databricks.sdk import WorkspaceClient
@@ -31,7 +34,7 @@ from pair_recon_left.common.checks.col_check import (
     wait_for_row_result,
 )
 from pair_recon_left.common.checks.row_check import reuse_row_check, run_row_check
-from pair_recon_left.common.checks.row_diff import compare_rows, row_difference_workbook
+from pair_recon_left.common.checks.row_diff import compare_rows
 from pair_recon_left.common.model.protocol import (
     DIAGNOSTIC_PREFIX,
     REPORT_PREFIX,
@@ -56,6 +59,7 @@ from pair_recon_left.common.model.protocol import (
     right_stats_path,
     row_result_path,
     row_retry_path,
+    select_sample_window,
     write_right_state,
     write_run_status,
 )
@@ -861,14 +865,6 @@ def run_local_reconciliation(store, *, right_workers: int) -> dict:
     return result
 
 
-def _relation_label(config: dict) -> str:
-    return str(config.get("table") or config.get("path") or config.get("source") or "")
-
-
-XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-
-# >>> publish actual differing rows, ordered by normalized sampled key <<< #
 def publish_row_differences(store, run_dir: Path, manifest, document, prefix, results) -> int:
     pair, window = document["pair"], str(document["vintage"])
     numeric = {
@@ -883,27 +879,34 @@ def publish_row_differences(store, run_dir: Path, manifest, document, prefix, re
         manifest,
         numeric=numeric,
         limit=int(manifest.get("sample_rows") or 0),
+        per_column=True,
     )
-    body = row_difference_workbook(
-        compared,
-        left_label=_relation_label(manifest.get("left") or {}),
-        right_label=_relation_label(manifest.get("right") or {}),
+    target = diagnostic_prefix(pair, window)
+    local = run_dir / target
+    local.mkdir(parents=True, exist_ok=True)
+    written = set()
+    for column in compared["pairs"]:
+        left, right = column["left_column"], column["right_column"]
+        rows = compared["column_rows"][left]
+        output = io.StringIO(newline="")
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow([*compared["keys"], left, "", "", right])
+        writer.writerows([*row[:-2], row[-2], "", "", row[-1]] for row in rows)
+        body = output.getvalue().encode("utf-8-sig")
+        filename = f"diff_{quote(left, safe='')}.csv"
+        store.put_bytes(target + filename, body, content_type="text/csv")
+        (local / filename).write_bytes(body)
+        written.add(target + filename)
+        log.info("difference CSV %s %s %s: %d row(s)", pair, window, left, len(rows))
+    store.delete_keys(
+        [
+            key
+            for key in store.list_keys(DIAGNOSTIC_PREFIX)
+            if key not in written
+            and (key.endswith(".xlsx") or key.rsplit("/", 1)[-1].startswith("diff_"))
+        ]
     )
-    store.put_bytes(f"{diagnostic_prefix(pair, window)}samples.xlsx", body, content_type=XLSX)
-    local = run_dir / REPORT_PREFIX / "differences" / window / "samples.xlsx"
-    local.parent.mkdir(parents=True, exist_ok=True)
-    local.write_bytes(body)
-    log.info(
-        "row differences %s %s: %d of %d row(s) written (different=%d left_only=%d right_only=%d)",
-        pair,
-        window,
-        len(compared["rows"]),
-        compared["total"],
-        compared["totals"]["different"],
-        compared["totals"]["left_only"],
-        compared["totals"]["right_only"],
-    )
-    return compared["total"]
+    return len(compared["column_rows"])
 
 
 def publish_kept_left_csv(store, run_dir: Path, pair: str):
@@ -942,7 +945,11 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
     scratch_manifests = [
         key for key in store.list_keys(RIGHT_SAMPLE_PREFIX) if key.endswith("/rows.json")
     ]
-    first_window = min(by_window) if by_window else None
+    first_window = select_sample_window(manifest, by_window)
+    if by_window and first_window is None:
+        log.info(
+            "no differing vintage matches sample_partitions=%s", manifest.get("sample_partitions")
+        )
     published = 0
     for key in scratch_manifests:
         document = store.get_json(key)
@@ -950,8 +957,6 @@ def publish_difference_samples(store, run_dir: Path, pair: str) -> int:
             continue
         window = str(document["vintage"])
         prefix = key.removesuffix("rows.json")
-        target = diagnostic_prefix(pair, window)
-        store.delete_keys([key for key in store.list_keys(target) if key.endswith(".xlsx")])
         if window != first_window:
             store.delete_keys(store.list_keys(prefix))
             continue

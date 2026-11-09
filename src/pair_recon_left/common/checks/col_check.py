@@ -51,7 +51,7 @@ from ..model.protocol import (
     write_window_count,
 )
 from ..runtime.duck import use_temp
-from ..runtime.progress import StatisticsProgress
+from ..runtime.progress import BackpressureProgress, StatisticsProgress
 from ..runtime.run_logging import get_left_logger
 from ..runtime.stats import compute_csv_statistics
 from ..runtime.stop import Heartbeat, abandoning_executor, beat
@@ -319,6 +319,7 @@ class ColCheckPipeline:
         self.wip = max(1, wip)
         self.backpressure_sleep = max(0, backpressure_sleep)
         self.wait_for_right = wait_for_right
+        self._backpressure_progress = BackpressureProgress()
         self.abort_if = abort_if or (lambda: None)
         self.progress_interval = max(
             0.01,
@@ -680,43 +681,63 @@ class ColCheckPipeline:
         waiting_started = None
         last_wait_log = None
         heartbeat = Heartbeat(self.store)
-        while True:
-            self.abort_if()
-            heartbeat.tick()
-            left_ready, right_finished, active_ready_unclaimed = self._unit_progress(active_ids)
-            ready_unclaimed = active_ready_unclaimed
-            if ready_unclaimed < self.wip:
-                if waiting_started is not None:
+        with self._backpressure_progress as waiting_line:
+            while True:
+                self.abort_if()
+                heartbeat.tick()
+                left_ready, right_finished, active_ready_unclaimed = self._unit_progress(active_ids)
+                ready_unclaimed = active_ready_unclaimed
+                if ready_unclaimed < self.wip:
+                    if waiting_started is not None:
+                        waited = time.monotonic() - waiting_started
+                        log.info(
+                            "backpressure cleared: ready_unclaimed=%d, wip=%d, "
+                            "left_ready=%d/%d, right_finished=%d/%d, waited=%.1fs",
+                            ready_unclaimed,
+                            self.wip,
+                            left_ready,
+                            len(active_ids),
+                            right_finished,
+                            len(active_ids),
+                            waited,
+                            extra={
+                                "console_message": (
+                                    f"col_check: resumed | pending={ready_unclaimed}/{self.wip} "
+                                    f"L={left_ready}/{len(active_ids)} R={right_finished}/{len(active_ids)} "
+                                    f"{waited:.0f}s"
+                                )
+                            },
+                        )
+                    return
+                now = time.monotonic()
+                first_wait = waiting_started is None
+                if first_wait:
+                    waiting_started = now
+                console_message = (
+                    f"col_check: wait R | pending={ready_unclaimed}/{self.wip} "
+                    f"L={left_ready}/{len(active_ids)} R={right_finished}/{len(active_ids)} "
+                    f"{now - waiting_started:.0f}s"
+                )
+                waiting_line.update(console_message)
+                if first_wait or now - last_wait_log >= BACKPRESSURE_LOG_INTERVAL:
+                    last_wait_log = now
                     log.info(
-                        "backpressure cleared: ready_unclaimed=%d, wip=%d, "
-                        "left_ready=%d/%d, right_finished=%d/%d, waited=%.1fs",
+                        "backpressure: ready_unclaimed=%d, wip=%d, over_limit=%d; "
+                        "left_ready=%d/%d, right_finished=%d/%d; waiting for Right (%.1fs)",
                         ready_unclaimed,
                         self.wip,
+                        max(0, ready_unclaimed - self.wip),
                         left_ready,
                         len(active_ids),
                         right_finished,
                         len(active_ids),
-                        time.monotonic() - waiting_started,
+                        now - waiting_started,
+                        extra={
+                            "console_message": console_message,
+                            "console_silent": waiting_line.interactive,
+                        },
                     )
-                return
-            now = time.monotonic()
-            if waiting_started is None or now - last_wait_log >= BACKPRESSURE_LOG_INTERVAL:
-                if waiting_started is None:
-                    waiting_started = now
-                last_wait_log = now
-                log.info(
-                    "backpressure: ready_unclaimed=%d, wip=%d, over_limit=%d; "
-                    "left_ready=%d/%d, right_finished=%d/%d; waiting for Right (%.1fs)",
-                    ready_unclaimed,
-                    self.wip,
-                    max(0, ready_unclaimed - self.wip),
-                    left_ready,
-                    len(active_ids),
-                    right_finished,
-                    len(active_ids),
-                    now - waiting_started,
-                )
-            time.sleep(self.backpressure_sleep)
+                time.sleep(self.backpressure_sleep)
 
 
 def _row_count(path: str | Path) -> int:

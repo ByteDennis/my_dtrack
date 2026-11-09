@@ -671,10 +671,18 @@ def test_sample_columns_limit_right_rows_to_chosen_columns():
 
 
 @pytest.mark.parametrize("sample_rows", [0, 50])
-def test_keepcsv_preserves_raw_values_only_for_first_differing_window(sample_rows):
+@pytest.mark.parametrize("sample_partitions", [[], ["2026-02-01"]])
+def test_keepcsv_preserves_raw_values_only_for_first_differing_window(
+    sample_rows, sample_partitions
+):
     store, _uid = _drained_store()
     manifest = store.get_json(plan_path("p"))
-    manifest.update(keepcsv=True, sample_rows=sample_rows, sample_columns=["note"])
+    manifest.update(
+        keepcsv=True,
+        sample_rows=sample_rows,
+        sample_columns=["note"],
+        sample_partitions=sample_partitions,
+    )
     manifest["windows"].append({**manifest["windows"][0], "bucket": "2026-02-01"})
     for window in manifest["windows"]:
         store.put_result(
@@ -703,9 +711,9 @@ def test_keepcsv_preserves_raw_values_only_for_first_differing_window(sample_row
     engine.scheduler.manifests["p"] = manifest
     engine._stage_rows()
     engine._stage_rows()  # resume reuses the completed Right export
-    assert raw_calls == ["2026-01-01"]
-    assert store.get_bytes("results/report/differences/2026-01-01/right.csv").decode() == (
+    assert raw_calls == [sample_partitions[0] if sample_partitions else "2026-01-01"]
+    assert store.get_bytes("results/report/differences/right.csv").decode() == (
         "id,amount\n001,5.6475e-05\n002, 0100 \n"
     )
-    assert store.get_json("results/report/differences/2026-01-01/sample.json")["right_rows"] == 2
+    assert store.get_json("results/report/differences/sample.json")["right_rows"] == 2
     assert not store.list_keys("results/report/differences/2026-02-01/")

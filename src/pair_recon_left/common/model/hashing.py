@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any, ClassVar
@@ -12,7 +13,6 @@ from ..sql.dates import DateType, NativeDateType, canonical_date, resolve_date_t
 NULL = "<<NULL>>"
 PURE_DECIMAL = re.compile(r"^-?[0-9]+\.[0-9]+$")
 ISO_DATETIME = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2})[ Tt].*$")
-NORMALIZATION_TRANSFORMS = ("trim", "lowercase", "decimal", "strip_datetime")
 NORMALIZATION_SOURCES = ("all", "oracle", "hadoop", "csv", "databricks")
 MISSING_VALUE = "@missing"
 WHITESPACE_VALUE = "@whitespace"
@@ -65,9 +65,7 @@ def canonical_numeric_sql(expr: str, dialect: str) -> str:
         scale = 18 - exponent
         fractional = rf"(?:[.][0-9]{{0,{scale}}}0*)?"
         leading_dot = rf"|[.][0-9]{{1,{scale}}}0*" if scale else r"|[.]0+"
-        negative_exponents.append(
-            rf"(?:[0-9]{{1,20}}{fractional}{leading_dot})[eE]-0*{exponent}"
-        )
+        negative_exponents.append(rf"(?:[0-9]{{1,20}}{fractional}{leading_dot})[eE]-0*{exponent}")
     scientific_negative = "|".join(negative_exponents)
     safe = _regex_matches(
         text,
@@ -128,8 +126,93 @@ def sql_literal(value: object, dialect: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
+class NormalizationRule(ABC):
+    name: ClassVar[str] = "custom"
+
+    @abstractmethod
+    def normalize_value(self, text: str) -> str:
+        """Normalize one text value in Python."""
+
+    @abstractmethod
+    def normalize_sql(self, expr: str, dialect: str) -> str:
+        """Render the equivalent normalization as a SQL expression."""
+
+
+RULES: dict[str, NormalizationRule] = {}
+
+
+def register_rule(cls: type[NormalizationRule]) -> type[NormalizationRule]:
+    if not isinstance(cls, type) or not issubclass(cls, NormalizationRule):
+        raise TypeError("register_rule requires a NormalizationRule class")
+    if (
+        not isinstance(cls.name, str)
+        or not cls.name
+        or cls.name == "custom"
+        or cls.name != cls.name.strip().casefold()
+    ):
+        raise ValueError("registered NormalizationRule class must declare a lowercase name")
+    RULES[cls.name] = cls()
+    return cls
+
+
+@register_rule
+class TrimRule(NormalizationRule):
+    name = "trim"
+
+    def normalize_value(self, text: str) -> str:
+        return text.strip()
+
+    def normalize_sql(self, expr: str, dialect: str) -> str:
+        return f"trim({expr})"
+
+
+@register_rule
+class StripQuotesRule(NormalizationRule):
+    name = "strip_quotes"
+
+    def normalize_value(self, text: str) -> str:
+        return text.strip("'\"")
+
+    def normalize_sql(self, expr: str, dialect: str) -> str:
+        end = "$" if dialect_name(dialect) == "oracle" else r"\z"
+        return _regex_replace(expr, r"^['\"]+|['\"]+" + end, "", dialect)
+
+
+@register_rule
+class LowercaseRule(NormalizationRule):
+    name = "lowercase"
+
+    def normalize_value(self, text: str) -> str:
+        return text.lower()
+
+    def normalize_sql(self, expr: str, dialect: str) -> str:
+        return f"lower({expr})"
+
+
+@register_rule
+class DecimalRule(NormalizationRule):
+    name = "decimal"
+
+    def normalize_value(self, text: str) -> str:
+        return collapse_decimal(text)
+
+    def normalize_sql(self, expr: str, dialect: str) -> str:
+        return collapse_decimal_sql(expr, dialect)
+
+
+@register_rule
+class StripDatetimeRule(NormalizationRule):
+    name = "strip_datetime"
+
+    def normalize_value(self, text: str) -> str:
+        return strip_datetime(text)
+
+    def normalize_sql(self, expr: str, dialect: str) -> str:
+        return strip_datetime_sql(expr, dialect)
+
+
 def default_normalization_rules() -> list[dict[str, str]]:
-    return [{"rule_name": name, "source": "all"} for name in NORMALIZATION_TRANSFORMS]
+    return [{"rule_name": name, "source": "all"} for name in RULES]
 
 
 def is_transform_rule(rule: Mapping[str, str]) -> bool:
@@ -158,7 +241,7 @@ def canonical_normalization_rules(raw: object) -> list[dict[str, str]]:
         normalized = {"rule_name": name, "source": source}
         match_value = str(item.get("match_value") or "")
         if not match_value:
-            if name not in NORMALIZATION_TRANSFORMS:
+            if name not in RULES:
                 raise ValueError(f"unsupported normalization transform: {name}")
             if item.get("canonical_value") not in (None, ""):
                 raise ValueError(f"normalization transform {name!r} cannot define canonical_value")
@@ -199,14 +282,7 @@ def normalize_system_value(
     text = str(value)
     for rule in rules:
         if is_transform_rule(rule):
-            if rule["rule_name"] == "trim":
-                text = text.strip()
-            elif rule["rule_name"] == "lowercase":
-                text = text.lower()
-            elif rule["rule_name"] == "decimal":
-                text = collapse_decimal(text)
-            elif rule["rule_name"] == "strip_datetime":
-                text = strip_datetime(text)
+            text = RULES[rule["rule_name"]].normalize_value(text)
         elif text == rule["match_value"] or (
             rule["match_value"] == WHITESPACE_VALUE and not text.strip()
         ):
@@ -231,14 +307,7 @@ def normalize_system_sql(
     value = expr
     for rule in rules:
         if is_transform_rule(rule):
-            if rule["rule_name"] == "trim":
-                value = f"trim({value})"
-            elif rule["rule_name"] == "lowercase":
-                value = f"lower({value})"
-            elif rule["rule_name"] == "decimal":
-                value = collapse_decimal_sql(value, dialect)
-            elif rule["rule_name"] == "strip_datetime":
-                value = strip_datetime_sql(value, dialect)
+            value = RULES[rule["rule_name"]].normalize_sql(value, dialect)
             continue
         replacement = rule["canonical_value"]
         if replacement == MISSING_VALUE:

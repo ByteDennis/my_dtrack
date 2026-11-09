@@ -10,9 +10,11 @@ from pair_recon.app.config import (
     load_defaults,
     load_environment,
     local_output_root,
+    read_run_options,
     resolve_run_defaults,
     run_config,
     save_defaults,
+    select_run_options,
 )
 
 
@@ -204,6 +206,7 @@ def test_resolve_run_defaults_preserves_precedence_and_explicit_empty_values(cat
         "audit": True,
         "sample_columns": ["A"],
         "use_modular": "OLD",
+        "sample_partitions": ["2026-01-01"],
         "excluded_columns": ["B"],
         "left_workers": 1,
         "work_dir": "local",
@@ -214,6 +217,7 @@ def test_resolve_run_defaults_preserves_precedence_and_explicit_empty_values(cat
     assert actual["sample_columns"] == ([] if catalog_authoritative else ["A"])
     assert actual["excluded_columns"] == ([] if catalog_authoritative else ["B"])
     assert actual["use_modular"] == (None if catalog_authoritative else "OLD")
+    assert actual["sample_partitions"] == (None if catalog_authoritative else ["2026-01-01"])
     assert actual["work_dir"] == "local"
     assert actual.get("absent", "fallback") == "fallback"
     assert saved["use_modular"] == "OLD" and "use_modular" not in metadata
@@ -227,3 +231,56 @@ def test_resolve_run_defaults_explicit_catalog_selector_wins():
         ]
         == "CURRENT"
     )
+
+
+def test_automatic_run_options_normalize_before_saving_and_building_config(tmp_path):
+    defaults = {
+        "sample_rows": "0",
+        "sample_columns": " B, A, B ",
+        "sample_partitions": ["2026-02-01", " 2026-01-01 ", "2026-02-01"],
+    }
+    answers = {
+        **read_run_options(defaults),
+        "sample": False,
+        "audit": False,
+        "checks": ["row_count"],
+        "unrelated": "not a run option",
+    }
+    expected = {
+        "sample_rows": 0,
+        "sample_columns": ["B", "A"],
+        "sample_partitions": ["2026-02-01", "2026-01-01"],
+        "sample": False,
+        "audit": False,
+    }
+    path = tmp_path / "defaults.yaml"
+    save_defaults(path, select_run_options(answers))
+    assert load_defaults(path) == expected
+    configured = run_config("p", {"partition": "all"}, answers, timezone="UTC")["pairs"]["p"]
+    assert {name: configured[name] for name in expected} == expected
+    assert "unrelated" not in configured
+    configured["sample_columns"].append("C")
+    assert answers["sample_columns"] == ["B", "A"]
+    assert defaults["sample_partitions"][1] == " 2026-01-01 "
+
+
+def test_automatic_run_options_clear_old_selectors_and_use_fresh_defaults():
+    resolved = resolve_run_defaults(
+        {"_run_defaults": {"sample_columns": []}},
+        {"sample_columns": ["OLD"], "sample_partitions": ["2025-01-01"]},
+        catalog_authoritative=True,
+    )
+    assert resolved["sample_partitions"] is None
+    assert read_run_options(resolved) == {
+        "sample_rows": 50,
+        "sample_columns": [],
+        "sample_partitions": [],
+    }
+    first = read_run_options({})
+    first["sample_columns"].append("A")
+    assert read_run_options({})["sample_columns"] == []
+
+
+def test_automatic_run_options_reject_negative_row_limits():
+    with pytest.raises(ValueError, match="sample_rows"):
+        read_run_options({"sample_rows": -1})

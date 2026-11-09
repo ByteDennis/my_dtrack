@@ -246,6 +246,7 @@ def test_run_defaults_normalize_comma_lists(tmp_path):
         "checks": "row_count, hash_sum, row_count",
         "excluded_partitions": "2026-01-02, 2026-02-01->2026-02-03,",
         "excluded_columns": "AMOUNT, COMMENTS, AMOUNT",
+        "sample_partitions": "2026-02-01, 2026-01-01, 2026-02-01",
         "vintage_sample_size": None,
         "vintage_values": "2026-01-01, 2026-04-01",
     }
@@ -258,6 +259,7 @@ def test_run_defaults_normalize_comma_lists(tmp_path):
         "2026-02-01->2026-02-03",
     ]
     assert defaults["excluded_columns"] == ["AMOUNT", "COMMENTS"]
+    assert defaults["sample_partitions"] == ["2026-02-01", "2026-01-01"]
     assert defaults["vintage_values"] == ["2026-01-01", "2026-04-01"]
 
 

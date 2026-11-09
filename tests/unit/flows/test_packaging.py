@@ -71,7 +71,7 @@ def test_source_release_contains_only_the_main_runtime(tmp_path):
         assert "pair_recon/readme.txt" in names
         assert "pair_recon/pyproject.toml" in names
         assert "pair_recon/justfile" in names
-        assert "pair_recon/.pair_recon.env.example" in names
+        assert not any(".env" in Path(name).name for name in names)
         assert "pair_recon/setup/pairs.xlsx" in names
         assert "pair_recon/src/pair_recon/__main__.py" in names
         assert "pair_recon/src/pair_recon_dbx/deploy.py" in names
@@ -108,6 +108,7 @@ def test_source_release_contains_only_the_main_runtime(tmp_path):
         assert "just run" in readme
         assert "uv run python -m pair_recon" in readme
         assert "GitLab" not in readme
+        assert ".env.example" not in readme
 
         archive.extractall(tmp_path / "release")
 

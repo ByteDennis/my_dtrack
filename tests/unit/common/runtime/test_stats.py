@@ -127,6 +127,24 @@ def test_strip_datetime_normalization():
     assert iso_timestamp["hash_sum"] == date["hash_sum"]
 
 
+def test_strip_quotes_normalizes_unique_counts_and_hashes_in_csv_statistics(tmp_path):
+    values = ["xxx", '"xxx"', "'xxx'", '"""xxx"""', "'''xxx'''"]
+    path = tmp_path / "quoted.csv"
+    pd.DataFrame({"value": values}).to_csv(path, index=False)
+    options = {"col_types": {"value": "categorical"}}
+    actual = stats.compute_csv_statistics(path, ["value"], **options)["value"]
+    expected = stats.column_statistics(_series(*(["xxx"] * len(values))), col_type="categorical")
+    assert actual["n_unique"] == expected["n_unique"] == 1
+    assert actual["hash_sum"] == expected["hash_sum"]
+    disabled = [
+        rule for rule in default_normalization_rules() if rule["rule_name"] != "strip_quotes"
+    ]
+    distinct = stats.compute_csv_statistics(
+        path, ["value"], normalization_rules=disabled, **options
+    )["value"]
+    assert distinct["n_unique"] == 5
+
+
 def test_only_enabled_normalization_rules_apply():
     trim = [{"rule_name": "trim", "source": "all"}]
     left = stats.column_statistics(

@@ -100,6 +100,7 @@ USING (
     ('pair_recon_window_history', 'checked_at', NULL, 'Timestamp when the completing run published its results.'),
     ('pair_recon_normalization', 'rule_name', NULL, 'Stable system rule name recorded in every run configuration and manifest.'),
     ('pair_recon_normalization', 'rule_name', 'trim', 'Trim leading and trailing whitespace before statistics and hashing.'),
+    ('pair_recon_normalization', 'rule_name', 'strip_quotes', 'Remove repeated or mixed single and double quotes at the start and end of text; preserve interior quotes.'),
     ('pair_recon_normalization', 'rule_name', 'lowercase', 'Compare text without letter-case differences.'),
     ('pair_recon_normalization', 'rule_name', 'decimal', 'Remove insignificant trailing decimal zeros such as 1.00 to 1.'),
     ('pair_recon_normalization', 'rule_name', 'strip_datetime', 'Reduce an ISO datetime to its YYYY-MM-DD date before statistics and hashing.'),

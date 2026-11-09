@@ -36,6 +36,7 @@ from ..common.model.protocol import (
     right_ready_path,
     right_sample_prefix,
     right_stats_path,
+    select_sample_window,
     timestamp,
     unit_batch_units,
     unit_prefix,
@@ -618,9 +619,20 @@ class ColCheck:
     def _keep_csv(self, manifest, window):
         if not manifest.get("keepcsv"):
             return
+        if (
+            manifest.get("sample_partitions")
+            and str(window["bucket"]) not in manifest["sample_partitions"]
+        ):
+            return
         prefix = diagnostic_prefix(manifest["pair"], str(window["bucket"]))
         if self.store.exists(f"{prefix}right.csv") and self.store.exists(f"{prefix}sample.json"):
-            return
+            existing = self.store.get_json(f"{prefix}sample.json")
+            if (
+                existing.get("vintage") == str(window["bucket"])
+                and existing.get("plan_id") == manifest["plan_id"]
+            ):
+                return
+            self.store.delete_keys([f"{prefix}left.csv"])
         target = self._target(manifest)
         raw = target.window_raw_rows(manifest, window)
         with TemporaryDirectory(prefix="pair_recon-keepcsv-") as folder:
@@ -661,13 +673,12 @@ class ColCheck:
         for result in results:
             if result.get("verdict") != "match":
                 differing[(result["pair"], str(result["vintage"]))].add(result["column"])
-        retained_pairs = set()
         for (pair, window), names in sorted(differing.items()):
-            if pair in retained_pairs:
-                continue
-            retained_pairs.add(pair)
             manifest = self.scheduler.manifests.get(pair)
             if manifest is None:
+                continue
+            selected = select_sample_window(manifest, [v for p, v in differing if p == pair])
+            if window != selected:
                 continue
             target = self._target(manifest)
             chosen = set(manifest.get("sample_columns") or manifest["columns"])

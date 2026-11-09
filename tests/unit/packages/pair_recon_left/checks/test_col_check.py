@@ -367,3 +367,68 @@ def test_left_pull_publishes_bounded_difference_keys(tmp_path):
         ["01"],
         ["2"],
     ]
+
+
+@pytest.mark.parametrize("interactive", [True, False])
+def test_backpressure_console_is_compact_and_keeps_reporting_interval(monkeypatch, interactive):
+    import logging
+    from types import SimpleNamespace
+
+    from pair_recon_left.common.checks import col_check
+    from pair_recon_left.common.runtime.run_logging import CONSOLE_LOG_FORMAT, ConsoleFormatter
+
+    records = []
+
+    def info(message, *args, **kwargs):
+        record = logging.LogRecord(
+            "pair_recon.left.col_check", logging.INFO, __file__, 1, message, args, None
+        )
+        record.__dict__.update(kwargs.get("extra", {}))
+        records.append(record)
+
+    from pair_recon_left.common.runtime import progress
+
+    frames = []
+    closed = []
+    monkeypatch.setattr(progress, "_interactive_terminal", lambda: interactive)
+    monkeypatch.setattr(
+        progress,
+        "tqdm",
+        lambda **_options: SimpleNamespace(
+            set_description_str=lambda message, refresh: frames.append(message),
+            close=lambda: closed.append(True),
+        ),
+    )
+    pipeline = ColCheckPipeline(
+        MemoryStore(), pull_window=lambda *_args: None, compute_stats=lambda *_args: {}, wip=200
+    )
+    progress = iter([(256, 0, 256)] * 3 + [(256, 64, 192)])
+    times = iter([0, 5, 31, 32])
+    monkeypatch.setattr(pipeline, "_unit_progress", lambda _ids: next(progress))
+    monkeypatch.setattr(col_check, "Heartbeat", lambda _store: SimpleNamespace(tick=lambda: None))
+    monkeypatch.setattr(col_check.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(col_check.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(col_check, "log", SimpleNamespace(info=info))
+    pipeline._wait_for_capacity({str(i) for i in range(908)})
+    formatter = ConsoleFormatter(CONSOLE_LOG_FORMAT, "UTC")
+    messages = [formatter.format(record) for record in records]
+    assert messages == [
+        "col_check: wait R | pending=256/200 L=256/908 R=0/908 0s",
+        "col_check: wait R | pending=256/200 L=256/908 R=0/908 31s",
+        "col_check: resumed | pending=192/200 L=256/908 R=64/908 32s",
+    ]
+    assert all(len(message) <= 80 for message in messages)
+    assert "over_limit=56" in records[0].getMessage()
+    assert "waited=32.0s" in records[-1].getMessage()
+
+    assert frames == (
+        [
+            "col_check: wait R | pending=256/200 L=256/908 R=0/908 0s",
+            "col_check: wait R | pending=256/200 L=256/908 R=0/908 5s",
+            "col_check: wait R | pending=256/200 L=256/908 R=0/908 31s",
+        ]
+        if interactive
+        else []
+    )
+    assert closed == ([True] if interactive else [])
+    assert all(record.console_silent is interactive for record in records[:-1])

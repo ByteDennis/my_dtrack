@@ -19,6 +19,37 @@ def _interactive_terminal() -> bool:
     return bool(getattr(sys.stderr, "isatty", lambda: False)())
 
 
+class BackpressureProgress:
+    """Share one terminal status line across concurrent publication waiters."""
+
+    def __init__(self):
+        self.interactive = _interactive_terminal()
+        self.lock = threading.Lock()
+        self.waiters = 0
+        self.bar = None
+
+    def __enter__(self):
+        with self.lock:
+            self.waiters += 1
+        return self
+
+    def update(self, message: str):
+        if not self.interactive:
+            return
+        with self.lock:
+            if self.bar is None:
+                self.bar = tqdm(total=0, bar_format="{desc}", ncols=80, leave=False)
+            message = message if len(message) <= 80 else message[:77] + "..."
+            self.bar.set_description_str(message, refresh=True)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        with self.lock:
+            self.waiters -= 1
+            if self.waiters == 0 and self.bar is not None:
+                self.bar.close()
+                self.bar = None
+
+
 class StatisticsProgress:
     def __init__(
         self,

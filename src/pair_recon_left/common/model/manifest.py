@@ -484,6 +484,15 @@ def build_manifest(
         "excluded_columns": sorted(excluded_columns),
         "expected_units": len(windows) * len(columns),
     }
+    sample_partitions = pair.get("sample_partitions") or []
+    if not isinstance(sample_partitions, list) or not all(
+        isinstance(value, str) and value.strip() for value in sample_partitions
+    ):
+        raise TypeError(f"{pair_name}: sample_partitions must be a list of vintage IDs")
+    if sample_partitions:
+        manifest["sample_partitions"] = list(
+            dict.fromkeys(value.strip() for value in sample_partitions)
+        )
     if pair.get("keepcsv"):
         manifest["keepcsv"] = True
     if normalized_on is not None:
@@ -499,7 +508,14 @@ def build_manifest(
         {
             key: value
             for key, value in manifest.items()
-            if key not in {"sample_rows", "sample_columns", "local_reconciliation", "keepcsv"}
+            if key
+            not in {
+                "sample_rows",
+                "sample_columns",
+                "sample_partitions",
+                "local_reconciliation",
+                "keepcsv",
+            }
         }
     )
     validate_manifest(manifest)
@@ -536,6 +552,11 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     statistics = statistics_plan(manifest.get("statistics"))
     if statistics is not None and manifest["statistics"] != statistics:
         raise ValueError("manifest statistics must use canonical order")
+    sample_partitions = manifest.get("sample_partitions") or []
+    if not isinstance(sample_partitions, list) or not all(
+        isinstance(value, str) and value.strip() for value in sample_partitions
+    ):
+        raise ValueError("manifest sample_partitions must be a list of vintage IDs")
     sample_rows = manifest.get("sample_rows", 50)
     if isinstance(sample_rows, bool) or not isinstance(sample_rows, int) or sample_rows < 0:
         raise ValueError("manifest sample_rows must be a non-negative integer")

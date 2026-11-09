@@ -25,6 +25,125 @@ def test_collapse(common, text, expected):
 
 
 @pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ('"xxx"', "xxx"),
+        ("'xxx'", "xxx"),
+        ('"""xxx"""', "xxx"),
+        ("'''xxx'''", "xxx"),
+        ("\"'\"xxx'\"'", "xxx"),
+        ('"xxx', "xxx"),
+        ("xxx'", "xxx"),
+        ("O'Connor", "O'Connor"),
+        ('say "hello" please', 'say "hello" please'),
+        ('"O\'Connor"', "O'Connor"),
+        ('" xxx "', " xxx "),
+        ('xxx"\n', 'xxx"\n'),
+        ("\"''\"", ""),
+        ("", ""),
+    ],
+)
+def test_strip_quotes_python_and_sql_agree(common, value, expected):
+    import duckdb
+
+    rules = common.hashing.canonical_normalization_rules(
+        [{"rule_name": "strip_quotes", "source": "all"}]
+    )
+    assert common.hashing.normalize_system_value(value, rules) == expected
+    sql = common.hashing.normalize_system_sql("v", "duckdb", rules)
+    assert duckdb.sql(f"SELECT {sql} FROM (SELECT ?::VARCHAR AS v)", params=[value]).fetchone() == (
+        expected,
+    )
+    assert common.hashing.normalize_system_value(value, []) == value
+
+
+def test_strip_quotes_honors_source_scope_and_preserves_sql_null(common):
+    import duckdb
+
+    rules = [{"rule_name": "strip_quotes", "source": "oracle"}]
+    assert common.hashing.active_normalization_rules(rules, "csv") == ()
+    active = common.hashing.active_normalization_rules(rules, "oracle")
+    assert common.hashing.normalize_system_value('"xxx"', active) == "xxx"
+    sql = common.hashing.normalize_system_sql("NULL::VARCHAR", "duckdb", active)
+    assert duckdb.sql(f"SELECT {sql}").fetchone() == (None,)
+
+
+def test_registered_rule_drives_validation_and_both_execution_paths(common, monkeypatch):
+    import duckdb
+
+    hashing = common.hashing
+    monkeypatch.setattr(hashing, "RULES", dict(hashing.RULES))
+
+    @hashing.register_rule
+    class ReverseRule(hashing.NormalizationRule):
+        name = "test_reverse"
+
+        def normalize_value(self, text):
+            return text[::-1]
+
+        def normalize_sql(self, expr, dialect):
+            return f"reverse({expr})"
+
+    assert isinstance(hashing.RULES["test_reverse"], ReverseRule)
+    assert hashing.default_normalization_rules()[-1] == {
+        "rule_name": "test_reverse",
+        "source": "all",
+    }
+    rules = [
+        {"rule_name": "trim", "source": "all"},
+        {"rule_name": "test_reverse", "source": "csv"},
+        {
+            "rule_name": "reversed_text",
+            "source": "all",
+            "match_value": "cba",
+            "canonical_value": "done",
+        },
+    ]
+    assert hashing.canonical_normalization_rules(rules) == rules
+    active = hashing.active_normalization_rules(rules, "csv")
+    assert hashing.normalize_system_value(" abc ", active) == "done"
+    sql = hashing.normalize_system_sql("v", "duckdb", active)
+    assert duckdb.sql(f"SELECT {sql} FROM (SELECT ' abc ' AS v)").fetchone() == ("done",)
+    scoped = hashing.active_normalization_rules(rules, "oracle")
+    assert hashing.normalize_system_value(" abc ", scoped) == "abc"
+
+
+def test_default_rule_registration_preserves_existing_order(common):
+    assert common.hashing.default_normalization_rules() == [
+        {"rule_name": name, "source": "all"}
+        for name in ("trim", "strip_quotes", "lowercase", "decimal", "strip_datetime")
+    ]
+
+
+def test_rule_registration_rejects_invalid_or_incomplete_classes(common):
+    hashing = common.hashing
+    with pytest.raises(TypeError, match="NormalizationRule class"):
+        hashing.register_rule(object)
+    with pytest.raises(TypeError, match="NormalizationRule class"):
+        hashing.register_rule("trim")
+
+    class MissingName(hashing.NormalizationRule):
+        def normalize_value(self, text):
+            return text
+
+        def normalize_sql(self, expr, dialect):
+            return expr
+
+    with pytest.raises(ValueError, match="declare a lowercase name"):
+        hashing.register_rule(MissingName)
+
+    class MissingSql(hashing.NormalizationRule):
+        name = "test_missing_sql"
+
+        def normalize_value(self, text):
+            return text
+
+    with pytest.raises(TypeError, match="abstract"):
+        hashing.register_rule(MissingSql)
+    assert "test_missing_sql" not in hashing.RULES
+
+
+@pytest.mark.parametrize(
     ("value", "family", "expected"),
     [
         (None, "string", "<<NULL>>"),

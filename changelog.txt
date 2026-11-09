@@ -1,3 +1,112 @@
+pair_recon Register normalization transforms like key families — 2026-11-09
+
+Summary
+- Add NormalizationRule, RULES, and the register_rule class decorator in both mirrored hashing modules.
+- Each transform owns normalize_value(text) and normalize_sql(expr, dialect). Dispatch, supported-name validation, and default-rule generation now use the registry instead of per-name if/elif branches and a separate name tuple.
+- Migrate trim, strip_quotes, lowercase, decimal, and strip_datetime while preserving the existing default order, configured execution order, source scopes, and synonym handling.
+- Require both Python and SQL implementations before a rule can register. Catalog-driven runs still enable transforms through normalization-table rows.
+
+Verification
+- Normalization, key families, CSV statistics, protocol/manifest parity, row differences, Right SQL generation, catalog, and CLI/runner tests: 553 passed.
+- A temporary custom rule passed validation and both Python/DuckDB execution paths without dispatch changes; registration rejects incomplete or invalid classes.
+- Ruff, formatting checks, and git diff --check passed. Cloud execution was not run.
+
+pair_recon Strip repeated single and double edge quotes during normalization — 2026-11-09
+
+Summary
+- Add the source-scoped strip_quotes transform to both mirrored normalization implementations and the default rule list.
+- Remove single/double quotes at either text edge, including repeated and mixed quotes, while preserving interior apostrophes and quotation marks.
+- Apply the normalized text to distinct counts, hashes, and difference-row filtering; diagnostic CSVs continue to show original values.
+- Seed strip_quotes in schema.sql, document it in reference.sql, and provide setup/migrate_strip_quotes.sql to enable it on existing installations after both sides are deployed.
+
+Verification
+- Normalization, CSV statistics, protocol/manifest parity, row differences, Right SQL generation, and setup tests: 307 passed.
+- Java regex validation: 14 quote and newline cases passed. Ruff, formatting checks, and git diff --check passed.
+- Full Spark execution was not verified: the installed Databricks Connect package cannot start a local Spark session. No cloud table was modified.
+
+pair_recon Centralize app run options and omit the environment template from releases — 2026-11-09
+
+Summary
+- Define direct run options once in app/config.py, sharing the same field selection for saved CLI settings and Pair configuration.
+- Centralize sample_rows, sample_columns, and sample_partitions defaults and conversion; preserve list order, explicit empty selections, zero row limits, and catalog-versus-local precedence.
+- Keep interactive prompts and special date/check transformations explicit. Catalog constants, Workbook validation, and Left/Right configuration are unchanged.
+- Exclude .pair_recon.env.example from publish ZIPs and update the packaged installation instructions to use organization-provided connection settings.
+
+Verification
+- Configuration, CLI, and packaging tests: 174 passed, including archive contents and the extracted runtime's --help invocation.
+- The existing test_layout check still fails: src/pair_recon_dbx, src/pair_recon/app, and tests/unit/packages/pair_recon each already contain six entries in HEAD, exceeding the check's five-entry limit. No files were added by this change.
+- Ruff checks, formatting checks for changed Python files, and git diff --check passed.
+
+pair_recon Per-attribute difference CSVs and vintage selection — 2026-11-09
+
+Summary
+- Write one CSV per differing attribute directly under results/report/differences/, without a vintage subdirectory, status column, summary banner, or Excel formatting.
+- Keep keys and raw Left/Right values with two blank separator columns; independently filter each attribute before sorting by normalized key and applying sample_rows (default 50).
+- Use only the first differing vintage by default. run_defaults_json.sample_partitions accepts an ordered list of eligible vintage IDs and does not change statistical sampling.
+- Reuse the existing local Left CSV, normalize it once, and align Left/Right rows once before filtering individual attributes. Right still queries the selected vintage's sampled rows for the differing columns.
+- Store --keepcsv raw left.csv, right.csv, and sample.json in the same flat directory, using the selected vintage.
+
+Modified files
+- Runner and Left row_diff: produce independent CSVs while sharing data loading, normalization, and key alignment.
+- Mirrored protocol/manifest and Right column checks: select one diagnostic vintage and use flat report paths.
+- CLI/configuration and workbook metadata: accept sample_partitions, preserve its preference order, and clear removed catalog selections for collaborators.
+- README.md, guideme.txt, and regression tests: document and verify the output layout and selection behavior.
+
+Verification
+- Report, row comparison, Right checks, protocol, workbook, configuration, and installation regression tests: 380 passed locally; Ruff and git diff --check passed.
+- Databricks execution and cloud performance were not exercised locally.
+
+pair_recon Refresh backpressure on one terminal line — 2026-11-09
+
+Summary
+- Refresh the backpressure status and elapsed time in place on each polling cycle in interactive terminals.
+- Share a single 80-character status line across publication waiters, with cleanup on resume, cancellation, or error.
+- Keep periodic complete records in left.log and use periodic compact log messages for redirected output.
+
+Modified files
+- `src/pair_recon_left/common/runtime/progress.py`: manages the shared live terminal line.
+- `src/pair_recon_left/common/checks/col_check.py`: refreshes the line independently of the persistent-log interval.
+- `tests/unit/packages/pair_recon_left/checks/test_col_check.py`: covers live refresh and periodic log fallback.
+- `tests/unit/packages/pair_recon_left/test_progress_output.py`: covers shared ownership, cleanup on error, and truncation.
+- `changelog.txt`: records the live status update.
+
+Verification
+- Logging, progress, column-check, and runner tests: 168 passed.
+- Actual tqdm rendering to a terminal-like stream refreshed through carriage returns without adding lines.
+- Ruff and git diff --check passed.
+
+pair_recon Compact backpressure console messages — 2026-11-09
+
+Summary
+- Show waiting and resumed column-check messages in a compact console format with pending/WIP, Left published units, Right finished units, and elapsed wait time.
+- Limit the rendered console line, including the col_check label, to 80 characters and shorten oversized messages with an ellipsis.
+- Retain complete backpressure details and timestamps in the persistent Left log.
+
+Modified files
+- `src/pair_recon_left/common/checks/col_check.py`: attaches compact waiting and resumed console messages.
+- `src/pair_recon_left/common/runtime/run_logging.py`: renders the compact message on the console.
+- `tests/unit/packages/pair_recon_left/checks/test_col_check.py`: verifies progress counters and the reporting interval.
+- `tests/unit/common/runtime/test_run_logging.py`: verifies truncation and full file-record retention.
+- `changelog.txt`: records the console change.
+
+Verification
+- Focused logging and backpressure tests passed. Ruff and git diff --check passed.
+
+pair_recon Check column mappings only for enabled Pairs — 2026-11-09
+
+Summary
+- Limit startup key/type/date-column mapping checks to workbook Pairs with enabled=true.
+- Continue synchronizing Pair metadata, including enabled=false, so the remote catalog receives enable/disable changes.
+- Changed mappings continue to use partial MERGE updates.
+
+Modified files
+- `src/pair_recon/app/cli/__init__.py`: filters disabled Pairs before querying their mappings.
+- `tests/unit/packages/pair_recon/test_runner.py`: verifies disabled Pairs receive metadata updates without mapping checks.
+- `changelog.txt`: records the change.
+
+Verification
+- CLI regression tests and code checks passed.
+
 pair_recon Centralize run-default precedence — 2026-11-09
 
 Summary

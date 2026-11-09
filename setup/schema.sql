@@ -149,6 +149,7 @@ MERGE INTO ${catalog}.${schema}.pair_recon_normalization AS t
 USING (
   SELECT * FROM VALUES
     ('trim', 'all', NULL, NULL, true),
+    ('strip_quotes', 'all', NULL, NULL, true),
     ('lowercase', 'all', NULL, NULL, true),
     ('decimal', 'all', NULL, NULL, true),
     ('strip_datetime', 'all', NULL, NULL, true),

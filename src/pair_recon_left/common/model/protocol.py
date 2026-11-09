@@ -63,7 +63,13 @@ def difference_keys_path(_pair: str, window: str) -> str:
 
 
 def diagnostic_prefix(_pair: str, window: str) -> str:
-    return f"{DIAGNOSTIC_PREFIX}{_artifact_segment(window)}/"
+    return DIAGNOSTIC_PREFIX
+
+
+def select_sample_window(manifest: dict, windows) -> str | None:
+    available = {str(window) for window in windows}
+    candidates = manifest.get("sample_partitions") or sorted(available)
+    return next((str(window) for window in candidates if str(window) in available), None)
 
 
 def left_row_path(_pair: str) -> str:

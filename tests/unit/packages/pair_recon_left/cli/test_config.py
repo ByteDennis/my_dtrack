@@ -200,3 +200,18 @@ def test_sample(sample):
     value.update(pre_sampled=True, sample=sample, key="A")
     with pytest.raises(ValueError, match="requires all or fraction"):
         validate_config({"pairs": {"p": value}})
+
+
+def test_sample_partitions_preserve_preference_order_and_remove_duplicates():
+    value = pair()
+    value["sample_partitions"] = [" 2026-02-01 ", "2026-01-01", "2026-02-01"]
+    configured = validate_config({"pairs": {"p": value}})["pairs"]["p"]
+    assert configured["sample_partitions"] == ["2026-02-01", "2026-01-01"]
+
+
+@pytest.mark.parametrize("selector", ["2026-02-01", 1, [""], [None]])
+def test_sample_partitions_require_a_list_of_nonempty_vintage_ids(selector):
+    value = pair()
+    value["sample_partitions"] = selector
+    with pytest.raises(TypeError, match="sample_partitions"):
+        validate_config({"pairs": {"p": value}})

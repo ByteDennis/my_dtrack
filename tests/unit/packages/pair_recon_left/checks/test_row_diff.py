@@ -149,3 +149,79 @@ def test_all_window_sorts_sampled_keys_before_limiting_to_50(tmp_path):
     result = compare_rows(left, right, document, manifest, numeric=set(), limit=50)
     assert result["total"] == 60
     assert [row[1] for row in result["rows"]] == keys[1:51]
+
+
+def test_each_attribute_filters_its_own_rows_before_limit(tmp_path):
+    left = tmp_path / "left.csv"
+    left.write_text("id,a,b\n001,old,same\n002,same,old\n003,same,same\n")
+    right = _gzip_rows(
+        ["_key", "k0", "v0", "v1", "n0", "n1"],
+        [
+            ["001", "001", "new", "same", "new", "same"],
+            ["002", "002", "same", "new", "same", "new"],
+            ["003", "003", "same", "same", "same", "same"],
+        ],
+    )
+    document = {
+        "key_columns": ["id"],
+        "pairs": [
+            {"left_column": "a", "right_column": "a"},
+            {"left_column": "b", "right_column": "b"},
+        ],
+    }
+    result = compare_rows(
+        left,
+        right,
+        document,
+        {"key_cols": ["id"], "key_families": ["string"], "left": {"source": "csv"}},
+        numeric=set(),
+        limit=1,
+        per_column=True,
+    )
+    assert result["column_rows"] == {
+        "a": [("001", "old", "new")],
+        "b": [("002", "old", "new")],
+    }
+
+
+def test_per_attribute_samples_keep_one_sided_keys_and_compare_normalized_values(tmp_path):
+    left, right = _fixture(tmp_path)
+    result = compare_rows(
+        left, right, DOCUMENT, MANIFEST, numeric={"AMOUNT"}, limit=50, per_column=True
+    )
+    assert result["column_rows"]["AMOUNT"] == [
+        ("3", "2026-08-02", "8", None),
+        ("4", "20260802", None, "4"),
+        ("6", "2026-08-02", "01.20", "1.3"),
+    ]
+    assert result["column_rows"]["STATUS"] == [
+        ("3", "2026-08-02", "x", None),
+        ("4", "20260802", None, "new"),
+    ]
+
+
+def test_per_attribute_samples_ignore_quote_only_differences(tmp_path):
+    left = tmp_path / "left.csv"
+    with left.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["id", "value"])
+        writer.writerows([["001", '"""xxx"""'], ["002", "'old'"]])
+    right = _gzip_rows(
+        ["_key", "k0", "v0", "n0"],
+        [["001", "001", "'xxx'", "xxx"], ["002", "002", '"new"', "new"]],
+    )
+    compared = compare_rows(
+        left,
+        right,
+        {"key_columns": ["id"], "pairs": [{"left_column": "value", "right_column": "value"}]},
+        {
+            "key_cols": ["id"],
+            "key_families": ["string"],
+            "left": {"source": "csv"},
+            "normalization_rules": [{"rule_name": "strip_quotes", "source": "all"}],
+        },
+        numeric=set(),
+        limit=50,
+        per_column=True,
+    )
+    assert compared["column_rows"] == {"value": [("002", "'old'", '"new"')]}

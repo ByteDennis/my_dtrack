@@ -22,6 +22,7 @@ def compare_rows(
     *,
     numeric: set[str],
     limit: int,
+    per_column: bool = False,
 ) -> dict[str, Any]:
     from ..runtime.duck import connect, temp_directory
 
@@ -79,10 +80,49 @@ def compare_rows(
                         *[f"n{i}" for i in range(count)],
                     ]
                 )
+                connection.execute(f"CREATE TABLE left_rows AS SELECT {left_select} FROM left_raw")
+                connection.execute(
+                    f"CREATE TABLE right_rows AS SELECT {right_select} FROM right_raw"
+                )
+                if per_column:
+                    aligned = [
+                        "coalesce(l._key, r._key) AS _key",
+                        "coalesce(l._n, r._n) AS _n",
+                        "l._key IS NULL OR r._key IS NULL AS one_sided",
+                        *[f"coalesce(l.k{i}, r.k{i}) AS k{i}" for i in range(len(keys))],
+                    ]
+                    for index in range(count):
+                        aligned.extend(
+                            [
+                                f"l.v{index} AS lv{index}",
+                                f"r.v{index} AS rv{index}",
+                                f"l.n{index} IS DISTINCT FROM r.n{index} AS d{index}",
+                            ]
+                        )
+                    connection.execute(
+                        f"CREATE TABLE aligned_rows AS SELECT {', '.join(aligned)} "
+                        "FROM left_rows l FULL OUTER JOIN right_rows r "
+                        "ON l._key = r._key AND l._n = r._n"
+                    )
+                    for table in ("left_raw", "right_raw", "left_rows", "right_rows"):
+                        connection.execute(f"DROP TABLE {table}")
+                    column_rows = {}
+                    for index, pair in enumerate(pairs):
+                        selected = ", ".join(
+                            [
+                                *[f"k{i}" for i in range(len(keys))],
+                                f"lv{index}",
+                                f"rv{index}",
+                            ]
+                        )
+                        column_rows[pair["left_column"]] = connection.execute(
+                            f"SELECT {selected} FROM aligned_rows "
+                            f"WHERE one_sided OR d{index} ORDER BY _key, _n LIMIT {int(limit)}"
+                        ).fetchall()
+                    return {"keys": keys, "pairs": pairs, "column_rows": column_rows}
                 differs = " OR ".join(f"l.n{i} IS DISTINCT FROM r.n{i}" for i in range(count))
                 joined = (
-                    f"FROM (SELECT {left_select} FROM left_raw) l "
-                    f"FULL OUTER JOIN (SELECT {right_select} FROM right_raw) r "
+                    "FROM left_rows l FULL OUTER JOIN right_rows r "
                     "ON l._key = r._key AND l._n = r._n "
                     f"WHERE l._key IS NULL OR r._key IS NULL OR {differs or 'false'}"
                 )
