@@ -10,6 +10,7 @@ from pair_recon.app.config import (
     load_defaults,
     load_environment,
     local_output_root,
+    resolve_run_defaults,
     run_config,
     save_defaults,
 )
@@ -187,3 +188,42 @@ def test_run_config_applies_excluded_columns():
     answers = {"partition": "all", "checks": ["row_count"], "excluded_columns": ["VALUE"]}
     value = run_config("p", pair, answers, timezone="UTC")
     assert value["pairs"]["p"]["excluded_columns"] == ["VALUE"]
+
+
+@pytest.mark.parametrize("catalog_authoritative", [True, False])
+def test_resolve_run_defaults_preserves_precedence_and_explicit_empty_values(catalog_authoritative):
+    metadata = {
+        "partition": "month",
+        "vintage": "quarter",
+        "excluded_columns": [],
+        "_run_defaults": {"sample": 0.01, "audit": False, "sample_columns": [], "left_workers": 3},
+    }
+    saved = {
+        "partition": "day",
+        "sample": 0.25,
+        "audit": True,
+        "sample_columns": ["A"],
+        "use_modular": "OLD",
+        "excluded_columns": ["B"],
+        "left_workers": 1,
+        "work_dir": "local",
+    }
+    actual = resolve_run_defaults(metadata, saved, catalog_authoritative=catalog_authoritative)
+    assert actual["sample"] == (0.01 if catalog_authoritative else 0.25)
+    assert actual["audit"] is (not catalog_authoritative)
+    assert actual["sample_columns"] == ([] if catalog_authoritative else ["A"])
+    assert actual["excluded_columns"] == ([] if catalog_authoritative else ["B"])
+    assert actual["use_modular"] == (None if catalog_authoritative else "OLD")
+    assert actual["work_dir"] == "local"
+    assert actual.get("absent", "fallback") == "fallback"
+    assert saved["use_modular"] == "OLD" and "use_modular" not in metadata
+
+
+def test_resolve_run_defaults_explicit_catalog_selector_wins():
+    metadata = {"use_modular": "FROM_METADATA", "_run_defaults": {"use_modular": "CURRENT"}}
+    assert (
+        resolve_run_defaults(metadata, {"use_modular": "OLD"}, catalog_authoritative=True)[
+            "use_modular"
+        ]
+        == "CURRENT"
+    )

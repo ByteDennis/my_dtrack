@@ -377,7 +377,7 @@ def test_excluded_partition_ranges_reject_invalid_values(value):
         cli.excluded_partition_values(value)
 
 
-def test_statement_sql_reports_waiting_and_completion(monkeypatch):
+def test_statement_sql_keeps_successful_select_quiet(monkeypatch):
     def response(state, rows=None):
         return SimpleNamespace(
             statement_id="statement-1",
@@ -413,10 +413,7 @@ def test_statement_sql_reports_waiting_and_completion(monkeypatch):
 
     assert rows == [{"value": "ready"}]
     assert submitted["wait_timeout"] == "10s"
-    assert "submitted to warehouse warehouse-1" in messages[0]
-    assert any("pending" in message for message in messages)
-    assert any("running" in message for message in messages)
-    assert "completed" in messages[-1] and "1 row(s)" in messages[-1]
+    assert messages == []
 
 
 def test_resolve_job_id_accepts_id_or_unique_name():
@@ -1709,10 +1706,16 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
         assert config["pairs"]["orders"]["right_pre_sampled"] is True
 
 
-def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_path):
+@pytest.mark.parametrize("workbook_definition", ["missing", "empty", "other_pair"])
+@pytest.mark.parametrize("saved_pair", ["other", "orders"])
+@pytest.mark.parametrize("modular_selector", [None, "A"])
+def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(
+    monkeypatch, tmp_path, saved_pair, modular_selector, workbook_definition
+):
     row = {
         "pair_name": "orders",
         "partition": "day",
+        "key_columns": ["ID"],
         "left_source": "oracle",
         "left_conn": "PCDS",
         "left_table": "L",
@@ -1723,6 +1726,8 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_
         "right_date_col": "order_dt",
         "run_defaults_json": json.dumps(
             {
+                "sample": 0.01,
+                **({"use_modular": modular_selector} if modular_selector else {}),
                 "from_date": "2026-03-01",
                 "to_date": "2026-03-31",
                 "vintage": "week",
@@ -1733,7 +1738,10 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_
                 "right_workers": 12,
             }
         ),
-        "column_map_rows": [{"left_column": "A", "right_column": "a"}],
+        "column_map_rows": [
+            {"left_column": "A", "right_column": "a"},
+            {"left_column": "ID", "right_column": "id"},
+        ],
     }
 
     class Catalog:
@@ -1759,17 +1767,28 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_
         "error_table": "main.recon.pair_recon_run_error",
         "volume_root": "/Volumes/main/recon/artifacts/runs",
         "right_job_id": "42",
-        "pair": "other",
+        "pair": saved_pair,
+        "pair_workbook": str(tmp_path / "missing.xlsx"),
+        "use_modular": "OLD_SELECTOR",
+        "sample": 0.25,
+        "left_workers": 1,
+        "audit": False,
         "timezone": "America/New_York",
         "from_date": "2025-01-01",
         "to_date": "2025-01-31",
     }
+    if workbook_definition != "missing":
+        Path(defaults["pair_workbook"]).touch()
+        local_rows = [{"pair_name": "another_pair"}] if workbook_definition == "other_pair" else []
+        monkeypatch.setattr(
+            cli, "synchronize_pair_workbook", lambda *_args: (local_rows, {"rows": 0})
+        )
     monkeypatch.setattr(cli, "Catalog", Catalog)
     monkeypatch.setattr(cli, "make_run_id", lambda *_args: "r-new")
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
     monkeypatch.setenv("PAIR_RECON_OUTPUT_DIR", str(tmp_path / "artifacts"))
 
-    settings, _config, _action, _client, _catalog = cli.prompts(
+    settings, config, _action, _client, _catalog = cli.prompts(
         defaults, workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object())
     )
 
@@ -1781,6 +1800,14 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(monkeypatch, tmp_
     assert settings["sync_remote"] is False
     assert settings["left_workers"] == 3
     assert settings["right_workers"] == 12
+
+    assert settings["sample"] == 0.01
+    if modular_selector:
+        assert settings["use_modular"] == modular_selector
+        assert config["pairs"]["orders"]["use_modular"] == modular_selector
+    else:
+        assert "use_modular" not in settings
+        assert not config["pairs"]["orders"].get("use_modular")
 
 
 def test_prompt_prints_and_records_metadata_columns_without_asking(monkeypatch, tmp_path, capsys):
@@ -2153,12 +2180,24 @@ def test_synchronize_key_types_and_run_defaults_write_data_type_to_the_column_ma
     assert cli.synchronize_key_types(Sql(), catalog, row) == 4
     statement, parameters = calls[0]
     assert "MERGE INTO main.recon.pair_recon_column_map" in statement
-    assert (parameters["r0_left_column"], parameters["r0_right_column"]) == ("ACCT_ID", "acct_id")
-    assert parameters["r0_data_type"] == "categorical"
-    assert (parameters["r1_right_column"], parameters["r1_data_type"]) == ("dw_bus_dt", "date")
-    assert (parameters["r2_right_column"], parameters["r2_data_type"]) == ("CAMPAIGN", "string")
-    assert (parameters["r3_left_column"], parameters["r3_right_column"]) == ("AMOUNT", "AMOUNT")
-    assert parameters["r3_data_type"] == "numeric"
+    assert (
+        json.loads(parameters["mappings_json"])[0]["left_column"],
+        json.loads(parameters["mappings_json"])[0]["right_column"],
+    ) == ("ACCT_ID", "acct_id")
+    assert json.loads(parameters["mappings_json"])[0]["data_type"] == "categorical"
+    assert (
+        json.loads(parameters["mappings_json"])[1]["right_column"],
+        json.loads(parameters["mappings_json"])[1]["data_type"],
+    ) == ("dw_bus_dt", "date")
+    assert (
+        json.loads(parameters["mappings_json"])[2]["right_column"],
+        json.loads(parameters["mappings_json"])[2]["data_type"],
+    ) == ("CAMPAIGN", "string")
+    assert (
+        json.loads(parameters["mappings_json"])[3]["left_column"],
+        json.loads(parameters["mappings_json"])[3]["right_column"],
+    ) == ("AMOUNT", "AMOUNT")
+    assert json.loads(parameters["mappings_json"])[3]["data_type"] == "numeric"
     assert cli.synchronize_key_types(Sql(), catalog, {"pair_name": "p", "key_columns": ["X"]}) == 0
     assert len(calls) == 1
 
@@ -2191,9 +2230,9 @@ def test_synchronize_key_types_forces_date_column_mapping_and_preserves_type():
 
     assert cli.synchronize_key_types(Sql(), catalog, row) == 1
     _statement, parameters = calls[0]
-    assert parameters["r0_left_column"] == "BUSINESS_DT"
-    assert parameters["r0_right_column"] == "business_date"
-    assert parameters["r0_data_type"] == "date"
+    assert json.loads(parameters["mappings_json"])[0]["left_column"] == "BUSINESS_DT"
+    assert json.loads(parameters["mappings_json"])[0]["right_column"] == "business_date"
+    assert json.loads(parameters["mappings_json"])[0]["data_type"] == "date"
 
 
 def test_local(monkeypatch, tmp_path):
@@ -3702,10 +3741,14 @@ def test_key_type_sync_skips_unchanged_mappings_and_repairs_date_mapping():
         column_map_table="main.recon.pair_recon_column_map",
         column_mappings=lambda _pair: existing,
     )
-    sql = SimpleNamespace(execute=lambda statement, parameters: calls.append((statement, parameters)))
+    sql = SimpleNamespace(
+        execute=lambda statement, parameters: calls.append((statement, parameters))
+    )
     row = {
-        "pair_name": "p", "key_columns": ["ID[numeric]"],
-        "left_date_col": "DT", "right_date_col": "business_date",
+        "pair_name": "p",
+        "key_columns": ["ID[numeric]"],
+        "left_date_col": "DT",
+        "right_date_col": "business_date",
         "run_defaults_json": {"data_type": {"AMOUNT": "numeric"}},
     }
     assert cli.synchronize_key_types(sql, catalog, row) == 0
@@ -3713,11 +3756,64 @@ def test_key_type_sync_skips_unchanged_mappings_and_repairs_date_mapping():
     existing[1]["right_column"] = "wrong_date"
     assert cli.synchronize_key_types(sql, catalog, row) == 1
     parameters = calls[-1][1]
-    assert parameters["r0_left_column"] == "DT"
-    assert parameters["r0_right_column"] == "business_date"
-    assert "r1_left_column" not in parameters
+    assert json.loads(parameters["mappings_json"])[0]["left_column"] == "DT"
+    assert json.loads(parameters["mappings_json"])[0]["right_column"] == "business_date"
+    assert len(json.loads(parameters["mappings_json"])) == 1
     existing[1]["right_column"] = "business_date"
     existing[0]["data_type"] = "categorical"
     assert cli.synchronize_key_types(sql, catalog, row) == 1
-    assert calls[-1][1]["r0_left_column"] == "ID"
-    assert calls[-1][1]["r0_data_type"] == "numeric"
+    assert json.loads(calls[-1][1]["mappings_json"])[0]["left_column"] == "ID"
+    assert json.loads(calls[-1][1]["mappings_json"])[0]["data_type"] == "numeric"
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        {"num_affected_rows": "7"},
+        {"num_inserted_rows": "3", "num_updated_rows": "4", "num_deleted_rows": "0"},
+        {},
+    ],
+)
+@pytest.mark.parametrize("table", ["pair_recon_pair_meta", "custom_table_" + "x" * 100])
+def test_statement_sql_merge_summary_is_one_bounded_line_with_actual_counts(counts, table):
+    response = SimpleNamespace(
+        status=SimpleNamespace(state="SUCCEEDED"),
+        manifest=SimpleNamespace(
+            schema=SimpleNamespace(columns=[SimpleNamespace(name=name) for name in counts])
+        ),
+        result=SimpleNamespace(data_array=[list(counts.values())] if counts else []),
+    )
+    api = SimpleNamespace(execute_statement=lambda *_args, **_kwargs: response)
+    messages = []
+    sql = StatementSql(
+        SimpleNamespace(statement_execution=api), "warehouse", reporter=messages.append
+    )
+    result = sql.execute(
+        f"MERGE INTO very_long_catalog_name.very_long_schema_name.{table} AS t USING (SELECT 1) AS s ON t.id=s.id WHEN MATCHED THEN UPDATE SET id=1"
+    )
+    assert result == ([counts] if counts else [])
+    assert len(messages) == 1 and len(messages[0]) <= 80
+    if table == "pair_recon_pair_meta":
+        assert "MERGE pair_recon_pair_meta" in messages[0]
+        assert "sync pair" in messages[0]
+    else:
+        assert messages[0].startswith("MERGE custom_table_") and "..." in messages[0]
+    assert "s," in messages[0]
+    assert ("7 affected rows" if counts else "affected rows unavailable") in messages[0]
+
+
+def test_statement_sql_failure_is_compact_but_exception_keeps_full_detail():
+    error = "bad query\n" + "detail " * 40
+    response = SimpleNamespace(
+        status=SimpleNamespace(state="FAILED", error=SimpleNamespace(message=error))
+    )
+    api = SimpleNamespace(execute_statement=lambda *_args, **_kwargs: response)
+    messages = []
+    sql = StatementSql(
+        SimpleNamespace(statement_execution=api), "warehouse", reporter=messages.append
+    )
+    with pytest.raises(RuntimeError) as caught:
+        sql.execute("SELECT broken")
+    assert str(caught.value) == error
+    assert len(messages) == 1 and len(messages[0]) <= 80
+    assert "\n" not in messages[0] and messages[0].endswith("...")

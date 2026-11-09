@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -344,7 +345,15 @@ def automatch_columns(
     return rows
 
 
-def upsert_column_mappings(sql, table: str, pair_name: str, mappings: Iterable[dict]) -> dict:
+def upsert_column_mappings(
+    sql, table: str, pair_name: str, mappings: Iterable[dict], *, overwrite: bool = True
+) -> dict:
+    """Replace the entire mapping table, or patch one Pair with overwrite=False.
+
+    An empty overwrite clears the entire table. Empty patches do no work.
+    """
+    if not isinstance(overwrite, bool):
+        raise TypeError("overwrite must be true or false")
     table = validate_table_name(table)
     pair = str(pair_name or "").strip()
     if not pair:
@@ -366,22 +375,21 @@ def upsert_column_mappings(sql, table: str, pair_name: str, mappings: Iterable[d
             "data_type": str(raw.get("data_type") or "").strip() or None,
         }
         rows.append(row)
-    for start in range(0, len(rows), 250):
-        batch = rows[start : start + 250]
-        parameters = {}
-        values = []
-        for index, row in enumerate(batch):
-            names = []
-            for column in ("pair_name", "left_column", "right_column", "data_type"):
-                name = f"r{index}_{column}"
-                parameters[name] = row[column]
-                names.append(f":{name}")
-            values.append(f"({', '.join(names)})")
-        statement = f"""MERGE INTO {table} AS t
+    if rows or overwrite:
+        parameters = {"mappings_json": json.dumps(rows, ensure_ascii=False)}
+        source = """SELECT m.* FROM (
+  SELECT explode(from_json(:mappings_json,
+    'ARRAY<STRUCT<pair_name:STRING,left_column:STRING,right_column:STRING,data_type:STRING>>'
+  )) AS m
+) AS incoming"""
+        if overwrite:
+            statement = f"""INSERT OVERWRITE TABLE {table}
+(pair_name, left_column, right_column, data_type)
+{source}"""
+        else:
+            statement = f"""MERGE INTO {table} AS t
 USING (
-  SELECT * FROM VALUES
-  {", ".join(values)}
-  AS v(pair_name, left_column, right_column, data_type)
+{source}
 ) AS s
 ON t.pair_name = s.pair_name AND t.left_column = s.left_column
 WHEN MATCHED THEN UPDATE SET
@@ -390,4 +398,10 @@ WHEN MATCHED THEN UPDATE SET
 WHEN NOT MATCHED THEN INSERT (pair_name, left_column, right_column, data_type)
 VALUES (s.pair_name, s.left_column, s.right_column, s.data_type)"""
         sql.execute(statement, parameters)
-    return {"table": table, "pair_name": pair, "rows": len(rows), "mappings": rows}
+    return {
+        "table": table,
+        "pair_name": pair,
+        "rows": len(rows),
+        "mappings": rows,
+        "overwrite": overwrite,
+    }

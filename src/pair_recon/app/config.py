@@ -7,6 +7,11 @@ from typing import Any
 import yaml
 from dotenv import find_dotenv, load_dotenv
 
+from pair_recon.core.metadata.constant import (
+    CATALOG_RESETTABLE_RUN_DEFAULT_FIELDS,
+    CATALOG_RUN_DEFAULT_FIELDS,
+)
+
 _PRIVATE = ("password", "secret", "token", "credential")
 OUTPUT_DIR_ENV = "PAIR_RECON_OUTPUT_DIR"
 DEFAULT_OUTPUT_DIR = "outputs"
@@ -89,6 +94,26 @@ def save_defaults(path: str | Path, value: dict[str, Any]) -> dict[str, Any]:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(yaml.safe_dump(saved, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return saved
+
+
+def resolve_run_defaults(
+    metadata: dict[str, Any],
+    saved_defaults: dict[str, Any],
+    *,
+    catalog_authoritative: bool = False,
+) -> dict[str, Any]:
+    """Merge run defaults once, retaining explicit None/False/empty values."""
+    catalog_defaults = metadata.get("_run_defaults") or {}
+    resolved = {**catalog_defaults, **saved_defaults}
+    if catalog_authoritative:
+        resolved.update(
+            {name: metadata[name] for name in CATALOG_RUN_DEFAULT_FIELDS if name in metadata}
+        )
+        resolved.update(
+            {name: metadata.get(name) for name in CATALOG_RESETTABLE_RUN_DEFAULT_FIELDS}
+        )
+        resolved.update(catalog_defaults)
+    return resolved
 
 
 def run_config(

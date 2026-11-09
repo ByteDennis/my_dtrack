@@ -1,3 +1,59 @@
+pair_recon Centralize run-default precedence — 2026-11-09
+
+Summary
+- Resolve run defaults once in app/config.py, then use dictionary get for prompt defaults.
+- Declare catalog-owned and resettable default fields in metadata/constant.py.
+- Preserve workbook-owner and collaborator precedence, explicit None/False/empty values, and clearing of removed catalog selectors.
+
+Modified files
+- `src/pair_recon/app/config.py`: merges catalog and saved defaults.
+- `src/pair_recon/app/cli/__init__.py`: replaces per-option branching with lookup of resolved defaults.
+- `src/pair_recon/core/metadata/constant.py`: centralizes catalog default policy fields.
+- `tests/unit/packages/pair_recon/test_config.py`: checks precedence, explicit empty values, and selector updates.
+- `changelog.txt`: records the refactor.
+
+Verification
+- Configuration and CLI regression tests passed.
+
+pair_recon Bulk column-mapping replacement — 2026-11-09
+
+Summary
+- Add keyword-only overwrite=True to upsert_column_mappings. Overwrite replaces the entire mapping table with the supplied Pair's mappings, including removal of mappings belonging to other Pairs. Empty input clears the table.
+- Use one INSERT OVERWRITE statement with a typed JSON parameter for complete replacement. All input validation finishes before the write.
+- Use overwrite=False for partial updates, submitting the complete patch in one MERGE. An empty patch performs no write.
+- Make the mapping notebook's OVERWRITE switch explicit and document whole-table replacement. Automatic startup synchronization uses partial updates.
+
+Modified files
+- `src/pair_recon/core/metadata/mapping.py`: single-statement replacement and partial MERGE paths.
+- `src/pair_recon/app/cli/__init__.py`: explicitly retains partial-update behavior for automatic key/type synchronization.
+- `src/pair_recon/app/runner.py`: identifies INSERT OVERWRITE targets in compact SQL summaries.
+- `setup/mapping.ipynb`: exposes OVERWRITE=True and explains its table-wide scope.
+- `tests/unit/flows/test_mapping.py`: covers empty/full replacement, partial updates, 501-column inputs, and validation before writes.
+- `tests/unit/packages/pair_recon/test_runner.py`: checks startup mapping updates through the bulk JSON payload.
+- `changelog.txt`: records the change.
+
+Verification
+- Mapping, runner, and setup tests passed, including local execution of replacement and MERGE semantics with an adapted JSON source.
+- Databricks execution was not exercised.
+
+pair_recon Refresh collaborator defaults and compact SQL reporting — 2026-11-09
+
+Summary
+- When the selected Pair has no local workbook definition, prefer run defaults read from Databricks pair_meta over saved YAML values for the same Pair. Keep catalog partition, vintage, and declared column exclusions authoritative in this mode.
+- Refresh use_modular from catalog configuration, including clearing an old YAML selector when the catalog removes it. Interactive prompts can still change visible run options.
+- Suppress successful SQL read submission, polling, and completion messages on the console.
+- Report SQL writes in one line of at most 80 characters with operation, table, purpose, elapsed time, and actual affected-row metrics when returned by Databricks. Report unavailable counts explicitly and shorten long labels with an ellipsis.
+- Keep compact SQL failure notifications and retain the complete error in the raised exception.
+
+Modified files
+- `src/pair_recon/app/cli/__init__.py`: resolves collaborator defaults from current catalog metadata before saved YAML.
+- `src/pair_recon/app/runner.py`: emits compact write summaries and suppresses successful read chatter.
+- `tests/unit/packages/pair_recon/test_runner.py`: covers changed and removed remote defaults, silent read polling, affected-row metrics, truncation, and full failure details.
+- `changelog.txt`: records both changes.
+
+Verification
+- Runner, catalog, and setup tests: 187 passed. Ruff and git diff --check passed. Databricks execution was not exercised.
+
 pair_recon Setup notebook examples and editor configurations — 2026-11-06
 
 Summary

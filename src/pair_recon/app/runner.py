@@ -409,7 +409,8 @@ class StatementSql:
 
     def _report(self, message: str):
         if self.reporter:
-            self.reporter(message)
+            message = " ".join(message.split())
+            self.reporter(message if len(message) <= 80 else message[:77] + "...")
 
     def execute(self, statement: str, parameters=None):
         with self.lock:
@@ -418,10 +419,6 @@ class StatementSql:
     def _execute(self, statement: str, parameters=None):
         operation = statement.lstrip().split(None, 1)[0].upper()
         started = time.monotonic()
-        self._report(
-            f"Databricks SQL {operation}: submitted to warehouse {self.warehouse_id}; "
-            "waiting for completion (a stopped warehouse may take a few minutes to start)."
-        )
         values = [
             StatementParameterListItem(
                 name=name,
@@ -438,17 +435,7 @@ class StatementSql:
         )
         state = getattr(getattr(response, "status", None), "state", None)
         state_name = getattr(state, "value", state)
-        last_reported = None
-        last_reported_at = started
         while state_name in {"PENDING", "RUNNING"}:
-            now = time.monotonic()
-            if state_name != last_reported or now - last_reported_at >= 15:
-                self._report(
-                    f"Databricks SQL {operation}: {str(state_name).lower()} "
-                    f"for {int(now - started)}s..."
-                )
-                last_reported = state_name
-                last_reported_at = now
             time.sleep(1)
             response = self.api.get_statement(response.statement_id)
             state = getattr(getattr(response, "status", None), "state", None)
@@ -470,11 +457,56 @@ class StatementSql:
             else []
         )
         rows = getattr(getattr(response, "result", None), "data_array", None) or []
-        self._report(
-            f"Databricks SQL {operation}: completed in "
-            f"{int(time.monotonic() - started)}s ({len(rows)} row(s))."
-        )
-        return [dict(zip(columns, row)) for row in rows]
+        result = [dict(zip(columns, row)) for row in rows]
+        if operation not in {"SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH"}:
+            target = re.search(
+                r"\b(?:MERGE\s+INTO|INSERT\s+(?:INTO|OVERWRITE(?:\s+TABLE)?)|UPDATE|DELETE\s+FROM|"
+                r"CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|ALTER\s+TABLE|"
+                r"DROP\s+TABLE(?:\s+IF\s+EXISTS)?)\s+([\w.\x60\"]+)",
+                statement,
+                re.IGNORECASE,
+            )
+            table = (
+                target.group(1).replace("`", "").replace('"', "").rsplit(".", 1)[-1]
+                if target
+                else ""
+            )
+            purpose = {
+                "pair_recon_pair_meta": "sync pair metadata",
+                "pair_recon_pair_sql": "sync pair queries",
+                "pair_recon_column_map": "sync column mappings",
+                "pair_recon_normalization": "sync normalization rules",
+                "pair_recon_run_status": "record run status",
+                "pair_recon_progress_snapshot": "record progress",
+                "pair_recon_window_history": "record vintage coverage",
+                "pair_recon_run_error": "record findings",
+            }.get(table, "")
+            metrics = {
+                str(key).lower(): value for key, value in (result[0] if result else {}).items()
+            }
+            affected = metrics.get("num_affected_rows")
+            if affected is None:
+                counts = [
+                    metrics[key]
+                    for key in ("num_inserted_rows", "num_updated_rows", "num_deleted_rows")
+                    if key in metrics
+                ]
+                if counts:
+                    affected = sum(int(count or 0) for count in counts)
+            count_text = (
+                f"{int(affected)} affected rows"
+                if affected is not None
+                else "affected rows unavailable"
+            )
+            suffix = f" ({time.monotonic() - started:.1f}s, {count_text})"
+            label = f"{operation} {table}".strip()
+            if purpose:
+                label += f" - {purpose}"
+            width = max(3, 80 - len(suffix))
+            if len(label) > width:
+                label = label[: width - 3] + "..."
+            self._report(label + suffix)
+        return result
 
 
 # >>> browser login unless DATABRICKS_AUTH_TYPE says otherwise; other auth types fail on this setup <<< #

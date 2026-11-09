@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace as NS
 
 import pytest
@@ -172,14 +173,14 @@ def test_upsert_column_mappings():
     )
 
     assert result["rows"] == 1
-    assert "MERGE INTO main.recon.pair_recon_column_map" in calls[0][0]
-    assert calls[0][1]["r0_data_type"] == "numeric"
+    assert "INSERT OVERWRITE TABLE main.recon.pair_recon_column_map" in calls[0][0]
+    assert json.loads(calls[0][1]["mappings_json"])[0]["data_type"] == "numeric"
 
     with pytest.raises(ValueError, match="invalid table name"):
         upsert_column_mappings(sql, "bad", "orders", [])
 
 
-def test_upsert_column_mappings_batches_rows_in_one_merge():
+def test_upsert_column_mappings_batches_rows_in_one_write():
     calls = []
     sql = NS(execute=lambda statement, parameters: calls.append((statement, parameters)))
 
@@ -196,6 +197,74 @@ def test_upsert_column_mappings_batches_rows_in_one_merge():
     assert result["rows"] == 2
     assert len(calls) == 1
     statement, parameters = calls[0]
-    assert "SELECT * FROM VALUES" in statement
-    assert parameters["r0_left_column"] == "ID"
-    assert parameters["r1_left_column"] == "NAME"
+    assert "explode(from_json(:mappings_json" in statement
+    assert json.loads(parameters["mappings_json"])[0]["left_column"] == "ID"
+    assert json.loads(parameters["mappings_json"])[1]["left_column"] == "NAME"
+
+
+@pytest.mark.parametrize("overwrite", [True, False])
+@pytest.mark.parametrize("size", [0, 1, 501])
+def test_mapping_write_overwrites_table_or_patches_pair_in_one_statement(overwrite, size):
+    import duckdb
+
+    with duckdb.connect() as connection:
+        connection.execute(
+            "CREATE TABLE column_map (pair_name VARCHAR, left_column VARCHAR, right_column VARCHAR, data_type VARCHAR)"
+        )
+        connection.execute(
+            "INSERT INTO column_map VALUES ('orders', 'C0', 'old', NULL), ('orders', 'OBSOLETE', 'obsolete', NULL), ('other', 'C0', 'keep', NULL)"
+        )
+        calls = []
+
+        def execute(statement, parameters):
+            calls.append((statement, parameters))
+            # Adapt the Spark JSON source and SQL dialect for a local execution
+            # of whole-table replacement or partial MERGE semantics.
+            columns = ("pair_name", "left_column", "right_column", "data_type")
+            source = ", ".join(
+                f"json_extract_string(value, '$.{name}') AS {name}" for name in columns
+            )
+            source = f"SELECT {source} FROM json_each($mappings_json)"
+            if overwrite:
+                assert statement.startswith("INSERT OVERWRITE TABLE memory.main.column_map")
+                connection.execute(f"CREATE OR REPLACE TABLE column_map AS {source}", parameters)
+            else:
+                assert statement.startswith("MERGE INTO memory.main.column_map")
+                start = statement.index("USING (")
+                end = statement.index(") AS s\nON ", start) + len(") AS s")
+                statement = statement[:start] + f"USING ({source}) AS s" + statement[end:]
+                statement = statement.replace("t.right_column =", "right_column =").replace(
+                    "t.data_type =", "data_type ="
+                )
+                connection.execute(statement, parameters)
+
+        rows = [
+            {"left_column": f"C{i}", "right_column": f"c{i}", "data_type": "string"}
+            for i in range(size)
+        ]
+        upsert_column_mappings(
+            NS(execute=execute), "memory.main.column_map", "orders", iter(rows), overwrite=overwrite
+        )
+        assert len(calls) == (1 if size or overwrite else 0)
+        actual = connection.execute(
+            "SELECT left_column, right_column FROM column_map WHERE pair_name='orders' ORDER BY left_column"
+        ).fetchall()
+        expected = {row["left_column"]: row["right_column"] for row in rows}
+        if not overwrite:
+            expected = {"C0": "old", "OBSOLETE": "obsolete", **expected}
+        assert actual == sorted(expected.items())
+        others = connection.execute("SELECT * FROM column_map WHERE pair_name='other'").fetchall()
+        assert others == ([] if overwrite else [("other", "C0", "keep", None)])
+
+
+def test_mapping_validation_finishes_before_any_write():
+    calls = []
+    sql = NS(execute=lambda *args: calls.append(args))
+    rows = [{"left_column": f"C{i}", "right_column": f"c{i}"} for i in range(501)]
+    rows.append({"left_column": "C0", "right_column": "duplicate"})
+    with pytest.raises(ValueError, match="duplicate left column"):
+        upsert_column_mappings(sql, "main.recon.column_map", "orders", rows)
+    assert calls == []
+    with pytest.raises(TypeError, match="overwrite"):
+        upsert_column_mappings(sql, "main.recon.column_map", "orders", [], overwrite="false")
+    assert calls == []

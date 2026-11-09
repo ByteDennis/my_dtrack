@@ -44,6 +44,7 @@ from ..config import (
     load_defaults,
     load_environment,
     local_output_root,
+    resolve_run_defaults,
     run_config,
     save_defaults,
 )
@@ -470,7 +471,7 @@ def synchronize_key_types(sql, catalog, row: dict) -> int:
             continue
         mappings.append({"left_column": name, "right_column": right, "data_type": data_type})
     if mappings:
-        upsert_column_mappings(sql, catalog.column_map_table, pair, mappings)
+        upsert_column_mappings(sql, catalog.column_map_table, pair, mappings, overwrite=False)
     return len(mappings)
 
 
@@ -551,7 +552,7 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
     )
     cached = session.cache.get("metadata") if session else None
     if cached and cached[0] == metadata_key:
-        client, statement_sql, catalog, by_name = cached[1:]
+        client, statement_sql, catalog, by_name, workbook_rows = cached[1:]
         statement_sql.reporter = console
     else:
         console(f"Initializing Databricks client for profile {profile!r}...")
@@ -593,7 +594,14 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         by_name = {row["pair_name"]: row for row in catalog.pairs()}
         console(f"Loaded {len(by_name)} enabled pair(s).")
         if session:
-            session.cache["metadata"] = (metadata_key, client, statement_sql, catalog, by_name)
+            session.cache["metadata"] = (
+                metadata_key,
+                client,
+                statement_sql,
+                catalog,
+                by_name,
+                workbook_rows,
+            )
     system_normalization_rules = catalog.normalization_rules()
     pair_names = list(by_name)
     if not pair_names:
@@ -605,13 +613,14 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
         saved_pair if saved_pair in pair_names else None,
     )
     metadata = pair_config(by_name[pair])
-    run_defaults = metadata.get("_run_defaults") or {}
     same_pair = defaults.get("pair") == pair
-
-    def run_default(name, fallback=None):
-        if same_pair and name in defaults:
-            return defaults[name]
-        return run_defaults.get(name, fallback)
+    catalog_defaults = pair not in {row["pair_name"] for row in workbook_rows}
+    resolved_defaults = resolve_run_defaults(
+        metadata,
+        defaults if same_pair else {},
+        catalog_authoritative=catalog_defaults,
+    )
+    run_default = resolved_defaults.get
 
     run_mode = select("Run mode", ["full", "left-only"], run_default("run_mode", "full"))
     left_source = str(metadata["left"].get("source") or "").casefold()
