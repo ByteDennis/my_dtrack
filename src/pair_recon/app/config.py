@@ -3,8 +3,10 @@ import os
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import yaml
 from dotenv import find_dotenv, load_dotenv
@@ -163,6 +165,13 @@ def resolve_run_defaults(
         )
         resolved.update(catalog_defaults)
     return resolved
+
+
+def default_to_date(value: Any, timezone: str) -> str:
+    """Use the run timezone's current day when no effective end date is supplied."""
+    if value is not None and str(value).strip():
+        return str(value).strip()
+    return datetime.now(ZoneInfo(timezone)).date().isoformat()
 
 
 def run_config(

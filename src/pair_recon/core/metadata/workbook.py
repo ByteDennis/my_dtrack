@@ -227,7 +227,7 @@ FIELD_GUIDE = (
         "run_defaults_json.to_date",
         "date partition",
         "YYYY-MM-DD",
-        "Inclusive upper date bound; a single date, not a list.",
+        "Inclusive upper date bound; defaults to today in the run timezone when no effective value is supplied.",
         "2026-12-31",
     ),
     (

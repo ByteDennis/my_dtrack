@@ -17,6 +17,7 @@ from typing import Any
 
 from tqdm import tqdm
 
+from ..backends.targets import MissingSamplingColumnError
 from ..common.model.attribute_checks import attribute_check_names, get_attribute_check
 from ..common.model.audit import SqlAudit, attach_sql_audit
 from ..common.model.manifest import DEFAULT_STATISTICS, planned_unit_ids, unit_id_for, window_id
@@ -186,6 +187,29 @@ class SampleCountMismatch(RuntimeError):
     pass
 
 
+def _is_unresolved_column_error(error: Exception) -> bool:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, MissingSamplingColumnError):
+            return True
+        for name in ("getCondition", "getErrorClass", "getSqlState"):
+            method = getattr(error, name, None)
+            if not callable(method):
+                continue
+            try:
+                code = str(method() or "")
+            except Exception:
+                log.debug("could not read Spark error metadata %s", name, exc_info=True)
+                continue
+            if code == "42703" or code.split(".", 1)[0] == "UNRESOLVED_COLUMN":
+                return True
+        if str(error).lstrip().startswith(("[UNRESOLVED_COLUMN]", "[UNRESOLVED_COLUMN.")):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 # >>> Left and Right totals of one window must agree, otherwise no column can match: stop the Right now <<< #
 def require_same_total(manifest, window, column, left, right) -> None:
     left_total, right_total = left.get("n_total"), right.get("n_total")
@@ -288,6 +312,10 @@ class ColCheck:
         self.window_payloads: dict[tuple[str, str], dict[str, Any]] = {}
         self.activity: dict[tuple[str, str], tuple[int, int]] = {}
         self.activity_lock = threading.Lock()
+        self.stages = {}
+        self.stage_lock = threading.Lock()
+        self.last_stage_log = time.monotonic()
+        self.last_progress_render = 0.0
 
     # >>> the first window's sampled count is compared as soon as both sides have it, before any statistics <<< #
     def _check_first_window(self) -> None:
@@ -313,7 +341,7 @@ class ColCheck:
             "B sampled counts agree %s %s: left=%d right=%d", pair, window, left_total, right_total
         )
 
-    def _refresh_progress(self):
+    def _refresh_progress(self, *, force=False):
         total = len(self.active_ids)
         completed = len(self.completed_ids & self.active_ids)
         if self.progress is None:
@@ -323,7 +351,8 @@ class ColCheck:
                 unit="column",
                 file=sys.stdout,
                 ascii=True,
-                ncols=140,
+                ncols=80,
+                bar_format="{desc}",
                 leave=True,
                 mininterval=PROGRESS_INTERVAL,
             )
@@ -331,17 +360,38 @@ class ColCheck:
             self.progress.total = total
         if completed > self.progress.n:
             self.progress.update(completed - self.progress.n)
-        self.progress.set_postfix_str(
-            f"received={len(self.seen)}/{total} "
-            f"stats={len(self.ready_windows)}/{len(self.scheduler.windows)} "
-            f"fetching={len(self.scheduler.prefetching)} "
-            f"queued={len(self.scheduler.ready) + sum(map(len, self.scheduler.pending.values()))}",
-            refresh=False,
-        )
+        now = time.monotonic()
+        with self.stage_lock:
+            stages = list(self.stages.values())
+        message = f"Right {completed}/{total} stats={len(self.ready_windows)}/{len(self.scheduler.windows)}"
+        if stages:
+            phase, context, started = min(stages, key=lambda stage: stage[2])
+            phase = {
+                "window_statistics": "stats",
+                "health_check": "schema",
+                "window_count": "count",
+            }.get(phase, phase)
+            label = context.replace("pair=", "").replace("vintage=", "").replace("batch=", "b=")
+            suffix = f" {now - started:.0f}s" + (f" +{len(stages) - 1}" if len(stages) > 1 else "")
+            message += f" {phase} "
+            width = max(3, 80 - len(message) - len(suffix))
+            if len(label) > width:
+                head = (width - 3) // 2
+                tail = width - head - 3
+                label = label[:head] + "..." + (label[-tail:] if tail else "")
+            message += label + suffix
+            if now - self.last_stage_log >= PROGRESS_INTERVAL:
+                log.info("%s", message[:80])
+                self.last_stage_log = now
+        else:
+            message += f" received={len(self.seen)}/{total}"
+        if force or now - self.last_progress_render >= 1.0:
+            self.progress.set_description_str(message[:80], refresh=True)
+            self.last_progress_render = now
 
     def _close_progress(self):
         if self.progress is not None:
-            self._refresh_progress()
+            self._refresh_progress(force=True)
             self.progress.close()
 
     def _validated_plan_ids(self):
@@ -385,6 +435,13 @@ class ColCheck:
         with self.activity_lock:
             self.activity[(task.pair, task.window)] = (int(done), int(total))
         write_right_state(self.store, {"fetching": self._activity()})
+
+    def _note_stage(self, token, phase, context, started):
+        with self.stage_lock:
+            if phase is None:
+                self.stages.pop(token, None)
+            else:
+                self.stages[token] = (phase, context, started)
 
     def _flush_matches(self, *, force=False):
         while len(self.pending_matches) >= self.result_batch_size or (
@@ -453,6 +510,8 @@ class ColCheck:
                         enabled=bool(manifest.get("audit")),
                     ),
                 )
+                if hasattr(self.targets[pair], "set_stage_reporter"):
+                    self.targets[pair].set_stage_reporter(self._note_stage)
         return self.targets[pair]
 
     def poll(self):
@@ -504,8 +563,18 @@ class ColCheck:
         if changed:
             self._write_progress()
             self._refresh_progress()
+        self._require_statistics_not_failed()
         self._check_first_window()
         return changed
+
+    def _require_statistics_not_failed(self):
+        failed = self.failure_ids & self.active_ids
+        if self.stats_only and failed:
+            self._write_progress("failed")
+            raise RuntimeError(
+                f"Right statistics unavailable: {len(failed)} unit(s) failed; "
+                "stopping instead of waiting for failed windows"
+            )
 
     def _failure(self, task, exc):
         uid = task.payload.get("unit_id") or f"right--{task.pair}--{task.window}"
@@ -516,20 +585,49 @@ class ColCheck:
             return
         details = "".join(traceback.format_exception(exc))
         self.attempts[uid] += 1
+        if _is_unresolved_column_error(exc):
+            failed_uid = uid
+            if task.kind == "prefetch":
+                manifest = self.scheduler.manifests[task.pair]
+                window = self.scheduler.windows[(task.pair, task.window)]
+                failed_uid = unit_id_for(manifest, window, manifest["columns"][0])
+                self.scheduler.prefetching.discard((task.pair, task.window))
+            self.store.put_dead(
+                failed_uid,
+                {
+                    "unit_id": failed_uid,
+                    "pair": task.pair,
+                    "window": task.window,
+                    "error": str(exc),
+                    "traceback": details,
+                    "fatal": True,
+                    "plan_id": self.scheduler.manifests[task.pair].get("plan_id"),
+                },
+            )
+            self.failure_ids.add(failed_uid)
+            self.completed_ids.add(failed_uid)
+            self._write_progress("failed")
+            raise RuntimeError(
+                f"{task.pair} {task.window}: Right column resolution failed; "
+                f"not retrying an invalid query: {exc}"
+            ) from exc
         if self.attempts[uid] >= self.max_attempts:
             units = [uid]
             if task.kind == "prefetch":
                 manifest = self.scheduler.manifests[task.pair]
                 window = self.scheduler.windows[(task.pair, task.window)]
                 units = [unit_id_for(manifest, window, col) for col in manifest["columns"]]
+                self.scheduler.prefetching.discard((task.pair, task.window))
+            log.error(
+                "dead %s %s: %d unit(s) after %d attempt(s): %s",
+                task.pair,
+                task.window,
+                len(units),
+                self.attempts[uid],
+                exc,
+                extra={"pair_recon_traceback": details},
+            )
             for failed_uid in units:
-                log.error(
-                    "dead %s after %d attempt(s): %s",
-                    failed_uid,
-                    self.attempts[uid],
-                    exc,
-                    extra={"pair_recon_traceback": details},
-                )
                 self.store.put_dead(
                     failed_uid,
                     {
@@ -544,6 +642,7 @@ class ColCheck:
                 self.failure_ids.add(failed_uid)
                 self.completed_ids.add(failed_uid)
             self._write_progress()
+            self._require_statistics_not_failed()
             return
         log.warning("retry %s attempt %d: %s", uid, self.attempts[uid], exc)
         if task.kind == "prefetch":

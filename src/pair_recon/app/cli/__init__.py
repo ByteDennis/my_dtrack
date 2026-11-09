@@ -40,6 +40,7 @@ from pair_recon_left.common.sql.dates import contiguous_runs, resolve_date_type
 from ..catalog import Catalog
 from ..config import (
     column_list,
+    default_to_date,
     env_value,
     load_config,
     load_defaults,
@@ -733,7 +734,10 @@ def prompts(defaults: dict, *, workspace_factory=workspace, interactive: bool = 
             ),
             to_date=answer(
                 "To date",
-                provenance.get("to_date", run_default("to_date", defaults.get("to_date"))),
+                default_to_date(
+                    provenance.get("to_date", run_default("to_date", defaults.get("to_date"))),
+                    timezone,
+                ),
             ),
         )
         excluded_default = run_default(

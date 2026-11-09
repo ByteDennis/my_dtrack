@@ -1,3 +1,53 @@
+pair_recon Restore cached Spark statistics and live stage progress — 2026-11-09
+
+Summary
+- Default Right statistics to Spark aggregation in RIGHT_STATS_COLUMNS batches (50 attributes), collecting one aggregate row per batch instead of sampled rows in pandas.
+- Keep the sampled window's MEMORY_AND_DISK cached view for all statistics batches, including windows that exceed an explicitly enabled pandas row cap. Independent row counts and lost-cache recomputation can still read the source.
+- Preserve the optional pandas path only when RIGHT_STATS_DRIVER_ROWS is explicitly positive; its default is now 0.
+- Report query/cache stage starts and completions. Refresh the shared 80-character stdout status with the active stage, batch, elapsed time, and concurrent-stage count; retain a status log every 30 seconds while stages run.
+- Separate optional pandas slot-wait time, SQL/toPandas time, and local statistics time. Preserve difference sampling, selected checks, normalization, and checkpoint formats.
+- Update operator documentation. In-place rendering depends on whether the notebook/log viewer supports carriage returns.
+
+Verification
+- Right targets, scheduler/column checks, job, and CLI/runner tests: 304 passed. Added coverage proves source materialization is reused across Spark batches, the default path never calls toPandas, stage cleanup works on errors, status refresh/log intervals are bounded, and pandas timings exclude slot waiting.
+- Ruff, formatting checks, and git diff --check passed. Databricks performance and notebook rendering were not exercised locally.
+
+pair_recon Stop Right jobs on unresolved columns and failed statistics windows — 2026-11-09
+
+Summary
+- Validate the mapped Right use_modular column against discovered relation columns before submitting a window data query; report the Pair, window, Left selector, and missing Right column.
+- Treat unresolved-column analysis errors (including SQLSTATE 42703 and wrapped Spark errors) as terminal: save one fatal failure, publish failed progress, and raise instead of retrying the invalid query.
+- Fix the stats_only/debug wait loop: exhausted retries or persisted active failures now raise instead of waiting forever for failed windows to become ready.
+- Release failed prefetch slots and log a terminal window failure once, rather than repeating the same stack trace for every attribute.
+
+Verification
+- Right targets, scheduler/column checks, job, and CLI/runner tests: 299 passed. Coverage includes pre-query sampling-column validation, both comparison modes, Spark metadata variants, wrapped errors, transient retry exhaustion, and resume from a recorded failure.
+- Ruff, formatting checks, and git diff --check passed. Databricks execution was not run.
+
+pair_recon Default a missing CLI end date to today — 2026-11-09
+
+Summary
+- For dated CLI runs, use the current day in the selected IANA run timezone when the effective to_date is missing, null, or blank.
+- Apply the fallback to both interactive and --defaults modes, saving the resolved date in settings and Pair configuration. The end date remains inclusive.
+- Preserve existing date-source precedence, including supplied CSV provenance and saved end dates. from_date is still required; partition=all behavior is unchanged.
+- Update the workbook field guide and operator documentation.
+
+Verification
+- Configuration and CLI/runner tests: 218 passed, covering missing/null end dates, explicit dates, both CLI modes, and a UTC date boundary across New York and Tokyo.
+- Ruff and formatting checks for the implementation/tests passed; git diff --check passed. No cloud writes were executed.
+
+pair_recon Limit column-mapping overwrite to the selected Pair — 2026-11-09
+
+Summary
+- Correct overwrite=True in upsert_column_mappings to replace only the supplied pair_name's mappings, preserving every other Pair.
+- Replace table-wide INSERT OVERWRITE with one MERGE. Delete omitted target rows only when t.pair_name equals the bound pair_name parameter; input validation still completes before any write.
+- An empty overwrite clears only the selected Pair. overwrite=False continues to preserve omitted attributes and performs no write for an empty patch.
+- Update the mapping notebook, its teaching notebook, and the notebook generator to describe Pair-scoped replacement.
+
+Verification
+- Mapping and CLI/runner tests: 166 passed. Local MERGE execution covered zero, one, and 501 input rows, quoted Pair names, stale-attribute deletion, and preservation of other Pairs and similarly prefixed Pair names.
+- Ruff, formatting checks, notebook JSON validation, and git diff --check passed. No cloud writes were executed.
+
 pair_recon Register normalization transforms like key families — 2026-11-09
 
 Summary
@@ -125,6 +175,8 @@ Verification
 - Configuration and CLI regression tests passed.
 
 pair_recon Bulk column-mapping replacement — 2026-11-09
+
+Superseded: the later Pair-scoped overwrite correction removes the table-wide replacement behavior described below.
 
 Summary
 - Add keyword-only overwrite=True to upsert_column_mappings. Overwrite replaces the entire mapping table with the supplied Pair's mappings, including removal of mappings belonging to other Pairs. Empty input clears the table.

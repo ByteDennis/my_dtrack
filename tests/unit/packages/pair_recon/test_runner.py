@@ -1692,10 +1692,19 @@ def test_prompt(monkeypatch, run_mode, left_source, right_source, existing, tmp_
 
 
 @pytest.mark.parametrize("workbook_definition", ["missing", "empty", "other_pair"])
-@pytest.mark.parametrize("saved_pair", ["other", "orders"])
+@pytest.mark.parametrize(
+    "interactive,saved_pair", [(True, "other"), (True, "orders"), (False, "orders")]
+)
 @pytest.mark.parametrize("modular_selector", [None, "A"])
+@pytest.mark.parametrize("end_date_options", [{"to_date": "2026-03-31"}, {"to_date": None}, {}])
 def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(
-    monkeypatch, tmp_path, saved_pair, modular_selector, workbook_definition
+    monkeypatch,
+    tmp_path,
+    saved_pair,
+    modular_selector,
+    workbook_definition,
+    end_date_options,
+    interactive,
 ):
     row = {
         "pair_name": "orders",
@@ -1717,7 +1726,7 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(
                 "sample_columns": ["A"],
                 "sample_partitions": ["2026-03-15", "2026-03-01"],
                 "from_date": "2026-03-01",
-                "to_date": "2026-03-31",
+                **end_date_options,
                 "vintage": "week",
                 "excluded_partitions": ["2026-03-05"],
                 "audit": True,
@@ -1766,7 +1775,7 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(
         "audit": False,
         "timezone": "America/New_York",
         "from_date": "2025-01-01",
-        "to_date": "2025-01-31",
+        **({"to_date": "2025-01-31"} if end_date_options else {}),
     }
     if workbook_definition != "missing":
         Path(defaults["pair_workbook"]).touch()
@@ -1776,15 +1785,25 @@ def test_prompt_takes_dates_and_budgets_from_pair_run_defaults(
         )
     monkeypatch.setattr(cli, "Catalog", Catalog)
     monkeypatch.setattr(cli, "make_run_id", lambda *_args: "r-new")
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz):
+            return datetime(2026, 11, 10, 1, 30, tzinfo=ZoneInfo("UTC")).astimezone(tz)
+
+    monkeypatch.setattr("pair_recon.app.config.datetime", FrozenDatetime)
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
     monkeypatch.setenv("PAIR_RECON_OUTPUT_DIR", str(tmp_path / "artifacts"))
 
     settings, config, _action, _client, _catalog = cli.prompts(
-        defaults, workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object())
+        defaults,
+        workspace_factory=lambda _profile: SimpleNamespace(statement_execution=object()),
+        interactive=interactive,
     )
 
     assert settings["from_date"] == "2026-03-01"
-    assert settings["to_date"] == "2026-03-31"
+    expected_end = end_date_options.get("to_date") or "2026-11-09"
+    assert settings["to_date"] == config["pairs"]["orders"]["toDate"] == expected_end
     assert settings["vintage"] == "week"
     assert settings["excluded_partitions"] == ["2026-03-05"]
     assert settings["audit"] is True

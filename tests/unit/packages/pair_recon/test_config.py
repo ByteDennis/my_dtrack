@@ -1,9 +1,12 @@
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from pair_recon.app import config as config_module
 from pair_recon.app.config import (
+    default_to_date,
     env_boolean,
     env_value,
     load_config,
@@ -16,6 +19,28 @@ from pair_recon.app.config import (
     save_defaults,
     select_run_options,
 )
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+@pytest.mark.parametrize(
+    ("zone", "expected"),
+    [("America/New_York", "2026-11-09"), ("Asia/Tokyo", "2026-11-10")],
+)
+def test_missing_to_date_defaults_to_today_in_run_timezone(monkeypatch, value, zone, expected):
+    instant = datetime(2026, 11, 10, 1, 30, tzinfo=UTC)
+
+    class FrozenDatetime:
+        @staticmethod
+        def now(tz):
+            return instant.astimezone(tz)
+
+    monkeypatch.setattr(config_module, "datetime", FrozenDatetime)
+    assert default_to_date(value, zone) == expected
+
+
+def test_explicit_to_date_is_preserved_without_reading_the_clock(monkeypatch):
+    monkeypatch.setattr(config_module, "datetime", None)
+    assert default_to_date("2026-03-31", "America/New_York") == "2026-03-31"
 
 
 @pytest.mark.parametrize(

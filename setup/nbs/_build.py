@@ -669,7 +669,7 @@ NOTEBOOKS["25_mapping_discovery.ipynb"]["cells"][0] = markdown(
     "Explore column discovery and mapping updates. The example uses a mock SQL client and does not contact a database."
 )
 NOTEBOOKS["25_mapping_discovery.ipynb"]["cells"].extend([
-    markdown("## Replace or patch mappings\n\n`overwrite=True` replaces the entire mapping table, including rows for other pairs. `overwrite=False` patches the selected pair using MERGE. This example only records SQL calls."),
+    markdown("## Replace or patch mappings\n\n`overwrite=True` replaces only mappings for the selected pair, preserving all other pairs. An empty overwrite clears only the selected pair. `overwrite=False` patches the selected pair using MERGE. This example only records SQL calls."),
     code('''from unittest.mock import Mock
 import json
 

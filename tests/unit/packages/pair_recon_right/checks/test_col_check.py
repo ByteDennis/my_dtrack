@@ -290,6 +290,54 @@ def test_progress_bar_is_plain_text_on_stdout(capsys):
     captured = capsys.readouterr()
     assert "Right comparison" in captured.out and "received=1/1" in captured.out
     assert "Right comparison" not in captured.err
+    assert "\r" in captured.out
+
+
+def test_stage_progress_refreshes_in_place_and_logs_periodically(monkeypatch, caplog):
+    clock = [100.0]
+    bars = []
+
+    class Bar:
+        def __init__(self, **options):
+            self.options, self.total, self.n, self.messages = options, options["total"], 0, []
+            bars.append(self)
+
+        def update(self, amount):
+            self.n += amount
+
+        def set_description_str(self, message, refresh):
+            assert refresh is True
+            self.messages.append(message)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(col_check, "tqdm", Bar)
+    monkeypatch.setattr(col_check.time, "monotonic", lambda: clock[0])
+    store, uid = _drained_store()
+    engine = ColCheck(store, lambda _cfg: FakeTarget(), poll_interval=0)
+    engine.poll()
+    engine._note_stage(
+        1, "window_statistics", f"pair={'p' * 200} vintage=2026-01-01 batch=1/2", 90.0
+    )
+    with caplog.at_level("INFO", logger="pair_recon.right.col_check"):
+        engine._refresh_progress(force=True)
+        clock[0] = 101.0
+        engine._note_stage(2, "cache", "pair=p vintage=2026-02-01", 95.0)
+        engine._refresh_progress()
+        assert bars[0].messages[-1].endswith("11s +1")
+        clock[0] = 131.0
+        engine._refresh_progress()
+    records = [record.message for record in caplog.records if record.message.startswith("Right ")]
+    assert len(records) == 1 and records[0].endswith("41s +1")
+    assert all(len(message) <= 80 for message in bars[0].messages)
+    assert "stats" in bars[0].messages[-1] and "b=1/2" in bars[0].messages[-1]
+    assert bars[0].options["ncols"] == 80 and bars[0].options["bar_format"] == "{desc}"
+    engine._note_stage(1, None, "", 0)
+    engine._note_stage(2, None, "", 0)
+    engine.completed_ids.add(uid)
+    engine._close_progress()
+    assert "Right 1/1" in bars[0].messages[-1] and "received=1/1" in bars[0].messages[-1]
 
 
 def test_result_detail():
@@ -462,6 +510,90 @@ def test_prefetch():
     results = ColCheck(store, lambda _cfg: Broken(), poll_interval=0, max_attempts=2).run()
     failure = store.get_json(failure_path("p", uid))
     assert results == [] and failure["error"] == "boom"
+
+
+@pytest.mark.parametrize("stats_only", [False, True])
+@pytest.mark.parametrize(
+    "kind", ["getCondition", "getErrorClass", "getSqlState", "text", "preflight", "wrapped"]
+)
+def test_unresolved_column_stops_without_retry_in_both_modes(stats_only, kind):
+    store, uid = _drained_store()
+    error = RuntimeError("[UNRESOLVED_COLUMN.WITH_SUGGESTION] missing_gid")
+    if kind == "preflight":
+        error = col_check.MissingSamplingColumnError("missing use_modular Right column missing_gid")
+    elif kind == "wrapped":
+        root = RuntimeError("missing_gid")
+
+        def unavailable_metadata():
+            raise NotImplementedError("getCondition unavailable")
+
+        root.getCondition = unavailable_metadata
+        root.getSqlState = lambda: "42703"
+        error = RuntimeError("wrapped Spark error")
+        error.__cause__ = root
+    elif kind != "text":
+        # Structured Spark errors need not include the error class in their text.
+        error = RuntimeError("missing_gid")
+        code = "42703" if kind == "getSqlState" else "UNRESOLVED_COLUMN.WITH_SUGGESTION"
+        setattr(error, kind, lambda: code)
+
+    class Broken(FakeTarget):
+        attempts = 0
+
+        def window_statistics(self, *_args, **_kwargs):
+            self.attempts += 1
+            raise error
+
+    target = Broken()
+    engine = ColCheck(store, lambda _cfg: target, poll_interval=0, stats_only=stats_only)
+    with pytest.raises(RuntimeError, match="not retrying an invalid query"):
+        engine.run()
+    assert target.attempts == 1
+    assert store.get_json(failure_path("p", uid))["fatal"] is True
+    assert get_right_state(store)["phase"] == "failed"
+    assert engine.scheduler.prefetching == set()
+
+
+def test_stats_only_retry_exhaustion_fails_instead_of_waiting_for_a_dead_window():
+    store, uid = _drained_store()
+
+    class Broken(FakeTarget):
+        attempts = 0
+
+        def window_statistics(self, *_args, **_kwargs):
+            self.attempts += 1
+            raise OSError("temporary fetch failure")
+
+    target = Broken()
+    engine = ColCheck(
+        store,
+        lambda _cfg: target,
+        poll_interval=0,
+        max_attempts=2,
+        stats_only=True,
+        on_idle=lambda: pytest.fail("must not enter the idle wait after a terminal failure"),
+    )
+    with pytest.raises(RuntimeError, match="Right statistics unavailable"):
+        engine.run()
+    assert target.attempts == 2
+    assert store.exists(failure_path("p", uid))
+    assert get_right_state(store)["phase"] == "failed"
+
+
+def test_stats_only_resume_detects_persisted_failures_without_waiting():
+    store, uid = _drained_store()
+    store.put_dead(uid, {"pair": "p", "window": "2026-01-01", "error": "prior failure"})
+    target = FakeTarget()
+    engine = ColCheck(
+        store,
+        lambda _cfg: target,
+        poll_interval=0,
+        stats_only=True,
+        on_idle=lambda: pytest.fail("must not wait for previously failed statistics"),
+    )
+    with pytest.raises(RuntimeError, match="Right statistics unavailable"):
+        engine.run()
+    assert target.calls == []
 
 
 def test_compare():

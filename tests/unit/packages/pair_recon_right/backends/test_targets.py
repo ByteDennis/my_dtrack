@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from support import FakeRow, FakeSpark
+from support import FakeFrame, FakeRow, FakeSpark
 
 from pair_recon_right.engine.backends import targets
 from pair_recon_right.engine.backends.frame_stats import frame_statistics, hash16
@@ -331,7 +331,8 @@ def test_all():
     stats_sql = spark.statements[-1]
     assert count_sql == "SELECT COUNT(*) FROM `main`.`sales`.`orders` WHERE 1=1"
     assert "business_date" not in stats_sql
-    assert "< 1000" in stats_sql
+    assert "< 1000" in spark.statements[-2]
+    assert "FROM `pair_recon_" in stats_sql and "WHERE 1=1" in stats_sql
 
 
 def test_sql():
@@ -379,6 +380,34 @@ def test_sample(sample, window, expected):
     assert SparkTarget(None, ORDERS)._sample_predicate(_manifest(sample, keys=()), window) is None
 
 
+@pytest.mark.parametrize("selector", ["order_id", "ORDER_ID", "missing_gid"])
+def test_modular_sampling_checks_the_mapped_right_column_before_querying(selector):
+    spark = FakeSpark(lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [])
+    target = SparkTarget(spark, ORDERS)
+    manifest = _manifest(
+        {
+            "mode": "fraction",
+            "rate": 0.01,
+            "modular": {
+                "left_column": "LEFT_GID",
+                "right_column": selector,
+                "run_date": "20261109",
+            },
+        }
+    )
+    window = {"bucket": "2024-12-01", "partitions": ["2024-12-01"], "sample_seed": 123}
+    if selector == "missing_gid":
+        with pytest.raises(targets.MissingSamplingColumnError) as error:
+            target.window_count(manifest, window)
+        assert "orders 2024-12-01" in str(error.value)
+        assert "LEFT_GID" in str(error.value) and "missing_gid" in str(error.value)
+        assert all(sql.startswith("DESCRIBE") for sql in spark.statements)
+    else:
+        assert target.health_check()["ok"]
+        predicate = target._sample_predicate(manifest, window)
+        assert selector in predicate
+
+
 def _stats_row():
     row = {"n_total": 4}
     values = [
@@ -408,10 +437,14 @@ def test_statistics():
     target = SparkTarget(spark, ORDERS)
     window = {"bucket": "2026-01-01", "partitions": ["2026-01-01", "2026-01-02"]}
     stats = target.window_statistics(_manifest({"mode": "fraction", "threshold": 99}), window)
-    assert len(spark.statements) == 2
-    query = spark.statements[1]
-    assert "`business_date` >= DATE '2026-01-01' AND `business_date` < DATE '2026-01-03'" in query
-    assert "< 99" in query and "APPROX" not in query.upper()
+    assert len(spark.statements) == 3
+    materialize, query = spark.statements[1:]
+    assert (
+        "`business_date` >= DATE '2026-01-01' AND `business_date` < DATE '2026-01-03'"
+        in materialize
+    )
+    assert "< 99" in materialize and "APPROX" not in query.upper()
+    assert "FROM `pair_recon_" in query and "WHERE 1=1" in query
     assert "AS min_0" in query
     assert "cast(min(cast(`amount` as double)) as string)" in query
     assert stats["order_id"]["col_type"] == "categorical"
@@ -514,7 +547,7 @@ def test_overrides(overrides, fragments, types):
     manifest = _manifest({"mode": "all"})
     manifest["col_type_overrides"] = overrides
     stats = SparkTarget(spark, ORDERS).window_statistics(manifest, {"partitions": ["2026-01-01"]})
-    query = spark.statements[1]
+    query = spark.statements[-1]
     assert all(fragment in query for fragment in fragments)
     assert all(stats[column]["col_type"] == kind for column, kind in types.items())
 
@@ -533,7 +566,7 @@ def test_date():
         }
     }
     SparkTarget(spark, ORDERS).window_statistics(manifest, {"partitions": ["2026-01-01"]})
-    query = spark.statements[1]
+    query = spark.statements[-1]
     assert "date_format(to_date(`status`), 'yyyy-MM-dd')" in query
     assert "NULL AS mean_2" in query
     text_spark = FakeSpark(lambda sql: DESCRIBE if sql.startswith("DESCRIBE") else [])
@@ -547,8 +580,8 @@ def test_system_normalization_rules():
     )
     target = SparkTarget(spark, ORDERS)
     target.window_statistics(_manifest({"mode": "all"}), {"partitions": ["2026-01-01"]})
-    assert "lower(regexp_replace(trim(cast(`status` as string))" in spark.statements[1]
-    assert "[0-9]{4}-[0-9]{2}-[0-9]{2}" in spark.statements[1]
+    assert "lower(regexp_replace(trim(cast(`status` as string))" in spark.statements[-1]
+    assert "[0-9]{4}-[0-9]{2}-[0-9]{2}" in spark.statements[-1]
 
 
 def test_fixed():
@@ -569,12 +602,63 @@ def test_statistics_batches_wide_tables(monkeypatch):
     stats = SparkTarget(spark, ORDERS).window_statistics(
         _manifest({"mode": "all"}), window, progress=lambda done, total: seen.append((done, total))
     )
-    queries = spark.statements[1:]
+    materialize, *queries = spark.statements[1:]
+    assert materialize.startswith("SELECT * FROM `main`.`sales`.`orders` WHERE ")
     assert len(queries) == 2 and seen == [(2, 3), (3, 3)]
     assert all(query.startswith("SELECT count(1) AS n_total, ") for query in queries)
     assert "AS n_unique_1" in queries[0] and "AS n_unique_2" not in queries[0]
     assert "AS n_unique_2" in queries[1] and "AS n_unique_0" not in queries[1]
     assert stats["amount"]["hash_sum"] == "2000" and stats["status"]["length_max"] == 2
+
+
+def test_spark_batches_reuse_one_cached_sample_without_transferring_rows_to_pandas(monkeypatch):
+    def respond(sql):
+        if sql.startswith("DESCRIBE"):
+            return DESCRIBE
+        if sql.startswith("SELECT * FROM"):
+            return [FakeRow({"order_id": i}) for i in range(4)]
+        if sql.startswith("SELECT count(1) FROM"):
+            return [(4,)]
+        return [FakeRow(_stats_row())]
+
+    def no_pandas(_frame):
+        pytest.fail("Spark statistics must collect only the aggregate row")
+
+    monkeypatch.setattr(FakeFrame, "toPandas", no_pandas)
+    monkeypatch.setattr(targets, "STATS_COLUMNS", 2)
+    spark = FakeSpark(respond)
+    target = SparkTarget(spark, ORDERS)
+    manifest = _manifest({"mode": "fraction", "threshold": 99})
+    window = {"bucket": "2026-01-01", "partitions": ["2026-01-01"]}
+    first = target.window_statistics(manifest, window)
+    assert target.window_statistics(manifest, window) == first
+    assert target.window_count(manifest, window) == 4
+    materializations = [sql for sql in spark.statements if sql.startswith("SELECT * FROM")]
+    assert len(materializations) == 1 and "< 99" in materializations[0]
+    queries = [sql for sql in spark.statements if sql.startswith("SELECT count(1)")]
+    assert len(queries) == 5
+    assert all("FROM `pair_recon_" in sql and "WHERE 1=1" in sql for sql in queries)
+    target.release_window(window)
+    assert target._views == {} and len(spark.catalog.dropped) == 1
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_query_stage_reports_start_and_always_clears(fail):
+    def respond(_sql):
+        if fail:
+            raise RuntimeError("query failed")
+        return [(1,)]
+
+    events = []
+    target = SparkTarget(FakeSpark(respond), ORDERS)
+    target.set_stage_reporter(lambda *event: events.append(event))
+    if fail:
+        with pytest.raises(RuntimeError, match="query failed"):
+            target._collect("SELECT 1", "window_statistics", log_context="batch=1/2")
+    else:
+        assert target._collect("SELECT 1", "window_statistics", log_context="batch=1/2") == [(1,)]
+    assert [event[1] for event in events] == ["window_statistics", None]
+    assert events[0][0] == events[1][0] and events[0][2] == "batch=1/2"
 
 
 DRIVER_ROWS = {
@@ -678,9 +762,45 @@ def test_statistics_fall_back_to_spark_above_the_driver_row_cap(monkeypatch):
         _manifest({"mode": "all"}), {"partitions": ["2026-01-01"]}
     )
     assert spark.statements[2].startswith("SELECT count(1) AS n_total, count_if(")
-    assert "FROM `main`.`sales`.`orders` WHERE" in spark.statements[2]
-    assert len(spark.catalog.dropped) == 1
+    assert "FROM `pair_recon_" in spark.statements[2] and "WHERE 1=1" in spark.statements[2]
+    assert spark.catalog.dropped == []
     assert stats["amount"]["hash_sum"] == "2000"
+
+
+def test_optional_pandas_timing_separates_wait_fetch_and_reduction(monkeypatch, caplog):
+    clock, released = [0.0], []
+    original_pandas, original_stats = FakeFrame.toPandas, targets.frame_statistics
+
+    class Slots:
+        def acquire(self):
+            clock[0] += 10
+
+        def release(self):
+            released.append(True)
+
+    def fetch(frame):
+        clock[0] += 5
+        return original_pandas(frame)
+
+    def reduce(*args):
+        clock[0] += 3
+        return original_stats(*args)
+
+    monkeypatch.setattr(targets.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(targets, "_driver_slots", Slots())
+    monkeypatch.setattr(FakeFrame, "toPandas", fetch)
+    monkeypatch.setattr(targets, "frame_statistics", reduce)
+    target = SparkTarget(_driver_spark(), ORDERS)
+    target.column_types = {name: kind for name, kind, _ in DESCRIBE if name}
+    plans = target._column_plans(_manifest({"mode": "all"}))
+    with caplog.at_level("INFO", logger="pair_recon.right.target"):
+        target._driver_statistics(
+            plans, ["n_unique", "hash_sum"], "example", "1=1", log_context="batch=1/1"
+        )
+    assert "acquired (10.000s)" in caplog.text
+    assert "to pandas (5.000s)" in caplog.text
+    assert "done (3.000s)" in caplog.text
+    assert released == [True]
 
 
 def test_driver_statistics_match_the_left_duckdb_statistics(tmp_path):
@@ -731,7 +851,8 @@ def test_window_rows_projects_normalized_key_raw_and_normalized_values():
     )
     sql = spark.statements[-1]
     assert sql.startswith("SELECT concat_ws('|', ") and " AS _key, `order_id` AS k0, " in sql
-    assert "`amount` AS v0, " in sql and " AS n0 FROM `main`.`sales`.`orders` WHERE " in sql
+    assert "`amount` AS v0, `__pr1_" in sql and " AS n0 FROM (SELECT *, " in sql
+    assert "SELECT * FROM `main`.`sales`.`orders` WHERE " in sql and sql.endswith("WHERE 1=1")
     assert "< 99" in sql and "LIMIT" not in sql and " IN (" not in sql
     assert list(rows.pop("rows")) == [["7|2026-01-01", 7, "2.50", "2.5"]]
     assert rows == {
@@ -749,5 +870,5 @@ def test_numeric_column_plan_uses_canonical_decimal_text_for_databricks():
     plan = next(plan for plan in target._column_plans(manifest) if plan["left"] == "AMOUNT")
 
     assert plan["numeric"] is True
-    assert "try_cast" in plan["text"]
-    assert "DECIMAL(38,18)" in plan["text"]
+    assert plan["text"].startswith("`__pr1_") and "try_cast" in " ".join(plan["layers"])
+    assert "DECIMAL(38,18)" in " ".join(plan["layers"])

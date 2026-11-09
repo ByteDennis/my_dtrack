@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -51,6 +52,38 @@ NUMERIC_TYPES = (
 INTEGRAL_TYPES = ("int", "bigint", "smallint", "tinyint", "long", "short")
 TEMPORAL_TYPES = ("date", "timestamp")
 TEXT_DATE_TYPES = (StringDateType, NumericDateType, SasDateType)
+LAYER_INPUT = "__pair_recon_input__"
+LAYER_INLINE_CHARS = 64
+
+
+# >>> wrap the current expression in one normalization step; a step that repeats a non-trivial input materializes it as a projected layer column first <<< #
+def _apply_step(current: str, layers: list[str], index: int, step) -> str:
+    probe = step(LAYER_INPUT)
+    if probe.count(LAYER_INPUT) > 1 and len(current) > LAYER_INLINE_CHARS:
+        layers.append(current)
+        current = _layer_name(index, len(layers) - 1)
+    return probe.replace(LAYER_INPUT, current)
+
+
+# >>> quoted alias of one plan's projected layer <<< #
+def _layer_name(index: int, level: int) -> str:
+    return quote_ident(f"__pr{index}_{level}", "spark")
+
+
+# >>> stack each plan's materialized layers as nested projections over the filtered relation, so every layer references the previous alias once <<< #
+def layered_relation(plans: list[dict[str, Any]], relation: str, where: str) -> tuple[str, str]:
+    depth = max((len(plan.get("layers") or ()) for plan in plans), default=0)
+    if not depth:
+        return relation, where
+    sql = f"SELECT * FROM {relation} WHERE {where}"
+    for level in range(depth):
+        selects = [
+            f"{plan['layers'][level]} AS {_layer_name(plan['index'], level)}"
+            for plan in plans
+            if len(plan.get("layers") or ()) > level
+        ]
+        sql = f"SELECT *, {', '.join(selects)} FROM ({sql}) pair_recon_layer{level}"
+    return f"({sql}) pair_recon_layers", "1=1"
 
 
 # >>> an explicit date type must fit the physical Spark column, otherwise ANSI casts fail or parse to NULL <<< #
@@ -87,7 +120,7 @@ def _bucket(window: dict[str, Any]) -> str:
 
 
 STATS_COLUMNS = int(os.environ.get("RIGHT_STATS_COLUMNS") or 50)
-STATS_DRIVER_ROWS = int(os.environ.get("RIGHT_STATS_DRIVER_ROWS") or 2000000)
+STATS_DRIVER_ROWS = int(os.environ.get("RIGHT_STATS_DRIVER_ROWS") or 0)
 STATS_DRIVER_CELLS = int(os.environ.get("RIGHT_STATS_DRIVER_CELLS") or 5000000)
 DRIVER_FETCHES = max(1, int(os.environ.get("RIGHT_DRIVER_FETCHES") or 1))
 _driver_slots = threading.BoundedSemaphore(DRIVER_FETCHES)
@@ -190,6 +223,10 @@ class CsvTarget:
             )
 
 
+class MissingSamplingColumnError(ValueError):
+    pass
+
+
 class SparkTarget:
     date_probe_size = 16
 
@@ -197,6 +234,7 @@ class SparkTarget:
         self.spark = spark
         self.config = dict(config)
         self.sql_audit = None
+        self.stage_reporter = None
         self._date_type = None
         self._date_type_lock = threading.Lock()
         self._views: dict[str, dict[str, Any]] = {}
@@ -217,6 +255,24 @@ class SparkTarget:
     def set_sql_audit(self, audit):
         self.sql_audit = audit
         return self
+
+    def set_stage_reporter(self, reporter):
+        self.stage_reporter = reporter
+        return self
+
+    @contextmanager
+    def _stage(self, phase: str, context: str = ""):
+        started = time.monotonic()
+        token = threading.get_ident()
+        label = f"{phase} {context}".strip()
+        log.info("start %s", label)
+        if self.stage_reporter is not None:
+            self.stage_reporter(token, phase, context, started)
+        try:
+            yield started
+        finally:
+            if self.stage_reporter is not None:
+                self.stage_reporter(token, None, context, started)
 
     @property
     def partition(self) -> str:
@@ -276,7 +332,8 @@ class SparkTarget:
         started = time.monotonic()
         label = f"{operation} {log_context}" if log_context else operation
         try:
-            rows = self.spark.sql(sql).collect()
+            with self._stage(operation, log_context or self.config.get("table") or ""):
+                rows = self.spark.sql(sql).collect()
         except Exception:
             log.exception("spark.sql %s failed after %.3fs", label, time.monotonic() - started)
             raise
@@ -460,8 +517,22 @@ class SparkTarget:
     def _sample_predicate(self, manifest: dict[str, Any], window: dict[str, Any]) -> str | None:
         keys, families = manifest["right_key_cols"], manifest["key_families"]
         self._check_key_families(keys, families)
+        plan = window_sample_plan(manifest, window, "right")
+        selector = plan.get("modular_column")
+        columns = getattr(self, "column_types", None)
+        if (
+            selector
+            and columns is not None
+            and str(selector).casefold() not in {str(column).casefold() for column in columns}
+        ):
+            left = (manifest.get("sample", {}).get("modular") or {}).get("left_column")
+            raise MissingSamplingColumnError(
+                f"{manifest['pair']} {window.get('bucket') or window.get('partitions')}: "
+                f"use_modular maps Left {left!r} to missing Right column {selector!r}; "
+                f"check column mappings and the Right relation {self.relation()}"
+            )
         return sample_predicate_sql(
-            window_sample_plan(manifest, window, "right"),
+            plan,
             [quote_ident(key, "spark") for key in keys],
             families,
             "spark",
@@ -516,15 +587,16 @@ class SparkTarget:
         self._audit(sql, "window_materialize")
         started = time.monotonic()
         name = "pair_recon_" + hashlib.sha256(f"{id(self)}|{bucket}".encode()).hexdigest()[:16]
-        frame = self.spark.sql(sql)
-        try:
-            from pyspark import StorageLevel
+        with self._stage("cache", f"pair={manifest.get('pair')} vintage={bucket}"):
+            frame = self.spark.sql(sql)
+            try:
+                from pyspark import StorageLevel
 
-            frame = frame.persist(StorageLevel.MEMORY_AND_DISK)
-        except ImportError:
-            frame = frame.persist()
-        frame.createOrReplaceTempView(name)
-        rows = int(frame.count())
+                frame = frame.persist(StorageLevel.MEMORY_AND_DISK)
+            except ImportError:
+                frame = frame.persist()
+            frame.createOrReplaceTempView(name)
+            rows = int(frame.count())
         log.info(
             "window materialized %s: %d sampled row(s) (%.3fs)",
             bucket,
@@ -565,20 +637,28 @@ class SparkTarget:
                 requested == "numeric" or (requested is None and native and not integral)
             )
             text = f"cast({ref} as string)"
+            layers: list[str] = []
             if comparison:
                 normalizer = resolve_column_type(comparison)
                 if isinstance(normalizer, DateKeyFamily):
                     self._check_date_column(column, normalizer.right_date_type, "column")
                 text = normalizer.normalize_sql(ref, "spark", "right")
             if numeric:
-                text = canonical_numeric_sql(text, "spark")
-            if normalization_rules:
-                text = normalize_system_sql(
-                    text,
-                    "spark",
-                    normalization_rules,
-                    run_date=manifest.get("normalization_date"),
+                text = _apply_step(
+                    text, layers, i, lambda expr: canonical_numeric_sql(expr, "spark")
                 )
+            for rule in normalization_rules:
+                text = _apply_step(
+                    text,
+                    layers,
+                    i,
+                    lambda expr, rule=rule: normalize_system_sql(
+                        expr, "spark", [rule], run_date=manifest.get("normalization_date")
+                    ),
+                )
+            if len(text) > LAYER_INLINE_CHARS:
+                layers.append(text)
+                text = _layer_name(i, len(layers) - 1)
             value = (
                 (f"cast({ref} as double)" if native else f"try_cast({text} as double)")
                 if numeric
@@ -594,6 +674,7 @@ class SparkTarget:
                     "extreme": ref if integral and numeric else value,
                     "numeric": numeric,
                     "integral": integral,
+                    "layers": layers,
                 }
             )
         return plans
@@ -602,6 +683,7 @@ class SparkTarget:
     def _spark_statistics(
         self, plans, selected, relation, where, *, log_context: str
     ) -> dict[str, dict[str, Any]]:
+        relation, where = layered_relation(plans, relation, where)
         selects = ["count(1) AS n_total"]
         for plan in plans:
             i, text, value, extreme = plan["index"], plan["text"], plan["value"], plan["extreme"]
@@ -670,6 +752,7 @@ class SparkTarget:
     def _driver_statistics(
         self, plans, selected, relation, where, *, log_context: str
     ) -> dict[str, dict[str, Any]]:
+        relation, where = layered_relation(plans, relation, where)
         selects = []
         for plan in plans:
             selects.append(f"{plan['text']} AS t{plan['index']}")
@@ -677,10 +760,14 @@ class SparkTarget:
                 selects.append(f"{plan['value']} AS v{plan['index']}")
         sql = f"SELECT {', '.join(selects)} FROM {relation} WHERE {where}"
         self._audit(sql, "window_statistics")
-        started = time.monotonic()
-        with _driver_slots:
+        with self._stage("driver-wait", log_context) as waiting:
+            _driver_slots.acquire()
+        log.info("driver slot %s: acquired (%.3fs)", log_context, time.monotonic() - waiting)
+        try:
+            started = time.monotonic()
             try:
-                frame = self.spark.sql(sql).toPandas()
+                with self._stage("to-pandas", log_context):
+                    frame = self.spark.sql(sql).toPandas()
             except Exception:
                 log.exception(
                     "spark.sql window_statistics %s failed after %.3fs",
@@ -695,20 +782,23 @@ class SparkTarget:
                 len(frame.columns),
                 time.monotonic() - started,
             )
-            return frame_statistics(frame, plans, selected)
+            with self._stage("pandas-stats", log_context) as reducing:
+                stats = frame_statistics(frame, plans, selected)
+            log.info("pandas statistics %s: done (%.3fs)", log_context, time.monotonic() - reducing)
+            return stats
+        finally:
+            _driver_slots.release()
 
-    # >>> windows up to STATS_DRIVER_ROWS rows are reduced in pandas on the driver, STATS_DRIVER_CELLS cells per scan; larger ones aggregate in Spark, STATS_COLUMNS columns per query <<< #
+    # >>> aggregate in Spark over one cached sampled window; pandas requires an explicit positive row cap <<< #
     def window_statistics(
         self, manifest: dict[str, Any], window: dict[str, Any], progress=None
     ) -> dict[str, dict[str, Any]]:
         where, sample = self._window_where(manifest, window)
         plans = self._column_plans(manifest)
         selected = manifest.get("statistics") or list(DEFAULT_STATISTICS)
-        view = self._window_view(manifest, window) if STATS_DRIVER_ROWS > 0 else None
-        rows = view["rows"] if view is not None else None
-        on_driver = rows is not None and rows <= STATS_DRIVER_ROWS
-        if view is not None and not on_driver:
-            self.release_window(window)
+        view = self._window_view(manifest, window)
+        rows = view["rows"]
+        on_driver = STATS_DRIVER_ROWS > 0 and rows <= STATS_DRIVER_ROWS
         relation, where = self._scope(manifest, window)
         batch = max(1, STATS_DRIVER_CELLS // max(rows or 0, 1) if on_driver else STATS_COLUMNS)
         starts = range(0, len(plans), batch)
@@ -868,6 +958,9 @@ class SparkTarget:
             f"{quote_ident(row['right_column'], 'spark')} AS v{i}" for i, row in enumerate(pairs)
         ]
         selects += [f"{plans[row['left_column']]['text']} AS n{i}" for i, row in enumerate(pairs)]
+        relation, where = layered_relation(
+            [plans[row["left_column"]] for row in pairs], relation, where
+        )
         sql = f"SELECT {', '.join(selects)} FROM {relation} WHERE {where}"
         self._audit(sql, "difference_rows")
         frame = self.spark.sql(sql)

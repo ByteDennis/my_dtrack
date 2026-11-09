@@ -348,9 +348,9 @@ def automatch_columns(
 def upsert_column_mappings(
     sql, table: str, pair_name: str, mappings: Iterable[dict], *, overwrite: bool = True
 ) -> dict:
-    """Replace the entire mapping table, or patch one Pair with overwrite=False.
+    """Replace one Pair's mappings, or patch that Pair with overwrite=False.
 
-    An empty overwrite clears the entire table. Empty patches do no work.
+    An empty overwrite clears only that Pair. Empty patches do no work.
     """
     if not isinstance(overwrite, bool):
         raise TypeError("overwrite must be true or false")
@@ -382,12 +382,7 @@ def upsert_column_mappings(
     'ARRAY<STRUCT<pair_name:STRING,left_column:STRING,right_column:STRING,data_type:STRING>>'
   )) AS m
 ) AS incoming"""
-        if overwrite:
-            statement = f"""INSERT OVERWRITE TABLE {table}
-(pair_name, left_column, right_column, data_type)
-{source}"""
-        else:
-            statement = f"""MERGE INTO {table} AS t
+        statement = f"""MERGE INTO {table} AS t
 USING (
 {source}
 ) AS s
@@ -397,6 +392,9 @@ WHEN MATCHED THEN UPDATE SET
   t.data_type = s.data_type
 WHEN NOT MATCHED THEN INSERT (pair_name, left_column, right_column, data_type)
 VALUES (s.pair_name, s.left_column, s.right_column, s.data_type)"""
+        if overwrite:
+            parameters["pair_name"] = pair
+            statement += "\nWHEN NOT MATCHED BY SOURCE AND t.pair_name = :pair_name THEN DELETE"
         sql.execute(statement, parameters)
     return {
         "table": table,
